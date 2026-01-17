@@ -320,7 +320,7 @@ class EngineMatch:
             return fen
         return random.choice(self.fens)
 
-    def _openbench_emit_game(self, variant, pos, white_idx, black_idx, moves, result, time_loss):
+    def _openbench_emit_game(self, game_id, variant, pos, white_idx, black_idx, moves, result, time_loss):
         if not self.openbench_mode:
             return
 
@@ -328,16 +328,20 @@ class EngineMatch:
         white_name = self._engine_label(white_idx)
         black_name = self._engine_label(black_idx)
 
-        with self.openbench_lock:
-            game_id = self.openbench_game_id
-            self.openbench_game_id += 1
-
         reason = " {on time}" if time_loss else ""
         self.out.write("Finished game %d (%s vs %s): %s%s\n" % (game_id, white_name, black_name, result_str, reason))
         self.out.flush()
 
         if self.openbench_pgn_path:
             self._append_pgn(game_id, variant, pos, white_name, black_name, moves, result_str)
+
+    def _reserve_game_ids(self, count):
+        if not self.openbench_mode:
+            return [None] * count
+        with self.openbench_lock:
+            start = self.openbench_game_id
+            self.openbench_game_id += count
+        return list(range(start, start + count))
 
     def _append_pgn(self, game_id, variant, pos, white_name, black_name, moves, result_str):
         if not self.openbench_pgn_path:
@@ -1040,15 +1044,17 @@ class EngineMatch:
             white_idx, black_idx = 0, 1
             engine_pair = (0, 1)
 
+        game_ids = self._reserve_game_ids(2 if self.play_reverse else 1)
+
         # Game 1: first engine plays white, second engine plays black.
         res1, tl1, moves1 = self.play_game_instance(variant, pos, white=white_idx, black=black_idx)
-        self._openbench_emit_game(variant, pos, white_idx, black_idx, moves1, res1, tl1)
+        self._openbench_emit_game(game_ids[0], variant, pos, white_idx, black_idx, moves1, res1, tl1)
 
         res2 = tl2 = None
         if self.play_reverse:
             # Game 2: swap colors.
             res2, tl2, moves2 = self.play_game_instance(variant, pos, white=black_idx, black=white_idx)
-            self._openbench_emit_game(variant, pos, black_idx, white_idx, moves2, res2, tl2)
+            self._openbench_emit_game(game_ids[1], variant, pos, black_idx, white_idx, moves2, res2, tl2)
         return res1, res2, tl1, tl2, engine_pair
 
     def play_game_instance(self, variant, pos, white, black):

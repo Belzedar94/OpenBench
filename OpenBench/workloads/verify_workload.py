@@ -121,6 +121,7 @@ def verify_test_creation(errors, request):
         (verify_variant_path   , 'variant_path'),
         (verify_match_runner   , 'match_runner'),
         (verify_variantfishtest_time_controls, 'dev_time_control', 'base_time_control'),
+        (verify_fastchess_variant, 'variant', 'book_name'),
     ]
 
     for verification in verifications:
@@ -166,6 +167,7 @@ def verify_tune_creation(errors, request):
         (verify_variant               , 'variant'),
         (verify_variant_path          , 'variant_path'),
         (verify_match_runner          , 'match_runner'),
+        (verify_fastchess_variant, 'variant', 'book_name'),
 
         # Verify everything about the SPSA Settings
         (verify_float                 , 'spsa_alpha', 'SPSA A-Ratio'),
@@ -234,6 +236,7 @@ def verify_datagen_creation(errors, request):
         (verify_variant_path   , 'variant_path'),
         (verify_match_runner   , 'match_runner'),
         (verify_variantfishtest_time_controls, 'dev_time_control', 'base_time_control'),
+        (verify_fastchess_variant, 'variant', 'book_name'),
     ]
 
     for verification in verifications:
@@ -295,6 +298,19 @@ def verify_variantfishtest_time_controls(errors, request, dev_field, base_field)
         return
     if '/' in dev_tc:
         errors.append('Variantfishtest does not support move-count time controls (X/Y+Z)')
+
+def verify_fastchess_variant(errors, request, variant_field, book_field):
+    if request.POST['match_runner'] != 'FASTCHESS':
+        return
+    raw = request.POST[variant_field].strip()
+    variants = [v.strip().lower() for v in raw.split(',') if v.strip()]
+    if len(variants) != 1:
+        errors.append('Fastchess supports only one variant per test')
+        return
+    variant = variants[0]
+    allowed = ['chess', 'standard', 'chess960', 'fischerandom', 'frc', 'fischer']
+    if variant not in allowed:
+        errors.append('Fastchess only supports standard or Fischer random variants. Use VARIANTFISHTEST.')
 
 def verify_time_control(errors, request, field, field_name):
     try: OpenBench.utils.TimeControl.parse(request.POST[field])
