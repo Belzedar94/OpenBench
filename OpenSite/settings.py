@@ -19,10 +19,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # See https://docs.djangoproject.com/en/2.0/howto/deployment/checklist/
 # SECURITY WARNING: keep the secret key used in production secret!
 # SECURITY WARNING: don't run with debug turned on in production!
-SECRET_KEY = '@!zw2l8til1(0eb_nk+1w!(n78gqm&u)s)_v7#k6iseia@g9q0'
-DEBUG = True
+SECRET_KEY = os.environ.get('OPENBENCH_SECRET_KEY', '@!zw2l8til1(0eb_nk+1w!(n78gqm&u)s)_v7#k6iseia@g9q0')
+DEBUG = os.environ.get('OPENBENCH_DEBUG', 'True').lower() in ['1', 'true', 'yes']
 
-ALLOWED_HOSTS = ['*']
+allowed_hosts = os.environ.get('OPENBENCH_ALLOWED_HOSTS', '*')
+ALLOWED_HOSTS = [x.strip() for x in allowed_hosts.split(',') if x.strip()]
 
 HTML_MINIFY   = True
 APPEND_SLASH  = True
@@ -37,7 +38,7 @@ PROJECT_PATH  = os.path.abspath(PROJECT_PATH)
 TEMPLATE_PATH = os.path.join(PROJECT_PATH, 'Templates')
 
 MEDIA_URL  = '/Media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'Media')
+MEDIA_ROOT = os.environ.get('OPENBENCH_MEDIA_ROOT', os.path.join(BASE_DIR, 'Media'))
 
 INSTALLED_APPS = [
     'OpenBench',
@@ -87,12 +88,19 @@ WSGI_APPLICATION = 'OpenSite.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/2.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if DATABASE_URL:
+    import dj_database_url
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600),
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        }
+    }
 
 
 # Password validation

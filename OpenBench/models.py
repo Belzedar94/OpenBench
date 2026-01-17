@@ -94,9 +94,16 @@ class Test(Model):
         BASE = 'BASE', 'BASE'
         BOTH = 'BOTH', 'BOTH'
 
+    class MatchRunner(TextChoices):
+        FASTCHESS       = 'FASTCHESS', 'FASTCHESS'
+        VARIANTFISHTEST = 'VARIANTFISHTEST', 'VARIANTFISHTEST'
+
     # Misc information
     author      = CharField(max_length=64)
     upload_pgns = CharField(max_length=16, default='FALSE')
+    variant     = CharField(max_length=64, default='chess')
+    variant_path = CharField(max_length=256, blank=True, default='')
+    match_runner = CharField(max_length=32, choices=MatchRunner.choices, default=MatchRunner.FASTCHESS)
 
     # Opening book settings
     book_name  = CharField(max_length=32)

@@ -30,6 +30,7 @@ import queue
 import re
 import requests
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,7 @@ TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
+VARIANTFISHTEST_VERSION = 'embedded'
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -398,10 +400,14 @@ class MatchRunner:
     @staticmethod
     def basic_settings(config):
 
-        # Assume Fischer if FRC, 960, or FISCHER appears in the Opening Book
-        book_name = config.workload['test']['book']['name'].upper()
-        is_frc    = 'FRC' in book_name or '960' in book_name or 'FISCHER' in book_name
-        variant   = ['standard', 'fischerandom'][is_frc]
+        # Prefer explicit variant, otherwise infer Fischer from book name
+        variant_name = config.workload['test'].get('variant', 'chess').lower()
+        if variant_name in ['chess960', 'fischerandom', 'frc', 'fischer']:
+            variant = 'fischerandom'
+        else:
+            book_name = config.workload['test']['book']['name'].upper()
+            is_frc = 'FRC' in book_name or '960' in book_name or 'FISCHER' in book_name
+            variant = ['standard', 'fischerandom'][is_frc]
 
         # Always include -recover, -variant, and -testEnv
         return '-recover -variant %s -testEnv' % variant
@@ -862,6 +868,150 @@ def scale_time_control(workload, scale_factor, branch):
         return 'tc=%.2f+%.2f timemargin=250' % (base, inc)
     return 'tc=%d/%.2f+%.2f timemargin=250' % (int(moves), base, inc)
 
+def parse_engine_options(option_text):
+
+    # Split on spaces while respecting quoted values
+    tokens = shlex.split(option_text, posix=IS_LINUX)
+    options = {}
+
+    for token in tokens:
+        if '=' not in token:
+            continue
+        key, value = token.split('=', 1)
+        value = value.strip('"')
+        options[key] = value
+
+    return options
+
+def build_variantfishtest_engine_options(config, branch, runner_idx):
+
+    options_text = config.workload['test'][branch]['options']
+    options = parse_engine_options(options_text)
+
+    network = config.workload['test'][branch]['network']
+    private = config.workload['test'][branch]['private']
+    syzygy  = config.workload['test']['syzygy_wdl']
+
+    if private and network and network != 'None':
+        options['EvalFile'] = os.path.join('Networks', network)
+
+    if syzygy != 'DISABLED' and config.syzygy_max:
+        options['SyzygyPath'] = config.syzygy_path
+
+    if syzygy != 'DISABLED' and syzygy != 'OPTIONAL':
+        options['SyzygyProbeLimit'] = syzygy.split('-')[0]
+
+    if config.workload['test']['type'] == 'SPSA':
+        for param, data in config.workload['spsa'].items():
+            options[param] = str(data[branch][runner_idx])
+
+    options.pop('UCI_Variant', None)
+    options.pop('VariantPath', None)
+
+    return options
+
+def variantfishtest_time_settings(workload, scale_factor, branch):
+
+    time_control = workload['test'][branch]['time_control']
+
+    if time_control.startswith('N='):
+        return { 'mode' : 'nodes', 'nodes' : int(time_control.split('=')[1]) }
+
+    if time_control.startswith('D='):
+        return { 'mode' : 'depth', 'depth' : int(time_control.split('=')[1]) }
+
+    if time_control.startswith('MT='):
+        value = int(time_control.split('=')[1])
+        movetime = max(1, int(round(value * scale_factor)))
+        return { 'mode' : 'movetime', 'movetime' : movetime }
+
+    pattern = r'(?P<moves>(\d+/)?)(?P<base>\d*(\.\d+)?)(?P<inc>\+(\d+\.)?\d+)?'
+    results = re.search(pattern, time_control)
+    moves, base, inc = results.group('moves', 'base', 'inc')
+
+    inc = 0.0 if inc is None else float(inc.lstrip('+'))
+    base = float(base) * scale_factor
+    inc  = float(inc) * scale_factor
+
+    return {
+        'mode'    : 'time',
+        'base_ms' : int(round(base * 1000)),
+        'inc_ms'  : int(round(inc  * 1000)),
+        'moves'   : None if moves == '' else moves.rstrip('/'),
+    }
+
+def build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, timestamp, runner_idx):
+
+    test       = config.workload['test']
+    runner     = os.path.join('variantfishtest', 'variantfishtest.py')
+    variant    = test.get('variant', 'chess')
+    var_path   = test.get('variant_path')
+    book_name  = test['book']['name']
+    book_seed  = test.get('book_seed')
+    is_datagen = test['type'] == 'DATAGEN'
+    no_reverse = is_datagen and not test.get('play_reverses')
+
+    rounds_per = config.workload['distribution']['rounds-per-runner']
+    games_per_round = 1 if no_reverse else 2
+    max_games = rounds_per * games_per_round
+
+    time_info = variantfishtest_time_settings(config.workload, scale_factor, 'dev')
+
+    if test['dev']['time_control'] != test['base']['time_control']:
+        print('[WARN] Variantfishtest uses a single time control; using dev_time_control')
+
+    args = [
+        sys.executable, '-u', runner,
+        os.path.join('Engines', dev_cmd),
+        os.path.join('Engines', base_cmd),
+        '-v', variant,
+        '-n', str(max_games),
+        '-T', str(config.workload['distribution']['concurrency-per']),
+        '--verbosity', '0',
+        '--openbench',
+        '--openbench-time-control', test['dev']['time_control'],
+    ]
+
+    if var_path:
+        args += ['-c', var_path]
+
+    if book_name and book_name.upper() != 'NONE':
+        book_path = os.path.join('Books', 'openbench.genfens.epd' if is_datagen else book_name)
+        args += ['-b', book_path]
+
+        if is_datagen:
+            pairs = rounds_per // 2
+            start = 1 + (runner_idx * pairs * (1 + no_reverse))
+        else:
+            pairs = rounds_per // 2
+            start = test['book_index'] + runner_idx * pairs
+
+        args += ['--openbench-book-start', str(max(start - 1, 0))]
+        if book_seed is not None:
+            args += ['--openbench-book-seed', str(book_seed)]
+
+    if no_reverse:
+        args += ['--no-reverse']
+
+    if time_info['mode'] == 'time':
+        args += ['-t', str(time_info['base_ms']), '-i', str(time_info['inc_ms'])]
+    elif time_info['mode'] == 'nodes':
+        args += ['--fixed-nodes', str(time_info['nodes'])]
+    elif time_info['mode'] == 'depth':
+        args += ['--fixed-depth', str(time_info['depth'])]
+    elif time_info['mode'] == 'movetime':
+        args += ['--move-time', str(time_info['movetime'])]
+
+    if test['upload_pgns'] != 'FALSE':
+        args += ['--openbench-pgn', MatchRunner.pgn_name(config, timestamp, runner_idx)]
+
+    for idx, branch in enumerate(['dev', 'base'], start=1):
+        opts = build_variantfishtest_engine_options(config, branch, runner_idx)
+        for key in sorted(opts.keys()):
+            args += ['--engine-options', '%d:%s=%s' % (idx, key, opts[key])]
+
+    return args
+
 def find_pgn_error(reason, command):
 
     pgn_file = command.split('-pgnout file=')[1].split()[0]
@@ -1020,6 +1170,7 @@ def server_configure_worker(config):
         'focus'          : config.focus,          # List of engines we have a preference to help
         'cxx_comp'       : config.cxx_comp,       # C++ Compiler used to build Fastchess binaries
         'fastchess_ver'  : config.fastchess_ver,  # Fastchess Version, set during server_configure_fastchess()
+        'variantfishtest_ver' : VARIANTFISHTEST_VERSION, # Embedded variantfishtest version
         'client_ver'     : CLIENT_VERSION,        # Version of the Client, which the server may reject
     }
 
@@ -1100,6 +1251,17 @@ def complete_workload(config):
 
     # Scale time control based on the Engine's local NPS
     scale_factor = determine_scale_factor(config, dev_name, dev_network, base_name, base_network)
+
+    runner_type = config.workload['test'].get('match_runner', 'FASTCHESS')
+    if runner_type == 'FASTCHESS':
+        variant = config.workload['test'].get('variant', 'chess').split(',')[0].strip().lower()
+        if variant not in ['chess', 'standard', 'chess960', 'fischerandom', 'frc', 'fischer']:
+            print('[WARN] Fastchess only supports standard and Fischer random variants. Consider VARIANTFISHTEST.')
+    else:
+        if config.workload['test']['win_adj'] != 'None' or config.workload['test']['draw_adj'] != 'None':
+            print('[WARN] Variantfishtest ignores win/draw adjudication settings.')
+        if config.workload['test']['syzygy_adj'] != 'DISABLED' or config.workload['test']['syzygy_wdl'] != 'DISABLED':
+            print('[WARN] Variantfishtest does not use Syzygy tablebases for adjudication.')
 
     # Server knows how many copies of the match runner we should run
     runner_cnt      = config.workload['distribution']['runner-count']
@@ -1249,6 +1411,11 @@ def safe_run_benchmarks(config, branch, engine, network):
 
 def build_runner_command(config, dev_cmd, base_cmd, scale_factor, timestamp, runner_idx):
 
+    runner_type = config.workload['test'].get('match_runner', 'FASTCHESS')
+
+    if runner_type == 'VARIANTFISHTEST':
+        return build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, timestamp, runner_idx)
+
     flags  = ' ' + MatchRunner.basic_settings(config)
     flags += ' ' + MatchRunner.concurrency_settings(config)
     flags += ' ' + MatchRunner.adjudication_settings(config)
@@ -1262,7 +1429,8 @@ def build_runner_command(config, dev_cmd, base_cmd, scale_factor, timestamp, run
 def run_and_parse_runner(config, command, runner_idx, results_queue, abort_flag):
 
     print('\n[#%d] Launching match runner...\n%s\n' % (runner_idx, command))
-    runner = Popen(command.split(), stdout=PIPE)
+    cmd = command.split() if isinstance(command, str) else command
+    runner = Popen(cmd, stdout=PIPE, stderr=STDOUT)
 
     results = {
 
@@ -1283,6 +1451,7 @@ def run_and_parse_runner(config, command, runner_idx, results_queue, abort_flag)
             break
 
         if abort_flag.is_set():
+            runner.terminate()
             break
 
         if 'Started game' not in line and 'Score of' not in line:
@@ -1310,6 +1479,10 @@ def run_and_parse_runner(config, command, runner_idx, results_queue, abort_flag)
             results['crashes'    ] = 0
             results['timelosses' ] = 0
             results['illegals'   ] = 0
+
+    if runner.poll() is None:
+        runner.terminate()
+        runner.wait()
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                                                                           #

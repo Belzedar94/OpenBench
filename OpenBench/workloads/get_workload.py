@@ -207,6 +207,9 @@ def workload_to_dictionary(test, result, machine):
         'play_reverses' : test.play_reverses,
         'scale_method'  : test.scale_method,
         'scale_nps'     : test.scale_nps,
+        'variant'       : test.variant,
+        'variant_path'  : test.variant_path,
+        'match_runner'  : test.match_runner,
     }
 
     workload['test']['book'] = {

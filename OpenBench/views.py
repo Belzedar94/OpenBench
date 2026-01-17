@@ -613,6 +613,8 @@ def client_match_runner_version_ref(request):
         'fastchess_min_version' : OPENBENCH_CONFIG['fastchess_min_version'],
         'fastchess_repo_url'    : OPENBENCH_CONFIG['fastchess_repo_url'],
         'fastchess_repo_ref'    : OPENBENCH_CONFIG['fastchess_repo_ref'],
+        'variantfishtest_repo_url' : OPENBENCH_CONFIG['variantfishtest_repo_url'],
+        'variantfishtest_repo_ref' : OPENBENCH_CONFIG['variantfishtest_repo_ref'],
     })
 
 @csrf_exempt

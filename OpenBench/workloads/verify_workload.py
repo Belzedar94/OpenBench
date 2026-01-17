@@ -115,6 +115,12 @@ def verify_test_creation(errors, request):
         (verify_syzygy_field   , 'syzygy_adj', 'Syzygy Adjudication'),
         (verify_win_adj        , 'win_adj'),
         (verify_draw_adj       , 'draw_adj'),
+
+        # Verify variant configuration
+        (verify_variant        , 'variant'),
+        (verify_variant_path   , 'variant_path'),
+        (verify_match_runner   , 'match_runner'),
+        (verify_variantfishtest_time_controls, 'dev_time_control', 'base_time_control'),
     ]
 
     for verification in verifications:
@@ -155,6 +161,11 @@ def verify_tune_creation(errors, request):
         (verify_syzygy_field          , 'syzygy_adj', 'Syzygy Adjudication'),
         (verify_win_adj               , 'win_adj'),
         (verify_draw_adj              , 'draw_adj'),
+
+        # Verify variant configuration
+        (verify_variant               , 'variant'),
+        (verify_variant_path          , 'variant_path'),
+        (verify_match_runner          , 'match_runner'),
 
         # Verify everything about the SPSA Settings
         (verify_float                 , 'spsa_alpha', 'SPSA A-Ratio'),
@@ -217,6 +228,12 @@ def verify_datagen_creation(errors, request):
         (verify_syzygy_field   , 'syzygy_adj', 'Syzygy Adjudication'),
         (verify_win_adj        , 'win_adj'),
         (verify_draw_adj       , 'draw_adj'),
+
+        # Verify variant configuration
+        (verify_variant        , 'variant'),
+        (verify_variant_path   , 'variant_path'),
+        (verify_match_runner   , 'match_runner'),
+        (verify_variantfishtest_time_controls, 'dev_time_control', 'base_time_control'),
     ]
 
     for verification in verifications:
@@ -242,6 +259,39 @@ def verify_options(errors, request, field, option, field_name):
 def verify_configuration(errors, request, field, field_name, parent):
     try: assert request.POST[field] in OpenBench.config.OPENBENCH_CONFIG[parent].keys()
     except: errors.append('{0} was not found in the configuration'.format(field_name))
+
+def verify_variant(errors, request, field):
+    try:
+        value = request.POST[field].strip()
+        assert value != ''
+        if not re.match(r'^[A-Za-z0-9_.,+-]+$', value):
+            raise Exception()
+    except:
+        errors.append('Variant must be non-empty and contain only letters, numbers, and "_.+-,"')
+
+def verify_variant_path(errors, request, field):
+    try:
+        value = request.POST[field].strip()
+        if value:
+            assert len(value) <= 256
+    except:
+        errors.append('VariantPath must be 256 characters or fewer')
+
+def verify_match_runner(errors, request, field):
+    candidates = ['FASTCHESS', 'VARIANTFISHTEST']
+    try: assert request.POST[field] in candidates
+    except: errors.append('Match Runner must be in %s' % ', '.join(candidates))
+
+def verify_variantfishtest_time_controls(errors, request, dev_field, base_field):
+    try:
+        if request.POST['match_runner'] != 'VARIANTFISHTEST':
+            return
+        dev_tc = OpenBench.utils.TimeControl.parse(request.POST[dev_field])
+        base_tc = OpenBench.utils.TimeControl.parse(request.POST[base_field])
+        if dev_tc != base_tc:
+            raise Exception()
+    except:
+        errors.append('Variantfishtest requires identical Dev/Base time controls')
 
 def verify_time_control(errors, request, field, field_name):
     try: OpenBench.utils.TimeControl.parse(request.POST[field])

@@ -108,6 +108,9 @@ def verify_general_config(conf):
     assert type(conf.get('fastchess_repo_url') == str)
     assert type(conf.get('fastchess_repo_ref') == str)
 
+    assert type(conf.get('variantfishtest_repo_url') == str)
+    assert type(conf.get('variantfishtest_repo_ref') == str)
+
     assert type(conf.get('use_cross_approval'         ) == bool)
     assert type(conf.get('require_login_to_view'      ) == bool)
     assert type(conf.get('require_manual_registration') == bool)
@@ -146,18 +149,39 @@ def verify_engine_test_preset(test_preset):
         'both_network',
         'both_options',
         'both_time_control',
+        'both_variant',
+        'both_variant_path',
+        'both_match_runner',
+        'both_variant',
+        'both_variant_path',
+        'both_match_runner',
+        'both_variant',
+        'both_variant_path',
+        'both_match_runner',
 
         'dev_branch',
         'dev_bench',
         'dev_network',
         'dev_options',
         'dev_time_control',
+        'dev_variant',
+        'dev_variant_path',
+        'dev_match_runner',
+        'dev_variant',
+        'dev_variant_path',
+        'dev_match_runner',
+        'dev_variant',
+        'dev_variant_path',
+        'dev_match_runner',
 
         'base_branch',
         'base_bench',
         'base_network',
         'base_options',
         'base_time_control',
+        'base_variant',
+        'base_variant_path',
+        'base_match_runner',
 
         'test_bounds',
         'test_confidence',
@@ -169,6 +193,9 @@ def verify_engine_test_preset(test_preset):
         'throughput',
         'workload_size',
         'syzygy_wdl',
+        'variant',
+        'variant_path',
+        'match_runner',
 
         'syzygy_adj',
         'win_adj',
@@ -208,6 +235,9 @@ def verify_engine_tune_preset(tune_preset):
         'priority',
         'throughput',
         'syzygy_wdl',
+        'variant',
+        'variant_path',
+        'match_runner',
 
         'syzygy_adj',
         'win_adj',
@@ -227,18 +257,27 @@ def verify_engine_datagen_preset(datagen_preset):
         'both_network',
         'both_options',
         'both_time_control',
+        'both_variant',
+        'both_variant_path',
+        'both_match_runner',
 
         'dev_branch',
         'dev_bench',
         'dev_network',
         'dev_options',
         'dev_time_control',
+        'dev_variant',
+        'dev_variant_path',
+        'dev_match_runner',
 
         'base_branch',
         'base_bench',
         'base_network',
         'base_options',
         'base_time_control',
+        'base_variant',
+        'base_variant_path',
+        'base_match_runner',
 
         'book_name',
         'upload_pgns',
@@ -246,6 +285,9 @@ def verify_engine_datagen_preset(datagen_preset):
         'throughput',
         'workload_size',
         'syzygy_wdl',
+        'variant',
+        'variant_path',
+        'match_runner',
 
         'syzygy_adj',
         'win_adj',

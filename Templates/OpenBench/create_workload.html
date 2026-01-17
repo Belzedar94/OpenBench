@@ -208,6 +208,22 @@
                 </div>
 
                 <div class="row">
+                    <label for="variant"> Variant </label> <input value="chess" id="variant" name="variant">
+                </div>
+
+                <div class="row">
+                    <label for="variant_path"> Variant Path </label> <input id="variant_path" name="variant_path">
+                </div>
+
+                <div class="row">
+                    <label for="match_runner"> Match Runner </label>
+                    <select id="match_runner" name="match_runner">
+                        <option selected value="FASTCHESS"> Fastchess </option>
+                        <option value="VARIANTFISHTEST"> Variantfishtest </option>
+                    </select>
+                </div>
+
+                <div class="row">
                     <label for="upload_pgns"> Upload PGNs </label>
                     <select id="upload_pgns" name="upload_pgns">
                         {% if workload == "DATAGEN" %}

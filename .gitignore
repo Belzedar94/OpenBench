@@ -11,6 +11,8 @@ Scripts/Networks/*
 Media/*
 
 !Client/*.py
+!Client/variantfishtest/
+!Client/variantfishtest/**
 !Client/cutechess-ob
 !Client/cutechess-ob.exe
 
