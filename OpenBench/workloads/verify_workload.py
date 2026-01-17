@@ -283,15 +283,18 @@ def verify_match_runner(errors, request, field):
     except: errors.append('Match Runner must be in %s' % ', '.join(candidates))
 
 def verify_variantfishtest_time_controls(errors, request, dev_field, base_field):
+    if request.POST['match_runner'] != 'VARIANTFISHTEST':
+        return
     try:
-        if request.POST['match_runner'] != 'VARIANTFISHTEST':
-            return
         dev_tc = OpenBench.utils.TimeControl.parse(request.POST[dev_field])
         base_tc = OpenBench.utils.TimeControl.parse(request.POST[base_field])
-        if dev_tc != base_tc:
-            raise Exception()
     except:
+        return
+    if dev_tc != base_tc:
         errors.append('Variantfishtest requires identical Dev/Base time controls')
+        return
+    if '/' in dev_tc:
+        errors.append('Variantfishtest does not support move-count time controls (X/Y+Z)')
 
 def verify_time_control(errors, request, field, field_name):
     try: OpenBench.utils.TimeControl.parse(request.POST[field])
