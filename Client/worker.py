@@ -981,15 +981,19 @@ def build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, times
     if var_path:
         args += ['-c', var_path]
 
-    if book_name and book_name.upper() != 'NONE':
-        book_path = os.path.join('Books', 'openbench.genfens.epd' if is_datagen else book_name)
+    book_path = None
+    if is_datagen:
+        book_path = os.path.join('Books', 'openbench.genfens.epd')
+    elif book_name and book_name.upper() != 'NONE':
+        book_path = os.path.join('Books', book_name)
+
+    if book_path:
         args += ['-b', book_path]
 
+        pairs = rounds_per // 2
         if is_datagen:
-            pairs = rounds_per // 2
             start = 1 + (runner_idx * pairs * (1 + no_reverse))
         else:
-            pairs = rounds_per // 2
             start = test['book_index'] + runner_idx * pairs
 
         args += ['--openbench-book-start', str(max(start - 1, 0))]
