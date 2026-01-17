@@ -530,11 +530,15 @@ class MatchRunner:
 
         # Extract the game # and result str from a match runner output line
         def parse_finished_game(line):
+            match = re.search(r'Finished game (\d+) .*?: (1-0|0-1|1/2-1/2)', line)
+            if match:
+                return int(match.group(1)), match.group(2)
             tokens = line.split()
             return int(tokens[2]), tokens[6]
 
         # Parse for errors resulting in adjudication
-        reason = line.split(':')[1]
+        parts = line.rsplit(':', 1)
+        reason = parts[1] if len(parts) > 1 else ''
         results['crashes'   ] += 'disconnect' in reason or 'stalls' in reason
         results['timelosses'] += 'on time' in reason
         results['illegals'  ] += 'illegal' in reason
@@ -944,7 +948,9 @@ def build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, times
 
     test       = config.workload['test']
     runner     = os.path.join('variantfishtest', 'variantfishtest.py')
-    variant    = test.get('variant', 'chess')
+    raw_variant = test.get('variant', 'chess')
+    variants = [v.strip().lower() for v in raw_variant.split(',') if v.strip()]
+    variant = ','.join(variants) if variants else 'chess'
     var_path   = test.get('variant_path')
     book_name  = test['book']['name']
     book_seed  = test.get('book_seed')

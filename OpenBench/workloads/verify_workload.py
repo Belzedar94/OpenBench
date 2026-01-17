@@ -167,6 +167,7 @@ def verify_tune_creation(errors, request):
         (verify_variant               , 'variant'),
         (verify_variant_path          , 'variant_path'),
         (verify_match_runner          , 'match_runner'),
+        (verify_variantfishtest_time_controls, 'dev_time_control', 'dev_time_control'),
         (verify_fastchess_variant, 'variant', 'book_name'),
 
         # Verify everything about the SPSA Settings
