@@ -924,16 +924,19 @@ def build_variantfishtest_engine_options(config, branch, runner_idx):
 
 def variantfishtest_time_settings(workload, scale_factor, branch):
 
-    time_control = workload['test'][branch]['time_control']
+    time_control = workload['test'][branch]['time_control'].strip()
 
-    if time_control.startswith('N='):
-        return { 'mode' : 'nodes', 'nodes' : int(time_control.split('=')[1]) }
+    match = re.match(r'(?i)^(N|NODES)=(\d+)$', time_control)
+    if match:
+        return { 'mode' : 'nodes', 'nodes' : int(match.group(2)) }
 
-    if time_control.startswith('D='):
-        return { 'mode' : 'depth', 'depth' : int(time_control.split('=')[1]) }
+    match = re.match(r'(?i)^(D|DEPTH)=(\d+)$', time_control)
+    if match:
+        return { 'mode' : 'depth', 'depth' : int(match.group(2)) }
 
-    if time_control.startswith('MT='):
-        value = int(time_control.split('=')[1])
+    match = re.match(r'(?i)^(MT|MOVETIME)=(\d+)$', time_control)
+    if match:
+        value = int(match.group(2))
         movetime = max(1, int(round(value * scale_factor)))
         return { 'mode' : 'movetime', 'movetime' : movetime }
 

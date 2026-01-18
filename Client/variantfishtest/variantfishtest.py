@@ -305,7 +305,12 @@ class EngineMatch:
             with open(bookfile) as f:
                 self.fens = []
                 for line in f:
-                    self.fens.append(line.rstrip(';\n'))
+                    fen = line.strip()
+                    if not fen:
+                        continue
+                    fen = fen.split(';', 1)[0].strip()
+                    if fen:
+                        self.fens.append(fen)
             if self.openbench_book_seed is not None:
                 rng = random.Random(self.openbench_book_seed)
                 rng.shuffle(self.fens)
