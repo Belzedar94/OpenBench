@@ -121,6 +121,7 @@ def verify_test_creation(errors, request):
         (verify_variant_path   , 'variant_path'),
         (verify_match_runner   , 'match_runner'),
         (verify_variantfishtest_time_controls, 'dev_time_control', 'base_time_control'),
+        (verify_variantfishtest_book, 'book_name'),
         (verify_fastchess_variant, 'variant', 'book_name'),
     ]
 
@@ -168,6 +169,7 @@ def verify_tune_creation(errors, request):
         (verify_variant_path          , 'variant_path'),
         (verify_match_runner          , 'match_runner'),
         (verify_variantfishtest_time_controls, 'dev_time_control', 'dev_time_control'),
+        (verify_variantfishtest_book, 'book_name'),
         (verify_fastchess_variant, 'variant', 'book_name'),
 
         # Verify everything about the SPSA Settings
@@ -299,6 +301,16 @@ def verify_variantfishtest_time_controls(errors, request, dev_field, base_field)
         return
     if '/' in dev_tc:
         errors.append('Variantfishtest does not support move-count time controls (X/Y+Z)')
+
+def verify_variantfishtest_book(errors, request, field):
+    if request.POST['match_runner'] != 'VARIANTFISHTEST':
+        return
+    book_name = request.POST[field].strip()
+    if not book_name or book_name.upper() == 'NONE':
+        return
+    ext = os.path.splitext(book_name)[1].lower()
+    if ext == '.pgn':
+        errors.append('Variantfishtest does not support PGN books; use EPD/FEN or NONE.')
 
 def verify_fastchess_variant(errors, request, variant_field, book_field):
     if request.POST['match_runner'] != 'FASTCHESS':
