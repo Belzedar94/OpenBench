@@ -92,6 +92,7 @@ class EngineMatch:
         self.openbench_pgn_path = self.openbench_pgn if self.openbench_pgn else None
         self.openbench_time_control = self.openbench_time_control
         self.openbench_lock = threading.Lock()
+        self.openbench_pgn_lock = threading.Lock()
         self.book_lock = threading.Lock()
         self.book_cursor = self.openbench_book_start
         self.time_margin_ms = 250 if self.openbench_mode else 0
@@ -372,11 +373,12 @@ class EngineMatch:
                 move_parts.append(move)
         move_text = " ".join(move_parts) + " " + result_str
 
-        with open(self.openbench_pgn_path, "a", encoding="utf-8") as fout:
-            for key, value in headers.items():
-                fout.write('[%s "%s"]\n' % (key, value))
-            fout.write("\n")
-            fout.write(move_text + "\n\n")
+        with self.openbench_pgn_lock:
+            with open(self.openbench_pgn_path, "a", encoding="utf-8") as fout:
+                for key, value in headers.items():
+                    fout.write('[%s "%s"]\n' % (key, value))
+                fout.write("\n")
+                fout.write(move_text + "\n\n")
 
     def print_settings(self):
         """Print settings for the test."""
