@@ -401,9 +401,12 @@ class MatchRunner:
     def basic_settings(config):
 
         # Prefer explicit variant, otherwise infer Fischer from book name
-        variant_name = config.workload['test'].get('variant', 'chess').lower()
+        raw_variant = config.workload['test'].get('variant', '')
+        variant_name = raw_variant.split(',')[0].strip().lower()
         if variant_name in ['chess960', 'fischerandom', 'frc', 'fischer']:
             variant = 'fischerandom'
+        elif variant_name in ['chess', 'standard']:
+            variant = 'standard'
         else:
             book_name = config.workload['test']['book']['name'].upper()
             is_frc = 'FRC' in book_name or '960' in book_name or 'FISCHER' in book_name
@@ -1440,6 +1443,18 @@ def run_and_parse_runner(config, command, runner_idx, results_queue, abort_flag)
     print('\n[#%d] Launching match runner...\n%s\n' % (runner_idx, command))
     cmd = command.split() if isinstance(command, str) else command
     runner = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+
+    def terminate_on_abort():
+        abort_flag.wait()
+        if runner.poll() is None:
+            runner.terminate()
+            try:
+                runner.wait(timeout=5)
+            except Exception:
+                runner.kill()
+
+    abort_thread = threading.Thread(target=terminate_on_abort, daemon=True)
+    abort_thread.start()
 
     results = {
 
