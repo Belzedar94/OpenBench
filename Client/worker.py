@@ -405,7 +405,9 @@ class MatchRunner:
         variant_name = raw_variant.split(',')[0].strip().lower()
         if variant_name in ['chess960', 'fischerandom', 'frc', 'fischer']:
             variant = 'fischerandom'
-        elif variant_name in ['chess', 'standard']:
+        elif variant_name in ['standard']:
+            variant = 'standard'
+        elif variant_name not in ['chess', '']:
             variant = 'standard'
         else:
             book_name = config.workload['test']['book']['name'].upper()
