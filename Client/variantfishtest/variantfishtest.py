@@ -213,6 +213,7 @@ class EngineMatch:
 
         # Lock for updating shared counters
         self.lock = threading.Lock()
+        self.reserved_games = 0
 
     def validate_engine_variants(self):
         """Validate that both engines support all required variants.
@@ -281,7 +282,7 @@ class EngineMatch:
 
     def stop(self):
         """Check whether testing should stop."""
-        if self.max_games and sum(self.scores) >= self.max_games:
+        if self.max_games and self.reserved_games >= self.max_games:
             return True
         if self.sprt and self.sprt_finished():
             return True
@@ -869,43 +870,47 @@ class EngineMatch:
             with self.lock:
                 if self.stop():
                     break
-            
-            # Select pair intelligently and manage in_flight counter
-            if self.is_tournament:
-                selected_pair = self.select_pair()
-                with self.lock:
+
+                desired_games = 2 if self.play_reverse else 1
+                if self.max_games:
+                    remaining = self.max_games - self.reserved_games
+                    if remaining <= 0:
+                        break
+                    reserved_games = min(desired_games, remaining)
+                else:
+                    reserved_games = desired_games
+                self.reserved_games += reserved_games
+                play_reverse = self.play_reverse and reserved_games == 2
+
+                # Select pair intelligently and manage in_flight counter
+                if self.is_tournament:
+                    selected_pair = self.select_pair()
                     self.in_flight[selected_pair] += 1
-            else:
-                selected_pair = None
+                else:
+                    selected_pair = None
                 
             try:
                 # Play one match instance (two games with color swap)
                 if self.is_tournament:
-                    res1, res2, tl1, tl2, engine_pair = self.play_match_instance(forced_pair=selected_pair)
+                    res1, res2, tl1, tl2, engine_pair = self.play_match_instance(
+                        forced_pair=selected_pair, play_reverse=play_reverse)
                 else:
-                    res1, res2, tl1, tl2, engine_pair = self.play_match_instance()
+                    res1, res2, tl1, tl2, engine_pair = self.play_match_instance(
+                        play_reverse=play_reverse)
             except Exception as e:
                 # Decrement in_flight counter on error
                 if self.is_tournament:
                     with self.lock:
                         self.in_flight[selected_pair] -= 1
+                with self.lock:
+                    self.reserved_games -= reserved_games
                 # Log the exception and continue with the next match instance.
                 self.out.write("Error in match instance: %s\n" % e)
                 self.out.flush()
                 continue
             # Update the counters (each match instance is 2 games)
             with self.lock:
-                # Check if we can add these games without exceeding the limit
-                current_total = sum(self.scores)
-                games_to_add = 2 if self.play_reverse else 1  # Each match instance is 2 games unless disabled
-                
-                # If adding these games would exceed the limit, only add what we can
-                if self.max_games and current_total + games_to_add > self.max_games:
-                    remaining_games = self.max_games - current_total
-                    if remaining_games <= 0:
-                        break  # Already at or over the limit, stop this worker
-                    # Only process the first game if we can only fit one more
-                    games_to_add = remaining_games
+                games_to_add = reserved_games
                 
                 games_added = 0
                 white_idx, black_idx = engine_pair
@@ -1021,7 +1026,7 @@ class EngineMatch:
                 elif self.verbosity > 0:
                     self.print_stats()
 
-    def play_match_instance(self, forced_pair=None):
+    def play_match_instance(self, forced_pair=None, play_reverse=None):
         """
         Play a pair of games (swapping colors between the two engines)
         and return a tuple: (result_game1, result_game2, time_loss_game1, time_loss_game2, engine_pair)
@@ -1046,14 +1051,16 @@ class EngineMatch:
             white_idx, black_idx = 0, 1
             engine_pair = (0, 1)
 
-        game_ids = self._reserve_game_ids(2 if self.play_reverse else 1)
+        if play_reverse is None:
+            play_reverse = self.play_reverse
+        game_ids = self._reserve_game_ids(2 if play_reverse else 1)
 
         # Game 1: first engine plays white, second engine plays black.
         res1, tl1, moves1 = self.play_game_instance(variant, pos, white=white_idx, black=black_idx)
         self._openbench_emit_game(game_ids[0], variant, pos, white_idx, black_idx, moves1, res1, tl1)
 
         res2 = tl2 = None
-        if self.play_reverse:
+        if play_reverse:
             # Game 2: swap colors.
             res2, tl2, moves2 = self.play_game_instance(variant, pos, white=black_idx, black=white_idx)
             self._openbench_emit_game(game_ids[1], variant, pos, black_idx, white_idx, moves2, res2, tl2)
