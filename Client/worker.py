@@ -879,15 +879,18 @@ def scale_time_control(workload, scale_factor, branch):
 
 def parse_engine_options(option_text):
 
-    # Split on spaces while respecting quoted values
-    tokens = shlex.split(option_text, posix=IS_LINUX)
+    # Split key=value tokens while preserving quoted values with spaces
+    token_regex = re.compile(r'(\S+?=(?:"[^"]*"|\'[^\']*\'|[^\s]+))')
+    tokens = token_regex.findall(option_text)
     options = {}
 
     for token in tokens:
         if '=' not in token:
             continue
         key, value = token.split('=', 1)
-        value = value.strip('"')
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
         options[key] = value
 
     return options
