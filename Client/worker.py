@@ -1012,8 +1012,7 @@ def build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, times
     elif time_info['mode'] == 'movetime':
         args += ['--move-time', str(time_info['movetime'])]
 
-    if test['upload_pgns'] != 'FALSE':
-        args += ['--openbench-pgn', MatchRunner.pgn_name(config, timestamp, runner_idx)]
+    args += ['--openbench-pgn', MatchRunner.pgn_name(config, timestamp, runner_idx)]
 
     for idx, branch in enumerate(['dev', 'base'], start=1):
         opts = build_variantfishtest_engine_options(config, branch, runner_idx)
