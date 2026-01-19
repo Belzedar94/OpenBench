@@ -289,7 +289,7 @@ def verify_match_runner(errors, request, field):
     except: errors.append('Match Runner must be in %s' % ', '.join(candidates))
 
 def verify_variantfishtest_time_controls(errors, request, dev_field, base_field):
-    if request.POST['match_runner'] != 'VARIANTFISHTEST':
+    if request.POST.get('match_runner') != 'VARIANTFISHTEST':
         return
     try:
         dev_tc = OpenBench.utils.TimeControl.parse(request.POST[dev_field])
@@ -303,7 +303,7 @@ def verify_variantfishtest_time_controls(errors, request, dev_field, base_field)
         errors.append('Variantfishtest does not support move-count time controls (X/Y+Z)')
 
 def verify_variantfishtest_book(errors, request, field):
-    if request.POST['match_runner'] != 'VARIANTFISHTEST':
+    if request.POST.get('match_runner') != 'VARIANTFISHTEST':
         return
     book_name = request.POST[field].strip()
     if not book_name or book_name.upper() == 'NONE':
@@ -313,7 +313,7 @@ def verify_variantfishtest_book(errors, request, field):
         errors.append('Variantfishtest does not support PGN books; use EPD/FEN or NONE.')
 
 def verify_fastchess_variant(errors, request, variant_field, book_field):
-    if request.POST['match_runner'] != 'FASTCHESS':
+    if request.POST.get('match_runner') != 'FASTCHESS':
         return
     raw = request.POST[variant_field].strip()
     variants = [v.strip().lower() for v in raw.split(',') if v.strip()]

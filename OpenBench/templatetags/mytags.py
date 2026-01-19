@@ -366,7 +366,9 @@ def test_is_time_odds(test):
     return test.dev_time_control != test.base_time_control
 
 def test_is_fischer(test):
-    if getattr(test, 'variant', '').lower() in ['chess960', 'fischerandom', 'frc', 'fischer']:
+    raw_variant = getattr(test, 'variant', '')
+    variants = [v.strip().lower() for v in raw_variant.split(',') if v.strip()]
+    if any(v in ['chess960', 'fischerandom', 'frc', 'fischer'] for v in variants):
         return True
     return 'FRC' in test.book_name.upper() or '960' in test.book_name.upper()
 
