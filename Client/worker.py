@@ -969,8 +969,7 @@ def build_variantfishtest_command(config, dev_cmd, base_cmd, scale_factor, times
     no_reverse = is_datagen and not test.get('play_reverses')
 
     rounds_per = config.workload['distribution']['rounds-per-runner']
-    games_per_round = 1 if no_reverse else 2
-    max_games = rounds_per * games_per_round
+    max_games = rounds_per
 
     time_info = variantfishtest_time_settings(config.workload, scale_factor, 'dev')
 
