@@ -334,13 +334,14 @@ class EngineMatch:
         result_str = {WIN: "1-0", LOSS: "0-1", DRAW: "1/2-1/2"}.get(result, "1/2-1/2")
         white_name = self._engine_label(white_idx)
         black_name = self._engine_label(black_idx)
+        termination = "time forfeit" if time_loss else "normal"
 
         reason = " {on time}" if time_loss else ""
         self.out.write("Finished game %d (%s vs %s): %s%s\n" % (game_id, white_name, black_name, result_str, reason))
         self.out.flush()
 
         if self.openbench_pgn_path:
-            self._append_pgn(game_id, variant, pos, white_name, black_name, moves, result_str)
+            self._append_pgn(game_id, variant, pos, white_name, black_name, moves, result_str, termination)
 
     def _reserve_game_ids(self, count):
         if not self.openbench_mode:
@@ -350,7 +351,7 @@ class EngineMatch:
             self.openbench_game_id += count
         return list(range(start, start + count))
 
-    def _append_pgn(self, game_id, variant, pos, white_name, black_name, moves, result_str):
+    def _append_pgn(self, game_id, variant, pos, white_name, black_name, moves, result_str, termination):
         if not self.openbench_pgn_path:
             return
 
@@ -363,6 +364,7 @@ class EngineMatch:
             "Black": black_name,
             "Result": result_str,
             "Variant": variant,
+            "Termination": termination,
         }
 
         if self.openbench_time_control:

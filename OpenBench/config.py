@@ -108,8 +108,8 @@ def verify_general_config(conf):
     assert type(conf.get('fastchess_repo_url') == str)
     assert type(conf.get('fastchess_repo_ref') == str)
 
-    assert type(conf.get('variantfishtest_repo_url') == str)
-    assert type(conf.get('variantfishtest_repo_ref') == str)
+    assert isinstance(conf.get('variantfishtest_repo_url'), str)
+    assert isinstance(conf.get('variantfishtest_repo_ref'), str)
 
     assert type(conf.get('use_cross_approval'         ) == bool)
     assert type(conf.get('require_login_to_view'      ) == bool)
