@@ -368,6 +368,64 @@ class ServerReporter:
 
         return ServerReporter.report(config, 'clientSubmitPGN', payload, files)
 
+
+## Variant -> Runner routing table.
+##
+## The variant is inferred from tokens in the Opening Book name, generalizing
+## the old "SHATRANJ in book_name" hack. Each entry maps a token found in the
+## book name to a (runner, variant_id) pair:
+##
+##   'cutechess'       : native cutechess-ob arbitration ( -variant <id> )
+##   'uci-pair-runner' : uci_pair_runner.py, a pure-UCI pair runner for
+##                       variants that cutechess does not arbitrate. It accepts
+##                       the exact same command line flags as cutechess-ob and
+##                       emits cutechess-compatible output ("Started game",
+##                       "Score of", "Finished game ... {reason}", -pgnout with
+##                       Termination headers), so parsing does not change.
+##
+## Tokens are checked in insertion order; the first match wins. No match means
+## standard chess through cutechess, exactly as before.
+
+VARIANTS = {
+    'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
+    'ATOMIC'   : ('cutechess'      , 'atomic'      ),
+    'FRC'      : ('cutechess'      , 'fischerandom'),
+    '960'      : ('cutechess'      , 'fischerandom'),
+    'FISCHER'  : ('cutechess'      , 'fischerandom'),
+    'SPELL'    : ('uci-pair-runner', 'spell-chess' ),
+}
+
+# Pair-runner script distributed alongside worker.py, inside Client/. The
+# worker os.chdir()s to the Client/ directory on startup, so a bare relative
+# name is always resolvable here.
+UCI_PAIR_RUNNER = 'uci_pair_runner.py'
+
+def variant_routing(config):
+
+    # Returns (runner, variant_id), inferred from the Opening Book name
+    book_name = config.workload['test']['book']['name'].upper()
+
+    for token, (runner, variant_id) in VARIANTS.items():
+        if token in book_name:
+            return (runner, variant_id)
+
+    return ('cutechess', 'standard')
+
+def runner_base_command(config):
+
+    # Everything cutechess arbitrates natively keeps the original binary
+    runner, variant = variant_routing(config)
+    if runner == 'cutechess':
+        return ['cutechess-ob.exe', './cutechess-ob'][IS_LINUX]
+
+    # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
+    # interpreter running the worker (same venv), unless its path contains
+    # spaces, since run_and_parse_cutechess() builds argv with command.split()
+    python = sys.executable if ' ' not in sys.executable else \
+             ['python', 'python3'][IS_LINUX]
+    return '%s %s' % (python, UCI_PAIR_RUNNER)
+
+
 class Cutechess:
 
     ## Handles building the very long string of arguments that need to be passed
@@ -376,12 +434,10 @@ class Cutechess:
 
     @staticmethod
     def basic_settings(config):
-        # Assume shatranj if SHATRANJ appears in the Opening Book
-        # Assume Fischer if FRC, 960, or FISCHER appears in the Opening Book
-        book_name = config.workload['test']['book']['name'].upper()
-        is_shatranj = 'SHATRANJ' in book_name
-        is_frc    = 'FRC' in book_name or '960' in book_name or 'FISCHER' in book_name
-        variant   = [['standard', 'fischerandom'], ['shatranj', 'shatranj']][is_shatranj][is_frc]
+
+        # Variant and runner are both inferred from the Opening Book name,
+        # via the VARIANTS routing table ( see variant_routing() )
+        runner, variant = variant_routing(config)
 
         # Only include -repeat if not skipping the reverses in DATAGEN
         is_datagen = config.workload['test']['type'] == 'DATAGEN'
@@ -1122,6 +1178,9 @@ def safe_run_benchmarks(config, branch, engine, network):
 
 def build_cutechess_command(config, dev_cmd, base_cmd, scale_factor, timestamp, cutechess_idx):
 
+    # Identical flag construction for every runner: the uci-pair-runner
+    # accepts the same command line surface as cutechess-ob, and emits
+    # cutechess-compatible output, so nothing downstream changes
     flags  = ' ' + Cutechess.basic_settings(config)
     flags += ' ' + Cutechess.concurrency_settings(config)
     flags += ' ' + Cutechess.adjudication_settings(config)
@@ -1130,7 +1189,8 @@ def build_cutechess_command(config, dev_cmd, base_cmd, scale_factor, timestamp, 
     flags += ' ' + Cutechess.book_settings(config, cutechess_idx)
     flags += ' ' + Cutechess.pgnout_settings(config, timestamp, cutechess_idx)
 
-    return ['cutechess-ob.exe', './cutechess-ob'][IS_LINUX] + flags
+    # Dispatch on the VARIANTS routing table: cutechess-ob, or uci_pair_runner.py
+    return runner_base_command(config) + flags
 
 def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort_flag):
 
