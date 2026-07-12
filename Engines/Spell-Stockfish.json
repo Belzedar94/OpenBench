@@ -1,11 +1,13 @@
 {
-    "private" : true,
+    "private" : false,
     "nps"     : 380000,
     "source"  : "https://github.com/Belzedar94/Spell-Stockfish",
 
     "build" : {
-        "cpuflags" : ["AVX2", "FMA", "POPCNT"],
-        "systems"  : ["Windows", "Linux"]
+        "path"      : "src",
+        "compilers" : ["g++"],
+        "cpuflags"  : ["AVX2", "FMA", "POPCNT"],
+        "systems"   : ["Windows", "Linux"]
     },
 
     "test_presets" : {
