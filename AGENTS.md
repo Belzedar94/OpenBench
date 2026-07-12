@@ -162,10 +162,13 @@ python client.py -U <user> -P <pass> -S http://localhost:8000 -T <hilos> -N 1
 - Hecho también (2026-07-12, tarde): fork publicado en `Belzedar94/OpenBench@spell-runner`
   (única rama, default; zipball verificado); servidor endurecido (SECRET_KEY/DEBUG por
   env + WhiteNoise) y expuesto vía túnel TryCloudflare.
-- Pendiente: **hosting estable para la web** (el túnel quick es efímero: URL nueva por
-  arranque y muere con la máquina — opciones: VPS del propietario, túnel Cloudflare con
-  cuenta y dominio, o PaaS); smoke SPRT E2E por la torre; mecanismo EVALFILE→default UCI
-  para tests de spell CON red asignada (los netless y SPSA funcionan ya); presets de
-  Atomic cuando exista su json; migrar a PostgreSQL si la flota de workers crece.
+- Hosting web: decisión del propietario (2026-07-12) = **quedarse con el túnel efímero
+  por ahora**; hosting estable "ya veremos" (candidatos evaluados: VPS propio, Fly.io,
+  túnel Cloudflare con dominio). **Vercel se evaluó y se DESCARTÓ**: serverless no encaja
+  (sin disco persistente para SQLite/redes, límite de subida 4,5MB vs redes de 101MB, sin
+  procesos residentes para los watchers) — no re-proponerlo.
+- Pendiente: smoke SPRT E2E por la torre; mecanismo EVALFILE→default UCI para tests de
+  spell CON red asignada (los netless y SPSA funcionan ya); presets de Atomic cuando
+  exista su json; migrar a PostgreSQL si la flota de workers crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
