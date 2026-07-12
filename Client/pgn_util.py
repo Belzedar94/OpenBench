@@ -25,7 +25,8 @@ import sys
 # For use externally
 REGEX_COMMENT_VERBOSE  = r'(book|[+-]?M?\d+(?:\.\d+)? \d+/\d+ \d+ \d+)'
 REGEX_COMMENT_COMPACT  = r'(book|[+-]?M?\d+(?:\.\d+)?) \d+/\d+ \d+ \d+'
-REGEX_MOVE_AND_COMMENT = r'\s*(?:\d+\. )?([a-zA-Z0-9+=#-]+) (?:\s*\{\s*([^}]*)\s*\})?'
+# '@' and ',' admit variant gated moves such as spell-chess 'f@e4,d2d4'
+REGEX_MOVE_AND_COMMENT = r'\s*(?:\d+\. )?([a-zA-Z0-9+=#@,-]+) (?:\s*\{\s*([^}]*)\s*\})?'
 REGEX_GAME_RESULT      = r'\s*(1-0|0-1|1/2-1/2|\*)'
 
 def pgn_iterator(fname):

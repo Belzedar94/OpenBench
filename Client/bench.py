@@ -40,7 +40,10 @@ import sys
 from utils import kill_process_by_name
 from utils import OpenBenchBadBenchException
 
-MAX_BENCH_TIME_SECONDS = 60
+# 300s: large variant NNUEs (spell-chess run5rl is 101MB and benches at
+# ~223k NPS) take ~53s solo on a 5950X, and this module launches one bench
+# per worker thread CONCURRENTLY -- 60s starves them into false BadBench
+MAX_BENCH_TIME_SECONDS = 300
 
 def parse_stream_output(stream):
 

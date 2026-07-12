@@ -36,6 +36,7 @@ Example (local smoke):
       -srand 42 -pgnout out.pgn
 """
 
+import atexit
 import math
 import os
 import queue
@@ -56,6 +57,35 @@ MOVE_RE = re.compile(r"^[A-Za-z0-9@+=,\-]{2,12}$")
 
 _out_lock = threading.Lock()
 
+# Every live engine subprocess, so that no exit path can leak one: normal
+# exit (atexit), boot failures, and the hard-exit taken when our stdout pipe
+# dies (the OpenBench worker never kills the runner by name -- see below)
+_live_procs = set()
+_live_lock = threading.Lock()
+
+
+def _register(proc):
+    with _live_lock:
+        _live_procs.add(proc)
+
+
+def _unregister(proc):
+    with _live_lock:
+        _live_procs.discard(proc)
+
+
+def _kill_live_engines():
+    with _live_lock:
+        procs = list(_live_procs)
+    for p in procs:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+atexit.register(_kill_live_engines)
+
 
 def emit(line):
     """stdout writer: ASCII only, never blank, one line, immediate flush."""
@@ -64,8 +94,15 @@ def emit(line):
         return
     line = line.encode("ascii", "replace").decode("ascii")
     with _out_lock:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        except OSError:
+            # stdout pipe is gone: the parent died or dropped us. Nobody is
+            # listening for results anymore -- kill the engines and exit hard
+            # instead of playing the rest of the batch as an orphan.
+            _kill_live_engines()
+            os._exit(3)
 
 
 def warn(msg):
@@ -201,13 +238,18 @@ class Engine:
         except OSError as exc:
             raise EngineDied("%s failed to launch (%s): %s"
                              % (spec.name, spec.path, exc))
+        _register(self.proc)
         self._lines = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
-        self.send("uci")
-        self.read_until("uciok", timeout=60)
-        for k, v in spec.options.items():
-            self.send("setoption name %s value %s" % (k, v))
-        self.sync()
+        try:
+            self.send("uci")
+            self.read_until("uciok", timeout=60)
+            for k, v in spec.options.items():
+                self.send("setoption name %s value %s" % (k, v))
+            self.sync()
+        except Exception:
+            self.quit()  # a half-booted engine must not outlive its ctor
+            raise
 
     def send(self, cmd):
         if self.debug:
@@ -323,6 +365,7 @@ class Engine:
                 self.proc.kill()
             except Exception:
                 pass
+        _unregister(self.proc)
 
 
 # --------------------------------------------------------------------------
@@ -378,7 +421,7 @@ def play_game(white, black, fen, cfg):
     adj_streak, adj_leader = 0, 0
     moves = []
     record = []
-    stm0, fullmove0 = _fen_fields(fen)
+    stm0, _ = _fen_fields(fen)
 
     def finish(result, reason, termination="normal", restart=False):
         out = Outcome(result, reason, termination, restart)
@@ -477,17 +520,19 @@ def play_game(white, black, fen, cfg):
         record.append((best, _fmt_comment(info, elapsed_ms)))
 
         # ---- resign adjudication (cutechess -resign movecount=M score=S:
-        # a side whose own score stays <= -S for M consecutive moves loses)
-        if cfg.resign and score is not None:
-            if score <= -cfg.resign["score"]:
+        # a side whose own score stays <= -S for M consecutive moves loses;
+        # a scoreless move resets the streak, as cutechess does on empty
+        # evaluations)
+        if cfg.resign:
+            if score is None or score > -cfg.resign["score"]:
+                resign_cnt[eng] = 0
+            else:
                 resign_cnt[eng] += 1
                 if resign_cnt[eng] >= cfg.resign["movecount"]:
                     winner = black if stm_is_white else white
                     return finish("0-1" if stm_is_white else "1-0",
                                   "%s wins by adjudication" % side_of(winner),
                                   "adjudication")
-            else:
-                resign_cnt[eng] = 0
 
         # ---- draw adjudication (cutechess -draw movenumber=N movecount=M
         # score=S: after move N, both sides within +/-S for M moves each)
@@ -497,9 +542,10 @@ def play_game(white, black, fen, cfg):
                 draw_cnt += 1
             else:
                 draw_cnt = 0
-            fullmove_now = fullmove0 + (ply + (1 if stm0 == "b" else 0)) // 2
+            # cutechess counts plies played since the opening position
+            # (plyCount >= 2*movenumber), not the FEN fullmove counter
             if (draw_cnt >= 2 * cfg.draw["movecount"]
-                    and fullmove_now >= cfg.draw["movenumber"]):
+                    and ply + 1 >= 2 * cfg.draw["movenumber"]):
                 return finish("1/2-1/2", "Draw by adjudication",
                               "adjudication")
 
@@ -629,6 +675,7 @@ def parse_cli(argv):
     cfg.engines_raw = []
     cfg.each_raw = {"options": {}}
     cfg.openings = None
+    cfg.variant = "standard"
     cfg.repeat = False
     cfg.concurrency = 1
     cfg.games = 2
@@ -681,9 +728,7 @@ def parse_cli(argv):
             val = argv[i + 1]
             i += 2
             if flag == "-variant":
-                if val not in ("standard",):
-                    warn("-variant %s noted; variant play is engine-side "
-                         "(pass option.UCI_Variant=...)" % val)
+                cfg.variant = val
             elif flag == "-concurrency":
                 cfg.concurrency = max(1, int(val))
             elif flag == "-games":
@@ -734,6 +779,12 @@ def parse_cli(argv):
             if k != "options":
                 merged[k] = v
         specs.append(EngineSpec.from_settings(merged, idx))
+    # non-standard -variant: forward to the engines as UCI_Variant (engines
+    # that do not expose the option just ignore the setoption). An explicit
+    # option.UCI_Variant from the command line wins.
+    if cfg.variant != "standard":
+        for spec in specs:
+            spec.options.setdefault("UCI_Variant", cfg.variant)
     cfg.specs = specs
     if specs[0].name == specs[1].name:
         specs[1].name += "-2"
@@ -835,8 +886,19 @@ def main():
 
     def worker():
         holder = {"engines": None}  # (dev Engine, base Engine) or None
+        fast_restarts = 0           # consecutive near-instant engine deaths
+        aborted = False
 
-        while True:
+        def boot_pair():
+            e_dev = Engine(dev, cfg.debug)
+            try:
+                e_base = Engine(base, cfg.debug)
+            except Exception:
+                e_dev.quit()  # do not leak the half-booted pair
+                raise
+            return e_dev, e_base
+
+        while not aborted:
             try:
                 p = jobs.get_nowait()
             except queue.Empty:
@@ -853,10 +915,10 @@ def main():
                 wspec, bspec = (dev, base) if dev_is_white else (base, dev)
                 emit("Started game %d of %d (%s vs %s)"
                      % (g, total, wspec.name, bspec.name))
+                t_game = time.monotonic()
                 try:
                     if holder["engines"] is None:
-                        holder["engines"] = (Engine(dev, cfg.debug),
-                                             Engine(base, cfg.debug))
+                        holder["engines"] = boot_pair()
                     e_dev, e_base = holder["engines"]
                     e_dev.new_game()
                     e_base.new_game()
@@ -893,10 +955,30 @@ def main():
                                   fen, outcome, tc_label)
                     except OSError as exc:
                         warn("pgn write failed: %s" % exc)
-                if outcome.restart and holder["engines"]:
-                    for e in holder["engines"]:
-                        e.quit()
-                    holder["engines"] = None
+                if outcome.restart:
+                    if holder["engines"]:
+                        for e in holder["engines"]:
+                            e.quit()
+                        holder["engines"] = None
+                    # Circuit breaker: engines dying instantly over and over
+                    # means someone (the OpenBench worker on abort, or the
+                    # user) is killing them by name. cutechess dies in that
+                    # flow; a runner that keeps resurrecting engines would
+                    # steal CPU from the next workload forever.
+                    fast = time.monotonic() - t_game < 5.0
+                    fast_restarts = fast_restarts + 1 if fast else 0
+                    if fast_restarts >= 3:
+                        warn("3 consecutive instant engine deaths; "
+                             "aborting the remaining games of this batch")
+                        try:
+                            while True:
+                                jobs.get_nowait()
+                        except queue.Empty:
+                            pass
+                        aborted = True
+                        break
+                else:
+                    fast_restarts = 0
         if holder["engines"]:
             for e in holder["engines"]:
                 e.quit()

@@ -387,12 +387,19 @@ class ServerReporter:
 ## standard chess through cutechess, exactly as before.
 
 VARIANTS = {
+    'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
     'FRC'      : ('cutechess'      , 'fischerandom'),
     '960'      : ('cutechess'      , 'fischerandom'),
     'FISCHER'  : ('cutechess'      , 'fischerandom'),
-    'SPELL'    : ('uci-pair-runner', 'spell-chess' ),
+}
+
+# Fallback when the book name carries no token (DATAGEN runs use book='None';
+# genfens builds the openings by calling the engine): route by the dev
+# engine's registered variant instead.
+ENGINE_VARIANTS = {
+    'SPELL-STOCKFISH' : ('uci-pair-runner', 'spell-chess'),
 }
 
 # Pair-runner script distributed alongside worker.py, inside Client/. The
@@ -409,6 +416,12 @@ def variant_routing(config):
         if token in book_name:
             return (runner, variant_id)
 
+    # No token in the book name (e.g. DATAGEN's book='None'): fall back to
+    # the dev engine's registered variant
+    dev_engine = config.workload['test']['dev']['engine'].upper()
+    if dev_engine in ENGINE_VARIANTS:
+        return ENGINE_VARIANTS[dev_engine]
+
     return ('cutechess', 'standard')
 
 def runner_base_command(config):
@@ -419,10 +432,22 @@ def runner_base_command(config):
         return ['cutechess-ob.exe', './cutechess-ob'][IS_LINUX]
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
-    # interpreter running the worker (same venv), unless its path contains
-    # spaces, since run_and_parse_cutechess() builds argv with command.split()
-    python = sys.executable if ' ' not in sys.executable else \
-             ['python', 'python3'][IS_LINUX]
+    # interpreter running the worker (same venv), but the command line is
+    # split on spaces by run_and_parse_cutechess(), so a spaced path must be
+    # converted to its 8.3 short form (Windows) or dropped for a bare name.
+    python = sys.executable
+    if ' ' in python and IS_WINDOWS:
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(260)
+            if ctypes.windll.kernel32.GetShortPathNameW(python, buf, 260):
+                python = buf.value
+        except Exception:
+            pass
+    if ' ' in python:
+        python = ['python', 'python3'][IS_LINUX]
+        print('WARNING: venv python path contains spaces; falling back to '
+              'bare "%s" from PATH for the uci-pair-runner' % python)
     return '%s %s' % (python, UCI_PAIR_RUNNER)
 
 
