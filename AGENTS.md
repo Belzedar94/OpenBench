@@ -20,7 +20,9 @@ Rutas en esta máquina:
 | Cosa | Ruta |
 |---|---|
 | Este fork (server+client) | `C:\Users\djime\Documents\Chess_variants\Codex\Fairy-Stockfish organization\openbench-spell` |
-| venv del servidor | `<fork>\.venv` (Django 4.2.30, scipy 1.18) |
+| Fork publicado (workers remotos) | `https://github.com/Belzedar94/OpenBench` rama `spell-runner` (default) |
+| Web pública | Túnel TryCloudflare EFÍMERO sobre el servidor local — la URL vigente está en `%TEMP%\ob_public_url.txt` del host (cambia en cada arranque del túnel; hosting estable pendiente de decisión) |
+| venv del servidor | `<fork>\.venv` (Django 4.2.30, scipy 1.18, whitenoise) |
 | Motor spell (público) | `https://github.com/Belzedar94/Spell-Stockfish` (branch de trabajo `phase-4-strength`, base `master`) |
 | Docs de despliegue/diseño | `Spell-Stockfish\docs\openbench-server-runbook.md` y `docs\openbench-spell.md` |
 | DB | `<fork>\db.sqlite3` (SQLite; suficiente para pocos workers) |
@@ -29,11 +31,19 @@ Rutas en esta máquina:
 
 ```powershell
 cd "<fork>"
-.\.venv\Scripts\python.exe manage.py runserver 0.0.0.0:8000
+# instancia PÚBLICA endurecida (la clave vive en Config\secret.key, gitignored):
+$env:OPENBENCH_SECRET_KEY = (Get-Content Config\secret.key -Raw).Trim()
+$env:OPENBENCH_DEBUG = 'False'
+.\.venv\Scripts\python.exe manage.py runserver 0.0.0.0:8000 --noreload
+# túnel web (URL nueva en cada arranque; queda en %TEMP%\cf_err.log):
+cloudflared tunnel --url http://localhost:8000
 ```
 
 - OJO: `runserver` está sobreescrito y arranca dos watchers (artifacts y PGN). No usar
-  gunicorn/otro WSGI sin replicarlos.
+  gunicorn/otro WSGI sin replicarlos. Con `--noreload` los watchers arrancan igual
+  (verificado); sin las env vars corre en modo dev local (DEBUG on, clave de fallback).
+- Los estáticos con DEBUG=False los sirve WhiteNoise (`WHITENOISE_USE_FINDERS`), porque
+  el runserver custom no acepta `--insecure`.
 - Web: `http://localhost:8000/` · admin: `/admin/` · tests nuevos: `/newTest/` · redes:
   `/networks/`.
 - Usuario: **`belzedar`** (superuser + Profile `enabled`+`approver`). La contraseña la
@@ -115,13 +125,19 @@ python client.py -U <user> -P <pass> -S http://localhost:8000 -T <hilos> -N 1
   Atomic y a veces corre granjas de datagen o entrenamientos. Antes de conectar un worker
   gordo: mira qué corre (`Get-Process stockfish*, python*`) y reparte (regla de la casa:
   ≤24 hilos de motor en total). Los benches del worker usan -T hilos de golpe.
-- Workers REMOTOS: pendiente de publicar este fork en GitHub (ver §7). El auto-update del
-  cliente descarga `client_repo_url`@`client_repo_ref` y asume carpeta raíz
-  `OpenBench-<ref>` → **el repo en GitHub debe llamarse `OpenBench`**. Además el
-  kill-by-name del worker busca `cutechess-ob(.exe)`: para remotos, empaquetar
-  `uci_pair_runner.py` como ejecutable con ese nombre (pyinstaller) — localmente no hace
-  falta (el runner se auto-protege: pipe muerto → sale matando motores; 3 muertes
-  instantáneas seguidas → aborta el lote).
+- **Workers REMOTOS (quickstart)** — el fork ya está publicado:
+  ```
+  git clone -b spell-runner https://github.com/Belzedar94/OpenBench
+  cd OpenBench/Client && pip install -r requirements.txt
+  python client.py -U <user> -P <pass> -S <URL-publica-del-servidor> -T <hilos> -N 1
+  ```
+  Requisitos de la máquina: Python 3.9+, `make` + `g++` en PATH (Linux:
+  build-essential; Windows: MSYS2 mingw64). Los tests SPELL corren con
+  `uci_pair_runner.py` que viaja en `Client/` (usa el mismo python del worker). El
+  auto-update descarga `client_repo_url`@`client_repo_ref` y asume carpeta raíz
+  `OpenBench-<ref>` → por eso el repo se llama `OpenBench`. El kill-by-name del worker
+  busca `cutechess-ob(.exe)` y no alcanza al runner python: el runner se auto-protege
+  (pipe muerto → sale matando motores; 3 muertes instantáneas seguidas → aborta el lote).
 
 ## 6. Gotchas que ya mordieron (no reaprender por las malas)
 
@@ -143,10 +159,13 @@ python client.py -U <user> -P <pass> -S http://localhost:8000 -T <hilos> -N 1
 - Hecho: server local operativo; Spell-Stockfish registrado (flujo público); red run5rl
   subida; libro `spell_openings.epd` publicado como release y manifestado; shim de Makefile
   en el repo del motor; `uci_pair_runner` integrado y endurecido (verificación adversarial).
-- Pendiente: **publicar este fork en GitHub** como `Belzedar94/OpenBench` rama
-  `spell-runner` (config.json ya apunta ahí; hasta entonces, workers solo desde este
-  checkout local); smoke SPRT E2E master-vs-master de spell; mecanismo EVALFILE→default
-  UCI para tests de spell CON red asignada (los netless y SPSA funcionan ya); presets de
-  Atomic cuando exista su json.
+- Hecho también (2026-07-12, tarde): fork publicado en `Belzedar94/OpenBench@spell-runner`
+  (única rama, default; zipball verificado); servidor endurecido (SECRET_KEY/DEBUG por
+  env + WhiteNoise) y expuesto vía túnel TryCloudflare.
+- Pendiente: **hosting estable para la web** (el túnel quick es efímero: URL nueva por
+  arranque y muere con la máquina — opciones: VPS del propietario, túnel Cloudflare con
+  cuenta y dominio, o PaaS); smoke SPRT E2E por la torre; mecanismo EVALFILE→default UCI
+  para tests de spell CON red asignada (los netless y SPSA funcionan ya); presets de
+  Atomic cuando exista su json; migrar a PostgreSQL si la flota de workers crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
