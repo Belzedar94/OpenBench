@@ -27,25 +27,25 @@
         },
 
         "STC" : {
-            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 Use NNUE=true",
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 \"Use NNUE=true\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32
         },
 
         "LTC" : {
-            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 Use NNUE=true",
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 \"Use NNUE=true\"",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 8
         },
 
         "Classical STC" : {
-            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 Use NNUE=false",
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 \"Use NNUE=false\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32
         },
 
         "Classical LTC" : {
-            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 Use NNUE=false",
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 \"Use NNUE=false\"",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 8
         }

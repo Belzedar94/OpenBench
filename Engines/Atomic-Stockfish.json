@@ -28,64 +28,64 @@
         },
 
         "STC" : {
-            "both_options"      : "Threads=1 Hash=32 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=32 \"Use NNUE=true\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32
         },
 
         "LTC" : {
-            "both_options"      : "Threads=1 Hash=128 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=128 \"Use NNUE=true\"",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 8
         },
 
         "STC regression" : {
-            "both_options"      : "Threads=1 Hash=32 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=32 \"Use NNUE=true\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32,
             "test_bounds"       : "[-5.00, 0.00]"
         },
 
         "LTC regression" : {
-            "both_options"      : "Threads=1 Hash=128 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=128 \"Use NNUE=true\"",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 8,
             "test_bounds"       : "[-5.00, 0.00]"
         },
 
         "Classical STC" : {
-            "both_options"      : "Threads=1 Hash=32 Use NNUE=false",
+            "both_options"      : "Threads=1 Hash=32 \"Use NNUE=false\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32
         },
 
         "Classical LTC" : {
-            "both_options"      : "Threads=1 Hash=128 Use NNUE=false",
+            "both_options"      : "Threads=1 Hash=128 \"Use NNUE=false\"",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 8
         },
 
         "SMP STC" : {
-            "both_options"      : "Threads=8 Hash=64 Use NNUE=true",
+            "both_options"      : "Threads=8 Hash=64 \"Use NNUE=true\"",
             "both_time_control" : "10.0+0.1",
             "workload_size"     : 16
         },
 
         "SMP LTC" : {
-            "both_options"      : "Threads=8 Hash=256 Use NNUE=true",
+            "both_options"      : "Threads=8 Hash=256 \"Use NNUE=true\"",
             "both_time_control" : "30.0+0.3",
             "workload_size"     : 8
         },
 
         "STC progtest" : {
-            "both_options"      : "Threads=1 Hash=32 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=32 \"Use NNUE=true\"",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 32,
             "test_max_games"    : 3000
         },
 
         "LTC progtest" : {
-            "both_options"      : "Threads=1 Hash=128 Use NNUE=true",
+            "both_options"      : "Threads=1 Hash=128 \"Use NNUE=true\"",
             "both_time_control" : "60.0+0.6",
             "workload_size"     : 8,
             "test_max_games"    : 1000
@@ -93,8 +93,8 @@
 
         "Syzygy STC NNUE" : {
             "book_name"         : "ATOMIC_syzygy_6man.epd",
-            "dev_options"       : "Threads=1 Hash=32 Use NNUE=true SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
-            "base_options"      : "Threads=1 Hash=32 Use NNUE=true SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "dev_options"       : "Threads=1 Hash=32 \"Use NNUE=true\" SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "base_options"      : "Threads=1 Hash=32 \"Use NNUE=true\" SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 1,
             "test_max_games"    : 2000,
@@ -104,8 +104,8 @@
 
         "Syzygy LTC NNUE" : {
             "book_name"         : "ATOMIC_syzygy_6man.epd",
-            "dev_options"       : "Threads=1 Hash=128 Use NNUE=true SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
-            "base_options"      : "Threads=1 Hash=128 Use NNUE=true SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "dev_options"       : "Threads=1 Hash=128 \"Use NNUE=true\" SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "base_options"      : "Threads=1 Hash=128 \"Use NNUE=true\" SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 1,
             "test_max_games"    : 2000,
@@ -115,8 +115,8 @@
 
         "Syzygy STC classical" : {
             "book_name"         : "ATOMIC_syzygy_6man.epd",
-            "dev_options"       : "Threads=1 Hash=32 Use NNUE=false SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
-            "base_options"      : "Threads=1 Hash=32 Use NNUE=false SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "dev_options"       : "Threads=1 Hash=32 \"Use NNUE=false\" SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "base_options"      : "Threads=1 Hash=32 \"Use NNUE=false\" SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
             "both_time_control" : "8.0+0.08",
             "workload_size"     : 1,
             "test_max_games"    : 2000,
@@ -126,8 +126,8 @@
 
         "Syzygy LTC classical" : {
             "book_name"         : "ATOMIC_syzygy_6man.epd",
-            "dev_options"       : "Threads=1 Hash=128 Use NNUE=false SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
-            "base_options"      : "Threads=1 Hash=128 Use NNUE=false SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "dev_options"       : "Threads=1 Hash=128 \"Use NNUE=false\" SyzygyProbeLimit=6 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
+            "base_options"      : "Threads=1 Hash=128 \"Use NNUE=false\" SyzygyProbeLimit=0 SyzygyProbeDepth=1 Syzygy50MoveRule=true",
             "both_time_control" : "40.0+0.4",
             "workload_size"     : 1,
             "test_max_games"    : 2000,
@@ -149,12 +149,12 @@
         },
 
         "SPSA STC" : {
-            "dev_options"      : "Threads=1 Hash=32 Use NNUE=true",
+            "dev_options"      : "Threads=1 Hash=32 \"Use NNUE=true\"",
             "dev_time_control" : "8.0+0.08"
         },
 
         "SPSA VSTC" : {
-            "dev_options"      : "Threads=1 Hash=16 Use NNUE=true",
+            "dev_options"      : "Threads=1 Hash=16 \"Use NNUE=true\"",
             "dev_time_control" : "2.0+0.02"
         }
     },

@@ -71,6 +71,7 @@ class AtomicOnboardingTests(unittest.TestCase):
             if name == "default":
                 continue
             self.assertIn("UCI_Variant=atomic", preset["both_options"], name)
+            self.assertIn('"Use NNUE=', preset["both_options"], name)
             self.assertNotIn("Use NNUE=pure", preset["both_options"], name)
 
     def test_four_fixed_game_syzygy_presets(self):
@@ -106,6 +107,7 @@ class AtomicOnboardingTests(unittest.TestCase):
                 self.assertIn("Threads=1", options, name)
                 self.assertIn(hash_option, options, name)
                 self.assertIn(eval_option, options, name)
+                self.assertIn(f'"{eval_option}"', options, name)
                 self.assertIn(f"SyzygyProbeLimit={limit}", options, name)
                 self.assertIn("SyzygyProbeDepth=1", options, name)
                 self.assertIn("Syzygy50MoveRule=true", options, name)

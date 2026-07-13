@@ -47,8 +47,8 @@ adjudicator consumes orthodox `.rtbw` files. Engine probing remains enabled via
 ## Four fixed-game measurements
 
 Run the four named Syzygy presets as ordinary `GAMES` workloads, each targeting
-2,000 games. The presets deliberately omit a `test_mode` override: select the
-normal fixed-game mode when creating each workload.
+2,000 games. Applying a preset sets `test_max_games=2000` and selects `GAMES`
+automatically; do not change the test mode afterwards.
 
 | Evaluation | Control | Time control | Hash |
 | --- | --- | --- | --- |
