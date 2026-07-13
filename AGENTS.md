@@ -148,6 +148,12 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 1. **Flujo por idea**: rama → **SPRT STC** (`8.0+0.08`, Threads=1 Hash=32) → si pasa →
    **SPRT LTC** (`40.0+0.4`, Threads=1 Hash=128) → si pasan AMBOS → **merge a master**
    con `Bench: <N>` al final del commit. Master solo avanza así.
+   **Nomenclatura (corrección del propietario)**: el título del test en la web es
+   `Engine-rama_dev vs Engine-rama_base` — la rama dev SIEMPRE lleva nombre descriptivo
+   de la idea (`merged-ordering`, `razor-guard`...), NUNCA master-vs-master. Para tests
+   por diff de opciones, crear igualmente una rama-etiqueta (commit vacío descriptivo
+   con el `Bench:` de master) y pasar el toggle en dev_options: cero rebuilds de código,
+   nombre legible.
 2. **Bounds**: ganancia `[0.00, 5.00]` · simplificación/no-regresión `[-5.00, 0.00]` ·
    confianza `[0.05, 0.05]`. Adjudicación: win `movecount=3 score=400`, draw
    `movenumber=40 movecount=8 score=10`.
