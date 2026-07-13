@@ -26,6 +26,14 @@ DEBUG = os.environ.get('OPENBENCH_DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ['*']
 
+# The public web goes through an HTTPS tunnel in front of runserver; Django's
+# CSRF origin check needs the tunnel origin trusted or every login/form POST
+# 403s. Comma-separated env override; the default trusts TryCloudflare quick
+# tunnels (their subdomain rotates on every tunnel restart).
+CSRF_TRUSTED_ORIGINS = [
+    o for o in os.environ.get('OPENBENCH_TRUSTED_ORIGINS',
+                              'https://*.trycloudflare.com').split(',') if o]
+
 HTML_MINIFY   = True
 APPEND_SLASH  = True
 
