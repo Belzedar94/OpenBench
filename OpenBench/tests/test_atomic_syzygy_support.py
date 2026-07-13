@@ -18,6 +18,7 @@ import django
 django.setup()
 
 import worker
+import uci_pair_runner
 import OpenBench.views
 from OpenBench import config as openbench_config
 from OpenBench.workloads import get_workload
@@ -141,6 +142,91 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
                 'SyzygyProbeLimit',
             )
         )
+
+    def test_multiword_nnue_options_reach_popen_as_single_arguments(self):
+        config = SimpleNamespace(
+            syzygy_path=None,
+            syzygy_max=0,
+            atomic_syzygy_path=None,
+            atomic_syzygy_max=0,
+            workload={
+                'distribution': {
+                    'concurrency-per': 1,
+                    'games-per-cutechess': 2,
+                },
+                'result': {'id': 2},
+                'test': {
+                    'id': 1,
+                    'type': 'TEST',
+                    'book': {'name': 'ATOMIC_openings.epd'},
+                    'book_index': 1,
+                    'book_seed': 7,
+                    'syzygy_wdl': 'DISABLED',
+                    'syzygy_adj': 'DISABLED',
+                    'win_adj': 'None',
+                    'draw_adj': 'None',
+                    'dev': {
+                        'options': 'Threads=1 Hash=32 "Use NNUE=true"',
+                        'network': 'None',
+                        'private': False,
+                        'engine': 'Atomic-Stockfish',
+                        'nps': 1000,
+                        'time_control': '8.0+0.08',
+                        'tablebase_family': 'atomic',
+                    },
+                    'base': {
+                        'options': (
+                            'UCI_Variant=atomic Threads=1 Hash=32 '
+                            '"Use NNUE=false"'
+                        ),
+                        'network': 'None',
+                        'private': False,
+                        'engine': 'Fairy-Stockfish-Atomic-Baseline',
+                        'nps': 1000,
+                        'time_control': '8.0+0.08',
+                        'tablebase_family': 'atomic',
+                    },
+                },
+            },
+        )
+        command = worker.build_cutechess_command(
+            config, 'atomic.exe', 'fairy.exe', 1.0, 1, 0
+        )
+        process = SimpleNamespace(
+            stdout=SimpleNamespace(readline=lambda: b'')
+        )
+        with mock.patch.object(worker, 'Popen', return_value=process) as popen:
+            worker.run_and_parse_cutechess(config, command, 0, None, None)
+
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv.count('option.Use NNUE=true'), 1)
+        self.assertEqual(argv.count('option.Use NNUE=false'), 1)
+        self.assertNotIn('option.Use', argv)
+        self.assertNotIn('option.NNUE=true', argv)
+        self.assertNotIn('option.NNUE=false', argv)
+
+        pair_config = uci_pair_runner.parse_cli(argv[1:])
+        self.assertEqual(pair_config.specs[0].options['Use NNUE'], 'true')
+        self.assertEqual(pair_config.specs[1].options['Use NNUE'], 'false')
+
+    def test_bookless_atomic_datagen_uses_atomic_referee(self):
+        for engine in (
+            'Atomic-Stockfish',
+            'Fairy-Stockfish-Atomic-Baseline',
+        ):
+            config = SimpleNamespace(
+                workload={
+                    'test': {
+                        'book': {'name': 'None'},
+                        'dev': {'engine': engine},
+                    }
+                }
+            )
+            self.assertEqual(
+                worker.variant_routing(config),
+                ('cutechess', 'atomic'),
+                engine,
+            )
 
     @staticmethod
     def authenticated_fixture(root):
@@ -403,6 +489,7 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
     def test_client_version_matches_server(self):
         server = json.loads((ROOT / 'Config' / 'config.json').read_text())
         self.assertEqual(worker.CLIENT_VERSION, server['client_version'])
+        self.assertEqual(worker.CLIENT_VERSION, 34)
 
     def test_engine_metadata_accepts_only_known_family_and_sha256_pin(self):
         base = {

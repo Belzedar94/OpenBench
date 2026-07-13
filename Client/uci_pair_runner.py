@@ -23,7 +23,8 @@ OpenBench worker stdout contract honored here (see docs in repo):
 CLI: accepts the cutechess flag set the worker builds (-repeat -recover
 -variant -concurrency -games -resign -draw -engine ... -openings ... -srand
 -pgnout ...) plus -each, and ignores with a stderr warning whatever does not
-apply. No argument may contain spaces (the worker Popens command.split()).
+apply. UCI option names may contain spaces because the worker passes a real
+argv list to the runner.
 
 Example (local smoke):
   python tools/uci_pair_runner.py -repeat -recover -variant standard \

@@ -261,8 +261,11 @@ function set_test_type() {
     }
 
     if (mode == 'GAMES') {
+        const current = parseInt(document.getElementById('test_max_games').value, 10);
         document.getElementById('test_bounds'    ).value = 'N/A';
         document.getElementById('test_confidence').value = 'N/A';
-        document.getElementById('test_max_games' ).value = base.test_max_games || stc.test_max_games || 40000;
+        document.getElementById('test_max_games' ).value = current > 0
+            ? current
+            : base.test_max_games || stc.test_max_games || 40000;
     }
 }

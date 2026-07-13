@@ -1,5 +1,5 @@
 {
-    "client_version"  : 33,
+    "client_version"  : 34,
     "client_repo_url" : "https://github.com/Belzedar94/OpenBench",
     "client_repo_ref" : "spell-runner",
 
@@ -24,10 +24,14 @@
         "shatranj_dfrs.epd",
         "shatranj_unbalanced.epd",
         "shatranj_unbalanced2.epd",
-        "spell_openings.epd"
+        "spell_openings.epd",
+        "ATOMIC_openings.epd",
+        "ATOMIC_syzygy_6man.epd"
     ],
 
-  "engines": [
-    "Spell-Stockfish"
-  ]
+    "engines": [
+        "Spell-Stockfish",
+        "Atomic-Stockfish",
+        "Fairy-Stockfish-Atomic-Baseline"
+    ]
 }

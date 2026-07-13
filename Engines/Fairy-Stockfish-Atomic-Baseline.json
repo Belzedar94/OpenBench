@@ -1,0 +1,61 @@
+{
+    "private"                   : false,
+    "nps"                       : 1165682,
+    "source"                    : "https://github.com/Belzedar94/Fairy-Stockfish",
+    "tablebase_family"          : "atomic",
+    "tablebase_manifest_sha256" : "3d4b7fd0ab387f4f60da2078f612c9e8890e6026f551aebe8631efc157788f23",
+
+    "build" : {
+        "path"      : "src",
+        "compilers" : ["g++"],
+        "cpuflags"  : ["AVX2", "FMA", "POPCNT", "BMI2"],
+        "systems"   : ["Windows", "Linux"]
+    },
+
+    "test_presets" : {
+        "default" : {
+            "base_branch"     : "atomic-openbench-baseline",
+            "both_bench"      : 97362,
+            "both_network"    : "atomic_run3b_e202_l05.nnue",
+            "book_name"       : "ATOMIC_openings.epd",
+            "test_bounds"     : "[1.00, 6.00]",
+            "test_confidence" : "[0.05, 0.05]",
+            "win_adj"         : "movecount=4 score=800",
+            "draw_adj"        : "movenumber=40 movecount=8 score=10",
+            "syzygy_wdl"      : "DISABLED",
+            "syzygy_adj"      : "DISABLED"
+        },
+
+        "STC" : {
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 \"Use NNUE=true\"",
+            "both_time_control" : "8.0+0.08",
+            "workload_size"     : 32
+        },
+
+        "LTC" : {
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 \"Use NNUE=true\"",
+            "both_time_control" : "40.0+0.4",
+            "workload_size"     : 8
+        },
+
+        "Classical STC" : {
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=32 \"Use NNUE=false\"",
+            "both_time_control" : "8.0+0.08",
+            "workload_size"     : 32
+        },
+
+        "Classical LTC" : {
+            "both_options"      : "UCI_Variant=atomic Threads=1 Hash=128 \"Use NNUE=false\"",
+            "both_time_control" : "40.0+0.4",
+            "workload_size"     : 8
+        }
+    },
+
+    "tune_presets" : {
+        "default" : {}
+    },
+
+    "datagen_presets" : {
+        "default" : {}
+    }
+}

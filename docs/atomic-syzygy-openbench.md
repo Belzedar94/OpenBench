@@ -46,8 +46,9 @@ adjudicator consumes orthodox `.rtbw` files. Engine probing remains enabled via
 
 ## Four fixed-game measurements
 
-Run four ordinary `GAMES` workloads, each targeting 2,000 games (the final
-concurrent result batch may finish slightly above that threshold):
+Run the four named Syzygy presets as ordinary `GAMES` workloads, each targeting
+2,000 games. Applying a preset sets `test_max_games=2000` and selects `GAMES`
+automatically; do not change the test mode afterwards.
 
 | Evaluation | Control | Time control | Hash |
 | --- | --- | --- | --- |
@@ -58,7 +59,7 @@ concurrent result batch may finish slightly above that threshold):
 
 Common settings:
 
-- `test_mode=GAMES`, `test_max_games=2000`;
+- `test_mode=GAMES` in the workload and `test_max_games=2000` from the preset;
 - the same Atomic-Stockfish source commit, bench and network on both sides;
 - `Threads=1`, `syzygy_wdl=6-MAN`, `syzygy_adj=DISABLED`;
 - `SyzygyProbeDepth=1 Syzygy50MoveRule=true` on both sides;
@@ -68,6 +69,12 @@ Common settings:
 - never use `Use NNUE=pure` in playing tests; `pure` is data-generation only;
 - use an opening book whose configured filename contains `ATOMIC`, so the
   worker selects cutechess-ob's Atomic referee.
+
+The exact preset names are `Syzygy STC NNUE`, `Syzygy LTC NNUE`,
+`Syzygy STC classical`, and `Syzygy LTC classical`. They inherit the current
+Atomic defaults (`[1.00, 6.00]` bounds and `movecount=4 score=800` win
+adjudication), but fixed-game completion -- not SPRT or LOS -- determines when
+these four measurements finish.
 
 Use the current OpenBench priority controls normally; no special result gate or
 ordered-pair upload path exists. Engine-level conformance must already have

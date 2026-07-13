@@ -55,7 +55,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 33 # Client version to send to the Server
+CLIENT_VERSION   = 34 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -431,7 +431,9 @@ VARIANTS = {
 # genfens builds the openings by calling the engine): route by the dev
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
-    'SPELL-STOCKFISH' : ('uci-pair-runner', 'spell-chess'),
+    'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
+    'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
+    'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
 }
 
 # Pair-runner script distributed alongside worker.py, inside Client/. The
@@ -464,9 +466,9 @@ def runner_base_command(config):
         return ['cutechess-ob.exe', './cutechess-ob'][IS_LINUX]
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
-    # interpreter running the worker (same venv), but the command line is
-    # split on spaces by run_and_parse_cutechess(), so a spaced path must be
-    # converted to its 8.3 short form (Windows) or dropped for a bare name.
+    # interpreter running the worker (same venv). The assembled command still
+    # uses quoted tokens only for UCI options, so a spaced executable path must
+    # be converted to its 8.3 short form (Windows) or dropped for a bare name.
     python = sys.executable
     if ' ' in python and IS_WINDOWS:
         try:
@@ -604,8 +606,22 @@ class Cutechess:
             for param, data in config.workload['spsa'].items():
                 options += ' %s=%s' % (param, str(data[branch][cutechess_idx]))
 
-        # Join options together in the Cutechess format
-        options = ' option.'.join([''] + re.findall(r'"[^"]*"|\S+', options))
+        # Join options together in the Cutechess format. Quoted workload
+        # tokens allow UCI option names to contain spaces (for example
+        # "Use NNUE=true"). Keep the complete option.NAME=VALUE expression
+        # quoted until the final argv serialization so it reaches cutechess
+        # as one argument.
+        option_tokens = re.findall(r'"[^"]*"|\S+', options)
+        option_args = []
+        for option in option_tokens:
+            if len(option) >= 2 and option[0] == option[-1] == '"':
+                option = option[1:-1]
+            argument = 'option.' + option
+            option_args.append(
+                '"%s"' % argument if any(c.isspace() for c in argument)
+                else argument
+            )
+        options = (' ' + ' '.join(option_args)) if option_args else ''
         return '-engine dir=Engines/ cmd=./%s proto=uci %s%s name=%s-%s' % (command, control, options, engine, branch)
 
     @staticmethod
@@ -1427,10 +1443,23 @@ def build_cutechess_command(config, dev_cmd, base_cmd, scale_factor, timestamp, 
     # Dispatch on the VARIANTS routing table: cutechess-ob, or uci_pair_runner.py
     return runner_base_command(config) + flags
 
+def cutechess_command_argv(command):
+
+    # The command is kept as a string while it is assembled for compatibility
+    # with the existing diagnostics and PGN error reporting. Serialize it to
+    # argv here without splitting quoted UCI option names on whitespace.
+    tokens = re.findall(r'"[^"]*"|\S+', command)
+    return [
+        token[1:-1]
+        if len(token) >= 2 and token[0] == token[-1] == '"'
+        else token
+        for token in tokens
+    ]
+
 def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort_flag):
 
     print('\n[#%d] Launching Cutechess...\n%s\n' % (cutechess_idx, command))
-    cutechess = Popen(command.split(), stdout=PIPE)
+    cutechess = Popen(cutechess_command_argv(command), stdout=PIPE)
 
     results = {
 
