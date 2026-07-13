@@ -203,7 +203,7 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - SQLite aguanta pocos workers reportando; si la flota crece → PostgreSQL.
 - `Config/config.json` no se valida al arranque (bug upstream): revísalo a mano.
 
-## 7. Estado y pendientes (2026-07-12)
+## 7. Estado y pendientes (2026-07-13)
 
 - Hecho: server local operativo; Spell-Stockfish registrado (flujo público); red run5rl
   subida; libro `spell_openings.epd` publicado como release y manifestado; shim de Makefile
@@ -224,7 +224,10 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - Tests CON red asignada: RESUELTO — el motor hornea `EVALFILE=` como default de la
   opción EvalFile (SPELL_EVALFILE_DEFAULT; bench con red = 11477541 para run5rl). Los
   engines que copien el patrón deben citar ese bench en sus commits cuando asignen red.
-- Pendiente: presets de Atomic cuando exista su json; migrar a PostgreSQL si la flota
-  crece.
+- Hecho: Atomic-Stockfish y el baseline Fairy congelado estan registrados con sus
+  benches, red, libros y pin del corpus Atomic. Los cuatro presets Syzygy son tests
+  `GAMES` de 2.000 partidas (STC/LTC por NNUE/clasico), sin LOS ni SPRT.
+- Pendiente: desplegar este onboarding, subir la red Atomic y ejecutar los cuatro
+  workloads Syzygy; migrar a PostgreSQL si la flota crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
