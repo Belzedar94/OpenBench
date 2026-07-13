@@ -101,13 +101,12 @@ def filter_valid_workloads(request, machine):
     if blacklisted := request.POST.getlist('blacklist'):
         workloads = workloads.exclude(id__in=blacklisted)
 
-    # Skip workloads with unmet Syzygy requirements
-    for K in range(machine.info['syzygy_max'] + 1, 10):
-        workloads = workloads.exclude(syzygy_adj='%d-MAN' % (K))
-        workloads = workloads.exclude(syzygy_wdl='%d-MAN' % (K))
-
     # Skip workloads that we have insufficient threads to play
-    options = [x for x in workloads if valid_hardware_assignment(x, machine)]
+    options = [
+        x for x in workloads
+        if valid_tablebase_assignment(x, machine)
+        and valid_hardware_assignment(x, machine)
+    ]
 
     # Possible that no work exists for the machine
     if not options:
@@ -125,6 +124,75 @@ def filter_valid_workloads(request, machine):
         candidates = list(filter(lambda x: x.dev_engine in focuses, candidates))
 
     return candidates, has_focus
+
+def required_tablebase_size(setting):
+
+    if setting in ['DISABLED', 'OPTIONAL']:
+        return 0
+    return int(setting.split('-')[0])
+
+def machine_tablebase_max(machine, family):
+
+    tablebases = machine.info.get('tablebases', {})
+    if family in tablebases:
+        capability = tablebases[family]
+        return int(capability.get('max', 0) if isinstance(capability, dict)
+                   else capability)
+    if family == 'standard':
+        return int(machine.info.get('syzygy_max', 0))
+    return 0
+
+def engine_tablebase_family(engine):
+
+    return OPENBENCH_CONFIG['engines'][engine].get(
+        'tablebase_family', 'standard'
+    )
+
+def machine_tablebase_manifest(machine, family):
+
+    capability = machine.info.get('tablebases', {}).get(family, {})
+    if not isinstance(capability, dict):
+        return None
+    value = capability.get('manifest_sha256')
+    return value.lower() if isinstance(value, str) else None
+
+def valid_tablebase_assignment(workload, machine):
+
+    workload_families = {
+        engine_tablebase_family(workload.dev_engine),
+        engine_tablebase_family(workload.base_engine),
+    }
+
+    # cutechess-ob adjudication consumes orthodox .rtbw files. Never allow it
+    # on an Atomic workload, even if the worker also has standard tables.
+    if workload.syzygy_adj != 'DISABLED' and workload_families != {'standard'}:
+        return False
+
+    probe_size = required_tablebase_size(workload.syzygy_wdl)
+    if probe_size:
+        if any(machine_tablebase_max(machine, family) < probe_size
+               for family in workload_families):
+            return False
+
+    # OPTIONAL may still enable every table found on the worker. A configured
+    # corpus pin therefore applies whenever probing is allowed and this worker
+    # actually advertises tables, not only to an explicit N-MAN requirement.
+    if workload.syzygy_wdl != 'DISABLED':
+        for engine in [workload.dev_engine, workload.base_engine]:
+            engine_config = OPENBENCH_CONFIG['engines'][engine]
+            expected = engine_config.get('tablebase_manifest_sha256')
+            family = engine_tablebase_family(engine)
+            if (expected and machine_tablebase_max(machine, family) > 0
+                    and machine_tablebase_manifest(
+                        machine, family) != expected.lower()):
+                return False
+
+    adjudication_size = required_tablebase_size(workload.syzygy_adj)
+    if adjudication_size:
+        if machine_tablebase_max(machine, 'standard') < adjudication_size:
+            return False
+
+    return True
 
 def valid_hardware_assignment(workload, machine):
 
@@ -218,6 +286,7 @@ def workload_to_dictionary(test, result, machine):
         'nps'          : OPENBENCH_CONFIG['engines'][test.dev_engine]['nps'],
         'build'        : OPENBENCH_CONFIG['engines'][test.dev_engine]['build'],
         'private'      : OPENBENCH_CONFIG['engines'][test.dev_engine]['private'],
+        'tablebase_family' : engine_tablebase_family(test.dev_engine),
     }
 
     workload['test']['base'] = {
@@ -234,6 +303,7 @@ def workload_to_dictionary(test, result, machine):
         'nps'          : OPENBENCH_CONFIG['engines'][test.base_engine]['nps'],
         'build'        : OPENBENCH_CONFIG['engines'][test.base_engine]['build'],
         'private'      : OPENBENCH_CONFIG['engines'][test.base_engine]['private'],
+        'tablebase_family' : engine_tablebase_family(test.base_engine),
     }
 
     workload['distribution']   = game_distribution(test, machine)

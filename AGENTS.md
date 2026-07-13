@@ -184,6 +184,9 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 7. **Operación web**: login en `/login/`; en la página de un test los approvers tienen
    botones STOP / RESTART / DELETE / MODIFY (prioridad/throughput). STOP suelta al
    worker tras el lote en curso. Prioridad más alta = el worker lo coge antes.
+8. **Medición Atomic Syzygy**: es una comparación de feature, no un gate de parche.
+   Usa cuatro tests `GAMES` fijos de 2.000 partidas (STC/LTC × NNUE on/off), según
+   `docs/atomic-syzygy-openbench.md`; no usa SPRT ni un protocolo especial.
 
 ## 6. Gotchas que ya mordieron (no reaprender por las malas)
 
