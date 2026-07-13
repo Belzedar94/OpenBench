@@ -20,6 +20,7 @@
 
 import argparse
 import cpuinfo
+import hashlib
 import json
 import multiprocessing
 import os
@@ -54,7 +55,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 32 # Client version to send to the Server
+CLIENT_VERSION   = 33 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -88,6 +89,7 @@ class Configuration:
         self.machine_id     = 'None'
         self.secret_token   = 'None'
         self.syzygy_max     = 2
+        self.atomic_syzygy_max = 2
         self.blacklist      = []
 
         self.process_args(args) # Rest of the command line settings
@@ -104,6 +106,17 @@ class Configuration:
         self.sockets     = int(args.nsockets)
         self.identity    = args.identity if args.identity else 'None'
         self.syzygy_path = args.syzygy   if args.syzygy   else None
+        self.atomic_syzygy_path = (
+            args.atomic_syzygy if args.atomic_syzygy else None
+        )
+        self.atomic_syzygy_manifest = (
+            args.atomic_syzygy_manifest if args.atomic_syzygy_manifest else None
+        )
+        self.atomic_syzygy_manifest_sha256 = None
+        if self.atomic_syzygy_manifest and not self.atomic_syzygy_path:
+            raise ValueError('--atomic-syzygy-manifest requires --atomic-syzygy')
+        if self.atomic_syzygy_path and not self.atomic_syzygy_manifest:
+            raise ValueError('--atomic-syzygy requires --atomic-syzygy-manifest')
         self.fleet       = args.fleet    if args.fleet    else False
         self.focus       = args.focus    if args.focus    else []
 
@@ -122,15 +135,34 @@ class Configuration:
 
         # Check until we stop finding valid N-man tables
         if self.syzygy_path:
-            while validate_syzygy_exists(self, self.syzygy_max+1):
+            while validate_syzygy_exists(
+                self.syzygy_path, self.syzygy_max + 1, '.rtbw'
+            ):
                 self.syzygy_max = self.syzygy_max + 1
+
+        if self.atomic_syzygy_path:
+            while validate_syzygy_exists(
+                self.atomic_syzygy_path,
+                self.atomic_syzygy_max + 1,
+                ('.atbw', '.atbz'),
+            ):
+                self.atomic_syzygy_max += 1
+            if self.atomic_syzygy_manifest:
+                self.atomic_syzygy_manifest_sha256 = validate_tablebase_inventory(
+                    self.atomic_syzygy_path,
+                    self.atomic_syzygy_manifest,
+                    ('.atbw', '.atbz'),
+                )
 
         # 1-man and 2-man tables are not a thing
         if self.syzygy_max < 3:
             self.syzygy_max = 0
+        if self.atomic_syzygy_max < 3:
+            self.atomic_syzygy_max = 0
 
         # Report highest complete depth that we found
         print('Looking for Syzygy... [%d-Man]' % (self.syzygy_max))
+        print('Looking for Atomic Syzygy... [%d-Man]' % (self.atomic_syzygy_max))
 
     def validate_setup(self):
 
@@ -535,6 +567,19 @@ class Cutechess:
         private = config.workload['test'][branch]['private']
         engine  = config.workload['test'][branch]['engine']
         syzygy  = config.workload['test']['syzygy_wdl']
+        family  = config.workload['test'][branch].get(
+            'tablebase_family', 'standard'
+        )
+        path, maximum = tablebase_capability(config, family)
+        required = (
+            0 if syzygy in ['DISABLED', 'OPTIONAL']
+            else int(syzygy.split('-')[0])
+        )
+        if required and (not path or maximum < required):
+            raise RuntimeError(
+                '%s requires %d-man %s tablebases; worker has %d-man'
+                % (engine, required, family, maximum)
+            )
 
         # Human-readable name, and scale the time control
         name    = command.replace('.exe', '')
@@ -546,11 +591,12 @@ class Cutechess:
             name    += '-%s' % (network)
 
         # Set the SyzygyPath if we have them, and are allowed to use them
-        if syzygy != 'DISABLED' and config.syzygy_max:
-            options += ' SyzygyPath=%s' % (config.syzygy_path.replace('\\', '\\\\'))
+        if syzygy != 'DISABLED' and maximum:
+            options += ' SyzygyPath=%s' % (path.replace('\\', '\\\\'))
 
         # Set a SyzygyProbeLimit if we may only use up-to N-Man
-        if syzygy != 'DISABLED' and syzygy != 'OPTIONAL':
+        if (syzygy != 'DISABLED' and syzygy != 'OPTIONAL'
+                and not has_uci_option(options, 'SyzygyProbeLimit')):
             options += ' SyzygyProbeLimit=%s' % (syzygy.split('-')[0])
 
         # Add any of the custom SPSA settings
@@ -834,7 +880,30 @@ def cleanup_client():
         if file_age(os.path.join('Networks', file)) > SECONDS_PER_MONTH:
             os.remove(os.path.join('Networks', file))
 
-def validate_syzygy_exists(config, K):
+def has_uci_option(options, name):
+
+    pattern = r'(?<!\S)%s=(?:"[^"]*"|\'[^\']*\'|\S+)' % re.escape(name)
+    return re.search(pattern, options, re.IGNORECASE) is not None
+
+
+def tablebase_capability(config, family):
+
+    if family == 'standard':
+        return config.syzygy_path, config.syzygy_max
+    if family == 'atomic':
+        return config.atomic_syzygy_path, config.atomic_syzygy_max
+    raise ValueError('Unknown tablebase family: %s' % (family))
+
+
+def split_tablebase_paths(path_value):
+
+    return path_value.split(':' if IS_LINUX else ';')
+
+
+def validate_syzygy_exists(path_value, K, required_suffixes=('.rtbw',)):
+
+    if isinstance(required_suffixes, str):
+        required_suffixes = (required_suffixes,)
 
     letters = ['', 'Q', 'R', 'B', 'N', 'P']
 
@@ -851,22 +920,156 @@ def validate_syzygy_exists(config, K):
         lhs, rhs = name.replace('K', '9').split('v')
         return int(lhs) >= int(rhs) and name != 'KvK'
 
-    # See if file exists in (any of) the paths
-    def has_filename(paths, name):
-        for path in paths:
-            if os.path.isfile(os.path.join(path, name + '.rtbw')):
-                return True
-        return False
-
     # Split paths, using ":" on Unix, and ";" on Windows
-    paths = config.syzygy_path.split(':' if IS_LINUX else ';')
+    paths = split_tablebase_paths(path_value)
 
     # Check to see if each Syzygy File exists as desired
     for filename in list(filter(valid_filename, set(candidates))):
-        if not has_filename(paths, filename):
-            return False
+        for suffix in required_suffixes:
+            if not any(
+                os.path.isfile(os.path.join(path, filename + suffix))
+                for path in paths
+            ):
+                return False
 
     return True
+
+
+def validate_tablebase_inventory(path_value, manifest_path, required_suffixes):
+
+    with open(manifest_path, 'rb') as fin:
+        raw_manifest = fin.read()
+    manifest_sha256 = hashlib.sha256(raw_manifest).hexdigest()
+
+    try:
+        inventory = json.loads(raw_manifest.decode('utf-8-sig'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError('Invalid tablebase inventory JSON') from error
+    if not isinstance(inventory, list) or not inventory:
+        raise ValueError('Tablebase inventory must be a non-empty JSON list')
+
+    paths = [os.path.abspath(path) for path in split_tablebase_paths(path_value)]
+    if any(not os.path.isdir(path) for path in paths):
+        raise ValueError('Every tablebase runtime path must be a directory')
+    suffixes = tuple(suffix.lower() for suffix in required_suffixes)
+    observed = set()
+    groups = {}
+    paths_by_label = {}
+
+    def source_directory(label):
+        key = label.casefold()
+        if key in paths_by_label:
+            return paths_by_label[key]
+
+        candidates = {
+            os.path.realpath(path)
+            for path in paths
+            if os.path.basename(path).casefold() == key
+        }
+        candidates.update(
+            os.path.realpath(candidate)
+            for path in paths
+            for candidate in [os.path.join(os.path.dirname(path), label)]
+            if os.path.isdir(candidate)
+        )
+        if len(candidates) != 1:
+            raise ValueError(
+                'Cannot resolve one authenticated source directory for %s'
+                % (label,)
+            )
+        paths_by_label[key] = candidates.pop()
+        return paths_by_label[key]
+
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            raise ValueError('Tablebase inventory entries must be JSON objects')
+        name = entry.get('name')
+        directory = entry.get('directory')
+        size = entry.get('bytes')
+        if (not isinstance(name, str) or os.path.basename(name) != name
+                or not name.lower().endswith(suffixes)):
+            raise ValueError('Invalid tablebase inventory name: %r' % (name,))
+        if (not isinstance(directory, str) or not directory
+                or os.path.basename(directory) != directory
+                or directory in ['.', '..']):
+            raise ValueError('Invalid directory for tablebase %s' % (name,))
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError('Invalid byte count for tablebase %s' % (name,))
+        if name.casefold() in observed:
+            raise ValueError('Duplicate tablebase inventory name: %s' % (name,))
+        observed.add(name.casefold())
+
+        source_file = os.path.join(source_directory(directory), name)
+        runtime_files = [
+            os.path.join(path, name)
+            for path in paths
+            if os.path.isfile(os.path.join(path, name))
+        ]
+        if not os.path.isfile(source_file) or len(runtime_files) != 1:
+            raise ValueError(
+                'Expected one authenticated source and runtime file for %s'
+                % (name,)
+            )
+        if not os.path.samefile(source_file, runtime_files[0]):
+            raise ValueError(
+                'Runtime tablebase is not the authenticated hardlink for %s'
+                % (name,)
+            )
+        if os.path.getsize(source_file) != size:
+            raise ValueError('Tablebase byte count mismatch for %s' % (name,))
+
+        group = groups.setdefault(
+            directory, {'files': 0, 'bytes': 0, 'mtime_ns': 0}
+        )
+        group['files'] += 1
+        group['bytes'] += size
+        group['mtime_ns'] = max(
+            group['mtime_ns'], os.stat(source_file).st_mtime_ns
+        )
+
+    actual = set()
+    for path in paths:
+        for name in os.listdir(path):
+            if name.lower().endswith(suffixes):
+                actual.add(name.casefold())
+    if actual != observed:
+        missing = sorted(observed - actual)
+        extra = sorted(actual - observed)
+        raise ValueError(
+            'Tablebase inventory mismatch: missing=%r extra=%r'
+            % (missing[:5], extra[:5])
+        )
+
+    for directory, expected in groups.items():
+        marker_path = os.path.join(
+            source_directory(directory), '.acquisition-complete.json'
+        )
+        try:
+            with open(marker_path, encoding='utf-8-sig') as fin:
+                marker = json.load(fin)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                'Missing or invalid Atomic Syzygy acquisition marker: %s'
+                % (marker_path,)
+            ) from error
+        valid_marker = (
+            isinstance(marker, dict)
+            and marker.get('schema') == 'atomic-syzygy-acquisition-v1'
+            and marker.get('directory') == directory
+            and marker.get('files') == expected['files']
+            and marker.get('bytes') == expected['bytes']
+            and str(marker.get('source_inventory_sha256', '')).lower()
+                == manifest_sha256
+            and marker.get('official_md5_verification') == 'pass'
+            and os.stat(marker_path).st_mtime_ns >= expected['mtime_ns']
+        )
+        if not valid_marker:
+            raise ValueError(
+                'Invalid or stale Atomic Syzygy acquisition marker: %s'
+                % (marker_path,)
+            )
+
+    return manifest_sha256
 
 
 def scale_time_control(workload, scale_factor, branch):
@@ -959,7 +1162,14 @@ def server_configure_worker(config):
         'machine_name'   : config.identity,       # Optional pseudonym for the machine, otherwise None
         'concurrency'    : config.threads,        # Threads to use to play games
         'sockets'        : config.sockets,        # Cutechess copies, usually equal to Socket count
-        'syzygy_max'     : config.syzygy_max,     # Whether or not the machine has Syzygy support
+        'syzygy_max'     : config.syzygy_max,     # Legacy standard-Syzygy capability
+        'tablebases'     : {
+            'standard' : config.syzygy_max,
+            'atomic'   : {
+                'max'             : config.atomic_syzygy_max,
+                'manifest_sha256' : config.atomic_syzygy_manifest_sha256,
+            },
+        },
         'focus'          : config.focus,          # List of engines we have a preference to help
         'client_ver'     : CLIENT_VERSION,        # Version of the Client, which the server may reject
     }
@@ -1288,6 +1498,9 @@ def parse_arguments(client_args):
     p.add_argument('-N', '--nsockets', help='Number of Sockets'       , required=True      )
     p.add_argument('-I', '--identity', help='Machine pseudonym'       , required=False     )
     p.add_argument(      '--syzygy'  , help='Syzygy WDL'              , required=False     )
+    p.add_argument(      '--atomic-syzygy', help='Atomic Syzygy WDL'  , required=False     )
+    p.add_argument(      '--atomic-syzygy-manifest',
+                        help='Atomic Syzygy inventory JSON', required=False)
     p.add_argument(      '--fleet'   , help='Fleet Mode'              , action='store_true')
     p.add_argument(      '--focus'   , help='Prefer certain engine(s)', nargs='+'          )
 

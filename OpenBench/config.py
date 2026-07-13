@@ -20,6 +20,7 @@
 
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -107,6 +108,9 @@ def verify_engine_basics(conf):
     assert type(conf.get('nps')) == int and conf['nps'] > 0
     assert type(conf.get('source')) == str
     assert type(conf.get('build')) == dict
+    assert conf.get('tablebase_family', 'standard') in ['standard', 'atomic']
+    manifest = conf.get('tablebase_manifest_sha256')
+    assert manifest is None or re.fullmatch('[0-9a-fA-F]{64}', manifest)
 
 def verify_engine_build(engine_name, conf):
 

@@ -284,8 +284,27 @@ def verify_max_games(errors, request, field):
 
 def verify_syzygy_field(errors, request, field, field_name):
     candidates = ['OPTIONAL', 'DISABLED', '3-MAN', '4-MAN', '5-MAN', '6-MAN', '7-MAN']
-    try: assert request.POST[field] in candidates
-    except: errors.append('%s must be in %s' % (field_name, ', '.join(candidates)))
+    try: value = request.POST[field]
+    except:
+        errors.append('%s must be in %s' % (field_name, ', '.join(candidates)))
+        return
+    if value not in candidates:
+        errors.append('%s must be in %s' % (field_name, ', '.join(candidates)))
+        return
+    if field == 'syzygy_adj' and value != 'DISABLED':
+        engines = [request.POST.get('dev_engine')]
+        if request.POST.get('base_engine'):
+            engines.append(request.POST['base_engine'])
+        if any(
+            OpenBench.config.OPENBENCH_CONFIG['engines'].get(engine, {}).get(
+                'tablebase_family', 'standard'
+            ) != 'standard'
+            for engine in engines
+        ):
+            errors.append(
+                'Atomic tests require Syzygy Adjudication=DISABLED; '
+                'cutechess-ob adjudication consumes orthodox tables'
+            )
 
 def verify_spsa_inputs(errors, request, field):
 
