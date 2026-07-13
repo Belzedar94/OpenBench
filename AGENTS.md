@@ -155,8 +155,11 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
    con el `Bench:` de master) y pasar el toggle en dev_options: cero rebuilds de código,
    nombre legible.
 2. **Bounds**: ganancia `[0.00, 5.00]` · simplificación/no-regresión `[-5.00, 0.00]` ·
-   confianza `[0.05, 0.05]`. Adjudicación: win `movecount=3 score=400`, draw
-   `movenumber=40 movecount=8 score=10`.
+   confianza `[0.05, 0.05]`. Adjudicación: win `movecount=4 score=800`, draw
+   `movenumber=40 movecount=8 score=10`. (Win endurecida de 3/400 el 2026-07-13, decisión
+   del propietario: con la eval aún verde, adjudicar a -400 corta partidas donde el bando
+   "perdido" aún tiene salvaciones con spells — y sesga contra parches que justo mejoran
+   la búsqueda de esas salvaciones. No aplicar retroactivamente a tests en curso.)
 3. **Cambios no-funcionales** (bench idéntico, p.ej. toggles con default = comportamiento
    actual, refactors, docs): master directo estilo "No functional change", sin SPRT.
    Truco útil: implementar N ideas como opciones UCI default-off en UN commit
