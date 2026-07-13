@@ -139,6 +139,39 @@ python client.py -U <user> -P <pass> -S http://localhost:8000 -T <hilos> -N 1
   busca `cutechess-ob(.exe)` y no alcanza al runner python: el runner se auto-protege
   (pipe muerto → sale matando motores; 3 muertes instantáneas seguidas → aborta el lote).
 
+## 5b. Metodología de testeo (fishtest-style, decisión del propietario 2026-07-13)
+
+Vale para TODOS los engines de la torre (Spell-Stockfish hoy, Atomic-Stockfish después).
+Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.json`
+(fuente de verdad — Atomic debe copiar la estructura del de Spell-Stockfish).
+
+1. **Flujo por idea**: rama → **SPRT STC** (`8.0+0.08`, Threads=1 Hash=32) → si pasa →
+   **SPRT LTC** (`40.0+0.4`, Threads=1 Hash=128) → si pasan AMBOS → **merge a master**
+   con `Bench: <N>` al final del commit. Master solo avanza así.
+2. **Bounds**: ganancia `[0.00, 5.00]` · simplificación/no-regresión `[-5.00, 0.00]` ·
+   confianza `[0.05, 0.05]`. Adjudicación: win `movecount=3 score=400`, draw
+   `movenumber=40 movecount=8 score=10`.
+3. **Cambios no-funcionales** (bench idéntico, p.ej. toggles con default = comportamiento
+   actual, refactors, docs): master directo estilo "No functional change", sin SPRT.
+   Truco útil: implementar N ideas como opciones UCI default-off en UN commit
+   no-funcional y lanzar N SPRTs por diff de opciones (dev_options vs base_options,
+   misma rama) — cero ramas, cero rebuilds por idea.
+4. **SMP**: si el cambio toca multithreading, presets SMP con Threads=8
+   (STC 10+0.1 Hash=64 / LTC 30+0.3 Hash=256).
+5. **SPSA**: presets `SPSA STC`/`SPSA VSTC`; los parámetros se exponen vía el TUNE de SF
+   (el dump CSV de arranque del motor es EXACTAMENTE el formato de `spsa_inputs`
+   anteponiendo el tipo: `Nombre, int, valor, min, max, c_end, r_end`). Aplicar
+   resultados redondeados como defaults = commit FUNCIONAL (bench cambia) → en rigor
+   pasa por SPRT; para paquetes SPSA grandes vale un test de confirmación
+   paquete-vs-anterior.
+6. **Progresión y releases**: cada tramo de Elo acumulado (~+30-50), test de partidas
+   FIJAS a LTC (presets `progtest`) vs la **última release** — y para Spell, también vs
+   el baseline FSF congelado (vara del hito M1, cross-engine, fuera de la torre).
+   Release cuando el acumulado lo justifique.
+7. **Operación web**: login en `/login/`; en la página de un test los approvers tienen
+   botones STOP / RESTART / DELETE / MODIFY (prioridad/throughput). STOP suelta al
+   worker tras el lote en curso. Prioridad más alta = el worker lo coge antes.
+
 ## 6. Gotchas que ya mordieron (no reaprender por las malas)
 
 - **sha de libro en modo texto**, no binario (§4.5).
