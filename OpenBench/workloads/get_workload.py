@@ -286,6 +286,9 @@ def workload_to_dictionary(test, result, machine):
         'nps'          : OPENBENCH_CONFIG['engines'][test.dev_engine]['nps'],
         'build'        : OPENBENCH_CONFIG['engines'][test.dev_engine]['build'],
         'private'      : OPENBENCH_CONFIG['engines'][test.dev_engine]['private'],
+        'cutechess_launch_stagger_ms' : OPENBENCH_CONFIG['engines'][test.dev_engine].get(
+            'cutechess_launch_stagger_ms', 0
+        ),
         'tablebase_family' : engine_tablebase_family(test.dev_engine),
     }
 
@@ -303,6 +306,9 @@ def workload_to_dictionary(test, result, machine):
         'nps'          : OPENBENCH_CONFIG['engines'][test.base_engine]['nps'],
         'build'        : OPENBENCH_CONFIG['engines'][test.base_engine]['build'],
         'private'      : OPENBENCH_CONFIG['engines'][test.base_engine]['private'],
+        'cutechess_launch_stagger_ms' : OPENBENCH_CONFIG['engines'][test.base_engine].get(
+            'cutechess_launch_stagger_ms', 0
+        ),
         'tablebase_family' : engine_tablebase_family(test.base_engine),
     }
 
@@ -425,10 +431,37 @@ def game_distribution(test, machine):
     spsa_count = (worker_threads // max(dev_threads, base_threads)) // 2
 
     # SPSA is treated specially, if we are distributing many parameter sets at once
-    is_multiple_spsa = test.test_mode == 'SPSA' and test.spsa['distribution_type'] == 'MULTIPLE'
+    is_multiple_spsa = (
+        test.test_mode == 'SPSA'
+        and test.spsa['distribution_type'] == 'MULTIPLE'
+    )
+
+    # Some engines initialize slowly enough that one large Cutechess copy can
+    # hit the protocol-start timeout while launching every game at once. Split
+    # that per-socket concurrency into equal smaller copies. Choosing a divisor
+    # preserves the exact total worker concurrency and game/book accounting.
+    concurrency_per = max_concurrency
+    copies_per_socket = 1
+    if not is_multiple_spsa:
+        configured_limits = [
+            OPENBENCH_CONFIG['engines'][engine].get(
+                'cutechess_max_concurrency', 0
+            )
+            for engine in [test.dev_engine, test.base_engine]
+        ]
+        configured_limits = [limit for limit in configured_limits if limit]
+        if configured_limits and max_concurrency:
+            limit = min(min(configured_limits), max_concurrency)
+            concurrency_per = max(
+                divisor for divisor in range(1, limit + 1)
+                if max_concurrency % divisor == 0
+            )
+            copies_per_socket = max_concurrency // concurrency_per
 
     return {
-        'cutechess-count'     : spsa_count if is_multiple_spsa else worker_sockets,
-        'concurrency-per'     : 2 if is_multiple_spsa else max_concurrency,
-        'games-per-cutechess' : 2 * test.workload_size * (1 if is_multiple_spsa else max_concurrency),
+        'cutechess-count'     : spsa_count if is_multiple_spsa
+                                else worker_sockets * copies_per_socket,
+        'concurrency-per'     : 2 if is_multiple_spsa else concurrency_per,
+        'games-per-cutechess' : 2 * test.workload_size
+                                * (1 if is_multiple_spsa else concurrency_per),
     }

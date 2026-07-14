@@ -2,6 +2,8 @@
     "private"                   : false,
     "nps"                       : 1165682,
     "source"                    : "https://github.com/Belzedar94/Fairy-Stockfish",
+    "cutechess_max_concurrency"  : 8,
+    "cutechess_launch_stagger_ms": 1500,
     "tablebase_family"          : "atomic",
     "tablebase_manifest_sha256" : "3d4b7fd0ab387f4f60da2078f612c9e8890e6026f551aebe8631efc157788f23",
 

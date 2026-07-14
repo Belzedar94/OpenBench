@@ -1,4 +1,5 @@
 import hashlib
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -95,6 +96,7 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
                         'network': 'None',
                         'private': False,
                         'engine': 'Atomic-Stockfish',
+                        'cutechess_launch_stagger_ms': 1500,
                         'nps': 1000,
                         'time_control': '8.0+0.08',
                         'tablebase_family': 'atomic',
@@ -182,6 +184,7 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
                         'network': 'None',
                         'private': False,
                         'engine': 'Fairy-Stockfish-Atomic-Baseline',
+                        'cutechess_launch_stagger_ms': 1500,
                         'nps': 1000,
                         'time_control': '8.0+0.08',
                         'tablebase_family': 'atomic',
@@ -193,12 +196,15 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
             config, 'atomic.exe', 'fairy.exe', 1.0, 1, 0
         )
         process = SimpleNamespace(
-            stdout=SimpleNamespace(readline=lambda: b'')
+            stdout=SimpleNamespace(readline=lambda: b''),
+            wait=lambda: 0,
         )
         with mock.patch.object(worker, 'Popen', return_value=process) as popen:
             worker.run_and_parse_cutechess(config, command, 0, None, None)
 
         argv = popen.call_args.args[0]
+        self.assertNotIn('-tscale', argv)
+        self.assertNotIn('-wait', argv)
         self.assertEqual(argv.count('option.Use NNUE=true'), 1)
         self.assertEqual(argv.count('option.Use NNUE=false'), 1)
         self.assertNotIn('option.Use', argv)
@@ -489,7 +495,7 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
     def test_client_version_matches_server(self):
         server = json.loads((ROOT / 'Config' / 'config.json').read_text())
         self.assertEqual(worker.CLIENT_VERSION, server['client_version'])
-        self.assertEqual(worker.CLIENT_VERSION, 34)
+        self.assertEqual(worker.CLIENT_VERSION, 35)
 
     def test_engine_metadata_accepts_only_known_family_and_sha256_pin(self):
         base = {
@@ -503,6 +509,8 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
                 base,
                 tablebase_family='atomic',
                 tablebase_manifest_sha256='a' * 64,
+                cutechess_max_concurrency=8,
+                cutechess_launch_stagger_ms=1500,
             )
         )
         with self.assertRaises(AssertionError):
@@ -513,6 +521,15 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
             openbench_config.verify_engine_basics(
                 dict(base, tablebase_manifest_sha256='not-a-sha')
             )
+        for field, invalid_values in [
+            ('cutechess_max_concurrency', [False, -1, 1025, 1.5, '8']),
+            ('cutechess_launch_stagger_ms', [False, -1, 60001, 1.5, '1500']),
+        ]:
+            for invalid in invalid_values:
+                with self.assertRaises(AssertionError):
+                    openbench_config.verify_engine_basics(
+                        dict(base, **{field: invalid})
+                    )
 
     def test_atomic_cutechess_adjudication_is_rejected_at_creation(self):
         request = SimpleNamespace(
@@ -539,6 +556,169 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn('DISABLED', errors[0])
 
+
+class AtomicConcurrencyDistributionTests(unittest.TestCase):
+
+    @staticmethod
+    def distribution(dev, base, threads=24, test_mode='GAMES'):
+        configured = {
+            'engines': {
+                'Atomic-Stockfish': {'cutechess_max_concurrency': 8},
+                'Spell-Stockfish': {},
+            }
+        }
+        test = SimpleNamespace(
+            dev_engine=dev,
+            base_engine=base,
+            dev_options='Threads=1 Hash=32',
+            base_options='Threads=1 Hash=32',
+            test_mode=test_mode,
+            spsa={'distribution_type': 'MULTIPLE'},
+            workload_size=1,
+        )
+        machine = SimpleNamespace(
+            info={
+                'concurrency': threads,
+                'sockets': 1,
+                'physical_cores': threads,
+            }
+        )
+        with mock.patch.object(
+            get_workload, 'OPENBENCH_CONFIG', configured
+        ):
+            return get_workload.game_distribution(test, machine)
+
+    def test_atomic_concurrency_is_split_without_losing_threads_or_games(self):
+        distribution = self.distribution(
+            'Atomic-Stockfish', 'Atomic-Stockfish'
+        )
+        self.assertEqual(distribution['cutechess-count'], 3)
+        self.assertEqual(distribution['concurrency-per'], 8)
+        self.assertEqual(distribution['games-per-cutechess'], 16)
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['concurrency-per'],
+            24,
+        )
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['games-per-cutechess'],
+            48,
+        )
+
+    def test_non_divisible_worker_uses_largest_safe_divisor(self):
+        distribution = self.distribution(
+            'Atomic-Stockfish', 'Atomic-Stockfish', threads=20
+        )
+        self.assertEqual(distribution['cutechess-count'], 4)
+        self.assertEqual(distribution['concurrency-per'], 5)
+        self.assertEqual(distribution['games-per-cutechess'], 10)
+
+    def test_spell_distribution_is_unchanged(self):
+        distribution = self.distribution(
+            'Spell-Stockfish', 'Spell-Stockfish'
+        )
+        self.assertEqual(
+            distribution,
+            {
+                'cutechess-count': 1,
+                'concurrency-per': 24,
+                'games-per-cutechess': 48,
+            },
+        )
+
+    def test_multiple_spsa_distribution_is_unchanged(self):
+        distribution = self.distribution(
+            'Atomic-Stockfish', 'Atomic-Stockfish', test_mode='SPSA'
+        )
+        self.assertEqual(
+            distribution,
+            {
+                'cutechess-count': 12,
+                'concurrency-per': 2,
+                'games-per-cutechess': 2,
+            },
+        )
+
+    def test_workload_serializes_atomic_launch_stagger_to_worker(self):
+        engine = SimpleNamespace(
+            id=1,
+            name='atomic',
+            source='https://example.test/archive.zip',
+            sha='a' * 40,
+            bench=1,
+        )
+        test = SimpleNamespace(
+            id=7,
+            test_mode='GAMES',
+            syzygy_wdl='DISABLED',
+            syzygy_adj='DISABLED',
+            win_adj='None',
+            draw_adj='None',
+            workload_size=1,
+            upload_pgns='FALSE',
+            genfens_args='',
+            play_reverses=True,
+            book_name='ATOMIC_openings.epd',
+            book_index=1,
+            dev=engine,
+            base=engine,
+            dev_engine='Atomic-Stockfish',
+            base_engine='Atomic-Stockfish',
+            dev_options='Threads=1 Hash=32',
+            base_options='Threads=1 Hash=32',
+            dev_network='',
+            base_network='',
+            dev_netname='',
+            base_netname='',
+            dev_time_control='8.0+0.08',
+            base_time_control='8.0+0.08',
+            spsa={},
+            save=mock.Mock(),
+        )
+        configured = {
+            'books': {
+                'ATOMIC_openings.epd': {'sha': 'b' * 64, 'source': 'book'}
+            },
+            'engines': {
+                'Atomic-Stockfish': {
+                    'nps': 1000,
+                    'build': {},
+                    'private': False,
+                    'tablebase_family': 'atomic',
+                    'cutechess_max_concurrency': 8,
+                    'cutechess_launch_stagger_ms': 1500,
+                }
+            },
+        }
+        locked = mock.Mock()
+        locked.get.return_value = test
+
+        with mock.patch.object(
+            get_workload, 'OPENBENCH_CONFIG', configured
+        ), mock.patch.object(
+            get_workload, 'game_distribution', return_value={
+                'cutechess-count': 3,
+                'concurrency-per': 8,
+                'games-per-cutechess': 16,
+            }
+        ), mock.patch.object(
+            get_workload, 'spsa_to_dictionary', return_value=None
+        ), mock.patch.object(
+            get_workload.transaction, 'atomic', return_value=nullcontext()
+        ), mock.patch.object(
+            get_workload.Test.objects, 'select_for_update', return_value=locked
+        ):
+            workload = get_workload.workload_to_dictionary(
+                test, SimpleNamespace(id=9), SimpleNamespace()
+            )
+
+        self.assertEqual(
+            workload['test']['dev']['cutechess_launch_stagger_ms'], 1500
+        )
+        self.assertEqual(
+            workload['test']['base']['cutechess_launch_stagger_ms'], 1500
+        )
 
 if __name__ == '__main__':
     unittest.main()
