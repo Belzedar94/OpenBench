@@ -19,6 +19,7 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 import argparse
+from collections import deque
 import cpuinfo
 import hashlib
 import json
@@ -39,7 +40,7 @@ import zipfile
 
 from subprocess import PIPE, Popen, call, STDOUT
 from itertools import combinations_with_replacement
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 ## Local imports
 
@@ -55,7 +56,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 34 # Client version to send to the Server
+CLIENT_VERSION   = 35 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -317,7 +318,7 @@ class ServerReporter:
         payload = {
             'test_id'    : config.workload['test']['id'],
             'error'      : error,
-            'logs'       : pgn,
+            'logs'       : pgn or '',
         }
 
         return ServerReporter.report(config, 'clientSubmitError', payload)
@@ -515,6 +516,25 @@ class Cutechess:
         )
 
     @staticmethod
+    def launch_stagger_seconds(config, cutechess_idx):
+
+        # The bundled Cutechess launches every concurrent game immediately.
+        # Server-side distribution can split a slow-starting engine into
+        # smaller copies; stagger those copy launches here. Custom runners
+        # retain their historical startup behavior.
+        runner, _ = variant_routing(config)
+        if runner != 'cutechess':
+            return 0.0
+
+        stagger_ms = max(
+            config.workload['test'][branch].get(
+                'cutechess_launch_stagger_ms', 0
+            )
+            for branch in ['dev', 'base']
+        )
+        return cutechess_idx * stagger_ms / 1000.0
+
+    @staticmethod
     def adjudication_settings(config):
 
         # All three possible adjudication settings
@@ -622,7 +642,9 @@ class Cutechess:
                 else argument
             )
         options = (' ' + ' '.join(option_args)) if option_args else ''
-        return '-engine dir=Engines/ cmd=./%s proto=uci %s%s name=%s-%s' % (command, control, options, engine, branch)
+        return '-engine dir=Engines/ cmd=./%s proto=uci %s%s name=%s-%s' % (
+            command, control, options, engine, branch
+        )
 
     @staticmethod
     def pgnout_settings(config, timestamp, cutechess_idx):
@@ -834,12 +856,94 @@ class ResultsReporter(object):
             # Reuse logic that was given to Cutechess to decide the PGN name
             fname = Cutechess.pgn_name(self.config, timestamp, x)
 
+            # A runner may fail during engine initialization, before it has a
+            # chance to create its PGN. The runner failure is reported from
+            # send_runner_errors(); do not mask it with FileNotFoundError.
+            if not os.path.isfile(fname):
+                print('[#%d] No PGN was created by the game runner' % x)
+                continue
+
             # For any game with weird Termination, report it
             for header, moves in PGNHelper.slice_pgn_file(fname):
                 error = PGNHelper.get_error_reason(header)
                 if error:
                     as_str = PGNHelper.pretty_format(header, moves)
                     ServerReporter.report_engine_error(self.config, error, as_str)
+
+    def send_runner_errors(self):
+
+        # A server/user stop is intentional. process_until_finished() may
+        # return while runner futures are still winding down, so never block
+        # on task.result() or report those cancellations as engine failures.
+        if self.abort_flag.is_set():
+            return 0
+
+        failures = []
+        for cutechess_idx, task in enumerate(self.tasks):
+            if not task.done():
+                failures.append({
+                    'cutechess_idx': cutechess_idx,
+                    'returncode': None,
+                    'started_games': 0,
+                    'finished_games': 0,
+                    'message': 'game runner task did not terminate',
+                    'logs': '',
+                })
+                continue
+            try:
+                failure = task.result()
+            except Exception as error:
+                failure = {
+                    'cutechess_idx': cutechess_idx,
+                    'returncode': None,
+                    'started_games': 0,
+                    'finished_games': 0,
+                    'message': 'game runner raised %s: %s'
+                               % (type(error).__name__, error),
+                    'logs': ''.join(traceback.format_exception(
+                        type(error), error, error.__traceback__
+                    )),
+                }
+
+            if failure:
+                failures.append(failure)
+
+        if not failures:
+            return 0
+
+        pregame = sum(failure['finished_games'] == 0 for failure in failures)
+        summary = (
+            'Game runner failure: %d/%d copies failed; '
+            '%d before the first completed game'
+            % (len(failures), len(self.tasks), pregame)
+        )
+
+        # One failed high-concurrency workload can contain dozens of identical
+        # traces. Keep the server event useful and bounded while retaining the
+        # first eight independent runner diagnostics.
+        reports = []
+        for failure in failures[:8]:
+            reports.append(
+                '[runner #%d] exit=%s started=%d finished=%d\n%s\n%s'
+                % (
+                    failure['cutechess_idx'],
+                    failure['returncode'],
+                    failure['started_games'],
+                    failure['finished_games'],
+                    failure['message'],
+                    failure['logs'][-8192:],
+                )
+            )
+        if len(failures) > len(reports):
+            reports.append(
+                '[%d additional runner failures omitted]'
+                % (len(failures) - len(reports))
+            )
+
+        ServerReporter.report_engine_error(
+            self.config, summary, '\n\n'.join(reports)
+        )
+        return len(failures)
 
 
 def get_version(program):
@@ -1320,6 +1424,16 @@ def complete_workload(config):
         try:
             rr = ResultsReporter(config, tasks, results, abort_flag)
             rr.process_until_finished()
+
+            # A stop response can return from process_until_finished() while
+            # runner threads are alive. Terminate them before inspecting
+            # futures or PGNs; wait is bounded and send_runner_errors() is
+            # non-blocking even if a stubborn process survives.
+            if abort_flag.is_set():
+                Cutechess.kill_everything(dev_name, base_name)
+                wait(tasks, timeout=10)
+
+            runner_failures = rr.send_runner_errors()
             rr.send_errors(timestamp, cutechess_cnt)
             Cutechess.kill_everything(dev_name, base_name)
 
@@ -1329,6 +1443,12 @@ def complete_workload(config):
             abort_flag.set()
             Cutechess.kill_everything(dev_name, base_name)
             raise
+
+        if runner_failures:
+            raise RuntimeError(
+                '%d game runner copies failed; diagnostics were sent to OpenBench'
+                % runner_failures
+            )
 
         # Upload the PGN if requested
         if config.workload['test']['upload_pgns'] != 'FALSE':
@@ -1458,8 +1578,20 @@ def cutechess_command_argv(command):
 
 def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort_flag):
 
+    launch_delay = Cutechess.launch_stagger_seconds(config, cutechess_idx)
+    if launch_delay:
+        print('[#%d] Delaying game runner launch by %.3f seconds'
+              % (cutechess_idx, launch_delay))
+        if abort_flag is not None:
+            if abort_flag.wait(launch_delay):
+                return None
+        else:
+            time.sleep(launch_delay)
+
     print('\n[#%d] Launching Cutechess...\n%s\n' % (cutechess_idx, command))
-    cutechess = Popen(cutechess_command_argv(command), stdout=PIPE)
+    cutechess = Popen(
+        cutechess_command_argv(command), stdout=PIPE, stderr=STDOUT
+    )
 
     results = {
 
@@ -1472,34 +1604,51 @@ def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort
         'illegals'    : 0,               # " illegal move "
     }
 
+    output_tail = deque(maxlen=80)
+    started_games = 0
+    finished_games = 0
+    workload = getattr(config, 'workload', {})
+    expected_games = workload.get('distribution', {}).get(
+        'games-per-cutechess'
+    )
+
     while True:
 
         # Read each line of output until the pipe closes and we get "" back
-        line = cutechess.stdout.readline().strip().decode('ascii')
+        line = cutechess.stdout.readline().strip().decode(
+            'utf-8', errors='replace'
+        )
         if not line:
             break
 
-        if abort_flag.is_set():
+        output_tail.append(line)
+
+        if abort_flag is not None and abort_flag.is_set():
             break
+
+        if 'Started game' in line:
+            started_games += 1
 
         if 'Started game' not in line and 'Score of' not in line:
             print('[#%d] %s' % (cutechess_idx, line))
 
         if 'Finished game' in line:
+            finished_games += 1
             Cutechess.update_results(results, line)
 
         # Add to the results queue every time we have a game-pair finished
         if any(results['pentanomial']):
 
             # Place the results into the Queue, and be sure to copy the lists
-            results_queue.put({
-                'trinomial'     : list(results['trinomial']),
-                'pentanomial'   : list(results['pentanomial']),
-                'crashes'       : results['crashes'],
-                'timelosses'    : results['timelosses'],
-                'illegals'      : results['illegals'],
-                'cutechess_idx' : cutechess_idx,
-            })
+            if results_queue is not None:
+                results_queue.put({
+                    'trinomial'     : list(results['trinomial']),
+                    'pentanomial'   : list(results['pentanomial']),
+                    'crashes'       : results['crashes'],
+                    'timelosses'    : results['timelosses'],
+                    'illegals'      : results['illegals'],
+                    'cutechess_idx' : cutechess_idx,
+                })
 
             # Clear out all the results, so we can start collecting a new set
             results['trinomial'  ] = [0, 0, 0]
@@ -1507,6 +1656,46 @@ def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort
             results['crashes'    ] = 0
             results['timelosses' ] = 0
             results['illegals'   ] = 0
+
+    # Do not classify an intentional server/user abort as a runner failure;
+    # kill_everything() owns terminating the remaining subprocesses.
+    if abort_flag is not None and abort_flag.is_set():
+        return None
+
+    returncode = cutechess.wait()
+    completed_assignment = (
+        finished_games > 0
+        and (expected_games is None or finished_games >= expected_games)
+    )
+    if returncode == 0 and completed_assignment:
+        return None
+
+    if returncode:
+        message = 'game runner exited with code %d' % returncode
+    elif finished_games:
+        if expected_games is None:
+            message = 'game runner exited after completing %d games' % (
+                finished_games
+            )
+        else:
+            message = 'game runner exited after completing only %d/%d games' % (
+                finished_games, expected_games
+            )
+    else:
+        message = 'game runner exited without completing a game'
+
+    if not finished_games:
+        message += ' before the first completed game'
+
+    return {
+        'cutechess_idx': cutechess_idx,
+        'returncode': returncode,
+        'started_games': started_games,
+        'finished_games': finished_games,
+        'expected_games': expected_games,
+        'message': message,
+        'logs': '\n'.join(output_tail),
+    }
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                                                                           #

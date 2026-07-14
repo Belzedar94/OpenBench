@@ -41,6 +41,8 @@ class AtomicOnboardingTests(unittest.TestCase):
         defaults = self.engine["test_presets"]["default"]
         self.assertEqual(self.engine["source"], "https://github.com/Belzedar94/Atomic-Stockfish")
         self.assertEqual(self.engine["nps"], 1338320)
+        self.assertEqual(self.engine["cutechess_max_concurrency"], 8)
+        self.assertEqual(self.engine["cutechess_launch_stagger_ms"], 1500)
         self.assertEqual(self.engine["build"]["path"], "src")
         self.assertEqual(self.engine["build"]["compilers"], ["g++"])
         self.assertIn("BMI2", self.engine["build"]["cpuflags"])
@@ -60,6 +62,8 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.baseline["source"], "https://github.com/Belzedar94/Fairy-Stockfish"
         )
         self.assertEqual(self.baseline["nps"], 1165682)
+        self.assertEqual(self.baseline["cutechess_max_concurrency"], 8)
+        self.assertEqual(self.baseline["cutechess_launch_stagger_ms"], 1500)
         self.assertEqual(defaults["base_branch"], "atomic-openbench-baseline")
         self.assertEqual(defaults["both_bench"], 97362)
         self.assertEqual(defaults["both_network"], NETWORK)

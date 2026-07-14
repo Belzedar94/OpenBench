@@ -109,6 +109,10 @@ def verify_engine_basics(conf):
     assert type(conf.get('source')) == str
     assert type(conf.get('build')) == dict
     assert conf.get('tablebase_family', 'standard') in ['standard', 'atomic']
+    assert type(conf.get('cutechess_max_concurrency', 0)) == int
+    assert 0 <= conf.get('cutechess_max_concurrency', 0) <= 1024
+    assert type(conf.get('cutechess_launch_stagger_ms', 0)) == int
+    assert 0 <= conf.get('cutechess_launch_stagger_ms', 0) <= 60000
     manifest = conf.get('tablebase_manifest_sha256')
     assert manifest is None or re.fullmatch('[0-9a-fA-F]{64}', manifest)
 

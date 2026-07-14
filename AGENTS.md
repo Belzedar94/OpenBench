@@ -94,7 +94,11 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    Spell: `Bench: 13456297` (red default embebida).
 4. **`Engines/Atomic-Stockfish.json`** — copia `Engines/Spell-Stockfish.json` (flujo
    público: `"private": false` + `build.path/compilers/cpuflags/systems`) y ajusta `nps`
-   (mídelo: es el que escala TCs entre máquinas), presets y `book_name`.
+   (mídelo: es el que escala TCs entre máquinas), presets y `book_name`. Los motores con
+   arranque UCI costoso pueden declarar `"cutechess_max_concurrency": 8` y
+   `"cutechess_launch_stagger_ms": 1500`: el servidor divide la concurrencia total en
+   copias iguales y el worker escalona esas copias. Ambos defaults son 0 (desactivado) y
+   los runners custom (Spell) conservan su distribución y arranque históricos.
 5. **Libro**: `.epd` con token `ATOMIC` en el nombre → zip PÚBLICO (un release de GitHub
    vale: así está hosteado el de spell) que contenga el archivo con ese nombre EXACTO →
    `Books/<nombre>.json` con `source` y `sha`. **El sha es sha256 del TEXTO del .epd
@@ -195,6 +199,8 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   parser de resultados lee `tokens[6]`). Nada de espacios en rutas de binarios/args.
 - El PGN de cada partida se escribe SIEMPRE (aunque no haya errores) — el worker lo relee
   para contar crashes por cabecera `[Termination ...]`.
+- Si cutechess falla antes de crear el PGN, el worker captura stdout/stderr y exit code,
+  publica un único evento agregado y no intenta abrir el PGN inexistente.
 - `option.<K>=<V>` en presets/tests para opciones UCI; en SPSA los parámetros se exponen
   como opciones UCI (TUNE de SF) y el server los mueve por lotes.
 - Al medir benches a mano en PowerShell: las pipes de here-string meten un BOM que mata el
@@ -227,6 +233,9 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - Hecho: Atomic-Stockfish y el baseline Fairy congelado estan registrados con sus
   benches, red, libros y pin del corpus Atomic. Los cuatro presets Syzygy son tests
   `GAMES` de 2.000 partidas (STC/LTC por NNUE/clasico), sin LOS ni SPRT.
+- El arranque Atomic usa copias de concurrencia 8 escalonadas 1,5 s. En la medición
+  local de 48 handshakes reales (3 grupos de 16 procesos), la mediana fue 1,493 s,
+  p95 2,179 s y máximo 2,462 s; la ráfaga única anterior rozaba 5 s.
 - Pendiente: desplegar este onboarding, subir la red Atomic y ejecutar los cuatro
   workloads Syzygy; migrar a PostgreSQL si la flota crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
