@@ -61,6 +61,25 @@ def routing_config(book, dev_stagger_ms=0, base_stagger_ms=0):
 
 class CutechessLaunchStaggerTests(unittest.TestCase):
 
+    def test_native_runner_uses_an_explicit_worker_local_path(self):
+        config = routing_config("ATOMIC_openings.epd")
+        expected_name = ["cutechess-ob.exe", "cutechess-ob"][worker.IS_LINUX]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                command = worker.runner_base_command(config)
+                argv = worker.cutechess_command_argv(command)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(
+            Path(argv[0]).resolve(),
+            (Path(worker.__file__).resolve().parent / expected_name).resolve(),
+        )
+        self.assertTrue(Path(argv[0]).is_absolute())
+
     def test_atomic_staggers_copies_by_larger_requested_interval(self):
         config = routing_config("ATOMIC_openings.epd", 1000, 1500)
         self.assertEqual(
