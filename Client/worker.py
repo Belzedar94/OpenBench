@@ -464,7 +464,9 @@ def runner_base_command(config):
     # Everything cutechess arbitrates natively keeps the original binary
     runner, variant = variant_routing(config)
     if runner == 'cutechess':
-        return ['cutechess-ob.exe', './cutechess-ob'][IS_LINUX]
+        binary = ['cutechess-ob.exe', 'cutechess-ob'][IS_LINUX]
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), binary)
+        return '"%s"' % path
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
     # interpreter running the worker (same venv). The assembled command still
