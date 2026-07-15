@@ -240,3 +240,20 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   workloads Syzygy; migrar a PostgreSQL si la flota crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
+
+## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-15)
+
+- Contrato y runbook: `docs/datagen-mode.md`.
+- OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
+  proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
+- La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
+  `{BOOK}`. El proceso debe terminar con código cero dejando `{OUT}` completo.
+- Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease
+  de cinco minutos durante build, bench, generación y upload; un fallo vuelve a
+  dejar el chunk repartible.
+- El SHA-256 y los bytes registrados corresponden al `.bz2` recibido y son
+  recalculados por el servidor. Los archivos viven en
+  `Media/datagen/<test_id>/chunk_<idx>.bz2`.
+- En este host compartido, limitar builds con `OPENBENCH_BUILD_JOBS=8` y usar
+  clientes dev pequeños; nunca mezclar la DB/Media/clientes de `:8000` con los
+  ensayos de `:8001`.

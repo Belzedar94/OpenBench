@@ -26,6 +26,7 @@
 # indication as to success, or a reason for failure.
 
 import OpenBench.views
+import OpenBench.datagen
 
 from OpenBench.models import *
 
@@ -68,6 +69,7 @@ def approve_workload(request, profile, workload):
 
 def restart_workload(request, profile, workload):
     workload.finished = False;
+    OpenBench.datagen.requeue_running_chunks(workload)
     return 'Workload was Restarted!'
 
 def stop_workload(request, profile, workload):
@@ -93,7 +95,7 @@ def tweak_workload(request, profile, workload):
     except: pass
 
     try: # Must be at least one. Cannot be changed for Tuning workloads
-        if workload.test_mode != 'SPSA':
+        if workload.test_mode != 'SPSA' and not workload.is_generic_datagen():
             workload.workload_size = max(1, int(request.POST['workload_size']))
     except: pass
 

@@ -26,7 +26,7 @@ import traceback
 
 from OpenSite.settings import PROJECT_PATH
 
-OPENBENCH_STATIC_VERSION = 'v4'
+OPENBENCH_STATIC_VERSION = 'v5'
 
 OPENBENCH_CONFIG = None # Initialized by OpenBench/apps.py
 
@@ -244,6 +244,11 @@ def verify_engine_datagen_preset(datagen_preset):
         'datagen_custom_genfens',
         'datagen_play_reverses',
         'datagen_max_games',
+
+        'datagen_command',
+        'datagen_total_count',
+        'datagen_positions_per_chunk',
+        'datagen_base_seed',
     ]
 
     for key in datagen_preset.keys():

@@ -495,7 +495,7 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
     def test_client_version_matches_server(self):
         server = json.loads((ROOT / 'Config' / 'config.json').read_text())
         self.assertEqual(worker.CLIENT_VERSION, server['client_version'])
-        self.assertEqual(worker.CLIENT_VERSION, 35)
+        self.assertEqual(worker.CLIENT_VERSION, 36)
 
     def test_engine_metadata_accepts_only_known_family_and_sha256_pin(self):
         base = {

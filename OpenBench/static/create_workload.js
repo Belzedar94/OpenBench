@@ -57,6 +57,7 @@ function create_preset_buttons(engine, workload_type) {
         // Create a new button for the test mode
         var btn       = document.createElement('button')
         btn.innerHTML = mode;
+        btn.type      = 'button';
         btn.onclick   = function() { apply_preset(mode, workload_type); };
 
         // Apply all of our CSS bootstrapping
@@ -91,13 +92,16 @@ function get_dev_engine() {
 
 function get_base_engine() {
     const selection = document.getElementById('base_engine');
+    if (selection == null)
+        return get_dev_engine();
     return selection.options[selection.selectedIndex].value;
 }
 
 function get_presets(engine, preset, workload_type) {
-    return workload_type == 'TEST'    ? config.engines[engine].test_presets[preset]
-         : workload_type == 'TUNE'    ? config.engines[engine].tune_presets[preset]
-         : workload_type == 'DATAGEN' ? config.engines[engine].datagen_presets[preset] : {};
+    const presets = workload_type == 'TEST'    ? config.engines[engine].test_presets
+                  : workload_type == 'TUNE'    ? config.engines[engine].tune_presets
+                  : workload_type == 'DATAGEN' ? config.engines[engine].datagen_presets : {};
+    return presets[preset] || {};
 }
 
 
@@ -207,14 +211,14 @@ function apply_preset(preset, workload_type) {
         else {
             set_option(option.replace('both_', 'dev_'), settings[option]);
 
-            if (workload_type == 'TEST' || workload_type == "DATAGEN")
+            if (workload_type == 'TEST')
                 set_option(option.replace('both_', 'base_'), settings[option]);
         }
     }
 
     // For cross-engine tests, keep the original Hash/Threads, but
     // add any other settings that might be specific to the engine
-    if (workload_type == 'TEST' || workload_type == "DATAGEN") {
+    if (workload_type == 'TEST') {
         try {
             retain_specific_options(get_base_engine(), preset, workload_type);
         } catch (error) {}
@@ -228,10 +232,15 @@ function change_engine(engine, target, workload_type) {
     if (target == 'dev')
         create_preset_buttons(engine, workload_type);
 
-    if (target == 'dev' && (workload_type == 'TEST' || workload_type == 'DATAGEN'))
+    if (target == 'dev' && workload_type == 'TEST')
         set_engine(engine, 'base');
 
-    apply_preset('STC', workload_type);
+    const initial = Object.keys(
+        workload_type == 'TEST'    ? config.engines[engine].test_presets
+      : workload_type == 'TUNE'    ? config.engines[engine].tune_presets
+      : workload_type == 'DATAGEN' ? config.engines[engine].datagen_presets : {}
+    ).includes('STC') ? 'STC' : 'default';
+    apply_preset(initial, workload_type);
 }
 
 function set_test_type() {
@@ -243,10 +252,27 @@ function set_test_type() {
     // Attempt to fill FIXED fields using default settings, then just use 40,000
 
     var selectA  = document.getElementById('test_mode');
-    var mode     = selectA.options[selectA.selectedIndex].value;
+    if (selectA == null)
+        return;
+
+    var mode     = selectA.value;
 
     var selectB  = document.getElementById('dev_engine');
     var engine   = selectB.options[selectB.selectedIndex].value;
+
+    const genericDatagen = mode == 'DATAGEN';
+    document.querySelectorAll('.gameplay-only').forEach(function(element) {
+        element.style.display = genericDatagen ? 'none' : '';
+    });
+    document.querySelectorAll('.datagen-only').forEach(function(element) {
+        element.style.display = genericDatagen ? '' : 'none';
+    });
+
+    create_preset_buttons(engine, genericDatagen ? 'DATAGEN' : 'TEST');
+    if (genericDatagen) {
+        apply_preset('default', 'DATAGEN');
+        return;
+    }
 
     var base = get_presets(engine, 'default', 'TEST');
     var stc  = get_presets(engine, 'STC', 'TEST');

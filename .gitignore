@@ -1,6 +1,8 @@
 *.pyc
+.venv/
+.scratch/
 Client/*
-OpenBench/migrations/*
+OpenBench/migrations/__pycache__/
 
 credentials
 credentials.*

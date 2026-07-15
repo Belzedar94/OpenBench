@@ -19,6 +19,7 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 import argparse
+import bz2
 from collections import deque
 import cpuinfo
 import hashlib
@@ -30,6 +31,7 @@ import psutil
 import queue
 import re
 import requests
+import shutil
 import subprocess
 import sys
 import threading
@@ -56,7 +58,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 35 # Client version to send to the Server
+CLIENT_VERSION   = 36 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -130,7 +132,7 @@ class Configuration:
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
         # Ensure the folder structure for ease of coding
-        for folder in ['PGNs', 'Engines', 'Networks', 'Books']:
+        for folder in ['PGNs', 'Engines', 'Networks', 'Books', 'Datagen']:
             if not os.path.isdir(folder):
                 os.mkdir(folder)
 
@@ -264,6 +266,10 @@ class ServerReporter:
 
     @staticmethod
     def report(config, endpoint, payload, files=None):
+
+        datagen = (config.workload or {}).get('test', {}).get('datagen')
+        if datagen:
+            payload.setdefault('chunk_idx', datagen['chunk_idx'])
 
         payload['machine_id'] = config.machine_id
         payload['secret']     = config.secret_token
@@ -406,6 +412,38 @@ class ServerReporter:
         }
 
         return ServerReporter.report(config, 'clientSubmitPGN', payload, files)
+
+    @staticmethod
+    def report_datagen(config, path, sha256, byte_count):
+
+        payload = {
+            'test_id': config.workload['test']['id'],
+            'chunk_idx': config.workload['test']['datagen']['chunk_idx'],
+            'sha256': sha256,
+            'bytes': byte_count,
+        }
+
+        target = url_join(config.server, 'clientSubmitDatagen')
+        payload['machine_id'] = config.machine_id
+        payload['secret'] = config.secret_token
+
+        with open(path, 'rb') as data:
+            response = requests.post(
+                target,
+                data=payload,
+                files={'file': (os.path.basename(path), data, 'application/x-bzip2')},
+                timeout=(TIMEOUT_HTTP, 600),
+            )
+
+        try:
+            body = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise RuntimeError('DATAGEN upload returned a non-JSON response')
+
+        if response.status_code != 200 or 'error' in body:
+            raise RuntimeError(body.get('error', 'DATAGEN upload failed'))
+        return body
 
 
 ## Variant -> Runner routing table.
@@ -1008,6 +1046,10 @@ def cleanup_client():
         if file_age(os.path.join('Networks', file)) > SECONDS_PER_MONTH:
             os.remove(os.path.join('Networks', file))
 
+    for file in os.listdir('Datagen'):
+        if file_age(os.path.join('Datagen', file)) > SECONDS_PER_DAY:
+            os.remove(os.path.join('Datagen', file))
+
 def has_uci_option(options, name):
 
     pattern = r'(?<!\S)%s=(?:"[^"]*"|\'[^\']*\'|\S+)' % re.escape(name)
@@ -1365,7 +1407,239 @@ def server_request_workload(config):
     config.workload = response.get('workload', None)
 
 
+class DatagenStopped(Exception):
+    pass
+
+
+class DatagenHeartbeat:
+
+    def __init__(self, config):
+        self.config = config
+        self.shutdown = threading.Event()
+        self.stop_requested = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback_value):
+        self.shutdown.set()
+        self.thread.join(timeout=1)
+
+    def _run(self):
+        while not self.shutdown.wait(REPORT_INTERVAL):
+            try:
+                response = ServerReporter.report_heartbeat(self.config).json()
+                if 'stop' in response:
+                    self.stop_requested.set()
+                    return
+            except BadVersionException:
+                self.stop_requested.set()
+                return
+            except Exception:
+                traceback.print_exc()
+                print('[Note] Failed to send DATAGEN heartbeat; lease retry continues')
+
+
+def terminate_datagen_process(process):
+    """Terminate only the DATAGEN process tree started by this worker."""
+
+    if process.poll() is not None:
+        return
+
+    targets = []
+    try:
+        parent = psutil.Process(process.pid)
+        targets = parent.children(recursive=True) + [parent]
+        for target in targets:
+            try:
+                target.terminate()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(targets, timeout=5)
+        for target in alive:
+            try:
+                target.kill()
+            except psutil.Error:
+                pass
+    except psutil.Error:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def datagen_file_sha256(path):
+    digest = hashlib.sha256()
+    byte_count = 0
+    with open(path, 'rb') as data:
+        while block := data.read(1024 * 1024):
+            digest.update(block)
+            byte_count += len(block)
+    return digest.hexdigest(), byte_count
+
+
+def datagen_log_tail(path, limit=65536):
+    if not os.path.exists(path):
+        return ''
+    with open(path, 'rb') as log:
+        log.seek(0, os.SEEK_END)
+        size = log.tell()
+        log.seek(max(0, size - limit), os.SEEK_SET)
+        return log.read().decode('utf-8', errors='replace')
+
+
+def render_datagen_command(config, output_path):
+    data = config.workload['test']['datagen']
+    book_name = config.workload['test']['book']['name']
+    book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
+    values = {
+        'SEED': str(data['seed']),
+        'COUNT': str(data['chunk_count']),
+        'OUT': output_path.replace('\\', '/'),
+        'THREADS': str(config.threads),
+        'BOOK': book_path.replace('\\', '/'),
+    }
+    return data['command'].format_map(values)
+
+
+def run_datagen_command(config, engine, output_path, log_path, heartbeat):
+    command = render_datagen_command(config, output_path)
+    print('DATAGEN command: %s' % command)
+
+    with open(log_path, 'wb') as log:
+        process = Popen(
+            [engine],
+            stdin=PIPE,
+            stdout=log,
+            stderr=STDOUT,
+            text=True,
+        )
+        try:
+            process.stdin.write(command + '\nquit\n')
+            process.stdin.flush()
+            process.stdin.close()
+
+            while process.poll() is None:
+                if heartbeat.stop_requested.is_set() or os.path.isfile('openbench.exit'):
+                    terminate_datagen_process(process)
+                    raise DatagenStopped()
+                time.sleep(1)
+        except Exception:
+            terminate_datagen_process(process)
+            raise
+
+    if process.returncode != 0:
+        raise RuntimeError('DATAGEN engine exited with code %d' % process.returncode)
+    if not os.path.isfile(output_path):
+        raise RuntimeError('DATAGEN command completed without creating {OUT}')
+
+
+def complete_datagen_workload(config):
+    test = config.workload['test']
+    chunk = test['datagen']
+    stem = 'test_%d_chunk_%d' % (test['id'], chunk['chunk_idx'])
+    output_path = os.path.join('Datagen', stem + '.bin')
+    compressed_path = output_path + '.bz2'
+    log_path = os.path.join('Datagen', stem + '.log')
+
+    for path in [output_path, compressed_path, log_path]:
+        if os.path.exists(path):
+            os.remove(path)
+
+    try:
+        with DatagenHeartbeat(config) as heartbeat:
+            download_opening_book(
+                test['book']['sha'], test['book']['source'], test['book']['name']
+            )
+            dev_network = safe_download_network_weights(config, 'dev')
+            dev_name = safe_download_engine(config, 'dev', dev_network)
+            dev_nps = safe_run_benchmarks(config, 'dev', dev_name, dev_network)
+            ServerReporter.report_nps(config, dev_nps, dev_nps)
+
+            if heartbeat.stop_requested.is_set():
+                raise DatagenStopped()
+
+            run_datagen_command(
+                config,
+                os.path.join('Engines', dev_name),
+                output_path,
+                log_path,
+                heartbeat,
+            )
+
+            with open(output_path, 'rb') as source:
+                with bz2.open(compressed_path, 'wb', compresslevel=9) as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+
+            sha256, byte_count = datagen_file_sha256(compressed_path)
+            response = None
+            for attempt in range(3):
+                try:
+                    response = ServerReporter.report_datagen(
+                        config, compressed_path, sha256, byte_count
+                    )
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    traceback.print_exc()
+                    if heartbeat.stop_requested.wait(5):
+                        raise DatagenStopped()
+
+            print(
+                'Uploaded DATAGEN chunk %d: %d bytes, sha256 %s (%d/%d complete)'
+                % (
+                    chunk['chunk_idx'],
+                    byte_count,
+                    sha256,
+                    response['completed_chunks'],
+                    response['total_chunks'],
+                )
+            )
+
+    except DatagenStopped:
+        print('DATAGEN chunk stopped by server; local process tree was terminated')
+        return
+
+    except (OpenBenchBuildFailedException,
+            OpenBenchMissingArtifactException,
+            OpenBenchBadBenchException):
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    except Exception as error:
+        logs = datagen_log_tail(log_path)
+        summary = 'DATAGEN chunk %d failed: %s' % (chunk['chunk_idx'], error)
+        try:
+            ServerReporter.report_engine_error(config, summary, logs)
+        except Exception:
+            traceback.print_exc()
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    finally:
+        for path in [output_path, compressed_path, log_path]:
+            if os.path.exists(path):
+                os.remove(path)
+
+
 def complete_workload(config):
+
+    if config.workload['test']['type'] == 'DATAGEN' and config.workload['test'].get('datagen'):
+        return complete_datagen_workload(config)
 
     # Download the opening book, throws an exception on corruption
     download_opening_book(
