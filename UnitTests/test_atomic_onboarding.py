@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SHA256 = "3d4b7fd0ab387f4f60da2078f612c9e8890e6026f551aebe8631efc157788f23"
 NETWORK = "atomic_run3b_e202_l05.nnue"
 NETWORK_SHA256 = "99DC67EABF26A64FAEECA3A88B4C38597A840B8D4A874B9F2CF658C6F92A04A6"
+BOOK_SHA256 = "28ED51C2F42E723D5E127D2D3F21C0BFA4A9B318615AFDB299B93EA62DEA2B1E"
 
 
 def load_json(path):
@@ -154,6 +155,7 @@ class AtomicOnboardingTests(unittest.TestCase):
         ):
             self.assertIn(option, command)
         self.assertIn("network_sha256 " + NETWORK_SHA256, command)
+        self.assertIn("book_sha256 " + BOOK_SHA256, command)
 
 
 if __name__ == "__main__":
