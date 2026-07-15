@@ -161,8 +161,11 @@ def check_for_engine_binary(out_path):
 
 def makefile_command(net_path, make_path, out_path, compiler):
 
-    # Build with -j, and EXE= to contol the output location
-    command = ['make', '-j', 'EXE=%s' % (out_path)]
+    # Keep historical unlimited parallelism unless an operator explicitly caps
+    # this client (useful when DATAGEN shares a host with other long jobs).
+    build_jobs = os.environ.get('OPENBENCH_BUILD_JOBS', '').strip()
+    parallel = '-j%s' % int(build_jobs) if build_jobs else '-j'
+    command = ['make', parallel, 'EXE=%s' % (out_path)]
 
     # Build with CC/CXX= when using a custom compiler
     if compiler:
