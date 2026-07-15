@@ -41,6 +41,8 @@ def workload():
                     'generate seed {SEED} count {COUNT} threads {THREADS} '
                     'book {BOOK} out {OUT}'
                 ),
+                'total_count': 200,
+                'positions_per_chunk': 25,
                 'chunk_idx': 3,
                 'chunk_count': 25,
                 'seed': 103,
@@ -62,6 +64,18 @@ def config():
 
 
 class DatagenWorkerTests(unittest.TestCase):
+
+    def test_workload_log_identifies_datagen_chunk_instead_of_match(self):
+        cfg = config()
+        response = SimpleNamespace(json=lambda: {'workload': workload()})
+
+        with mock.patch.object(worker.requests, 'post', return_value=response), \
+             mock.patch('builtins.print') as output:
+            worker.server_request_workload(cfg)
+
+        output.assert_any_call(
+            'Workload DATAGEN [GenericEngine] branch - chunk 4/8 (test #7)\n'
+        )
 
     def test_template_substitution_is_engine_agnostic(self):
         rendered = worker.render_datagen_command(
