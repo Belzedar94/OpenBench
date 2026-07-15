@@ -348,7 +348,7 @@ def verify_datagen_book(errors, request, field, field_name, parent):
 
 def verify_datagen_template(errors, request, field):
 
-    allowed = {'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK'}
+    allowed = {'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'NETWORK'}
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
 
     try:
@@ -369,7 +369,8 @@ def verify_datagen_template(errors, request, field):
     except Exception:
         errors.append(
             'Datagen Command must be one line, use only {SEED}, {COUNT}, '
-            '{OUT}, {THREADS}, {BOOK}, and include SEED/COUNT/OUT/THREADS'
+            '{OUT}, {THREADS}, {BOOK}, {NETWORK}, and include '
+            'SEED/COUNT/OUT/THREADS'
         )
 
 def verify_datagen_counts(errors, request, total_field, chunk_field):

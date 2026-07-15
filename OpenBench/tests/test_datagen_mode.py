@@ -79,7 +79,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 36,
+            'client_ver': 37,
             'tablebases': {'standard': 0},
             'syzygy_max': 0,
         }
@@ -212,6 +212,7 @@ class DatagenModeTests(TestCase):
     def test_template_validation_rejects_unknown_or_missing_placeholders(self):
         valid = SimpleNamespace(POST={'datagen_command': (
             'datagen seed {SEED} count {COUNT} threads {THREADS} out {OUT}'
+            ' network {NETWORK}'
         )})
         errors = []
         verify_workload.verify_datagen_template(errors, valid, 'datagen_command')

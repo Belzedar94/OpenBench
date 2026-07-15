@@ -27,10 +27,13 @@ def workload():
             'dev': {
                 'engine': 'GenericEngine',
                 'name': 'branch',
+                'sha': 'a' * 40,
+                'source': 'https://example.test/archive.zip',
                 'network': '',
                 'netname': '',
                 'private': False,
                 'bench': 1,
+                'build': {'path': 'src'},
             },
             'base': {
                 'engine': 'GenericEngine',
@@ -39,7 +42,7 @@ def workload():
             'datagen': {
                 'command': (
                     'generate seed {SEED} count {COUNT} threads {THREADS} '
-                    'book {BOOK} out {OUT}'
+                    'book {BOOK} network {NETWORK} out {OUT}'
                 ),
                 'total_count': 200,
                 'positions_per_chunk': 25,
@@ -60,6 +63,9 @@ def config():
         machine_id=11,
         secret_token='secret',
         server='http://localhost:8001',
+        compilers={'GenericEngine': ['g++']},
+        cpu_name='Generic CPU',
+        cpu_flags=[],
     )
 
 
@@ -79,20 +85,33 @@ class DatagenWorkerTests(unittest.TestCase):
 
     def test_template_substitution_is_engine_agnostic(self):
         rendered = worker.render_datagen_command(
-            config(), os.path.join('Datagen', 'chunk.bin')
+            config(),
+            os.path.join('Datagen', 'chunk.bin'),
+            os.path.join('Networks', '12345678'),
         )
         self.assertEqual(
             rendered,
             'generate seed 103 count 25 threads 2 book NONE '
+            'network Networks/12345678 '
             'out Datagen/chunk.bin',
         )
 
+    def test_template_uses_none_when_the_workload_has_no_network(self):
+        rendered = worker.render_datagen_command(
+            config(), os.path.join('Datagen', 'chunk.bin')
+        )
+        self.assertIn('network NONE', rendered)
+
     def test_complete_workload_builds_one_engine_benches_compresses_and_uploads(self):
         cfg = config()
+        cfg.threads = 30
         captured = {}
 
-        def generate(_config, engine, output_path, _log_path, _heartbeat):
+        def generate(
+            _config, engine, output_path, _log_path, _heartbeat, network_path
+        ):
             captured['engine'] = engine
+            captured['network'] = network_path
             with open(output_path, 'wb') as output:
                 output.write(b'opaque training records')
 
@@ -111,7 +130,11 @@ class DatagenWorkerTests(unittest.TestCase):
             os.mkdir('Datagen')
             try:
                 with mock.patch.object(worker, 'download_opening_book'), \
-                     mock.patch.object(worker, 'safe_download_network_weights', return_value=None), \
+                     mock.patch.object(
+                         worker,
+                         'safe_download_network_weights',
+                         return_value=os.path.join('Networks', '12345678'),
+                     ), \
                      mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe') as build, \
                      mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000) as bench, \
                      mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
@@ -123,10 +146,12 @@ class DatagenWorkerTests(unittest.TestCase):
 
         self.assertEqual(captured['payload'], b'opaque training records')
         self.assertEqual(captured['engine'], os.path.join('Engines', 'engine.exe'))
+        self.assertEqual(captured['network'], os.path.join('Networks', '12345678'))
         build.assert_called_once()
         self.assertEqual(build.call_args.args[1], 'dev')
         bench.assert_called_once()
         self.assertEqual(bench.call_args.args[1], 'dev')
+        self.assertEqual(bench.call_args.kwargs, {'bench_threads': 1})
 
     def test_retry_cleans_orphaned_chunk_files_before_running(self):
         cfg = config()
@@ -142,7 +167,9 @@ class DatagenWorkerTests(unittest.TestCase):
             'test_7_chunk_4.bin.meta',
         ]
 
-        def generate(_config, _engine, output_path, _log_path, _heartbeat):
+        def generate(
+            _config, _engine, output_path, _log_path, _heartbeat, _network_path
+        ):
             for name in stale_names:
                 self.assertFalse(Path('Datagen', name).exists(), name)
             for name in preserved_names:
@@ -246,6 +273,92 @@ class DatagenWorkerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'OPENBENCH_BUILD_JOBS': '8'}):
             command = worker.makefile_command(None, '.', 'engine', 'g++')
         self.assertIn('-j8', command)
+
+    def test_datagen_build_has_provenance_target_switch_and_separate_cache(self):
+        sha = '0123456789abcdef' * 2 + '01234567'
+        command = worker.makefile_command(
+            os.path.join('Networks', '12345678'),
+            '.',
+            'engine',
+            'g++',
+            sha,
+            'datagen',
+        )
+        self.assertIn('GIT_SHA_FULL=%s' % sha, command)
+        self.assertIn('OPENBENCH_DATAGEN=1', command)
+
+        play_command = worker.makefile_command(
+            None, '.', 'engine', 'g++', sha
+        )
+        self.assertIn('GIT_SHA_FULL=%s' % sha, play_command)
+        self.assertNotIn('OPENBENCH_DATAGEN=1', play_command)
+
+        play = worker.engine_binary_name(
+            'GenericEngine', sha, os.path.join('Networks', '12345678'), False
+        )
+        datagen = worker.engine_binary_name(
+            'GenericEngine',
+            sha,
+            os.path.join('Networks', '12345678'),
+            False,
+            'datagen',
+        )
+        self.assertNotEqual(play, datagen)
+        self.assertTrue(datagen.endswith('-DATAGEN'))
+
+        private_play = worker.engine_binary_name(
+            'PrivateEngine', sha, os.path.join('Networks', '12345678'), True
+        )
+        private_datagen = worker.engine_binary_name(
+            'PrivateEngine',
+            sha,
+            os.path.join('Networks', '12345678'),
+            True,
+            'datagen',
+        )
+        self.assertNotEqual(private_play, private_datagen)
+        self.assertTrue(private_datagen.endswith('-DATAGEN'))
+
+    def test_safe_download_engine_passes_full_sha_and_datagen_role(self):
+        cfg = config()
+        with mock.patch.object(
+            worker, 'download_public_engine', return_value='engine.exe'
+        ) as download:
+            result = worker.safe_download_engine(
+                cfg, 'dev', os.path.join('Networks', '12345678')
+            )
+
+        self.assertEqual(result, 'engine.exe')
+        self.assertTrue(download.call_args.args[5].endswith('-DATAGEN'))
+        self.assertEqual(download.call_args.args[7], 'a' * 40)
+        self.assertEqual(download.call_args.args[8], 'datagen')
+
+    def test_datagen_benches_once_while_play_keeps_worker_concurrency(self):
+        cfg = config()
+        cfg.threads = 30
+        with mock.patch.object(
+            worker.bench, 'run_benchmark', return_value=(1234, 1)
+        ) as run:
+            worker.safe_run_benchmarks(
+                cfg, 'dev', 'engine.exe', None, bench_threads=1
+            )
+            self.assertEqual(run.call_args.args[3], 1)
+
+            worker.safe_run_benchmarks(cfg, 'dev', 'engine.exe', None)
+            self.assertEqual(run.call_args.args[3], 30)
+
+    def test_private_datagen_uses_the_separate_role_cache(self):
+        cfg = config()
+        cfg.workload['test']['dev']['private'] = True
+        with mock.patch.object(
+            worker, 'download_private_engine', return_value='engine.exe'
+        ) as download:
+            result = worker.safe_download_engine(
+                cfg, 'dev', os.path.join('Networks', '12345678')
+            )
+
+        self.assertEqual(result, 'engine.exe')
+        self.assertTrue(download.call_args.args[3].endswith('-DATAGEN'))
 
 
 if __name__ == '__main__':

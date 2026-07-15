@@ -135,10 +135,12 @@ def read_git_credentials(engine):
     raise OpenBenchMissingAPICredentialsException('%s not found' % fname)
 
 
-def engine_binary_name(engine, commit_sha, net_path, private):
+def engine_binary_name(engine, commit_sha, net_path, private, build_role='play'):
     name = '%s-%s' % (engine, commit_sha.upper()[:8])
     if net_path and not private:
         name += '-%s' % (net_path[-8:])
+    if build_role != 'play':
+        name += '-%s' % build_role.upper()
     return name
 
 def check_for_engine_binary(out_path):
@@ -159,13 +161,25 @@ def check_for_engine_binary(out_path):
         os.rename(out_path, '%s.exe' % (out_path))
         return '%s.exe' % (out_path)
 
-def makefile_command(net_path, make_path, out_path, compiler):
+def makefile_command(
+    net_path, make_path, out_path, compiler, git_sha_full=None, build_role='play'
+):
 
     # Keep historical unlimited parallelism unless an operator explicitly caps
     # this client (useful when DATAGEN shares a host with other long jobs).
     build_jobs = os.environ.get('OPENBENCH_BUILD_JOBS', '').strip()
     parallel = '-j%s' % int(build_jobs) if build_jobs else '-j'
     command = ['make', parallel, 'EXE=%s' % (out_path)]
+
+    # Let engines embed exact source provenance even though public workers build
+    # from a GitHub archive without a .git directory.
+    if git_sha_full:
+        command += ['GIT_SHA_FULL=%s' % git_sha_full]
+
+    # A generic DATAGEN workload may need a different default target than the
+    # playing engine. Unknown make variables are harmless for existing engines.
+    if build_role == 'datagen':
+        command += ['OPENBENCH_DATAGEN=1']
 
     # Build with CC/CXX= when using a custom compiler
     if compiler:
@@ -297,7 +311,17 @@ def download_network(server, username, password, engine, net_name, net_sha, net_
         os.remove(net_path)
         raise OpenBenchCorruptedNetworkException('Invalid SHA for %s' % (net_name))
 
-def download_public_engine(engine, net_path, branch, source, make_path, out_path, compiler=None):
+def download_public_engine(
+    engine,
+    net_path,
+    branch,
+    source,
+    make_path,
+    out_path,
+    compiler=None,
+    git_sha_full=None,
+    build_role='play',
+):
 
     # Check to see if we already have the binary
     if check_for_engine_binary(out_path):
@@ -327,7 +351,14 @@ def download_public_engine(engine, net_path, branch, source, make_path, out_path
         # Prepare the MAKEFILE command
         make_path = os.path.join(src_path, make_path)
         bin_path  = os.path.join(make_path, os.path.basename(out_path))
-        make_cmd  = makefile_command(net_path, make_path, os.path.basename(out_path), compiler)
+        make_cmd = makefile_command(
+            net_path,
+            make_path,
+            os.path.basename(out_path),
+            compiler,
+            git_sha_full,
+            build_role,
+        )
 
         # Build the engine, which will produce a binary to bin_path, to be moved after
         process     = subprocess.Popen(make_cmd, cwd=make_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

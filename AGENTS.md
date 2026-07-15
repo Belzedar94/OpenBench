@@ -79,7 +79,10 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
 1. **Repo público en GitHub** (el flujo público compila EN el worker; el flujo privado
    necesita artifacts de GitHub Actions y un PAT — evítalo si puedes).
 2. **Contrato de build**: el worker ejecuta, con cwd = `build.path` de tu json:
-   `make -j EXE=<salida> [CC=<compiler>] [EVALFILE=<red>]` — SIN target y SIN ARCH/COMP.
+   `make -j EXE=<salida> GIT_SHA_FULL=<commit> [CC=<compiler>] [EVALFILE=<red>]`.
+   Un DATAGEN genérico añade `OPENBENCH_DATAGEN=1`; el Makefile debe usarlo si
+   necesita seleccionar un objetivo generador distinto. Las cachés de juego y
+   DATAGEN están separadas. El worker sigue sin imponer target ni ARCH/COMP.
    Tu Makefile debe producir un binario nativo optimizado con `make` a pelo.
    Spell-Stockfish lo resuelve con un shim al final de `src/Makefile`
    (`.DEFAULT_GOAL := openbench` → `build COMP=<por-OS>`, ARCH ya es native) — cópialo.
@@ -88,8 +91,9 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    (spell aún lo tiene pendiente — ver §7).
 3. **Contrato de bench**: el worker corre `./binario bench` (sin args; con red asignada y
    engine PRIVADO antepone `setoption name EvalFile value <red>`). Requisitos: determinista,
-   < 300 s (timeout ya subido en este fork; se lanza UN bench POR HILO del worker EN
-   PARALELO), imprime `Nodes searched: N`. Disciplina: los commits que se testeen llevan
+   < 300 s (timeout ya subido en este fork; los workloads de juego lanzan UN bench
+   POR HILO del worker EN PARALELO, mientras DATAGEN genérico verifica exactamente
+   uno porque no usa NPS para escalar), imprime `Nodes searched: N`. Disciplina: los commits que se testeen llevan
    `Bench: <N>` al final del mensaje (regex del server: `(?:BENCH|NODES)[ :=]+([0-9,]+)`).
    Spell: `Bench: 13456297` (red default embebida).
 4. **`Engines/Atomic-Stockfish.json`** — copia `Engines/Spell-Stockfish.json` (flujo

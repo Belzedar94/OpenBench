@@ -59,7 +59,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 36 # Client version to send to the Server
+CLIENT_VERSION   = 37 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -1528,7 +1528,7 @@ def clean_datagen_workspace(output_path):
             os.remove(path)
 
 
-def render_datagen_command(config, output_path):
+def render_datagen_command(config, output_path, network_path=None):
     data = config.workload['test']['datagen']
     book_name = config.workload['test']['book']['name']
     book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
@@ -1538,12 +1538,17 @@ def render_datagen_command(config, output_path):
         'OUT': output_path.replace('\\', '/'),
         'THREADS': str(config.threads),
         'BOOK': book_path.replace('\\', '/'),
+        'NETWORK': (
+            'NONE' if not network_path else network_path.replace('\\', '/')
+        ),
     }
     return data['command'].format_map(values)
 
 
-def run_datagen_command(config, engine, output_path, log_path, heartbeat):
-    command = render_datagen_command(config, output_path)
+def run_datagen_command(
+    config, engine, output_path, log_path, heartbeat, network_path=None
+):
+    command = render_datagen_command(config, output_path, network_path)
     print('DATAGEN command: %s' % command)
 
     with open(log_path, 'wb') as log:
@@ -1593,7 +1598,11 @@ def complete_datagen_workload(config):
             )
             dev_network = safe_download_network_weights(config, 'dev')
             dev_name = safe_download_engine(config, 'dev', dev_network)
-            dev_nps = safe_run_benchmarks(config, 'dev', dev_name, dev_network)
+            # DATAGEN needs one deterministic compatibility check. Its NPS is
+            # informational only and is never used to scale generation work.
+            dev_nps = safe_run_benchmarks(
+                config, 'dev', dev_name, dev_network, bench_threads=1
+            )
             ServerReporter.report_nps(config, dev_nps, dev_nps)
 
             if heartbeat.stop_requested.is_set():
@@ -1605,6 +1614,7 @@ def complete_datagen_workload(config):
                 output_path,
                 log_path,
                 heartbeat,
+                dev_network,
             )
 
             with open(output_path, 'rb') as source:
@@ -1796,7 +1806,17 @@ def safe_download_engine(config, branch, net_path):
     source      = config.workload['test'][branch]['source']
     private     = config.workload['test'][branch]['private']
 
-    bin_name = engine_binary_name(engine, commit_sha, net_path, private)
+    # Historical PGN DATAGEN uses the regular playing engine. Only the generic
+    # chunk protocol has an in-engine generator and therefore a separate role.
+    generic_datagen = (
+        config.workload['test']['type'] == 'DATAGEN'
+        and bool(config.workload['test'].get('datagen'))
+    )
+    build_role = 'datagen' if generic_datagen else 'play'
+
+    bin_name = engine_binary_name(
+        engine, commit_sha, net_path, private, build_role
+    )
     out_path = os.path.join('Engines', bin_name)
 
     if private:
@@ -1816,7 +1836,16 @@ def safe_download_engine(config, branch, net_path):
 
         try:
             return download_public_engine(
-                engine, net_path, branch_name, source, make_path, out_path, compiler)
+                engine,
+                net_path,
+                branch_name,
+                source,
+                make_path,
+                out_path,
+                compiler,
+                commit_sha,
+                build_role,
+            )
 
         except OpenBenchBuildFailedException as error:
 
@@ -1837,17 +1866,20 @@ def safe_create_genfens_opening_book(config, dev_name, dev_network):
         ServerReporter.report_engine_error(config, error.message)
         raise
 
-def safe_run_benchmarks(config, branch, engine, network):
+def safe_run_benchmarks(
+    config, branch, engine, network, bench_threads=None
+):
 
     name     = config.workload['test'][branch]['name']
     private  = config.workload['test'][branch]['private']
     expected = int(config.workload['test'][branch]['bench'])
     binary   = os.path.join('Engines', engine)
+    threads  = config.threads if bench_threads is None else bench_threads
 
     try:
-        print('\nRunning %dx Benchmarks for %s' % (config.threads, name))
+        print('\nRunning %dx Benchmarks for %s' % (threads, name))
         speed, nodes = bench.run_benchmark(
-            binary, network, private, config.threads, 1, expected)
+            binary, network, private, threads, 1, expected)
 
     except OpenBenchBadBenchException as error:
         ServerReporter.report_bad_bench(config, error.message)

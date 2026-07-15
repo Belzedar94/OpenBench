@@ -15,10 +15,13 @@ estos placeholders:
 - `{OUT}`: ruta local única donde el motor debe escribir el archivo final.
 - `{THREADS}`: concurrencia `-T` del cliente asignado.
 - `{BOOK}`: ruta local del libro, o `NONE` cuando el test no usa libro.
+- `{NETWORK}`: ruta local de la red dev ya descargada y verificada, o `NONE`
+  cuando el workload no tiene red.
 
 `SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK` es opcional. No se
 admiten placeholders desconocidos, conversiones, formatos, saltos de línea,
-NUL ni plantillas mayores de 4096 caracteres.
+NUL ni plantillas mayores de 4096 caracteres. `NETWORK` también es opcional y
+no modifica el mecanismo existente que pasa `EVALFILE` durante el build.
 
 El cliente escribe por stdin:
 
@@ -35,9 +38,20 @@ fallo de compresión o un fallo definitivo de upload se reportan por el flujo de
 errores existente y liberan el chunk para otro cliente.
 
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
-dev del motor y comprueba su bench por el mecanismo normal de OpenBench. El
-formato del motor, la variante y el contenido del libro no están codificados en
-los modelos ni en las vistas.
+dev del motor y comprueba su bench una sola vez, independientemente de
+`{THREADS}`. Ese NPS es sólo informativo: DATAGEN no escala trabajo ni parámetros
+con él. Los workloads de juego conservan sus benches por hilo y su escalado
+normal. El formato del motor, la variante y el contenido del libro no están
+codificados en los modelos ni en las vistas.
+
+Los builds públicos reciben siempre `GIT_SHA_FULL=<sha>` para que el binario
+pueda conservar procedencia exacta aunque el archive de GitHub no incluya
+`.git`. Un DATAGEN genérico recibe además `OPENBENCH_DATAGEN=1`; el Makefile
+puede usar esa variable para seleccionar su objetivo generador. Las cachés de
+binarios de juego y generación usan nombres distintos, de modo que nunca se
+reutiliza accidentalmente un ejecutable del rol equivocado; esto también se
+aplica a artefactos de motores privados. Los Makefiles que ignoran esas
+variables mantienen el comportamiento anterior.
 
 ## Creación y reparto
 
@@ -123,7 +137,7 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 36; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión 37; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
@@ -134,7 +148,7 @@ de `Media/`. En una ventana coordinada:
    después `python manage.py migrate`.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 36 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes versión 37 de forma gradual y vigilar logs, disco y leases.
 
 No usar `--fake` para `0002`: esa migración crea las columnas DATAGEN y la tabla
 de chunks. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
@@ -153,6 +167,10 @@ del proyecto de cada motor.
    archivo final en la ruta de salida y sale con código cero. Referencia
    completa: `src/datagen.cpp` de Spell-Stockfish (multihilo con shards por
    hilo + merge final, filtros al escribir, sidecar de metadata, `--resume`).
+   Si el generador no es el objetivo por defecto del motor, haz que el Makefile
+   seleccione ese objetivo cuando recibe `OPENBENCH_DATAGEN=1`. Usa
+   `GIT_SHA_FULL` para rellenar el commit de procedencia y `{NETWORK}` en la
+   plantilla cuando el comando necesite la ruta de la red en runtime.
 2. **Formato y auditoría propios**: decide tu registro binario y escribe tu
    merge/auditoría OFFLINE (los chunks se descargan de `Media/datagen/<test>/`;
    son bzip2 del archivo que tu motor escribió). Referencia:
