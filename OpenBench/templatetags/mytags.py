@@ -84,11 +84,10 @@ def shortStatBlock(test):
 
     elif test.test_mode == 'DATAGEN':
         if test.is_generic_datagen():
-            completed = test.datagen_chunks.filter(
-                status=OpenBench.models.DatagenChunk.COMPLETED
-            ).count()
             statlines = [
-                'Chunks: %d/%d' % (completed, test.datagen_total_chunks()),
+                'Chunks: %d/%d' % (
+                    test.datagen_completed_chunks, test.datagen_total_chunks()
+                ),
                 'Positions: %d/%d' % (test.games, test.datagen_total_count),
             ]
         else:
@@ -104,11 +103,10 @@ def longStatBlock(test):
     assert test.test_mode != 'SPSA'
 
     if test.is_generic_datagen():
-        completed = test.datagen_chunks.filter(
-            status=OpenBench.models.DatagenChunk.COMPLETED
-        ).count()
         return '\n'.join([
-            'Chunks    | %d / %d' % (completed, test.datagen_total_chunks()),
+            'Chunks    | %d / %d' % (
+                test.datagen_completed_chunks, test.datagen_total_chunks()
+            ),
             'Positions | %d / %d' % (test.games, test.datagen_total_count),
         ])
 

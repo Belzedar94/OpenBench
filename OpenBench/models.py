@@ -135,7 +135,7 @@ class Test(Model):
     lowerllr      = FloatField(default=0.0) # SPRT
     currentllr    = FloatField(default=0.0) # SPRT
     upperllr      = FloatField(default=0.0) # SPRT
-    max_games     = IntegerField(default=0) # GAMES or DATAGEN
+    max_games     = IntegerField(default=0) # GAMES or legacy DATAGEN summary
     spsa          = JSONField(default=dict, blank=True, null=True) # SPSA
     genfens_args  = CharField(max_length=256, default='', blank=True) # DATAGEN
     play_reverses = BooleanField(default=False) # DATAGEN
@@ -148,7 +148,7 @@ class Test(Model):
     datagen_completed_chunks    = IntegerField(default=0)
 
     # Collection of all individual Result() objects
-    games  = IntegerField(default=0) # Overall
+    games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
     losses = IntegerField(default=0) # Trinomial
     draws  = IntegerField(default=0) # Trinomial
     wins   = IntegerField(default=0) # Trinomial

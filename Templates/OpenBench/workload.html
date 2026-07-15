@@ -227,6 +227,7 @@
     {% if workload.is_generic_datagen %}
     <div id="datagen-chunks" class="w-100 mt-3" style="float:left;">
         <h3>Chunks {{datagen_completed}} / {{datagen_total}}</h3>
+        <p>Showing rows {{datagen_chunk_page.start_index}}-{{datagen_chunk_page.end_index}} of {{datagen_total}} chunks</p>
         <table class="stripes wrappable">
             <tr class="table-header">
                 <th>#</th>
@@ -267,6 +268,23 @@
                 </tr>
             {% endfor %}
         </table>
+        {% if datagen_chunk_page.has_other_pages %}
+            <div class="mt-3" id="pagebrowse">
+                <div class="pagination">
+                    {% if datagen_chunk_page.has_previous %}
+                        <a class="page previous" href="?chunks_page={{datagen_chunk_page.previous_page_number}}#datagen-chunks" aria-label="Previous chunk page">
+                            <i class="fa-solid fa-arrow-left"></i>
+                        </a>
+                    {% endif %}
+                    <span class="page current">Page {{datagen_chunk_page.number}} / {{datagen_chunk_page.paginator.num_pages}}</span>
+                    {% if datagen_chunk_page.has_next %}
+                        <a class="page next" href="?chunks_page={{datagen_chunk_page.next_page_number}}#datagen-chunks" aria-label="Next chunk page">
+                            <i class="fa-solid fa-arrow-right"></i>
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
     </div>
     {% else %}
     <div id="results" class="w-100 mt-3" style="float:left;">

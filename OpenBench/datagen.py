@@ -18,6 +18,11 @@ DATAGEN_LEASE = datetime.timedelta(minutes=5)
 MAX_DATAGEN_CHUNKS = 100000
 DATAGEN_CHUNK_CREATE_BATCH = 1000
 
+# ``Test.max_games`` remains a signed 32-bit IntegerField for historical
+# gameplay workloads. Generic DATAGEN keeps its canonical 64-bit total in
+# ``datagen_total_count`` and only mirrors a saturated summary into max_games.
+MAX_LEGACY_DATAGEN_GAMES = (1 << 31) - 1
+
 # SQLite does not implement SELECT ... FOR UPDATE and briefly returns
 # ``database is locked`` when several workers claim at once.  Claims use a
 # compare-and-swap UPDATE and retry only a bounded number of times.  The same

@@ -28,8 +28,11 @@
 import datetime
 import OpenBench.views
 
+from django.core.paginator import Paginator
 from django.utils import timezone
 from OpenBench.models import *
+
+DATAGEN_CHUNKS_PER_PAGE = 100
 
 def view_workload(request, workload, workload_type):
 
@@ -55,11 +58,15 @@ def view_workload(request, workload, workload_type):
         data['type']            = workload_type
         data['dev_text']        = 'Engine'
         if workload.is_generic_datagen():
-            chunks = workload.datagen_chunks.select_related('machine__user').all()
-            data['datagen_chunks'] = chunks
-            data['datagen_completed'] = chunks.filter(
-                status=DatagenChunk.COMPLETED
-            ).count()
+            chunks = workload.datagen_chunks.select_related(
+                'machine__user'
+            ).order_by('idx')
+            chunk_page = Paginator(chunks, DATAGEN_CHUNKS_PER_PAGE).get_page(
+                request.GET.get('chunks_page')
+            )
+            data['datagen_chunks'] = chunk_page
+            data['datagen_chunk_page'] = chunk_page
+            data['datagen_completed'] = workload.datagen_completed_chunks
             data['datagen_total'] = workload.datagen_total_chunks()
 
     return OpenBench.views.render(request, 'workload.html', data)

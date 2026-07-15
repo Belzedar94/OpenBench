@@ -35,7 +35,7 @@ import OpenBench.utils
 import OpenBench.views
 
 from django.db import transaction
-from OpenBench.datagen import initialize_chunks
+from OpenBench.datagen import MAX_LEGACY_DATAGEN_GAMES, initialize_chunks
 from OpenBench.models import *
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.workloads.verify_workload import verify_workload
@@ -250,9 +250,12 @@ def create_new_datagen(request):
         test.datagen_positions_per_chunk = int(request.POST['datagen_positions_per_chunk'])
         test.datagen_base_seed = int(request.POST['datagen_base_seed'])
 
-        # Preserve the historical summary columns without using their gameplay
-        # semantics for generic DATAGEN scheduling.
-        test.max_games = test.datagen_total_count
+        # Generic DATAGEN completion uses the 64-bit position counters below.
+        # max_games is only a legacy signed-32-bit summary, so preserve exact
+        # values while representable and saturate that non-canonical mirror.
+        test.max_games = min(
+            test.datagen_total_count, MAX_LEGACY_DATAGEN_GAMES
+        )
         test.workload_size = 1
         test.priority = int(request.POST['priority'])
         test.throughput = int(request.POST['throughput'])

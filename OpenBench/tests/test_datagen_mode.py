@@ -20,9 +20,11 @@ from django.utils import timezone
 import OpenBench.datagen
 import OpenBench.config
 import OpenBench.views
+from OpenBench.templatetags import mytags
 from OpenBench.datagen import (
     DATAGEN_CHUNK_CREATE_BATCH,
     DATAGEN_LEASE,
+    MAX_LEGACY_DATAGEN_GAMES,
     MAX_DATAGEN_CHUNKS,
     claim_chunk,
     initialize_chunks,
@@ -30,7 +32,12 @@ from OpenBench.datagen import (
     requeue_chunk,
 )
 from OpenBench.models import DatagenChunk, Engine, Machine, Profile, Test
-from OpenBench.workloads import create_workload, get_workload, verify_workload
+from OpenBench.workloads import (
+    create_workload,
+    get_workload,
+    verify_workload,
+    view_workload,
+)
 
 
 class DatagenModeTests(TestCase):
@@ -79,7 +86,7 @@ class DatagenModeTests(TestCase):
             datagen_total_count=total,
             datagen_positions_per_chunk=per_chunk,
             datagen_base_seed=100,
-            max_games=total,
+            max_games=min(total, MAX_LEGACY_DATAGEN_GAMES),
             throughput=1000,
             approved=True,
         )
@@ -144,6 +151,47 @@ class DatagenModeTests(TestCase):
             list(test.datagen_chunks.values_list('idx', 'position_count')),
             [(idx, 2000) for idx in range(8)],
         )
+
+    def test_creation_caps_legacy_summary_and_preserves_64_bit_total(self):
+        total = MAX_LEGACY_DATAGEN_GAMES + 123
+        payload = {
+            'dev_engine': 'Spell-Stockfish',
+            'dev_repo': 'https://github.com/example/engine',
+            'dev_branch': 'nnue-v2',
+            'dev_network': '',
+            'dev_options': '',
+            'book_name': 'NONE',
+            'datagen_command': (
+                'datagen seed {SEED} count {COUNT} threads {THREADS} '
+                'book {BOOK} out {OUT}'
+            ),
+            'datagen_total_count': str(total),
+            'datagen_positions_per_chunk': str(total),
+            'datagen_base_seed': '9000',
+            'priority': '0',
+            'throughput': '1000',
+        }
+        request = RequestFactory().post('/newDatagen/', payload)
+        request.user = self.user
+        engine_info = (
+            ('https://example.test/archive.zip', 'nnue-v2', 'b' * 40, 456),
+            True,
+        )
+
+        with mock.patch.object(
+            create_workload, 'verify_workload', return_value=([], engine_info)
+        ):
+            test, errors = create_workload.create_new_datagen(request)
+
+        self.assertIsNone(errors)
+        test.refresh_from_db()
+        self.assertEqual(test.datagen_total_count, total)
+        self.assertEqual(test.max_games, MAX_LEGACY_DATAGEN_GAMES)
+        self.assertEqual(test.games, 0)
+        self.assertEqual(
+            Test._meta.get_field('games').get_internal_type(), 'BigIntegerField'
+        )
+        self.assertEqual(test.datagen_chunks.get().position_count, total)
 
     def test_chunk_count_is_capped_before_initialization(self):
         boundary = SimpleNamespace(POST={
@@ -335,6 +383,50 @@ class DatagenModeTests(TestCase):
         self.assertEqual(test.games, 4)
         self.assertEqual(response.json()['completed_chunks'], 2)
 
+    def test_upload_progress_crosses_signed_32_bit_boundary(self):
+        total = MAX_LEGACY_DATAGEN_GAMES + 2
+        test = self.make_test(
+            total=total,
+            per_chunk=MAX_LEGACY_DATAGEN_GAMES,
+        )
+        machine = self.make_machine()
+        client = Client()
+
+        expected_positions = [MAX_LEGACY_DATAGEN_GAMES, total]
+        for idx, expected in enumerate(expected_positions):
+            chunk = claim_chunk(test, machine)
+            payload = bz2.compress(('large-counter-%d' % idx).encode())
+            response = client.post(
+                '/clientSubmitDatagen/',
+                {
+                    'machine_id': machine.id,
+                    'secret': machine.secret,
+                    'test_id': test.id,
+                    'chunk_idx': chunk.idx,
+                    'sha256': hashlib.sha256(payload).hexdigest(),
+                    'bytes': len(payload),
+                    'file': SimpleUploadedFile('chunk.bz2', payload),
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.content)
+            test.refresh_from_db()
+            self.assertEqual(test.games, expected)
+            self.assertEqual(response.json()['positions'], expected)
+
+        self.assertEqual(test.max_games, MAX_LEGACY_DATAGEN_GAMES)
+        self.assertEqual(test.datagen_completed_chunks, 2)
+        self.assertTrue(test.finished)
+        self.assertTrue(test.passed)
+
+        self.assertEqual(
+            mytags.shortStatBlock(test),
+            'Chunks: 2/2\nPositions: %d/%d' % (total, total),
+        )
+        self.assertEqual(
+            mytags.longStatBlock(test),
+            'Chunks    | 2 / 2\nPositions | %d / %d' % (total, total),
+        )
+
     def test_storage_failure_rolls_back_completed_transition(self):
         test = self.make_test(total=2, per_chunk=2)
         machine = self.make_machine()
@@ -418,6 +510,65 @@ class DatagenModeTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '/datagen/%d/' % test.id)
+
+    def test_datagen_chunk_view_renders_only_one_bounded_page(self):
+        page_size = view_workload.DATAGEN_CHUNKS_PER_PAGE
+        test = self.make_test(total=page_size + 5, per_chunk=1)
+        test.datagen_chunks.filter(idx=page_size).update(
+            status=DatagenChunk.COMPLETED
+        )
+        test.datagen_completed_chunks = 1
+        test.games = 1
+        test.save(update_fields=['datagen_completed_chunks', 'games'])
+        client = Client()
+        client.force_login(self.user)
+
+        response = client.get('/datagen/%d/' % test.id)
+        self.assertEqual(response.status_code, 200)
+        page = response.context['datagen_chunk_page']
+        self.assertEqual(page.number, 1)
+        self.assertEqual(len(response.context['datagen_chunks']), page_size)
+        self.assertEqual(
+            [chunk.idx for chunk in response.context['datagen_chunks']],
+            list(range(page_size)),
+        )
+        self.assertContains(response, 'Showing rows 1-%d of %d chunks' % (
+            page_size, page_size + 5
+        ))
+        self.assertContains(response, 'Chunks 1 / %d' % (page_size + 5))
+        self.assertContains(response, '?chunks_page=2#datagen-chunks')
+
+        response = client.get(
+            '/datagen/%d/' % test.id, {'chunks_page': 2}
+        )
+        self.assertEqual(response.status_code, 200)
+        page = response.context['datagen_chunk_page']
+        self.assertEqual(page.number, 2)
+        self.assertEqual(
+            [chunk.idx for chunk in response.context['datagen_chunks']],
+            list(range(page_size, page_size + 5)),
+        )
+        self.assertContains(response, 'Showing rows %d-%d of %d chunks' % (
+            page_size + 1, page_size + 5, page_size + 5
+        ))
+
+    def test_datagen_chunk_view_handles_invalid_page_safely(self):
+        page_size = view_workload.DATAGEN_CHUNKS_PER_PAGE
+        test = self.make_test(total=page_size + 1, per_chunk=1)
+        client = Client()
+        client.force_login(self.user)
+
+        response = client.get(
+            '/datagen/%d/' % test.id, {'chunks_page': 'invalid'}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['datagen_chunk_page'].number, 1)
+
+        response = client.get(
+            '/datagen/%d/' % test.id, {'chunks_page': '999999'}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['datagen_chunk_page'].number, 2)
 
     def test_template_validation_rejects_unknown_or_missing_placeholders(self):
         valid = SimpleNamespace(POST={'datagen_command': (
