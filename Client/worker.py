@@ -1393,11 +1393,31 @@ def server_request_workload(config):
 
     # Log the start of a new Workload
     if 'workload' in response:
-        dev_engine  = response['workload']['test']['dev' ]['engine']
-        dev_name    = response['workload']['test']['dev' ]['name'  ]
-        base_engine = response['workload']['test']['base']['engine']
-        base_name   = response['workload']['test']['base']['name'  ]
-        print('Workload [%s] %s vs [%s] %s\n' % (dev_engine, dev_name, base_engine, base_name))
+        test = response['workload']['test']
+        dev_engine = test['dev']['engine']
+        dev_name = test['dev']['name']
+        datagen = test.get('datagen')
+        if test['type'] == 'DATAGEN' and datagen:
+            total_chunks = (
+                datagen['total_count'] + datagen['positions_per_chunk'] - 1
+            ) // datagen['positions_per_chunk']
+            print(
+                'Workload DATAGEN [%s] %s - chunk %d/%d (test #%d)\n'
+                % (
+                    dev_engine,
+                    dev_name,
+                    datagen['chunk_idx'] + 1,
+                    total_chunks,
+                    test['id'],
+                )
+            )
+        else:
+            base_engine = test['base']['engine']
+            base_name = test['base']['name']
+            print(
+                'Workload [%s] %s vs [%s] %s\n'
+                % (dev_engine, dev_name, base_engine, base_name)
+            )
 
     config.workload = response.get('workload', None)
 
