@@ -114,6 +114,54 @@ class DatagenWorkerTests(unittest.TestCase):
         bench.assert_called_once()
         self.assertEqual(bench.call_args.args[1], 'dev')
 
+    def test_retry_cleans_orphaned_chunk_files_before_running(self):
+        cfg = config()
+        stem = 'test_7_chunk_3.bin'
+        stale_names = (
+            [stem]
+            + ['%s.%d' % (stem, idx) for idx in range(24)]
+            + [stem + '.meta', stem + '.meta.json', stem + '.debug', stem + '.debug.trace']
+        )
+        preserved_names = [
+            stem + '-backup',
+            'test_7_chunk_30.bin.0',
+            'test_7_chunk_4.bin.meta',
+        ]
+
+        def generate(_config, _engine, output_path, _log_path, _heartbeat):
+            for name in stale_names:
+                self.assertFalse(Path('Datagen', name).exists(), name)
+            for name in preserved_names:
+                self.assertTrue(Path('Datagen', name).exists(), name)
+            Path(output_path).write_bytes(b'fresh retry output')
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            os.mkdir('Datagen')
+            try:
+                for name in stale_names + preserved_names:
+                    Path('Datagen', name).write_bytes(b'orphaned attempt data')
+
+                with mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(worker, 'safe_download_network_weights', return_value=None), \
+                     mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe'), \
+                     mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000), \
+                     mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_datagen',
+                         return_value={'completed_chunks': 1, 'total_chunks': 8},
+                     ) as upload:
+                    worker.complete_workload(cfg)
+
+                upload.assert_called_once()
+                for name in preserved_names:
+                    self.assertTrue(Path('Datagen', name).exists(), name)
+            finally:
+                os.chdir(previous)
+
     def test_missing_output_is_a_clean_chunk_failure(self):
         process = SimpleNamespace(
             stdin=SimpleNamespace(

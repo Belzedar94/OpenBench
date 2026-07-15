@@ -22,6 +22,7 @@ import argparse
 import bz2
 from collections import deque
 import cpuinfo
+import glob
 import hashlib
 import json
 import multiprocessing
@@ -1499,6 +1500,14 @@ def datagen_log_tail(path, limit=65536):
         return log.read().decode('utf-8', errors='replace')
 
 
+def clean_datagen_workspace(output_path):
+    """Remove only output files belonging to one DATAGEN chunk attempt."""
+
+    for path in [output_path] + glob.glob(output_path + '.*'):
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+
+
 def render_datagen_command(config, output_path):
     data = config.workload['test']['datagen']
     book_name = config.workload['test']['book']['name']
@@ -1553,9 +1562,9 @@ def complete_datagen_workload(config):
     compressed_path = output_path + '.bz2'
     log_path = os.path.join('Datagen', stem + '.log')
 
-    for path in [output_path, compressed_path, log_path]:
-        if os.path.exists(path):
-            os.remove(path)
+    clean_datagen_workspace(output_path)
+    if os.path.isfile(log_path):
+        os.remove(log_path)
 
     try:
         with DatagenHeartbeat(config) as heartbeat:
@@ -1631,9 +1640,9 @@ def complete_datagen_workload(config):
         raise
 
     finally:
-        for path in [output_path, compressed_path, log_path]:
-            if os.path.exists(path):
-                os.remove(path)
+        clean_datagen_workspace(output_path)
+        if os.path.isfile(log_path):
+            os.remove(log_path)
 
 
 def complete_workload(config):
