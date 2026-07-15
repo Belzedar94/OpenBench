@@ -24,10 +24,12 @@
             <tr><td class="td-label">{{dev_text}} Bench</td><td>{{workload.dev.bench}}</td></tr>
             <tr><td class="td-label">{{dev_text}} Network</td><td><a href="{{workload|network_download_link:'dev'}}">{{workload.dev_netname}}</td></tr>
             <tr><td class="td-label">{{dev_text}} Options</td><td>{{workload.dev_options}}</td></tr>
+            {% if not workload.is_generic_datagen %}
             <tr><td class="td-label">{{dev_text}} Time</td><td>{{workload.dev_time_control}}</td></tr>
+            {% endif %}
 
             <!-- All of the Base Engine information, which only exists for TESTs -->
-            {% if type == "TEST" or type == "DATAGEN" %}
+            {% if type == "TEST" or type == "DATAGEN" and not workload.is_generic_datagen %}
                 <tr><td class="td-label">Base Source</td><td><a href="{{workload.base_repo}}">{{workload.base_repo}}</a></td></tr>
                 <tr><td class="td-label">Base Sha</td><td>{{workload.base.sha}}</td></tr>
                 <tr><td class="td-label">Base Branch</td><td class="branch_name">{{workload.base.name|prettyName}}</td></tr>
@@ -43,11 +45,13 @@
                 <tr><td class="td-label">Opening Book</td><td><a>{{workload.book_name}}</a></td></tr>
             {% endif %}
 
-            <tr><td class="td-label">Upload PGNs</td><td>{{workload.upload_pgns}}</td></tr>
-            <tr><td class="td-label">Syzygy WDL</td><td>{{workload.syzygy_wdl}}</td></tr>
-            <tr><td class="td-label">Syzygy ADJ.</td><td>{{workload.syzygy_adj}}</td></tr>
-            <tr><td class="td-label">Win ADJ.</td><td>{{workload.win_adj}}</td></tr>
-            <tr><td class="td-label">Draw ADJ.</td><td>{{workload.draw_adj}}</td></tr>
+            {% if not workload.is_generic_datagen %}
+                <tr><td class="td-label">Upload PGNs</td><td>{{workload.upload_pgns}}</td></tr>
+                <tr><td class="td-label">Syzygy WDL</td><td>{{workload.syzygy_wdl}}</td></tr>
+                <tr><td class="td-label">Syzygy ADJ.</td><td>{{workload.syzygy_adj}}</td></tr>
+                <tr><td class="td-label">Win ADJ.</td><td>{{workload.win_adj}}</td></tr>
+                <tr><td class="td-label">Draw ADJ.</td><td>{{workload.draw_adj}}</td></tr>
+            {% endif %}
 
             {% if type == "TUNE" %}
                 <tr><td class="td-label">Alpha</td><td>{{workload.spsa.Alpha}}</td></tr>
@@ -57,8 +61,15 @@
                 <tr><td class="td-label">Distribution</td><td>{{workload.spsa.distribution_type}}</td></tr>
                 <tr><td class="td-label">Pairs Per Point</td><td>{{workload.workload_size}}</td></tr>
             {% elif type == "DATAGEN" %}
-                <tr><td class="td-label">Genfens Args</td><td>{{workload.genfens_args}}</td></tr>
-                <tr><td class="td-label">Play Reverses</td><td>{{workload.play_reverses}}</td></tr>
+                {% if workload.is_generic_datagen %}
+                    <tr><td class="td-label">Command Template</td><td>{{workload.datagen_command}}</td></tr>
+                    <tr><td class="td-label">Total Positions</td><td>{{workload.datagen_total_count}}</td></tr>
+                    <tr><td class="td-label">Positions / Chunk</td><td>{{workload.datagen_positions_per_chunk}}</td></tr>
+                    <tr><td class="td-label">Base Seed</td><td>{{workload.datagen_base_seed}}</td></tr>
+                {% else %}
+                    <tr><td class="td-label">Genfens Args</td><td>{{workload.genfens_args}}</td></tr>
+                    <tr><td class="td-label">Play Reverses</td><td>{{workload.play_reverses}}</td></tr>
+                {% endif %}
             {% endif %}
 
         </table>
@@ -169,7 +180,7 @@
                         <input value="{{workload.throughput}}" id="throughput" name="throughput">
                     </div>
 
-                    {% if type == "TEST" or type == "DATAGEN" %}
+                    {% if type == "TEST" or type == "DATAGEN" and not workload.is_generic_datagen %}
                         <div class="row">
                             <label for="workload_size">Workload Size</label>
                             <input value="{{workload.workload_size}}" id="workload_size" name="workload_size">
@@ -213,6 +224,51 @@
         </div>
     {% endif %}
 
+    {% if workload.is_generic_datagen %}
+    <div id="datagen-chunks" class="w-100 mt-3" style="float:left;">
+        <h3>Chunks {{datagen_completed}} / {{datagen_total}}</h3>
+        <table class="stripes wrappable">
+            <tr class="table-header">
+                <th>#</th>
+                <th>Status</th>
+                <th>Positions</th>
+                <th>Seed</th>
+                <th>Attempts</th>
+                <th>Machine</th>
+                <th>Bytes</th>
+                <th>SHA256</th>
+                <th>Completed</th>
+                <th>File</th>
+            </tr>
+            {% for chunk in datagen_chunks %}
+                <tr>
+                    <td class="numeric">{{chunk.idx}}</td>
+                    <td>{{chunk.status}}</td>
+                    <td class="numeric">{{chunk.position_count}}</td>
+                    <td class="numeric">{{chunk.seed}}</td>
+                    <td class="numeric">{{chunk.attempts}}</td>
+                    <td>
+                        {% if chunk.machine %}
+                            <a href="/machines/{{chunk.machine.id}}/">#{{chunk.machine.id}} {{chunk.machine.user.username}}</a>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td class="numeric">{{chunk.bytes}}</td>
+                    <td><code>{{chunk.sha256}}</code></td>
+                    <td>{% if chunk.completed %}<span class="timestamp">{{chunk.completed|date:'U'}}</span>{% else %}-{% endif %}</td>
+                    <td>
+                        {% if chunk.status == "COMPLETED" %}
+                            <a href="/api/datagen/{{workload.id}}/{{chunk.idx}}/">Download</a>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% else %}
     <div id="results" class="w-100 mt-3" style="float:left;">
         <table class="stripes wrappable">
             <tr class="table-header">
@@ -243,6 +299,7 @@
             {% endfor %}
         </table>
     </div>
+    {% endif %}
 
     </div>
 

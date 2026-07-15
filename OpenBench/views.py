@@ -25,6 +25,7 @@ import django.shortcuts
 import django.contrib.auth
 
 import OpenBench.config
+import OpenBench.datagen
 import OpenBench.utils
 
 from OpenBench.workloads.create_workload import create_workload
@@ -772,6 +773,23 @@ def client_submit_error(request, machine):
     FileSystemStorage().save('event%d.log' % (event.id), logfile)
     event.log_file = 'event%d.log' % (event.id); event.save()
 
+    # Generic DATAGEN failures release only this machine's current chunk. The
+    # normal event/log path above remains the source of failure diagnostics.
+    if request.POST.get('chunk_idx') is not None:
+        try:
+            test = Test.objects.get(id=int(request.POST['test_id']))
+            if test.is_generic_datagen():
+                OpenBench.datagen.requeue_chunk(
+                    test.id,
+                    int(request.POST['chunk_idx']),
+                    machine,
+                    request.POST.get('error', ''),
+                )
+                machine.workload = 0
+                machine.save()
+        except (Test.DoesNotExist, ValueError):
+            pass
+
     return JsonResponse({})
 
 @csrf_exempt
@@ -785,11 +803,24 @@ def client_submit_results(request, machine):
 @verify_worker
 def client_heartbeat(request, machine):
 
-    # Force a refresh of the updated timestamp
-    machine.save()
-
-    # Include a 'stop' header iff the test was finished
     test = Test.objects.get(id=int(request.POST['test_id']))
+
+    # Generic DATAGEN heartbeats also renew the chunk lease. A client holding
+    # a stale or reassigned lease is explicitly stopped.
+    if test.is_generic_datagen():
+        try:
+            active = OpenBench.datagen.renew_chunk(
+                test.id, int(request.POST['chunk_idx']), machine
+            )
+        except (KeyError, ValueError):
+            active = False
+        machine.save()
+        return JsonResponse(
+            {} if active and not test.finished else {'stop': True}
+        )
+
+    # Force a refresh of the updated timestamp for gameplay workloads.
+    machine.save()
     return JsonResponse([{}, { 'stop' : True }][test.finished])
 
 @csrf_exempt
@@ -809,6 +840,105 @@ def client_submit_pgn(request, machine):
         FileSystemStorage().save(pgn.filename(), ContentFile(request.FILES['file'].read()))
 
     return JsonResponse({})
+
+@csrf_exempt
+@verify_worker
+def client_submit_datagen(request, machine):
+
+    try:
+        test_id = int(request.POST['test_id'])
+        chunk_idx = int(request.POST['chunk_idx'])
+        expected_sha = request.POST['sha256'].lower()
+        expected_bytes = int(request.POST['bytes'])
+        upload = request.FILES['file']
+        assert re.fullmatch(r'[0-9a-f]{64}', expected_sha)
+        assert expected_bytes >= 0
+    except (KeyError, ValueError, AssertionError):
+        return JsonResponse({'error': 'Malformed DATAGEN upload'}, status=400)
+
+    digest = hashlib.sha256()
+    actual_bytes = 0
+    for block in upload.chunks():
+        digest.update(block)
+        actual_bytes += len(block)
+    actual_sha = digest.hexdigest()
+    upload.seek(0)
+
+    if actual_sha != expected_sha or actual_bytes != expected_bytes:
+        return JsonResponse({
+            'error': 'DATAGEN sha256 or byte count mismatch',
+            'sha256': actual_sha,
+            'bytes': actual_bytes,
+        }, status=400)
+
+    storage = FileSystemStorage()
+
+    with transaction.atomic():
+        test = Test.objects.select_for_update().filter(id=test_id).first()
+        chunk = DatagenChunk.objects.select_for_update().filter(
+            test_id=test_id, idx=chunk_idx
+        ).first()
+
+        if test is None or chunk is None or not test.is_generic_datagen():
+            return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+
+        # Lost HTTP responses may cause an identical retry. Keep completed
+        # chunks immutable while accepting that retry idempotently.
+        if chunk.status == DatagenChunk.COMPLETED:
+            if chunk.sha256 != actual_sha or chunk.bytes != actual_bytes:
+                return JsonResponse(
+                    {'error': 'DATAGEN chunk already completed with different data'},
+                    status=409,
+                )
+            completed, total, positions = OpenBench.datagen.completed_progress(test)
+            return JsonResponse({
+                'sha256': actual_sha,
+                'bytes': actual_bytes,
+                'completed_chunks': completed,
+                'total_chunks': total,
+                'positions': positions,
+                'finished': test.finished,
+            })
+
+        if test.finished or test.deleted:
+            return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
+
+        if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
+            return JsonResponse({'error': 'DATAGEN chunk lease is not owned by machine'}, status=409)
+
+        filename = chunk.filename()
+        if storage.exists(filename):
+            storage.delete(filename)
+        saved_name = storage.save(filename, upload)
+        if saved_name != filename:
+            storage.delete(saved_name)
+            return JsonResponse({'error': 'Unable to store DATAGEN chunk at canonical path'}, status=500)
+
+        chunk.status = DatagenChunk.COMPLETED
+        chunk.sha256 = actual_sha
+        chunk.bytes = actual_bytes
+        chunk.completed = timezone.now()
+        chunk.last_error = ''
+        chunk.save()
+
+        completed, total, positions = OpenBench.datagen.completed_progress(test)
+        test.games = positions
+        if completed == total:
+            test.passed = True
+            test.finished = True
+        test.save()
+
+        machine.workload = 0
+        machine.save()
+
+    return JsonResponse({
+        'sha256': actual_sha,
+        'bytes': actual_bytes,
+        'completed_chunks': completed,
+        'total_chunks': total,
+        'positions': positions,
+        'finished': test.finished,
+    })
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                                                                             #
@@ -944,6 +1074,34 @@ def api_pgns(request, pgn_id):
     response['Expires'] = -1
     response['Content-Length'] = os.path.getsize(pgn_path)
     response['Content-Disposition'] = 'attachment; filename=%d.pgn.tar' % (pgn_id)
+    return response
+
+@csrf_exempt
+def api_datagen_chunk(request, test_id, chunk_idx):
+
+    if not api_authenticate(request):
+        return api_response({ 'error' : 'API requires authentication for this server' })
+
+    chunk = DatagenChunk.objects.filter(
+        test_id=test_id,
+        idx=chunk_idx,
+        status=DatagenChunk.COMPLETED,
+    ).first()
+    if chunk is None:
+        return api_response({
+            'error': 'Unable to find DATAGEN chunk %d for Workload #%d'
+                     % (chunk_idx, test_id)
+        })
+
+    path = FileSystemStorage().path(chunk.filename())
+    if not os.path.exists(path):
+        return api_response({'error': 'DATAGEN chunk metadata exists but file is missing'})
+
+    fwrapper = FileWrapper(open(path, 'rb'), 8192)
+    response = FileResponse(fwrapper, content_type='application/x-bzip2')
+    response['Expires'] = -1
+    response['Content-Length'] = os.path.getsize(path)
+    response['Content-Disposition'] = 'attachment; filename=chunk_%d.bz2' % chunk_idx
     return response
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #

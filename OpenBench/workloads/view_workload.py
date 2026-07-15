@@ -53,7 +53,14 @@ def view_workload(request, workload, workload_type):
 
     if workload_type == 'DATAGEN':
         data['type']            = workload_type
-        data['dev_text']        = 'Dev'
+        data['dev_text']        = 'Engine'
+        if workload.is_generic_datagen():
+            chunks = workload.datagen_chunks.select_related('machine__user').all()
+            data['datagen_chunks'] = chunks
+            data['datagen_completed'] = chunks.filter(
+                status=DatagenChunk.COMPLETED
+            ).count()
+            data['datagen_total'] = workload.datagen_total_chunks()
 
     return OpenBench.views.render(request, 'workload.html', data)
 

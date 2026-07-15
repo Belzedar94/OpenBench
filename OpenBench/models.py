@@ -18,9 +18,9 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-from django.db.models import CharField, IntegerField, BooleanField, FloatField
-from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField
-from django.db.models import CASCADE, PROTECT, Model
+from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
+from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField, TextField
+from django.db.models import CASCADE, PROTECT, SET_NULL, Model, UniqueConstraint
 from django.contrib.auth.models import User
 
 class Engine(Model):
@@ -140,6 +140,12 @@ class Test(Model):
     genfens_args  = CharField(max_length=256, default='', blank=True) # DATAGEN
     play_reverses = BooleanField(default=False) # DATAGEN
 
+    # Generic DATAGEN settings. Empty command means a historical PGN datagen.
+    datagen_command             = TextField(default='', blank=True)
+    datagen_total_count         = BigIntegerField(default=0)
+    datagen_positions_per_chunk = BigIntegerField(default=0)
+    datagen_base_seed           = BigIntegerField(default=0)
+
     # Collection of all individual Result() objects
     games  = IntegerField(default=0) # Overall
     losses = IntegerField(default=0) # Trinomial
@@ -182,6 +188,53 @@ class Test(Model):
 
     def as_nwld(self):
         return (self.games, self.wins, self.losses, self.draws)
+
+    def is_generic_datagen(self):
+        return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
+
+    def datagen_total_chunks(self):
+        if not self.datagen_positions_per_chunk:
+            return 0
+        return (
+            self.datagen_total_count + self.datagen_positions_per_chunk - 1
+        ) // self.datagen_positions_per_chunk
+
+class DatagenChunk(Model):
+
+    PENDING   = 'PENDING'
+    RUNNING   = 'RUNNING'
+    COMPLETED = 'COMPLETED'
+
+    test = ForeignKey('Test', CASCADE, related_name='datagen_chunks')
+    idx  = IntegerField()
+    position_count = BigIntegerField()
+
+    status      = CharField(max_length=16, default=PENDING)
+    sha256      = CharField(max_length=64, default='', blank=True)
+    bytes       = BigIntegerField(default=0)
+    machine     = ForeignKey(
+        'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)
+    attempts    = IntegerField(default=0)
+    last_error  = TextField(default='', blank=True)
+
+    created      = DateTimeField(auto_now_add=True)
+    assigned     = DateTimeField(null=True, blank=True)
+    completed    = DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['idx']
+        constraints = [
+            UniqueConstraint(fields=['test', 'idx'], name='unique_datagen_test_chunk'),
+        ]
+
+    def __str__(self):
+        return 'Datagen #%d chunk %d (%s)' % (self.test_id, self.idx, self.status)
+
+    def filename(self):
+        return 'datagen/%d/chunk_%d.bz2' % (self.test_id, self.idx)
+
+    def seed(self):
+        return self.test.datagen_base_seed + self.idx
 
 class LogEvent(Model):
 

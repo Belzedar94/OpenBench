@@ -1,5 +1,6 @@
 *.pyc
 .venv/
+.scratch/
 Client/*
 OpenBench/migrations/__pycache__/
 

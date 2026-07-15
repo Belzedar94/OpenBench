@@ -96,9 +96,11 @@
     "datagen_presets" : {
 
         "default" : {
-            "win_adj"       : "None",
-            "draw_adj"      : "None",
-            "workload_size" : 128
+            "book_name"                     : "spell_openings.epd",
+            "datagen_command"               : "datagen book {BOOK} nodes 1000 count {COUNT} threads {THREADS} seed {SEED} out {OUT}",
+            "datagen_total_count"           : 16000,
+            "datagen_positions_per_chunk"   : 2000,
+            "datagen_base_seed"             : 1
         }
     }
 }
