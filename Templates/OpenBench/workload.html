@@ -62,7 +62,7 @@
                 <tr><td class="td-label">Pairs Per Point</td><td>{{workload.workload_size}}</td></tr>
             {% elif type == "DATAGEN" %}
                 {% if workload.is_generic_datagen %}
-                    <tr><td class="td-label">Command Template</td><td>{{workload.datagen_command}}</td></tr>
+                    <tr><td class="td-label">Command Template</td><td><code>{{workload.datagen_command}}</code></td></tr>
                     <tr><td class="td-label">Total Positions</td><td>{{workload.datagen_total_count}}</td></tr>
                     <tr><td class="td-label">Positions / Chunk</td><td>{{workload.datagen_positions_per_chunk}}</td></tr>
                     <tr><td class="td-label">Base Seed</td><td>{{workload.datagen_base_seed}}</td></tr>
