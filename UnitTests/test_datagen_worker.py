@@ -77,7 +77,8 @@ class DatagenWorkerTests(unittest.TestCase):
         cfg = config()
         captured = {}
 
-        def generate(_config, _engine, output_path, _log_path, _heartbeat):
+        def generate(_config, engine, output_path, _log_path, _heartbeat):
+            captured['engine'] = engine
             with open(output_path, 'wb') as output:
                 output.write(b'opaque training records')
 
@@ -107,6 +108,7 @@ class DatagenWorkerTests(unittest.TestCase):
                 os.chdir(previous)
 
         self.assertEqual(captured['payload'], b'opaque training records')
+        self.assertEqual(captured['engine'], os.path.join('Engines', 'engine.exe'))
         build.assert_called_once()
         self.assertEqual(build.call_args.args[1], 'dev')
         bench.assert_called_once()

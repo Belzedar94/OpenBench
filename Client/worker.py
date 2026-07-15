@@ -1565,7 +1565,11 @@ def complete_datagen_workload(config):
                 raise DatagenStopped()
 
             run_datagen_command(
-                config, dev_name, output_path, log_path, heartbeat
+                config,
+                os.path.join('Engines', dev_name),
+                output_path,
+                log_path,
+                heartbeat,
             )
 
             with open(output_path, 'rb') as source:
