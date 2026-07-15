@@ -178,6 +178,12 @@ class Configuration:
         # For each engine, attempt to find a valid compiler
         for engine, build_info in data.items():
 
+            # Local patch: this worker's Atomic engines stall under load and
+            # kill the whole client (see Spell-Stockfish AUDIT 2026-07-14).
+            # With OB_SKIP_ATOMIC set we do not advertise Atomic compilers,
+            # so the server never assigns Atomic workloads to this machine.
+            if os.environ.get('OB_SKIP_ATOMIC') and 'Atomic' in engine: continue
+
             # Private engines don't need to be compiled
             if build_info['private']: continue
 
