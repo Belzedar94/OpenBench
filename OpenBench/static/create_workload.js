@@ -97,6 +97,16 @@ function get_base_engine() {
     return selection.options[selection.selectedIndex].value;
 }
 
+function current_workload_type(workload_type) {
+    // /newTest/ can switch modes without reloading. Engine changes must use
+    // DATAGEN presets once that mode is selected instead of the route's
+    // original TEST type.
+    const mode = document.getElementById('test_mode');
+    return workload_type == 'TEST' && mode != null && mode.value == 'DATAGEN'
+        ? 'DATAGEN'
+        : workload_type;
+}
+
 function get_presets(engine, preset, workload_type) {
     const presets = workload_type == 'TEST'    ? config.engines[engine].test_presets
                   : workload_type == 'TUNE'    ? config.engines[engine].tune_presets
@@ -227,6 +237,7 @@ function apply_preset(preset, workload_type) {
 
 function change_engine(engine, target, workload_type) {
 
+    workload_type = current_workload_type(workload_type);
     set_engine(engine, target);
 
     if (target == 'dev')

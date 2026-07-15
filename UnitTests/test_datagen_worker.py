@@ -246,6 +246,117 @@ class DatagenWorkerTests(unittest.TestCase):
         report.assert_called_once()
         self.assertIn('chunk 3 failed', report.call_args.args[1])
 
+    def test_upload_and_failure_report_errors_remain_retryable(self):
+        cfg = config()
+
+        def generate(
+            _config, _engine, output_path, _log_path, _heartbeat, _network_path
+        ):
+            Path(output_path).write_bytes(b'retryable transport payload')
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            os.mkdir('Datagen')
+            try:
+                with mock.patch.object(worker, 'DATAGEN_TRANSFER_RETRY_DELAY', 0), \
+                     mock.patch.object(worker.traceback, 'print_exc'), \
+                     mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(worker, 'safe_download_network_weights', return_value=None), \
+                     mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe'), \
+                     mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_datagen',
+                         side_effect=RuntimeError('temporary upload outage'),
+                     ) as upload, \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_engine_error',
+                         side_effect=RuntimeError('temporary report outage'),
+                     ) as report:
+                    with self.assertRaisesRegex(
+                        worker.DatagenTransientError,
+                        'upload failed after 3 attempts',
+                    ):
+                        worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(upload.call_count, 3)
+        self.assertEqual(report.call_count, 3)
+        self.assertEqual(cfg.blacklist, [])
+
+    def test_bzip2_failure_requeues_without_blacklisting_workload(self):
+        cfg = config()
+
+        def generate(
+            _config, _engine, output_path, _log_path, _heartbeat, _network_path
+        ):
+            Path(output_path).write_bytes(b'retryable compression payload')
+
+        accepted = SimpleNamespace(raise_for_status=lambda: None)
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            os.mkdir('Datagen')
+            try:
+                with mock.patch.object(worker, 'DATAGEN_TRANSFER_RETRY_DELAY', 0), \
+                     mock.patch.object(worker.traceback, 'print_exc'), \
+                     mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(worker, 'safe_download_network_weights', return_value=None), \
+                     mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe'), \
+                     mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
+                     mock.patch.object(
+                         worker.bz2, 'open', side_effect=OSError('temporary disk error')
+                     ) as compress, \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_engine_error',
+                         return_value=accepted,
+                     ) as report:
+                    with self.assertRaisesRegex(
+                        worker.DatagenTransientError,
+                        'bzip2 compression failed after 3 attempts',
+                    ):
+                        worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(compress.call_count, 3)
+        report.assert_called_once()
+        self.assertIn('transient failure', report.call_args.args[1])
+        self.assertEqual(cfg.blacklist, [])
+
+    def test_locked_partial_archive_remains_a_transient_failure(self):
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+
+        with tempfile.TemporaryDirectory() as cwd:
+            source = os.path.join(cwd, 'chunk.bin')
+            target = source + '.bz2'
+            Path(source).write_bytes(b'payload')
+            Path(target).write_bytes(b'partial')
+
+            real_remove = os.remove
+
+            def locked_remove(path):
+                if path == target:
+                    raise PermissionError('temporarily locked')
+                return real_remove(path)
+
+            with mock.patch.object(worker, 'DATAGEN_TRANSFER_RETRY_DELAY', 0), \
+                 mock.patch.object(worker.traceback, 'print_exc'), \
+                 mock.patch.object(worker.os, 'remove', side_effect=locked_remove):
+                with self.assertRaisesRegex(
+                    worker.DatagenTransientError,
+                    'partial archive cleanup failed',
+                ):
+                    worker.compress_datagen_output(source, target, heartbeat)
+
     def test_reports_automatically_carry_the_chunk_lease(self):
         cfg = config()
         response = SimpleNamespace(json=lambda: {})
@@ -347,18 +458,21 @@ class DatagenWorkerTests(unittest.TestCase):
             worker.safe_run_benchmarks(cfg, 'dev', 'engine.exe', None)
             self.assertEqual(run.call_args.args[3], 30)
 
-    def test_private_datagen_uses_the_separate_role_cache(self):
+    def test_private_generic_datagen_is_rejected_before_artifact_selection(self):
         cfg = config()
         cfg.workload['test']['dev']['private'] = True
         with mock.patch.object(
             worker, 'download_private_engine', return_value='engine.exe'
         ) as download:
-            result = worker.safe_download_engine(
-                cfg, 'dev', os.path.join('Networks', '12345678')
-            )
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'does not support private engine artifacts',
+            ):
+                worker.safe_download_engine(
+                    cfg, 'dev', os.path.join('Networks', '12345678')
+                )
 
-        self.assertEqual(result, 'engine.exe')
-        self.assertTrue(download.call_args.args[3].endswith('-DATAGEN'))
+        download.assert_not_called()
 
 
 if __name__ == '__main__':

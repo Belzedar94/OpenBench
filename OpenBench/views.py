@@ -18,7 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-import os, hashlib, datetime, json, secrets, sys, re
+import os, hashlib, datetime, json, secrets, sys, re, time
 
 import django.http
 import django.shortcuts
@@ -41,7 +41,7 @@ from OpenBench.models import *
 from django.contrib.auth.models import User
 from OpenSite.settings import MEDIA_ROOT
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.db.models import F, Q
 from django.http import HttpResponse, JsonResponse, FileResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -377,6 +377,16 @@ def search(request):
 
         # None of the keywords appear in the dev branch name
         if keywords and not any(x in test.dev.name.upper() for x in keywords):
+            continue
+
+        # Generic DATAGEN does not have a fixed engine Threads option or a
+        # chess time control: {THREADS} is supplied by the assigned worker.
+        # Keep it searchable when no time-control filter was requested and do
+        # not force its intentionally empty options through int(None).
+        if test.is_generic_datagen():
+            if tc_type or tc_value:
+                continue
+            filtered.append(test)
             continue
 
         # Determine the max number of threads that either engine used
@@ -873,72 +883,178 @@ def client_submit_datagen(request, machine):
 
     storage = FileSystemStorage()
 
-    with transaction.atomic():
-        test = Test.objects.select_for_update().filter(id=test_id).first()
-        chunk = DatagenChunk.objects.select_for_update().filter(
-            test_id=test_id, idx=chunk_idx
-        ).first()
+    def completed_response(test):
+        completed, total, positions = OpenBench.datagen.completed_progress(test)
+        return JsonResponse({
+            'sha256': actual_sha,
+            'bytes': actual_bytes,
+            'completed_chunks': completed,
+            'total_chunks': total,
+            'positions': positions,
+            'finished': test.finished,
+        })
 
-        if test is None or chunk is None or not test.is_generic_datagen():
-            return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+    test = Test.objects.filter(id=test_id).first()
+    chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
+    if test is None or chunk is None or not test.is_generic_datagen():
+        return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
 
-        # Lost HTTP responses may cause an identical retry. Keep completed
-        # chunks immutable while accepting that retry idempotently.
-        if chunk.status == DatagenChunk.COMPLETED:
-            if chunk.sha256 != actual_sha or chunk.bytes != actual_bytes:
+    # Lost HTTP responses may cause an identical retry. Keep completed chunks
+    # immutable while accepting that retry idempotently without staging again.
+    if chunk.status == DatagenChunk.COMPLETED:
+        if chunk.sha256 != actual_sha or chunk.bytes != actual_bytes:
+            return JsonResponse(
+                {'error': 'DATAGEN chunk already completed with different data'},
+                status=409,
+            )
+        return completed_response(test)
+    if test.finished or test.deleted:
+        return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
+    if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
+        return JsonResponse(
+            {'error': 'DATAGEN chunk lease is not owned by machine'},
+            status=409,
+        )
+
+    filename = chunk.filename()
+    chunk_pk = chunk.pk
+    chunk_position_count = chunk.position_count
+    staging_name = '%s.staging-%d-%s' % (
+        filename,
+        machine.id,
+        secrets.token_hex(16),
+    )
+
+    def cleanup_staging(name):
+        if name is None:
+            return
+        try:
+            if storage.exists(name):
+                storage.delete(name)
+        except OSError:
+            pass
+
+    # Materialize the potentially multi-gigabyte upload on the destination
+    # filesystem before opening a database write transaction.  Production uses
+    # SQLite, so holding its global writer lock during a C: -> F: copy would
+    # otherwise stall heartbeats and every other OpenBench workload.
+    try:
+        saved_name = storage.save(staging_name, upload)
+    except Exception:
+        cleanup_staging(staging_name)
+        return JsonResponse({'error': 'Unable to stage DATAGEN chunk'}, status=500)
+    if saved_name != staging_name:
+        cleanup_staging(saved_name)
+        cleanup_staging(staging_name)
+        return JsonResponse(
+            {'error': 'Unable to stage DATAGEN chunk at canonical path'},
+            status=500,
+        )
+
+    def commit_staged_upload():
+        nonlocal staging_name
+        with transaction.atomic():
+            # Ownership validation and completion are one conditional write.
+            # Keep it as the first statement in the transaction: SQLite can
+            # then serialize writers without a read-to-write upgrade deadlock.
+            completed_by_machine = DatagenChunk.objects.filter(
+                pk=chunk_pk,
+                status=DatagenChunk.RUNNING,
+                machine_id=machine.id,
+                test__finished=False,
+                test__deleted=False,
+            ).update(
+                status=DatagenChunk.COMPLETED,
+                sha256=actual_sha,
+                bytes=actual_bytes,
+                completed=timezone.now(),
+                last_error='',
+            )
+            if completed_by_machine != 1:
+                test = Test.objects.filter(id=test_id).first()
+                chunk = DatagenChunk.objects.filter(pk=chunk_pk).first()
+                if test is None or chunk is None or not test.is_generic_datagen():
+                    return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+                if (
+                    chunk.status == DatagenChunk.COMPLETED
+                    and chunk.sha256 == actual_sha
+                    and chunk.bytes == actual_bytes
+                ):
+                    return completed_response(test)
                 return JsonResponse(
-                    {'error': 'DATAGEN chunk already completed with different data'},
+                    {'error': 'DATAGEN chunk lease is not owned by machine'},
                     status=409,
                 )
+
+            test = Test.objects.get(id=test_id)
+
+            # Both names live under the same FileSystemStorage root, so this is
+            # a short atomic rename rather than a large copy under SQLite's
+            # writer lock. Roll back the chunk transition if promotion fails.
+            try:
+                os.replace(storage.path(staging_name), storage.path(filename))
+            except OSError:
+                transaction.set_rollback(True)
+                return JsonResponse(
+                    {'error': 'Unable to promote staged DATAGEN chunk'},
+                    status=500,
+                )
+            staging_name = None
+
+            # Increment progress exactly once after the successful chunk CAS.
+            # F() updates serialize concurrent chunks without rescanning the
+            # complete chunk table or losing a PostgreSQL update.
+            Test.objects.filter(pk=test.pk).update(
+                games=F('games') + chunk_position_count,
+                datagen_completed_chunks=F('datagen_completed_chunks') + 1,
+            )
+            test.refresh_from_db()
             completed, total, positions = OpenBench.datagen.completed_progress(test)
-            return JsonResponse({
-                'sha256': actual_sha,
-                'bytes': actual_bytes,
-                'completed_chunks': completed,
-                'total_chunks': total,
-                'positions': positions,
-                'finished': test.finished,
-            })
+            if completed > total or positions > test.datagen_total_count:
+                transaction.set_rollback(True)
+                return JsonResponse(
+                    {'error': 'DATAGEN progress counters exceeded workload totals'},
+                    status=500,
+                )
+            if completed == total or positions == test.datagen_total_count:
+                if completed != total or positions != test.datagen_total_count:
+                    transaction.set_rollback(True)
+                    return JsonResponse(
+                        {'error': 'DATAGEN progress counters are inconsistent'},
+                        status=500,
+                    )
+                Test.objects.filter(pk=test.pk).update(passed=True, finished=True)
+                test.refresh_from_db()
 
-        if test.finished or test.deleted:
-            return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
+            Machine.objects.filter(pk=machine.id).update(workload=0)
+            return completed_response(test)
 
-        if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
-            return JsonResponse({'error': 'DATAGEN chunk lease is not owned by machine'}, status=409)
-
-        filename = chunk.filename()
-        if storage.exists(filename):
-            storage.delete(filename)
-        saved_name = storage.save(filename, upload)
-        if saved_name != filename:
-            storage.delete(saved_name)
-            return JsonResponse({'error': 'Unable to store DATAGEN chunk at canonical path'}, status=500)
-
-        chunk.status = DatagenChunk.COMPLETED
-        chunk.sha256 = actual_sha
-        chunk.bytes = actual_bytes
-        chunk.completed = timezone.now()
-        chunk.last_error = ''
-        chunk.save()
-
-        completed, total, positions = OpenBench.datagen.completed_progress(test)
-        test.games = positions
-        if completed == total:
-            test.passed = True
-            test.finished = True
-        test.save()
-
-        machine.workload = 0
-        machine.save()
-
-    return JsonResponse({
-        'sha256': actual_sha,
-        'bytes': actual_bytes,
-        'completed_chunks': completed,
-        'total_chunks': total,
-        'positions': positions,
-        'finished': test.finished,
-    })
+    try:
+        for attempt in range(OpenBench.datagen.DATAGEN_CLAIM_RETRIES):
+            try:
+                return commit_staged_upload()
+            except OperationalError as error:
+                # A SQLite BUSY/locked error on the first CAS has no unknown
+                # commit outcome and is safe to retry while staging still
+                # exists. Never retry after promotion or arbitrary database
+                # errors, where commit state may be ambiguous.
+                retryable = (
+                    staging_name is not None
+                    and OpenBench.datagen._is_sqlite_lock_contention(error)
+                )
+                if not retryable:
+                    raise
+                if attempt + 1 == OpenBench.datagen.DATAGEN_CLAIM_RETRIES:
+                    return JsonResponse(
+                        {'error': 'DATAGEN database is temporarily busy'},
+                        status=503,
+                    )
+                time.sleep(min(
+                    OpenBench.datagen.DATAGEN_CLAIM_BACKOFF * (attempt + 1),
+                    0.05,
+                ))
+    finally:
+        cleanup_staging(staging_name)
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                                                                             #

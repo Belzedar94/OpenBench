@@ -82,7 +82,9 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    `make -j EXE=<salida> GIT_SHA_FULL=<commit> [CC=<compiler>] [EVALFILE=<red>]`.
    Un DATAGEN genérico añade `OPENBENCH_DATAGEN=1`; el Makefile debe usarlo si
    necesita seleccionar un objetivo generador distinto. Las cachés de juego y
-   DATAGEN están separadas. El worker sigue sin imponer target ni ARCH/COMP.
+   DATAGEN públicas están separadas. DATAGEN genérico rechaza motores privados
+   porque sus artifacts no declaran el rol play/generator. El worker sigue sin
+   imponer target ni ARCH/COMP.
    Tu Makefile debe producir un binario nativo optimizado con `make` a pelo.
    Spell-Stockfish lo resuelve con un shim al final de `src/Makefile`
    (`.DEFAULT_GOAL := openbench` → `build COMP=<por-OS>`, ARCH ya es native) — cópialo.

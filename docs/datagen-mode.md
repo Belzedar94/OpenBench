@@ -33,9 +33,12 @@ quit
 El contrato de éxito es deliberadamente pequeño: el proceso termina con código
 cero y `{OUT}` existe como archivo. El motor puede crear shards internos, pero
 debe producir el archivo merged final antes de terminar. El cliente comprime
-ese archivo con bzip2 y lo sube. Un código no-cero, la ausencia de `{OUT}`, un
-fallo de compresión o un fallo definitivo de upload se reportan por el flujo de
-errores existente y liberan el chunk para otro cliente.
+ese archivo con bzip2 y lo sube. Un código no-cero o la ausencia de `{OUT}` son
+fallos deterministas del motor: se reportan, liberan el chunk y ponen este
+workload en la blacklist local del cliente. Compresión, upload y sus reportes
+tienen reintentos acotados; si se agotan, el chunk se reencola sin bloquear todo
+el workload. Si tampoco se puede notificar al servidor, el lease de cinco
+minutos sigue siendo la red de seguridad.
 
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
@@ -49,9 +52,11 @@ pueda conservar procedencia exacta aunque el archive de GitHub no incluya
 `.git`. Un DATAGEN genérico recibe además `OPENBENCH_DATAGEN=1`; el Makefile
 puede usar esa variable para seleccionar su objetivo generador. Las cachés de
 binarios de juego y generación usan nombres distintos, de modo que nunca se
-reutiliza accidentalmente un ejecutable del rol equivocado; esto también se
-aplica a artefactos de motores privados. Los Makefiles que ignoran esas
-variables mantienen el comportamiento anterior.
+reutiliza accidentalmente un ejecutable público del rol equivocado. DATAGEN
+genérico rechaza motores privados tanto al crear el workload como en el cliente:
+el metadata de artifacts privado actual no declara el rol play/generator y no
+es seguro adivinarlo. Los Makefiles que ignoran las variables mantienen el
+comportamiento anterior para builds públicos.
 
 ## Creación y reparto
 
@@ -69,17 +74,20 @@ También se mantiene `/newDatagen/` como acceso directo al mismo modo. Los
 presets son datos del motor en `Engines/<Motor>.json`, bajo
 `datagen_presets`; añadir otro motor o variante no requiere tocar Python.
 
-El servidor crea el mapa completo de chunks al guardar el test. Cada fila tiene
-índice, count real, estado, intentos, propietario actual, SHA-256, bytes y
-fechas. El lease dura cinco minutos y cada heartbeat lo renueva. Si el cliente
-desaparece, un lease vencido vuelve a ser asignable. Si el servidor indica que
-el lease ya no pertenece al cliente, este detiene sólo su proceso DATAGEN y no
-sube el resultado obsoleto.
+El servidor acepta como máximo 100.000 chunks por workload (el mismo techo que
+el manifiesto Atomic BIN V2), valida el límite antes de crear filas y las
+inserta en lotes acotados. Después crea el mapa completo al guardar el test.
+Cada fila tiene índice, count real, estado, intentos, propietario actual,
+SHA-256, bytes y fechas. El lease dura cinco minutos y cada heartbeat lo
+renueva. Si el cliente desaparece, un lease vencido vuelve a ser asignable. Si
+el servidor indica que el lease ya no pertenece al cliente, este detiene sólo
+su proceso DATAGEN y no sube el resultado obsoleto.
 
-Tras un error, el servidor devuelve el chunk a `PENDING`. El cliente que falló
-pone ese workload en una blacklist local hasta reiniciarse para evitar un bucle
-caliente; otro cliente puede recogerlo inmediatamente. `attempts` permite
-auditar las reasignaciones.
+Tras un error, el servidor devuelve el chunk a `PENDING`. Sólo los fallos
+deterministas de build, bench o generador ponen ese workload en una blacklist
+local hasta reiniciarse para evitar un bucle caliente. Los fallos transitorios
+de empaquetado/transporte no lo hacen: cualquier cliente puede recoger el chunk
+reencolado. `attempts` permite auditar las reasignaciones.
 
 Dimensionar `positions_per_chunk` para unos 20–40 minutos en el hardware típico.
 Chunks mucho más cortos amplifican builds, benches y uploads; chunks mucho más
@@ -103,6 +111,13 @@ por el cliente. El nombre canónico es:
 ```text
 Media/datagen/<test_id>/chunk_<idx>.bz2
 ```
+
+El upload se escribe primero con un nombre de staging único dentro de
+`Media/datagen`. Esa copia potencialmente grande ocurre fuera de la transacción;
+después un compare-and-swap del lease, un `rename` atómico en el mismo volumen y
+los contadores `games/completed_chunks` se confirman juntos. Así SQLite no
+mantiene su lock global durante la copia y dos chunks simultáneos no pierden
+progreso. La migración de estos contadores hace backfill de campañas existentes.
 
 Una repetición con contenido idéntico es idempotente. Un segundo contenido para
 un chunk ya completado se rechaza. El test pasa y finaliza sólo cuando todos los

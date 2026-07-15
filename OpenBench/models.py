@@ -145,6 +145,7 @@ class Test(Model):
     datagen_total_count         = BigIntegerField(default=0)
     datagen_positions_per_chunk = BigIntegerField(default=0)
     datagen_base_seed           = BigIntegerField(default=0)
+    datagen_completed_chunks    = IntegerField(default=0)
 
     # Collection of all individual Result() objects
     games  = IntegerField(default=0) # Overall

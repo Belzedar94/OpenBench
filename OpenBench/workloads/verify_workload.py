@@ -43,6 +43,7 @@ import string
 import traceback
 
 import OpenBench.config
+import OpenBench.datagen
 import OpenBench.utils
 
 from OpenBench.models import *
@@ -168,6 +169,7 @@ def verify_datagen_creation(errors, request):
 
         # DATAGEN builds and verifies one engine branch.
         (verify_configuration  , 'dev_engine', 'Engine', 'engines'),
+        (verify_public_datagen_engine, 'dev_engine'),
         (verify_github_repo    , 'dev_repo'),
         (verify_network        , 'dev_network', 'Network', 'dev_engine'),
 
@@ -206,6 +208,17 @@ def verify_options(errors, request, field, option, field_name):
 def verify_configuration(errors, request, field, field_name, parent):
     try: assert request.POST[field] in OpenBench.config.OPENBENCH_CONFIG[parent].keys()
     except: errors.append('{0} was not found in the configuration'.format(field_name))
+
+def verify_public_datagen_engine(errors, request, field):
+    try:
+        private = OpenBench.config.OPENBENCH_CONFIG['engines'][request.POST[field]]['private']
+    except (KeyError, TypeError):
+        return  # verify_configuration owns unknown-engine diagnostics
+    if private:
+        errors.append(
+            'Generic DATAGEN currently supports only public engines; private '
+            'artifacts do not declare a play or data-generator role'
+        )
 
 def verify_time_control(errors, request, field, field_name):
     try: OpenBench.utils.TimeControl.parse(request.POST[field])
@@ -380,8 +393,14 @@ def verify_datagen_counts(errors, request, total_field, chunk_field):
         per_chunk = int(request.POST[chunk_field])
         assert 0 < total <= 2**63 - 1
         assert 0 < per_chunk <= 2**63 - 1
+        chunks = (total + per_chunk - 1) // per_chunk
+        assert chunks <= OpenBench.datagen.MAX_DATAGEN_CHUNKS
     except Exception:
-        errors.append('Datagen total count and positions per chunk must be positive integers')
+        errors.append(
+            'Datagen total count and positions per chunk must be positive '
+            'integers producing at most %d chunks'
+            % OpenBench.datagen.MAX_DATAGEN_CHUNKS
+        )
 
 def verify_datagen_seed(errors, request, seed_field, total_field, chunk_field):
 
