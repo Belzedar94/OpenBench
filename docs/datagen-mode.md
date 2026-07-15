@@ -141,3 +141,29 @@ de chunks. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
 HEAD, resolver posibles diferencias de modelos/migraciones y enviar servidor,
 cliente, tests y documentación juntos. Conviene acordar además política de
 retención/cuotas para blobs antes de abrir DATAGEN a una flota grande.
+
+## Adopción por otra variante (checklist para Atomic y futuras)
+
+El server no sabe nada de tu formato: adoptar el modo son tres pasos del lado
+del proyecto de cada motor.
+
+1. **Comando datagen in-engine** que cumpla el contrato de arriba: invocable
+   por stdin UCI en una línea, acepta al menos semilla/count/salida/hilos (los
+   nombres de flags son tuyos — la plantilla los mapea), y al terminar deja UN
+   archivo final en la ruta de salida y sale con código cero. Referencia
+   completa: `src/datagen.cpp` de Spell-Stockfish (multihilo con shards por
+   hilo + merge final, filtros al escribir, sidecar de metadata, `--resume`).
+2. **Formato y auditoría propios**: decide tu registro binario y escribe tu
+   merge/auditoría OFFLINE (los chunks se descargan de `Media/datagen/<test>/`;
+   son bzip2 del archivo que tu motor escribió). Referencia:
+   `tools/spellnnue-pytorch/run7.py` (formato de 44 B con round-trip motor↔
+   python) y `audit_run7.py` (informe de distribución con umbrales).
+3. **Crear el test** en `/newDatagen/`: motor+rama+bench (el cliente compila y
+   verifica el bench como en cualquier SPRT), plantilla con placeholders,
+   count total, posiciones por chunk (dimensiona para ~20-40 min por chunk en
+   un worker típico), semilla base y libro si aplica. La reproducibilidad por
+   chunk (seed = base + idx) es gratis; consérvala.
+
+Consejo operativo de la primera producción (Spell, test #66): el bench del
+motor a nodos bajos NO predice el ritmo de escritura — mide posiciones/s con
+un piloto local de tu datagen antes de dimensionar chunks.
