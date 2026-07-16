@@ -255,6 +255,13 @@ def get_machine(machineid, user, info):
     try: machine = Machine.objects.get(id=int(machineid))
     except: return None
 
+    # A persisted machine id belongs to the authenticated account that
+    # registered it.  MAC addresses are not identities (and several workers
+    # on one host legitimately share one), so never let another account reuse
+    # the row, rotate its session secret, or inherit an active chunk lease.
+    if machine.user_id != user.id:
+        return None
+
     # Workload requests should always contain a MAC
     if 'mac_address' not in machine.info:
         return None

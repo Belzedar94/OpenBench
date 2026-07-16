@@ -19,6 +19,7 @@ from django.utils import timezone
 
 import OpenBench.datagen
 import OpenBench.config
+import OpenBench.utils
 import OpenBench.views
 from OpenBench.templatetags import mytags
 from OpenBench.datagen import (
@@ -38,6 +39,57 @@ from OpenBench.workloads import (
     verify_workload,
     view_workload,
 )
+
+
+class MachineIdentityTests(TestCase):
+
+    def setUp(self):
+        self.owner = User.objects.create_user('machine-owner', password='password')
+        self.other = User.objects.create_user('other-worker', password='password')
+        self.info = {
+            'mac_address': 'AABBCCDDEEFF',
+            'client_ver': 38,
+            'concurrency': 2,
+        }
+        self.machine = Machine.objects.create(
+            user=self.owner,
+            secret='owner-secret',
+            info=self.info,
+        )
+        self.profile = Profile.objects.create(user=self.owner, enabled=True)
+
+    def test_persisted_machine_id_is_reusable_by_its_owner(self):
+        resolved = OpenBench.utils.get_machine(
+            str(self.machine.id), self.owner, dict(self.info)
+        )
+
+        self.assertEqual(resolved, self.machine)
+
+    def test_persisted_machine_id_is_rejected_for_another_user(self):
+        resolved = OpenBench.utils.get_machine(
+            str(self.machine.id), self.other, dict(self.info)
+        )
+
+        self.assertIsNone(resolved)
+        self.machine.refresh_from_db()
+        self.assertEqual(self.machine.user, self.owner)
+        self.assertEqual(self.machine.secret, 'owner-secret')
+
+    def test_disabling_profile_revokes_an_existing_worker_session(self):
+        self.profile.enabled = False
+        self.profile.save(update_fields=['enabled'])
+        request = RequestFactory().post(
+            '/clientGetWorkload/',
+            {'machine_id': self.machine.id, 'secret': self.machine.secret},
+        )
+
+        response = OpenBench.views.client_get_workload(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertJSONEqual(
+            response.content,
+            {'error': 'Worker Account Disabled', 'stop': True},
+        )
 
 
 class DatagenModeTests(TestCase):
@@ -103,7 +155,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 37,
+            'client_ver': 38,
             'tablebases': {'standard': 0},
             'syzygy_max': 0,
         }
@@ -653,7 +705,7 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 37},
+                info={'concurrency': 1, 'client_ver': 38},
             ))
 
     def tearDown(self):
