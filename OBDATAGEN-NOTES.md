@@ -221,8 +221,8 @@ de onboarding/runner Atomic.
 
 1. Ensayar sobre copias de la DB y `Media`; medir tiempo/espacio de la migración
    SQLite y validar un rollback por restauración.
-2. Publicar primero una ref del cliente que incluya v36. El servidor anuncia
-   v36 y un cliente viejo intentará auto-update; ref y versión deben desplegarse
+2. Publicar primero una ref del cliente que incluya v37. El servidor anuncia
+   v37 y un cliente viejo intentará auto-update; ref y versión deben desplegarse
    de forma atómica.
 3. En ventana de mantenimiento, parar ordenadamente servidor/workers activos y
    hacer backup. La producción no tiene el baseline de migraciones explícito:
@@ -234,7 +234,7 @@ de onboarding/runner Atomic.
    subir clientes gradualmente.
 6. Para upstream a sscg13: rebase sobre su HEAD, adaptar la numeración de
    migraciones y cualquier evolución de modelos, mantener juntos servidor,
-   cliente v36, tests y docs, y explicar explícitamente la coexistencia con el
+   cliente v37, tests y docs, y explicar explícitamente la coexistencia con el
    DATAGEN legacy del fork.
 
 El procedimiento ampliado está en `docs/datagen-mode.md`.
