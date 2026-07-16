@@ -15,13 +15,17 @@ estos placeholders:
 - `{OUT}`: ruta local única donde el motor debe escribir el archivo final.
 - `{THREADS}`: concurrencia `-T` del cliente asignado.
 - `{BOOK}`: ruta local del libro, o `NONE` cuando el test no usa libro.
+- `{BOOK_SHA256}`: SHA-256 de los bytes exactos del libro extraído, o `NONE`.
+  OpenBench conserva además su SHA histórico normalizado como texto; el cliente
+  verifica ambas identidades antes de iniciar el generador.
 - `{NETWORK}`: ruta local de la red dev ya descargada y verificada, o `NONE`
   cuando el workload no tiene red.
 
-`SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK` es opcional. No se
-admiten placeholders desconocidos, conversiones, formatos, saltos de línea,
-NUL ni plantillas mayores de 4096 caracteres. `NETWORK` también es opcional y
-no modifica el mecanismo existente que pasa `EVALFILE` durante el build.
+`SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256` y
+`NETWORK` son opcionales. No se admiten placeholders desconocidos,
+conversiones, formatos, saltos de línea, NUL ni plantillas mayores de 4096
+caracteres. `NETWORK` no modifica el mecanismo existente que pasa `EVALFILE`
+durante el build.
 
 El cliente escribe por stdin:
 
@@ -35,10 +39,12 @@ cero y `{OUT}` existe como archivo. El motor puede crear shards internos, pero
 debe producir el archivo merged final antes de terminar. El cliente comprime
 ese archivo con bzip2 y lo sube. Un código no-cero o la ausencia de `{OUT}` son
 fallos deterministas del motor: se reportan, liberan el chunk y ponen este
-workload en la blacklist local del cliente. Compresión, upload y sus reportes
-tienen reintentos acotados; si se agotan, el chunk se reencola sin bloquear todo
-el workload. Si tampoco se puede notificar al servidor, el lease de cinco
-minutos sigue siendo la red de seguridad.
+workload en la blacklist local del cliente. Descargas y fallos de setup que no
+sean errores explícitos de configuración, además de compresión, upload y sus
+reportes, se tratan como transitorios: el chunk se reencola sin bloquear todo el
+workload. Los errores de configuración, build, artefacto ausente y bench siguen
+siendo deterministas. Si tampoco se puede notificar al servidor, el lease de
+cinco minutos sigue siendo la red de seguridad.
 
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
