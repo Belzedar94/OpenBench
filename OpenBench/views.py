@@ -26,6 +26,7 @@ import django.contrib.auth
 
 import OpenBench.config
 import OpenBench.datagen
+import OpenBench.index_metrics
 import OpenBench.utils
 
 from OpenBench.workloads.create_workload import create_workload
@@ -278,6 +279,7 @@ def index(request, page=1):
         'awaiting'  : awaiting,
         'paging'    : paging,
         'status'    : OpenBench.utils.getMachineStatus(),
+        'dashboard_metrics': OpenBench.index_metrics.get_index_metrics(),
     }
 
     return render(request, 'index.html', data)
