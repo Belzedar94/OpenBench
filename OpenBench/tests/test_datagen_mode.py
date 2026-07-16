@@ -32,7 +32,9 @@ from OpenBench.datagen import (
     renew_chunk,
     requeue_chunk,
 )
-from OpenBench.models import DatagenChunk, Engine, Machine, Profile, Test
+from OpenBench.models import (
+    DatagenChunk, DatagenProducerArtifact, Engine, Machine, Profile, Test,
+)
 from OpenBench.workloads import (
     create_workload,
     get_workload,
@@ -48,7 +50,7 @@ class MachineIdentityTests(TestCase):
         self.other = User.objects.create_user('other-worker', password='password')
         self.info = {
             'mac_address': 'AABBCCDDEEFF',
-            'client_ver': 38,
+            'client_ver': 39,
             'concurrency': 2,
         }
         self.machine = Machine.objects.create(
@@ -155,7 +157,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 38,
+            'client_ver': 39,
             'tablebases': {'standard': 0},
             'syzygy_max': 0,
         }
@@ -656,6 +658,222 @@ class DatagenModeTests(TestCase):
             '28ed51c2f42e723d5e127d2d3f21c0bfa4a9b318615afdb299b93ea62dea2b1e',
         )
 
+    def producer_test(self, total=2, per_chunk=2):
+        test = self.make_test(total=total, per_chunk=per_chunk)
+        test.datagen_command += ' producer {PRODUCER_SHA256}'
+        test.save(update_fields=['datagen_command'])
+        return test
+
+    def register_producer(
+        self, test, chunk, machine, payload=b'producer-binary', commit=None,
+        sha256=None, byte_count=None,
+    ):
+        return Client().post(
+            '/clientSubmitDatagenProducer/',
+            {
+                'machine_id': machine.id,
+                'secret': machine.secret,
+                'test_id': test.id,
+                'chunk_idx': chunk.idx,
+                'sha256': sha256 or hashlib.sha256(payload).hexdigest(),
+                'bytes': len(payload) if byte_count is None else byte_count,
+                'commit': commit or test.dev.sha,
+                'file': SimpleUploadedFile('producer.bin', payload),
+            },
+        )
+
+    def submit_chunk(self, test, chunk, machine, producer=None):
+        payload = bz2.compress(b'opaque-chunk')
+        fields = {
+            'machine_id': machine.id,
+            'secret': machine.secret,
+            'test_id': test.id,
+            'chunk_idx': chunk.idx,
+            'sha256': hashlib.sha256(payload).hexdigest(),
+            'bytes': len(payload),
+            'file': SimpleUploadedFile('chunk.bz2', payload),
+        }
+        if producer is not None:
+            fields.update({
+                'producer_sha256': producer['sha256'],
+                'producer_bytes': producer['bytes'],
+                'producer_commit': producer['commit'],
+            })
+        return Client().post('/clientSubmitDatagen/', fields)
+
+    def test_template_and_workload_opt_in_to_producer_evidence(self):
+        request = SimpleNamespace(POST={'datagen_command': (
+            'datagen {SEED} {COUNT} {THREADS} {OUT} '
+            'producer {PRODUCER_SHA256}'
+        )})
+        errors = []
+        verify_workload.verify_datagen_template(
+            errors, request, 'datagen_command'
+        )
+        self.assertEqual(errors, [])
+
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = test.datagen_chunks.get(idx=0)
+        workload = get_workload.workload_to_dictionary(
+            test, SimpleNamespace(id=1), machine, chunk
+        )
+        self.assertTrue(
+            workload['test']['datagen']['producer_artifact_required']
+        )
+
+        test.datagen_command = (
+            'datagen {SEED} {COUNT} {THREADS} {OUT} '
+            'literal {{PRODUCER_SHA256}}'
+        )
+        test.save(update_fields=['datagen_command'])
+        self.assertFalse(test.datagen_requires_producer_artifact())
+
+    def test_producer_is_rehashed_stored_and_bound_before_generation(self):
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+        payload = b'producer-binary'
+        sha256 = hashlib.sha256(payload).hexdigest()
+
+        response = self.register_producer(test, chunk, machine, payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['sha256'], sha256)
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.producer_sha256, sha256)
+        self.assertEqual(chunk.producer_bytes, len(payload))
+        self.assertEqual(chunk.producer_commit, self.engine.sha)
+        artifact = DatagenProducerArtifact.objects.get(sha256=sha256)
+        self.assertEqual(artifact.bytes, len(payload))
+        self.assertEqual(
+            Path(self.media.name, artifact.filename()).read_bytes(), payload
+        )
+
+    def test_producer_rejects_bad_bytes_commit_and_stale_lease(self):
+        test = self.producer_test()
+        owner = self.make_machine('producer-owner')
+        stale = self.make_machine('producer-stale')
+        chunk = claim_chunk(test, owner)
+
+        bad_hash = self.register_producer(
+            test, chunk, owner, sha256='0' * 64
+        )
+        self.assertEqual(bad_hash.status_code, 400)
+        bad_commit = self.register_producer(
+            test, chunk, owner, commit='b' * 40
+        )
+        self.assertEqual(bad_commit.status_code, 409)
+        stale_lease = self.register_producer(test, chunk, stale)
+        self.assertEqual(stale_lease.status_code, 409)
+        self.assertEqual(DatagenProducerArtifact.objects.count(), 0)
+
+    def test_producer_registration_is_idempotent_and_cas_is_reused(self):
+        test = self.producer_test(total=2, per_chunk=1)
+        first_machine = self.make_machine('producer-first')
+        second_machine = self.make_machine('producer-second')
+        first = claim_chunk(test, first_machine)
+        second = claim_chunk(test, second_machine)
+
+        first_response = self.register_producer(test, first, first_machine)
+        retry_response = self.register_producer(test, first, first_machine)
+        second_response = self.register_producer(test, second, second_machine)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertFalse(first_response.json()['already_registered'])
+        self.assertEqual(retry_response.status_code, 200)
+        self.assertTrue(retry_response.json()['already_registered'])
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(DatagenProducerArtifact.objects.count(), 1)
+        self.assertEqual(
+            test.datagen_chunks.values('producer_sha256').distinct().count(), 1
+        )
+
+    def test_required_chunk_cannot_publish_without_exact_producer_binding(self):
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+
+        missing = self.submit_chunk(test, chunk, machine)
+        self.assertEqual(missing.status_code, 400)
+
+        registered = self.register_producer(test, chunk, machine).json()
+        mismatched = dict(registered)
+        mismatched['sha256'] = 'f' * 64
+        conflict = self.submit_chunk(test, chunk, machine, mismatched)
+        self.assertEqual(conflict.status_code, 409)
+
+        accepted = self.submit_chunk(test, chunk, machine, registered)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(
+            accepted.json()['producer_sha256'], registered['sha256']
+        )
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, DatagenChunk.COMPLETED)
+
+    def test_missing_cas_blob_blocks_chunk_and_authenticated_retry_repairs_it(self):
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+        registered = self.register_producer(test, chunk, machine).json()
+        artifact = DatagenProducerArtifact.objects.get(
+            sha256=registered['sha256']
+        )
+        Path(self.media.name, artifact.filename()).unlink()
+
+        blocked = self.submit_chunk(test, chunk, machine, registered)
+        self.assertEqual(blocked.status_code, 409)
+        self.assertIn('unavailable or corrupt', blocked.json()['error'])
+
+        repaired = self.register_producer(test, chunk, machine)
+        self.assertEqual(repaired.status_code, 200)
+        self.assertFalse(repaired.json()['already_registered'])
+        self.assertEqual(
+            self.submit_chunk(test, chunk, machine, registered).status_code,
+            200,
+        )
+
+    def test_requeue_clears_attempt_local_producer_binding(self):
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+        self.assertEqual(
+            self.register_producer(test, chunk, machine).status_code, 200
+        )
+
+        self.assertTrue(requeue_chunk(test.id, chunk.idx, machine, 'retry'))
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.producer_sha256, '')
+        self.assertEqual(chunk.producer_bytes, 0)
+        self.assertEqual(chunk.producer_commit, '')
+        self.assertEqual(DatagenProducerArtifact.objects.count(), 1)
+
+    def test_completed_manifest_and_producer_download_expose_exact_evidence(self):
+        test = self.producer_test()
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+        registered = self.register_producer(test, chunk, machine).json()
+        self.assertEqual(
+            self.submit_chunk(test, chunk, machine, registered).status_code,
+            200,
+        )
+
+        manifest = Client().get('/api/datagen/%d/' % test.id)
+        self.assertEqual(manifest.status_code, 200)
+        document = manifest.json()
+        self.assertEqual(document['producer_commit'], self.engine.sha)
+        self.assertTrue(document['producer_artifact_required'])
+        self.assertEqual(document['chunks'][0]['producer_sha256'], registered['sha256'])
+
+        download = Client().get(
+            '/api/datagen-producer/%s/' % registered['sha256']
+        )
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b''.join(download.streaming_content), b'producer-binary')
+        self.assertEqual(
+            download['ETag'], '"sha256:%s"' % registered['sha256']
+        )
+
 
 class DatagenClaimConcurrencyTests(TransactionTestCase):
 
@@ -705,7 +923,7 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 38},
+                info={'concurrency': 1, 'client_ver': 39},
             ))
 
     def tearDown(self):
@@ -822,3 +1040,59 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.assertTrue(
                 os.path.isfile(os.path.join(self.media.name, chunk.filename()))
             )
+
+    def test_simultaneous_chunks_reuse_one_content_addressed_producer(self):
+        self.test.datagen_command += ' producer {PRODUCER_SHA256}'
+        self.test.save(update_fields=['datagen_command'])
+        chunks = [
+            claim_chunk(self.test, self.machines[index]) for index in range(2)
+        ]
+        payload = b'shared-producer-binary'
+        sha256 = hashlib.sha256(payload).hexdigest()
+        barrier = threading.Barrier(2)
+        responses = [None, None]
+        failures = []
+
+        def submit(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=5)
+                response = Client().post(
+                    '/clientSubmitDatagenProducer/',
+                    {
+                        'machine_id': self.machines[index].id,
+                        'secret': self.machines[index].secret,
+                        'test_id': self.test.id,
+                        'chunk_idx': chunks[index].idx,
+                        'sha256': sha256,
+                        'bytes': len(payload),
+                        'commit': self.engine.sha,
+                        'file': SimpleUploadedFile('producer.bin', payload),
+                    },
+                )
+                responses[index] = (response.status_code, response.json())
+            except Exception as error:
+                failures.append((error, traceback.format_exc()))
+            finally:
+                close_old_connections()
+
+        threads = [
+            threading.Thread(target=submit, args=(index,)) for index in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(failures, [])
+        self.assertEqual([status for status, _ in responses], [200, 200])
+        self.assertEqual(DatagenProducerArtifact.objects.count(), 1)
+        self.assertEqual(
+            self.test.datagen_chunks.filter(
+                producer_sha256=sha256,
+                producer_bytes=len(payload),
+                producer_commit=self.engine.sha,
+            ).count(),
+            2,
+        )

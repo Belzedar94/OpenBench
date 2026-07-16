@@ -1,10 +1,12 @@
 # DATAGEN distribuido
 
-> Worker protocol v38 reloads hot-updated Client dependencies before running
+> Worker protocol v39 reloads hot-updated Client dependencies before running
 > a workload and binds persisted machine IDs to their authenticated owner. This
 > prevents mixed-version book helpers and cross-account lease collisions.
 > Disabling a worker profile also revokes its existing session immediately and
-> asks an active workload to stop at its next heartbeat.
+> asks an active workload to stop at its next heartbeat. It additionally
+> supports opt-in content-addressed producer evidence for publication-grade
+> datasets.
 
 Este fork añade un workload `DATAGEN` genérico. OpenBench distribuye trabajo,
 verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
@@ -26,9 +28,13 @@ estos placeholders:
   verifica ambas identidades antes de iniciar el generador.
 - `{NETWORK}`: ruta local de la red dev ya descargada y verificada, o `NONE`
   cuando el workload no tiene red.
+- `{PRODUCER_SHA256}`: SHA-256 de los bytes exactos del ejecutable generador.
+  Su presencia activa el protocolo de evidencia v39: el worker sube primero el
+  binario y el servidor recalcula su identidad, lo conserva en CAS y liga hash,
+  tamaño y commit dev al lease antes de ejecutar el comando.
 
-`SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256` y
-`NETWORK` son opcionales. No se admiten placeholders desconocidos,
+`SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256`,
+`NETWORK` y `PRODUCER_SHA256` son opcionales. No se admiten placeholders desconocidos,
 conversiones, formatos, saltos de línea, NUL ni plantillas mayores de 4096
 caracteres. `NETWORK` no modifica el mecanismo existente que pasa `EVALFILE`
 durante el build.
@@ -51,6 +57,17 @@ reportes, se tratan como transitorios: el chunk se reencola sin bloquear todo el
 workload. Los errores de configuración, build, artefacto ausente y bench siguen
 siendo deterministas. Si tampoco se puede notificar al servidor, el lease de
 cinco minutos sigue siendo la red de seguridad.
+
+Cuando la plantilla contiene `{PRODUCER_SHA256}`, el contrato se endurece antes
+del launch. El worker calcula el hash sobre un handle estable del ejecutable,
+sube los bytes a `/clientSubmitDatagenProducer/` y el servidor vuelve a calcular
+hash y tamaño. El blob se almacena por contenido bajo
+`Media/datagen-producers/sha256/<prefijo>/<sha256>`; el chunk conserva además el
+commit dev exacto. Reintentar los mismos bytes es idempotente, pero un segundo
+productor para el mismo lease se rechaza. Reencolar el chunk borra su binding de
+intento, no el blob CAS reutilizable. El upload final del chunk debe repetir la
+misma identidad o falla cerrado. El canal CAS admite como máximo 2 GiB por
+ejecutable y nunca sustituye el canal, cuotas ni formato de los chunks.
 
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
@@ -136,6 +153,14 @@ un chunk ya completado se rechaza. El test pasa y finaliza sólo cuando todos lo
 chunks están `COMPLETED`. La página del test muestra chunks y progreso; cada
 archivo se descarga por `GET /api/datagen/<test_id>/<chunk_idx>/`.
 
+Una campaña ya completa expone su mapa inmutable en
+`GET /api/datagen/<test_id>/`. Cada entrada incluye semilla, posiciones, hash y
+tamaño del chunk y, cuando se solicitó evidencia, hash/tamaño/commit del
+productor. Los ejecutables se descargan por
+`GET /api/datagen-producer/<sha256>/`. Estos metadatos son transporte: el
+publicador del formato sigue obligado a descargar y reautenticar todos los
+bytes y a aplicar sus propios trust pins.
+
 La validación universal termina en SHA-256 y bytes. Descompresión, validación de
 registros, combinación de cabeceras, deduplicación y auditoría quedan fuera de
 OpenBench. Por ejemplo, un proyecto Spell puede concatenar offline sus registros
@@ -164,7 +189,7 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 38; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión 39; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
@@ -175,7 +200,7 @@ de `Media/`. En una ventana coordinada:
    después `python manage.py migrate`.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 38 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes versión 39 de forma gradual y vigilar logs, disco y leases.
 
 No usar `--fake` para `0002`: esa migración crea las columnas DATAGEN y la tabla
 de chunks. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
@@ -197,7 +222,10 @@ del proyecto de cada motor.
    Si el generador no es el objetivo por defecto del motor, haz que el Makefile
    seleccione ese objetivo cuando recibe `OPENBENCH_DATAGEN=1`. Usa
    `GIT_SHA_FULL` para rellenar el commit de procedencia y `{NETWORK}` en la
-   plantilla cuando el comando necesite la ruta de la red en runtime.
+   plantilla cuando el comando necesite la ruta de la red en runtime. Para un
+   dataset publicable, incluye `{PRODUCER_SHA256}` y escríbelo dentro del
+   manifiesto de chunk; OpenBench no permite iniciar el generador hasta haber
+   autenticado y ligado esos bytes al lease.
 2. **Formato y auditoría propios**: decide tu registro binario y escribe tu
    merge/auditoría OFFLINE (los chunks se descargan de `Media/datagen/<test>/`;
    son bzip2 del archivo que tu motor escribió). Referencia:

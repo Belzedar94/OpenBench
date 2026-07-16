@@ -107,6 +107,32 @@ class DatagenWorkerTests(unittest.TestCase):
         )
         self.assertIn('network NONE', rendered)
 
+    def test_template_fails_closed_until_producer_is_authenticated(self):
+        cfg = config()
+        cfg.workload['test']['datagen'].update({
+            'command': (
+                'generate {SEED} {COUNT} {THREADS} {OUT} '
+                'producer {PRODUCER_SHA256}'
+            ),
+            'producer_artifact_required': True,
+        })
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'authenticated producer'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        rendered = worker.render_datagen_command(
+            cfg,
+            'Datagen/chunk.bin',
+            producer={
+                'sha256': 'ab' * 32,
+                'bytes': 123,
+                'commit': 'cd' * 20,
+            },
+        )
+        self.assertIn('producer ' + ('ab' * 32), rendered)
+
     def test_template_uses_the_exact_raw_book_identity(self):
         cfg = config()
         cfg.workload['test']['book'] = {
@@ -365,6 +391,79 @@ class DatagenWorkerTests(unittest.TestCase):
         bench.assert_called_once()
         self.assertEqual(bench.call_args.args[1], 'dev')
         self.assertEqual(bench.call_args.kwargs, {'bench_threads': 1})
+
+    def test_required_producer_is_uploaded_before_generator_and_bound_to_chunk(self):
+        cfg = config()
+        cfg.workload['test']['datagen'].update({
+            'command': (
+                'generate {SEED} {COUNT} {THREADS} {OUT} '
+                'producer {PRODUCER_SHA256}'
+            ),
+            'producer_artifact_required': True,
+        })
+        producer_bytes = b'exact-generator-executable'
+        producer_sha = hashlib.sha256(producer_bytes).hexdigest()
+        calls = []
+
+        def register(_config, path, sha256, byte_count, commit):
+            calls.append('producer')
+            self.assertEqual(Path(path).read_bytes(), producer_bytes)
+            self.assertEqual(sha256, producer_sha)
+            self.assertEqual(byte_count, len(producer_bytes))
+            self.assertEqual(commit, 'a' * 40)
+            return {
+                'sha256': sha256,
+                'bytes': byte_count,
+                'commit': commit,
+            }
+
+        def generate(
+            _config, _engine, output_path, _log_path, _heartbeat,
+            _network_path, producer,
+        ):
+            calls.append('generator')
+            self.assertEqual(producer['sha256'], producer_sha)
+            Path(output_path).write_bytes(b'v3-envelope')
+
+        def upload(_config, _path, _sha256, _byte_count, producer):
+            calls.append('chunk')
+            self.assertEqual(producer['sha256'], producer_sha)
+            return {'completed_chunks': 1, 'total_chunks': 8}
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            Path('Datagen').mkdir()
+            Path('Engines').mkdir()
+            Path('Engines', 'engine.exe').write_bytes(producer_bytes)
+            try:
+                with mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(
+                         worker, 'safe_download_network_weights', return_value=None
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_download_engine', return_value='engine.exe'
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_run_benchmarks', return_value=1000
+                     ), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_datagen_producer',
+                         side_effect=register,
+                     ), \
+                     mock.patch.object(
+                         worker, 'run_datagen_command', side_effect=generate
+                     ), \
+                     mock.patch.object(
+                         worker.ServerReporter, 'report_datagen', side_effect=upload
+                     ):
+                    worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(calls, ['producer', 'generator', 'chunk'])
 
     def test_retry_cleans_orphaned_chunk_files_before_running(self):
         cfg = config()
@@ -684,6 +783,34 @@ class DatagenWorkerTests(unittest.TestCase):
                 cfg, 'clientSubmitError', {'test_id': 7, 'error': 'failed'}
             )
         self.assertEqual(post.call_args.kwargs['data']['chunk_idx'], 3)
+
+    def test_producer_report_carries_exact_lease_commit_and_binary(self):
+        cfg = config()
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'sha256': 'ab' * 32,
+                'bytes': 4,
+                'commit': 'cd' * 20,
+            },
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            binary = Path(cwd, 'producer.bin')
+            binary.write_bytes(b'ELF!')
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                body = worker.ServerReporter.report_datagen_producer(
+                    cfg, str(binary), 'ab' * 32, 4, 'cd' * 20
+                )
+
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['test_id'], 7)
+        self.assertEqual(sent['chunk_idx'], 3)
+        self.assertEqual(sent['machine_id'], 11)
+        self.assertEqual(sent['secret'], 'secret')
+        self.assertEqual(sent['commit'], 'cd' * 20)
+        self.assertEqual(body['sha256'], 'ab' * 32)
 
     def test_heartbeat_continues_until_server_requests_stop(self):
         calls = []

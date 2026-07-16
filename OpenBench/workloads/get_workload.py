@@ -341,6 +341,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'chunk_count'         : datagen_chunk.position_count,
             'seed'                : test.datagen_base_seed + datagen_chunk.idx,
             'attempt'             : datagen_chunk.attempts,
+            'producer_artifact_required': test.datagen_requires_producer_artifact(),
         }
         workload['distribution'] = None
         workload['spsa'] = None

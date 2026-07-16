@@ -75,7 +75,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 38 # Client version to send to the Server
+CLIENT_VERSION   = 39 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -502,7 +502,44 @@ class ServerReporter:
         return ServerReporter.report(config, 'clientSubmitPGN', payload, files)
 
     @staticmethod
-    def report_datagen(config, path, sha256, byte_count):
+    def report_datagen_producer(config, path, sha256, byte_count, commit):
+
+        payload = {
+            'test_id': config.workload['test']['id'],
+            'chunk_idx': config.workload['test']['datagen']['chunk_idx'],
+            'sha256': sha256,
+            'bytes': byte_count,
+            'commit': commit,
+        }
+
+        target = url_join(config.server, 'clientSubmitDatagenProducer')
+        payload['machine_id'] = config.machine_id
+        payload['secret'] = config.secret_token
+
+        with open(path, 'rb') as data:
+            response = requests.post(
+                target,
+                data=payload,
+                files={'file': (os.path.basename(path), data, 'application/octet-stream')},
+                timeout=(TIMEOUT_HTTP, 600),
+            )
+
+        try:
+            body = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise RuntimeError(
+                'DATAGEN producer upload returned a non-JSON response'
+            )
+
+        if response.status_code != 200 or 'error' in body:
+            raise RuntimeError(
+                body.get('error', 'DATAGEN producer upload failed')
+            )
+        return body
+
+    @staticmethod
+    def report_datagen(config, path, sha256, byte_count, producer=None):
 
         payload = {
             'test_id': config.workload['test']['id'],
@@ -510,6 +547,12 @@ class ServerReporter:
             'sha256': sha256,
             'bytes': byte_count,
         }
+        if producer is not None:
+            payload.update({
+                'producer_sha256': producer['sha256'],
+                'producer_bytes': producer['bytes'],
+                'producer_commit': producer['commit'],
+            })
 
         target = url_join(config.server, 'clientSubmitDatagen')
         payload['machine_id'] = config.machine_id
@@ -1620,12 +1663,23 @@ def terminate_datagen_process(process):
 
 
 def datagen_file_sha256(path):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise OSError('DATAGEN artifact is not a regular file')
+
     digest = hashlib.sha256()
     byte_count = 0
     with open(path, 'rb') as data:
+        before = os.fstat(data.fileno())
         while block := data.read(1024 * 1024):
             digest.update(block)
             byte_count += len(block)
+        after = os.fstat(data.fileno())
+
+    identity = lambda stat: (
+        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+    )
+    if identity(before) != identity(after) or byte_count != after.st_size:
+        raise OSError('DATAGEN artifact changed while hashing')
     return digest.hexdigest(), byte_count
 
 
@@ -1664,14 +1718,55 @@ def compress_datagen_output(source_path, target_path, heartbeat):
                 raise DatagenStopped()
 
 
-def upload_datagen_output(config, path, sha256, byte_count, heartbeat):
+def upload_datagen_producer(
+    config, path, sha256, byte_count, commit, heartbeat
+):
+    """Upload and bind one content-addressed producer with bounded retries."""
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            response = ServerReporter.report_datagen_producer(
+                config, path, sha256, byte_count, commit
+            )
+            expected = {
+                'sha256': sha256,
+                'bytes': byte_count,
+                'commit': commit,
+            }
+            for field, value in expected.items():
+                if response.get(field) != value:
+                    raise RuntimeError(
+                        'DATAGEN producer response mismatched %s' % field
+                    )
+            return expected
+        except BadVersionException:
+            raise
+        except Exception as error:
+            if attempt + 1 == DATAGEN_TRANSFER_RETRIES:
+                raise DatagenTransientError(
+                    'DATAGEN producer upload failed after %d attempts: %s'
+                    % (DATAGEN_TRANSFER_RETRIES, error)
+                ) from error
+            traceback.print_exc()
+            if heartbeat.stop_requested.wait(DATAGEN_TRANSFER_RETRY_DELAY):
+                raise DatagenStopped()
+
+
+def upload_datagen_output(
+    config, path, sha256, byte_count, heartbeat, producer=None
+):
     """Upload one immutable archive with bounded transport retries."""
 
     for attempt in range(DATAGEN_TRANSFER_RETRIES):
         try:
-            response = ServerReporter.report_datagen(
-                config, path, sha256, byte_count
-            )
+            if producer is None:
+                response = ServerReporter.report_datagen(
+                    config, path, sha256, byte_count
+                )
+            else:
+                response = ServerReporter.report_datagen(
+                    config, path, sha256, byte_count, producer
+                )
             for field in ('completed_chunks', 'total_chunks'):
                 if field not in response:
                     raise RuntimeError(
@@ -1747,7 +1842,9 @@ def clean_datagen_workspace(output_path):
     return errors
 
 
-def render_datagen_command(config, output_path, network_path=None):
+def render_datagen_command(
+    config, output_path, network_path=None, producer=None
+):
     data = config.workload['test']['datagen']
     book = config.workload['test']['book']
     book_name = book['name']
@@ -1765,14 +1862,24 @@ def render_datagen_command(config, output_path, network_path=None):
         'NETWORK': (
             'NONE' if not network_path else network_path.replace('\\', '/')
         ),
+        'PRODUCER_SHA256': (
+            'NONE' if producer is None else producer['sha256'].lower()
+        ),
     }
+    if data.get('producer_artifact_required') and producer is None:
+        raise DatagenConfigurationError(
+            'DATAGEN command requires an authenticated producer artifact'
+        )
     return data['command'].format_map(values)
 
 
 def run_datagen_command(
-    config, engine, output_path, log_path, heartbeat, network_path=None
+    config, engine, output_path, log_path, heartbeat, network_path=None,
+    producer=None,
 ):
-    command = render_datagen_command(config, output_path, network_path)
+    command = render_datagen_command(
+        config, output_path, network_path, producer
+    )
     print('DATAGEN command: %s' % command)
 
     with open(log_path, 'wb') as log:
@@ -1811,6 +1918,7 @@ def complete_datagen_workload(config):
     compressed_path = output_path + '.bz2'
     log_path = os.path.join('Datagen', stem + '.log')
     setup_complete = False
+    producer = None
 
     try:
         cleanup_errors = clean_datagen_workspace(output_path)
@@ -1852,7 +1960,27 @@ def complete_datagen_workload(config):
             if heartbeat.stop_requested.is_set():
                 raise DatagenStopped()
 
-            run_datagen_command(
+            if chunk.get('producer_artifact_required'):
+                producer_path = os.path.join('Engines', dev_name)
+                try:
+                    producer_sha256, producer_bytes = datagen_file_sha256(
+                        producer_path
+                    )
+                except Exception as error:
+                    raise DatagenTransientError(
+                        'DATAGEN producer hashing failed: %s' % error
+                    ) from error
+                producer_commit = test['dev']['sha'].lower()
+                producer = upload_datagen_producer(
+                    config,
+                    producer_path,
+                    producer_sha256,
+                    producer_bytes,
+                    producer_commit,
+                    heartbeat,
+                )
+
+            generator_args = (
                 config,
                 os.path.join('Engines', dev_name),
                 output_path,
@@ -1860,6 +1988,10 @@ def complete_datagen_workload(config):
                 heartbeat,
                 dev_network,
             )
+            if producer is None:
+                run_datagen_command(*generator_args)
+            else:
+                run_datagen_command(*generator_args, producer)
 
             compress_datagen_output(output_path, compressed_path, heartbeat)
             try:
@@ -1869,7 +2001,7 @@ def complete_datagen_workload(config):
                     'DATAGEN archive hashing failed: %s' % error
                 ) from error
             response = upload_datagen_output(
-                config, compressed_path, sha256, byte_count, heartbeat
+                config, compressed_path, sha256, byte_count, heartbeat, producer
             )
 
             print(

@@ -861,6 +861,240 @@ def client_submit_pgn(request, machine):
 
     return JsonResponse({})
 
+
+def _datagen_uploaded_digest(upload, max_bytes=None):
+    digest = hashlib.sha256()
+    byte_count = 0
+    for block in upload.chunks():
+        digest.update(block)
+        byte_count += len(block)
+        if max_bytes is not None and byte_count > max_bytes:
+            raise ValueError('uploaded artifact exceeds its size limit')
+    upload.seek(0)
+    return digest.hexdigest(), byte_count
+
+
+def _hash_regular_file(path):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise OSError('content-addressed artifact is not a regular file')
+
+    digest = hashlib.sha256()
+    byte_count = 0
+    with open(path, 'rb') as data:
+        before = os.fstat(data.fileno())
+        while True:
+            block = data.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            byte_count += len(block)
+        after = os.fstat(data.fileno())
+
+    identity = lambda stat: (
+        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+    )
+    if identity(before) != identity(after) or byte_count != after.st_size:
+        raise OSError('content-addressed artifact changed while hashing')
+    return digest.hexdigest(), byte_count
+
+
+@csrf_exempt
+@verify_worker
+def client_submit_datagen_producer(request, machine):
+    """Persist and bind the exact generator executable before it is run."""
+
+    try:
+        test_id = int(request.POST['test_id'])
+        chunk_idx = int(request.POST['chunk_idx'])
+        expected_sha = request.POST['sha256'].lower()
+        expected_bytes = int(request.POST['bytes'])
+        producer_commit = request.POST['commit'].lower()
+        upload = request.FILES['file']
+        assert re.fullmatch(r'[0-9a-f]{64}', expected_sha)
+        assert re.fullmatch(r'[0-9a-f]{40}', producer_commit)
+        assert 0 < expected_bytes <= OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES
+    except (KeyError, ValueError, AssertionError):
+        return JsonResponse(
+            {'error': 'Malformed DATAGEN producer upload'}, status=400
+        )
+
+    test = Test.objects.filter(id=test_id).first()
+    chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
+    if test is None or chunk is None or not test.is_generic_datagen():
+        return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+    if not test.datagen_requires_producer_artifact():
+        return JsonResponse(
+            {'error': 'DATAGEN workload does not request producer evidence'},
+            status=409,
+        )
+    if test.finished or test.deleted:
+        return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
+    if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
+        return JsonResponse(
+            {'error': 'DATAGEN chunk lease is not owned by machine'}, status=409
+        )
+
+    expected_commit = test.dev.sha.lower()
+    if (
+        not re.fullmatch(r'[0-9a-f]{40}', expected_commit)
+        or producer_commit != expected_commit
+    ):
+        return JsonResponse(
+            {'error': 'DATAGEN producer commit does not match workload'}, status=409
+        )
+
+    try:
+        actual_sha, actual_bytes = _datagen_uploaded_digest(
+            upload, OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES
+        )
+    except ValueError:
+        return JsonResponse(
+            {'error': 'DATAGEN producer exceeds size limit'}, status=400
+        )
+    if actual_sha != expected_sha or actual_bytes != expected_bytes:
+        return JsonResponse({
+            'error': 'DATAGEN producer sha256 or byte count mismatch',
+            'sha256': actual_sha,
+            'bytes': actual_bytes,
+        }, status=400)
+
+    if chunk.producer_sha256:
+        if (
+            chunk.producer_sha256 == actual_sha
+            and chunk.producer_bytes == actual_bytes
+            and chunk.producer_commit == producer_commit
+        ):
+            registered = DatagenProducerArtifact.objects.filter(
+                sha256=actual_sha, bytes=actual_bytes
+            ).first()
+            if registered is not None:
+                try:
+                    stored_identity = _hash_regular_file(
+                        FileSystemStorage().path(registered.filename())
+                    )
+                except OSError:
+                    stored_identity = None
+                if stored_identity == (actual_sha, actual_bytes):
+                    return JsonResponse({
+                        'sha256': actual_sha,
+                        'bytes': actual_bytes,
+                        'commit': producer_commit,
+                        'already_registered': True,
+                    })
+            # Repair missing CAS metadata from the just-authenticated upload.
+            # A conflicting existing blob still fails below.
+        if (
+            chunk.producer_sha256 != actual_sha
+            or chunk.producer_bytes != actual_bytes
+            or chunk.producer_commit != producer_commit
+        ):
+            return JsonResponse(
+                {'error': 'DATAGEN chunk is already bound to another producer'},
+                status=409,
+            )
+
+    storage = FileSystemStorage()
+    staging_name = 'datagen-producers/.staging/%d-%d-%s' % (
+        test_id, chunk_idx, secrets.token_hex(16),
+    )
+    artifact = DatagenProducerArtifact(
+        sha256=actual_sha, bytes=actual_bytes,
+    )
+    canonical_name = artifact.filename()
+
+    def cleanup_staging():
+        try:
+            if storage.exists(staging_name):
+                storage.delete(staging_name)
+        except OSError:
+            pass
+
+    try:
+        saved_name = storage.save(staging_name, upload)
+        if saved_name != staging_name:
+            cleanup_staging()
+            if storage.exists(saved_name):
+                storage.delete(saved_name)
+            return JsonResponse(
+                {'error': 'Unable to stage DATAGEN producer at canonical path'},
+                status=500,
+            )
+
+        canonical_path = storage.path(canonical_name)
+        os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
+        promote = True
+        if os.path.lexists(canonical_path):
+            try:
+                stored_sha, stored_bytes = _hash_regular_file(canonical_path)
+            except OSError:
+                stored_sha, stored_bytes = None, None
+            promote = stored_sha != actual_sha or stored_bytes != actual_bytes
+        if promote:
+            try:
+                os.replace(storage.path(staging_name), canonical_path)
+            except OSError:
+                return JsonResponse(
+                    {'error': 'Unable to promote DATAGEN producer artifact'},
+                    status=500,
+                )
+        try:
+            final_identity = _hash_regular_file(canonical_path)
+        except OSError:
+            final_identity = None
+        if final_identity != (actual_sha, actual_bytes):
+            return JsonResponse(
+                {'error': 'Promoted DATAGEN producer artifact failed verification'},
+                status=500,
+            )
+
+        with transaction.atomic():
+            stored, _ = DatagenProducerArtifact.objects.get_or_create(
+                sha256=actual_sha,
+                defaults={'bytes': actual_bytes},
+            )
+            if stored.bytes != actual_bytes:
+                return JsonResponse(
+                    {'error': 'DATAGEN producer database identity conflict'},
+                    status=500,
+                )
+
+            bound = DatagenChunk.objects.filter(
+                pk=chunk.pk,
+                status=DatagenChunk.RUNNING,
+                machine_id=machine.id,
+                producer_sha256='',
+                test__finished=False,
+                test__deleted=False,
+            ).update(
+                producer_sha256=actual_sha,
+                producer_bytes=actual_bytes,
+                producer_commit=producer_commit,
+            )
+            if bound != 1:
+                current = DatagenChunk.objects.get(pk=chunk.pk)
+                if not (
+                    current.status == DatagenChunk.RUNNING
+                    and current.machine_id == machine.id
+                    and current.producer_sha256 == actual_sha
+                    and current.producer_bytes == actual_bytes
+                    and current.producer_commit == producer_commit
+                ):
+                    transaction.set_rollback(True)
+                    return JsonResponse(
+                        {'error': 'DATAGEN chunk lease or producer binding changed'},
+                        status=409,
+                    )
+
+        return JsonResponse({
+            'sha256': actual_sha,
+            'bytes': actual_bytes,
+            'commit': producer_commit,
+            'already_registered': False,
+        })
+
+    finally:
+        cleanup_staging()
+
 @csrf_exempt
 @verify_worker
 def client_submit_datagen(request, machine):
@@ -876,13 +1110,7 @@ def client_submit_datagen(request, machine):
     except (KeyError, ValueError, AssertionError):
         return JsonResponse({'error': 'Malformed DATAGEN upload'}, status=400)
 
-    digest = hashlib.sha256()
-    actual_bytes = 0
-    for block in upload.chunks():
-        digest.update(block)
-        actual_bytes += len(block)
-    actual_sha = digest.hexdigest()
-    upload.seek(0)
+    actual_sha, actual_bytes = _datagen_uploaded_digest(upload)
 
     if actual_sha != expected_sha or actual_bytes != expected_bytes:
         return JsonResponse({
@@ -898,6 +1126,9 @@ def client_submit_datagen(request, machine):
         return JsonResponse({
             'sha256': actual_sha,
             'bytes': actual_bytes,
+            'producer_sha256': chunk.producer_sha256 or None,
+            'producer_bytes': chunk.producer_bytes,
+            'producer_commit': chunk.producer_commit or None,
             'completed_chunks': completed,
             'total_chunks': total,
             'positions': positions,
@@ -908,6 +1139,48 @@ def client_submit_datagen(request, machine):
     chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
     if test is None or chunk is None or not test.is_generic_datagen():
         return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+
+    if test.datagen_requires_producer_artifact():
+        try:
+            submitted_producer = request.POST['producer_sha256'].lower()
+            submitted_producer_bytes = int(request.POST['producer_bytes'])
+            submitted_producer_commit = request.POST['producer_commit'].lower()
+            assert re.fullmatch(r'[0-9a-f]{64}', submitted_producer)
+            assert re.fullmatch(r'[0-9a-f]{40}', submitted_producer_commit)
+            assert submitted_producer_bytes > 0
+        except (KeyError, ValueError, AssertionError):
+            return JsonResponse(
+                {'error': 'DATAGEN upload omitted producer evidence'}, status=400
+            )
+        if (
+            not chunk.producer_sha256
+            or submitted_producer != chunk.producer_sha256
+            or submitted_producer_bytes != chunk.producer_bytes
+            or submitted_producer_commit != chunk.producer_commit
+        ):
+            return JsonResponse(
+                {'error': 'DATAGEN upload producer evidence does not match lease'},
+                status=409,
+            )
+        artifact = DatagenProducerArtifact.objects.filter(
+            sha256=chunk.producer_sha256,
+            bytes=chunk.producer_bytes,
+        ).first()
+        try:
+            stored_producer = (
+                None if artifact is None else _hash_regular_file(
+                    FileSystemStorage().path(artifact.filename())
+                )
+            )
+        except OSError:
+            stored_producer = None
+        if stored_producer != (
+            chunk.producer_sha256, chunk.producer_bytes
+        ):
+            return JsonResponse(
+                {'error': 'DATAGEN producer artifact is unavailable or corrupt'},
+                status=409,
+            )
 
     # Lost HTTP responses may cause an identical retry. Keep completed chunks
     # immutable while accepting that retry idempotently without staging again.
@@ -1228,6 +1501,124 @@ def api_datagen_chunk(request, test_id, chunk_idx):
     response['Expires'] = -1
     response['Content-Length'] = os.path.getsize(path)
     response['Content-Disposition'] = 'attachment; filename=chunk_%d.bz2' % chunk_idx
+    return response
+
+
+@csrf_exempt
+def api_datagen_manifest(request, test_id):
+
+    if not api_authenticate(request):
+        return api_response({ 'error' : 'API requires authentication for this server' })
+
+    test = Test.objects.filter(id=test_id).first()
+    if test is None or not test.is_generic_datagen():
+        return api_response({
+            'error': 'Unable to find generic DATAGEN Workload #%d' % test_id
+        })
+
+    chunks = list(test.datagen_chunks.order_by('idx'))
+    if (
+        not test.finished
+        or test.datagen_completed_chunks != test.datagen_total_chunks()
+        or any(chunk.status != DatagenChunk.COMPLETED for chunk in chunks)
+    ):
+        return api_response({
+            'error': 'DATAGEN Workload #%d is not complete' % test_id
+        })
+
+    producer_required = test.datagen_requires_producer_artifact()
+    if producer_required:
+        expected_commit = test.dev.sha.lower()
+        if (
+            not re.fullmatch(r'[0-9a-f]{40}', expected_commit)
+            or any(
+                not re.fullmatch(r'[0-9a-f]{64}', chunk.producer_sha256)
+                or chunk.producer_bytes <= 0
+                or chunk.producer_commit != expected_commit
+                for chunk in chunks
+            )
+        ):
+            return api_response({
+                'error': 'DATAGEN Workload #%d has incomplete producer evidence'
+                         % test_id
+            })
+
+        for producer_sha256, producer_bytes in sorted({
+            (chunk.producer_sha256, chunk.producer_bytes) for chunk in chunks
+        }):
+            artifact = DatagenProducerArtifact.objects.filter(
+                sha256=producer_sha256, bytes=producer_bytes
+            ).first()
+            try:
+                identity = (
+                    None if artifact is None else _hash_regular_file(
+                        FileSystemStorage().path(artifact.filename())
+                    )
+                )
+            except OSError:
+                identity = None
+            if identity != (producer_sha256, producer_bytes):
+                return api_response({
+                    'error': 'DATAGEN Workload #%d has unavailable producer evidence'
+                             % test_id
+                })
+
+    return api_response({
+        'test_id': test.id,
+        'engine': test.dev_engine,
+        'producer_commit': test.dev.sha.lower(),
+        'producer_artifact_required': producer_required,
+        'total_count': test.datagen_total_count,
+        'positions_per_chunk': test.datagen_positions_per_chunk,
+        'base_seed': test.datagen_base_seed,
+        'chunks': [
+            {
+                'index': chunk.idx,
+                'seed': chunk.seed(),
+                'positions': chunk.position_count,
+                'artifact_sha256': chunk.sha256,
+                'artifact_bytes': chunk.bytes,
+                'producer_sha256': chunk.producer_sha256 or None,
+                'producer_bytes': chunk.producer_bytes,
+                'producer_commit': chunk.producer_commit or None,
+            }
+            for chunk in chunks
+        ],
+    })
+
+
+@csrf_exempt
+def api_datagen_producer(request, sha256):
+
+    if not api_authenticate(request):
+        return api_response({ 'error' : 'API requires authentication for this server' })
+
+    sha256 = sha256.lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', sha256):
+        return api_response({'error': 'Malformed DATAGEN producer SHA-256'})
+
+    artifact = DatagenProducerArtifact.objects.filter(sha256=sha256).first()
+    if artifact is None:
+        return api_response({'error': 'Unable to find DATAGEN producer artifact'})
+
+    path = FileSystemStorage().path(artifact.filename())
+    try:
+        identity = _hash_regular_file(path)
+    except OSError:
+        identity = None
+    if identity != (artifact.sha256, artifact.bytes):
+        return api_response({
+            'error': 'DATAGEN producer metadata exists but file is invalid'
+        })
+
+    fwrapper = FileWrapper(open(path, 'rb'), 8192)
+    response = FileResponse(fwrapper, content_type='application/octet-stream')
+    response['Expires'] = -1
+    response['Content-Length'] = artifact.bytes
+    response['ETag'] = '"sha256:%s"' % artifact.sha256
+    response['Content-Disposition'] = (
+        'attachment; filename=producer-%s.bin' % artifact.sha256
+    )
     return response
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #

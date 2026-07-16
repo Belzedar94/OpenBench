@@ -238,6 +238,8 @@
                 <th>Machine</th>
                 <th>Bytes</th>
                 <th>SHA256</th>
+                <th>Producer SHA256</th>
+                <th>Producer commit</th>
                 <th>Completed</th>
                 <th>File</th>
             </tr>
@@ -257,6 +259,14 @@
                     </td>
                     <td class="numeric">{{chunk.bytes}}</td>
                     <td><code>{{chunk.sha256}}</code></td>
+                    <td>
+                        {% if chunk.producer_sha256 %}
+                            <a href="/api/datagen-producer/{{chunk.producer_sha256}}/"><code>{{chunk.producer_sha256}}</code></a>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{% if chunk.producer_commit %}<code>{{chunk.producer_commit}}</code>{% else %}-{% endif %}</td>
                     <td>{% if chunk.completed %}<span class="timestamp">{{chunk.completed|date:'U'}}</span>{% else %}-{% endif %}</td>
                     <td>
                         {% if chunk.status == "COMPLETED" %}

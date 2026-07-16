@@ -18,6 +18,11 @@ DATAGEN_LEASE = datetime.timedelta(minutes=5)
 MAX_DATAGEN_CHUNKS = 100000
 DATAGEN_CHUNK_CREATE_BATCH = 1000
 
+# Producer executables are build evidence, not dataset payloads.  Bound them
+# independently so a compromised worker cannot use the CAS endpoint as an
+# unbounded second artifact channel.
+MAX_DATAGEN_PRODUCER_BYTES = 2 * 1024 * 1024 * 1024
+
 # ``Test.max_games`` remains a signed 32-bit IntegerField for historical
 # gameplay workloads. Generic DATAGEN keeps its canonical 64-bit total in
 # ``datagen_total_count`` and only mirrors a saturated summary into max_games.
@@ -149,6 +154,9 @@ def claim_chunk(test, machine):
                     completed=None,
                     sha256='',
                     bytes=0,
+                    producer_sha256='',
+                    producer_bytes=0,
+                    producer_commit='',
                     attempts=F('attempts') + 1,
                     last_error='',
                 )
@@ -165,6 +173,9 @@ def claim_chunk(test, machine):
                 chunk.completed = None
                 chunk.sha256 = ''
                 chunk.bytes = 0
+                chunk.producer_sha256 = ''
+                chunk.producer_bytes = 0
+                chunk.producer_commit = ''
                 chunk.attempts += 1
                 chunk.last_error = ''
                 return chunk
@@ -221,6 +232,9 @@ def requeue_chunk(test_id, chunk_idx, machine, error=''):
         completed=None,
         sha256='',
         bytes=0,
+        producer_sha256='',
+        producer_bytes=0,
+        producer_commit='',
         last_error=error[:4096],
     ) == 1
 
@@ -237,6 +251,9 @@ def requeue_running_chunks(test):
         status=DatagenChunk.PENDING,
         machine=None,
         assigned=None,
+        producer_sha256='',
+        producer_bytes=0,
+        producer_commit='',
         last_error='Requeued by workload restart',
     )
 

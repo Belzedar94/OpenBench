@@ -85,6 +85,7 @@ urlpatterns = [
     django.urls.path(r'clientSubmitResults/', OpenBench.views.client_submit_results),
     django.urls.path(r'clientHeartbeat/', OpenBench.views.client_heartbeat),
     django.urls.path(r'clientSubmitPGN/', OpenBench.views.client_submit_pgn),
+    django.urls.path(r'clientSubmitDatagenProducer/', OpenBench.views.client_submit_datagen_producer),
     django.urls.path(r'clientSubmitDatagen/', OpenBench.views.client_submit_datagen),
 
     # Nice endpoints, which can be hit from the website or with credentials cleanly
@@ -95,6 +96,8 @@ urlpatterns = [
     django.urls.path(r'api/buildinfo/', OpenBench.views.api_build_info),
     django.urls.path(r'api/pgns/<int:pgn_id>/', OpenBench.views.api_pgns),
     django.urls.path(r'api/datagen/<int:test_id>/<int:chunk_idx>/', OpenBench.views.api_datagen_chunk),
+    django.urls.path(r'api/datagen/<int:test_id>/', OpenBench.views.api_datagen_manifest),
+    django.urls.path(r'api/datagen-producer/<str:sha256>/', OpenBench.views.api_datagen_producer),
 
     # Redirect anything else to the Index
     django.urls.path(r'', OpenBench.views.index),

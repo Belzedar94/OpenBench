@@ -18,6 +18,8 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+import string
+
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
 from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField, TextField
 from django.db.models import CASCADE, PROTECT, SET_NULL, Model, UniqueConstraint
@@ -193,6 +195,18 @@ class Test(Model):
     def is_generic_datagen(self):
         return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
 
+    def datagen_requires_producer_artifact(self):
+        if not self.is_generic_datagen():
+            return False
+        try:
+            return any(
+                name == 'PRODUCER_SHA256'
+                for _literal, name, _format_spec, _conversion
+                in string.Formatter().parse(self.datagen_command)
+            )
+        except ValueError:
+            return False
+
     def datagen_total_chunks(self):
         if not self.datagen_positions_per_chunk:
             return 0
@@ -213,6 +227,9 @@ class DatagenChunk(Model):
     status      = CharField(max_length=16, default=PENDING)
     sha256      = CharField(max_length=64, default='', blank=True)
     bytes       = BigIntegerField(default=0)
+    producer_sha256 = CharField(max_length=64, default='', blank=True)
+    producer_bytes  = BigIntegerField(default=0)
+    producer_commit = CharField(max_length=40, default='', blank=True)
     machine     = ForeignKey(
         'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)
     attempts    = IntegerField(default=0)
@@ -236,6 +253,24 @@ class DatagenChunk(Model):
 
     def seed(self):
         return self.test.datagen_base_seed + self.idx
+
+
+class DatagenProducerArtifact(Model):
+
+    # The executable itself is immutable content-addressed evidence.  Chunk
+    # rows deliberately keep their own commit binding because identical bytes
+    # can truthfully be produced from more than one source commit.
+    sha256 = CharField(max_length=64, unique=True)
+    bytes  = BigIntegerField()
+    created = DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return 'DATAGEN producer %s' % self.sha256
+
+    def filename(self):
+        return 'datagen-producers/sha256/%s/%s' % (
+            self.sha256[:2], self.sha256,
+        )
 
 class LogEvent(Model):
 
