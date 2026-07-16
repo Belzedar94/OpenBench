@@ -251,6 +251,12 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 
 ## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-15)
 
+- El protocolo v38 corrige la actualización en caliente de dependencias del
+  worker y liga cada `machine_id` al usuario autenticado. Un cliente con un ID
+  persistido de otra cuenta recibe `Bad Machine Id`, elimina `machine.txt` y se
+  registra con una identidad nueva antes de poder reclamar un chunk. Desactivar
+  el perfil revoca también las sesiones de worker que ya estaban conectadas.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.

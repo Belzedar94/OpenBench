@@ -24,6 +24,8 @@ from collections import deque
 import cpuinfo
 import glob
 import hashlib
+import importlib
+import inspect
 import json
 import multiprocessing
 import os
@@ -48,6 +50,20 @@ from concurrent.futures import ThreadPoolExecutor, wait
 ## Local imports
 
 import bench
+import genfens as client_genfens
+import pgn_util as client_pgn_util
+import utils as client_utils
+
+# ``client.py`` is intentionally not replaced by the hot updater.  Older
+# bootstraps therefore reload this module after copying the new Client files,
+# while already-imported dependency modules would otherwise remain stale in
+# ``sys.modules``.  Reload them in dependency order before importing their
+# public helpers so a worker and its support code always come from the same
+# downloaded client version.
+client_utils = importlib.reload(client_utils)
+bench = importlib.reload(bench)
+client_genfens = importlib.reload(client_genfens)
+client_pgn_util = importlib.reload(client_pgn_util)
 
 from client import BadVersionException
 from client import url_join
@@ -59,7 +75,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 37 # Client version to send to the Server
+CLIENT_VERSION   = 38 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -69,6 +85,75 @@ DATAGEN_TRANSFER_RETRY_DELAY = 5
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
+
+
+def download_opening_book_compatible(
+    book_sha, book_source, book_name, book_raw_sha=None
+):
+    """Download a book across an in-process Client hot update.
+
+    Version 37 added the fourth raw-SHA argument.  Reloading ``utils`` above is
+    the durable fix, while this narrow adapter lets a process recover if an
+    embedded/legacy bootstrap prevents that reload.  Signature inspection is
+    deliberate: catching ``TypeError`` from the call would also hide a real
+    error raised inside a modern four-argument implementation.
+    """
+
+    try:
+        parameters = list(
+            inspect.signature(download_opening_book).parameters.values()
+        )
+    except (TypeError, ValueError):
+        parameters = ()
+
+    positional_parameters = [
+        parameter for parameter in parameters
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    supports_positional_raw_sha = not parameters or any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL
+        for parameter in parameters
+    ) or len(positional_parameters) >= 4
+
+    if supports_positional_raw_sha:
+        return download_opening_book(
+            book_sha, book_source, book_name, book_raw_sha
+        )
+
+    supports_keyword_raw_sha = any(
+        parameter.name == 'book_raw_sha'
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if supports_keyword_raw_sha:
+        return download_opening_book(
+            book_sha,
+            book_source,
+            book_name,
+            book_raw_sha=book_raw_sha,
+        )
+
+    print('[Note] Legacy opening-book helper detected after Client hot update.')
+    result = download_opening_book(book_sha, book_source, book_name)
+
+    # Preserve the v37 raw-byte contract even when adapting a legacy helper.
+    # The old function has already verified the normalized identity here.
+    if book_raw_sha and book_name.upper() != 'NONE':
+        book_path = os.path.join('Books', book_name)
+        with open(book_path, 'rb') as book_file:
+            raw_sha256 = hashlib.sha256(book_file.read()).hexdigest()
+        print('Correct Raw  %s' % book_raw_sha.upper())
+        print('Download Raw %s\n' % raw_sha256.upper())
+        if book_raw_sha.upper() != raw_sha256.upper():
+            os.remove(book_path)
+            raise OpenBenchCorruptedBookException(
+                'Invalid raw sha for %s' % book_name
+            )
+
+    return result
 
 
 class Configuration:
@@ -1378,7 +1463,8 @@ def server_configure_worker(config):
     # Delete the machine.txt if we have saved an invalid machine number
     if response.get('error', '').lower() == "bad machine id":
         config.machine_id = 'None'
-        os.remove('machine.txt')
+        if os.path.isfile('machine.txt'):
+            os.remove('machine.txt')
 
     # Throw all the way back to the client.py
     if 'Bad Client Version' in response.get('error', ''):
@@ -1740,7 +1826,7 @@ def complete_datagen_workload(config):
             )
 
         with DatagenHeartbeat(config) as heartbeat:
-            download_opening_book(
+            download_opening_book_compatible(
                 test['book']['sha'],
                 test['book']['source'],
                 test['book']['name'],
@@ -1856,7 +1942,7 @@ def complete_workload(config):
         return complete_datagen_workload(config)
 
     # Download the opening book, throws an exception on corruption
-    download_opening_book(
+    download_opening_book_compatible(
         config.workload['test']['book']['sha'   ],
         config.workload['test']['book']['source'],
         config.workload['test']['book']['name'  ],

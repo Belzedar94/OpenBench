@@ -1,5 +1,11 @@
 # DATAGEN distribuido
 
+> Worker protocol v38 reloads hot-updated Client dependencies before running
+> a workload and binds persisted machine IDs to their authenticated owner. This
+> prevents mixed-version book helpers and cross-account lease collisions.
+> Disabling a worker profile also revokes its existing session immediately and
+> asks an active workload to stop at its next heartbeat.
+
 Este fork añade un workload `DATAGEN` genérico. OpenBench distribuye trabajo,
 verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
 conoce el formato de entrenamiento ni concatena archivos; esas responsabilidades
@@ -158,7 +164,7 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 37; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión 38; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
@@ -169,7 +175,7 @@ de `Media/`. En una ventana coordinada:
    después `python manage.py migrate`.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 37 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes versión 38 de forma gradual y vigilar logs, disco y leases.
 
 No usar `--fake` para `0002`: esa migración crea las columnas DATAGEN y la tabla
 de chunks. Para upstream hacia sscg13 hay que rebasar estos commits sobre su

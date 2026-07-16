@@ -634,6 +634,16 @@ def verify_worker(function):
         if machine.secret != args[0].POST['secret']:
             return JsonResponse({ 'error' : 'Invalid Secret Token' })
 
+        # Disabling a worker account must revoke already-issued sessions as
+        # well as prevent fresh credential authentication.  Otherwise a
+        # connected worker can continue claiming and requeueing chunks until
+        # its process is manually stopped.
+        if not Profile.objects.filter(user=machine.user, enabled=True).exists():
+            return JsonResponse({
+                'error' : 'Worker Account Disabled',
+                'stop'  : True,
+            })
+
         # Otherwise, carry on, and pass along the machine
         return function(*args, machine)
 

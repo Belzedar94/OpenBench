@@ -154,6 +154,99 @@ class DatagenWorkerTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_opening_book_adapter_accepts_legacy_three_argument_helper(self):
+        calls = []
+        content = b'atomic opening\r\n'
+
+        def legacy(book_sha, book_source, book_name):
+            calls.append((book_sha, book_source, book_name))
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                Path('Books').mkdir()
+                Path('Books', 'atomic.epd').write_bytes(content)
+                with mock.patch.object(worker, 'download_opening_book', legacy):
+                    worker.download_opening_book_compatible(
+                        'normalized',
+                        'source',
+                        'atomic.epd',
+                        hashlib.sha256(content).hexdigest(),
+                    )
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(calls, [('normalized', 'source', 'atomic.epd')])
+
+    def test_opening_book_adapter_enforces_raw_sha_with_legacy_helper(self):
+        def legacy(book_sha, book_source, book_name):
+            pass
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                Path('Books').mkdir()
+                book = Path('Books', 'atomic.epd')
+                book.write_bytes(b'wrong bytes')
+                with mock.patch.object(worker, 'download_opening_book', legacy):
+                    with self.assertRaisesRegex(
+                        worker.OpenBenchCorruptedBookException, 'Invalid raw sha'
+                    ):
+                        worker.download_opening_book_compatible(
+                            'normalized', 'source', book.name, '0' * 64
+                        )
+                self.assertFalse(book.exists())
+            finally:
+                os.chdir(previous)
+
+    def test_opening_book_adapter_passes_raw_sha_to_modern_helper(self):
+        calls = []
+
+        def modern(book_sha, book_source, book_name, book_raw_sha=None):
+            calls.append((book_sha, book_source, book_name, book_raw_sha))
+
+        with mock.patch.object(worker, 'download_opening_book', modern):
+            worker.download_opening_book_compatible(
+                'normalized', 'source', 'atomic.epd', 'raw'
+            )
+
+        self.assertEqual(
+            calls, [('normalized', 'source', 'atomic.epd', 'raw')]
+        )
+
+    def test_opening_book_adapter_uses_keyword_for_kwargs_helper(self):
+        calls = []
+
+        def modern(book_sha, book_source, book_name, **kwargs):
+            calls.append((book_sha, book_source, book_name, kwargs))
+
+        with mock.patch.object(worker, 'download_opening_book', modern):
+            worker.download_opening_book_compatible(
+                'normalized', 'source', 'atomic.epd', 'raw'
+            )
+
+        self.assertEqual(
+            calls,
+            [(
+                'normalized',
+                'source',
+                'atomic.epd',
+                {'book_raw_sha': 'raw'},
+            )],
+        )
+
+    def test_opening_book_adapter_does_not_hide_modern_internal_type_error(self):
+        def modern(book_sha, book_source, book_name, book_raw_sha=None):
+            raise TypeError('modern helper failed internally')
+
+        with mock.patch.object(worker, 'download_opening_book', modern):
+            with self.assertRaisesRegex(TypeError, 'failed internally'):
+                worker.download_opening_book_compatible(
+                    'normalized', 'source', 'atomic.epd', 'raw'
+                )
+
     def test_cleanup_removes_stale_datagen_sidecar_directories(self):
         with tempfile.TemporaryDirectory() as cwd:
             previous = os.getcwd()
