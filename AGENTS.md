@@ -79,7 +79,12 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
 1. **Repo público en GitHub** (el flujo público compila EN el worker; el flujo privado
    necesita artifacts de GitHub Actions y un PAT — evítalo si puedes).
 2. **Contrato de build**: el worker ejecuta, con cwd = `build.path` de tu json:
-   `make -j EXE=<salida> [CC=<compiler>] [EVALFILE=<red>]` — SIN target y SIN ARCH/COMP.
+   `make -j EXE=<salida> GIT_SHA_FULL=<commit> [CC=<compiler>] [EVALFILE=<red>]`.
+   Un DATAGEN genérico añade `OPENBENCH_DATAGEN=1`; el Makefile debe usarlo si
+   necesita seleccionar un objetivo generador distinto. Las cachés de juego y
+   DATAGEN públicas están separadas. DATAGEN genérico rechaza motores privados
+   porque sus artifacts no declaran el rol play/generator. El worker sigue sin
+   imponer target ni ARCH/COMP.
    Tu Makefile debe producir un binario nativo optimizado con `make` a pelo.
    Spell-Stockfish lo resuelve con un shim al final de `src/Makefile`
    (`.DEFAULT_GOAL := openbench` → `build COMP=<por-OS>`, ARCH ya es native) — cópialo.
@@ -88,8 +93,9 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    (spell aún lo tiene pendiente — ver §7).
 3. **Contrato de bench**: el worker corre `./binario bench` (sin args; con red asignada y
    engine PRIVADO antepone `setoption name EvalFile value <red>`). Requisitos: determinista,
-   < 300 s (timeout ya subido en este fork; se lanza UN bench POR HILO del worker EN
-   PARALELO), imprime `Nodes searched: N`. Disciplina: los commits que se testeen llevan
+   < 300 s (timeout ya subido en este fork; los workloads de juego lanzan UN bench
+   POR HILO del worker EN PARALELO, mientras DATAGEN genérico verifica exactamente
+   uno porque no usa NPS para escalar), imprime `Nodes searched: N`. Disciplina: los commits que se testeen llevan
    `Bench: <N>` al final del mensaje (regex del server: `(?:BENCH|NODES)[ :=]+([0-9,]+)`).
    Spell: `Bench: 13456297` (red default embebida).
 4. **`Engines/Atomic-Stockfish.json`** — copia `Engines/Spell-Stockfish.json` (flujo
@@ -104,7 +110,9 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    `Books/<nombre>.json` con `source` y `sha`. **El sha es sha256 del TEXTO del .epd
    extraído con newlines universales** (así lo computa el worker):
    `python -c "import hashlib;print(hashlib.sha256(open('X.epd').read().encode()).hexdigest())"`
-   — NUNCA en binario `'rb'` (con CRLF no coincide).
+   — NUNCA sustituir este `sha` histórico por el binario (con CRLF no coincide).
+   Si un generador valida los bytes exactos, añade además `raw_sha` calculado con
+   `'rb'`; el cliente verificará ambas identidades.
 6. **`Config/config.json`**: añade tu engine a `"engines"` y tu libro a `"books"`.
    Reinicia el server.
 7. **Redes**: súbelas por web (`/networks/`, engine correspondiente) o
@@ -240,3 +248,22 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   workloads Syzygy; migrar a PostgreSQL si la flota crece.
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
+
+## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-15)
+
+- Contrato y runbook: `docs/datagen-mode.md`.
+- OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
+  proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
+- La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
+  `{BOOK}`, `{BOOK_SHA256}` y `{NETWORK}`. `BOOK_SHA256` es la identidad raw de
+  los bytes extraídos (o la identidad histórica si el manifiesto no publica
+  `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.
+- Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease
+  de cinco minutos durante build, bench, generación y upload; un fallo vuelve a
+  dejar el chunk repartible.
+- El SHA-256 y los bytes registrados corresponden al `.bz2` recibido y son
+  recalculados por el servidor. Los archivos viven en
+  `Media/datagen/<test_id>/chunk_<idx>.bz2`.
+- En este host compartido, limitar builds con `OPENBENCH_BUILD_JOBS=8` y usar
+  clientes dev pequeños; nunca mezclar la DB/Media/clientes de `:8000` con los
+  ensayos de `:8001`.

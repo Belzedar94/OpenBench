@@ -31,6 +31,7 @@ import sys
 import OpenBench.utils
 
 from OpenBench.config import OPENBENCH_CONFIG
+from OpenBench.datagen import claim_chunk, has_assignable_chunk, is_generic_datagen
 from OpenBench.models import Result, Test
 
 from django.db import transaction
@@ -41,6 +42,10 @@ def get_workload(request, machine):
     if not (test := select_workload(request, machine)):
         return {}
 
+    chunk = claim_chunk(test, machine) if is_generic_datagen(test) else None
+    if is_generic_datagen(test) and chunk is None:
+        return {}
+
     # Avoid creating duplicate Result objects
     result, created = Result.objects.get_or_create(test=test, machine=machine)
 
@@ -49,7 +54,7 @@ def get_workload(request, machine):
     machine.mnps = machine.dev_mnps = machine.base_mnps = 0.00
     machine.save(); result.save()
 
-    return { 'workload' : workload_to_dictionary(test, result, machine) }
+    return { 'workload' : workload_to_dictionary(test, result, machine, chunk) }
 
 def select_workload(request, machine):
 
@@ -106,6 +111,7 @@ def filter_valid_workloads(request, machine):
         x for x in workloads
         if valid_tablebase_assignment(x, machine)
         and valid_hardware_assignment(x, machine)
+        and has_assignable_chunk(x)
     ]
 
     # Possible that no work exists for the machine
@@ -196,6 +202,11 @@ def valid_tablebase_assignment(workload, machine):
 
 def valid_hardware_assignment(workload, machine):
 
+    # Generic DATAGEN explicitly receives all threads exposed by this worker;
+    # it does not derive resource needs from chess-game engine options.
+    if is_generic_datagen(workload):
+        return machine.info['concurrency'] > 0
+
     # Extract thread requirements from the workload itself
     dev_threads  = int(OpenBench.utils.extract_option(workload.dev_options,  'Threads'))
     base_threads = int(OpenBench.utils.extract_option(workload.base_options, 'Threads'))
@@ -245,7 +256,7 @@ def compute_resource_distribution(workloads, machine, has_focus):
 
     return worker_dist, engine_freq
 
-def workload_to_dictionary(test, result, machine):
+def workload_to_dictionary(test, result, machine, datagen_chunk=None):
 
     workload = {}
 
@@ -266,10 +277,17 @@ def workload_to_dictionary(test, result, machine):
         'play_reverses' : test.play_reverses,
     }
 
+    book_config = OPENBENCH_CONFIG['books'].get(
+        test.book_name, {'sha': None, 'source': None}
+    )
     workload['test']['book'] = {
         'name'   : test.book_name,
-        'sha'    : OPENBENCH_CONFIG['books'].get(test.book_name, { 'sha'    : None })['sha'   ],
-        'source' : OPENBENCH_CONFIG['books'].get(test.book_name, { 'source' : None })['source'],
+        # ``sha`` preserves OpenBench's historical UTF-8/text-normalized
+        # identity. DATAGEN generators consume the exact extracted bytes, so
+        # books with CRLF content may also publish an explicit raw identity.
+        'sha'     : book_config['sha'],
+        'raw_sha' : book_config.get('raw_sha'),
+        'source'  : book_config['source'],
     }
 
     workload['test']['dev'] = {
@@ -311,6 +329,23 @@ def workload_to_dictionary(test, result, machine):
         ),
         'tablebase_family' : engine_tablebase_family(test.base_engine),
     }
+
+    if is_generic_datagen(test):
+        assert datagen_chunk is not None
+        workload['test']['datagen'] = {
+            'command'             : test.datagen_command,
+            'total_count'         : test.datagen_total_count,
+            'positions_per_chunk' : test.datagen_positions_per_chunk,
+            'base_seed'           : test.datagen_base_seed,
+            'chunk_idx'           : datagen_chunk.idx,
+            'chunk_count'         : datagen_chunk.position_count,
+            'seed'                : test.datagen_base_seed + datagen_chunk.idx,
+            'attempt'             : datagen_chunk.attempts,
+        }
+        workload['distribution'] = None
+        workload['spsa'] = None
+        workload['reporting_type'] = None
+        return workload
 
     workload['distribution']   = game_distribution(test, machine)
     workload['spsa']           = spsa_to_dictionary(test, workload)

@@ -19,8 +19,10 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 import argparse
+import bz2
 from collections import deque
 import cpuinfo
+import glob
 import hashlib
 import json
 import multiprocessing
@@ -30,6 +32,7 @@ import psutil
 import queue
 import re
 import requests
+import shutil
 import subprocess
 import sys
 import threading
@@ -56,11 +59,13 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 35 # Client version to send to the Server
+CLIENT_VERSION   = 37 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
+DATAGEN_TRANSFER_RETRIES = 3
+DATAGEN_TRANSFER_RETRY_DELAY = 5
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -130,7 +135,7 @@ class Configuration:
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
         # Ensure the folder structure for ease of coding
-        for folder in ['PGNs', 'Engines', 'Networks', 'Books']:
+        for folder in ['PGNs', 'Engines', 'Networks', 'Books', 'Datagen']:
             if not os.path.isdir(folder):
                 os.mkdir(folder)
 
@@ -177,6 +182,12 @@ class Configuration:
 
         # For each engine, attempt to find a valid compiler
         for engine, build_info in data.items():
+
+            # Local patch: this worker's Atomic engines stall under load and
+            # kill the whole client (see Spell-Stockfish AUDIT 2026-07-14).
+            # With OB_SKIP_ATOMIC set we do not advertise Atomic compilers,
+            # so the server never assigns Atomic workloads to this machine.
+            if os.environ.get('OB_SKIP_ATOMIC') and 'Atomic' in engine: continue
 
             # Private engines don't need to be compiled
             if build_info['private']: continue
@@ -258,6 +269,10 @@ class ServerReporter:
 
     @staticmethod
     def report(config, endpoint, payload, files=None):
+
+        datagen = (config.workload or {}).get('test', {}).get('datagen')
+        if datagen:
+            payload.setdefault('chunk_idx', datagen['chunk_idx'])
 
         payload['machine_id'] = config.machine_id
         payload['secret']     = config.secret_token
@@ -400,6 +415,38 @@ class ServerReporter:
         }
 
         return ServerReporter.report(config, 'clientSubmitPGN', payload, files)
+
+    @staticmethod
+    def report_datagen(config, path, sha256, byte_count):
+
+        payload = {
+            'test_id': config.workload['test']['id'],
+            'chunk_idx': config.workload['test']['datagen']['chunk_idx'],
+            'sha256': sha256,
+            'bytes': byte_count,
+        }
+
+        target = url_join(config.server, 'clientSubmitDatagen')
+        payload['machine_id'] = config.machine_id
+        payload['secret'] = config.secret_token
+
+        with open(path, 'rb') as data:
+            response = requests.post(
+                target,
+                data=payload,
+                files={'file': (os.path.basename(path), data, 'application/x-bzip2')},
+                timeout=(TIMEOUT_HTTP, 600),
+            )
+
+        try:
+            body = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise RuntimeError('DATAGEN upload returned a non-JSON response')
+
+        if response.status_code != 200 or 'error' in body:
+            raise RuntimeError(body.get('error', 'DATAGEN upload failed'))
+        return body
 
 
 ## Variant -> Runner routing table.
@@ -982,25 +1029,47 @@ def set_cutechess_permissions():
         print ('[ERROR] Unable to set execute permissions on cutechess-ob')
 
 
+def cleanup_stale_path(path, max_age, remove_directories=False):
+
+    try:
+        if time.time() - os.path.getmtime(path) <= max_age:
+            return
+
+        # Datagen is a worker-owned cache and generators may leave sidecar
+        # directories behind. Never recurse through a symlink, though: remove
+        # only the link itself so cleanup cannot escape the cache directory.
+        if remove_directories and os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+
+    except OSError as error:
+        # Antivirus scanners and delayed Windows handles may keep stale paths
+        # locked. Cleanup is best effort and must not stop workload requests.
+        print('[Note] Cleanup deferred for %s: %s' % (path, error))
+
+
 def cleanup_client():
 
     SECONDS_PER_DAY   = 60 * 60 * 24
     SECONDS_PER_WEEK  = SECONDS_PER_DAY * 7
     SECONDS_PER_MONTH = SECONDS_PER_WEEK * 4
 
-    file_age = lambda x: time.time() - os.path.getmtime(x)
-
     for file in os.listdir('PGNs'):
-        if file_age(os.path.join('PGNs', file)) > SECONDS_PER_DAY:
-            os.remove(os.path.join('PGNs', file))
+        cleanup_stale_path(os.path.join('PGNs', file), SECONDS_PER_DAY)
 
     for file in os.listdir('Engines'):
-        if file_age(os.path.join('Engines', file)) > SECONDS_PER_WEEK:
-            os.remove(os.path.join('Engines', file))
+        cleanup_stale_path(os.path.join('Engines', file), SECONDS_PER_WEEK)
 
     for file in os.listdir('Networks'):
-        if file_age(os.path.join('Networks', file)) > SECONDS_PER_MONTH:
-            os.remove(os.path.join('Networks', file))
+        cleanup_stale_path(os.path.join('Networks', file), SECONDS_PER_MONTH)
+
+    for file in os.listdir('Datagen'):
+        cleanup_stale_path(
+            os.path.join('Datagen', file),
+            SECONDS_PER_DAY,
+            remove_directories=True,
+        )
 
 def has_uci_option(options, name):
 
@@ -1350,22 +1419,448 @@ def server_request_workload(config):
 
     # Log the start of a new Workload
     if 'workload' in response:
-        dev_engine  = response['workload']['test']['dev' ]['engine']
-        dev_name    = response['workload']['test']['dev' ]['name'  ]
-        base_engine = response['workload']['test']['base']['engine']
-        base_name   = response['workload']['test']['base']['name'  ]
-        print('Workload [%s] %s vs [%s] %s\n' % (dev_engine, dev_name, base_engine, base_name))
+        test = response['workload']['test']
+        dev_engine = test['dev']['engine']
+        dev_name = test['dev']['name']
+        datagen = test.get('datagen')
+        if test['type'] == 'DATAGEN' and datagen:
+            total_chunks = (
+                datagen['total_count'] + datagen['positions_per_chunk'] - 1
+            ) // datagen['positions_per_chunk']
+            print(
+                'Workload DATAGEN [%s] %s - chunk %d/%d (test #%d)\n'
+                % (
+                    dev_engine,
+                    dev_name,
+                    datagen['chunk_idx'] + 1,
+                    total_chunks,
+                    test['id'],
+                )
+            )
+        else:
+            base_engine = test['base']['engine']
+            base_name = test['base']['name']
+            print(
+                'Workload [%s] %s vs [%s] %s\n'
+                % (dev_engine, dev_name, base_engine, base_name)
+            )
 
     config.workload = response.get('workload', None)
 
 
+class DatagenStopped(Exception):
+    pass
+
+
+class DatagenTransientError(RuntimeError):
+    """Retryable packaging or server-transport failure for one DATAGEN chunk."""
+
+
+class DatagenConfigurationError(RuntimeError):
+    """Non-retryable generic DATAGEN configuration rejected by the client."""
+
+
+DATAGEN_DETERMINISTIC_SETUP_ERRORS = (
+    DatagenConfigurationError,
+)
+
+
+class DatagenHeartbeat:
+
+    def __init__(self, config):
+        self.config = config
+        self.shutdown = threading.Event()
+        self.stop_requested = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback_value):
+        self.shutdown.set()
+        self.thread.join(timeout=1)
+
+    def _run(self):
+        while not self.shutdown.wait(REPORT_INTERVAL):
+            try:
+                response = ServerReporter.report_heartbeat(self.config).json()
+                if 'stop' in response:
+                    self.stop_requested.set()
+                    return
+            except BadVersionException:
+                self.stop_requested.set()
+                return
+            except Exception:
+                traceback.print_exc()
+                print('[Note] Failed to send DATAGEN heartbeat; lease retry continues')
+
+
+def terminate_datagen_process(process):
+    """Terminate only the DATAGEN process tree started by this worker."""
+
+    if process.poll() is not None:
+        return
+
+    targets = []
+    try:
+        parent = psutil.Process(process.pid)
+        targets = parent.children(recursive=True) + [parent]
+        for target in targets:
+            try:
+                target.terminate()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(targets, timeout=5)
+        for target in alive:
+            try:
+                target.kill()
+            except psutil.Error:
+                pass
+    except psutil.Error:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def datagen_file_sha256(path):
+    digest = hashlib.sha256()
+    byte_count = 0
+    with open(path, 'rb') as data:
+        while block := data.read(1024 * 1024):
+            digest.update(block)
+            byte_count += len(block)
+    return digest.hexdigest(), byte_count
+
+
+def compress_datagen_output(source_path, target_path, heartbeat):
+    """Compress one output with bounded retries, replacing partial archives."""
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            if os.path.isfile(target_path):
+                os.remove(target_path)
+            with open(source_path, 'rb') as source:
+                with bz2.open(target_path, 'wb', compresslevel=9) as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+            return
+        except Exception as error:
+            cleanup_error = None
+            try:
+                if os.path.isfile(target_path):
+                    os.remove(target_path)
+            except Exception as removal_error:
+                # Antivirus scanners and delayed Windows handles can briefly
+                # keep the partial archive open. Treat cleanup as part of the
+                # same transient packaging failure instead of escaping into
+                # the deterministic generator/blacklist path.
+                cleanup_error = removal_error
+            if attempt + 1 == DATAGEN_TRANSFER_RETRIES:
+                detail = str(error)
+                if cleanup_error is not None:
+                    detail += '; partial archive cleanup failed: %s' % cleanup_error
+                raise DatagenTransientError(
+                    'DATAGEN bzip2 compression failed after %d attempts: %s'
+                    % (DATAGEN_TRANSFER_RETRIES, detail)
+                ) from error
+            traceback.print_exc()
+            if heartbeat.stop_requested.wait(DATAGEN_TRANSFER_RETRY_DELAY):
+                raise DatagenStopped()
+
+
+def upload_datagen_output(config, path, sha256, byte_count, heartbeat):
+    """Upload one immutable archive with bounded transport retries."""
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            response = ServerReporter.report_datagen(
+                config, path, sha256, byte_count
+            )
+            for field in ('completed_chunks', 'total_chunks'):
+                if field not in response:
+                    raise RuntimeError(
+                        'DATAGEN upload response omitted %s' % field
+                    )
+            return response
+        except BadVersionException:
+            raise
+        except Exception as error:
+            if attempt + 1 == DATAGEN_TRANSFER_RETRIES:
+                raise DatagenTransientError(
+                    'DATAGEN upload failed after %d attempts: %s'
+                    % (DATAGEN_TRANSFER_RETRIES, error)
+                ) from error
+            traceback.print_exc()
+            if heartbeat.stop_requested.wait(DATAGEN_TRANSFER_RETRY_DELAY):
+                raise DatagenStopped()
+
+
+def report_datagen_transient_failure(config, summary, logs):
+    """Ask the server to requeue the lease, retrying only the report itself.
+
+    If every report attempt fails, the heartbeat lease remains the final
+    safety net and the server will make the chunk assignable after expiry.
+    """
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            response = ServerReporter.report_engine_error(config, summary, logs)
+            response.raise_for_status()
+            return True
+        except BadVersionException:
+            raise
+        except Exception:
+            traceback.print_exc()
+            if attempt + 1 < DATAGEN_TRANSFER_RETRIES:
+                time.sleep(DATAGEN_TRANSFER_RETRY_DELAY)
+    return False
+
+
+def handle_datagen_transient_failure(config, chunk, log_path, error):
+    logs = datagen_log_tail(log_path)
+    summary = 'DATAGEN chunk %d transient failure: %s' % (
+        chunk['chunk_idx'], error
+    )
+    if not report_datagen_transient_failure(config, summary, logs):
+        print(
+            '[Note] Failed to report transient DATAGEN failure; '
+            'the server lease will safely expire'
+        )
+
+
+def datagen_log_tail(path, limit=65536):
+    if not os.path.exists(path):
+        return ''
+    with open(path, 'rb') as log:
+        log.seek(0, os.SEEK_END)
+        size = log.tell()
+        log.seek(max(0, size - limit), os.SEEK_SET)
+        return log.read().decode('utf-8', errors='replace')
+
+
+def clean_datagen_workspace(output_path):
+    """Best-effort removal of files belonging to one DATAGEN chunk attempt."""
+
+    errors = []
+    for path in [output_path] + glob.glob(output_path + '.*'):
+        if os.path.isfile(path) or os.path.islink(path):
+            try:
+                os.remove(path)
+            except OSError as error:
+                errors.append('%s: %s' % (path, error))
+    return errors
+
+
+def render_datagen_command(config, output_path, network_path=None):
+    data = config.workload['test']['datagen']
+    book = config.workload['test']['book']
+    book_name = book['name']
+    book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
+    book_raw_sha = book.get('raw_sha') or book.get('sha')
+    values = {
+        'SEED': str(data['seed']),
+        'COUNT': str(data['chunk_count']),
+        'OUT': output_path.replace('\\', '/'),
+        'THREADS': str(config.threads),
+        'BOOK': book_path.replace('\\', '/'),
+        'BOOK_SHA256': (
+            'NONE' if not book_raw_sha else str(book_raw_sha).upper()
+        ),
+        'NETWORK': (
+            'NONE' if not network_path else network_path.replace('\\', '/')
+        ),
+    }
+    return data['command'].format_map(values)
+
+
+def run_datagen_command(
+    config, engine, output_path, log_path, heartbeat, network_path=None
+):
+    command = render_datagen_command(config, output_path, network_path)
+    print('DATAGEN command: %s' % command)
+
+    with open(log_path, 'wb') as log:
+        process = Popen(
+            [engine],
+            stdin=PIPE,
+            stdout=log,
+            stderr=STDOUT,
+            text=True,
+        )
+        try:
+            process.stdin.write(command + '\nquit\n')
+            process.stdin.flush()
+            process.stdin.close()
+
+            while process.poll() is None:
+                if heartbeat.stop_requested.is_set() or os.path.isfile('openbench.exit'):
+                    terminate_datagen_process(process)
+                    raise DatagenStopped()
+                time.sleep(1)
+        except Exception:
+            terminate_datagen_process(process)
+            raise
+
+    if process.returncode != 0:
+        raise RuntimeError('DATAGEN engine exited with code %d' % process.returncode)
+    if not os.path.isfile(output_path):
+        raise RuntimeError('DATAGEN command completed without creating {OUT}')
+
+
+def complete_datagen_workload(config):
+    test = config.workload['test']
+    chunk = test['datagen']
+    stem = 'test_%d_chunk_%d' % (test['id'], chunk['chunk_idx'])
+    output_path = os.path.join('Datagen', stem + '.bin')
+    compressed_path = output_path + '.bz2'
+    log_path = os.path.join('Datagen', stem + '.log')
+    setup_complete = False
+
+    try:
+        cleanup_errors = clean_datagen_workspace(output_path)
+        try:
+            if os.path.isfile(log_path):
+                os.remove(log_path)
+        except OSError as error:
+            cleanup_errors.append('%s: %s' % (log_path, error))
+        if cleanup_errors:
+            raise DatagenTransientError(
+                'DATAGEN workspace cleanup failed: %s'
+                % '; '.join(cleanup_errors)
+            )
+
+        with DatagenHeartbeat(config) as heartbeat:
+            download_opening_book(
+                test['book']['sha'],
+                test['book']['source'],
+                test['book']['name'],
+                test['book'].get('raw_sha'),
+            )
+            dev_network = safe_download_network_weights(config, 'dev')
+            dev_name = safe_download_engine(config, 'dev', dev_network)
+            setup_complete = True
+            # DATAGEN needs one deterministic compatibility check. Its NPS is
+            # informational only and is never used to scale generation work.
+            dev_nps = safe_run_benchmarks(
+                config, 'dev', dev_name, dev_network, bench_threads=1
+            )
+            try:
+                ServerReporter.report_nps(config, dev_nps, dev_nps).raise_for_status()
+            except BadVersionException:
+                raise
+            except Exception as error:
+                raise DatagenTransientError(
+                    'DATAGEN NPS report failed: %s' % error
+                ) from error
+
+            if heartbeat.stop_requested.is_set():
+                raise DatagenStopped()
+
+            run_datagen_command(
+                config,
+                os.path.join('Engines', dev_name),
+                output_path,
+                log_path,
+                heartbeat,
+                dev_network,
+            )
+
+            compress_datagen_output(output_path, compressed_path, heartbeat)
+            try:
+                sha256, byte_count = datagen_file_sha256(compressed_path)
+            except Exception as error:
+                raise DatagenTransientError(
+                    'DATAGEN archive hashing failed: %s' % error
+                ) from error
+            response = upload_datagen_output(
+                config, compressed_path, sha256, byte_count, heartbeat
+            )
+
+            print(
+                'Uploaded DATAGEN chunk %d: %d bytes, sha256 %s (%d/%d complete)'
+                % (
+                    chunk['chunk_idx'],
+                    byte_count,
+                    sha256,
+                    response['completed_chunks'],
+                    response['total_chunks'],
+                )
+            )
+
+    except DatagenStopped:
+        print('DATAGEN chunk stopped by server; local process tree was terminated')
+        return
+
+    except BadVersionException:
+        raise
+
+    except (OpenBenchBuildFailedException,
+            OpenBenchMissingArtifactException,
+            OpenBenchBadBenchException):
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    except DatagenTransientError as error:
+        handle_datagen_transient_failure(config, chunk, log_path, error)
+        # Do not blacklist the workload: another worker (or this worker on a
+        # later scheduler pass) may safely retry the now-requeued chunk.
+        raise
+
+    except Exception as error:
+        if (
+            not setup_complete
+            and not isinstance(error, DATAGEN_DETERMINISTIC_SETUP_ERRORS)
+        ):
+            transient_error = DatagenTransientError(
+                'DATAGEN setup failed before generator launch: %s' % error
+            )
+            handle_datagen_transient_failure(
+                config, chunk, log_path, transient_error
+            )
+            raise transient_error from error
+
+        logs = datagen_log_tail(log_path)
+        summary = 'DATAGEN chunk %d failed: %s' % (chunk['chunk_idx'], error)
+        try:
+            ServerReporter.report_engine_error(config, summary, logs)
+        except Exception:
+            traceback.print_exc()
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    finally:
+        for cleanup_error in clean_datagen_workspace(output_path):
+            print('[Note] DATAGEN cleanup deferred: %s' % cleanup_error)
+        try:
+            if os.path.isfile(log_path):
+                os.remove(log_path)
+        except OSError as error:
+            print('[Note] DATAGEN log cleanup deferred: %s' % error)
+
+
 def complete_workload(config):
+
+    if config.workload['test']['type'] == 'DATAGEN' and config.workload['test'].get('datagen'):
+        return complete_datagen_workload(config)
 
     # Download the opening book, throws an exception on corruption
     download_opening_book(
         config.workload['test']['book']['sha'   ],
         config.workload['test']['book']['source'],
         config.workload['test']['book']['name'  ],
+        config.workload['test']['book'].get('raw_sha'),
     )
 
     # Download each NNUE file, throws an exception on corruption
@@ -1487,7 +1982,23 @@ def safe_download_engine(config, branch, net_path):
     source      = config.workload['test'][branch]['source']
     private     = config.workload['test'][branch]['private']
 
-    bin_name = engine_binary_name(engine, commit_sha, net_path, private)
+    # Historical PGN DATAGEN uses the regular playing engine. Only the generic
+    # chunk protocol has an in-engine generator and therefore a separate role.
+    generic_datagen = (
+        config.workload['test']['type'] == 'DATAGEN'
+        and bool(config.workload['test'].get('datagen'))
+    )
+    build_role = 'datagen' if generic_datagen else 'play'
+
+    if generic_datagen and private:
+        raise DatagenConfigurationError(
+            'Generic DATAGEN does not support private engine artifacts: '
+            'their artifact metadata has no play/data-generator role'
+        )
+
+    bin_name = engine_binary_name(
+        engine, commit_sha, net_path, private, build_role
+    )
     out_path = os.path.join('Engines', bin_name)
 
     if private:
@@ -1507,7 +2018,16 @@ def safe_download_engine(config, branch, net_path):
 
         try:
             return download_public_engine(
-                engine, net_path, branch_name, source, make_path, out_path, compiler)
+                engine,
+                net_path,
+                branch_name,
+                source,
+                make_path,
+                out_path,
+                compiler,
+                commit_sha,
+                build_role,
+            )
 
         except OpenBenchBuildFailedException as error:
 
@@ -1528,17 +2048,20 @@ def safe_create_genfens_opening_book(config, dev_name, dev_network):
         ServerReporter.report_engine_error(config, error.message)
         raise
 
-def safe_run_benchmarks(config, branch, engine, network):
+def safe_run_benchmarks(
+    config, branch, engine, network, bench_threads=None
+):
 
     name     = config.workload['test'][branch]['name']
     private  = config.workload['test'][branch]['private']
     expected = int(config.workload['test'][branch]['bench'])
     binary   = os.path.join('Engines', engine)
+    threads  = config.threads if bench_threads is None else bench_threads
 
     try:
-        print('\nRunning %dx Benchmarks for %s' % (config.threads, name))
+        print('\nRunning %dx Benchmarks for %s' % (threads, name))
         speed, nodes = bench.run_benchmark(
-            binary, network, private, config.threads, 1, expected)
+            binary, network, private, threads, 1, expected)
 
     except OpenBenchBadBenchException as error:
         ServerReporter.report_bad_bench(config, error.message)

@@ -135,10 +135,12 @@ def read_git_credentials(engine):
     raise OpenBenchMissingAPICredentialsException('%s not found' % fname)
 
 
-def engine_binary_name(engine, commit_sha, net_path, private):
+def engine_binary_name(engine, commit_sha, net_path, private, build_role='play'):
     name = '%s-%s' % (engine, commit_sha.upper()[:8])
     if net_path and not private:
         name += '-%s' % (net_path[-8:])
+    if build_role != 'play':
+        name += '-%s' % build_role.upper()
     return name
 
 def check_for_engine_binary(out_path):
@@ -159,10 +161,25 @@ def check_for_engine_binary(out_path):
         os.rename(out_path, '%s.exe' % (out_path))
         return '%s.exe' % (out_path)
 
-def makefile_command(net_path, make_path, out_path, compiler):
+def makefile_command(
+    net_path, make_path, out_path, compiler, git_sha_full=None, build_role='play'
+):
 
-    # Build with -j, and EXE= to contol the output location
-    command = ['make', '-j', 'EXE=%s' % (out_path)]
+    # Keep historical unlimited parallelism unless an operator explicitly caps
+    # this client (useful when DATAGEN shares a host with other long jobs).
+    build_jobs = os.environ.get('OPENBENCH_BUILD_JOBS', '').strip()
+    parallel = '-j%s' % int(build_jobs) if build_jobs else '-j'
+    command = ['make', parallel, 'EXE=%s' % (out_path)]
+
+    # Let engines embed exact source provenance even though public workers build
+    # from a GitHub archive without a .git directory.
+    if git_sha_full:
+        command += ['GIT_SHA_FULL=%s' % git_sha_full]
+
+    # A generic DATAGEN workload may need a different default target than the
+    # playing engine. Unknown make variables are harmless for existing engines.
+    if build_role == 'datagen':
+        command += ['OPENBENCH_DATAGEN=1']
 
     # Build with CC/CXX= when using a custom compiler
     if compiler:
@@ -221,7 +238,7 @@ def select_best_artifact(options, cpu_name, cpu_flags):
     return options[artifacts[0]]
 
 
-def download_opening_book(book_sha, book_source, book_name):
+def download_opening_book(book_sha, book_source, book_name, book_raw_sha=None):
 
     book_path = os.path.join('Books', book_name)
 
@@ -251,17 +268,25 @@ def download_opening_book(book_sha, book_source, book_name):
             unzip_root = os.path.join(unzip_path, os.listdir(unzip_path)[0])
             shutil.move(unzip_root, book_path)
 
-    # Verify SHAs match with the server
-    with open(book_path) as fin:
+    # ``book_sha`` is OpenBench's historical text-normalized identity. A
+    # generator receives the extracted file path and therefore also needs the
+    # exact byte identity when line endings differ (notably CRLF books).
+    with open(book_path, 'rb') as fin:
+        raw_sha256 = hashlib.sha256(fin.read()).hexdigest()
+    with open(book_path, encoding='utf-8') as fin:
         content = fin.read().encode('utf-8')
         sha256  = hashlib.sha256(content).hexdigest()
 
     # Log SHAs on every workload
     print ('Correct  %s' % (book_sha.upper()))
     print ('Download %s\n' % (sha256.upper()))
+    if book_raw_sha:
+        print ('Correct Raw  %s' % (book_raw_sha.upper()))
+        print ('Download Raw %s\n' % (raw_sha256.upper()))
 
     # We have to have the correct SHA to continue
-    if book_sha.upper() != sha256.upper():
+    if (book_sha.upper() != sha256.upper()
+            or (book_raw_sha and book_raw_sha.upper() != raw_sha256.upper())):
         os.remove(book_path)
         raise OpenBenchCorruptedBookException('Invalid sha for %s' % (book_name))
 
@@ -294,7 +319,17 @@ def download_network(server, username, password, engine, net_name, net_sha, net_
         os.remove(net_path)
         raise OpenBenchCorruptedNetworkException('Invalid SHA for %s' % (net_name))
 
-def download_public_engine(engine, net_path, branch, source, make_path, out_path, compiler=None):
+def download_public_engine(
+    engine,
+    net_path,
+    branch,
+    source,
+    make_path,
+    out_path,
+    compiler=None,
+    git_sha_full=None,
+    build_role='play',
+):
 
     # Check to see if we already have the binary
     if check_for_engine_binary(out_path):
@@ -324,7 +359,14 @@ def download_public_engine(engine, net_path, branch, source, make_path, out_path
         # Prepare the MAKEFILE command
         make_path = os.path.join(src_path, make_path)
         bin_path  = os.path.join(make_path, os.path.basename(out_path))
-        make_cmd  = makefile_command(net_path, make_path, os.path.basename(out_path), compiler)
+        make_cmd = makefile_command(
+            net_path,
+            make_path,
+            os.path.basename(out_path),
+            compiler,
+            git_sha_full,
+            build_role,
+        )
 
         # Build the engine, which will produce a binary to bin_path, to be moved after
         process     = subprocess.Popen(make_cmd, cwd=make_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

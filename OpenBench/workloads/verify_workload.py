@@ -39,9 +39,11 @@
 import os
 import re
 import requests
+import string
 import traceback
 
 import OpenBench.config
+import OpenBench.datagen
 import OpenBench.utils
 
 from OpenBench.models import *
@@ -65,9 +67,8 @@ def verify_workload(request, workload_type):
 
     if workload_type == 'DATAGEN':
         verify_datagen_creation(errors, request)
-        dev  = collect_github_info(errors, request, 'dev')
-        base = collect_github_info(errors, request, 'base')
-        return errors, (dev, base)
+        engine = collect_github_info(errors, request, 'dev')
+        return errors, engine
 
 def verify_test_creation(errors, request):
 
@@ -166,42 +167,22 @@ def verify_datagen_creation(errors, request):
 
     verifications = [
 
-        # Verify everything about the Dev Engine
-        (verify_configuration  , 'dev_engine', 'Dev Engine', 'engines'),
+        # DATAGEN builds and verifies one engine branch.
+        (verify_configuration  , 'dev_engine', 'Engine', 'engines'),
+        (verify_public_datagen_engine, 'dev_engine'),
         (verify_github_repo    , 'dev_repo'),
-        (verify_network        , 'dev_network', 'Dev Network', 'dev_engine'),
-        (verify_options        , 'dev_options', 'Threads', 'Dev Options'),
-        (verify_options        , 'dev_options', 'Hash', 'Dev Options'),
-        (verify_time_control   , 'dev_time_control', 'Dev Time Control'),
-
-        # Verify everything about the Base Engine
-        (verify_configuration  , 'base_engine', 'Base Engine', 'engines'),
-        (verify_github_repo    , 'base_repo'),
-        (verify_network        , 'base_network', 'Base Network', 'base_engine'),
-        (verify_options        , 'base_options', 'Threads', 'Base Options'),
-        (verify_options        , 'base_options', 'Hash', 'Base Options'),
-        (verify_time_control   , 'base_time_control', 'Base Time Control'),
+        (verify_network        , 'dev_network', 'Network', 'dev_engine'),
 
         # Verify everything about the Datagen Settings
-        (verify_datagen_games  , 'datagen_max_games'),
-        (verify_datagen_genfens, 'datagen_custom_genfens'),
-        (verify_datagen_reverse, 'datagen_play_reverses'),
+        (verify_datagen_template, 'datagen_command'),
+        (verify_datagen_counts  , 'datagen_total_count', 'datagen_positions_per_chunk'),
+        (verify_datagen_seed    , 'datagen_base_seed', 'datagen_total_count',
+                                  'datagen_positions_per_chunk'),
         (verify_datagen_book   , 'book_name', 'Book', 'books'),
-        (verify_upload_pgns    , 'upload_pgns', 'Upload PGNs'),
 
         # Verify everything about the General Settings
         (verify_integer        , 'priority', 'Priority'),
         (verify_greater_than   , 'throughput', 'Throughput', 0),
-        (verify_syzygy_field   , 'syzygy_wdl', 'Syzygy WDL'),
-
-        # Verify everything about the Workload Settings
-        (verify_integer        , 'workload_size', 'Workload Size'),
-        (verify_greater_than   , 'workload_size', 'Workload Size', 0),
-
-        # Verify everything about the Adjudicaton Settings
-        (verify_syzygy_field   , 'syzygy_adj', 'Syzygy Adjudication'),
-        (verify_win_adj        , 'win_adj'),
-        (verify_draw_adj       , 'draw_adj'),
     ]
 
     for verification in verifications:
@@ -227,6 +208,17 @@ def verify_options(errors, request, field, option, field_name):
 def verify_configuration(errors, request, field, field_name, parent):
     try: assert request.POST[field] in OpenBench.config.OPENBENCH_CONFIG[parent].keys()
     except: errors.append('{0} was not found in the configuration'.format(field_name))
+
+def verify_public_datagen_engine(errors, request, field):
+    try:
+        private = OpenBench.config.OPENBENCH_CONFIG['engines'][request.POST[field]]['private']
+    except (KeyError, TypeError):
+        return  # verify_configuration owns unknown-engine diagnostics
+    if private:
+        errors.append(
+            'Generic DATAGEN currently supports only public engines; private '
+            'artifacts do not declare a play or data-generator role'
+        )
 
 def verify_time_control(errors, request, field, field_name):
     try: OpenBench.utils.TimeControl.parse(request.POST[field])
@@ -256,7 +248,7 @@ def verify_network(errors, request, field, field_name, engine_field):
     except: errors.append('Unknown Network Provided for {0}'.format(field_name))
 
 def verify_test_mode(errors, request, field):
-    try: assert request.POST[field] in ['SPRT', 'GAMES']
+    try: assert request.POST[field] in ['SPRT', 'GAMES', 'DATAGEN']
     except: errors.append('Unknown Test Mode')
 
 def verify_sprt_bounds(errors, request, field):
@@ -366,6 +358,63 @@ def verify_datagen_book(errors, request, field, field_name, parent):
         valid = ['NONE'] + list(OpenBench.config.OPENBENCH_CONFIG[parent].keys())
         assert request.POST[field] in valid
     except: errors.append('{0} was neither NONE nor found in the configuration'.format(field_name))
+
+def verify_datagen_template(errors, request, field):
+
+    allowed = {
+        'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'BOOK_SHA256', 'NETWORK'
+    }
+    required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
+
+    try:
+        template = request.POST[field].strip()
+        assert template and len(template) <= 4096
+        assert '\n' not in template and '\r' not in template and '\x00' not in template
+
+        found = set()
+        for _, name, format_spec, conversion in string.Formatter().parse(template):
+            if name is None:
+                continue
+            assert name in allowed
+            assert not format_spec and conversion is None
+            found.add(name)
+
+        assert required.issubset(found)
+
+    except Exception:
+        errors.append(
+            'Datagen Command must be one line, use only {SEED}, {COUNT}, '
+            '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, and include '
+            'SEED/COUNT/OUT/THREADS'
+        )
+
+def verify_datagen_counts(errors, request, total_field, chunk_field):
+
+    try:
+        total = int(request.POST[total_field])
+        per_chunk = int(request.POST[chunk_field])
+        assert 0 < total <= 2**63 - 1
+        assert 0 < per_chunk <= 2**63 - 1
+        chunks = (total + per_chunk - 1) // per_chunk
+        assert chunks <= OpenBench.datagen.MAX_DATAGEN_CHUNKS
+    except Exception:
+        errors.append(
+            'Datagen total count and positions per chunk must be positive '
+            'integers producing at most %d chunks'
+            % OpenBench.datagen.MAX_DATAGEN_CHUNKS
+        )
+
+def verify_datagen_seed(errors, request, seed_field, total_field, chunk_field):
+
+    try:
+        seed = int(request.POST[seed_field])
+        total = int(request.POST[total_field])
+        per_chunk = int(request.POST[chunk_field])
+        chunks = (total + per_chunk - 1) // per_chunk
+        assert 0 <= seed <= 2**63 - 1
+        assert seed + chunks - 1 <= 2**63 - 1
+    except Exception:
+        errors.append('Datagen base seed must remain within signed 64-bit range for all chunks')
 
 
 def collect_github_info(errors, request, field):

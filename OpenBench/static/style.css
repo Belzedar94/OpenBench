@@ -331,6 +331,17 @@ body, html, main{
 
 #content .test-config .td-label {
     color: var(--color-font1);
+    white-space: nowrap;
+    vertical-align: top;
+}
+
+#content .test-config code {
+    display: block;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    font-family: "Courier Prime", monospace;
 }
 
 /* ??? */

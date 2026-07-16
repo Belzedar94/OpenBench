@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SHA256 = "3d4b7fd0ab387f4f60da2078f612c9e8890e6026f551aebe8631efc157788f23"
 NETWORK = "atomic_run3b_e202_l05.nnue"
+NETWORK_SHA256 = "99DC67EABF26A64FAEECA3A88B4C38597A840B8D4A874B9F2CF658C6F92A04A6"
+BOOK_SHA256 = "28ED51C2F42E723D5E127D2D3F21C0BFA4A9B318615AFDB299B93EA62DEA2B1E"
 
 
 def load_json(path):
@@ -32,6 +34,7 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.book["sha"],
             "ec3752727cd732a966fd6cb7b3340fb68a726f0b3426d198a3da7b891faa2e91",
         )
+        self.assertEqual(self.book["raw_sha"].upper(), BOOK_SHA256)
         self.assertEqual(
             self.syzygy_book["sha"],
             "ad83b0f3b8ee08d0f61f2f9afa11c1c72978ad0462d63a306c32697c92c5b449",
@@ -128,6 +131,40 @@ class AtomicOnboardingTests(unittest.TestCase):
             for key, value in preset.items():
                 if key.endswith("_options"):
                     self.assertNotIn("Use NNUE=pure", value, name)
+
+    def test_atomic_bootstrap_datagen_preset_is_frozen(self):
+        preset = self.engine["datagen_presets"]["default"]
+        command = preset["datagen_command"]
+        self.assertEqual(preset["both_bench"], 338376)
+        self.assertEqual(preset["both_network"], NETWORK)
+        self.assertEqual(preset["book_name"], "ATOMIC_openings.epd")
+        self.assertEqual(preset["datagen_total_count"], 500_000_000)
+        self.assertEqual(preset["datagen_positions_per_chunk"], 12_500_000)
+        self.assertEqual(preset["datagen_base_seed"], 202_607_150_500_000)
+        self.assertEqual(preset["priority"], 100)
+        for placeholder in (
+            "{SEED}",
+            "{COUNT}",
+            "{OUT}",
+            "{THREADS}",
+            "{BOOK}",
+            "{BOOK_SHA256}",
+            "{NETWORK}",
+        ):
+            self.assertIn(placeholder, command)
+        for option in (
+            "depth 6",
+            "eval_limit 10000",
+            "eval_diff_limit 32000",
+            "random_multi_pv 4",
+            "random_multi_pv_diff 200",
+            "filter_captures true",
+            "filter_checks false",
+            "filter_promotions true",
+        ):
+            self.assertIn(option, command)
+        self.assertIn("network_sha256 " + NETWORK_SHA256, command)
+        self.assertIn("book_sha256 {BOOK_SHA256}", command)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,9 @@ def gitDiffLink(test):
     else:
         repo = OpenBench.utils.path_join(*test.dev.source.split('/')[:-2])
 
+    if test.is_generic_datagen():
+        return OpenBench.utils.path_join(repo, 'commit', test.dev.sha)
+
     if test.test_mode == 'SPSA':
         return OpenBench.utils.path_join(repo, 'compare', test.dev.sha[:8])
 
@@ -80,16 +83,32 @@ def shortStatBlock(test):
         statlines = [elo_line, tri_line, penta_line] if test.use_penta else [elo_line, tri_line]
 
     elif test.test_mode == 'DATAGEN':
-        status_line = 'Generated %d/%d Games' % (test.games, test.max_games)
-        lower, elo, upper = OpenBench.stats.Elo(test.results())
-        elo_line = 'Elo: %0.2f +- %0.2f (95%%) [N=%d]' % (elo, max(upper - elo, elo - lower), test.max_games)
-        statlines = [status_line, elo_line, penta_line] if test.use_penta else [status_line, elo_line, tri_line]
+        if test.is_generic_datagen():
+            statlines = [
+                'Chunks: %d/%d' % (
+                    test.datagen_completed_chunks, test.datagen_total_chunks()
+                ),
+                'Positions: %d/%d' % (test.games, test.datagen_total_count),
+            ]
+        else:
+            status_line = 'Generated %d/%d Games' % (test.games, test.max_games)
+            lower, elo, upper = OpenBench.stats.Elo(test.results())
+            elo_line = 'Elo: %0.2f +- %0.2f (95%%) [N=%d]' % (elo, max(upper - elo, elo - lower), test.max_games)
+            statlines = [status_line, elo_line, penta_line] if test.use_penta else [status_line, elo_line, tri_line]
 
     return '\n'.join(statlines)
 
 def longStatBlock(test):
 
     assert test.test_mode != 'SPSA'
+
+    if test.is_generic_datagen():
+        return '\n'.join([
+            'Chunks    | %d / %d' % (
+                test.datagen_completed_chunks, test.datagen_total_chunks()
+            ),
+            'Positions | %d / %d' % (test.games, test.datagen_total_count),
+        ])
 
     threads     = int(OpenBench.utils.extract_option(test.dev_options, 'Threads'))
     hashmb      = int(OpenBench.utils.extract_option(test.dev_options, 'Hash'))
@@ -330,8 +349,13 @@ def workload_url(workload):
     if type(workload) == int:
         workload = OpenBench.models.Test.objects.get(id=workload)
 
-    # Differentiate between Tunes ( SPSA ) and Tests ( SPRT / Fixed )
-    return '/%s/%d/' % ('tune' if workload.test_mode == 'SPSA' else 'test', workload.id)
+    # Differentiate between Tunes, DATAGEN sessions, and gameplay Tests.
+    kind = (
+        'tune' if workload.test_mode == 'SPSA'
+        else 'datagen' if workload.test_mode == 'DATAGEN'
+        else 'test'
+    )
+    return '/%s/%d/' % (kind, workload.id)
 
 def workload_pretty_name(workload):
 
@@ -347,6 +371,9 @@ def workload_pretty_name(workload):
 
 def git_diff_text(workload, N=24):
 
+    if workload.is_generic_datagen():
+        return '%s @ %s' % (workload.dev_engine, prettyName(workload.dev.name))
+
     dev_name = workload.dev.name
     dev_name = dev_name[:N] + '...' if len(dev_name) > N else dev_name
 
@@ -357,11 +384,15 @@ def git_diff_text(workload, N=24):
 
 
 def test_is_smp_odds(test):
+    if test.is_generic_datagen():
+        return False
     dev_threads  = int(OpenBench.utils.extract_option(test.dev_options , 'Threads'))
     base_threads = int(OpenBench.utils.extract_option(test.base_options, 'Threads'))
     return dev_threads != base_threads
 
 def test_is_time_odds(test):
+    if test.is_generic_datagen():
+        return False
     return test.dev_time_control != test.base_time_control
 
 def test_is_fischer(test):
