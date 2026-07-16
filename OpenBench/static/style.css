@@ -395,6 +395,45 @@ td pre {
     border-left: 4px solid var(--color-font3);
 }
 
+/* Fishtest-style capacity summary on the main index */
+
+#content .index-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin: 0 0 1rem;
+    white-space: normal;
+}
+
+#content .index-metric {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--color-font1);
+    text-align: center;
+    background-color: var(--color2);
+    border: 1px solid var(--color3);
+    border-radius: 8px;
+    cursor: help;
+}
+
+#content .index-metric-title {
+    padding: 0.45rem 0.25rem;
+    color: var(--color-font2);
+    font-size: 0.85rem;
+    background-color: #171717;
+    border-bottom: 1px solid var(--color3);
+    white-space: nowrap;
+}
+
+#content .index-metric-value {
+    padding: 0.75rem 0.25rem;
+    color: var(--color-font1);
+    font-size: clamp(1.35rem, 2.5vw, 2rem);
+    font-weight: bold;
+    line-height: 1;
+    white-space: nowrap;
+}
+
 /* Styles for screen widths less than 768px */
 @media (max-width: 767px) {
     #sidebar {
@@ -495,5 +534,10 @@ td pre {
 
     #content .long-statblock {
         overflow-x: auto;
+    }
+
+    #content .index-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
     }
 }
