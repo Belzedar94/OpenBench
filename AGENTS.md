@@ -110,7 +110,9 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    `Books/<nombre>.json` con `source` y `sha`. **El sha es sha256 del TEXTO del .epd
    extraído con newlines universales** (así lo computa el worker):
    `python -c "import hashlib;print(hashlib.sha256(open('X.epd').read().encode()).hexdigest())"`
-   — NUNCA en binario `'rb'` (con CRLF no coincide).
+   — NUNCA sustituir este `sha` histórico por el binario (con CRLF no coincide).
+   Si un generador valida los bytes exactos, añade además `raw_sha` calculado con
+   `'rb'`; el cliente verificará ambas identidades.
 6. **`Config/config.json`**: añade tu engine a `"engines"` y tu libro a `"books"`.
    Reinicia el server.
 7. **Redes**: súbelas por web (`/networks/`, engine correspondiente) o
@@ -253,7 +255,9 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
-  `{BOOK}`. El proceso debe terminar con código cero dejando `{OUT}` completo.
+  `{BOOK}`, `{BOOK_SHA256}` y `{NETWORK}`. `BOOK_SHA256` es la identidad raw de
+  los bytes extraídos (o la identidad histórica si el manifiesto no publica
+  `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.
 - Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease
   de cinco minutos durante build, bench, generación y upload; un fallo vuelve a
   dejar el chunk repartible.
