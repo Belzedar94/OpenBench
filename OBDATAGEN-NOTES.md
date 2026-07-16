@@ -256,6 +256,8 @@ en el commit local `08bf920` (`feat(ui): add cached index capacity metrics`). No
 se escribió en `../openbench-spell`, no se lanzó ningún build/engine, no se
 tocaron procesos ajenos y no hubo push. La implementación no añade modelos ni
 campos: reutiliza `Machine`, `Result`, `Test` y `DatagenChunk`.
+La hoja nueva fuerza `OPENBENCH_STATIC_VERSION = 'v6'` para no reutilizar el
+CSS `v5` que ya había servido DATAGEN.
 
 ### Cómputo de los cuatro cajetines
 
@@ -302,22 +304,24 @@ proceso.
 | Gate | Estado | Evidencia |
 |---|---|---|
 | Unit tests nuevos | **PASS** | 6/6: máquinas viva/muerta, NPS `1.06G`, DATAGEN 500/1.000 a 5 pos/s con ETA 100 s, mediana SPRT 2.000 y delta 100 games/min, SPSA y caché/render. |
-| Suite Django completa | **PASS** | `Found 34 test(s)`; `Ran 34 tests in 2.799s`; `OK`. |
-| Suite cliente completa | **PASS** | `Ran 27 tests in 0.152s`; `OK`. |
+| Suite Django completa | **PASS** | `Found 34 test(s)`; `Ran 34 tests in 3.546s`; `OK`. |
+| Suite cliente completa | **PASS** | `Ran 27 tests in 0.100s`; `OK`. |
 | Django check | **PASS** | `System check identified no issues (0 silenced).` |
 | Esquema | **PASS** | `manage.py makemigrations --check --dry-run` → `No changes detected`. |
 
 ### Gate E2E en `:8001`
 
-Se comprobó primero que el puerto estaba libre. El único servidor lanzado fue:
+Se comprobó el puerto antes de cada arranque. Hubo dos pasadas secuenciales del
+mismo servidor dev: la primera validó el HTML y se apagó (PID 22784); tras
+detectar y corregir el cache-buster, la pasada final fue:
 
 ```text
 python manage.py runserver 127.0.0.1:8001 --noreload
-listener PID 22784
+listener PID 24404
 ```
 
 `GET /index/` respondió **200**, se detectaron exactamente cuatro cards y
-`GET /static/style.css?v5` respondió **200** con la cuadrícula de cuatro
+`GET /static/style.css?v6` respondió **200** con la cuadrícula de cuatro
 columnas. La DB dev conservada tenía DATAGEN #1 terminado y aprobado con
 16.000/16.000 posiciones (8 chunks), DATAGEN #4 con 4/4 (1 chunk), y el SPRT
 #2 terminado manualmente con 4 partidas pero LLR sin resolver. Ninguna máquina
@@ -348,7 +352,8 @@ HTML relevante devuelto por el servidor:
 </div>
 ```
 
-Al terminar se validó que el listener seguía siendo exactamente el PID 22784 y
-que su command line seguía apuntando a `manage.py runserver 127.0.0.1:8001
+Al terminar la pasada final se validó que el listener seguía siendo exactamente
+el PID 24404 y que su command line seguía apuntando a
+`manage.py runserver 127.0.0.1:8001
 --noreload`; se detuvo sólo ese PID. Estado final: proceso detenido y
 `PORT_8001_LISTENER_AFTER=none`. Producción `:8000` no se inspeccionó ni tocó.
