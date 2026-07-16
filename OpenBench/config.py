@@ -54,6 +54,9 @@ def load_book_config(book_name):
 
     assert type(conf.get('sha')) == str
     assert type(conf.get('source')) == str
+    if 'raw_sha' in conf:
+        assert type(conf['raw_sha']) == str
+        assert re.fullmatch(r'[0-9a-fA-F]{64}', conf['raw_sha'])
 
     return conf
 

@@ -361,7 +361,9 @@ def verify_datagen_book(errors, request, field, field_name, parent):
 
 def verify_datagen_template(errors, request, field):
 
-    allowed = {'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'NETWORK'}
+    allowed = {
+        'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'BOOK_SHA256', 'NETWORK'
+    }
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
 
     try:
@@ -382,7 +384,7 @@ def verify_datagen_template(errors, request, field):
     except Exception:
         errors.append(
             'Datagen Command must be one line, use only {SEED}, {COUNT}, '
-            '{OUT}, {THREADS}, {BOOK}, {NETWORK}, and include '
+            '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, and include '
             'SEED/COUNT/OUT/THREADS'
         )
 

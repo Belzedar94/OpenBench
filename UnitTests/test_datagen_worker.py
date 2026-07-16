@@ -23,7 +23,12 @@ def workload():
         'test': {
             'id': 7,
             'type': 'DATAGEN',
-            'book': {'name': 'NONE', 'sha': None, 'source': None},
+            'book': {
+                'name': 'NONE',
+                'sha': None,
+                'raw_sha': None,
+                'source': None,
+            },
             'dev': {
                 'engine': 'GenericEngine',
                 'name': 'branch',
@@ -101,6 +106,121 @@ class DatagenWorkerTests(unittest.TestCase):
             config(), os.path.join('Datagen', 'chunk.bin')
         )
         self.assertIn('network NONE', rendered)
+
+    def test_template_uses_the_exact_raw_book_identity(self):
+        cfg = config()
+        cfg.workload['test']['book'] = {
+            'name': 'atomic.epd',
+            'sha': '1' * 64,
+            'raw_sha': 'abcdef0123456789' * 4,
+            'source': 'https://example.test/atomic.zip',
+        }
+        cfg.workload['test']['datagen']['command'] = (
+            'generate book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} '
+            'seed {SEED} count {COUNT} threads {THREADS}'
+        )
+
+        rendered = worker.render_datagen_command(
+            cfg, os.path.join('Datagen', 'chunk.bin')
+        )
+        self.assertIn('book Books/atomic.epd', rendered)
+        self.assertIn(
+            'book_sha256 ' + ('ABCDEF0123456789' * 4), rendered
+        )
+
+    def test_opening_book_verifies_normalized_and_raw_identities(self):
+        raw = b'fen-one\r\nfen-two\r\n'
+        normalized = raw.replace(b'\r\n', b'\n')
+        normalized_sha = hashlib.sha256(normalized).hexdigest()
+        raw_sha = hashlib.sha256(raw).hexdigest()
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                Path('Books').mkdir()
+                book = Path('Books', 'atomic.epd')
+                book.write_bytes(raw)
+                worker.download_opening_book(
+                    normalized_sha, 'unused', book.name, raw_sha
+                )
+                self.assertEqual(book.read_bytes(), raw)
+
+                with self.assertRaises(worker.OpenBenchCorruptedBookException):
+                    worker.download_opening_book(
+                        normalized_sha, 'unused', book.name, '0' * 64
+                    )
+                self.assertFalse(book.exists())
+            finally:
+                os.chdir(previous)
+
+    def test_cleanup_removes_stale_datagen_sidecar_directories(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                for directory in ('PGNs', 'Engines', 'Networks', 'Datagen'):
+                    Path(directory).mkdir()
+
+                stale_file = Path('Datagen', 'old-chunk.bin')
+                stale_file.write_bytes(b'old')
+                stale_sidecar = Path('Datagen', 'old-chunk.parts')
+                stale_sidecar.mkdir()
+                stale_sidecar.joinpath('shard-0').write_bytes(b'old shard')
+                fresh_sidecar = Path('Datagen', 'current-chunk.parts')
+                fresh_sidecar.mkdir()
+
+                stale_time = time.time() - (2 * 24 * 60 * 60)
+                os.utime(stale_file, (stale_time, stale_time))
+                os.utime(stale_sidecar, (stale_time, stale_time))
+
+                worker.cleanup_client()
+
+                self.assertFalse(stale_file.exists())
+                self.assertFalse(stale_sidecar.exists())
+                self.assertTrue(fresh_sidecar.exists())
+            finally:
+                os.chdir(previous)
+
+    def test_locked_datagen_sidecar_does_not_block_other_cleanup(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                for directory in ('PGNs', 'Engines', 'Networks', 'Datagen'):
+                    Path(directory).mkdir()
+
+                locked_sidecar = Path('Datagen', 'locked.parts')
+                locked_sidecar.mkdir()
+                removable_file = Path('Datagen', 'other-old-chunk.bin')
+                removable_file.write_bytes(b'old')
+                stale_time = time.time() - (2 * 24 * 60 * 60)
+                os.utime(locked_sidecar, (stale_time, stale_time))
+                os.utime(removable_file, (stale_time, stale_time))
+
+                real_rmtree = worker.shutil.rmtree
+
+                def locked_rmtree(path, *args, **kwargs):
+                    if os.path.normcase(os.fspath(path)) == os.path.normcase(
+                        os.fspath(locked_sidecar)
+                    ):
+                        raise PermissionError('temporarily locked')
+                    return real_rmtree(path, *args, **kwargs)
+
+                with mock.patch.object(
+                    worker.shutil, 'rmtree', side_effect=locked_rmtree
+                ), mock.patch('builtins.print') as output:
+                    worker.cleanup_client()
+
+                self.assertTrue(locked_sidecar.exists())
+                self.assertFalse(removable_file.exists())
+                self.assertTrue(any(
+                    'Cleanup deferred' in str(call)
+                    and 'temporarily locked' in str(call)
+                    for call in output.call_args_list
+                ))
+            finally:
+                os.chdir(previous)
 
     def test_complete_workload_builds_one_engine_benches_compresses_and_uploads(self):
         cfg = config()
@@ -245,6 +365,112 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertEqual(cfg.blacklist, [7])
         report.assert_called_once()
         self.assertIn('chunk 3 failed', report.call_args.args[1])
+
+    def test_transient_setup_failures_requeue_without_blacklisting(self):
+        cases = (
+            (
+                'download_opening_book',
+                OSError('temporary book outage'),
+            ),
+            (
+                'safe_download_network_weights',
+                OSError('temporary network outage'),
+            ),
+            (
+                'safe_download_engine',
+                OSError('temporary source archive outage'),
+            ),
+            (
+                'download_opening_book',
+                worker.OpenBenchCorruptedBookException(
+                    'truncated book download'
+                ),
+            ),
+            (
+                'safe_download_network_weights',
+                worker.OpenBenchCorruptedNetworkException(
+                    'truncated network download'
+                ),
+            ),
+        )
+
+        for target, error in cases:
+            with self.subTest(target=target):
+                cfg = config()
+                with tempfile.TemporaryDirectory() as cwd:
+                    previous = os.getcwd()
+                    os.chdir(cwd)
+                    os.mkdir('Datagen')
+                    try:
+                        with mock.patch.object(
+                            worker, 'download_opening_book'
+                        ) as book, mock.patch.object(
+                            worker,
+                            'safe_download_network_weights',
+                            return_value=None,
+                        ) as network, mock.patch.object(
+                            worker,
+                            'safe_download_engine',
+                            return_value='engine.exe',
+                        ) as engine, mock.patch.object(
+                            worker,
+                            'report_datagen_transient_failure',
+                            return_value=True,
+                        ) as report:
+                            targets = {
+                                'download_opening_book': book,
+                                'safe_download_network_weights': network,
+                                'safe_download_engine': engine,
+                            }
+                            targets[target].side_effect = error
+
+                            with self.assertRaisesRegex(
+                                worker.DatagenTransientError, str(error)
+                            ):
+                                worker.complete_workload(cfg)
+                    finally:
+                        os.chdir(previous)
+
+                self.assertEqual(cfg.blacklist, [])
+                report.assert_called_once()
+                self.assertIn(
+                    'setup failed before generator launch',
+                    report.call_args.args[1],
+                )
+
+    def test_deterministic_setup_configuration_failure_stays_blacklisted(self):
+        cfg = config()
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            os.mkdir('Datagen')
+            try:
+                with mock.patch.object(
+                    worker, 'download_opening_book'
+                ), mock.patch.object(
+                    worker,
+                    'safe_download_network_weights',
+                    return_value=None,
+                ), mock.patch.object(
+                    worker,
+                    'safe_download_engine',
+                    side_effect=worker.DatagenConfigurationError(
+                        'unsupported DATAGEN artifact configuration'
+                    ),
+                ), mock.patch.object(
+                    worker.ServerReporter, 'report_engine_error'
+                ) as report:
+                    with self.assertRaisesRegex(
+                        worker.DatagenConfigurationError,
+                        'unsupported DATAGEN artifact configuration',
+                    ):
+                        worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(cfg.blacklist, [7])
+        report.assert_called_once()
 
     def test_upload_and_failure_report_errors_remain_retryable(self):
         cfg = config()

@@ -277,10 +277,17 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'play_reverses' : test.play_reverses,
     }
 
+    book_config = OPENBENCH_CONFIG['books'].get(
+        test.book_name, {'sha': None, 'source': None}
+    )
     workload['test']['book'] = {
         'name'   : test.book_name,
-        'sha'    : OPENBENCH_CONFIG['books'].get(test.book_name, { 'sha'    : None })['sha'   ],
-        'source' : OPENBENCH_CONFIG['books'].get(test.book_name, { 'source' : None })['source'],
+        # ``sha`` preserves OpenBench's historical UTF-8/text-normalized
+        # identity. DATAGEN generators consume the exact extracted bytes, so
+        # books with CRLF content may also publish an explicit raw identity.
+        'sha'     : book_config['sha'],
+        'raw_sha' : book_config.get('raw_sha'),
+        'source'  : book_config['source'],
     }
 
     workload['test']['dev'] = {

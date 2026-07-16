@@ -238,7 +238,7 @@ def select_best_artifact(options, cpu_name, cpu_flags):
     return options[artifacts[0]]
 
 
-def download_opening_book(book_sha, book_source, book_name):
+def download_opening_book(book_sha, book_source, book_name, book_raw_sha=None):
 
     book_path = os.path.join('Books', book_name)
 
@@ -268,17 +268,25 @@ def download_opening_book(book_sha, book_source, book_name):
             unzip_root = os.path.join(unzip_path, os.listdir(unzip_path)[0])
             shutil.move(unzip_root, book_path)
 
-    # Verify SHAs match with the server
-    with open(book_path) as fin:
+    # ``book_sha`` is OpenBench's historical text-normalized identity. A
+    # generator receives the extracted file path and therefore also needs the
+    # exact byte identity when line endings differ (notably CRLF books).
+    with open(book_path, 'rb') as fin:
+        raw_sha256 = hashlib.sha256(fin.read()).hexdigest()
+    with open(book_path, encoding='utf-8') as fin:
         content = fin.read().encode('utf-8')
         sha256  = hashlib.sha256(content).hexdigest()
 
     # Log SHAs on every workload
     print ('Correct  %s' % (book_sha.upper()))
     print ('Download %s\n' % (sha256.upper()))
+    if book_raw_sha:
+        print ('Correct Raw  %s' % (book_raw_sha.upper()))
+        print ('Download Raw %s\n' % (raw_sha256.upper()))
 
     # We have to have the correct SHA to continue
-    if book_sha.upper() != sha256.upper():
+    if (book_sha.upper() != sha256.upper()
+            or (book_raw_sha and book_raw_sha.upper() != raw_sha256.upper())):
         os.remove(book_path)
         raise OpenBenchCorruptedBookException('Invalid sha for %s' % (book_name))
 

@@ -34,6 +34,7 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.book["sha"],
             "ec3752727cd732a966fd6cb7b3340fb68a726f0b3426d198a3da7b891faa2e91",
         )
+        self.assertEqual(self.book["raw_sha"].upper(), BOOK_SHA256)
         self.assertEqual(
             self.syzygy_book["sha"],
             "ad83b0f3b8ee08d0f61f2f9afa11c1c72978ad0462d63a306c32697c92c5b449",
@@ -141,7 +142,15 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.assertEqual(preset["datagen_positions_per_chunk"], 12_500_000)
         self.assertEqual(preset["datagen_base_seed"], 202_607_150_500_000)
         self.assertEqual(preset["priority"], 100)
-        for placeholder in ("{SEED}", "{COUNT}", "{OUT}", "{THREADS}", "{BOOK}", "{NETWORK}"):
+        for placeholder in (
+            "{SEED}",
+            "{COUNT}",
+            "{OUT}",
+            "{THREADS}",
+            "{BOOK}",
+            "{BOOK_SHA256}",
+            "{NETWORK}",
+        ):
             self.assertIn(placeholder, command)
         for option in (
             "depth 6",
@@ -155,7 +164,7 @@ class AtomicOnboardingTests(unittest.TestCase):
         ):
             self.assertIn(option, command)
         self.assertIn("network_sha256 " + NETWORK_SHA256, command)
-        self.assertIn("book_sha256 " + BOOK_SHA256, command)
+        self.assertIn("book_sha256 {BOOK_SHA256}", command)
 
 
 if __name__ == "__main__":

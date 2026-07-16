@@ -1029,29 +1029,47 @@ def set_cutechess_permissions():
         print ('[ERROR] Unable to set execute permissions on cutechess-ob')
 
 
+def cleanup_stale_path(path, max_age, remove_directories=False):
+
+    try:
+        if time.time() - os.path.getmtime(path) <= max_age:
+            return
+
+        # Datagen is a worker-owned cache and generators may leave sidecar
+        # directories behind. Never recurse through a symlink, though: remove
+        # only the link itself so cleanup cannot escape the cache directory.
+        if remove_directories and os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+
+    except OSError as error:
+        # Antivirus scanners and delayed Windows handles may keep stale paths
+        # locked. Cleanup is best effort and must not stop workload requests.
+        print('[Note] Cleanup deferred for %s: %s' % (path, error))
+
+
 def cleanup_client():
 
     SECONDS_PER_DAY   = 60 * 60 * 24
     SECONDS_PER_WEEK  = SECONDS_PER_DAY * 7
     SECONDS_PER_MONTH = SECONDS_PER_WEEK * 4
 
-    file_age = lambda x: time.time() - os.path.getmtime(x)
-
     for file in os.listdir('PGNs'):
-        if file_age(os.path.join('PGNs', file)) > SECONDS_PER_DAY:
-            os.remove(os.path.join('PGNs', file))
+        cleanup_stale_path(os.path.join('PGNs', file), SECONDS_PER_DAY)
 
     for file in os.listdir('Engines'):
-        if file_age(os.path.join('Engines', file)) > SECONDS_PER_WEEK:
-            os.remove(os.path.join('Engines', file))
+        cleanup_stale_path(os.path.join('Engines', file), SECONDS_PER_WEEK)
 
     for file in os.listdir('Networks'):
-        if file_age(os.path.join('Networks', file)) > SECONDS_PER_MONTH:
-            os.remove(os.path.join('Networks', file))
+        cleanup_stale_path(os.path.join('Networks', file), SECONDS_PER_MONTH)
 
     for file in os.listdir('Datagen'):
-        if file_age(os.path.join('Datagen', file)) > SECONDS_PER_DAY:
-            os.remove(os.path.join('Datagen', file))
+        cleanup_stale_path(
+            os.path.join('Datagen', file),
+            SECONDS_PER_DAY,
+            remove_directories=True,
+        )
 
 def has_uci_option(options, name):
 
@@ -1442,6 +1460,11 @@ class DatagenConfigurationError(RuntimeError):
     """Non-retryable generic DATAGEN configuration rejected by the client."""
 
 
+DATAGEN_DETERMINISTIC_SETUP_ERRORS = (
+    DatagenConfigurationError,
+)
+
+
 class DatagenHeartbeat:
 
     def __init__(self, config):
@@ -1603,6 +1626,18 @@ def report_datagen_transient_failure(config, summary, logs):
     return False
 
 
+def handle_datagen_transient_failure(config, chunk, log_path, error):
+    logs = datagen_log_tail(log_path)
+    summary = 'DATAGEN chunk %d transient failure: %s' % (
+        chunk['chunk_idx'], error
+    )
+    if not report_datagen_transient_failure(config, summary, logs):
+        print(
+            '[Note] Failed to report transient DATAGEN failure; '
+            'the server lease will safely expire'
+        )
+
+
 def datagen_log_tail(path, limit=65536):
     if not os.path.exists(path):
         return ''
@@ -1628,14 +1663,19 @@ def clean_datagen_workspace(output_path):
 
 def render_datagen_command(config, output_path, network_path=None):
     data = config.workload['test']['datagen']
-    book_name = config.workload['test']['book']['name']
+    book = config.workload['test']['book']
+    book_name = book['name']
     book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
+    book_raw_sha = book.get('raw_sha') or book.get('sha')
     values = {
         'SEED': str(data['seed']),
         'COUNT': str(data['chunk_count']),
         'OUT': output_path.replace('\\', '/'),
         'THREADS': str(config.threads),
         'BOOK': book_path.replace('\\', '/'),
+        'BOOK_SHA256': (
+            'NONE' if not book_raw_sha else str(book_raw_sha).upper()
+        ),
         'NETWORK': (
             'NONE' if not network_path else network_path.replace('\\', '/')
         ),
@@ -1684,6 +1724,7 @@ def complete_datagen_workload(config):
     output_path = os.path.join('Datagen', stem + '.bin')
     compressed_path = output_path + '.bz2'
     log_path = os.path.join('Datagen', stem + '.log')
+    setup_complete = False
 
     try:
         cleanup_errors = clean_datagen_workspace(output_path)
@@ -1700,10 +1741,14 @@ def complete_datagen_workload(config):
 
         with DatagenHeartbeat(config) as heartbeat:
             download_opening_book(
-                test['book']['sha'], test['book']['source'], test['book']['name']
+                test['book']['sha'],
+                test['book']['source'],
+                test['book']['name'],
+                test['book'].get('raw_sha'),
             )
             dev_network = safe_download_network_weights(config, 'dev')
             dev_name = safe_download_engine(config, 'dev', dev_network)
+            setup_complete = True
             # DATAGEN needs one deterministic compatibility check. Its NPS is
             # informational only and is never used to scale generation work.
             dev_nps = safe_run_benchmarks(
@@ -1767,20 +1812,24 @@ def complete_datagen_workload(config):
         raise
 
     except DatagenTransientError as error:
-        logs = datagen_log_tail(log_path)
-        summary = 'DATAGEN chunk %d transient failure: %s' % (
-            chunk['chunk_idx'], error
-        )
-        if not report_datagen_transient_failure(config, summary, logs):
-            print(
-                '[Note] Failed to report transient DATAGEN failure; '
-                'the server lease will safely expire'
-            )
+        handle_datagen_transient_failure(config, chunk, log_path, error)
         # Do not blacklist the workload: another worker (or this worker on a
         # later scheduler pass) may safely retry the now-requeued chunk.
         raise
 
     except Exception as error:
+        if (
+            not setup_complete
+            and not isinstance(error, DATAGEN_DETERMINISTIC_SETUP_ERRORS)
+        ):
+            transient_error = DatagenTransientError(
+                'DATAGEN setup failed before generator launch: %s' % error
+            )
+            handle_datagen_transient_failure(
+                config, chunk, log_path, transient_error
+            )
+            raise transient_error from error
+
         logs = datagen_log_tail(log_path)
         summary = 'DATAGEN chunk %d failed: %s' % (chunk['chunk_idx'], error)
         try:
@@ -1811,6 +1860,7 @@ def complete_workload(config):
         config.workload['test']['book']['sha'   ],
         config.workload['test']['book']['source'],
         config.workload['test']['book']['name'  ],
+        config.workload['test']['book'].get('raw_sha'),
     )
 
     # Download each NNUE file, throws an exception on corruption

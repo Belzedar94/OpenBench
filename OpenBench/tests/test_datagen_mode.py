@@ -573,7 +573,7 @@ class DatagenModeTests(TestCase):
     def test_template_validation_rejects_unknown_or_missing_placeholders(self):
         valid = SimpleNamespace(POST={'datagen_command': (
             'datagen seed {SEED} count {COUNT} threads {THREADS} out {OUT}'
-            ' network {NETWORK}'
+            ' network {NETWORK} book-sha {BOOK_SHA256}'
         )})
         errors = []
         verify_workload.verify_datagen_template(errors, valid, 'datagen_command')
@@ -583,6 +583,26 @@ class DatagenModeTests(TestCase):
         errors = []
         verify_workload.verify_datagen_template(errors, invalid, 'datagen_command')
         self.assertEqual(len(errors), 1)
+
+    def test_workload_carries_separate_normalized_and_raw_book_hashes(self):
+        test = self.make_test(total=2, per_chunk=2)
+        test.book_name = 'ATOMIC_openings.epd'
+        test.save(update_fields=['book_name'])
+        machine = self.make_machine()
+        chunk = test.datagen_chunks.get(idx=0)
+
+        payload = get_workload.workload_to_dictionary(
+            test, SimpleNamespace(id=1), machine, chunk
+        )
+        book = payload['test']['book']
+        self.assertEqual(
+            book['sha'],
+            'ec3752727cd732a966fd6cb7b3340fb68a726f0b3426d198a3da7b891faa2e91',
+        )
+        self.assertEqual(
+            book['raw_sha'],
+            '28ed51c2f42e723d5e127d2d3f21c0bfa4a9b318615afdb299b93ea62dea2b1e',
+        )
 
 
 class DatagenClaimConcurrencyTests(TransactionTestCase):
