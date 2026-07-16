@@ -249,7 +249,7 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
   (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
 
-## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-15)
+## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-16)
 
 - El protocolo v38 corrige la actualización en caliente de dependencias del
   worker y liga cada `machine_id` al usuario autenticado. Un cliente con un ID
@@ -257,11 +257,16 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   registra con una identidad nueva antes de poder reclamar un chunk. Desactivar
   el perfil revoca también las sesiones de worker que ya estaban conectadas.
 
+- El protocolo v39 añade evidencia optativa del ejecutable productor. Una
+  plantilla con `{PRODUCER_SHA256}` obliga al worker a subir el binario exacto
+  antes de ejecutarlo; el servidor rehashea, guarda por contenido y liga
+  SHA/tamaño/commit al chunk. No desplegar v39 a mitad de una campaña v38.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
-  `{BOOK}`, `{BOOK_SHA256}` y `{NETWORK}`. `BOOK_SHA256` es la identidad raw de
+  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}` y `{PRODUCER_SHA256}`. `BOOK_SHA256` es la identidad raw de
   los bytes extraídos (o la identidad histórica si el manifiesto no publica
   `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.
 - Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease

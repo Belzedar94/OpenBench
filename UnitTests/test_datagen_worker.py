@@ -107,6 +107,32 @@ class DatagenWorkerTests(unittest.TestCase):
         )
         self.assertIn('network NONE', rendered)
 
+    def test_template_fails_closed_until_producer_is_authenticated(self):
+        cfg = config()
+        cfg.workload['test']['datagen'].update({
+            'command': (
+                'generate {SEED} {COUNT} {THREADS} {OUT} '
+                'producer {PRODUCER_SHA256}'
+            ),
+            'producer_artifact_required': True,
+        })
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'authenticated producer'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        rendered = worker.render_datagen_command(
+            cfg,
+            'Datagen/chunk.bin',
+            producer={
+                'sha256': 'ab' * 32,
+                'bytes': 123,
+                'commit': 'cd' * 20,
+            },
+        )
+        self.assertIn('producer ' + ('ab' * 32), rendered)
+
     def test_template_uses_the_exact_raw_book_identity(self):
         cfg = config()
         cfg.workload['test']['book'] = {
@@ -365,6 +391,138 @@ class DatagenWorkerTests(unittest.TestCase):
         bench.assert_called_once()
         self.assertEqual(bench.call_args.args[1], 'dev')
         self.assertEqual(bench.call_args.kwargs, {'bench_threads': 1})
+
+    def test_required_producer_is_uploaded_before_generator_and_bound_to_chunk(self):
+        cfg = config()
+        cfg.workload['test']['datagen'].update({
+            'command': (
+                'generate {SEED} {COUNT} {THREADS} {OUT} '
+                'producer {PRODUCER_SHA256}'
+            ),
+            'producer_artifact_required': True,
+        })
+        producer_bytes = b'exact-generator-executable'
+        producer_sha = hashlib.sha256(producer_bytes).hexdigest()
+        calls = []
+        real_hash = worker.datagen_file_sha256
+
+        def record_hash(path):
+            if '.producer' in os.fspath(path):
+                calls.append('snapshot-hash')
+            return real_hash(path)
+
+        def register(
+            _config, path, sha256, byte_count, commit, metadata_only=False
+        ):
+            if metadata_only:
+                self.assertIsNone(path)
+                return {'upload_required': True}
+            calls.append('producer')
+            self.assertEqual(Path(path).read_bytes(), producer_bytes)
+            self.assertTrue(os.fspath(path).endswith('.exe'))
+            self.assertEqual(sha256, producer_sha)
+            self.assertEqual(byte_count, len(producer_bytes))
+            self.assertEqual(commit, 'a' * 40)
+            # A mutable build-cache path may change after publication. The
+            # generator must still execute the authenticated private snapshot.
+            Path('Engines', 'engine.exe').write_bytes(b'replaced-engine-b')
+            return {
+                'sha256': sha256,
+                'bytes': byte_count,
+                'commit': commit,
+            }
+
+        def generate(
+            _config, engine, output_path, _log_path, _heartbeat,
+            _network_path, producer,
+        ):
+            calls.append('generator')
+            self.assertEqual(producer['sha256'], producer_sha)
+            self.assertNotEqual(engine, os.path.join('Engines', 'engine.exe'))
+            self.assertTrue(engine.endswith('.exe'))
+            self.assertEqual(Path(engine).read_bytes(), producer_bytes)
+            self.assertEqual(
+                Path('Engines', 'engine.exe').read_bytes(), b'replaced-engine-b'
+            )
+            Path(output_path).write_bytes(b'v3-envelope')
+
+        def upload(_config, _path, _sha256, _byte_count, producer):
+            calls.append('chunk')
+            self.assertEqual(producer['sha256'], producer_sha)
+            return {'completed_chunks': 1, 'total_chunks': 8}
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            Path('Datagen').mkdir()
+            Path('Engines').mkdir()
+            Path('Engines', 'engine.exe').write_bytes(producer_bytes)
+            try:
+                with mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(
+                         worker, 'safe_download_network_weights', return_value=None
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_download_engine', return_value='engine.exe'
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_run_benchmarks', return_value=1000
+                     ), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(
+                         worker.ServerReporter,
+                         'report_datagen_producer',
+                         side_effect=register,
+                     ), \
+                     mock.patch.object(
+                         worker, 'datagen_file_sha256', side_effect=record_hash
+                     ), \
+                     mock.patch.object(
+                         worker, 'run_datagen_command', side_effect=generate
+                     ), \
+                     mock.patch.object(
+                         worker.ServerReporter, 'report_datagen', side_effect=upload
+                     ):
+                    worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(
+            calls,
+            [
+                'snapshot-hash', 'producer', 'snapshot-hash',
+                'generator', 'chunk',
+            ],
+        )
+
+    def test_producer_snapshot_is_private_executable_and_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'engine')
+            target = Path(directory, 'chunk.producer')
+            source.write_bytes(b'producer-a')
+            source.chmod(0o755)
+
+            identity = worker.snapshot_datagen_producer(source, target)
+
+            self.assertEqual(target.read_bytes(), b'producer-a')
+            self.assertEqual(identity, worker.datagen_file_sha256(target))
+            if os.name != 'nt':
+                self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_producer_snapshot_rejects_symlink_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'engine')
+            link = Path(directory, 'engine-link')
+            target = Path(directory, 'snapshot')
+            source.write_bytes(b'producer-a')
+            try:
+                link.symlink_to(source)
+            except OSError as error:
+                self.skipTest('symlink creation unavailable: %s' % error)
+
+            with self.assertRaisesRegex(OSError, 'not a regular file'):
+                worker.snapshot_datagen_producer(link, target)
+            self.assertFalse(target.exists())
 
     def test_retry_cleans_orphaned_chunk_files_before_running(self):
         cfg = config()
@@ -684,6 +842,135 @@ class DatagenWorkerTests(unittest.TestCase):
                 cfg, 'clientSubmitError', {'test_id': 7, 'error': 'failed'}
             )
         self.assertEqual(post.call_args.kwargs['data']['chunk_idx'], 3)
+        self.assertEqual(post.call_args.kwargs['data']['attempt'], 1)
+
+    def test_producer_report_carries_exact_lease_commit_and_binary(self):
+        cfg = config()
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'sha256': 'ab' * 32,
+                'bytes': 4,
+                'commit': 'cd' * 20,
+            },
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            binary = Path(cwd, 'producer.bin')
+            binary.write_bytes(b'ELF!')
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                body = worker.ServerReporter.report_datagen_producer(
+                    cfg, str(binary), 'ab' * 32, 4, 'cd' * 20
+                )
+
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['test_id'], 7)
+        self.assertEqual(sent['chunk_idx'], 3)
+        self.assertEqual(sent['attempt'], 1)
+        self.assertEqual(sent['metadata_only'], 0)
+        self.assertEqual(sent['machine_id'], 11)
+        self.assertEqual(sent['secret'], 'secret')
+        self.assertEqual(sent['commit'], 'cd' * 20)
+        self.assertEqual(body['sha256'], 'ab' * 32)
+
+    def test_producer_metadata_probe_has_no_file_payload(self):
+        cfg = config()
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'sha256': 'ab' * 32,
+                'bytes': 4,
+                'commit': 'cd' * 20,
+                'upload_required': False,
+            },
+        )
+        with mock.patch.object(
+            worker.requests, 'post', return_value=response
+        ) as post:
+            body = worker.ServerReporter.report_datagen_producer(
+                cfg, None, 'ab' * 32, 4, 'cd' * 20, metadata_only=True
+            )
+
+        self.assertNotIn('files', post.call_args.kwargs)
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['attempt'], 1)
+        self.assertEqual(sent['metadata_only'], 1)
+        self.assertFalse(body['upload_required'])
+
+    def test_cached_producer_is_bound_without_resending_binary(self):
+        cfg = config()
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        identity = {
+            'sha256': 'ab' * 32,
+            'bytes': 4,
+            'commit': 'cd' * 20,
+            'upload_required': False,
+        }
+        with mock.patch.object(
+            worker.ServerReporter,
+            'report_datagen_producer',
+            return_value=identity,
+        ) as report:
+            result = worker.upload_datagen_producer(
+                cfg, 'must-not-open.bin', 'ab' * 32, 4, 'cd' * 20,
+                heartbeat,
+            )
+
+        self.assertEqual(result, {
+            'sha256': 'ab' * 32,
+            'bytes': 4,
+            'commit': 'cd' * 20,
+        })
+        report.assert_called_once_with(
+            cfg, None, 'ab' * 32, 4, 'cd' * 20, metadata_only=True
+        )
+
+    def test_bad_version_stops_producer_upload_without_retry(self):
+        cfg = config()
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {'error': 'Bad Client Version: expected 39'},
+        )
+        with mock.patch.object(
+            worker.requests, 'post', return_value=response
+        ) as post:
+            with self.assertRaises(worker.BadVersionException):
+                worker.upload_datagen_producer(
+                    cfg, 'unused.bin', 'ab' * 32, 4, 'cd' * 20,
+                    heartbeat,
+                )
+        post.assert_called_once()
+
+    def test_chunk_report_carries_attempt_and_exact_producer_binding(self):
+        cfg = config()
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {'completed_chunks': 1, 'total_chunks': 8},
+        )
+        producer = {
+            'sha256': 'ab' * 32,
+            'bytes': 4,
+            'commit': 'cd' * 20,
+        }
+        with tempfile.TemporaryDirectory() as cwd:
+            chunk = Path(cwd, 'chunk.bz2')
+            chunk.write_bytes(b'BZh9')
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                worker.ServerReporter.report_datagen(
+                    cfg, str(chunk), 'ef' * 32, 4, producer
+                )
+
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['test_id'], 7)
+        self.assertEqual(sent['chunk_idx'], 3)
+        self.assertEqual(sent['attempt'], 1)
+        self.assertEqual(sent['producer_sha256'], 'ab' * 32)
+        self.assertEqual(sent['producer_bytes'], 4)
+        self.assertEqual(sent['producer_commit'], 'cd' * 20)
 
     def test_heartbeat_continues_until_server_requests_stop(self):
         calls = []
