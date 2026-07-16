@@ -3,6 +3,7 @@ name: DATAGEN PostgreSQL races
 on:
   pull_request:
   push:
+    branches: [spell-runner]
 
 jobs:
   datagen-postgres:
@@ -33,7 +34,8 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt -r Client/requirements.txt
+      - run: python -c "import cpuinfo, psutil, requests"
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
       - run: python -m unittest UnitTests.test_datagen_worker -v
