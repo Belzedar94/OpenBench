@@ -2,10 +2,13 @@ import datetime
 import time
 
 from django.db import OperationalError, transaction
-from django.db.models import F, Q
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 
-from OpenBench.models import DatagenChunk
+from OpenBench.models import (
+    DatagenChunk, DatagenProducerArtifact, DatagenProducerBuild,
+    DatagenProducerOwnerQuota, DatagenProducerQuota, Test,
+)
 
 
 # Heartbeats arrive every 30 seconds. Five minutes tolerates transient network
@@ -22,6 +25,23 @@ DATAGEN_CHUNK_CREATE_BATCH = 1000
 # independently so a compromised worker cannot use the CAS endpoint as an
 # unbounded second artifact channel.
 MAX_DATAGEN_PRODUCER_BYTES = 2 * 1024 * 1024 * 1024
+MAX_DATAGEN_PRODUCER_REQUEST_BYTES = (
+    MAX_DATAGEN_PRODUCER_BYTES + 8 * 1024 * 1024
+)
+
+# A publication campaign may legitimately contain distinct binaries built for
+# different worker architectures/toolchains. Bound that authenticated build set
+# so a compromised worker cannot turn producer evidence into unbounded storage.
+MAX_DATAGEN_PRODUCERS_PER_CAMPAIGN = 256
+MAX_DATAGEN_PRODUCER_BYTES_PER_CAMPAIGN = 16 * 1024 * 1024 * 1024
+
+# Physical CAS quota and logical per-owner reservations.  Campaign quotas are
+# smaller and remain the first line of defence; these caps bound aggregate
+# storage even when many campaigns are created by one or many accounts.
+MAX_DATAGEN_PRODUCERS_GLOBAL = 4096
+MAX_DATAGEN_PRODUCER_BYTES_GLOBAL = 256 * 1024 * 1024 * 1024
+MAX_DATAGEN_PRODUCERS_PER_OWNER = 1024
+MAX_DATAGEN_PRODUCER_BYTES_PER_OWNER = 64 * 1024 * 1024 * 1024
 
 # ``Test.max_games`` remains a signed 32-bit IntegerField for historical
 # gameplay workloads. Generic DATAGEN keeps its canonical 64-bit total in
@@ -48,25 +68,41 @@ def initialize_chunks(test):
 
     assert test.pk and is_generic_datagen(test)
 
-    total_chunks = test.datagen_total_chunks()
-    if not 0 < total_chunks <= MAX_DATAGEN_CHUNKS:
-        raise ValueError(
-            'Generic DATAGEN workloads must contain between 1 and %d chunks'
-            % MAX_DATAGEN_CHUNKS
-        )
-
     # Keep peak memory bounded even at the accepted workload maximum.  The
     # outer transaction also prevents a partially initialized chunk map when a
     # later batch fails.
     with transaction.atomic():
+        persisted = Test.objects.select_for_update().get(pk=test.pk)
+        total_chunks = persisted.datagen_total_chunks()
+        if not 0 < total_chunks <= MAX_DATAGEN_CHUNKS:
+            raise ValueError(
+                'Generic DATAGEN workloads must contain between 1 and %d chunks'
+                % MAX_DATAGEN_CHUNKS
+            )
+        # Freeze the producer contract in the same transaction as the immutable
+        # chunk map. Editing command text later cannot silently weaken or opt a
+        # running campaign into executable publication.
+        persisted.freeze_datagen_producer_contract()
+        Test.objects.filter(pk=test.pk).update(
+            datagen_producer_required=persisted.datagen_producer_required,
+            datagen_producer_contract_sha256=(
+                persisted.datagen_producer_contract_sha256
+            ),
+        )
+        test.datagen_producer_required = persisted.datagen_producer_required
+        test.datagen_producer_contract_sha256 = (
+            persisted.datagen_producer_contract_sha256
+        )
         chunks = []
         for idx in range(total_chunks):
-            offset = idx * test.datagen_positions_per_chunk
+            offset = idx * persisted.datagen_positions_per_chunk
             count = min(
-                test.datagen_positions_per_chunk,
-                test.datagen_total_count - offset,
+                persisted.datagen_positions_per_chunk,
+                persisted.datagen_total_count - offset,
             )
-            chunks.append(DatagenChunk(test=test, idx=idx, position_count=count))
+            chunks.append(DatagenChunk(
+                test=persisted, idx=idx, position_count=count
+            ))
 
             if len(chunks) == DATAGEN_CHUNK_CREATE_BATCH:
                 DatagenChunk.objects.bulk_create(
@@ -93,7 +129,13 @@ def assignable_chunks(test, now=None):
 
 
 def has_assignable_chunk(test):
-    return not is_generic_datagen(test) or assignable_chunks(test).exists()
+    return (
+        not is_generic_datagen(test)
+        or (
+            test.datagen_producer_contract_is_current()
+            and assignable_chunks(test).exists()
+        )
+    )
 
 
 def _next_claim_candidate(test, now):
@@ -122,11 +164,23 @@ def claim_chunk(test, machine):
     does not rely on ``select_for_update()``, which is a no-op on SQLite.
     """
 
-    if not is_generic_datagen(test):
+    if (
+        not is_generic_datagen(test)
+        or not test.datagen_producer_contract_is_current()
+    ):
         return None
 
     for attempt in range(DATAGEN_CLAIM_RETRIES):
         try:
+            # Keep related-table predicates out of the chunk UPDATE below.
+            # Django implements cross-table UPDATE filters through a subquery;
+            # on PostgreSQL that subquery can retain a stale PENDING snapshot
+            # while waiting for another claimant's row lock, allowing both
+            # statements to report success for the same chunk.
+            if not Test.objects.filter(
+                pk=test.pk, finished=False, deleted=False,
+            ).exists():
+                return None
             now = timezone.now()
             chunk = _next_claim_candidate(test, now)
             if chunk is None:
@@ -143,8 +197,6 @@ def claim_chunk(test, machine):
                 DatagenChunk.objects.filter(
                     pk=chunk.pk,
                     test_id=test.pk,
-                    test__finished=False,
-                    test__deleted=False,
                 )
                 .filter(expected_state)
                 .update(
@@ -157,6 +209,7 @@ def claim_chunk(test, machine):
                     producer_sha256='',
                     producer_bytes=0,
                     producer_commit='',
+                    producer_build=None,
                     attempts=F('attempts') + 1,
                     last_error='',
                 )
@@ -176,6 +229,8 @@ def claim_chunk(test, machine):
                 chunk.producer_sha256 = ''
                 chunk.producer_bytes = 0
                 chunk.producer_commit = ''
+                chunk.producer_build = None
+                chunk.producer_build_id = None
                 chunk.attempts += 1
                 chunk.last_error = ''
                 return chunk
@@ -198,8 +253,15 @@ def claim_chunk(test, machine):
     return None
 
 
-def renew_chunk(test_id, chunk_idx, machine):
+def renew_chunk(test_id, chunk_idx, machine, lease_attempt):
     """Renew an active lease. False tells a stale/duplicate client to stop."""
+
+    # As in claim_chunk(), the ownership CAS must contain only columns from
+    # DatagenChunk so PostgreSQL rechecks them after waiting on a row lock.
+    if not Test.objects.filter(
+        pk=test_id, finished=False, deleted=False,
+    ).exists():
+        return False
 
     # This UPDATE is the ownership check and renewal in one database statement.
     # A read followed by save() is unsafe on SQLite because select_for_update()
@@ -210,12 +272,11 @@ def renew_chunk(test_id, chunk_idx, machine):
         idx=chunk_idx,
         status=DatagenChunk.RUNNING,
         machine_id=machine.id,
-        test__finished=False,
-        test__deleted=False,
+        attempts=lease_attempt,
     ).update(assigned=timezone.now()) == 1
 
 
-def requeue_chunk(test_id, chunk_idx, machine, error=''):
+def requeue_chunk(test_id, chunk_idx, machine, lease_attempt, error=''):
     """Release only the lease owned by this machine; completed data is immutable."""
 
     # Keep the ownership predicate in the UPDATE itself.  This prevents a late
@@ -225,6 +286,7 @@ def requeue_chunk(test_id, chunk_idx, machine, error=''):
         idx=chunk_idx,
         status=DatagenChunk.RUNNING,
         machine_id=machine.id,
+        attempts=lease_attempt,
     ).update(
         status=DatagenChunk.PENDING,
         machine=None,
@@ -235,6 +297,7 @@ def requeue_chunk(test_id, chunk_idx, machine, error=''):
         producer_sha256='',
         producer_bytes=0,
         producer_commit='',
+        producer_build=None,
         last_error=error[:4096],
     ) == 1
 
@@ -254,6 +317,7 @@ def requeue_running_chunks(test):
         producer_sha256='',
         producer_bytes=0,
         producer_commit='',
+        producer_build=None,
         last_error='Requeued by workload restart',
     )
 
@@ -267,3 +331,70 @@ def completed_progress(test):
         test.datagen_total_chunks(),
         test.games,
     )
+
+
+def rebuild_producer_quota_counters():
+    """Recompute cached quota/refcount counters from authoritative relations.
+
+    The admission path updates these in O(1).  This idempotent repair primitive
+    is intentionally separate so a crash, manual database edit, or legacy
+    migration can be reconciled without trusting cached totals.
+    """
+
+    with transaction.atomic():
+        # Match the admission lock order: campaign -> global -> owner -> CAS.
+        # Acquiring every campaign is acceptable for this offline reconciler
+        # and avoids a PostgreSQL deadlock with a live reservation.
+        list(
+            Test.objects.select_for_update().order_by('pk')
+            .values_list('pk', flat=True)
+        )
+        global_quota, _ = DatagenProducerQuota.objects.select_for_update().get_or_create(
+            key='global'
+        )
+        artifacts = DatagenProducerArtifact.objects.all()
+        totals = artifacts.aggregate(bytes=Sum('bytes'))
+        global_quota.artifact_count = artifacts.count()
+        global_quota.reserved_bytes = totals['bytes'] or 0
+        global_quota.save(update_fields=[
+            'artifact_count', 'reserved_bytes', 'updated',
+        ])
+
+        Test.objects.update(
+            datagen_producer_build_count=0,
+            datagen_producer_build_bytes=0,
+        )
+        DatagenProducerOwnerQuota.objects.all().delete()
+        test_totals = {}
+        owner_totals = {}
+        for build in DatagenProducerBuild.objects.select_related('artifact'):
+            count, byte_count = test_totals.get(build.test_id, (0, 0))
+            test_totals[build.test_id] = (
+                count + 1, byte_count + build.artifact.bytes,
+            )
+            count, byte_count = owner_totals.get(build.owner_id, (0, 0))
+            owner_totals[build.owner_id] = (
+                count + 1, byte_count + build.artifact.bytes,
+            )
+        for test_id, (count, byte_count) in test_totals.items():
+            Test.objects.filter(pk=test_id).update(
+                datagen_producer_build_count=count,
+                datagen_producer_build_bytes=byte_count,
+            )
+        DatagenProducerOwnerQuota.objects.bulk_create([
+            DatagenProducerOwnerQuota(
+                owner_id=owner_id,
+                build_count=count,
+                reserved_bytes=byte_count,
+            )
+            for owner_id, (count, byte_count) in owner_totals.items()
+        ])
+
+        DatagenProducerArtifact.objects.update(reference_count=0)
+        for row in (
+            DatagenProducerBuild.objects.values('artifact_id')
+            .annotate(total=Count('id'))
+        ):
+            DatagenProducerArtifact.objects.filter(pk=row['artifact_id']).update(
+                reference_count=row['total']
+            )

@@ -34,6 +34,12 @@ CSRF_TRUSTED_ORIGINS = [
     o for o in os.environ.get('OPENBENCH_TRUSTED_ORIGINS',
                               'https://*.trycloudflare.com').split(',') if o]
 
+# Trust X-Forwarded-Proto only when the application is known to sit behind a
+# proxy that strips the client-supplied header and sets its own value.  DATAGEN
+# producer/manifest HTTP Basic authentication relies on request.is_secure().
+if os.environ.get('OPENBENCH_TRUST_X_FORWARDED_PROTO', 'False') == 'True':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 HTML_MINIFY   = True
 APPEND_SLASH  = True
 
@@ -106,6 +112,20 @@ DATABASES = {
         'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
     }
 }
+
+# Production and CI can exercise the row-lock/CAS path on PostgreSQL without
+# maintaining a second settings module. SQLite remains the zero-config local
+# default used by existing installations.
+if os.environ.get('OPENBENCH_POSTGRES_DB'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ['OPENBENCH_POSTGRES_DB'],
+        'USER': os.environ.get('OPENBENCH_POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.environ.get('OPENBENCH_POSTGRES_PASSWORD', ''),
+        'HOST': os.environ.get('OPENBENCH_POSTGRES_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('OPENBENCH_POSTGRES_PORT', '5432'),
+        'CONN_MAX_AGE': 0,
+    }
 
 
 # Password validation

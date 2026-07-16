@@ -18,7 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-import os, hashlib, datetime, json, secrets, sys, re, time
+import os, base64, hashlib, datetime, json, secrets, stat, sys, re, time
 
 import django.http
 import django.shortcuts
@@ -621,6 +621,25 @@ def verify_worker(function):
 
     def wrapped_verify_worker(*args, **kwargs):
 
+        # Reject producer bodies from Content-Length before Django parses a
+        # multipart upload into memory/temporary storage.  The reverse proxy
+        # must enforce the same ceiling for chunked transfer encoding.
+        if function.__name__ == 'client_submit_datagen_producer':
+            raw_length = args[0].META.get('CONTENT_LENGTH')
+            try:
+                content_length = int(raw_length)
+            except (TypeError, ValueError):
+                content_length = -1
+            if (
+                content_length < 0
+                or content_length
+                > OpenBench.datagen.MAX_DATAGEN_PRODUCER_REQUEST_BYTES
+            ):
+                return JsonResponse(
+                    {'error': 'DATAGEN producer request exceeds size limit'},
+                    status=413,
+                )
+
         # Get the machine, assuming it exists
         try: machine = Machine.objects.get(id=int(args[0].POST['machine_id']))
         except: return JsonResponse({ 'error' : 'Bad Machine Id' })
@@ -780,7 +799,31 @@ def client_submit_error(request, machine):
     ## 2. Error getting the artifacts. Does not exist, lacks credentials.
     ## 3. Error during actual gameplay. Timeloss, Disconnect, Crash, etc.
 
-    # Log the Error into the Events table
+    released_datagen = False
+    if request.POST.get('chunk_idx') is not None:
+        try:
+            test = Test.objects.get(id=int(request.POST['test_id']))
+            if test.is_generic_datagen():
+                released_datagen = OpenBench.datagen.requeue_chunk(
+                    test.id,
+                    int(request.POST['chunk_idx']),
+                    machine,
+                    int(request.POST['attempt']),
+                    request.POST.get('error', ''),
+                )
+                if not released_datagen:
+                    # Authenticate the attempt before creating a LogEvent or a
+                    # Media file. Late ABA reports are untrusted input from an
+                    # attempt that no longer owns the lease.
+                    return JsonResponse(
+                        {'error': 'DATAGEN chunk lease is stale'}, status=409
+                    )
+        except (KeyError, Test.DoesNotExist, ValueError):
+            return JsonResponse(
+                {'error': 'Malformed DATAGEN error report'}, status=400
+            )
+
+    # Log the Error into the Events table only after DATAGEN lease CAS.
     event = LogEvent.objects.create(
         author     = machine.user.username,
         summary    = request.POST['error'],
@@ -793,22 +836,9 @@ def client_submit_error(request, machine):
     FileSystemStorage().save('event%d.log' % (event.id), logfile)
     event.log_file = 'event%d.log' % (event.id); event.save()
 
-    # Generic DATAGEN failures release only this machine's current chunk. The
-    # normal event/log path above remains the source of failure diagnostics.
-    if request.POST.get('chunk_idx') is not None:
-        try:
-            test = Test.objects.get(id=int(request.POST['test_id']))
-            if test.is_generic_datagen():
-                OpenBench.datagen.requeue_chunk(
-                    test.id,
-                    int(request.POST['chunk_idx']),
-                    machine,
-                    request.POST.get('error', ''),
-                )
-                machine.workload = 0
-                machine.save()
-        except (Test.DoesNotExist, ValueError):
-            pass
+    if released_datagen:
+        machine.workload = 0
+        machine.save(update_fields=['workload'])
 
     return JsonResponse({})
 
@@ -830,7 +860,10 @@ def client_heartbeat(request, machine):
     if test.is_generic_datagen():
         try:
             active = OpenBench.datagen.renew_chunk(
-                test.id, int(request.POST['chunk_idx']), machine
+                test.id,
+                int(request.POST['chunk_idx']),
+                machine,
+                int(request.POST['attempt']),
             )
         except (KeyError, ValueError):
             active = False
@@ -898,18 +931,99 @@ def _hash_regular_file(path):
     return digest.hexdigest(), byte_count
 
 
+def _open_regular_descriptor(path, expected_bytes=None):
+    """Open one non-symlink regular-file snapshot and return that descriptor."""
+
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise OSError('content-addressed artifact is not a regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        after = os.fstat(descriptor)
+        if not stat.S_ISREG(after.st_mode):
+            raise OSError('content-addressed artifact is not a regular file')
+        if (
+            (before.st_dev, before.st_ino)
+            != (after.st_dev, after.st_ino)
+            or (
+                expected_bytes is not None
+                and after.st_size != expected_bytes
+            )
+        ):
+            raise OSError('content-addressed artifact changed while opening')
+        return os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _cached_producer_available(artifact, storage=None):
+    if artifact is None or artifact.state != DatagenProducerArtifact.AVAILABLE:
+        return False
+    storage = storage or FileSystemStorage()
+    try:
+        data = _open_regular_descriptor(
+            storage.path(artifact.filename()), artifact.bytes
+        )
+        data.close()
+        return True
+    except OSError:
+        return False
+
+
+def _fsync_promoted_file(path):
+    # Windows requires a writable CRT descriptor for fsync(). Validate first,
+    # then open only for durability; content identity was already hashed.
+    with _open_regular_descriptor(path):
+        pass
+    with open(path, 'rb+' if os.name == 'nt' else 'rb') as data:
+        os.fsync(data.fileno())
+    if os.name != 'nt':
+        directory = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _datagen_database_retry(action):
+    """Retry only SQLite BUSY reads/CAS statements with a known no-commit result."""
+
+    for attempt in range(OpenBench.datagen.DATAGEN_CLAIM_RETRIES):
+        try:
+            return action()
+        except OperationalError as error:
+            if not OpenBench.datagen._is_sqlite_lock_contention(error):
+                raise
+            if attempt + 1 == OpenBench.datagen.DATAGEN_CLAIM_RETRIES:
+                raise
+            time.sleep(min(
+                OpenBench.datagen.DATAGEN_CLAIM_BACKOFF * (attempt + 1),
+                0.05,
+            ))
+
+
+
 @csrf_exempt
 @verify_worker
 def client_submit_datagen_producer(request, machine):
-    """Persist and bind the exact generator executable before it is run."""
+    """Reserve, bind and publish one immutable producer under protocol v39."""
 
     try:
         test_id = int(request.POST['test_id'])
         chunk_idx = int(request.POST['chunk_idx'])
+        lease_attempt = int(request.POST['attempt'])
         expected_sha = request.POST['sha256'].lower()
         expected_bytes = int(request.POST['bytes'])
         producer_commit = request.POST['commit'].lower()
-        upload = request.FILES['file']
+        metadata_text = request.POST.get('metadata_only', '0')
+        assert metadata_text in ('0', '1')
+        metadata_only = metadata_text == '1'
+        upload = None if metadata_only else request.FILES['file']
+        assert lease_attempt > 0
         assert re.fullmatch(r'[0-9a-f]{64}', expected_sha)
         assert re.fullmatch(r'[0-9a-f]{40}', producer_commit)
         assert 0 < expected_bytes <= OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES
@@ -918,8 +1032,17 @@ def client_submit_datagen_producer(request, machine):
             {'error': 'Malformed DATAGEN producer upload'}, status=400
         )
 
-    test = Test.objects.filter(id=test_id).first()
-    chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
+    try:
+        test, chunk = _datagen_database_retry(lambda: (
+            Test.objects.select_related('dev').filter(pk=test_id).first(),
+            DatagenChunk.objects.filter(
+                test_id=test_id, idx=chunk_idx
+            ).first(),
+        ))
+    except OperationalError:
+        return JsonResponse(
+            {'error': 'DATAGEN database is temporarily busy'}, status=503
+        )
     if test is None or chunk is None or not test.is_generic_datagen():
         return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
     if not test.datagen_requires_producer_artifact():
@@ -927,173 +1050,370 @@ def client_submit_datagen_producer(request, machine):
             {'error': 'DATAGEN workload does not request producer evidence'},
             status=409,
         )
+    if not test.datagen_producer_contract_is_current():
+        return JsonResponse(
+            {'error': 'DATAGEN producer contract changed'}, status=409
+        )
     if test.finished or test.deleted:
         return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
-    if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
-        return JsonResponse(
-            {'error': 'DATAGEN chunk lease is not owned by machine'}, status=409
-        )
-
-    expected_commit = test.dev.sha.lower()
     if (
-        not re.fullmatch(r'[0-9a-f]{40}', expected_commit)
-        or producer_commit != expected_commit
+        chunk.status != DatagenChunk.RUNNING
+        or chunk.machine_id != machine.id
+        or chunk.attempts != lease_attempt
     ):
         return JsonResponse(
-            {'error': 'DATAGEN producer commit does not match workload'}, status=409
+            {'error': 'DATAGEN chunk lease is not owned by this attempt'},
+            status=409,
         )
-
-    try:
-        actual_sha, actual_bytes = _datagen_uploaded_digest(
-            upload, OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES
-        )
-    except ValueError:
+    if producer_commit != test.dev.sha.lower():
         return JsonResponse(
-            {'error': 'DATAGEN producer exceeds size limit'}, status=400
+            {'error': 'DATAGEN producer commit does not match workload'},
+            status=409,
         )
-    if actual_sha != expected_sha or actual_bytes != expected_bytes:
-        return JsonResponse({
-            'error': 'DATAGEN producer sha256 or byte count mismatch',
-            'sha256': actual_sha,
-            'bytes': actual_bytes,
-        }, status=400)
-
-    if chunk.producer_sha256:
-        if (
-            chunk.producer_sha256 == actual_sha
-            and chunk.producer_bytes == actual_bytes
-            and chunk.producer_commit == producer_commit
-        ):
-            registered = DatagenProducerArtifact.objects.filter(
-                sha256=actual_sha, bytes=actual_bytes
-            ).first()
-            if registered is not None:
-                try:
-                    stored_identity = _hash_regular_file(
-                        FileSystemStorage().path(registered.filename())
-                    )
-                except OSError:
-                    stored_identity = None
-                if stored_identity == (actual_sha, actual_bytes):
-                    return JsonResponse({
-                        'sha256': actual_sha,
-                        'bytes': actual_bytes,
-                        'commit': producer_commit,
-                        'already_registered': True,
-                    })
-            # Repair missing CAS metadata from the just-authenticated upload.
-            # A conflicting existing blob still fails below.
-        if (
-            chunk.producer_sha256 != actual_sha
-            or chunk.producer_bytes != actual_bytes
-            or chunk.producer_commit != producer_commit
-        ):
-            return JsonResponse(
-                {'error': 'DATAGEN chunk is already bound to another producer'},
-                status=409,
-            )
 
     storage = FileSystemStorage()
-    staging_name = 'datagen-producers/.staging/%d-%d-%s' % (
-        test_id, chunk_idx, secrets.token_hex(16),
-    )
-    artifact = DatagenProducerArtifact(
-        sha256=actual_sha, bytes=actual_bytes,
-    )
-    canonical_name = artifact.filename()
+    try:
+        existing = _datagen_database_retry(lambda: (
+            DatagenProducerArtifact.objects.filter(
+                sha256=expected_sha, bytes=expected_bytes
+            ).first()
+        ))
+    except OperationalError:
+        return JsonResponse(
+            {'error': 'DATAGEN database is temporarily busy'}, status=503
+        )
+    cached_before = _cached_producer_available(existing, storage)
+    if metadata_only and not cached_before:
+        return JsonResponse({
+            'sha256': expected_sha,
+            'bytes': expected_bytes,
+            'commit': producer_commit,
+            'already_registered': False,
+            'upload_required': True,
+        })
 
-    def cleanup_staging():
+    if not metadata_only:
         try:
-            if storage.exists(staging_name):
-                storage.delete(staging_name)
+            actual_sha, actual_bytes = _datagen_uploaded_digest(
+                upload, OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES
+            )
+        except ValueError:
+            return JsonResponse(
+                {'error': 'DATAGEN producer exceeds size limit'}, status=400
+            )
+        if (actual_sha, actual_bytes) != (expected_sha, expected_bytes):
+            return JsonResponse({
+                'error': 'DATAGEN producer sha256 or byte count mismatch',
+                'sha256': actual_sha,
+                'bytes': actual_bytes,
+            }, status=400)
+
+    staging_name = None
+
+    def cleanup_staging(name):
+        if not name:
+            return
+        try:
+            if storage.exists(name):
+                storage.delete(name)
         except OSError:
             pass
 
     try:
-        saved_name = storage.save(staging_name, upload)
-        if saved_name != staging_name:
-            cleanup_staging()
-            if storage.exists(saved_name):
-                storage.delete(saved_name)
-            return JsonResponse(
-                {'error': 'Unable to stage DATAGEN producer at canonical path'},
-                status=500,
+        if not metadata_only:
+            staging_name = 'datagen-producers/.staging/%d-%d-%d-%s' % (
+                test_id, chunk_idx, lease_attempt, secrets.token_hex(16),
             )
+            try:
+                saved_name = storage.save(staging_name, upload)
+                if saved_name != staging_name:
+                    cleanup_staging(saved_name)
+                    raise OSError('storage changed the staging name')
+                if _hash_regular_file(storage.path(staging_name)) != (
+                    expected_sha, expected_bytes
+                ):
+                    raise OSError('staged producer failed verification')
+                _fsync_promoted_file(storage.path(staging_name))
+            except OSError:
+                return JsonResponse(
+                    {'error': 'Unable to stage DATAGEN producer artifact'},
+                    status=500,
+                )
 
-        canonical_path = storage.path(canonical_name)
-        os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
-        promote = True
-        if os.path.lexists(canonical_path):
+        def reserve_and_bind():
+            with transaction.atomic():
+                # Completion locks the chunk CAS before updating Test progress.
+                # Use the same chunk -> campaign order here to avoid a
+                # PostgreSQL deadlock between a producer retry and completion.
+                current = (
+                    DatagenChunk.objects.select_for_update()
+                    .filter(pk=chunk.pk, test_id=test_id)
+                    .first()
+                )
+                campaign = (
+                    Test.objects.select_for_update().select_related('dev')
+                    .filter(pk=test_id, finished=False, deleted=False)
+                    .first()
+                )
+                if campaign is None or current is None:
+                    return JsonResponse(
+                        {'error': 'DATAGEN campaign is no longer active'},
+                        status=409,
+                    ), None, False
+                if (
+                    current.status != DatagenChunk.RUNNING
+                    or current.machine_id != machine.id
+                    or current.attempts != lease_attempt
+                ):
+                    return JsonResponse(
+                        {'error': 'DATAGEN chunk lease changed'}, status=409
+                    ), None, False
+                if (
+                    not campaign.datagen_producer_required
+                    or not campaign.datagen_producer_contract_sha256
+                    or not campaign.datagen_producer_contract_is_current()
+                    or producer_commit != campaign.dev.sha.lower()
+                ):
+                    return JsonResponse(
+                        {'error': 'DATAGEN producer contract changed'}, status=409
+                    ), None, False
+
+                owner = User.objects.filter(username=campaign.author).first()
+                if owner is None:
+                    return JsonResponse(
+                        {'error': 'DATAGEN campaign owner is unavailable'},
+                        status=500,
+                    ), None, False
+
+                # The singleton and owner rows are explicit serialization
+                # points. Aggregate quota checks without these locks race on
+                # PostgreSQL when two distinct hashes arrive concurrently.
+                DatagenProducerQuota.objects.get_or_create(key='global')
+                global_quota = DatagenProducerQuota.objects.select_for_update().get(
+                    key='global'
+                )
+                DatagenProducerOwnerQuota.objects.get_or_create(owner=owner)
+                owner_quota = DatagenProducerOwnerQuota.objects.select_for_update().get(
+                    owner=owner
+                )
+
+                artifact = (
+                    DatagenProducerArtifact.objects.select_for_update()
+                    .filter(sha256=expected_sha)
+                    .first()
+                )
+                new_artifact = artifact is None
+                if new_artifact:
+                    if staging_name is None:
+                        return JsonResponse(
+                            {'error': 'DATAGEN producer CAS requires bytes'},
+                            status=409,
+                        ), None, False
+                    if (
+                        global_quota.artifact_count + 1
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCERS_GLOBAL
+                        or global_quota.reserved_bytes + expected_bytes
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES_GLOBAL
+                    ):
+                        return JsonResponse(
+                            {'error': 'DATAGEN global producer quota exceeded'},
+                            status=409,
+                        ), None, False
+                    artifact = DatagenProducerArtifact.objects.create(
+                        sha256=expected_sha,
+                        bytes=expected_bytes,
+                        state=DatagenProducerArtifact.STAGING,
+                        staging_name=staging_name,
+                    )
+                    global_quota.artifact_count += 1
+                    global_quota.reserved_bytes += expected_bytes
+                    global_quota.save(update_fields=[
+                        'artifact_count', 'reserved_bytes', 'updated',
+                    ])
+                elif artifact.bytes != expected_bytes:
+                    return JsonResponse(
+                        {'error': 'DATAGEN producer identity conflict'}, status=500
+                    ), None, False
+
+                available = _cached_producer_available(artifact, storage)
+                if not available:
+                    if staging_name is None:
+                        return JsonResponse(
+                            {'error': 'DATAGEN producer CAS requires bytes'},
+                            status=409,
+                        ), None, False
+                    artifact.state = DatagenProducerArtifact.STAGING
+                    artifact.staging_name = staging_name
+                    artifact.save(update_fields=[
+                        'state', 'staging_name', 'updated',
+                    ])
+
+                build = (
+                    DatagenProducerBuild.objects.select_for_update()
+                    .filter(test=campaign, artifact=artifact)
+                    .first()
+                )
+                if build is None:
+                    if (
+                        campaign.datagen_producer_build_count + 1
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCERS_PER_CAMPAIGN
+                        or campaign.datagen_producer_build_bytes + expected_bytes
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES_PER_CAMPAIGN
+                    ):
+                        transaction.set_rollback(True)
+                        return JsonResponse(
+                            {'error': 'DATAGEN producer build-set quota exceeded'},
+                            status=409,
+                        ), None, False
+                    if (
+                        owner_quota.build_count + 1
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCERS_PER_OWNER
+                        or owner_quota.reserved_bytes + expected_bytes
+                        > OpenBench.datagen.MAX_DATAGEN_PRODUCER_BYTES_PER_OWNER
+                    ):
+                        transaction.set_rollback(True)
+                        return JsonResponse(
+                            {'error': 'DATAGEN owner producer quota exceeded'},
+                            status=409,
+                        ), None, False
+                    build = DatagenProducerBuild.objects.create(
+                        test=campaign,
+                        artifact=artifact,
+                        owner=owner,
+                        commit=producer_commit,
+                        contract_sha256=(
+                            campaign.datagen_producer_contract_sha256
+                        ),
+                    )
+                    campaign.datagen_producer_build_count += 1
+                    campaign.datagen_producer_build_bytes += expected_bytes
+                    campaign.save(update_fields=[
+                        'datagen_producer_build_count',
+                        'datagen_producer_build_bytes',
+                        'updated',
+                    ])
+                    owner_quota.build_count += 1
+                    owner_quota.reserved_bytes += expected_bytes
+                    owner_quota.save(update_fields=[
+                        'build_count', 'reserved_bytes', 'updated',
+                    ])
+                    artifact.reference_count += 1
+                    artifact.save(update_fields=['reference_count', 'updated'])
+                elif (
+                    build.owner_id != owner.id
+                    or build.commit != producer_commit
+                    or build.contract_sha256
+                    != campaign.datagen_producer_contract_sha256
+                ):
+                    transaction.set_rollback(True)
+                    return JsonResponse(
+                        {'error': 'DATAGEN producer build binding conflict'},
+                        status=500,
+                    ), None, False
+
+                if current.producer_build_id not in (None, build.id):
+                    transaction.set_rollback(True)
+                    return JsonResponse(
+                        {'error': 'DATAGEN chunk producer binding changed'},
+                        status=409,
+                    ), None, False
+                current.producer_build = build
+                current.producer_sha256 = expected_sha
+                current.producer_bytes = expected_bytes
+                current.producer_commit = producer_commit
+                current.save(update_fields=[
+                    'producer_build', 'producer_sha256', 'producer_bytes',
+                    'producer_commit',
+                ])
+                return None, artifact.id, available
+
+        try:
+            response, artifact_id, already_available = _datagen_database_retry(
+                reserve_and_bind
+            )
+        except OperationalError:
+            return JsonResponse(
+                {'error': 'DATAGEN database is temporarily busy'}, status=503
+            )
+        if response is not None:
+            return response
+
+        try:
+            artifact = _datagen_database_retry(lambda: (
+                DatagenProducerArtifact.objects.get(pk=artifact_id)
+            ))
+        except OperationalError:
+            return JsonResponse(
+                {'error': 'DATAGEN database is temporarily busy'}, status=503
+            )
+        canonical_path = storage.path(artifact.filename())
+        if not already_available:
             try:
-                stored_sha, stored_bytes = _hash_regular_file(canonical_path)
-            except OSError:
-                stored_sha, stored_bytes = None, None
-            promote = stored_sha != actual_sha or stored_bytes != actual_bytes
-        if promote:
-            try:
+                os.makedirs(os.path.dirname(canonical_path), exist_ok=True)
                 os.replace(storage.path(staging_name), canonical_path)
+                staging_name = None
+                _fsync_promoted_file(canonical_path)
             except OSError:
+                # Preserve the tracked staging object for the reconciler. The
+                # reservation and build remain durable and cannot be used to
+                # bypass any quota via requeue.
+                staging_name = None
                 return JsonResponse(
                     {'error': 'Unable to promote DATAGEN producer artifact'},
                     status=500,
                 )
-        try:
-            final_identity = _hash_regular_file(canonical_path)
-        except OSError:
-            final_identity = None
-        if final_identity != (actual_sha, actual_bytes):
-            return JsonResponse(
-                {'error': 'Promoted DATAGEN producer artifact failed verification'},
-                status=500,
-            )
-
-        with transaction.atomic():
-            stored, _ = DatagenProducerArtifact.objects.get_or_create(
-                sha256=actual_sha,
-                defaults={'bytes': actual_bytes},
-            )
-            if stored.bytes != actual_bytes:
+            try:
+                _datagen_database_retry(lambda: (
+                    DatagenProducerArtifact.objects.filter(
+                        pk=artifact_id,
+                        sha256=expected_sha,
+                        bytes=expected_bytes,
+                    ).update(
+                        state=DatagenProducerArtifact.AVAILABLE,
+                        staging_name='',
+                        last_verified=timezone.now(),
+                        updated=timezone.now(),
+                    )
+                ))
+            except OperationalError:
                 return JsonResponse(
-                    {'error': 'DATAGEN producer database identity conflict'},
-                    status=500,
+                    {'error': 'DATAGEN database is temporarily busy'}, status=503
                 )
 
-            bound = DatagenChunk.objects.filter(
-                pk=chunk.pk,
-                status=DatagenChunk.RUNNING,
-                machine_id=machine.id,
-                producer_sha256='',
-                test__finished=False,
-                test__deleted=False,
-            ).update(
-                producer_sha256=actual_sha,
-                producer_bytes=actual_bytes,
-                producer_commit=producer_commit,
+        try:
+            lease_is_current = _datagen_database_retry(lambda: (
+                DatagenChunk.objects.filter(
+                    pk=chunk.pk,
+                    status=DatagenChunk.RUNNING,
+                    machine_id=machine.id,
+                    attempts=lease_attempt,
+                    producer_build__artifact_id=artifact_id,
+                    producer_sha256=expected_sha,
+                    producer_bytes=expected_bytes,
+                    producer_commit=producer_commit,
+                    test__finished=False,
+                    test__deleted=False,
+                ).exists()
+            ))
+        except OperationalError:
+            return JsonResponse(
+                {'error': 'DATAGEN database is temporarily busy'}, status=503
             )
-            if bound != 1:
-                current = DatagenChunk.objects.get(pk=chunk.pk)
-                if not (
-                    current.status == DatagenChunk.RUNNING
-                    and current.machine_id == machine.id
-                    and current.producer_sha256 == actual_sha
-                    and current.producer_bytes == actual_bytes
-                    and current.producer_commit == producer_commit
-                ):
-                    transaction.set_rollback(True)
-                    return JsonResponse(
-                        {'error': 'DATAGEN chunk lease or producer binding changed'},
-                        status=409,
-                    )
-
+        if not lease_is_current:
+            return JsonResponse(
+                {'error': 'DATAGEN chunk lease changed after producer binding'},
+                status=409,
+            )
         return JsonResponse({
-            'sha256': actual_sha,
-            'bytes': actual_bytes,
+            'sha256': expected_sha,
+            'bytes': expected_bytes,
             'commit': producer_commit,
-            'already_registered': False,
+            'already_registered': already_available,
+            'upload_required': False,
         })
-
     finally:
-        cleanup_staging()
+        cleanup_staging(staging_name)
+
 
 @csrf_exempt
 @verify_worker
@@ -1102,22 +1422,15 @@ def client_submit_datagen(request, machine):
     try:
         test_id = int(request.POST['test_id'])
         chunk_idx = int(request.POST['chunk_idx'])
+        lease_attempt = int(request.POST['attempt'])
         expected_sha = request.POST['sha256'].lower()
         expected_bytes = int(request.POST['bytes'])
         upload = request.FILES['file']
+        assert lease_attempt > 0
         assert re.fullmatch(r'[0-9a-f]{64}', expected_sha)
         assert expected_bytes >= 0
     except (KeyError, ValueError, AssertionError):
         return JsonResponse({'error': 'Malformed DATAGEN upload'}, status=400)
-
-    actual_sha, actual_bytes = _datagen_uploaded_digest(upload)
-
-    if actual_sha != expected_sha or actual_bytes != expected_bytes:
-        return JsonResponse({
-            'error': 'DATAGEN sha256 or byte count mismatch',
-            'sha256': actual_sha,
-            'bytes': actual_bytes,
-        }, status=400)
 
     storage = FileSystemStorage()
 
@@ -1135,11 +1448,25 @@ def client_submit_datagen(request, machine):
             'finished': test.finished,
         })
 
-    test = Test.objects.filter(id=test_id).first()
-    chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
+    try:
+        test, chunk = _datagen_database_retry(lambda: (
+            Test.objects.filter(id=test_id).first(),
+            DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first(),
+        ))
+    except OperationalError:
+        return JsonResponse(
+            {'error': 'DATAGEN database is temporarily busy'}, status=503
+        )
     if test is None or chunk is None or not test.is_generic_datagen():
         return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+    if chunk.attempts != lease_attempt:
+        return JsonResponse(
+            {'error': 'DATAGEN chunk lease attempt is stale'}, status=409
+        )
 
+    submitted_producer = None
+    submitted_producer_bytes = 0
+    submitted_producer_commit = None
     if test.datagen_requires_producer_artifact():
         try:
             submitted_producer = request.POST['producer_sha256'].lower()
@@ -1153,7 +1480,8 @@ def client_submit_datagen(request, machine):
                 {'error': 'DATAGEN upload omitted producer evidence'}, status=400
             )
         if (
-            not chunk.producer_sha256
+            chunk.producer_build_id is None
+            or not chunk.producer_sha256
             or submitted_producer != chunk.producer_sha256
             or submitted_producer_bytes != chunk.producer_bytes
             or submitted_producer_commit != chunk.producer_commit
@@ -1162,25 +1490,54 @@ def client_submit_datagen(request, machine):
                 {'error': 'DATAGEN upload producer evidence does not match lease'},
                 status=409,
             )
-        artifact = DatagenProducerArtifact.objects.filter(
-            sha256=chunk.producer_sha256,
-            bytes=chunk.producer_bytes,
-        ).first()
         try:
-            stored_producer = (
-                None if artifact is None else _hash_regular_file(
-                    FileSystemStorage().path(artifact.filename())
-                )
+            build = _datagen_database_retry(lambda: (
+                DatagenProducerBuild.objects.select_related('artifact').filter(
+                    pk=chunk.producer_build_id,
+                    test_id=test.id,
+                    commit=chunk.producer_commit,
+                    contract_sha256=test.datagen_producer_contract_sha256,
+                    artifact__sha256=chunk.producer_sha256,
+                    artifact__bytes=chunk.producer_bytes,
+                ).first()
+            ))
+        except OperationalError:
+            return JsonResponse(
+                {'error': 'DATAGEN database is temporarily busy'}, status=503
             )
-        except OSError:
-            stored_producer = None
-        if stored_producer != (
-            chunk.producer_sha256, chunk.producer_bytes
-        ):
+        if build is None or not _cached_producer_available(build.artifact):
             return JsonResponse(
                 {'error': 'DATAGEN producer artifact is unavailable or corrupt'},
                 status=409,
             )
+
+    if chunk.status == DatagenChunk.COMPLETED:
+        if chunk.machine_id != machine.id:
+            return JsonResponse(
+                {'error': 'DATAGEN completed chunk belongs to another machine'},
+                status=409,
+            )
+    elif (
+        test.finished
+        or test.deleted
+        or chunk.status != DatagenChunk.RUNNING
+        or chunk.machine_id != machine.id
+    ):
+        return JsonResponse(
+            {'error': 'DATAGEN chunk lease is not owned by this attempt'},
+            status=409,
+        )
+
+    # Authenticate the exact lease and producer before hashing a potentially
+    # multi-gigabyte request body. Stale attempts cannot consume upload CPU or
+    # create staging files.
+    actual_sha, actual_bytes = _datagen_uploaded_digest(upload)
+    if actual_sha != expected_sha or actual_bytes != expected_bytes:
+        return JsonResponse({
+            'error': 'DATAGEN sha256 or byte count mismatch',
+            'sha256': actual_sha,
+            'bytes': actual_bytes,
+        }, status=400)
 
     # Lost HTTP responses may cause an identical retry. Keep completed chunks
     # immutable while accepting that retry idempotently without staging again.
@@ -1193,15 +1550,20 @@ def client_submit_datagen(request, machine):
         return completed_response(test)
     if test.finished or test.deleted:
         return JsonResponse({'error': 'DATAGEN test is not active'}, status=409)
-    if chunk.status != DatagenChunk.RUNNING or chunk.machine_id != machine.id:
+    if (
+        chunk.status != DatagenChunk.RUNNING
+        or chunk.machine_id != machine.id
+        or chunk.attempts != lease_attempt
+    ):
         return JsonResponse(
-            {'error': 'DATAGEN chunk lease is not owned by machine'},
+            {'error': 'DATAGEN chunk lease is not owned by this attempt'},
             status=409,
         )
 
     filename = chunk.filename()
     chunk_pk = chunk.pk
     chunk_position_count = chunk.position_count
+    chunk_producer_build_id = chunk.producer_build_id
     staging_name = '%s.staging-%d-%s' % (
         filename,
         machine.id,
@@ -1240,13 +1602,20 @@ def client_submit_datagen(request, machine):
             # Ownership validation and completion are one conditional write.
             # Keep it as the first statement in the transaction: SQLite can
             # then serialize writers without a read-to-write upgrade deadlock.
-            completed_by_machine = DatagenChunk.objects.filter(
+            completion = DatagenChunk.objects.filter(
                 pk=chunk_pk,
                 status=DatagenChunk.RUNNING,
                 machine_id=machine.id,
-                test__finished=False,
-                test__deleted=False,
-            ).update(
+                attempts=lease_attempt,
+            )
+            if submitted_producer is not None:
+                completion = completion.filter(
+                    producer_build_id=chunk_producer_build_id,
+                    producer_sha256=submitted_producer,
+                    producer_bytes=submitted_producer_bytes,
+                    producer_commit=submitted_producer_commit,
+                )
+            completed_by_machine = completion.update(
                 status=DatagenChunk.COMPLETED,
                 sha256=actual_sha,
                 bytes=actual_bytes,
@@ -1260,6 +1629,7 @@ def client_submit_datagen(request, machine):
                     return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
                 if (
                     chunk.status == DatagenChunk.COMPLETED
+                    and chunk.attempts == lease_attempt
                     and chunk.sha256 == actual_sha
                     and chunk.bytes == actual_bytes
                 ):
@@ -1269,6 +1639,22 @@ def client_submit_datagen(request, machine):
                     status=409,
                 )
 
+            # Advance progress only if the campaign is still active.  This is
+            # a direct Test-row CAS after the direct chunk-row CAS, avoiding
+            # the stale cross-table UPDATE subquery used by Django on
+            # PostgreSQL. Any failure rolls the chunk transition back.
+            progressed = Test.objects.filter(
+                pk=test_id, finished=False, deleted=False,
+            ).update(
+                games=F('games') + chunk_position_count,
+                datagen_completed_chunks=F('datagen_completed_chunks') + 1,
+                updated=timezone.now(),
+            )
+            if progressed != 1:
+                transaction.set_rollback(True)
+                return JsonResponse(
+                    {'error': 'DATAGEN test is not active'}, status=409,
+                )
             test = Test.objects.get(id=test_id)
 
             # Both names live under the same FileSystemStorage root, so this is
@@ -1284,14 +1670,8 @@ def client_submit_datagen(request, machine):
                 )
             staging_name = None
 
-            # Increment progress exactly once after the successful chunk CAS.
-            # F() updates serialize concurrent chunks without rescanning the
-            # complete chunk table or losing a PostgreSQL update.
-            Test.objects.filter(pk=test.pk).update(
-                games=F('games') + chunk_position_count,
-                datagen_completed_chunks=F('datagen_completed_chunks') + 1,
-            )
-            test.refresh_from_db()
+            # F() updates above serialize concurrent chunks without rescanning
+            # the complete chunk table or losing a PostgreSQL update.
             completed, total, positions = OpenBench.datagen.completed_progress(test)
             if completed > total or positions > test.datagen_total_count:
                 transaction.set_rollback(True)
@@ -1306,7 +1686,9 @@ def client_submit_datagen(request, machine):
                         {'error': 'DATAGEN progress counters are inconsistent'},
                         status=500,
                     )
-                Test.objects.filter(pk=test.pk).update(passed=True, finished=True)
+                Test.objects.filter(pk=test.pk).update(
+                    passed=True, finished=True, updated=timezone.now()
+                )
                 test.refresh_from_db()
 
             Machine.objects.filter(pk=machine.id).update(workload=0)
@@ -1362,14 +1744,27 @@ def api_authenticate(request, require_enabled=False):
         if request.user.is_authenticated:
             return Profile.objects.get(user=request.user).enabled
 
-        # Request might be made from the command line. Check the headers
+        # Command-line GET clients use HTTP Basic. Historical POST credentials
+        # remain accepted for the rest of the API.
+        authorization = request.META.get('HTTP_AUTHORIZATION', '')
+        if authorization.startswith('Basic '):
+            # Basic credentials are reusable secrets.  Never accept them over
+            # cleartext HTTP; deployments behind a trusted TLS terminator must
+            # opt in to SECURE_PROXY_SSL_HEADER in settings.
+            if not request.is_secure():
+                return False
+            decoded = base64.b64decode(
+                authorization[6:], validate=True
+            ).decode('utf-8')
+            username, password = decoded.split(':', 1)
+        else:
+            username = request.POST['username']
+            password = request.POST['password']
         user = django.contrib.auth.authenticate(
-            username=request.POST['username'], password=request.POST['password'])
+            username=username, password=password)
         return Profile.objects.get(user=user).enabled
 
     except Exception:
-        import traceback
-        traceback.print_exc()
         return False
 
 @csrf_exempt
@@ -1507,7 +1902,7 @@ def api_datagen_chunk(request, test_id, chunk_idx):
 @csrf_exempt
 def api_datagen_manifest(request, test_id):
 
-    if not api_authenticate(request):
+    if not api_authenticate(request, require_enabled=True):
         return api_response({ 'error' : 'API requires authentication for this server' })
 
     test = Test.objects.filter(id=test_id).first()
@@ -1516,7 +1911,11 @@ def api_datagen_manifest(request, test_id):
             'error': 'Unable to find generic DATAGEN Workload #%d' % test_id
         })
 
-    chunks = list(test.datagen_chunks.order_by('idx'))
+    chunks = list(
+        test.datagen_chunks.select_related(
+            'producer_build__artifact'
+        ).order_by('idx')
+    )
     if (
         not test.finished
         or test.datagen_completed_chunks != test.datagen_total_chunks()
@@ -1527,12 +1926,17 @@ def api_datagen_manifest(request, test_id):
         })
 
     producer_required = test.datagen_requires_producer_artifact()
+    producer_builds = []
     if producer_required:
         expected_commit = test.dev.sha.lower()
         if (
             not re.fullmatch(r'[0-9a-f]{40}', expected_commit)
+            or not re.fullmatch(
+                r'[0-9a-f]{64}', test.datagen_producer_contract_sha256
+            )
             or any(
-                not re.fullmatch(r'[0-9a-f]{64}', chunk.producer_sha256)
+                chunk.producer_build_id is None
+                or not re.fullmatch(r'[0-9a-f]{64}', chunk.producer_sha256)
                 or chunk.producer_bytes <= 0
                 or chunk.producer_commit != expected_commit
                 for chunk in chunks
@@ -1543,31 +1947,51 @@ def api_datagen_manifest(request, test_id):
                          % test_id
             })
 
-        for producer_sha256, producer_bytes in sorted({
-            (chunk.producer_sha256, chunk.producer_bytes) for chunk in chunks
-        }):
-            artifact = DatagenProducerArtifact.objects.filter(
-                sha256=producer_sha256, bytes=producer_bytes
-            ).first()
-            try:
-                identity = (
-                    None if artifact is None else _hash_regular_file(
-                        FileSystemStorage().path(artifact.filename())
+        used_build_ids = set()
+        for chunk in chunks:
+            build = chunk.producer_build
+            if (
+                build.test_id != test.id
+                or build.commit != expected_commit
+                or build.contract_sha256
+                != test.datagen_producer_contract_sha256
+                or build.artifact.sha256 != chunk.producer_sha256
+                or build.artifact.bytes != chunk.producer_bytes
+            ):
+                return api_response({
+                    'error': (
+                        'DATAGEN Workload #%d has inconsistent producer evidence'
+                        % test_id
                     )
-                )
-            except OSError:
-                identity = None
-            if identity != (producer_sha256, producer_bytes):
+                })
+            used_build_ids.add(build.id)
+
+        builds = list(
+            DatagenProducerBuild.objects.select_related('artifact')
+            .filter(test=test, id__in=used_build_ids)
+            .order_by('artifact__sha256')
+        )
+        for build in builds:
+            if not _cached_producer_available(build.artifact):
                 return api_response({
                     'error': 'DATAGEN Workload #%d has unavailable producer evidence'
                              % test_id
                 })
+            producer_builds.append({
+                'sha256': build.artifact.sha256,
+                'bytes': build.artifact.bytes,
+                'commit': expected_commit,
+            })
 
     return api_response({
         'test_id': test.id,
         'engine': test.dev_engine,
         'producer_commit': test.dev.sha.lower(),
+        'producer_builds': producer_builds,
         'producer_artifact_required': producer_required,
+        'producer_contract_sha256': (
+            test.datagen_producer_contract_sha256
+        ),
         'total_count': test.datagen_total_count,
         'positions_per_chunk': test.datagen_positions_per_chunk,
         'base_seed': test.datagen_base_seed,
@@ -1590,7 +2014,7 @@ def api_datagen_manifest(request, test_id):
 @csrf_exempt
 def api_datagen_producer(request, sha256):
 
-    if not api_authenticate(request):
+    if not api_authenticate(request, require_enabled=True):
         return api_response({ 'error' : 'API requires authentication for this server' })
 
     sha256 = sha256.lower()
@@ -1601,18 +2025,22 @@ def api_datagen_producer(request, sha256):
     if artifact is None:
         return api_response({'error': 'Unable to find DATAGEN producer artifact'})
 
+    if artifact.state != DatagenProducerArtifact.AVAILABLE:
+        return api_response({
+            'error': 'DATAGEN producer artifact is not available'
+        })
+
     path = FileSystemStorage().path(artifact.filename())
     try:
-        identity = _hash_regular_file(path)
+        descriptor = _open_regular_descriptor(path, artifact.bytes)
     except OSError:
-        identity = None
-    if identity != (artifact.sha256, artifact.bytes):
         return api_response({
             'error': 'DATAGEN producer metadata exists but file is invalid'
         })
 
-    fwrapper = FileWrapper(open(path, 'rb'), 8192)
-    response = FileResponse(fwrapper, content_type='application/octet-stream')
+    # FileResponse owns the exact descriptor validated above; there is no
+    # path close/reopen TOCTOU and no multi-gigabyte rehash on every GET.
+    response = FileResponse(descriptor, content_type='application/octet-stream')
     response['Expires'] = -1
     response['Content-Length'] = artifact.bytes
     response['ETag'] = '"sha256:%s"' % artifact.sha256

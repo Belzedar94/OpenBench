@@ -18,11 +18,15 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+import hashlib
+import json
 import string
 
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
 from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField, TextField
-from django.db.models import CASCADE, PROTECT, SET_NULL, Model, UniqueConstraint
+from django.db.models import (
+    CASCADE, PROTECT, SET_NULL, CheckConstraint, Model, Q, UniqueConstraint,
+)
 from django.contrib.auth.models import User
 
 class Engine(Model):
@@ -148,6 +152,16 @@ class Test(Model):
     datagen_positions_per_chunk = BigIntegerField(default=0)
     datagen_base_seed           = BigIntegerField(default=0)
     datagen_completed_chunks    = IntegerField(default=0)
+    # Frozen when the chunk map is initialized.  Runtime authorization must
+    # never be derived from the mutable command text after workers have begun.
+    datagen_producer_required        = BooleanField(default=False)
+    datagen_producer_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    # Durable reservation counters make producer admission independent of the
+    # number of chunks and prevent upload -> requeue quota bypasses.
+    datagen_producer_build_count = IntegerField(default=0)
+    datagen_producer_build_bytes = BigIntegerField(default=0)
 
     # Collection of all individual Result() objects
     games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
@@ -196,16 +210,47 @@ class Test(Model):
         return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
 
     def datagen_requires_producer_artifact(self):
-        if not self.is_generic_datagen():
-            return False
+        return self.is_generic_datagen() and self.datagen_producer_required
+
+    @staticmethod
+    def producer_requirement_from_command(command):
         try:
             return any(
                 name == 'PRODUCER_SHA256'
                 for _literal, name, _format_spec, _conversion
-                in string.Formatter().parse(self.datagen_command)
+                in string.Formatter().parse(command)
             )
         except ValueError:
             return False
+
+    @classmethod
+    def producer_contract_for_command(cls, command):
+        required = cls.producer_requirement_from_command(command)
+        contract = json.dumps({
+            'command': command,
+            'producer_artifact_required': required,
+            'protocol': 39,
+            'schema': 'openbench-datagen-producer-v39',
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return required, hashlib.sha256(contract).hexdigest()
+
+    def freeze_datagen_producer_contract(self):
+        required, contract_sha256 = self.producer_contract_for_command(
+            self.datagen_command
+        )
+        self.datagen_producer_required = required
+        self.datagen_producer_contract_sha256 = contract_sha256
+
+    def datagen_producer_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return True
+        required, contract_sha256 = self.producer_contract_for_command(
+            self.datagen_command
+        )
+        return (
+            required == self.datagen_producer_required
+            and contract_sha256 == self.datagen_producer_contract_sha256
+        )
 
     def datagen_total_chunks(self):
         if not self.datagen_positions_per_chunk:
@@ -230,6 +275,10 @@ class DatagenChunk(Model):
     producer_sha256 = CharField(max_length=64, default='', blank=True)
     producer_bytes  = BigIntegerField(default=0)
     producer_commit = CharField(max_length=40, default='', blank=True)
+    producer_build = ForeignKey(
+        'DatagenProducerBuild', SET_NULL,
+        related_name='chunks', null=True, blank=True,
+    )
     machine     = ForeignKey(
         'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)
     attempts    = IntegerField(default=0)
@@ -257,12 +306,39 @@ class DatagenChunk(Model):
 
 class DatagenProducerArtifact(Model):
 
-    # The executable itself is immutable content-addressed evidence.  Chunk
-    # rows deliberately keep their own commit binding because identical bytes
-    # can truthfully be produced from more than one source commit.
+    # The executable itself is immutable content-addressed evidence. Campaign
+    # build rows bind commit/contract; chunk strings remain wire-compatible
+    # denormalized evidence backed by the producer_build FK.
+    STAGING   = 'STAGING'
+    AVAILABLE = 'AVAILABLE'
+    CORRUPT   = 'CORRUPT'
+    UNVERIFIED = 'UNVERIFIED'
+
     sha256 = CharField(max_length=64, unique=True)
     bytes  = BigIntegerField()
+    state = CharField(max_length=16, default=STAGING)
+    staging_name = CharField(max_length=512, default='', blank=True)
+    reference_count = BigIntegerField(default=0)
     created = DateTimeField(auto_now_add=True)
+    updated = DateTimeField(auto_now=True)
+    last_verified = DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(bytes__gt=0), name='datagen_producer_bytes_positive',
+            ),
+            CheckConstraint(
+                check=Q(reference_count__gte=0),
+                name='datagen_producer_refcount_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(state__in=[
+                    'STAGING', 'AVAILABLE', 'CORRUPT', 'UNVERIFIED',
+                ]),
+                name='datagen_producer_state_valid',
+            ),
+        ]
 
     def __str__(self):
         return 'DATAGEN producer %s' % self.sha256
@@ -271,6 +347,78 @@ class DatagenProducerArtifact(Model):
         return 'datagen-producers/sha256/%s/%s' % (
             self.sha256[:2], self.sha256,
         )
+
+
+class DatagenProducerBuild(Model):
+
+    test = ForeignKey('Test', CASCADE, related_name='datagen_producer_builds')
+    artifact = ForeignKey(
+        'DatagenProducerArtifact', PROTECT, related_name='campaign_builds',
+    )
+    owner = ForeignKey(
+        User, PROTECT, related_name='datagen_producer_builds',
+    )
+    commit = CharField(max_length=40)
+    contract_sha256 = CharField(max_length=64)
+    created = DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['test', 'artifact'],
+                name='unique_datagen_campaign_producer',
+            ),
+        ]
+
+    def __str__(self):
+        return 'DATAGEN #%d producer %s' % (self.test_id, self.artifact.sha256)
+
+
+class DatagenProducerQuota(Model):
+
+    # A single locked row serializes physical CAS reservations on every
+    # database backend, including PostgreSQL where aggregate scans alone race.
+    key = CharField(max_length=16, primary_key=True, default='global')
+    artifact_count = BigIntegerField(default=0)
+    reserved_bytes = BigIntegerField(default=0)
+    updated = DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(key='global'), name='datagen_global_quota_singleton',
+            ),
+            CheckConstraint(
+                check=Q(artifact_count__gte=0),
+                name='datagen_global_artifacts_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(reserved_bytes__gte=0),
+                name='datagen_global_bytes_nonnegative',
+            ),
+        ]
+
+
+class DatagenProducerOwnerQuota(Model):
+
+    owner = OneToOneField(
+        User, CASCADE, primary_key=True, related_name='datagen_producer_quota',
+    )
+    build_count = BigIntegerField(default=0)
+    reserved_bytes = BigIntegerField(default=0)
+    updated = DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(build_count__gte=0),
+                name='datagen_owner_builds_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(reserved_bytes__gte=0),
+                name='datagen_owner_bytes_nonnegative',
+            ),
+        ]
 
 class LogEvent(Model):
 

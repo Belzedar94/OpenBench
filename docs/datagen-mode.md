@@ -59,15 +59,23 @@ siendo deterministas. Si tampoco se puede notificar al servidor, el lease de
 cinco minutos sigue siendo la red de seguridad.
 
 Cuando la plantilla contiene `{PRODUCER_SHA256}`, el contrato se endurece antes
-del launch. El worker calcula el hash sobre un handle estable del ejecutable,
-sube los bytes a `/clientSubmitDatagenProducer/` y el servidor vuelve a calcular
-hash y tamaño. El blob se almacena por contenido bajo
+del launch. El worker calcula el hash sobre un handle estable del ejecutable y
+primero intenta ligar sólo sus metadatos en
+`/clientSubmitDatagenProducer/`. Si el CAS no contiene esos bytes, el servidor
+responde `upload_required=true`; sólo entonces el worker sube el binario y el
+servidor vuelve a calcular hash y tamaño. El blob se almacena por contenido bajo
 `Media/datagen-producers/sha256/<prefijo>/<sha256>`; el chunk conserva además el
-commit dev exacto. Reintentar los mismos bytes es idempotente, pero un segundo
-productor para el mismo lease se rechaza. Reencolar el chunk borra su binding de
-intento, no el blob CAS reutilizable. El upload final del chunk debe repetir la
-misma identidad o falla cerrado. El canal CAS admite como máximo 2 GiB por
-ejecutable y nunca sustituye el canal, cuotas ni formato de los chunks.
+commit dev exacto. Reintentar los mismos bytes o reutilizarlos desde otro chunk
+es idempotente, pero un segundo productor para el mismo lease se rechaza.
+Distintas arquitecturas o toolchains pueden aportar un build-set de productores
+para la misma campaña: todos deben corresponder al mismo commit, con un máximo
+de 256 binarios únicos, 2 GiB por binario y 16 GiB agregados. Reencolar el chunk
+borra su binding de intento, no el blob CAS reutilizable. Heartbeats, errores,
+binding del productor y publicación final repiten el número de intento del
+lease; una respuesta atrasada no puede afectar a un reclaim de la misma máquina.
+El upload final del chunk debe repetir exactamente su identidad de productor o
+falla cerrado. El canal CAS nunca sustituye el canal, cuotas ni formato de los
+chunks.
 
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
@@ -167,6 +175,14 @@ OpenBench. Por ejemplo, un proyecto Spell puede concatenar offline sus registros
 run7 y ejecutar `audit_run7.py`; un proyecto Atomic puede usar otro formato y
 otro auditor sin cambiar el servidor.
 
+## Operación del CAS v39
+
+La operación y recuperación del CAS de productores v39 (cuotas, estados,
+autenticación, límites del proxy, scrub/GC, migración y rollback) está descrita
+en `docs/datagen-producer-v39-runbook.md`. Los manifiestos y ejecutables de
+productor requieren siempre un usuario habilitado, incluso en una instancia
+pública; los clientes CLI usan HTTP Basic exclusivamente sobre TLS.
+
 ## Compatibilidad y pruebas
 
 Un workload histórico con `test_mode=DATAGEN` pero sin `datagen_command` conserva
@@ -196,14 +212,15 @@ de `Media/`. En una ventana coordinada:
 3. Verificar que el esquema existente coincide con el snapshot pre-DATAGEN.
 4. Marcar sólo el baseline ya existente con
    `python manage.py migrate OpenBench 0001 --fake`.
-5. Aplicar la migración real con `python manage.py migrate OpenBench 0002` y
-   después `python manage.py migrate`.
+5. Aplicar todas las migraciones reales hasta `0006` con
+   `python manage.py migrate`. `0006` congela contratos, crea reservas/cuotas
+   y hace backfill de evidencia de productor ya existente.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
 7. Arrancar clientes versión 39 de forma gradual y vigilar logs, disco y leases.
 
-No usar `--fake` para `0002`: esa migración crea las columnas DATAGEN y la tabla
-de chunks. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
+No usar `--fake` para `0002`–`0006`: crean el esquema DATAGEN, CAS y sus
+relaciones de integridad. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
 HEAD, resolver posibles diferencias de modelos/migraciones y enviar servidor,
 cliente, tests y documentación juntos. Conviene acordar además política de
 retención/cuotas para blobs antes de abrir DATAGEN a una flota grande.
