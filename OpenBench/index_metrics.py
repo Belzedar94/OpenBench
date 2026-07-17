@@ -74,7 +74,7 @@ def _compute_index_metrics(now):
     expected_sprt_games = _historical_sprt_games()
     work = _remaining_work(now, expected_sprt_games)
 
-    remaining_seconds = _remaining_seconds(
+    remaining_seconds, remaining_lower_bound = _remaining_seconds(
         bool(machines),
         games_per_minute,
         work['game_remaining'],
@@ -91,6 +91,8 @@ def _compute_index_metrics(now):
         remaining_display = '∞'
     else:
         remaining_display = _format_duration(remaining_seconds)
+        if remaining_lower_bound:
+            remaining_display = '≥ ' + remaining_display
 
     games_tooltip = (
         '10-minute rolling delta of Result.games sampled in memory; '
@@ -342,21 +344,28 @@ def _remaining_seconds(
     excluded_spsa,
 ):
     if not has_live_machines:
-        return None
+        return None, False
 
-    if game_remaining > 0 and games_per_minute <= 0:
-        return math.inf
-    if datagen_rate_unknown:
-        return math.inf
-
+    # Components without a measurable rate (queued gameplay while another
+    # workload monopolizes the workers, or datagen before its first chunk)
+    # must not poison the finite components: report the known part as a
+    # lower bound instead of collapsing everything to infinity.
     known_seconds = datagen_seconds
-    if game_remaining > 0:
-        known_seconds += 60.0 * game_remaining / games_per_minute
+    lower_bound = bool(datagen_rate_unknown)
 
-    # If every active workload is an unestimable SPSA, avoid claiming zero.
-    if excluded_spsa and known_seconds == 0:
-        return None
-    return known_seconds
+    if game_remaining > 0:
+        if games_per_minute > 0:
+            known_seconds += 60.0 * game_remaining / games_per_minute
+        else:
+            lower_bound = True
+
+    if known_seconds == 0:
+        if lower_bound:
+            return math.inf, False
+        # If every active workload is an unestimable SPSA, avoid claiming zero.
+        if excluded_spsa:
+            return None, False
+    return known_seconds, lower_bound
 
 
 def _number(value):

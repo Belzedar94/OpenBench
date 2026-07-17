@@ -192,3 +192,19 @@ class IndexMetricsTests(TestCase):
         for label in [b'Cores', b'Nodes/sec', b'Games/min', b'Time remaining']:
             self.assertContains(response, label)
         self.assertContains(response, b'ESTIMATE:')
+
+    def test_queued_sprt_does_not_poison_datagen_estimate(self):
+        # Incidente 2026-07-17: SPRTs encoladas (0 games/min) con datagen
+        # activo y medido colapsaban el total a infinito. Deben reportar
+        # la parte finita como cota inferior.
+        from OpenBench import index_metrics as im
+        seconds, lower = im._remaining_seconds(
+            has_live_machines=True,
+            games_per_minute=0.0,
+            game_remaining=5000,
+            datagen_seconds=3600.0,
+            datagen_rate_unknown=False,
+            excluded_spsa=0,
+        )
+        self.assertEqual(seconds, 3600.0)
+        self.assertTrue(lower)
