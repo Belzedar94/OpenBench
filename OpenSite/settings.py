@@ -146,3 +146,7 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 WHITENOISE_USE_FINDERS = True
+
+# --- Proxy HTTPS (nginx) : NO borrar - sin esto el CSRF de registro da 403 ---
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+CSRF_TRUSTED_ORIGINS = ["https://belzedar.duckdns.org"]
