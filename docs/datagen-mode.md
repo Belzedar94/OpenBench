@@ -212,3 +212,10 @@ del proyecto de cada motor.
 Consejo operativo de la primera producción (Spell, test #66): el bench del
 motor a nodos bajos NO predice el ritmo de escritura — mide posiciones/s con
 un piloto local de tu datagen antes de dimensionar chunks.
+
+## Instancia de producción
+
+Desde 2026-07-18 la instancia permanente es **https://belzedar.duckdns.org**
+(Hetzner, systemd auto-restart, HTTPS). Workers y creación de tests van SIEMPRE
+contra esa URL. Los chunks completados se purgan del server tras el merge
+(cuota de 40GB); el archivo de datasets vive en la torre del propietario.
