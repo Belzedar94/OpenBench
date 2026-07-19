@@ -960,14 +960,45 @@ def _open_regular_descriptor(path, expected_bytes=None):
         raise
 
 
-def _cached_producer_available(artifact, storage=None):
+def _open_verified_producer_descriptor(artifact, storage=None):
+    """Hash one immutable producer snapshot and rewind it for optional use."""
+
     if artifact is None or artifact.state != DatagenProducerArtifact.AVAILABLE:
-        return False
+        raise OSError('DATAGEN producer artifact is not available')
     storage = storage or FileSystemStorage()
+    data = _open_regular_descriptor(
+        storage.path(artifact.filename()), artifact.bytes
+    )
     try:
-        data = _open_regular_descriptor(
-            storage.path(artifact.filename()), artifact.bytes
+        before = os.fstat(data.fileno())
+        digest = hashlib.sha256()
+        byte_count = 0
+        while True:
+            block = data.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            byte_count += len(block)
+        after = os.fstat(data.fileno())
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
         )
+        if (
+            identity(before) != identity(after)
+            or byte_count != artifact.bytes
+            or digest.hexdigest() != artifact.sha256
+        ):
+            raise OSError('DATAGEN producer artifact failed CAS verification')
+        data.seek(0)
+        return data
+    except Exception:
+        data.close()
+        raise
+
+
+def _cached_producer_available(artifact, storage=None):
+    try:
+        data = _open_verified_producer_descriptor(artifact, storage)
         data.close()
         return True
     except OSError:
@@ -1082,7 +1113,22 @@ def client_submit_datagen_producer(request, machine):
         return JsonResponse(
             {'error': 'DATAGEN database is temporarily busy'}, status=503
         )
-    cached_before = _cached_producer_available(existing, storage)
+    cached_descriptor = None
+    if metadata_only and existing is not None:
+        try:
+            cached_descriptor = _open_verified_producer_descriptor(
+                existing, storage
+            )
+        except OSError:
+            pass
+    cached_before = cached_descriptor is not None
+
+    def close_cached_descriptor():
+        nonlocal cached_descriptor
+        if cached_descriptor is not None:
+            cached_descriptor.close()
+            cached_descriptor = None
+
     if metadata_only and not cached_before:
         return JsonResponse({
             'sha256': expected_sha,
@@ -1139,6 +1185,18 @@ def client_submit_datagen_producer(request, machine):
                     {'error': 'Unable to stage DATAGEN producer artifact'},
                     status=500,
                 )
+
+            # Hash the existing CAS object only after staging the submitted
+            # bytes and before entering the write transaction. Keep that exact
+            # descriptor open through reservation. This avoids repeating a
+            # potentially large hash while SQLite holds its global writer lock.
+            if existing is not None:
+                try:
+                    cached_descriptor = _open_verified_producer_descriptor(
+                        existing, storage
+                    )
+                except OSError:
+                    pass
 
         def reserve_and_bind():
             with transaction.atomic():
@@ -1235,7 +1293,12 @@ def client_submit_datagen_producer(request, machine):
                         {'error': 'DATAGEN producer identity conflict'}, status=500
                     ), None, False
 
-                available = _cached_producer_available(artifact, storage)
+                available = (
+                    artifact.state == DatagenProducerArtifact.AVAILABLE
+                    and existing is not None
+                    and artifact.pk == existing.pk
+                    and cached_descriptor is not None
+                )
                 if not available:
                     if staging_name is None:
                         return JsonResponse(
@@ -1412,13 +1475,82 @@ def client_submit_datagen_producer(request, machine):
             'upload_required': False,
         })
     finally:
+        close_cached_descriptor()
         cleanup_staging(staging_name)
 
 
-def _datagen_tablebase_attestation(request, test, chunk, machine):
-    """Authenticate the worker capability bound to one tablebase DATAGEN lease."""
+def _frozen_datagen_tablebase_attestation(test, chunk, machine):
+    """Reconstruct and authenticate every semantic field in one v40 lease."""
 
     if not test.datagen_tablebase_required:
+        return None
+    lease = chunk.environment_lease
+    if machine is None or not isinstance(lease, dict):
+        raise PermissionError(
+            'DATAGEN chunk lacks a frozen tablebase lease'
+        )
+    leased_tablebase = lease.get('tablebase', {})
+    if not isinstance(leased_tablebase, dict):
+        raise PermissionError('DATAGEN tablebase lease is malformed')
+    worker_max = leased_tablebase.get('worker_max')
+    if type(worker_max) is not int:
+        raise PermissionError('DATAGEN tablebase lease is malformed')
+    if (
+        not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test)
+        or chunk.machine_id != machine.id
+        or worker_max < test.datagen_tablebase_max
+        or not re.fullmatch(r'[0-9a-f]{64}', chunk.environment_lease_sha256)
+    ):
+        raise PermissionError(
+            'DATAGEN tablebase lease does not match campaign or worker'
+        )
+    expected_lease = {
+        'schema': OpenBench.datagen.DATAGEN_TABLEBASE_LEASE_SCHEMA,
+        'protocol': 40,
+        'test_id': test.id,
+        'chunk_idx': chunk.idx,
+        'attempt': chunk.attempts,
+        'machine_id': machine.id,
+        'environment_contract_sha256': (
+            test.datagen_environment_contract_sha256
+        ),
+        'tablebase': {
+            'family': test.datagen_tablebase_family,
+            'required_max': test.datagen_tablebase_max,
+            'worker_max': worker_max,
+            'manifest_sha256': test.datagen_tablebase_manifest_sha256,
+        },
+        'teacher_mode': test.datagen_teacher_mode,
+    }
+    if (
+        lease != expected_lease
+        or _canonical_json_sha256(lease) != chunk.environment_lease_sha256
+        or _canonical_json_sha256(expected_lease)
+           != chunk.environment_lease_sha256
+    ):
+        raise PermissionError(
+            'DATAGEN tablebase lease does not match campaign or worker'
+        )
+    return {
+        'environment_contract_sha256': (
+            test.datagen_environment_contract_sha256
+        ),
+        'environment_lease_sha256': chunk.environment_lease_sha256,
+        'family': test.datagen_tablebase_family,
+        'required_max': test.datagen_tablebase_max,
+        'worker_max': worker_max,
+        'manifest_sha256': (
+            test.datagen_tablebase_manifest_sha256
+        ),
+        'teacher_mode': test.datagen_teacher_mode,
+    }
+
+
+def _datagen_tablebase_attestation(request, test, chunk, machine):
+    """Authenticate request evidence against the complete frozen v40 lease."""
+
+    expected = _frozen_datagen_tablebase_attestation(test, chunk, machine)
+    if expected is None:
         return None
     try:
         submitted = {
@@ -1447,64 +1579,7 @@ def _datagen_tablebase_attestation(request, test, chunk, machine):
         assert submitted['worker_max'] >= submitted['required_max']
     except (KeyError, ValueError, AssertionError):
         raise ValueError('DATAGEN upload omitted tablebase attestation')
-
-    lease = chunk.environment_lease
-    if not isinstance(lease, dict):
-        raise PermissionError(
-            'DATAGEN chunk lacks a frozen tablebase lease'
-        )
-    encoded_lease = json.dumps(
-        lease, sort_keys=True, separators=(',', ':')
-    ).encode('utf-8')
-    if hashlib.sha256(encoded_lease).hexdigest() != (
-        chunk.environment_lease_sha256
-    ):
-        raise PermissionError('DATAGEN tablebase lease hash is invalid')
-    leased_tablebase = lease.get('tablebase', {})
-    if not isinstance(leased_tablebase, dict):
-        raise PermissionError('DATAGEN tablebase lease is malformed')
-    leased_contract = lease.get('environment_contract_sha256', '')
-    leased_manifest = leased_tablebase.get('manifest_sha256', '')
-    if not isinstance(leased_contract, str) or not isinstance(
-        leased_manifest, str
-    ):
-        raise PermissionError('DATAGEN tablebase lease is malformed')
-    expected = {
-        'environment_contract_sha256': (
-            leased_contract.lower()
-        ),
-        'environment_lease_sha256': chunk.environment_lease_sha256,
-        'family': leased_tablebase.get('family'),
-        'required_max': leased_tablebase.get('required_max'),
-        'worker_max': leased_tablebase.get('worker_max'),
-        'manifest_sha256': (
-            leased_manifest.lower()
-        ),
-        'teacher_mode': lease.get('teacher_mode', ''),
-    }
-    if (
-        lease.get('schema') != OpenBench.datagen.DATAGEN_TABLEBASE_LEASE_SCHEMA
-        or lease.get('protocol') != 40
-        or lease.get('test_id') != test.id
-        or lease.get('chunk_idx') != chunk.idx
-        or lease.get('attempt') != chunk.attempts
-        or lease.get('machine_id') != machine.id
-        or not test.datagen_environment_contract_is_current()
-        or test.syzygy_adj != 'DISABLED'
-        or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
-        or test.datagen_tablebase_family != 'atomic'
-        or test.datagen_tablebase_max not in range(3, 8)
-        or expected['environment_contract_sha256']
-           != test.datagen_environment_contract_sha256.lower()
-        or expected['family'] != test.datagen_tablebase_family
-        or expected['required_max'] != test.datagen_tablebase_max
-        or expected['worker_max'] < test.datagen_tablebase_max
-        or expected['manifest_sha256']
-           != test.datagen_tablebase_manifest_sha256.lower()
-        or expected['teacher_mode'] not in {'pure', 'true'}
-        or expected['teacher_mode'] != test.datagen_teacher_mode
-        or submitted != expected
-    ):
+    if submitted != expected:
         raise PermissionError(
             'DATAGEN tablebase attestation does not match campaign or worker'
         )
@@ -2123,42 +2198,17 @@ def api_datagen_manifest(request, test_id):
     producer_required = test.datagen_requires_producer_artifact()
     tablebase_required = test.datagen_tablebase_required
     if tablebase_required:
-        if (
-            not test.datagen_environment_contract_is_current()
-            or test.datagen_tablebase_family != 'atomic'
-            or test.datagen_tablebase_max not in range(3, 8)
-            or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
-            or test.syzygy_adj != 'DISABLED'
-            or test.datagen_teacher_mode not in {'pure', 'true'}
-            or not re.fullmatch(
-                r'[0-9a-f]{64}',
-                test.datagen_environment_contract_sha256,
-            )
-        ):
+        if not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test):
             return api_response({
                 'error': 'DATAGEN Workload #%d has an invalid environment contract'
                          % test_id
             })
         for chunk in chunks:
-            lease = chunk.environment_lease
-            lease_tablebase = (
-                lease.get('tablebase', {}) if isinstance(lease, dict) else {}
-            )
-            if (
-                chunk.machine is None
-                or not isinstance(lease_tablebase, dict)
-                or _canonical_json_sha256(lease)
-                   != chunk.environment_lease_sha256
-                or lease.get('environment_contract_sha256')
-                   != test.datagen_environment_contract_sha256
-                or lease_tablebase.get('family')
-                   != test.datagen_tablebase_family
-                or lease_tablebase.get('required_max')
-                   != test.datagen_tablebase_max
-                or lease_tablebase.get('manifest_sha256')
-                   != test.datagen_tablebase_manifest_sha256
-                or lease.get('teacher_mode') != test.datagen_teacher_mode
-            ):
+            try:
+                attestation = _frozen_datagen_tablebase_attestation(
+                    test, chunk, chunk.machine
+                )
+            except PermissionError:
                 return api_response({
                     'error': 'DATAGEN Workload #%d has inconsistent tablebase lease evidence'
                              % test_id
@@ -2170,19 +2220,6 @@ def api_datagen_manifest(request, test_id):
                     'bytes': chunk.producer_bytes,
                     'commit': chunk.producer_commit,
                 }
-            attestation = {
-                'environment_contract_sha256': (
-                    test.datagen_environment_contract_sha256
-                ),
-                'environment_lease_sha256': (
-                    chunk.environment_lease_sha256
-                ),
-                'family': lease_tablebase['family'],
-                'required_max': lease_tablebase['required_max'],
-                'worker_max': lease_tablebase['worker_max'],
-                'manifest_sha256': lease_tablebase['manifest_sha256'],
-                'teacher_mode': lease.get('teacher_mode', ''),
-            }
             expected_receipt, expected_receipt_sha = (
                 _datagen_environment_receipt(
                     test,
@@ -2196,6 +2233,8 @@ def api_datagen_manifest(request, test_id):
             )
             if (
                 chunk.environment_receipt != expected_receipt
+                or _canonical_json_sha256(chunk.environment_receipt)
+                   != chunk.environment_receipt_sha256
                 or chunk.environment_receipt_sha256
                    != expected_receipt_sha
             ):
@@ -2325,16 +2364,15 @@ def api_datagen_producer(request, sha256):
             'error': 'DATAGEN producer artifact is not available'
         })
 
-    path = FileSystemStorage().path(artifact.filename())
     try:
-        descriptor = _open_regular_descriptor(path, artifact.bytes)
+        descriptor = _open_verified_producer_descriptor(artifact)
     except OSError:
         return api_response({
-            'error': 'DATAGEN producer metadata exists but file is invalid'
+            'error': 'DATAGEN producer metadata exists but CAS is invalid'
         })
 
-    # FileResponse owns the exact descriptor validated above; there is no
-    # path close/reopen TOCTOU and no multi-gigabyte rehash on every GET.
+    # FileResponse owns the exact descriptor hashed above; there is no path
+    # close/reopen TOCTOU and the already-read snapshot is simply rewound.
     response = FileResponse(descriptor, content_type='application/octet-stream')
     response['Expires'] = -1
     response['Content-Length'] = artifact.bytes

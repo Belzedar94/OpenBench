@@ -124,6 +124,28 @@ def tablebase_config(teacher_mode='pure'):
 
 class DatagenWorkerTests(unittest.TestCase):
 
+    def test_atomic_v40_rejects_seven_man_even_with_matching_worker_inventory(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_max = 7
+        test = cfg.workload['test']
+        data = test['datagen']
+        test['syzygy_wdl'] = '7-MAN'
+        data['tablebase_max'] = 7
+        data['environment_lease']['tablebase']['required_max'] = 7
+        data['environment_lease']['tablebase']['worker_max'] = 7
+        data['environment_lease_sha256'] = hashlib.sha256(
+            json.dumps(
+                data['environment_lease'],
+                sort_keys=True,
+                separators=(',', ':'),
+            ).encode()
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'malformed or unsupported'
+        ):
+            worker.datagen_tablebase_attestation(cfg)
+
     def test_workload_log_identifies_datagen_chunk_instead_of_match(self):
         cfg = config()
         response = SimpleNamespace(json=lambda: {'workload': workload()})

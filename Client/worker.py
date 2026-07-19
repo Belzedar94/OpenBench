@@ -83,6 +83,8 @@ TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
 DATAGEN_TRANSFER_RETRIES = 3
 DATAGEN_TRANSFER_RETRY_DELAY = 5
+ATOMIC_DATAGEN_TABLEBASE_MIN = 3
+ATOMIC_DATAGEN_TABLEBASE_MAX = 6
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -2016,7 +2018,10 @@ def datagen_tablebase_attestation(config):
         or lease.get('attempt') != data.get('attempt')
         or str(lease.get('machine_id')) != str(config.machine_id)
         or family != 'atomic'
-        or required_max not in range(3, 8)
+        or required_max not in range(
+            ATOMIC_DATAGEN_TABLEBASE_MIN,
+            ATOMIC_DATAGEN_TABLEBASE_MAX + 1,
+        )
         or test.get('syzygy_adj') != 'DISABLED'
         or test.get('syzygy_wdl') != '%d-MAN' % required_max
         or test['dev'].get('tablebase_family') != family

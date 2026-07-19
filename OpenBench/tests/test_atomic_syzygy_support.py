@@ -434,6 +434,16 @@ class AtomicSyzygySchedulingTests(unittest.TestCase):
             )
         )
 
+    def test_standard_legacy_jobs_retain_seven_man_support(self):
+        job = self.workload(
+            dev='Stockfish', base='Stockfish', wdl='7-MAN'
+        )
+        self.assertTrue(
+            get_workload.valid_tablebase_assignment(
+                job, self.machine(standard=7, legacy=7)
+            )
+        )
+
     def test_orthodox_adjudication_is_rejected_for_atomic(self):
         job = self.workload(wdl='6-MAN', adj='5-MAN')
         self.assertFalse(

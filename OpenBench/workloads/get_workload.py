@@ -31,7 +31,10 @@ import sys
 import OpenBench.utils
 
 from OpenBench.config import OPENBENCH_CONFIG
-from OpenBench.datagen import claim_chunk, has_assignable_chunk, is_generic_datagen
+from OpenBench.datagen import (
+    claim_chunk, has_assignable_chunk, is_generic_datagen,
+    valid_atomic_datagen_tablebase_contract,
+)
 from OpenBench.models import Result, Test
 
 from django.db import transaction
@@ -170,12 +173,9 @@ def valid_tablebase_assignment(workload, machine):
         if workload.datagen_tablebase_required:
             family = workload.datagen_tablebase_family
             if (
-                workload.syzygy_adj != 'DISABLED'
-                or workload.datagen_tablebase_max not in range(3, 8)
+                not valid_atomic_datagen_tablebase_contract(workload)
                 or family != engine_tablebase_family(workload.dev_engine)
                 or workload.dev_engine != workload.base_engine
-                or workload.syzygy_wdl
-                   != '%d-MAN' % workload.datagen_tablebase_max
                 or machine_tablebase_max(machine, family)
                    < workload.datagen_tablebase_max
                 or machine_tablebase_manifest(machine, family)

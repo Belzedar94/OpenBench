@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import re
 import time
 
 from django.db import OperationalError, transaction
@@ -58,6 +59,40 @@ DATAGEN_CLAIM_RETRIES = 12
 DATAGEN_CLAIM_BACKOFF = 0.01
 
 DATAGEN_TABLEBASE_LEASE_SCHEMA = 'openbench-datagen-tablebase-lease-v40'
+ATOMIC_DATAGEN_TABLEBASE_MIN = 3
+ATOMIC_DATAGEN_TABLEBASE_MAX = 6
+
+
+def valid_atomic_datagen_tablebase_max(value):
+    """Return whether ``value`` is representable by the pinned v40 corpus."""
+
+    return (
+        type(value) is int
+        and ATOMIC_DATAGEN_TABLEBASE_MIN
+        <= value
+        <= ATOMIC_DATAGEN_TABLEBASE_MAX
+    )
+
+
+def valid_atomic_datagen_tablebase_contract(test):
+    """Validate the frozen Atomic-only tablebase contract for protocol v40."""
+
+    maximum = getattr(test, 'datagen_tablebase_max', None)
+    manifest = getattr(test, 'datagen_tablebase_manifest_sha256', '')
+    contract = getattr(test, 'datagen_environment_contract_sha256', '')
+    return (
+        bool(getattr(test, 'datagen_tablebase_required', False))
+        and getattr(test, 'datagen_tablebase_family', '') == 'atomic'
+        and valid_atomic_datagen_tablebase_max(maximum)
+        and getattr(test, 'syzygy_wdl', '') == '%d-MAN' % maximum
+        and getattr(test, 'syzygy_adj', '') == 'DISABLED'
+        and getattr(test, 'datagen_teacher_mode', '') in {'pure', 'true'}
+        and isinstance(manifest, str)
+        and re.fullmatch(r'[0-9a-f]{64}', manifest) is not None
+        and isinstance(contract, str)
+        and re.fullmatch(r'[0-9a-f]{64}', contract) is not None
+        and test.datagen_environment_contract_is_current()
+    )
 
 
 def is_generic_datagen(test):
@@ -93,6 +128,14 @@ def initialize_chunks(test):
             persisted.datagen_tablebase_manifest_sha256,
             persisted.datagen_teacher_mode,
         )
+        if (
+            persisted.datagen_tablebase_required
+            and not valid_atomic_datagen_tablebase_contract(persisted)
+        ):
+            raise ValueError(
+                'Authenticated Atomic DATAGEN requires a frozen 3-MAN through '
+                '6-MAN tablebase contract'
+            )
         Test.objects.filter(pk=test.pk).update(
             datagen_producer_required=persisted.datagen_producer_required,
             datagen_producer_contract_sha256=(
@@ -201,14 +244,9 @@ def tablebase_lease(test, machine, chunk_idx, lease_attempt):
     manifest = capability.get('manifest_sha256')
     manifest = manifest.lower() if isinstance(manifest, str) else None
     if (
-        family != 'atomic'
-        or test.datagen_tablebase_max not in range(3, 8)
-        or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
-        or test.syzygy_adj != 'DISABLED'
+        not valid_atomic_datagen_tablebase_contract(test)
         or worker_max < test.datagen_tablebase_max
         or manifest != test.datagen_tablebase_manifest_sha256.lower()
-        or test.datagen_teacher_mode not in {'pure', 'true'}
-        or not test.datagen_environment_contract_is_current()
     ):
         raise ValueError('Worker tablebase capability does not match campaign')
     lease = {

@@ -50,7 +50,7 @@ estos placeholders:
 `SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256`,
 `NETWORK` y `PRODUCER_SHA256` son opcionales. Los tres placeholders Syzygy se
 usan juntos o no se usa ninguno. Cuando se usan, `{TEACHER_MODE}` tambien es
-obligatorio, `syzygy_wdl` debe ser un limite explicito `3-MAN`--`7-MAN`, el
+obligatorio, `syzygy_wdl` debe ser un limite explicito `3-MAN`--`6-MAN`, el
 motor debe declarar la familia `atomic` y un manifest pin, y
 `syzygy_adj=DISABLED` se fuerza siempre. No se admiten placeholders desconocidos,
 conversiones, formatos, saltos de línea, NUL ni plantillas mayores de 4096
@@ -209,8 +209,11 @@ Una campaña ya completa expone su mapa inmutable en
 tamaño del chunk y, cuando se solicitó evidencia, hash/tamaño/commit del
 productor. Los ejecutables se descargan por
 `GET /api/datagen-producer/<sha256>/`. Estos metadatos son transporte: el
-publicador del formato sigue obligado a descargar y reautenticar todos los
-bytes y a aplicar sus propios trust pins.
+servidor rehashea cada productor contra su identidad CAS antes de autorizar un
+chunk, publicar el manifest o servir la descarga. El manifest hace un solo hash
+por build distinto y la descarga reutiliza el mismo descriptor verificado. El
+publicador del formato sigue obligado a descargar y reautenticar todos los bytes
+y a aplicar sus propios trust pins.
 
 En una campaña Atomic Syzygy v40, el mismo manifest incluye el contrato de
 entorno y, por chunk, el lease y receipt canonicos con sus SHA-256. Esos

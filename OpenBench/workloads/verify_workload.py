@@ -417,10 +417,11 @@ def verify_datagen_tablebase_contract(errors, request):
     if tablebase_fields:
         syzygy_wdl = request.POST.get('syzygy_wdl', 'DISABLED')
         if syzygy_wdl not in {
-            '3-MAN', '4-MAN', '5-MAN', '6-MAN', '7-MAN',
+            '3-MAN', '4-MAN', '5-MAN', '6-MAN',
         }:
             errors.append(
-                'Tablebase DATAGEN requires an explicit N-MAN Syzygy WDL limit'
+                'Tablebase DATAGEN requires an explicit 3-MAN through 6-MAN '
+                'Syzygy WDL limit'
             )
         if engine_config.get('tablebase_family', 'standard') != 'atomic':
             errors.append(

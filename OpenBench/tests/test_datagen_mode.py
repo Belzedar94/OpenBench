@@ -1,5 +1,6 @@
 import bz2
 import base64
+import copy
 import hashlib
 import importlib
 import json
@@ -200,7 +201,9 @@ class DatagenModeTests(TestCase):
             info=info,
         )
 
-    def make_tablebase_test(self, teacher_mode='pure', total=2):
+    def make_tablebase_test(
+        self, teacher_mode='pure', total=2, maximum=6, initialize=True,
+    ):
         manifest = OpenBench.config.OPENBENCH_CONFIG['engines'][
             'Atomic-Stockfish'
         ]['tablebase_manifest_sha256'].lower()
@@ -217,7 +220,7 @@ class DatagenModeTests(TestCase):
             base_options='',
             dev_time_control='',
             base_time_control='',
-            syzygy_wdl='6-MAN',
+            syzygy_wdl='%d-MAN' % maximum,
             syzygy_adj='DISABLED',
             test_mode='DATAGEN',
             datagen_command=(
@@ -233,12 +236,12 @@ class DatagenModeTests(TestCase):
             throughput=1000,
             approved=True,
             datagen_tablebase_family='atomic',
-            datagen_tablebase_max=6,
+            datagen_tablebase_max=maximum,
             datagen_tablebase_manifest_sha256=manifest,
             datagen_teacher_mode=teacher_mode,
         )
         test.freeze_datagen_environment_contract(
-            'atomic', 6, manifest, teacher_mode
+            'atomic', maximum, manifest, teacher_mode
         )
         test.save(update_fields=[
             'datagen_tablebase_required',
@@ -248,7 +251,8 @@ class DatagenModeTests(TestCase):
             'datagen_teacher_mode',
             'datagen_environment_contract_sha256',
         ])
-        initialize_chunks(test)
+        if initialize:
+            initialize_chunks(test)
         return test
 
     def test_creation_builds_exact_numbered_chunk_map(self):
@@ -846,7 +850,14 @@ class DatagenModeTests(TestCase):
         ))
         errors = []
         verify_workload.verify_datagen_tablebase_contract(errors, optional)
-        self.assertIn('explicit N-MAN', errors[0])
+        self.assertIn('explicit 3-MAN through 6-MAN', errors[0])
+
+        seven_man = SimpleNamespace(POST=dict(
+            base, datagen_command=full_command, syzygy_wdl='7-MAN'
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(errors, seven_man)
+        self.assertIn('3-MAN through 6-MAN', errors[0])
 
         ambiguous_teacher = SimpleNamespace(POST=dict(
             base, datagen_command=full_command, datagen_teacher_mode=''
@@ -869,6 +880,28 @@ class DatagenModeTests(TestCase):
             errors, semantic_default
         )
         self.assertTrue(any('{TEACHER_MODE}' in error for error in errors))
+
+    def test_atomic_v40_rejects_seven_man_at_creation_schedule_and_lease(self):
+        with self.assertRaisesRegex(ValueError, '3-MAN through 6-MAN'):
+            self.make_tablebase_test(maximum=7)
+
+        test = self.make_tablebase_test()
+        test.syzygy_wdl = '7-MAN'
+        test.freeze_datagen_environment_contract(
+            'atomic', 7, test.datagen_tablebase_manifest_sha256, 'pure'
+        )
+        test.save(update_fields=[
+            'syzygy_wdl', 'datagen_tablebase_required',
+            'datagen_tablebase_family', 'datagen_tablebase_max',
+            'datagen_tablebase_manifest_sha256', 'datagen_teacher_mode',
+            'datagen_environment_contract_sha256',
+        ])
+        machine = self.make_machine(
+            atomic=7, manifest=test.datagen_tablebase_manifest_sha256
+        )
+        self.assertFalse(get_workload.valid_tablebase_assignment(test, machine))
+        with self.assertRaisesRegex(ValueError, 'capability does not match'):
+            OpenBench.datagen.tablebase_lease(test, machine, 0, 1)
 
     def test_tablebase_chunk_freezes_lease_and_completed_manifest_receipt(self):
         test = self.make_tablebase_test(teacher_mode='true')
@@ -931,6 +964,105 @@ class DatagenModeTests(TestCase):
         ).json()
         self.assertIn('inconsistent tablebase receipt', rejected['error'])
 
+    def test_manifest_rejects_every_drifted_lease_and_receipt_binding(self):
+        test = self.make_tablebase_test(teacher_mode='true')
+        machine = self.make_machine(
+            atomic=6, manifest=test.datagen_tablebase_manifest_sha256
+        )
+        chunk = claim_chunk(test, machine)
+        self.assertEqual(
+            self.submit_chunk(test, chunk, machine, tablebase=True).status_code,
+            200,
+        )
+        chunk.refresh_from_db()
+        original_lease = copy.deepcopy(chunk.environment_lease)
+        original_lease_sha = chunk.environment_lease_sha256
+        original_receipt = copy.deepcopy(chunk.environment_receipt)
+        original_receipt_sha = chunk.environment_receipt_sha256
+        client = Client()
+        client.force_login(self.user)
+
+        lease_mutations = [
+            (('schema',), 'openbench-datagen-tablebase-lease-v41'),
+            (('protocol',), 41),
+            (('test_id',), test.id + 1),
+            (('chunk_idx',), chunk.idx + 1),
+            (('attempt',), chunk.attempts + 1),
+            (('machine_id',), machine.id + 1),
+            (('environment_contract_sha256',), 'd' * 64),
+            (('tablebase', 'family'), 'standard'),
+            (('tablebase', 'required_max'), 5),
+            (('tablebase', 'worker_max'), 5),
+            (('tablebase', 'manifest_sha256'), 'd' * 64),
+            (('teacher_mode',), 'pure'),
+        ]
+        for path, value in lease_mutations:
+            with self.subTest(evidence='lease', field='.'.join(path)):
+                lease = copy.deepcopy(original_lease)
+                target = lease
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                lease_sha = OpenBench.views._canonical_json_sha256(lease)
+                receipt = copy.deepcopy(original_receipt)
+                receipt['environment_lease_sha256'] = lease_sha
+                receipt_sha = OpenBench.views._canonical_json_sha256(receipt)
+                DatagenChunk.objects.filter(pk=chunk.pk).update(
+                    environment_lease=lease,
+                    environment_lease_sha256=lease_sha,
+                    environment_receipt=receipt,
+                    environment_receipt_sha256=receipt_sha,
+                )
+                rejected = client.get('/api/datagen/%d/' % test.id).json()
+                self.assertIn(
+                    'inconsistent tablebase lease', rejected['error']
+                )
+
+        DatagenChunk.objects.filter(pk=chunk.pk).update(
+            environment_lease=original_lease,
+            environment_lease_sha256=original_lease_sha,
+        )
+        receipt_mutations = [
+            (('schema',), 'openbench-datagen-tablebase-receipt-v41'),
+            (('protocol',), 41),
+            (('test_id',), test.id + 1),
+            (('chunk_idx',), chunk.idx + 1),
+            (('attempt',), chunk.attempts + 1),
+            (('machine_id',), machine.id + 1),
+            (('environment_contract_sha256',), 'd' * 64),
+            (('environment_lease_sha256',), 'd' * 64),
+            (('tablebase', 'family'), 'standard'),
+            (('tablebase', 'required_max'), 5),
+            (('tablebase', 'worker_max'), 5),
+            (('tablebase', 'manifest_sha256'), 'd' * 64),
+            (('teacher_mode',), 'pure'),
+            (('artifact', 'sha256'), 'd' * 64),
+            (('artifact', 'bytes'), original_receipt['artifact']['bytes'] + 1),
+            (('producer',), {'sha256': 'd' * 64, 'bytes': 1, 'commit': 'e' * 40}),
+        ]
+        for path, value in receipt_mutations:
+            with self.subTest(evidence='receipt', field='.'.join(path)):
+                receipt = copy.deepcopy(original_receipt)
+                target = receipt
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                DatagenChunk.objects.filter(pk=chunk.pk).update(
+                    environment_receipt=receipt,
+                    environment_receipt_sha256=(
+                        OpenBench.views._canonical_json_sha256(receipt)
+                    ),
+                )
+                rejected = client.get('/api/datagen/%d/' % test.id).json()
+                self.assertIn(
+                    'inconsistent tablebase receipt', rejected['error']
+                )
+
+        DatagenChunk.objects.filter(pk=chunk.pk).update(
+            environment_receipt=original_receipt,
+            environment_receipt_sha256=original_receipt_sha,
+        )
+
     def test_tablebase_scheduler_requires_exact_family_limit_and_pin(self):
         test = self.make_tablebase_test()
         manifest = test.datagen_tablebase_manifest_sha256
@@ -985,22 +1117,30 @@ class DatagenModeTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('omitted tablebase', response.json()['error'])
 
-        with mock.patch.object(
-            OpenBench.views,
-            '_datagen_uploaded_digest',
-            side_effect=AssertionError('must reject before hashing'),
-        ):
-            response = self.submit_chunk(
-                test,
-                chunk,
-                machine,
-                tablebase=True,
-                tablebase_overrides={
-                    'tablebase_manifest_sha256': 'd' * 64,
-                },
-            )
-        self.assertEqual(response.status_code, 409)
-        self.assertIn('does not match', response.json()['error'])
+        request_mutations = {
+            'environment_contract_sha256': 'd' * 64,
+            'environment_lease_sha256': 'd' * 64,
+            'tablebase_family': 'standard',
+            'tablebase_max': 5,
+            'tablebase_worker_max': 7,
+            'tablebase_manifest_sha256': 'd' * 64,
+            'teacher_mode': 'true',
+        }
+        for field, value in request_mutations.items():
+            with self.subTest(field=field), mock.patch.object(
+                OpenBench.views,
+                '_datagen_uploaded_digest',
+                side_effect=AssertionError('must reject before hashing'),
+            ):
+                response = self.submit_chunk(
+                    test,
+                    chunk,
+                    machine,
+                    tablebase=True,
+                    tablebase_overrides={field: value},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn('does not match', response.json()['error'])
 
     def test_requeue_clears_frozen_tablebase_attempt_evidence(self):
         test = self.make_tablebase_test()
@@ -1336,6 +1476,29 @@ class DatagenModeTests(TestCase):
         self.assertEqual(
             second.producer_sha256, uploaded.json()['sha256']
         )
+
+    def test_metadata_probe_detects_same_size_producer_bitrot(self):
+        test = self.producer_test(total=2, per_chunk=1)
+        first_machine = self.make_machine('bitrot-probe-first')
+        second_machine = self.make_machine('bitrot-probe-second')
+        first = claim_chunk(test, first_machine)
+        second = claim_chunk(test, second_machine)
+        uploaded = self.register_producer(test, first, first_machine)
+        self.assertEqual(uploaded.status_code, 200, uploaded.content)
+        artifact = DatagenProducerArtifact.objects.get(
+            sha256=uploaded.json()['sha256']
+        )
+        path = Path(self.media.name, artifact.filename())
+        path.write_bytes(b'x' * artifact.bytes)
+
+        response = self.register_producer(
+            test, second, second_machine, metadata_only=True
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.json()['upload_required'])
+        second.refresh_from_db()
+        self.assertEqual(second.producer_sha256, '')
         self.assertEqual(DatagenProducerArtifact.objects.count(), 1)
 
     def test_campaign_accepts_a_bounded_set_of_producer_builds(self):
@@ -1568,6 +1731,25 @@ class DatagenModeTests(TestCase):
         )
         chunk.refresh_from_db()
         self.assertEqual(chunk.status, DatagenChunk.COMPLETED)
+
+    def test_chunk_submission_rejects_same_size_producer_bitrot(self):
+        test = self.producer_test()
+        machine = self.make_machine('producer-bitrot-submit')
+        chunk = claim_chunk(test, machine)
+        registered = self.register_producer(test, chunk, machine).json()
+        artifact = DatagenProducerArtifact.objects.get(
+            sha256=registered['sha256']
+        )
+        Path(self.media.name, artifact.filename()).write_bytes(
+            b'x' * artifact.bytes
+        )
+
+        response = self.submit_chunk(test, chunk, machine, registered)
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn('unavailable or corrupt', response.json()['error'])
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, DatagenChunk.RUNNING)
 
     def test_missing_cas_blob_blocks_chunk_and_authenticated_retry_repairs_it(self):
         test = self.producer_test()
@@ -1843,11 +2025,14 @@ class DatagenModeTests(TestCase):
         self.assertIn(
             'requires authentication', spoofed_proxy.json()['error']
         )
+        verifier = OpenBench.views._open_verified_producer_descriptor
         with mock.patch.object(
-            OpenBench.views, '_hash_regular_file',
-            side_effect=AssertionError('GET must use cached availability'),
-        ):
+            OpenBench.views,
+            '_open_verified_producer_descriptor',
+            wraps=verifier,
+        ) as verified:
             manifest = client.get('/api/datagen/%d/' % test.id, secure=True)
+        self.assertEqual(verified.call_count, 1)
         self.assertEqual(manifest.status_code, 200)
         document = manifest.json()
         self.assertEqual(document['producer_commit'], self.engine.sha)
@@ -1870,18 +2055,46 @@ class DatagenModeTests(TestCase):
             ).json()['error'],
         )
         with mock.patch.object(
-            OpenBench.views, '_hash_regular_file',
-            side_effect=AssertionError('download must not rehash'),
-        ):
+            OpenBench.views,
+            '_open_verified_producer_descriptor',
+            wraps=verifier,
+        ) as verified:
             download = client.get(
                 '/api/datagen-producer/%s/' % registered['sha256'],
                 secure=True,
             )
+        self.assertEqual(verified.call_count, 1)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(b''.join(download.streaming_content), b'producer-binary')
         self.assertEqual(
             download['ETag'], '"sha256:%s"' % registered['sha256']
         )
+
+    def test_manifest_and_download_reject_same_size_producer_bitrot(self):
+        test = self.producer_test()
+        machine = self.make_machine('producer-bitrot-publication')
+        chunk = claim_chunk(test, machine)
+        registered = self.register_producer(test, chunk, machine).json()
+        self.assertEqual(
+            self.submit_chunk(test, chunk, machine, registered).status_code,
+            200,
+        )
+        artifact = DatagenProducerArtifact.objects.get(
+            sha256=registered['sha256']
+        )
+        Path(self.media.name, artifact.filename()).write_bytes(
+            b'x' * artifact.bytes
+        )
+        client = Client()
+        client.force_login(self.user)
+
+        manifest = client.get('/api/datagen/%d/' % test.id).json()
+        download = client.get(
+            '/api/datagen-producer/%s/' % registered['sha256']
+        ).json()
+
+        self.assertIn('unavailable producer evidence', manifest['error'])
+        self.assertIn('CAS is invalid', download['error'])
 
     def test_manifest_rejects_drift_from_campaign_producer_identity(self):
         test = self.producer_test()
