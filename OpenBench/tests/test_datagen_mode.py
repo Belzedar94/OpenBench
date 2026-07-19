@@ -829,6 +829,18 @@ class DatagenModeTests(TestCase):
         )
         self.assertTrue(any('{TEACHER_MODE}' in error for error in errors))
 
+        teacher_without_tablebases = SimpleNamespace(POST=dict(
+            base,
+            datagen_command=(
+                'datagen {SEED} {COUNT} {THREADS} {OUT} {TEACHER_MODE}'
+            ),
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(
+            errors, teacher_without_tablebases
+        )
+        self.assertTrue(any('{SYZYGY}' in error for error in errors))
+
         optional = SimpleNamespace(POST=dict(
             base, datagen_command=full_command, syzygy_wdl='OPTIONAL'
         ))
@@ -1499,6 +1511,36 @@ class DatagenModeTests(TestCase):
         self.assertEqual(current.status, DatagenChunk.RUNNING)
         self.assertEqual(current.attempts, 2)
         self.assertEqual(current.producer_sha256, '')
+        self.assertFalse(Path(self.media.name, current.filename()).exists())
+        self.assertFalse(any(
+            path.is_file() and '.staging-' in path.name
+            for path in Path(self.media.name).rglob('*')
+        ))
+
+    def test_chunk_staging_is_rehashed_before_receipt_and_completion_cas(self):
+        test = self.make_tablebase_test(total=2)
+        machine = self.make_machine(
+            'staging-corruption',
+            atomic=6,
+            manifest=test.datagen_tablebase_manifest_sha256,
+        )
+        chunk = claim_chunk(test, machine)
+
+        with mock.patch.object(
+            OpenBench.views,
+            '_hash_regular_file',
+            return_value=('0' * 64, 1),
+        ), mock.patch.object(OpenBench.views, '_fsync_promoted_file') as fsync:
+            response = self.submit_chunk(
+                test, chunk, machine, tablebase=True
+            )
+
+        self.assertEqual(response.status_code, 500, response.content)
+        fsync.assert_not_called()
+        current = DatagenChunk.objects.get(pk=chunk.pk)
+        self.assertEqual(current.status, DatagenChunk.RUNNING)
+        self.assertEqual(current.sha256, '')
+        self.assertEqual(current.environment_receipt, {})
         self.assertFalse(Path(self.media.name, current.filename()).exists())
         self.assertFalse(any(
             path.is_file() and '.staging-' in path.name

@@ -185,12 +185,16 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.assertIn("out {OUT} depth 7 nodes 0", command)
             self.assertNotIn("out {OUT} depth 6 nodes 0", command)
             for placeholder in (
+                "{PRODUCER_SHA256}",
                 "{SYZYGY}",
                 "{SYZYGY_MANIFEST_SHA256}",
                 "{SYZYGY_MAX}",
                 "{TEACHER_MODE}",
             ):
                 self.assertIn(placeholder, command, name)
+            self.assertIn(
+                "producer_sha256 {PRODUCER_SHA256}", command
+            )
             self.assertIn('syzygy "{SYZYGY}"', command)
             self.assertIn(
                 "syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256}", command

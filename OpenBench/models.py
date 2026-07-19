@@ -31,7 +31,7 @@ from django.contrib.auth.models import User
 
 
 DATAGEN_TABLEBASE_PLACEHOLDERS = frozenset({
-    'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX',
+    'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
 })
 DATAGEN_ENVIRONMENT_SCHEMA = 'openbench-datagen-environment-v40'
 DATAGEN_RECEIPT_SCHEMA = 'openbench-datagen-tablebase-receipt-v40'

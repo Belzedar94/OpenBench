@@ -30,6 +30,10 @@ Both flags are required together. At startup the client:
   an official-MD5 pass to the exact inventory and to postdate its files; and
 - advertises the Atomic maximum cardinality and inventory SHA-256.
 
+Before every tablebase-backed DATAGEN launch, the client repeats the inventory,
+hardlink, marker, and completeness checks. The resolved command is logged only
+by SHA-256; worker-local paths are never printed.
+
 The Atomic engine configuration pins that capability:
 
 ```json
@@ -53,6 +57,11 @@ Tablebase-backed DATAGEN must use all four environment placeholders:
 ```text
 syzygy "{SYZYGY}" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}
 ```
+
+Publishable presets additionally pass
+`producer_sha256 {PRODUCER_SHA256}` so OpenBench binds every chunk to the exact
+content-addressed generator executable. This provenance option is separate from
+the four-field Syzygy environment wire.
 
 `syzygy_wdl` is an explicit N-MAN limit and `syzygy_adj` remains disabled.
 Teacher mode is explicit and byte-exact: `pure` or `true`; `true` means the

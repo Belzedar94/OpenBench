@@ -268,6 +268,111 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertNotIn('C:\\Atomic', repr(sent))
         self.assertEqual(body['environment_receipt_sha256'], 'e' * 64)
 
+    def test_prelaunch_revalidation_rejects_inventory_mutated_after_startup(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root, '6-wdl')
+            runtime = Path(root, 'combined')
+            source.mkdir()
+            runtime.mkdir()
+            source_file = source / 'KPPPPvK.atbw'
+            source_file.write_bytes(b'good')
+            os.link(source_file, runtime / source_file.name)
+            inventory = [{
+                'directory': source.name,
+                'name': source_file.name,
+                'bytes': 4,
+            }]
+            raw_manifest = json.dumps(inventory).encode()
+            manifest = Path(root, 'inventory.json')
+            manifest.write_bytes(raw_manifest)
+            manifest_sha256 = hashlib.sha256(raw_manifest).hexdigest()
+            marker = source / '.acquisition-complete.json'
+            marker.write_text(json.dumps({
+                'schema': 'atomic-syzygy-acquisition-v1',
+                'directory': source.name,
+                'files': 1,
+                'bytes': 4,
+                'source_inventory_sha256': manifest_sha256,
+                'official_md5_verification': 'pass',
+            }))
+
+            cfg = tablebase_config()
+            cfg.atomic_syzygy_path = str(runtime)
+            cfg.atomic_syzygy_manifest = str(manifest)
+            cfg.atomic_syzygy_manifest_sha256 = manifest_sha256
+            data = cfg.workload['test']['datagen']
+            data['tablebase_manifest_sha256'] = manifest_sha256
+            data['environment_lease']['tablebase'][
+                'manifest_sha256'
+            ] = manifest_sha256
+            data['environment_lease_sha256'] = hashlib.sha256(
+                json.dumps(
+                    data['environment_lease'],
+                    sort_keys=True,
+                    separators=(',', ':'),
+                ).encode()
+            ).hexdigest()
+            attestation = worker.datagen_tablebase_attestation(cfg)
+
+            # Simulate same-size corruption after startup/capability advert.
+            source_file.write_bytes(b'evil')
+            marker_mtime = marker.stat().st_mtime_ns
+            os.utime(
+                source_file,
+                ns=(source_file.stat().st_atime_ns, marker_mtime + 1_000_000),
+            )
+            with mock.patch.object(
+                worker, 'validate_syzygy_exists', return_value=True
+            ), self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'failed pre-launch revalidation',
+            ) as raised:
+                worker.revalidate_datagen_tablebase_inventory(cfg, attestation)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertNotIn(root, str(raised.exception))
+
+    def test_datagen_command_log_is_hashed_and_never_contains_local_path(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_manifest = 'inventory.json'
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        process = SimpleNamespace(
+            stdin=SimpleNamespace(
+                write=mock.Mock(), flush=mock.Mock(), close=mock.Mock()
+            ),
+            poll=mock.Mock(return_value=0),
+            returncode=0,
+        )
+
+        with tempfile.TemporaryDirectory() as cwd:
+            output = os.path.join(cwd, 'chunk.bin')
+            log = os.path.join(cwd, 'engine.log')
+            Path(output).write_bytes(b'data')
+            rendered = worker.render_datagen_command(
+                cfg, output, tablebase=attestation
+            )
+            command_sha256 = hashlib.sha256(rendered.encode()).hexdigest()
+            with mock.patch.object(
+                worker, 'revalidate_datagen_tablebase_inventory'
+            ) as revalidate, mock.patch.object(
+                worker, 'Popen', return_value=process
+            ), mock.patch('builtins.print') as printed:
+                worker.run_datagen_command(
+                    cfg,
+                    'engine.exe',
+                    output,
+                    log,
+                    heartbeat,
+                    tablebase=attestation,
+                )
+
+        revalidate.assert_called_once_with(cfg, attestation)
+        messages = '\n'.join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn(command_sha256, messages)
+        self.assertNotIn(cfg.atomic_syzygy_path, messages)
+        self.assertNotIn(cfg.atomic_syzygy_path.replace('\\', '/'), messages)
+        self.assertNotIn(rendered, messages)
+
     def test_opening_book_verifies_normalized_and_raw_identities(self):
         raw = b'fen-one\r\nfen-two\r\n'
         normalized = raw.replace(b'\r\n', b'\n')

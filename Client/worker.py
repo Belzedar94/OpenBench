@@ -2066,6 +2066,51 @@ def datagen_tablebase_attestation(config):
     }
 
 
+def revalidate_datagen_tablebase_inventory(config, tablebase):
+    """Re-authenticate the worker-local corpus immediately before launch."""
+
+    if tablebase is None:
+        return
+    family = tablebase.get('family')
+    if family != 'atomic':
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase revalidation requires the Atomic family'
+        )
+
+    path, worker_max = tablebase_capability(config, family)
+    manifest_path = getattr(config, 'atomic_syzygy_manifest', None)
+    expected_manifest = tablebase.get('manifest_sha256')
+    leased_worker_max = tablebase.get('worker_max')
+    required_max = tablebase.get('required_max')
+    if (
+        not path
+        or path != tablebase.get('path')
+        or not manifest_path
+        or worker_max != leased_worker_max
+        or not isinstance(required_max, int)
+        or worker_max < required_max
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase capability changed before generator launch'
+        )
+
+    try:
+        observed_manifest = validate_tablebase_inventory(
+            path, manifest_path, ('.atbw', '.atbz')
+        )
+        complete = validate_syzygy_exists(
+            path, worker_max, ('.atbw', '.atbz')
+        )
+    except (OSError, TypeError, ValueError):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory failed pre-launch revalidation'
+        ) from None
+    if observed_manifest != expected_manifest or not complete:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory changed before generator launch'
+        )
+
+
 def render_datagen_command(
     config, output_path, network_path=None, producer=None, tablebase=None
 ):
@@ -2114,10 +2159,16 @@ def run_datagen_command(
     config, engine, output_path, log_path, heartbeat, network_path=None,
     producer=None, tablebase=None,
 ):
+    if tablebase is not None:
+        revalidate_datagen_tablebase_inventory(config, tablebase)
     command = render_datagen_command(
         config, output_path, network_path, producer, tablebase
     )
-    print('DATAGEN command: %s' % command)
+    command_sha256 = hashlib.sha256(command.encode('utf-8')).hexdigest()
+    print(
+        'DATAGEN command prepared: sha256=%s tablebase=%s'
+        % (command_sha256, 'authenticated' if tablebase is not None else 'none')
+    )
 
     with open(log_path, 'wb') as log:
         process = Popen(
@@ -2157,9 +2208,10 @@ def complete_datagen_workload(config):
     setup_complete = False
     producer = None
     producer_snapshot_path = None
-    tablebase = datagen_tablebase_attestation(config)
+    tablebase = None
 
     try:
+        tablebase = datagen_tablebase_attestation(config)
         cleanup_errors = clean_datagen_workspace(output_path)
         try:
             if os.path.isfile(log_path):

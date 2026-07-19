@@ -1771,6 +1771,17 @@ def client_submit_datagen(request, machine):
             {'error': 'Unable to stage DATAGEN chunk at canonical path'},
             status=500,
         )
+    try:
+        if _hash_regular_file(storage.path(staging_name)) != (
+            actual_sha, actual_bytes,
+        ):
+            raise OSError('staged DATAGEN chunk failed verification')
+        _fsync_promoted_file(storage.path(staging_name))
+    except OSError:
+        cleanup_staging(staging_name)
+        return JsonResponse(
+            {'error': 'Unable to verify staged DATAGEN chunk'}, status=500,
+        )
 
     def commit_staged_upload():
         nonlocal staging_name

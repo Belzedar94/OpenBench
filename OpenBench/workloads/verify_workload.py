@@ -404,7 +404,8 @@ def verify_datagen_tablebase_contract(errors, request):
     if tablebase_fields and tablebase_fields != DATAGEN_TABLEBASE_PLACEHOLDERS:
         errors.append(
             'Tablebase DATAGEN must use {SYZYGY}, '
-            '{SYZYGY_MANIFEST_SHA256}, and {SYZYGY_MAX} together'
+            '{SYZYGY_MANIFEST_SHA256}, {SYZYGY_MAX}, and {TEACHER_MODE} '
+            'together'
         )
         return
 
@@ -432,12 +433,6 @@ def verify_datagen_tablebase_contract(errors, request):
         ):
             errors.append(
                 'Tablebase DATAGEN requires a pinned engine tablebase manifest'
-            )
-
-        if 'TEACHER_MODE' not in fields:
-            errors.append(
-                'Tablebase DATAGEN requires {TEACHER_MODE} and an explicit '
-                'teacher mode'
             )
 
     if 'TEACHER_MODE' in fields:
