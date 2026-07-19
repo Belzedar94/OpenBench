@@ -1499,6 +1499,7 @@ def _frozen_datagen_tablebase_attestation(test, chunk, machine):
         not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test)
         or chunk.machine_id != machine.id
         or worker_max < test.datagen_tablebase_max
+        or not isinstance(chunk.environment_lease_sha256, str)
         or not re.fullmatch(r'[0-9a-f]{64}', chunk.environment_lease_sha256)
     ):
         raise PermissionError(

@@ -1063,6 +1063,18 @@ class DatagenModeTests(TestCase):
             environment_receipt_sha256=original_receipt_sha,
         )
 
+        for malformed_sha in (None, 42):
+            with self.subTest(evidence='lease-sha-type', value=malformed_sha):
+                chunk.environment_lease = copy.deepcopy(original_lease)
+                chunk.environment_lease_sha256 = malformed_sha
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    'lease does not match campaign or worker',
+                ):
+                    OpenBench.views._frozen_datagen_tablebase_attestation(
+                        test, chunk, machine
+                    )
+
     def test_tablebase_scheduler_requires_exact_family_limit_and_pin(self):
         test = self.make_tablebase_test()
         manifest = test.datagen_tablebase_manifest_sha256
