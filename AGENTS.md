@@ -262,11 +262,19 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   antes de ejecutarlo; el servidor rehashea, guarda por contenido y liga
   SHA/tamaño/commit al chunk. No desplegar v39 a mitad de una campaña v38.
 
+- El protocolo v40 añade el entorno Atomic Syzygy opt-in. El grupo
+  `{SYZYGY}`, `{SYZYGY_MANIFEST_SHA256}`, `{SYZYGY_MAX}` y `{TEACHER_MODE}`
+  exige pin de inventario, limite N-MAN y teacher byte-exacto `pure|true`.
+  Scheduler, lease, upload receipt y manifest fallan cerrados; nunca persistir
+  la ruta local. `syzygy_adj` permanece siempre `DISABLED`. No desplegar v40 ni
+  lanzar sus canaries depth-7 antes del bridge/golden/A-B local verde.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
-  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}` y `{PRODUCER_SHA256}`. `BOOK_SHA256` es la identidad raw de
+  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}` y `{PRODUCER_SHA256}`. Atomic Syzygy
+  usa ademas el grupo v40 completo descrito arriba. `BOOK_SHA256` es la identidad raw de
   los bytes extraídos (o la identidad histórica si el manifiesto no publica
   `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.
 - Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease

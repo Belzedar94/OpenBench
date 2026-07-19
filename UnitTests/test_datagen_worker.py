@@ -1,5 +1,6 @@
 import bz2
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -72,6 +73,53 @@ def config():
         cpu_name='Generic CPU',
         cpu_flags=[],
     )
+
+
+def tablebase_config(teacher_mode='pure'):
+    cfg = config()
+    cfg.atomic_syzygy_path = r'C:\Atomic Tables\combined'
+    cfg.atomic_syzygy_max = 6
+    cfg.atomic_syzygy_manifest_sha256 = 'b' * 64
+    test = cfg.workload['test']
+    test['syzygy_wdl'] = '6-MAN'
+    test['syzygy_adj'] = 'DISABLED'
+    test['dev']['tablebase_family'] = 'atomic'
+    data = test['datagen']
+    data.update({
+        'command': (
+            'generate seed {SEED} count {COUNT} threads {THREADS} '
+            'out {OUT} syzygy "{SYZYGY}" '
+            'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+            'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+        ),
+        'tablebase_required': True,
+        'tablebase_family': 'atomic',
+        'tablebase_max': 6,
+        'tablebase_manifest_sha256': 'b' * 64,
+        'teacher_mode': teacher_mode,
+        'environment_contract_sha256': 'c' * 64,
+    })
+    lease = {
+        'schema': 'openbench-datagen-tablebase-lease-v40',
+        'protocol': 40,
+        'test_id': test['id'],
+        'chunk_idx': data['chunk_idx'],
+        'attempt': data['attempt'],
+        'machine_id': cfg.machine_id,
+        'environment_contract_sha256': 'c' * 64,
+        'tablebase': {
+            'family': 'atomic',
+            'required_max': 6,
+            'worker_max': 6,
+            'manifest_sha256': 'b' * 64,
+        },
+        'teacher_mode': teacher_mode,
+    }
+    data['environment_lease'] = lease
+    data['environment_lease_sha256'] = hashlib.sha256(
+        json.dumps(lease, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+    return cfg
 
 
 class DatagenWorkerTests(unittest.TestCase):
@@ -153,6 +201,72 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertIn(
             'book_sha256 ' + ('ABCDEF0123456789' * 4), rendered
         )
+
+    def test_tablebase_template_uses_frozen_authenticated_lease(self):
+        cfg = tablebase_config()
+        rendered = worker.render_datagen_command(
+            cfg, os.path.join('Datagen', 'chunk.bin')
+        )
+        self.assertIn('syzygy "C:/Atomic Tables/combined"', rendered)
+        self.assertIn('syzygy_manifest_sha256 ' + ('b' * 64), rendered)
+        self.assertIn('syzygy_max 6', rendered)
+        self.assertIn('teacher_mode pure', rendered)
+
+    def test_tablebase_template_fails_closed_on_capability_mismatch(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_max = 5
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'requires 6-man'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_manifest_sha256 = 'd' * 64
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'pinned manifest'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        cfg = tablebase_config('')
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'malformed or unsupported'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+    def test_tablebase_report_sends_attestation_without_local_path(self):
+        cfg = tablebase_config('true')
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'completed_chunks': 1,
+                'total_chunks': 8,
+                'environment_receipt_sha256': 'e' * 64,
+            },
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            chunk = Path(cwd, 'chunk.bz2')
+            chunk.write_bytes(b'BZh9')
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                body = worker.ServerReporter.report_datagen(
+                    cfg,
+                    str(chunk),
+                    'f' * 64,
+                    4,
+                    tablebase=attestation,
+                )
+
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['tablebase_family'], 'atomic')
+        self.assertEqual(sent['tablebase_max'], 6)
+        self.assertEqual(sent['tablebase_worker_max'], 6)
+        self.assertEqual(sent['tablebase_manifest_sha256'], 'b' * 64)
+        self.assertEqual(sent['teacher_mode'], 'true')
+        self.assertNotIn('path', sent)
+        self.assertNotIn('C:\\Atomic', repr(sent))
+        self.assertEqual(body['environment_receipt_sha256'], 'e' * 64)
 
     def test_opening_book_verifies_normalized_and_raw_identities(self):
         raw = b'fen-one\r\nfen-two\r\n'
@@ -931,7 +1045,7 @@ class DatagenWorkerTests(unittest.TestCase):
         heartbeat = SimpleNamespace(stop_requested=threading.Event())
         response = SimpleNamespace(
             status_code=200,
-            json=lambda: {'error': 'Bad Client Version: expected 39'},
+            json=lambda: {'error': 'Bad Client Version: expected 40'},
         )
         with mock.patch.object(
             worker.requests, 'post', return_value=response

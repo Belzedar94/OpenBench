@@ -252,6 +252,7 @@ def verify_engine_datagen_preset(datagen_preset):
         'datagen_total_count',
         'datagen_positions_per_chunk',
         'datagen_base_seed',
+        'datagen_teacher_mode',
     ]
 
     for key in datagen_preset.keys():

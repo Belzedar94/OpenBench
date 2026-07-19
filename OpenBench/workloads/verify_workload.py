@@ -188,6 +188,8 @@ def verify_datagen_creation(errors, request):
     for verification in verifications:
         verification[0](errors, request, *verification[1:])
 
+    verify_datagen_tablebase_contract(errors, request)
+
 
 def verify_integer(errors, request, field, field_name):
     try: int(request.POST[field])
@@ -363,7 +365,8 @@ def verify_datagen_template(errors, request, field):
 
     allowed = {
         'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'BOOK_SHA256', 'NETWORK',
-        'PRODUCER_SHA256',
+        'PRODUCER_SHA256', 'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX',
+        'TEACHER_MODE',
     }
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
 
@@ -386,7 +389,67 @@ def verify_datagen_template(errors, request, field):
         errors.append(
             'Datagen Command must be one line, use only {SEED}, {COUNT}, '
             '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, '
-            '{PRODUCER_SHA256}, and include SEED/COUNT/OUT/THREADS'
+            '{PRODUCER_SHA256}, {SYZYGY}, {SYZYGY_MANIFEST_SHA256}, '
+            '{SYZYGY_MAX}, {TEACHER_MODE}, and include '
+            'SEED/COUNT/OUT/THREADS'
+        )
+
+
+def verify_datagen_tablebase_contract(errors, request):
+    """Validate the opt-in placeholders before any campaign rows are created."""
+
+    command = request.POST.get('datagen_command', '').strip()
+    fields = Test.datagen_template_fields(command)
+    tablebase_fields = fields & DATAGEN_TABLEBASE_PLACEHOLDERS
+    if tablebase_fields and tablebase_fields != DATAGEN_TABLEBASE_PLACEHOLDERS:
+        errors.append(
+            'Tablebase DATAGEN must use {SYZYGY}, '
+            '{SYZYGY_MANIFEST_SHA256}, and {SYZYGY_MAX} together'
+        )
+        return
+
+    engine_name = request.POST.get('dev_engine')
+    engine_config = OpenBench.config.OPENBENCH_CONFIG.get(
+        'engines', {}
+    ).get(engine_name, {})
+
+    if tablebase_fields:
+        syzygy_wdl = request.POST.get('syzygy_wdl', 'DISABLED')
+        if syzygy_wdl not in {
+            '3-MAN', '4-MAN', '5-MAN', '6-MAN', '7-MAN',
+        }:
+            errors.append(
+                'Tablebase DATAGEN requires an explicit N-MAN Syzygy WDL limit'
+            )
+        if engine_config.get('tablebase_family', 'standard') != 'atomic':
+            errors.append(
+                'Authenticated tablebase DATAGEN currently requires an Atomic '
+                'tablebase engine'
+            )
+        manifest = engine_config.get('tablebase_manifest_sha256', '')
+        if not isinstance(manifest, str) or not re.fullmatch(
+            r'[0-9a-fA-F]{64}', manifest
+        ):
+            errors.append(
+                'Tablebase DATAGEN requires a pinned engine tablebase manifest'
+            )
+
+        if 'TEACHER_MODE' not in fields:
+            errors.append(
+                'Tablebase DATAGEN requires {TEACHER_MODE} and an explicit '
+                'teacher mode'
+            )
+
+    if 'TEACHER_MODE' in fields:
+        teacher_mode = request.POST.get('datagen_teacher_mode', '')
+        if teacher_mode not in {'pure', 'true'}:
+            errors.append(
+                '{TEACHER_MODE} requires an explicit datagen_teacher_mode '
+                'of pure or true'
+            )
+    elif request.POST.get('datagen_teacher_mode', '') != '':
+        errors.append(
+            'datagen_teacher_mode requires {TEACHER_MODE} in the command'
         )
 
 def verify_datagen_counts(errors, request, total_field, chunk_field):

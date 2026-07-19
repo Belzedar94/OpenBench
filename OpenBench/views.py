@@ -1415,6 +1415,143 @@ def client_submit_datagen_producer(request, machine):
         cleanup_staging(staging_name)
 
 
+def _datagen_tablebase_attestation(request, test, chunk, machine):
+    """Authenticate the worker capability bound to one tablebase DATAGEN lease."""
+
+    if not test.datagen_tablebase_required:
+        return None
+    try:
+        submitted = {
+            'environment_contract_sha256': request.POST[
+                'environment_contract_sha256'
+            ].lower(),
+            'environment_lease_sha256': request.POST[
+                'environment_lease_sha256'
+            ].lower(),
+            'family': request.POST['tablebase_family'],
+            'required_max': int(request.POST['tablebase_max']),
+            'worker_max': int(request.POST['tablebase_worker_max']),
+            'manifest_sha256': request.POST[
+                'tablebase_manifest_sha256'
+            ].lower(),
+            'teacher_mode': request.POST.get('teacher_mode', ''),
+        }
+        assert re.fullmatch(
+            r'[0-9a-f]{64}', submitted['environment_contract_sha256']
+        )
+        assert re.fullmatch(
+            r'[0-9a-f]{64}', submitted['environment_lease_sha256']
+        )
+        assert re.fullmatch(r'[0-9a-f]{64}', submitted['manifest_sha256'])
+        assert submitted['required_max'] > 0
+        assert submitted['worker_max'] >= submitted['required_max']
+    except (KeyError, ValueError, AssertionError):
+        raise ValueError('DATAGEN upload omitted tablebase attestation')
+
+    lease = chunk.environment_lease
+    if not isinstance(lease, dict):
+        raise PermissionError(
+            'DATAGEN chunk lacks a frozen tablebase lease'
+        )
+    encoded_lease = json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    if hashlib.sha256(encoded_lease).hexdigest() != (
+        chunk.environment_lease_sha256
+    ):
+        raise PermissionError('DATAGEN tablebase lease hash is invalid')
+    leased_tablebase = lease.get('tablebase', {})
+    if not isinstance(leased_tablebase, dict):
+        raise PermissionError('DATAGEN tablebase lease is malformed')
+    leased_contract = lease.get('environment_contract_sha256', '')
+    leased_manifest = leased_tablebase.get('manifest_sha256', '')
+    if not isinstance(leased_contract, str) or not isinstance(
+        leased_manifest, str
+    ):
+        raise PermissionError('DATAGEN tablebase lease is malformed')
+    expected = {
+        'environment_contract_sha256': (
+            leased_contract.lower()
+        ),
+        'environment_lease_sha256': chunk.environment_lease_sha256,
+        'family': leased_tablebase.get('family'),
+        'required_max': leased_tablebase.get('required_max'),
+        'worker_max': leased_tablebase.get('worker_max'),
+        'manifest_sha256': (
+            leased_manifest.lower()
+        ),
+        'teacher_mode': lease.get('teacher_mode', ''),
+    }
+    if (
+        lease.get('schema') != OpenBench.datagen.DATAGEN_TABLEBASE_LEASE_SCHEMA
+        or lease.get('protocol') != 40
+        or lease.get('test_id') != test.id
+        or lease.get('chunk_idx') != chunk.idx
+        or lease.get('attempt') != chunk.attempts
+        or lease.get('machine_id') != machine.id
+        or not test.datagen_environment_contract_is_current()
+        or test.syzygy_adj != 'DISABLED'
+        or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
+        or test.datagen_tablebase_family != 'atomic'
+        or test.datagen_tablebase_max not in range(3, 8)
+        or expected['environment_contract_sha256']
+           != test.datagen_environment_contract_sha256.lower()
+        or expected['family'] != test.datagen_tablebase_family
+        or expected['required_max'] != test.datagen_tablebase_max
+        or expected['worker_max'] < test.datagen_tablebase_max
+        or expected['manifest_sha256']
+           != test.datagen_tablebase_manifest_sha256.lower()
+        or expected['teacher_mode'] not in {'pure', 'true'}
+        or expected['teacher_mode'] != test.datagen_teacher_mode
+        or submitted != expected
+    ):
+        raise PermissionError(
+            'DATAGEN tablebase attestation does not match campaign or worker'
+        )
+    return submitted
+
+
+def _datagen_environment_receipt(
+    test, chunk, machine, artifact_sha256, artifact_bytes, producer, attestation,
+):
+    if attestation is None:
+        return {}, ''
+    receipt = {
+        'schema': DATAGEN_RECEIPT_SCHEMA,
+        'protocol': 40,
+        'test_id': test.id,
+        'chunk_idx': chunk.idx,
+        'attempt': chunk.attempts,
+        'machine_id': machine.id,
+        'environment_contract_sha256': (
+            attestation['environment_contract_sha256']
+        ),
+        'environment_lease_sha256': (
+            attestation['environment_lease_sha256']
+        ),
+        'tablebase': {
+            'family': attestation['family'],
+            'required_max': attestation['required_max'],
+            'worker_max': attestation['worker_max'],
+            'manifest_sha256': attestation['manifest_sha256'],
+        },
+        'teacher_mode': attestation['teacher_mode'],
+        'artifact': {
+            'sha256': artifact_sha256,
+            'bytes': artifact_bytes,
+        },
+        'producer': producer,
+    }
+    return receipt, _canonical_json_sha256(receipt)
+
+
+def _canonical_json_sha256(document):
+    encoded = json.dumps(
+        document, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @csrf_exempt
 @verify_worker
 def client_submit_datagen(request, machine):
@@ -1433,6 +1570,8 @@ def client_submit_datagen(request, machine):
         return JsonResponse({'error': 'Malformed DATAGEN upload'}, status=400)
 
     storage = FileSystemStorage()
+    receipt = {}
+    receipt_sha256 = ''
 
     def completed_response(test):
         completed, total, positions = OpenBench.datagen.completed_progress(test)
@@ -1442,6 +1581,9 @@ def client_submit_datagen(request, machine):
             'producer_sha256': chunk.producer_sha256 or None,
             'producer_bytes': chunk.producer_bytes,
             'producer_commit': chunk.producer_commit or None,
+            'environment_receipt_sha256': (
+                receipt_sha256 or chunk.environment_receipt_sha256 or None
+            ),
             'completed_chunks': completed,
             'total_chunks': total,
             'positions': positions,
@@ -1463,6 +1605,15 @@ def client_submit_datagen(request, machine):
         return JsonResponse(
             {'error': 'DATAGEN chunk lease attempt is stale'}, status=409
         )
+
+    try:
+        tablebase_attestation = _datagen_tablebase_attestation(
+            request, test, chunk, machine
+        )
+    except ValueError as error:
+        return JsonResponse({'error': str(error)}, status=400)
+    except PermissionError as error:
+        return JsonResponse({'error': str(error)}, status=409)
 
     submitted_producer = None
     submitted_producer_bytes = 0
@@ -1539,12 +1690,37 @@ def client_submit_datagen(request, machine):
             'bytes': actual_bytes,
         }, status=400)
 
+    producer_receipt = None
+    if submitted_producer is not None:
+        producer_receipt = {
+            'sha256': submitted_producer,
+            'bytes': submitted_producer_bytes,
+            'commit': submitted_producer_commit,
+        }
+    receipt, receipt_sha256 = _datagen_environment_receipt(
+        test,
+        chunk,
+        machine,
+        actual_sha,
+        actual_bytes,
+        producer_receipt,
+        tablebase_attestation,
+    )
+
     # Lost HTTP responses may cause an identical retry. Keep completed chunks
     # immutable while accepting that retry idempotently without staging again.
     if chunk.status == DatagenChunk.COMPLETED:
         if chunk.sha256 != actual_sha or chunk.bytes != actual_bytes:
             return JsonResponse(
                 {'error': 'DATAGEN chunk already completed with different data'},
+                status=409,
+            )
+        if test.datagen_tablebase_required and (
+            chunk.environment_receipt != receipt
+            or chunk.environment_receipt_sha256 != receipt_sha256
+        ):
+            return JsonResponse(
+                {'error': 'DATAGEN completed chunk has different tablebase evidence'},
                 status=409,
             )
         return completed_response(test)
@@ -1615,10 +1791,18 @@ def client_submit_datagen(request, machine):
                     producer_bytes=submitted_producer_bytes,
                     producer_commit=submitted_producer_commit,
                 )
+            if tablebase_attestation is not None:
+                completion = completion.filter(
+                    environment_lease_sha256=tablebase_attestation[
+                        'environment_lease_sha256'
+                    ]
+                )
             completed_by_machine = completion.update(
                 status=DatagenChunk.COMPLETED,
                 sha256=actual_sha,
                 bytes=actual_bytes,
+                environment_receipt=receipt,
+                environment_receipt_sha256=receipt_sha256,
                 completed=timezone.now(),
                 last_error='',
             )
@@ -1913,7 +2097,7 @@ def api_datagen_manifest(request, test_id):
 
     chunks = list(
         test.datagen_chunks.select_related(
-            'producer_build__artifact'
+            'producer_build__artifact', 'machine'
         ).order_by('idx')
     )
     if (
@@ -1926,6 +2110,88 @@ def api_datagen_manifest(request, test_id):
         })
 
     producer_required = test.datagen_requires_producer_artifact()
+    tablebase_required = test.datagen_tablebase_required
+    if tablebase_required:
+        if (
+            not test.datagen_environment_contract_is_current()
+            or test.datagen_tablebase_family != 'atomic'
+            or test.datagen_tablebase_max not in range(3, 8)
+            or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
+            or test.syzygy_adj != 'DISABLED'
+            or test.datagen_teacher_mode not in {'pure', 'true'}
+            or not re.fullmatch(
+                r'[0-9a-f]{64}',
+                test.datagen_environment_contract_sha256,
+            )
+        ):
+            return api_response({
+                'error': 'DATAGEN Workload #%d has an invalid environment contract'
+                         % test_id
+            })
+        for chunk in chunks:
+            lease = chunk.environment_lease
+            lease_tablebase = (
+                lease.get('tablebase', {}) if isinstance(lease, dict) else {}
+            )
+            if (
+                chunk.machine is None
+                or not isinstance(lease_tablebase, dict)
+                or _canonical_json_sha256(lease)
+                   != chunk.environment_lease_sha256
+                or lease.get('environment_contract_sha256')
+                   != test.datagen_environment_contract_sha256
+                or lease_tablebase.get('family')
+                   != test.datagen_tablebase_family
+                or lease_tablebase.get('required_max')
+                   != test.datagen_tablebase_max
+                or lease_tablebase.get('manifest_sha256')
+                   != test.datagen_tablebase_manifest_sha256
+                or lease.get('teacher_mode') != test.datagen_teacher_mode
+            ):
+                return api_response({
+                    'error': 'DATAGEN Workload #%d has inconsistent tablebase lease evidence'
+                             % test_id
+                })
+            producer = None
+            if chunk.producer_sha256:
+                producer = {
+                    'sha256': chunk.producer_sha256,
+                    'bytes': chunk.producer_bytes,
+                    'commit': chunk.producer_commit,
+                }
+            attestation = {
+                'environment_contract_sha256': (
+                    test.datagen_environment_contract_sha256
+                ),
+                'environment_lease_sha256': (
+                    chunk.environment_lease_sha256
+                ),
+                'family': lease_tablebase['family'],
+                'required_max': lease_tablebase['required_max'],
+                'worker_max': lease_tablebase['worker_max'],
+                'manifest_sha256': lease_tablebase['manifest_sha256'],
+                'teacher_mode': lease.get('teacher_mode', ''),
+            }
+            expected_receipt, expected_receipt_sha = (
+                _datagen_environment_receipt(
+                    test,
+                    chunk,
+                    chunk.machine,
+                    chunk.sha256,
+                    chunk.bytes,
+                    producer,
+                    attestation,
+                )
+            )
+            if (
+                chunk.environment_receipt != expected_receipt
+                or chunk.environment_receipt_sha256
+                   != expected_receipt_sha
+            ):
+                return api_response({
+                    'error': 'DATAGEN Workload #%d has inconsistent tablebase receipt evidence'
+                             % test_id
+                })
     producer_builds = []
     if producer_required:
         expected_commit = test.dev.sha.lower()
@@ -1992,6 +2258,16 @@ def api_datagen_manifest(request, test_id):
         'producer_contract_sha256': (
             test.datagen_producer_contract_sha256
         ),
+        'environment': {
+            'tablebase_required': tablebase_required,
+            'contract_sha256': test.datagen_environment_contract_sha256,
+            'tablebase_family': test.datagen_tablebase_family or None,
+            'tablebase_max': test.datagen_tablebase_max,
+            'tablebase_manifest_sha256': (
+                test.datagen_tablebase_manifest_sha256 or None
+            ),
+            'teacher_mode': test.datagen_teacher_mode or None,
+        },
         'total_count': test.datagen_total_count,
         'positions_per_chunk': test.datagen_positions_per_chunk,
         'base_seed': test.datagen_base_seed,
@@ -2005,6 +2281,14 @@ def api_datagen_manifest(request, test_id):
                 'producer_sha256': chunk.producer_sha256 or None,
                 'producer_bytes': chunk.producer_bytes,
                 'producer_commit': chunk.producer_commit or None,
+                'environment_lease': chunk.environment_lease or None,
+                'environment_lease_sha256': (
+                    chunk.environment_lease_sha256 or None
+                ),
+                'environment_receipt': chunk.environment_receipt or None,
+                'environment_receipt_sha256': (
+                    chunk.environment_receipt_sha256 or None
+                ),
             }
             for chunk in chunks
         ],

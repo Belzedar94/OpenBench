@@ -2,8 +2,10 @@
 
 OpenBench can route Atomic tablebase workloads only to workers that own the
 authenticated 3--6-man Atomic corpus. This is worker capability plumbing; it
-does not add a new workload type, result protocol, database table, or stopping
-rule. Atomic Syzygy measurements use ordinary fixed-game (`GAMES`) workloads.
+supports ordinary fixed-game (`GAMES`) measurements and an opt-in v40
+environment contract for generic `DATAGEN`. It does not add a statistical
+stopping rule: GAMES still finishes by game count and DATAGEN by its immutable
+chunk map.
 
 ## Worker-local corpus
 
@@ -43,6 +45,26 @@ per-side `SyzygyProbeLimit` values are preserved.
 Atomic workloads must set `syzygy_adj=DISABLED`: cutechess-ob's tablebase
 adjudicator consumes orthodox `.rtbw` files. Engine probing remains enabled via
 `syzygy_wdl=6-MAN`.
+
+## Generic DATAGEN with Atomic tables
+
+Tablebase-backed DATAGEN must use all four environment placeholders:
+
+```text
+syzygy "{SYZYGY}" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}
+```
+
+`syzygy_wdl` is an explicit N-MAN limit and `syzygy_adj` remains disabled.
+Teacher mode is explicit and byte-exact: `pure` or `true`; `true` means the
+legacy-playing teacher. The scheduler requires the exact Atomic manifest and
+sufficient cardinality. At claim time the server freezes that authenticated
+worker capability in a hashed lease; at upload it creates a hashed receipt
+binding the lease to the exact output bytes. Neither document contains the
+worker-local tablebase path.
+
+The depth-7 `pure` and `true` presets are canaries, kept separate from the
+legacy depth-6 default. Do not activate them until the Atomic engine bridge,
+golden vectors, and a local A/B format check are green.
 
 ## Four fixed-game measurements
 
@@ -84,7 +106,9 @@ impact and do not replace that conformance evidence.
 
 ## Deployment
 
-This capability bumps the worker protocol version so workers auto-update and
-re-register with the new tablebase advertisement. Restart the server after the
-configuration lands, then restart capable workers with both Atomic flags. No
-database migration or `--run-syncdb` step is introduced by this change.
+This capability uses worker protocol version 40 so workers auto-update and
+re-register with the tablebase advertisement. Migration `0007` adds frozen
+campaign contracts and per-chunk leases/receipts; run it normally after a DB
+and Media backup. Validate on an isolated `:8001` clone first. Restart the
+production server and capable workers only in a coordinated idle window, and
+never use `--fake` for `0007`.

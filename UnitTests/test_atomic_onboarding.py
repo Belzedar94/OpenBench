@@ -166,6 +166,38 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.assertIn("network_sha256 " + NETWORK_SHA256, command)
         self.assertIn("book_sha256 {BOOK_SHA256}", command)
 
+    def test_atomic_syzygy_datagen_canaries_are_explicit_and_separate(self):
+        presets = self.engine["datagen_presets"]
+        expected = {
+            "Atomic Syzygy depth-7 pure canary": "pure",
+            "Atomic Syzygy depth-7 true canary": "true",
+        }
+        self.assertEqual(
+            {name for name in presets if name != "default"}, set(expected)
+        )
+
+        for name, teacher_mode in expected.items():
+            preset = presets[name]
+            command = preset["datagen_command"]
+            self.assertEqual(preset["datagen_teacher_mode"], teacher_mode)
+            self.assertEqual(preset["syzygy_wdl"], "6-MAN")
+            self.assertEqual(preset["syzygy_adj"], "DISABLED")
+            self.assertIn("out {OUT} depth 7 nodes 0", command)
+            self.assertNotIn("out {OUT} depth 6 nodes 0", command)
+            for placeholder in (
+                "{SYZYGY}",
+                "{SYZYGY_MANIFEST_SHA256}",
+                "{SYZYGY_MAX}",
+                "{TEACHER_MODE}",
+            ):
+                self.assertIn(placeholder, command, name)
+            self.assertIn('syzygy "{SYZYGY}"', command)
+            self.assertIn(
+                "syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256}", command
+            )
+            self.assertIn("syzygy_max {SYZYGY_MAX}", command)
+            self.assertIn("teacher_mode {TEACHER_MODE}", command)
+
 
 if __name__ == "__main__":
     unittest.main()

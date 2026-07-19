@@ -57,7 +57,7 @@ class MachineIdentityTests(TestCase):
         self.other = User.objects.create_user('other-worker', password='password')
         self.info = {
             'mac_address': 'AABBCCDDEEFF',
-            'client_ver': 39,
+            'client_ver': 40,
             'concurrency': 2,
         }
         self.machine = Machine.objects.create(
@@ -100,8 +100,8 @@ class MachineIdentityTests(TestCase):
             {'error': 'Worker Account Disabled', 'stop': True},
         )
 
-    def test_protocol_v38_worker_is_told_to_upgrade_to_v39(self):
-        self.machine.info = dict(self.machine.info, client_ver=38)
+    def test_protocol_v39_worker_is_told_to_upgrade_to_v40(self):
+        self.machine.info = dict(self.machine.info, client_ver=39)
         self.machine.save(update_fields=['info'])
         request = RequestFactory().post(
             '/clientGetWorkload/',
@@ -112,7 +112,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('39', error)
+        self.assertIn('40', error)
 
 
 class DatagenModeTests(TestCase):
@@ -172,7 +172,9 @@ class DatagenModeTests(TestCase):
             initialize_chunks(test)
         return test
 
-    def make_machine(self, username='worker', machine_id=None):
+    def make_machine(
+        self, username='worker', machine_id=None, atomic=0, manifest=None
+    ):
         user = User.objects.create_user(username, password='password')
         Profile.objects.create(user=user, enabled=True)
         info = {
@@ -181,8 +183,14 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 39,
-            'tablebases': {'standard': 0},
+            'client_ver': 40,
+            'tablebases': {
+                'standard': 0,
+                'atomic': {
+                    'max': atomic,
+                    'manifest_sha256': manifest,
+                },
+            },
             'syzygy_max': 0,
         }
         return Machine.objects.create(
@@ -191,6 +199,57 @@ class DatagenModeTests(TestCase):
             secret='secret',
             info=info,
         )
+
+    def make_tablebase_test(self, teacher_mode='pure', total=2):
+        manifest = OpenBench.config.OPENBENCH_CONFIG['engines'][
+            'Atomic-Stockfish'
+        ]['tablebase_manifest_sha256'].lower()
+        test = Test.objects.create(
+            author=self.user.username,
+            book_name='NONE',
+            dev=self.engine,
+            base=self.engine,
+            dev_repo='https://github.com/example/engine',
+            base_repo='https://github.com/example/engine',
+            dev_engine='Atomic-Stockfish',
+            base_engine='Atomic-Stockfish',
+            dev_options='',
+            base_options='',
+            dev_time_control='',
+            base_time_control='',
+            syzygy_wdl='6-MAN',
+            syzygy_adj='DISABLED',
+            test_mode='DATAGEN',
+            datagen_command=(
+                'datagen {SEED} {COUNT} {THREADS} {OUT} '
+                'syzygy "{SYZYGY}" '
+                'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+                'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+            ),
+            datagen_total_count=total,
+            datagen_positions_per_chunk=total,
+            datagen_base_seed=100,
+            max_games=total,
+            throughput=1000,
+            approved=True,
+            datagen_tablebase_family='atomic',
+            datagen_tablebase_max=6,
+            datagen_tablebase_manifest_sha256=manifest,
+            datagen_teacher_mode=teacher_mode,
+        )
+        test.freeze_datagen_environment_contract(
+            'atomic', 6, manifest, teacher_mode
+        )
+        test.save(update_fields=[
+            'datagen_tablebase_required',
+            'datagen_tablebase_family',
+            'datagen_tablebase_max',
+            'datagen_tablebase_manifest_sha256',
+            'datagen_teacher_mode',
+            'datagen_environment_contract_sha256',
+        ])
+        initialize_chunks(test)
+        return test
 
     def test_creation_builds_exact_numbered_chunk_map(self):
         payload = {
@@ -225,10 +284,64 @@ class DatagenModeTests(TestCase):
         self.assertIsNone(errors)
         self.assertEqual(test.dev_id, test.base_id)
         self.assertEqual(test.datagen_total_chunks(), 8)
+        self.assertFalse(test.datagen_tablebase_required)
+        self.assertEqual(test.datagen_teacher_mode, '')
+        self.assertEqual(test.syzygy_wdl, 'DISABLED')
+        self.assertEqual(test.syzygy_adj, 'DISABLED')
+        self.assertTrue(test.datagen_environment_contract_is_current())
         self.assertEqual(
             list(test.datagen_chunks.values_list('idx', 'position_count')),
             [(idx, 2000) for idx in range(8)],
         )
+
+    def test_creation_freezes_exact_atomic_tablebase_environment(self):
+        payload = {
+            'dev_engine': 'Atomic-Stockfish',
+            'dev_repo': 'https://github.com/example/atomic-engine',
+            'dev_branch': 'nnue-v2',
+            'dev_network': '',
+            'dev_options': '',
+            'book_name': 'NONE',
+            'datagen_command': (
+                'datagen {SEED} {COUNT} {THREADS} {OUT} '
+                'syzygy "{SYZYGY}" '
+                'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+                'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+            ),
+            'datagen_total_count': '2000',
+            'datagen_positions_per_chunk': '2000',
+            'datagen_base_seed': '9000',
+            'datagen_teacher_mode': 'pure',
+            'syzygy_wdl': '6-MAN',
+            'priority': '0',
+            'throughput': '1000',
+        }
+        request = RequestFactory().post('/newDatagen/', payload)
+        request.user = self.user
+        engine_info = (
+            ('https://example.test/archive.zip', 'nnue-v2', 'b' * 40, 456),
+            True,
+        )
+
+        with mock.patch.object(
+            create_workload, 'verify_workload', return_value=([], engine_info)
+        ):
+            test, errors = create_workload.create_new_datagen(request)
+
+        expected_manifest = OpenBench.config.OPENBENCH_CONFIG['engines'][
+            'Atomic-Stockfish'
+        ]['tablebase_manifest_sha256'].lower()
+        self.assertIsNone(errors)
+        self.assertTrue(test.datagen_tablebase_required)
+        self.assertEqual(test.datagen_tablebase_family, 'atomic')
+        self.assertEqual(test.datagen_tablebase_max, 6)
+        self.assertEqual(
+            test.datagen_tablebase_manifest_sha256, expected_manifest
+        )
+        self.assertEqual(test.datagen_teacher_mode, 'pure')
+        self.assertEqual(test.syzygy_wdl, '6-MAN')
+        self.assertEqual(test.syzygy_adj, 'DISABLED')
+        self.assertTrue(test.datagen_environment_contract_is_current())
 
     def test_creation_caps_legacy_summary_and_preserves_64_bit_total(self):
         total = MAX_LEGACY_DATAGEN_GAMES + 123
@@ -672,6 +785,233 @@ class DatagenModeTests(TestCase):
         verify_workload.verify_datagen_template(errors, invalid, 'datagen_command')
         self.assertEqual(len(errors), 1)
 
+    def test_tablebase_template_requires_complete_group_explicit_limit_and_teacher(self):
+        base = {
+            'dev_engine': 'Atomic-Stockfish',
+            'syzygy_wdl': '6-MAN',
+            'datagen_teacher_mode': 'pure',
+        }
+        full_command = (
+            'datagen {SEED} {COUNT} {THREADS} {OUT} '
+            '{SYZYGY} {SYZYGY_MANIFEST_SHA256} {SYZYGY_MAX} '
+            '{TEACHER_MODE}'
+        )
+        request = SimpleNamespace(POST=dict(
+            base, datagen_command=full_command
+        ))
+        errors = []
+        verify_workload.verify_datagen_template(
+            errors, request, 'datagen_command'
+        )
+        verify_workload.verify_datagen_tablebase_contract(errors, request)
+        self.assertEqual(errors, [])
+
+        partial = SimpleNamespace(POST=dict(
+            base,
+            datagen_command=(
+                'datagen {SEED} {COUNT} {THREADS} {OUT} {SYZYGY}'
+            ),
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(errors, partial)
+        self.assertIn('use {SYZYGY}', errors[0])
+
+        missing_teacher_placeholder = SimpleNamespace(POST=dict(
+            base,
+            datagen_command=(
+                'datagen {SEED} {COUNT} {THREADS} {OUT} '
+                '{SYZYGY} {SYZYGY_MANIFEST_SHA256} {SYZYGY_MAX}'
+            ),
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(
+            errors, missing_teacher_placeholder
+        )
+        self.assertTrue(any('{TEACHER_MODE}' in error for error in errors))
+
+        optional = SimpleNamespace(POST=dict(
+            base, datagen_command=full_command, syzygy_wdl='OPTIONAL'
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(errors, optional)
+        self.assertIn('explicit N-MAN', errors[0])
+
+        ambiguous_teacher = SimpleNamespace(POST=dict(
+            base, datagen_command=full_command, datagen_teacher_mode=''
+        ))
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(
+            errors, ambiguous_teacher
+        )
+        self.assertTrue(any('pure or true' in error for error in errors))
+
+        semantic_default = SimpleNamespace(POST={
+            'dev_engine': 'Atomic-Stockfish',
+            'datagen_command': (
+                'datagen {SEED} {COUNT} {THREADS} {OUT}'
+            ),
+            'datagen_teacher_mode': 'none',
+        })
+        errors = []
+        verify_workload.verify_datagen_tablebase_contract(
+            errors, semantic_default
+        )
+        self.assertTrue(any('{TEACHER_MODE}' in error for error in errors))
+
+    def test_tablebase_chunk_freezes_lease_and_completed_manifest_receipt(self):
+        test = self.make_tablebase_test(teacher_mode='true')
+        manifest_sha = test.datagen_tablebase_manifest_sha256
+        machine = self.make_machine(
+            atomic=6, manifest=manifest_sha
+        )
+        chunk = claim_chunk(test, machine)
+        self.assertIsNotNone(chunk)
+        self.assertEqual(
+            chunk.environment_lease['tablebase']['manifest_sha256'],
+            manifest_sha,
+        )
+
+        # Machine.info is mutable operational state. The upload is authorized
+        # against the immutable lease captured above, not this later mutation.
+        machine.info['tablebases']['atomic'] = {
+            'max': 5,
+            'manifest_sha256': 'd' * 64,
+        }
+        machine.save(update_fields=['info'])
+        response = self.submit_chunk(
+            test, chunk, machine, tablebase=True
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        chunk.refresh_from_db()
+        self.assertRegex(chunk.environment_receipt_sha256, r'^[0-9a-f]{64}$')
+        self.assertEqual(
+            chunk.environment_receipt['environment_lease_sha256'],
+            chunk.environment_lease_sha256,
+        )
+        self.assertNotIn('path', json.dumps(chunk.environment_receipt).lower())
+
+        receipt_sha = chunk.environment_receipt_sha256
+        retry = self.submit_chunk(test, chunk, machine, tablebase=True)
+        self.assertEqual(retry.status_code, 200, retry.content)
+        test.refresh_from_db()
+        chunk.refresh_from_db()
+        self.assertEqual(test.datagen_completed_chunks, 1)
+        self.assertEqual(chunk.environment_receipt_sha256, receipt_sha)
+
+        authorization = 'Basic ' + base64.b64encode(
+            b'datagen:password'
+        ).decode('ascii')
+        document = Client(HTTP_AUTHORIZATION=authorization).get(
+            '/api/datagen/%d/' % test.id, secure=True
+        ).json()
+        self.assertTrue(document['environment']['tablebase_required'])
+        self.assertEqual(
+            document['chunks'][0]['environment_receipt_sha256'],
+            chunk.environment_receipt_sha256,
+        )
+        self.assertNotIn('path', json.dumps(document).lower())
+        self.assertNotIn('combined', json.dumps(document).lower())
+
+        chunk.environment_receipt['artifact']['sha256'] = '0' * 64
+        chunk.save(update_fields=['environment_receipt'])
+        rejected = Client(HTTP_AUTHORIZATION=authorization).get(
+            '/api/datagen/%d/' % test.id, secure=True
+        ).json()
+        self.assertIn('inconsistent tablebase receipt', rejected['error'])
+
+    def test_tablebase_scheduler_requires_exact_family_limit_and_pin(self):
+        test = self.make_tablebase_test()
+        manifest = test.datagen_tablebase_manifest_sha256
+
+        self.assertTrue(get_workload.valid_tablebase_assignment(
+            test, self.make_machine(atomic=6, manifest=manifest)
+        ))
+        self.assertFalse(get_workload.valid_tablebase_assignment(
+            test, self.make_machine(
+                username='too-small', atomic=5, manifest=manifest
+            )
+        ))
+        self.assertFalse(get_workload.valid_tablebase_assignment(
+            test, self.make_machine(
+                username='wrong-pin', atomic=6, manifest='d' * 64
+            )
+        ))
+        orthodox = self.make_machine(
+            username='orthodox-only', atomic=0, manifest=None
+        )
+        orthodox.info['tablebases']['standard'] = 7
+        orthodox.info['syzygy_max'] = 7
+        orthodox.save(update_fields=['info'])
+        self.assertFalse(
+            get_workload.valid_tablebase_assignment(test, orthodox)
+        )
+
+    def test_tablebase_contract_mutation_stops_future_claims(self):
+        test = self.make_tablebase_test()
+        machine = self.make_machine(
+            atomic=6, manifest=test.datagen_tablebase_manifest_sha256
+        )
+        self.assertTrue(test.datagen_environment_contract_is_current())
+
+        test.datagen_teacher_mode = 'true'
+        test.save(update_fields=['datagen_teacher_mode'])
+        self.assertFalse(test.datagen_environment_contract_is_current())
+        self.assertIsNone(claim_chunk(test, machine))
+
+    def test_tablebase_upload_fails_before_hashing_when_attestation_is_missing(self):
+        test = self.make_tablebase_test()
+        machine = self.make_machine(
+            atomic=6, manifest=test.datagen_tablebase_manifest_sha256
+        )
+        chunk = claim_chunk(test, machine)
+        with mock.patch.object(
+            OpenBench.views,
+            '_datagen_uploaded_digest',
+            side_effect=AssertionError('must reject before hashing'),
+        ):
+            response = self.submit_chunk(test, chunk, machine)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('omitted tablebase', response.json()['error'])
+
+        with mock.patch.object(
+            OpenBench.views,
+            '_datagen_uploaded_digest',
+            side_effect=AssertionError('must reject before hashing'),
+        ):
+            response = self.submit_chunk(
+                test,
+                chunk,
+                machine,
+                tablebase=True,
+                tablebase_overrides={
+                    'tablebase_manifest_sha256': 'd' * 64,
+                },
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('does not match', response.json()['error'])
+
+    def test_requeue_clears_frozen_tablebase_attempt_evidence(self):
+        test = self.make_tablebase_test()
+        machine = self.make_machine(
+            atomic=6, manifest=test.datagen_tablebase_manifest_sha256
+        )
+        chunk = claim_chunk(test, machine)
+        first_lease_sha = chunk.environment_lease_sha256
+        self.assertTrue(first_lease_sha)
+        self.assertTrue(
+            requeue_chunk(
+                test.id, chunk.idx, machine, chunk.attempts, 'retry'
+            )
+        )
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.environment_lease, {})
+        self.assertEqual(chunk.environment_lease_sha256, '')
+        self.assertEqual(chunk.environment_receipt, {})
+
+        second = claim_chunk(test, machine)
+        self.assertNotEqual(second.environment_lease_sha256, first_lease_sha)
+        self.assertEqual(second.environment_lease['attempt'], 2)
+
     def test_workload_carries_separate_normalized_and_raw_book_hashes(self):
         test = self.make_test(total=2, per_chunk=2)
         test.book_name = 'ATOMIC_openings.epd'
@@ -719,7 +1059,10 @@ class DatagenModeTests(TestCase):
             fields,
         )
 
-    def submit_chunk(self, test, chunk, machine, producer=None, attempt=None):
+    def submit_chunk(
+        self, test, chunk, machine, producer=None, attempt=None,
+        tablebase=False, tablebase_overrides=None,
+    ):
         payload = bz2.compress(b'opaque-chunk')
         fields = {
             'machine_id': machine.id,
@@ -737,6 +1080,25 @@ class DatagenModeTests(TestCase):
                 'producer_bytes': producer['bytes'],
                 'producer_commit': producer['commit'],
             })
+        if tablebase:
+            lease = chunk.environment_lease
+            tablebase_lease = lease['tablebase']
+            fields.update({
+                'environment_contract_sha256': (
+                    lease['environment_contract_sha256']
+                ),
+                'environment_lease_sha256': (
+                    chunk.environment_lease_sha256
+                ),
+                'tablebase_family': tablebase_lease['family'],
+                'tablebase_max': tablebase_lease['required_max'],
+                'tablebase_worker_max': tablebase_lease['worker_max'],
+                'tablebase_manifest_sha256': (
+                    tablebase_lease['manifest_sha256']
+                ),
+                'teacher_mode': lease['teacher_mode'],
+            })
+            fields.update(tablebase_overrides or {})
         return Client().post('/clientSubmitDatagen/', fields)
 
     def test_template_and_workload_opt_in_to_producer_evidence(self):
@@ -1588,7 +1950,7 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 39},
+                info={'concurrency': 1, 'client_ver': 40},
             ))
 
     def tearDown(self):

@@ -164,6 +164,25 @@ def machine_tablebase_manifest(machine, family):
 
 def valid_tablebase_assignment(workload, machine):
 
+    if is_generic_datagen(workload):
+        if not workload.datagen_environment_contract_is_current():
+            return False
+        if workload.datagen_tablebase_required:
+            family = workload.datagen_tablebase_family
+            if (
+                workload.syzygy_adj != 'DISABLED'
+                or workload.datagen_tablebase_max not in range(3, 8)
+                or family != engine_tablebase_family(workload.dev_engine)
+                or workload.dev_engine != workload.base_engine
+                or workload.syzygy_wdl
+                   != '%d-MAN' % workload.datagen_tablebase_max
+                or machine_tablebase_max(machine, family)
+                   < workload.datagen_tablebase_max
+                or machine_tablebase_manifest(machine, family)
+                   != workload.datagen_tablebase_manifest_sha256.lower()
+            ):
+                return False
+
     workload_families = {
         engine_tablebase_family(workload.dev_engine),
         engine_tablebase_family(workload.base_engine),
@@ -344,6 +363,20 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'producer_artifact_required': test.datagen_requires_producer_artifact(),
             'producer_contract_sha256': (
                 test.datagen_producer_contract_sha256
+            ),
+            'environment_contract_sha256': (
+                test.datagen_environment_contract_sha256
+            ),
+            'tablebase_required': test.datagen_tablebase_required,
+            'tablebase_family': test.datagen_tablebase_family,
+            'tablebase_max': test.datagen_tablebase_max,
+            'tablebase_manifest_sha256': (
+                test.datagen_tablebase_manifest_sha256
+            ),
+            'teacher_mode': test.datagen_teacher_mode,
+            'environment_lease': datagen_chunk.environment_lease,
+            'environment_lease_sha256': (
+                datagen_chunk.environment_lease_sha256
             ),
         }
         workload['distribution'] = None

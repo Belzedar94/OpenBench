@@ -8,6 +8,13 @@
 > supports opt-in content-addressed producer evidence for publication-grade
 > datasets.
 
+> Worker protocol v40 adds an opt-in authenticated Atomic-tablebase
+> environment contract. It freezes the corpus family, exact manifest,
+> cardinality limit, and byte-exact teacher mode at campaign creation; freezes
+> the assigned worker capability in every chunk lease; and stores a
+> server-generated receipt that binds that lease to the uploaded bytes. Worker
+> filesystem paths are never sent to or persisted by the server.
+
 Este fork añade un workload `DATAGEN` genérico. OpenBench distribuye trabajo,
 verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
 conoce el formato de entrenamiento ni concatena archivos; esas responsabilidades
@@ -32,9 +39,20 @@ estos placeholders:
   Su presencia activa el protocolo de evidencia v39: el worker sube primero el
   binario y el servidor recalcula su identidad, lo conserva en CAS y liga hash,
   tamaño y commit dev al lease antes de ejecutar el comando.
+- `{SYZYGY}`: ruta local del corpus Atomic autenticado. Solo se sustituye en el
+  worker y nunca forma parte del lease, receipt o manifest del servidor.
+- `{SYZYGY_MANIFEST_SHA256}`: pin SHA-256 del inventario Atomic autenticado.
+- `{SYZYGY_MAX}`: limite cardinal congelado del workload (por ejemplo `6`).
+- `{TEACHER_MODE}`: modo explicito y byte-exact del generador. Los unicos
+  valores permitidos son `pure` y `true`; `true` conserva el comportamiento
+  legacy-playing. No existe un default semantico del servidor.
 
 `SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256`,
-`NETWORK` y `PRODUCER_SHA256` son opcionales. No se admiten placeholders desconocidos,
+`NETWORK` y `PRODUCER_SHA256` son opcionales. Los tres placeholders Syzygy se
+usan juntos o no se usa ninguno. Cuando se usan, `{TEACHER_MODE}` tambien es
+obligatorio, `syzygy_wdl` debe ser un limite explicito `3-MAN`--`7-MAN`, el
+motor debe declarar la familia `atomic` y un manifest pin, y
+`syzygy_adj=DISABLED` se fuerza siempre. No se admiten placeholders desconocidos,
 conversiones, formatos, saltos de línea, NUL ni plantillas mayores de 4096
 caracteres. `NETWORK` no modifica el mecanismo existente que pasa `EVALFILE`
 durante el build.
@@ -77,6 +95,30 @@ El upload final del chunk debe repetir exactamente su identidad de productor o
 falla cerrado. El canal CAS nunca sustituye el canal, cuotas ni formato de los
 chunks.
 
+### Contrato de entorno Atomic v40
+
+La ruta Syzygy DATAGEN es opt-in y falla cerrada en cuatro puntos:
+
+1. Creacion: la plantilla debe contener el grupo Syzygy completo y
+   `{TEACHER_MODE}`. OpenBench congela familia `atomic`, limite N-MAN, pin del
+   inventario y modo `pure|true` en un hash de contrato.
+2. Scheduling: solo un worker que anuncia el mismo pin y al menos ese limite
+   puede reclamar un chunk. Las tablas ortodoxas no satisfacen la familia
+   Atomic.
+3. Lease: al reclamar, el servidor congela el capability autenticado del
+   worker, incluyendo su maximo anunciado, en un documento hasheado. Cambiar
+   despues `Machine.info` no cambia la autorizacion de ese intento.
+4. Upload: el worker repite la identidad congelada, nunca la ruta local. El
+   servidor la compara con el lease antes de hashear el archivo y crea un
+   receipt que liga contrato, lease, test/chunk/attempt/machine, identidad del
+   corpus, teacher mode, productor opcional y SHA-256/bytes del resultado.
+
+Requeue o restart elimina lease y receipt del intento abandonado. Un retry
+identico del upload completado es idempotente; evidencia distinta se rechaza.
+El manifest final rehashea todos los leases y receipts antes de publicarlos.
+La plantilla generica anterior, sin el grupo Syzygy, conserva exactamente el
+flujo legacy y deja vacios estos campos.
+
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
 `{THREADS}`. Ese NPS es sólo informativo: DATAGEN no escala trabajo ni parámetros
@@ -105,6 +147,7 @@ En `/newTest/`, seleccionar `DATAGEN` y completar:
 - posiciones por chunk;
 - semilla base;
 - libro o `NONE`;
+- para Atomic Syzygy: limite N-MAN y teacher mode explicito `pure|true`;
 - prioridad y throughput.
 
 También se mantiene `/newDatagen/` como acceso directo al mismo modo. Los
@@ -169,6 +212,11 @@ productor. Los ejecutables se descargan por
 publicador del formato sigue obligado a descargar y reautenticar todos los
 bytes y a aplicar sus propios trust pins.
 
+En una campaña Atomic Syzygy v40, el mismo manifest incluye el contrato de
+entorno y, por chunk, el lease y receipt canonicos con sus SHA-256. Esos
+documentos contienen identidad de corpus, cardinalidad y teacher mode, pero
+nunca la ruta local del worker.
+
 La validación universal termina en SHA-256 y bytes. Descompresión, validación de
 registros, combinación de cabeceras, deduplicación y auditoría quedan fuera de
 OpenBench. Por ejemplo, un proyecto Spell puede concatenar offline sus registros
@@ -195,8 +243,8 @@ Comprobaciones locales mínimas:
 python manage.py migrate
 python manage.py check
 python manage.py makemigrations --check --dry-run
-python manage.py test OpenBench.tests
-python -m unittest discover -s UnitTests -v
+python manage.py test OpenBench.tests.test_datagen_mode OpenBench.tests.test_atomic_syzygy_support
+python manage.py test UnitTests.test_datagen_worker UnitTests.test_atomic_onboarding
 ```
 
 ## Paso a producción
@@ -205,25 +253,32 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 39; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión 40; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
 3. Verificar que el esquema existente coincide con el snapshot pre-DATAGEN.
 4. Marcar sólo el baseline ya existente con
    `python manage.py migrate OpenBench 0001 --fake`.
-5. Aplicar todas las migraciones reales hasta `0006` con
+5. Aplicar todas las migraciones reales hasta `0007` con
    `python manage.py migrate`. `0006` congela contratos, crea reservas/cuotas
-   y hace backfill de evidencia de productor ya existente.
+   y hace backfill de evidencia de productor ya existente; `0007` añade el
+   contrato, lease y receipt de entorno v40.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 39 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes versión 40 de forma gradual y vigilar logs, disco y leases.
 
-No usar `--fake` para `0002`–`0006`: crean el esquema DATAGEN, CAS y sus
+No usar `--fake` para `0002`–`0007`: crean el esquema DATAGEN, CAS y sus
 relaciones de integridad. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
 HEAD, resolver posibles diferencias de modelos/migraciones y enviar servidor,
 cliente, tests y documentación juntos. Conviene acordar además política de
 retención/cuotas para blobs antes de abrir DATAGEN a una flota grande.
+
+Los presets `Atomic Syzygy depth-7 pure canary` y
+`Atomic Syzygy depth-7 true canary` son deliberadamente independientes del
+preset legacy depth-6. No crear ni aprobar esos workloads en produccion hasta
+que el bridge del motor acepte los cuatro argumentos v40, pasen sus golden
+tests y una prueba A/B local valide ambos teacher modes y el formato de salida.
 
 ## Adopción por otra variante (checklist para Atomic y futuras)
 

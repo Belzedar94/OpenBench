@@ -29,6 +29,13 @@ from django.db.models import (
 )
 from django.contrib.auth.models import User
 
+
+DATAGEN_TABLEBASE_PLACEHOLDERS = frozenset({
+    'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX',
+})
+DATAGEN_ENVIRONMENT_SCHEMA = 'openbench-datagen-environment-v40'
+DATAGEN_RECEIPT_SCHEMA = 'openbench-datagen-tablebase-receipt-v40'
+
 class Engine(Model):
 
     name     = CharField(max_length=128)
@@ -162,6 +169,19 @@ class Test(Model):
     # number of chunks and prevent upload -> requeue quota bypasses.
     datagen_producer_build_count = IntegerField(default=0)
     datagen_producer_build_bytes = BigIntegerField(default=0)
+    # Optional tablebase-backed DATAGEN is an explicit, frozen opt-in.  Paths
+    # are worker-local and are deliberately never persisted; only the corpus
+    # identity and the deterministic probe limit enter the campaign contract.
+    datagen_tablebase_required = BooleanField(default=False)
+    datagen_tablebase_family = CharField(max_length=16, default='', blank=True)
+    datagen_tablebase_max = IntegerField(default=0)
+    datagen_tablebase_manifest_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    datagen_teacher_mode = CharField(max_length=32, default='', blank=True)
+    datagen_environment_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
 
     # Collection of all individual Result() objects
     games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
@@ -252,6 +272,75 @@ class Test(Model):
             and contract_sha256 == self.datagen_producer_contract_sha256
         )
 
+    @staticmethod
+    def datagen_template_fields(command):
+        try:
+            return {
+                name for _literal, name, _format_spec, _conversion
+                in string.Formatter().parse(command) if name is not None
+            }
+        except ValueError:
+            return set()
+
+    @classmethod
+    def tablebase_requirement_from_command(cls, command):
+        return bool(cls.datagen_template_fields(command)
+                    & DATAGEN_TABLEBASE_PLACEHOLDERS)
+
+    @classmethod
+    def environment_contract_for_command(
+        cls, command, family='', maximum=0, manifest_sha256='', teacher_mode='',
+    ):
+        required = cls.tablebase_requirement_from_command(command)
+        contract = json.dumps({
+            'protocol': 40,
+            'schema': DATAGEN_ENVIRONMENT_SCHEMA,
+            'tablebase': {
+                'required': required,
+                'family': family if required else '',
+                'max': int(maximum) if required else 0,
+                'manifest_sha256': (
+                    manifest_sha256.lower() if required else ''
+                ),
+            },
+            'teacher_mode': teacher_mode,
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return required, hashlib.sha256(contract).hexdigest()
+
+    def freeze_datagen_environment_contract(
+        self, family='', maximum=0, manifest_sha256='', teacher_mode='',
+    ):
+        required, contract_sha256 = self.environment_contract_for_command(
+            self.datagen_command,
+            family,
+            maximum,
+            manifest_sha256,
+            teacher_mode,
+        )
+        self.datagen_tablebase_required = required
+        self.datagen_tablebase_family = family if required else ''
+        self.datagen_tablebase_max = int(maximum) if required else 0
+        self.datagen_tablebase_manifest_sha256 = (
+            manifest_sha256.lower() if required else ''
+        )
+        self.datagen_teacher_mode = teacher_mode
+        self.datagen_environment_contract_sha256 = contract_sha256
+
+    def datagen_environment_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return True
+        required, contract_sha256 = self.environment_contract_for_command(
+            self.datagen_command,
+            self.datagen_tablebase_family,
+            self.datagen_tablebase_max,
+            self.datagen_tablebase_manifest_sha256,
+            self.datagen_teacher_mode,
+        )
+        return (
+            required == self.datagen_tablebase_required
+            and contract_sha256 == self.datagen_environment_contract_sha256
+        )
+
     def datagen_total_chunks(self):
         if not self.datagen_positions_per_chunk:
             return 0
@@ -278,6 +367,17 @@ class DatagenChunk(Model):
     producer_build = ForeignKey(
         'DatagenProducerBuild', SET_NULL,
         related_name='chunks', null=True, blank=True,
+    )
+    # Server-generated immutable receipt binding an authenticated worker
+    # capability to the exact uploaded output.  Empty for legacy/non-tablebase
+    # DATAGEN chunks.
+    environment_receipt = JSONField(default=dict, blank=True)
+    environment_receipt_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    environment_lease = JSONField(default=dict, blank=True)
+    environment_lease_sha256 = CharField(
+        max_length=64, default='', blank=True,
     )
     machine     = ForeignKey(
         'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)

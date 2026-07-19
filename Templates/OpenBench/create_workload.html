@@ -169,7 +169,14 @@
                         <div class="row">
                             <label for="datagen_command"> Command Template </label>
                             <textarea id="datagen_command" name="datagen_command" rows="4"></textarea>
-                            <small>Use <code>&#123;PRODUCER_SHA256&#125;</code> to require content-addressed generator evidence.</small>
+                            <small>
+                                Use <code>&#123;PRODUCER_SHA256&#125;</code> for generator evidence.
+                                Atomic tablebase DATAGEN must use
+                                <code>&#123;SYZYGY&#125;</code>,
+                                <code>&#123;SYZYGY_MANIFEST_SHA256&#125;</code>,
+                                <code>&#123;SYZYGY_MAX&#125;</code>, and
+                                <code>&#123;TEACHER_MODE&#125;</code> together.
+                            </small>
                         </div>
                         <div class="row">
                             <label for="datagen_total_count"> Total Positions </label>
@@ -182,6 +189,14 @@
                         <div class="row">
                             <label for="datagen_base_seed"> Base Seed </label>
                             <input value="1" id="datagen_base_seed" name="datagen_base_seed">
+                        </div>
+                        <div class="row">
+                            <label for="datagen_teacher_mode"> Teacher Mode </label>
+                            <select id="datagen_teacher_mode" name="datagen_teacher_mode">
+                                <option selected value=""> Not specified </option>
+                                <option value="pure"> pure </option>
+                                <option value="true"> true (legacy-playing) </option>
+                            </select>
                         </div>
                     </div>
 
@@ -213,7 +228,14 @@
                         <div class="row">
                             <label for="datagen_command"> Command Template </label>
                             <textarea id="datagen_command" name="datagen_command" rows="4"></textarea>
-                            <small>Use <code>&#123;PRODUCER_SHA256&#125;</code> to require content-addressed generator evidence.</small>
+                            <small>
+                                Use <code>&#123;PRODUCER_SHA256&#125;</code> for generator evidence.
+                                Atomic tablebase DATAGEN must use
+                                <code>&#123;SYZYGY&#125;</code>,
+                                <code>&#123;SYZYGY_MANIFEST_SHA256&#125;</code>,
+                                <code>&#123;SYZYGY_MAX&#125;</code>, and
+                                <code>&#123;TEACHER_MODE&#125;</code> together.
+                            </small>
                         </div>
                         <div class="row">
                             <label for="datagen_total_count"> Total Positions </label>
@@ -226,6 +248,14 @@
                         <div class="row">
                             <label for="datagen_base_seed"> Base Seed </label>
                             <input value="1" id="datagen_base_seed" name="datagen_base_seed">
+                        </div>
+                        <div class="row">
+                            <label for="datagen_teacher_mode"> Teacher Mode </label>
+                            <select id="datagen_teacher_mode" name="datagen_teacher_mode">
+                                <option selected value=""> Not specified </option>
+                                <option value="pure"> pure </option>
+                                <option value="true"> true (legacy-playing) </option>
+                            </select>
                         </div>
                     </div>
 
@@ -270,7 +300,7 @@
                     </div>
                 {% endif %}
 
-                <div class="row gameplay-only">
+                <div class="row">
                     <label for="syzygy_wdl"> Syzygy WDL </label> <select id="syzygy_wdl" name="syzygy_wdl">
                         <option selected value="DISABLED"> Disabled </option>
                         <option value="OPTIONAL"> Optional </option>

@@ -76,7 +76,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 39 # Client version to send to the Server
+CLIENT_VERSION   = 40 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
@@ -558,7 +558,9 @@ class ServerReporter:
         return body
 
     @staticmethod
-    def report_datagen(config, path, sha256, byte_count, producer=None):
+    def report_datagen(
+        config, path, sha256, byte_count, producer=None, tablebase=None
+    ):
 
         payload = {
             'test_id': config.workload['test']['id'],
@@ -572,6 +574,20 @@ class ServerReporter:
                 'producer_sha256': producer['sha256'],
                 'producer_bytes': producer['bytes'],
                 'producer_commit': producer['commit'],
+            })
+        if tablebase is not None:
+            payload.update({
+                'environment_contract_sha256': (
+                    tablebase['environment_contract_sha256']
+                ),
+                'environment_lease_sha256': tablebase[
+                    'environment_lease_sha256'
+                ],
+                'tablebase_family': tablebase['family'],
+                'tablebase_max': tablebase['required_max'],
+                'tablebase_worker_max': tablebase['worker_max'],
+                'tablebase_manifest_sha256': tablebase['manifest_sha256'],
+                'teacher_mode': tablebase['teacher_mode'],
             })
 
         target = url_join(config.server, 'clientSubmitDatagen')
@@ -1236,6 +1252,18 @@ def tablebase_capability(config, family):
     raise ValueError('Unknown tablebase family: %s' % (family))
 
 
+def tablebase_manifest(config, family):
+
+    if family == 'atomic':
+        return config.atomic_syzygy_manifest_sha256
+    # The legacy standard-Syzygy capability has no authenticated inventory
+    # contract.  It remains valid for gameplay, but cannot satisfy the new
+    # provenance-bearing DATAGEN path.
+    if family == 'standard':
+        return None
+    raise ValueError('Unknown tablebase family: %s' % (family))
+
+
 def split_tablebase_paths(path_value):
 
     return path_value.split(':' if IS_LINUX else ';')
@@ -1843,25 +1871,42 @@ def upload_datagen_producer(
 
 
 def upload_datagen_output(
-    config, path, sha256, byte_count, heartbeat, producer=None
+    config, path, sha256, byte_count, heartbeat, producer=None, tablebase=None
 ):
     """Upload one immutable archive with bounded transport retries."""
 
     for attempt in range(DATAGEN_TRANSFER_RETRIES):
         try:
-            if producer is None:
-                response = ServerReporter.report_datagen(
-                    config, path, sha256, byte_count
-                )
+            if tablebase is None:
+                if producer is None:
+                    response = ServerReporter.report_datagen(
+                        config, path, sha256, byte_count
+                    )
+                else:
+                    response = ServerReporter.report_datagen(
+                        config, path, sha256, byte_count, producer
+                    )
             else:
                 response = ServerReporter.report_datagen(
-                    config, path, sha256, byte_count, producer
+                    config,
+                    path,
+                    sha256,
+                    byte_count,
+                    producer=producer,
+                    tablebase=tablebase,
                 )
             for field in ('completed_chunks', 'total_chunks'):
                 if field not in response:
                     raise RuntimeError(
                         'DATAGEN upload response omitted %s' % field
                     )
+            if tablebase is not None and not re.fullmatch(
+                r'[0-9a-f]{64}',
+                response.get('environment_receipt_sha256', ''),
+            ):
+                raise RuntimeError(
+                    'DATAGEN upload response omitted tablebase receipt'
+                )
             return response
         except BadVersionException:
             raise
@@ -1932,14 +1977,105 @@ def clean_datagen_workspace(output_path):
     return errors
 
 
+def datagen_tablebase_attestation(config):
+    data = config.workload['test']['datagen']
+    if not data.get('tablebase_required'):
+        return None
+
+    lease = data.get('environment_lease')
+    lease_sha256 = str(data.get('environment_lease_sha256', '')).lower()
+    if not isinstance(lease, dict):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase lease is missing'
+        )
+    encoded_lease = json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    if hashlib.sha256(encoded_lease).hexdigest() != lease_sha256:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase lease hash is invalid'
+        )
+    lease_tablebase = lease.get('tablebase', {})
+    family = lease_tablebase.get('family', '')
+    required_max = int(lease_tablebase.get('required_max', 0))
+    leased_worker_max = int(lease_tablebase.get('worker_max', 0))
+    expected_manifest = str(
+        lease_tablebase.get('manifest_sha256', '')
+    ).lower()
+    expected_contract = str(
+        lease.get('environment_contract_sha256', '')
+    ).lower()
+    teacher_mode = lease.get('teacher_mode', '')
+    test = config.workload['test']
+
+    if (
+        lease.get('schema') != 'openbench-datagen-tablebase-lease-v40'
+        or lease.get('protocol') != 40
+        or lease.get('test_id') != test.get('id')
+        or lease.get('chunk_idx') != data.get('chunk_idx')
+        or lease.get('attempt') != data.get('attempt')
+        or str(lease.get('machine_id')) != str(config.machine_id)
+        or family != 'atomic'
+        or required_max not in range(3, 8)
+        or test.get('syzygy_adj') != 'DISABLED'
+        or test.get('syzygy_wdl') != '%d-MAN' % required_max
+        or test['dev'].get('tablebase_family') != family
+        or data.get('tablebase_family') != family
+        or int(data.get('tablebase_max', 0)) != required_max
+        or str(data.get('tablebase_manifest_sha256', '')).lower()
+           != expected_manifest
+        or str(data.get('environment_contract_sha256', '')).lower()
+           != expected_contract
+        or data.get('teacher_mode', '') != teacher_mode
+        or not re.fullmatch(r'[0-9a-f]{64}', expected_manifest)
+        or not re.fullmatch(r'[0-9a-f]{64}', expected_contract)
+        or teacher_mode not in ['pure', 'true']
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase contract is malformed or unsupported'
+        )
+
+    path, worker_max = tablebase_capability(config, family)
+    worker_manifest = tablebase_manifest(config, family)
+    worker_manifest = (
+        worker_manifest.lower() if isinstance(worker_manifest, str) else None
+    )
+    if not path or worker_max < required_max:
+        raise DatagenConfigurationError(
+            'DATAGEN requires %d-man %s tablebases; worker has %d-man'
+            % (required_max, family, worker_max)
+        )
+    if worker_max != leased_worker_max:
+        raise DatagenConfigurationError(
+            'DATAGEN worker capability changed after lease assignment'
+        )
+    if worker_manifest != expected_manifest:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory does not match the pinned manifest'
+        )
+
+    return {
+        'path': path,
+        'family': family,
+        'required_max': required_max,
+        'worker_max': worker_max,
+        'manifest_sha256': worker_manifest,
+        'environment_contract_sha256': expected_contract,
+        'environment_lease_sha256': lease_sha256,
+        'teacher_mode': teacher_mode,
+    }
+
+
 def render_datagen_command(
-    config, output_path, network_path=None, producer=None
+    config, output_path, network_path=None, producer=None, tablebase=None
 ):
     data = config.workload['test']['datagen']
     book = config.workload['test']['book']
     book_name = book['name']
     book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
     book_raw_sha = book.get('raw_sha') or book.get('sha')
+    if data.get('tablebase_required') and tablebase is None:
+        tablebase = datagen_tablebase_attestation(config)
     values = {
         'SEED': str(data['seed']),
         'COUNT': str(data['chunk_count']),
@@ -1955,6 +2091,17 @@ def render_datagen_command(
         'PRODUCER_SHA256': (
             'NONE' if producer is None else producer['sha256'].lower()
         ),
+        'SYZYGY': (
+            'NONE' if tablebase is None
+            else tablebase['path'].replace('\\', '/')
+        ),
+        'SYZYGY_MANIFEST_SHA256': (
+            'NONE' if tablebase is None else tablebase['manifest_sha256']
+        ),
+        'SYZYGY_MAX': (
+            '0' if tablebase is None else str(tablebase['required_max'])
+        ),
+        'TEACHER_MODE': data.get('teacher_mode', '') or 'NONE',
     }
     if data.get('producer_artifact_required') and producer is None:
         raise DatagenConfigurationError(
@@ -1965,10 +2112,10 @@ def render_datagen_command(
 
 def run_datagen_command(
     config, engine, output_path, log_path, heartbeat, network_path=None,
-    producer=None,
+    producer=None, tablebase=None,
 ):
     command = render_datagen_command(
-        config, output_path, network_path, producer
+        config, output_path, network_path, producer, tablebase
     )
     print('DATAGEN command: %s' % command)
 
@@ -2010,6 +2157,7 @@ def complete_datagen_workload(config):
     setup_complete = False
     producer = None
     producer_snapshot_path = None
+    tablebase = datagen_tablebase_attestation(config)
 
     try:
         cleanup_errors = clean_datagen_workspace(output_path)
@@ -2105,10 +2253,20 @@ def complete_datagen_workload(config):
                 heartbeat,
                 dev_network,
             )
-            if producer is None:
-                run_datagen_command(*generator_args)
+            # Preserve the legacy call shape for ordinary DATAGEN and existing
+            # test/extension hooks.  The extra keyword exists only on the new
+            # tablebase-backed path.
+            if tablebase is None:
+                if producer is None:
+                    run_datagen_command(*generator_args)
+                else:
+                    run_datagen_command(*generator_args, producer)
             else:
-                run_datagen_command(*generator_args, producer)
+                run_datagen_command(
+                    *generator_args,
+                    producer=producer,
+                    tablebase=tablebase,
+                )
 
             compress_datagen_output(output_path, compressed_path, heartbeat)
             try:
@@ -2118,7 +2276,13 @@ def complete_datagen_workload(config):
                     'DATAGEN archive hashing failed: %s' % error
                 ) from error
             response = upload_datagen_output(
-                config, compressed_path, sha256, byte_count, heartbeat, producer
+                config,
+                compressed_path,
+                sha256,
+                byte_count,
+                heartbeat,
+                producer,
+                tablebase,
             )
 
             print(

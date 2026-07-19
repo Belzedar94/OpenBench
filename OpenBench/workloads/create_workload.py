@@ -260,10 +260,39 @@ def create_new_datagen(request):
         test.priority = int(request.POST['priority'])
         test.throughput = int(request.POST['throughput'])
 
-        test.syzygy_wdl = 'DISABLED'
+        template_fields = Test.datagen_template_fields(test.datagen_command)
+        tablebase_required = bool(
+            template_fields & DATAGEN_TABLEBASE_PLACEHOLDERS
+        )
+        engine_config = OPENBENCH_CONFIG['engines'][test.dev_engine]
+        if tablebase_required:
+            test.syzygy_wdl = request.POST['syzygy_wdl']
+            tablebase_family = engine_config.get(
+                'tablebase_family', 'standard'
+            )
+            tablebase_max = int(test.syzygy_wdl.split('-')[0])
+            tablebase_manifest = engine_config[
+                'tablebase_manifest_sha256'
+            ].lower()
+        else:
+            test.syzygy_wdl = 'DISABLED'
+            tablebase_family = ''
+            tablebase_max = 0
+            tablebase_manifest = ''
         test.syzygy_adj = 'DISABLED'
         test.win_adj = 'None'
         test.draw_adj = 'None'
+
+        teacher_mode = (
+            request.POST.get('datagen_teacher_mode', '')
+            if 'TEACHER_MODE' in template_fields else ''
+        )
+        test.freeze_datagen_environment_contract(
+            tablebase_family,
+            tablebase_max,
+            tablebase_manifest,
+            teacher_mode,
+        )
 
         test.test_mode = 'DATAGEN'
         test.awaiting = not dev_has_all

@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import json
 import time
 
 from django.db import OperationalError, transaction
@@ -55,6 +57,8 @@ MAX_LEGACY_DATAGEN_GAMES = (1 << 31) - 1
 DATAGEN_CLAIM_RETRIES = 12
 DATAGEN_CLAIM_BACKOFF = 0.01
 
+DATAGEN_TABLEBASE_LEASE_SCHEMA = 'openbench-datagen-tablebase-lease-v40'
+
 
 def is_generic_datagen(test):
     return (
@@ -79,19 +83,45 @@ def initialize_chunks(test):
                 'Generic DATAGEN workloads must contain between 1 and %d chunks'
                 % MAX_DATAGEN_CHUNKS
             )
-        # Freeze the producer contract in the same transaction as the immutable
-        # chunk map. Editing command text later cannot silently weaken or opt a
-        # running campaign into executable publication.
+        # Freeze both contracts in the same transaction as the immutable chunk
+        # map. Editing command text later cannot silently weaken executable or
+        # tablebase provenance requirements.
         persisted.freeze_datagen_producer_contract()
+        persisted.freeze_datagen_environment_contract(
+            persisted.datagen_tablebase_family,
+            persisted.datagen_tablebase_max,
+            persisted.datagen_tablebase_manifest_sha256,
+            persisted.datagen_teacher_mode,
+        )
         Test.objects.filter(pk=test.pk).update(
             datagen_producer_required=persisted.datagen_producer_required,
             datagen_producer_contract_sha256=(
                 persisted.datagen_producer_contract_sha256
             ),
+            datagen_tablebase_required=persisted.datagen_tablebase_required,
+            datagen_tablebase_family=persisted.datagen_tablebase_family,
+            datagen_tablebase_max=persisted.datagen_tablebase_max,
+            datagen_tablebase_manifest_sha256=(
+                persisted.datagen_tablebase_manifest_sha256
+            ),
+            datagen_teacher_mode=persisted.datagen_teacher_mode,
+            datagen_environment_contract_sha256=(
+                persisted.datagen_environment_contract_sha256
+            ),
         )
         test.datagen_producer_required = persisted.datagen_producer_required
         test.datagen_producer_contract_sha256 = (
             persisted.datagen_producer_contract_sha256
+        )
+        test.datagen_tablebase_required = persisted.datagen_tablebase_required
+        test.datagen_tablebase_family = persisted.datagen_tablebase_family
+        test.datagen_tablebase_max = persisted.datagen_tablebase_max
+        test.datagen_tablebase_manifest_sha256 = (
+            persisted.datagen_tablebase_manifest_sha256
+        )
+        test.datagen_teacher_mode = persisted.datagen_teacher_mode
+        test.datagen_environment_contract_sha256 = (
+            persisted.datagen_environment_contract_sha256
         )
         chunks = []
         for idx in range(total_chunks):
@@ -133,6 +163,7 @@ def has_assignable_chunk(test):
         not is_generic_datagen(test)
         or (
             test.datagen_producer_contract_is_current()
+            and test.datagen_environment_contract_is_current()
             and assignable_chunks(test).exists()
         )
     )
@@ -157,6 +188,53 @@ def _is_sqlite_lock_contention(error):
     return 'database is locked' in message or 'database table is locked' in message
 
 
+def tablebase_lease(test, machine, chunk_idx, lease_attempt):
+    """Freeze the authenticated worker capability at chunk-claim time."""
+
+    if not test.datagen_tablebase_required:
+        return {}, ''
+    family = test.datagen_tablebase_family
+    capability = machine.info.get('tablebases', {}).get(family, {})
+    if not isinstance(capability, dict):
+        raise ValueError('Worker lacks authenticated tablebase inventory')
+    worker_max = int(capability.get('max', 0))
+    manifest = capability.get('manifest_sha256')
+    manifest = manifest.lower() if isinstance(manifest, str) else None
+    if (
+        family != 'atomic'
+        or test.datagen_tablebase_max not in range(3, 8)
+        or test.syzygy_wdl != '%d-MAN' % test.datagen_tablebase_max
+        or test.syzygy_adj != 'DISABLED'
+        or worker_max < test.datagen_tablebase_max
+        or manifest != test.datagen_tablebase_manifest_sha256.lower()
+        or test.datagen_teacher_mode not in {'pure', 'true'}
+        or not test.datagen_environment_contract_is_current()
+    ):
+        raise ValueError('Worker tablebase capability does not match campaign')
+    lease = {
+        'schema': DATAGEN_TABLEBASE_LEASE_SCHEMA,
+        'protocol': 40,
+        'test_id': test.id,
+        'chunk_idx': chunk_idx,
+        'attempt': lease_attempt,
+        'machine_id': machine.id,
+        'environment_contract_sha256': (
+            test.datagen_environment_contract_sha256.lower()
+        ),
+        'tablebase': {
+            'family': family,
+            'required_max': test.datagen_tablebase_max,
+            'worker_max': worker_max,
+            'manifest_sha256': manifest,
+        },
+        'teacher_mode': test.datagen_teacher_mode,
+    }
+    encoded = json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    return lease, hashlib.sha256(encoded).hexdigest()
+
+
 def claim_chunk(test, machine):
     """Atomically lease one chunk to a machine, reclaiming stale work if needed.
 
@@ -167,6 +245,7 @@ def claim_chunk(test, machine):
     if (
         not is_generic_datagen(test)
         or not test.datagen_producer_contract_is_current()
+        or not test.datagen_environment_contract_is_current()
     ):
         return None
 
@@ -184,6 +263,12 @@ def claim_chunk(test, machine):
             now = timezone.now()
             chunk = _next_claim_candidate(test, now)
             if chunk is None:
+                return None
+            try:
+                environment_lease, environment_lease_sha256 = tablebase_lease(
+                    test, machine, chunk.idx, chunk.attempts + 1
+                )
+            except (TypeError, ValueError):
                 return None
 
             expected_state = Q(status=DatagenChunk.PENDING)
@@ -210,6 +295,10 @@ def claim_chunk(test, machine):
                     producer_bytes=0,
                     producer_commit='',
                     producer_build=None,
+                    environment_receipt={},
+                    environment_receipt_sha256='',
+                    environment_lease=environment_lease,
+                    environment_lease_sha256=environment_lease_sha256,
                     attempts=F('attempts') + 1,
                     last_error='',
                 )
@@ -231,6 +320,10 @@ def claim_chunk(test, machine):
                 chunk.producer_commit = ''
                 chunk.producer_build = None
                 chunk.producer_build_id = None
+                chunk.environment_receipt = {}
+                chunk.environment_receipt_sha256 = ''
+                chunk.environment_lease = environment_lease
+                chunk.environment_lease_sha256 = environment_lease_sha256
                 chunk.attempts += 1
                 chunk.last_error = ''
                 return chunk
@@ -298,6 +391,10 @@ def requeue_chunk(test_id, chunk_idx, machine, lease_attempt, error=''):
         producer_bytes=0,
         producer_commit='',
         producer_build=None,
+        environment_receipt={},
+        environment_receipt_sha256='',
+        environment_lease={},
+        environment_lease_sha256='',
         last_error=error[:4096],
     ) == 1
 
@@ -318,6 +415,10 @@ def requeue_running_chunks(test):
         producer_bytes=0,
         producer_commit='',
         producer_build=None,
+        environment_receipt={},
+        environment_receipt_sha256='',
+        environment_lease={},
+        environment_lease_sha256='',
         last_error='Requeued by workload restart',
     )
 
