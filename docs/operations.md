@@ -6,7 +6,7 @@ Media tree, and client endpoint (conventionally `:8001`). Never point a dev
 worker at production and never place credentials in commands committed to Git,
 logs, manifests, receipts, or status files.
 
-## Atomic Syzygy DATAGEN v40 gate
+## Atomic Syzygy DATAGEN v40/v41 gate
 
 Before any production rollout:
 
@@ -22,9 +22,13 @@ Before any production rollout:
 5. Keep `syzygy_adj=DISABLED` and run both depth-7 canaries locally only after
    the engine bridge and golden tests pass. Compare `pure` and `true`
    (legacy-playing) output with the format auditor before approval.
+6. For publication protocol v41, confirm creation authenticates the full
+   network SHA/bytes and book text/raw hashes, duplicate campaign slots fail,
+   every chunk carries a publication lease/receipt, and the completed API
+   verifies and publishes its `manifest_sha256`.
 
 Production deployment is a separate, explicitly authorized operation. It
-requires an idle-window DB/Media backup, migration `0007`, server restart,
-gradual worker-v40 restart, and a one-chunk smoke test. Do not use `--fake` for
-`0007`, do not deploy midway through an active campaign, and retain the prior
+requires an idle-window DB/Media backup, migrations through `0008`, server restart,
+gradual worker-v41 restart, and a one-chunk smoke test. Do not use `--fake` for
+`0007` or `0008`, do not deploy midway through an active campaign, and retain the prior
 application and backup for rollback.

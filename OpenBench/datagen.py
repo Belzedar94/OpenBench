@@ -12,6 +12,11 @@ from OpenBench.models import (
     DatagenChunk, DatagenProducerArtifact, DatagenProducerBuild,
     DatagenProducerOwnerQuota, DatagenProducerQuota, Test,
 )
+from OpenBench.datagen_publication import (
+    DATAGEN_PUBLICATION_LEASE_SCHEMA,
+    DATAGEN_PUBLICATION_PROTOCOL,
+    canonical_json_sha256,
+)
 
 
 # Heartbeats arrive every 30 seconds. Five minutes tolerates transient network
@@ -118,9 +123,9 @@ def initialize_chunks(test):
                 'Generic DATAGEN workloads must contain between 1 and %d chunks'
                 % MAX_DATAGEN_CHUNKS
             )
-        # Freeze both contracts in the same transaction as the immutable chunk
-        # map. Editing command text later cannot silently weaken executable or
-        # tablebase provenance requirements.
+        # Freeze the producer/environment contracts and authenticate the v41
+        # publication contract in the same transaction as the immutable chunk
+        # map. Editing command text later cannot silently weaken provenance.
         persisted.freeze_datagen_producer_contract()
         persisted.freeze_datagen_environment_contract(
             persisted.datagen_tablebase_family,
@@ -135,6 +140,10 @@ def initialize_chunks(test):
             raise ValueError(
                 'Authenticated Atomic DATAGEN requires a frozen 3-MAN through '
                 '6-MAN tablebase contract'
+            )
+        if not persisted.datagen_publication_contract_is_current():
+            raise ValueError(
+                'DATAGEN publication contract is missing, malformed, or stale'
             )
         Test.objects.filter(pk=test.pk).update(
             datagen_producer_required=persisted.datagen_producer_required,
@@ -207,6 +216,7 @@ def has_assignable_chunk(test):
         or (
             test.datagen_producer_contract_is_current()
             and test.datagen_environment_contract_is_current()
+            and test.datagen_publication_contract_is_current()
             and assignable_chunks(test).exists()
         )
     )
@@ -232,23 +242,56 @@ def _is_sqlite_lock_contention(error):
 
 
 def tablebase_lease(test, machine, chunk_idx, lease_attempt):
-    """Freeze the authenticated worker capability at chunk-claim time."""
+    """Freeze v40 tablebase or v41 publication evidence at claim time."""
 
-    if not test.datagen_tablebase_required:
+    publication = test.is_publication_datagen()
+    if not test.datagen_tablebase_required and not publication:
         return {}, ''
+    if publication and not test.datagen_publication_contract_is_current():
+        raise ValueError('DATAGEN publication contract is stale')
+
     family = test.datagen_tablebase_family
-    capability = machine.info.get('tablebases', {}).get(family, {})
-    if not isinstance(capability, dict):
-        raise ValueError('Worker lacks authenticated tablebase inventory')
-    worker_max = int(capability.get('max', 0))
-    manifest = capability.get('manifest_sha256')
-    manifest = manifest.lower() if isinstance(manifest, str) else None
-    if (
-        not valid_atomic_datagen_tablebase_contract(test)
-        or worker_max < test.datagen_tablebase_max
-        or manifest != test.datagen_tablebase_manifest_sha256.lower()
-    ):
-        raise ValueError('Worker tablebase capability does not match campaign')
+    worker_max = 0
+    manifest = None
+    if test.datagen_tablebase_required:
+        capability = machine.info.get('tablebases', {}).get(family, {})
+        if not isinstance(capability, dict):
+            raise ValueError('Worker lacks authenticated tablebase inventory')
+        worker_max = int(capability.get('max', 0))
+        manifest = capability.get('manifest_sha256')
+        manifest = manifest.lower() if isinstance(manifest, str) else None
+        if (
+            not valid_atomic_datagen_tablebase_contract(test)
+            or worker_max < test.datagen_tablebase_max
+            or manifest != test.datagen_tablebase_manifest_sha256.lower()
+        ):
+            raise ValueError('Worker tablebase capability does not match campaign')
+
+    if publication:
+        lease = {
+            'schema': DATAGEN_PUBLICATION_LEASE_SCHEMA,
+            'protocol': DATAGEN_PUBLICATION_PROTOCOL,
+            'test_id': test.id,
+            'chunk_idx': chunk_idx,
+            'attempt': lease_attempt,
+            'machine_id': machine.id,
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256.lower()
+            ),
+            'environment_contract_sha256': (
+                test.datagen_environment_contract_sha256.lower()
+            ),
+            'tablebase': {
+                'required': test.datagen_tablebase_required,
+                'family': family or None,
+                'required_max': test.datagen_tablebase_max,
+                'worker_max': worker_max,
+                'manifest_sha256': manifest,
+            },
+            'teacher_mode': test.datagen_teacher_mode or None,
+        }
+        return lease, canonical_json_sha256(lease)
+
     lease = {
         'schema': DATAGEN_TABLEBASE_LEASE_SCHEMA,
         'protocol': 40,
@@ -284,6 +327,7 @@ def claim_chunk(test, machine):
         not is_generic_datagen(test)
         or not test.datagen_producer_contract_is_current()
         or not test.datagen_environment_contract_is_current()
+        or not test.datagen_publication_contract_is_current()
     ):
         return None
 

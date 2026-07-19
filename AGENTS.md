@@ -269,11 +269,21 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   la ruta local. `syzygy_adj` permanece siempre `DISABLED`. No desplegar v40 ni
   lanzar sus canaries depth-7 antes del bridge/golden/A-B local verde.
 
+- El protocolo v41 añade el contrato opt-in de publicación. Congela identidad
+  de campaña/workload/role/cohort, motor+commit+bench, red completa, libro
+  text/raw, comando/count/seed, productor y entorno. Cada chunk recibe lease y
+  receipt ligados al hash del contrato incluso sin Syzygy; la API final publica
+  schema/version, contrato completo y self-hash. La red se hashea desde sus
+  bytes registrados y el libro congela sus identidades text/raw configuradas al
+  crear el workload; cualquier drift posterior falla cerrado. No convertir
+  workloads legacy a v41 por backfill.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
-  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}` y `{PRODUCER_SHA256}`. Atomic Syzygy
+  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}`, `{NETWORK_SHA256}` y
+  `{PRODUCER_SHA256}`. v41 exige los cuatro placeholders de libro/red. Atomic Syzygy
   usa ademas el grupo v40 completo descrito arriba. `BOOK_SHA256` es la identidad raw de
   los bytes extraídos (o la identidad histórica si el manifiesto no publica
   `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.

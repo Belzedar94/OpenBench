@@ -15,6 +15,14 @@
 > server-generated receipt that binds that lease to the uploaded bytes. Worker
 > filesystem paths are never sent to or persisted by the server.
 
+> Worker protocol v41 adds an opt-in publication contract. At workload
+> creation OpenBench authenticates the exact network bytes, freezes the
+> configured text/raw book identities, and records campaign identity, engine
+> provenance, command/count/seed semantics, producer,
+> teacher, and Syzygy requirements. Every assignment and upload is bound to that
+> immutable contract, and the completed API publishes the contract plus a
+> self-hashed manifest. Protocol-v41 evidence fails closed on any drift.
+
 Este fork añade un workload `DATAGEN` genérico. OpenBench distribuye trabajo,
 verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
 conoce el formato de entrenamiento ni concatena archivos; esas responsabilidades
@@ -35,6 +43,8 @@ estos placeholders:
   verifica ambas identidades antes de iniciar el generador.
 - `{NETWORK}`: ruta local de la red dev ya descargada y verificada, o `NONE`
   cuando el workload no tiene red.
+- `{NETWORK_SHA256}`: SHA-256 completo de los bytes exactos de la red. El
+  protocolo v41 lo exige junto con `{NETWORK}` y valida también su tamaño.
 - `{PRODUCER_SHA256}`: SHA-256 de los bytes exactos del ejecutable generador.
   Su presencia activa el protocolo de evidencia v39: el worker sube primero el
   binario y el servidor recalcula su identidad, lo conserva en CAS y liga hash,
@@ -48,7 +58,8 @@ estos placeholders:
   legacy-playing. No existe un default semantico del servidor.
 
 `SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256`,
-`NETWORK` y `PRODUCER_SHA256` son opcionales. Los tres placeholders Syzygy se
+`NETWORK`, `NETWORK_SHA256` y `PRODUCER_SHA256` son opcionales en legacy; v41
+exige `BOOK`, `BOOK_SHA256`, `NETWORK` y `NETWORK_SHA256`. Los tres placeholders Syzygy se
 usan juntos o no se usa ninguno. Cuando se usan, `{TEACHER_MODE}` tambien es
 obligatorio, `syzygy_wdl` debe ser un limite explicito `3-MAN`--`6-MAN`, el
 motor debe declarar la familia `atomic` y un manifest pin, y
@@ -119,6 +130,31 @@ El manifest final rehashea todos los leases y receipts antes de publicarlos.
 La plantilla generica anterior, sin el grupo Syzygy, conserva exactamente el
 flujo legacy y deja vacios estos campos.
 
+### Contrato de publicación v41
+
+El contrato v41 es opt-in y no hace backfill de workloads históricos. Al crear
+el workload exige `campaign_id`, `external_workload_id`, `role`, `cohort`, una
+red registrada y los cuatro placeholders `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}`
+y `{NETWORK_SHA256}`. OpenBench lee y hashea los bytes de red desde `Media/` y
+congela la identidad raw/text del libro desde la configuración cargada en ese
+instante. Un libro de archivo sin `source`, `sha` o `raw_sha` se rechaza; `NONE`
+queda registrado explícitamente como startpos builtin.
+
+El documento canónico incluye repositorio, ref solicitada, commit completo,
+bench y opciones del motor; red con SHA-256 completo y bytes; libro con tipo,
+nombre, origen y ambos hashes; comando exacto y su hash; count total, count por
+chunk, semilla base y método `base-plus-chunk-index-v1`; productor obligatorio
+u opcional; y teacher/Syzygy. Dos constraints impiden reutilizar dentro de una
+campaña tanto el `external_workload_id` como una pareja `role/cohort`.
+
+Cada chunk recibe un lease v41 incluso si no usa Syzygy. El worker revalida el
+contrato y los bytes locales antes del launch, repite el hash del contrato al
+subir, y el servidor lo comprueba antes de leer el artefacto. El receipt liga
+contrato, lease, intento, máquina, productor, teacher/Syzygy y resultado. La API
+final solo responde si contrato, leases, receipts y CAS siguen válidos; expone
+el contrato completo con schema/version y `manifest_sha256`. Cambios operativos
+de prioridad o throughput no cambian la identidad publicable.
+
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
 `{THREADS}`. Ese NPS es sólo informativo: DATAGEN no escala trabajo ni parámetros
@@ -148,6 +184,8 @@ En `/newTest/`, seleccionar `DATAGEN` y completar:
 - semilla base;
 - libro o `NONE`;
 - para Atomic Syzygy: limite N-MAN y teacher mode explicito `pure|true`;
+- para publicar con v41: protocolo 41, campaign id, external workload id,
+  role y cohort como slugs ASCII en minúsculas;
 - prioridad y throughput.
 
 También se mantiene `/newDatagen/` como acceso directo al mismo modo. Los
@@ -220,6 +258,11 @@ entorno y, por chunk, el lease y receipt canonicos con sus SHA-256. Esos
 documentos contienen identidad de corpus, cardinalidad y teacher mode, pero
 nunca la ruta local del worker.
 
+En una campaña v41, el manifest agrega el schema y versión de publicación, el
+contrato completo y su SHA-256, y un `manifest_sha256` calculado sobre todo el
+documento anterior al campo self-hash. Todos los chunks, también los que no
+usan tablas, publican lease y receipt v41 ligados al mismo contrato.
+
 La validación universal termina en SHA-256 y bytes. Descompresión, validación de
 registros, combinación de cabeceras, deduplicación y auditoría quedan fuera de
 OpenBench. Por ejemplo, un proyecto Spell puede concatenar offline sus registros
@@ -256,22 +299,23 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 40; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión 41; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
 3. Verificar que el esquema existente coincide con el snapshot pre-DATAGEN.
 4. Marcar sólo el baseline ya existente con
    `python manage.py migrate OpenBench 0001 --fake`.
-5. Aplicar todas las migraciones reales hasta `0007` con
+5. Aplicar todas las migraciones reales hasta `0008` con
    `python manage.py migrate`. `0006` congela contratos, crea reservas/cuotas
    y hace backfill de evidencia de productor ya existente; `0007` añade el
-   contrato, lease y receipt de entorno v40.
+   contrato, lease y receipt de entorno v40; `0008` agrega el contrato de
+   publicación v41 y sus constraints parciales sin convertir filas legacy.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 40 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes versión 41 de forma gradual y vigilar logs, disco y leases.
 
-No usar `--fake` para `0002`–`0007`: crean el esquema DATAGEN, CAS y sus
+No usar `--fake` para `0002`–`0008`: crean el esquema DATAGEN, CAS y sus
 relaciones de integridad. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
 HEAD, resolver posibles diferencias de modelos/migraciones y enviar servidor,
 cliente, tests y documentación juntos. Conviene acordar además política de

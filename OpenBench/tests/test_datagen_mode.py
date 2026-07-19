@@ -17,7 +17,7 @@ from django.contrib.auth.models import User
 from django.apps import apps as django_apps
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections
+from django.db import IntegrityError, close_old_connections, transaction
 from django.test import (
     Client, RequestFactory, TestCase, TransactionTestCase, override_settings,
 )
@@ -25,6 +25,7 @@ from django.utils import timezone
 
 import OpenBench.datagen
 import OpenBench.config
+import OpenBench.datagen_publication
 import OpenBench.utils
 import OpenBench.views
 from OpenBench.templatetags import mytags
@@ -41,7 +42,7 @@ from OpenBench.datagen import (
 from OpenBench.models import (
     DatagenChunk, DatagenProducerArtifact, DatagenProducerBuild,
     DatagenProducerOwnerQuota, DatagenProducerQuota, Engine, LogEvent,
-    Machine, Profile, Test,
+    Machine, Network, Profile, Test,
 )
 from OpenBench.workloads import (
     create_workload,
@@ -58,7 +59,7 @@ class MachineIdentityTests(TestCase):
         self.other = User.objects.create_user('other-worker', password='password')
         self.info = {
             'mac_address': 'AABBCCDDEEFF',
-            'client_ver': 40,
+            'client_ver': 41,
             'concurrency': 2,
         }
         self.machine = Machine.objects.create(
@@ -101,7 +102,7 @@ class MachineIdentityTests(TestCase):
             {'error': 'Worker Account Disabled', 'stop': True},
         )
 
-    def test_protocol_v39_worker_is_told_to_upgrade_to_v40(self):
+    def test_protocol_v39_worker_is_told_to_upgrade_to_v41(self):
         self.machine.info = dict(self.machine.info, client_ver=39)
         self.machine.save(update_fields=['info'])
         request = RequestFactory().post(
@@ -113,7 +114,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('40', error)
+        self.assertIn('41', error)
 
 
 class DatagenModeTests(TestCase):
@@ -184,7 +185,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 40,
+            'client_ver': 41,
             'tablebases': {
                 'standard': 0,
                 'atomic': {
@@ -254,6 +255,85 @@ class DatagenModeTests(TestCase):
         if initialize:
             initialize_chunks(test)
         return test
+
+    def make_publication_test(
+        self,
+        campaign_id='atomic-campaign',
+        workload_id='opening-train',
+        role='train',
+        cohort='opening',
+        total=2,
+        per_chunk=2,
+        producer=False,
+        tablebase=False,
+        book_name='NONE',
+    ):
+        network_bytes = b'authenticated-network-v41'
+        network_sha256 = hashlib.sha256(network_bytes).hexdigest()
+        network_id = network_sha256[:8].upper()
+        Path(self.media.name, network_id).write_bytes(network_bytes)
+        Network.objects.get_or_create(
+            engine='Atomic-Stockfish',
+            sha256=network_id,
+            defaults={
+                'name': 'network.nnue',
+                'author': self.user.username,
+            },
+        )
+        command = (
+            'datagen seed {SEED} count {COUNT} threads {THREADS} '
+            'book {BOOK} book_sha256 {BOOK_SHA256} '
+            'network {NETWORK} network_sha256 {NETWORK_SHA256}'
+        )
+        if producer:
+            command += ' producer {PRODUCER_SHA256}'
+        if tablebase:
+            command += (
+                ' syzygy {SYZYGY} '
+                'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+                'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+            )
+        command += ' out {OUT}'
+        payload = {
+            'dev_engine': 'Atomic-Stockfish',
+            'dev_repo': 'https://github.com/example/atomic-engine',
+            'dev_branch': 'publication-v41',
+            'dev_network': network_id,
+            'dev_options': 'Hash=512',
+            'book_name': book_name,
+            'datagen_command': command,
+            'datagen_total_count': str(total),
+            'datagen_positions_per_chunk': str(per_chunk),
+            'datagen_base_seed': '9000',
+            'priority': '0',
+            'throughput': '1000',
+            'datagen_publication_protocol': '41',
+            'datagen_campaign_id': campaign_id,
+            'datagen_external_workload_id': workload_id,
+            'datagen_role': role,
+            'datagen_cohort': cohort,
+        }
+        if tablebase:
+            payload.update({
+                'datagen_teacher_mode': 'pure',
+                'syzygy_wdl': '6-MAN',
+            })
+        request = RequestFactory().post('/newDatagen/', payload)
+        request.user = self.user
+        engine_info = (
+            (
+                'https://example.test/publication-v41.zip',
+                'publication-v41',
+                'b' * 40,
+                456,
+            ),
+            True,
+        )
+        with mock.patch.object(
+            create_workload, 'verify_workload', return_value=([], engine_info)
+        ):
+            test, errors = create_workload.create_new_datagen(request)
+        return test, errors, network_sha256
 
     def test_creation_builds_exact_numbered_chunk_map(self):
         payload = {
@@ -346,6 +426,257 @@ class DatagenModeTests(TestCase):
         self.assertEqual(test.syzygy_wdl, '6-MAN')
         self.assertEqual(test.syzygy_adj, 'DISABLED')
         self.assertTrue(test.datagen_environment_contract_is_current())
+
+    def test_v41_creation_freezes_complete_publication_contract(self):
+        test, errors, network_sha256 = self.make_publication_test()
+
+        self.assertIsNone(errors)
+        contract = test.datagen_publication_contract
+        self.assertEqual(
+            contract['schema'], 'openbench-datagen-publication-contract-v41'
+        )
+        self.assertEqual(contract['protocol'], 41)
+        self.assertEqual(contract['campaign_id'], 'atomic-campaign')
+        self.assertEqual(contract['external_workload_id'], 'opening-train')
+        self.assertEqual(contract['role'], 'train')
+        self.assertEqual(contract['cohort'], 'opening')
+        self.assertNotIn('test_id', contract)
+        self.assertEqual(contract['engine']['repo'], test.dev_repo)
+        self.assertEqual(contract['engine']['commit'], 'b' * 40)
+        self.assertEqual(contract['engine']['bench'], 456)
+        self.assertEqual(contract['network']['sha256'], network_sha256)
+        self.assertEqual(contract['network']['bytes'], 25)
+        self.assertEqual(contract['book']['kind'], 'builtin-startpos')
+        self.assertIsNone(contract['book']['raw_sha256'])
+        self.assertEqual(
+            contract['generation']['command_sha256'],
+            hashlib.sha256(test.datagen_command.encode('utf-8')).hexdigest(),
+        )
+        self.assertEqual(
+            contract['generation']['seed_method'],
+            'base-plus-chunk-index-v1',
+        )
+        self.assertFalse(contract['producer']['required'])
+        self.assertFalse(contract['syzygy']['required'])
+        self.assertEqual(
+            test.datagen_publication_contract_sha256,
+            OpenBench.datagen_publication.canonical_json_sha256(contract),
+        )
+        self.assertTrue(test.datagen_publication_contract_is_current())
+        self.assertEqual(test.datagen_chunks.count(), 1)
+
+    def test_v41_request_contract_is_explicit_complete_and_slugged(self):
+        payload = {
+            'datagen_publication_protocol': '41',
+            'datagen_campaign_id': 'atomic-20260719',
+            'datagen_external_workload_id': 'launch2-opening-train',
+            'datagen_role': 'selfplay-train',
+            'datagen_cohort': 'launch2-opening',
+            'dev_network': 'DEADBEEF',
+            'datagen_command': (
+                'datagen {BOOK} {BOOK_SHA256} {NETWORK} {NETWORK_SHA256}'
+            ),
+        }
+        self.assertEqual(
+            OpenBench.datagen_publication.validate_publication_request(payload),
+            [],
+        )
+
+        for field in (
+            'datagen_campaign_id',
+            'datagen_external_workload_id',
+            'datagen_role',
+            'datagen_cohort',
+            'dev_network',
+        ):
+            malformed = dict(payload, **{field: ''})
+            self.assertTrue(
+                OpenBench.datagen_publication.validate_publication_request(
+                    malformed
+                ),
+                field,
+            )
+        malformed = dict(payload, datagen_role='Uppercase')
+        self.assertTrue(
+            OpenBench.datagen_publication.validate_publication_request(malformed)
+        )
+        malformed = dict(
+            payload,
+            datagen_command='datagen {BOOK} {BOOK_SHA256} {NETWORK}',
+        )
+        self.assertTrue(
+            OpenBench.datagen_publication.validate_publication_request(malformed)
+        )
+        malformed = dict(payload, datagen_publication_protocol='0')
+        self.assertTrue(
+            OpenBench.datagen_publication.validate_publication_request(malformed)
+        )
+
+    def test_v41_creation_rejects_missing_network_bytes_without_rows(self):
+        network_bytes = b'missing-after-registration'
+        network_id = hashlib.sha256(network_bytes).hexdigest()[:8].upper()
+        Network.objects.create(
+            engine='Atomic-Stockfish',
+            sha256=network_id,
+            name='missing.nnue',
+            author=self.user.username,
+        )
+        payload = {
+            'dev_engine': 'Atomic-Stockfish',
+            'dev_repo': 'https://github.com/example/atomic-engine',
+            'dev_branch': 'publication-v41',
+            'dev_network': network_id,
+            'book_name': 'NONE',
+            'datagen_command': (
+                'datagen {SEED} {COUNT} {THREADS} {OUT} {BOOK} '
+                '{BOOK_SHA256} {NETWORK} {NETWORK_SHA256}'
+            ),
+            'datagen_total_count': '2',
+            'datagen_positions_per_chunk': '2',
+            'datagen_base_seed': '1',
+            'priority': '0',
+            'throughput': '1',
+            'datagen_publication_protocol': '41',
+            'datagen_campaign_id': 'atomic-campaign',
+            'datagen_external_workload_id': 'opening-train',
+            'datagen_role': 'train',
+            'datagen_cohort': 'opening',
+        }
+        request = RequestFactory().post('/newDatagen/', payload)
+        request.user = self.user
+        engine_info = (
+            ('https://example.test/v41.zip', 'v41', 'b' * 40, 456), True,
+        )
+
+        with mock.patch.object(
+            create_workload, 'verify_workload', return_value=([], engine_info)
+        ):
+            test, errors = create_workload.create_new_datagen(request)
+
+        self.assertIsNone(test)
+        self.assertIn('network bytes are unavailable', errors[0])
+        self.assertEqual(Test.objects.count(), 0)
+        self.assertEqual(DatagenChunk.objects.count(), 0)
+
+    def test_v41_freezes_both_book_identities_and_rejects_missing_raw_sha(self):
+        complete = {
+            'sha': '1' * 64,
+            'raw_sha': '2' * 64,
+            'source': 'https://example.test/publication.epd.zip',
+        }
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['books'],
+            {'publication.epd': complete},
+        ):
+            test, errors, _ = self.make_publication_test(
+                book_name='publication.epd'
+            )
+        self.assertIsNone(errors)
+        self.assertEqual(
+            test.datagen_publication_contract['book'],
+            {
+                'kind': 'file',
+                'name': 'publication.epd',
+                'source': complete['source'],
+                'text_sha256': complete['sha'],
+                'raw_sha256': complete['raw_sha'],
+            },
+        )
+
+        Test.objects.all().delete()
+        incomplete = {
+            'sha': '1' * 64,
+            'source': 'https://example.test/incomplete.epd.zip',
+        }
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['books'],
+            {'incomplete.epd': incomplete},
+        ):
+            rejected, rejected_errors, _ = self.make_publication_test(
+                book_name='incomplete.epd',
+                workload_id='opening-validation',
+                role='validation',
+            )
+        self.assertIsNone(rejected)
+        self.assertIn('raw SHA-256', rejected_errors[0])
+
+    def test_v41_campaign_slots_are_unique_and_legacy_rows_are_exempt(self):
+        test, errors, _ = self.make_publication_test()
+        self.assertIsNone(errors)
+
+        duplicate_external = copy.copy(test)
+        duplicate_external.pk = None
+        duplicate_external.id = None
+        duplicate_external._state.adding = True
+        duplicate_external.datagen_role = 'validation'
+        duplicate_external.datagen_cohort = 'midgame'
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            duplicate_external.save(force_insert=True)
+
+        duplicate_slot = copy.copy(test)
+        duplicate_slot.pk = None
+        duplicate_slot.id = None
+        duplicate_slot._state.adding = True
+        duplicate_slot.datagen_external_workload_id = 'different-workload'
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            duplicate_slot.save(force_insert=True)
+
+        first = self.make_test()
+        second = self.make_test()
+        self.assertEqual(first.datagen_publication_protocol, 0)
+        self.assertEqual(second.datagen_publication_protocol, 0)
+
+    def test_v41_semantic_mutation_fails_closed_but_tuning_does_not(self):
+        test, errors, _ = self.make_publication_test()
+        self.assertIsNone(errors)
+        test.priority += 1
+        test.throughput += 1
+        self.assertTrue(test.datagen_publication_contract_is_current())
+
+        original = test.datagen_command
+        test.datagen_command += ' drift'
+        self.assertFalse(test.datagen_publication_contract_is_current())
+        self.assertIsNone(claim_chunk(test, self.make_machine()))
+        test.datagen_command = original
+        self.assertTrue(test.datagen_publication_contract_is_current())
+
+        contract = copy.deepcopy(test.datagen_publication_contract)
+        contract['network']['bytes'] += 1
+        test.datagen_publication_contract = contract
+        test.datagen_publication_contract_sha256 = (
+            OpenBench.datagen_publication.canonical_json_sha256(contract)
+        )
+        self.assertFalse(test.datagen_publication_contract_is_current())
+
+        test.datagen_publication_contract = copy.deepcopy(
+            Test.objects.get(pk=test.pk).datagen_publication_contract
+        )
+        test.datagen_publication_contract_sha256 = (
+            OpenBench.datagen_publication.canonical_json_sha256(
+                test.datagen_publication_contract
+            )
+        )
+        test.datagen_book_source = 'unexpected-source'
+        self.assertFalse(test.datagen_publication_contract_is_current())
+
+    def test_v41_canonical_json_has_a_fixed_order_independent_vector(self):
+        document = {
+            'external_workload_id': 'opening-train',
+            'schema': 'openbench-datagen-publication-contract-v41',
+            'protocol': 41,
+            'campaign_id': 'atomic-20260719',
+        }
+        expected = '26d0aff3562181c97d0de8ee3fac81bc9ea842792fd5055ed1d1876e481541fc'
+        self.assertEqual(
+            OpenBench.datagen_publication.canonical_json_sha256(document),
+            expected,
+        )
+        self.assertEqual(
+            OpenBench.datagen_publication.canonical_json_sha256(
+                dict(reversed(list(document.items())))
+            ),
+            expected,
+        )
 
     def test_creation_caps_legacy_summary_and_preserves_64_bit_total(self):
         total = MAX_LEGACY_DATAGEN_GAMES + 123
@@ -964,6 +1295,147 @@ class DatagenModeTests(TestCase):
         ).json()
         self.assertIn('inconsistent tablebase receipt', rejected['error'])
 
+    def test_v41_chunk_receipt_and_manifest_bind_the_publication_contract(self):
+        test, errors, _ = self.make_publication_test()
+        self.assertIsNone(errors)
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+
+        self.assertEqual(
+            chunk.environment_lease['schema'],
+            'openbench-datagen-publication-lease-v41',
+        )
+        self.assertEqual(chunk.environment_lease['protocol'], 41)
+        self.assertEqual(
+            chunk.environment_lease['publication_contract_sha256'],
+            test.datagen_publication_contract_sha256,
+        )
+        self.assertFalse(chunk.environment_lease['tablebase']['required'])
+        self.assertEqual(
+            chunk.environment_lease_sha256,
+            OpenBench.datagen_publication.canonical_json_sha256(
+                chunk.environment_lease
+            ),
+        )
+
+        response = self.submit_chunk(test, chunk, machine)
+        self.assertEqual(response.status_code, 200, response.content)
+        test.refresh_from_db()
+        chunk.refresh_from_db()
+        receipt = chunk.environment_receipt
+        self.assertEqual(
+            receipt['schema'], 'openbench-datagen-publication-receipt-v41'
+        )
+        self.assertEqual(
+            receipt['publication_contract_sha256'],
+            test.datagen_publication_contract_sha256,
+        )
+        self.assertEqual(
+            receipt['environment_lease_sha256'],
+            chunk.environment_lease_sha256,
+        )
+        self.assertEqual(receipt['artifact']['sha256'], chunk.sha256)
+        self.assertNotIn('path', json.dumps(receipt).lower())
+
+        authorization = 'Basic ' + base64.b64encode(
+            b'datagen:password'
+        ).decode('ascii')
+        client = Client(HTTP_AUTHORIZATION=authorization)
+        document = client.get(
+            '/api/datagen/%d/' % test.id, secure=True
+        ).json()
+        self.assertEqual(
+            document['schema'],
+            'openbench-datagen-publication-manifest-v41',
+        )
+        self.assertEqual(document['version'], 1)
+        self.assertEqual(document['protocol'], 41)
+        self.assertEqual(
+            document['publication_contract'],
+            test.datagen_publication_contract,
+        )
+        manifest_sha256 = document.pop('manifest_sha256')
+        self.assertEqual(
+            manifest_sha256,
+            OpenBench.datagen_publication.canonical_json_sha256(document),
+        )
+
+        receipt['publication_contract_sha256'] = 'd' * 64
+        chunk.environment_receipt = receipt
+        chunk.environment_receipt_sha256 = (
+            OpenBench.datagen_publication.canonical_json_sha256(receipt)
+        )
+        chunk.save(update_fields=[
+            'environment_receipt', 'environment_receipt_sha256',
+        ])
+        rejected = client.get(
+            '/api/datagen/%d/' % test.id, secure=True
+        ).json()
+        self.assertIn('inconsistent publication receipt', rejected['error'])
+
+    def test_v41_upload_rejects_wrong_publication_binding_before_hashing(self):
+        test, errors, _ = self.make_publication_test()
+        self.assertIsNone(errors)
+        machine = self.make_machine()
+        chunk = claim_chunk(test, machine)
+
+        with mock.patch.object(
+            OpenBench.views,
+            '_datagen_uploaded_digest',
+            side_effect=AssertionError('upload body must not be hashed'),
+        ) as digest:
+            response = self.submit_chunk(
+                test,
+                chunk,
+                machine,
+                tablebase_overrides={
+                    'publication_contract_sha256': 'd' * 64,
+                },
+            )
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn('publication attestation', response.json()['error'])
+        digest.assert_not_called()
+
+    def test_v41_tablebase_receipt_binds_teacher_syzygy_and_producer(self):
+        test, errors, _ = self.make_publication_test(
+            producer=True, tablebase=True
+        )
+        self.assertIsNone(errors)
+        contract = test.datagen_publication_contract
+        self.assertTrue(contract['producer']['required'])
+        self.assertEqual(contract['teacher']['mode'], 'pure')
+        self.assertEqual(contract['syzygy']['family'], 'atomic')
+        self.assertEqual(contract['syzygy']['max'], 6)
+        self.assertRegex(
+            contract['syzygy']['manifest_sha256'], r'^[0-9a-f]{64}$'
+        )
+
+        machine = self.make_machine(
+            atomic=6,
+            manifest=test.datagen_tablebase_manifest_sha256,
+        )
+        chunk = claim_chunk(test, machine)
+        registered = self.register_producer(test, chunk, machine).json()
+        self.assertRegex(registered['sha256'], r'^[0-9a-f]{64}$')
+        response = self.submit_chunk(
+            test, chunk, machine, registered, tablebase=True
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+        chunk.refresh_from_db()
+        receipt = chunk.environment_receipt
+        self.assertEqual(receipt['teacher_mode'], 'pure')
+        self.assertTrue(receipt['tablebase']['required'])
+        self.assertEqual(
+            receipt['tablebase']['manifest_sha256'],
+            test.datagen_tablebase_manifest_sha256,
+        )
+        self.assertEqual(receipt['producer']['sha256'], registered['sha256'])
+        self.assertEqual(
+            receipt['publication_contract_sha256'],
+            test.datagen_publication_contract_sha256,
+        )
+
     def test_manifest_rejects_every_drifted_lease_and_receipt_binding(self):
         test = self.make_tablebase_test(teacher_mode='true')
         machine = self.make_machine(
@@ -1244,7 +1716,7 @@ class DatagenModeTests(TestCase):
                 'producer_bytes': producer['bytes'],
                 'producer_commit': producer['commit'],
             })
-        if tablebase:
+        if tablebase or test.is_publication_datagen():
             lease = chunk.environment_lease
             tablebase_lease = lease['tablebase']
             fields.update({
@@ -1254,14 +1726,18 @@ class DatagenModeTests(TestCase):
                 'environment_lease_sha256': (
                     chunk.environment_lease_sha256
                 ),
-                'tablebase_family': tablebase_lease['family'],
+                'tablebase_family': tablebase_lease['family'] or '',
                 'tablebase_max': tablebase_lease['required_max'],
                 'tablebase_worker_max': tablebase_lease['worker_max'],
                 'tablebase_manifest_sha256': (
-                    tablebase_lease['manifest_sha256']
+                    tablebase_lease['manifest_sha256'] or ''
                 ),
-                'teacher_mode': lease['teacher_mode'],
+                'teacher_mode': lease['teacher_mode'] or '',
             })
+            if test.is_publication_datagen():
+                fields['publication_contract_sha256'] = lease[
+                    'publication_contract_sha256'
+                ]
             fields.update(tablebase_overrides or {})
         return Client().post('/clientSubmitDatagen/', fields)
 
@@ -2217,7 +2693,7 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 40},
+                info={'concurrency': 1, 'client_ver': 41},
             ))
 
     def tearDown(self):

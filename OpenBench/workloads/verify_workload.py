@@ -44,6 +44,7 @@ import traceback
 
 import OpenBench.config
 import OpenBench.datagen
+import OpenBench.datagen_publication
 import OpenBench.utils
 
 from OpenBench.models import *
@@ -189,6 +190,9 @@ def verify_datagen_creation(errors, request):
         verification[0](errors, request, *verification[1:])
 
     verify_datagen_tablebase_contract(errors, request)
+    errors.extend(
+        OpenBench.datagen_publication.validate_publication_request(request.POST)
+    )
 
 
 def verify_integer(errors, request, field, field_name):
@@ -365,8 +369,8 @@ def verify_datagen_template(errors, request, field):
 
     allowed = {
         'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'BOOK_SHA256', 'NETWORK',
-        'PRODUCER_SHA256', 'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX',
-        'TEACHER_MODE',
+        'NETWORK_SHA256', 'PRODUCER_SHA256', 'SYZYGY',
+        'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
     }
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
 
@@ -389,8 +393,8 @@ def verify_datagen_template(errors, request, field):
         errors.append(
             'Datagen Command must be one line, use only {SEED}, {COUNT}, '
             '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, '
-            '{PRODUCER_SHA256}, {SYZYGY}, {SYZYGY_MANIFEST_SHA256}, '
-            '{SYZYGY_MAX}, {TEACHER_MODE}, and include '
+            '{NETWORK_SHA256}, {PRODUCER_SHA256}, {SYZYGY}, '
+            '{SYZYGY_MANIFEST_SHA256}, {SYZYGY_MAX}, {TEACHER_MODE}, and include '
             'SEED/COUNT/OUT/THREADS'
         )
 

@@ -29,6 +29,13 @@ from django.db.models import (
 )
 from django.contrib.auth.models import User
 
+from OpenBench.datagen_publication import (
+    DATAGEN_PUBLICATION_PROTOCOL,
+    build_publication_contract,
+    canonical_json_sha256,
+    publication_contract_is_current,
+)
+
 
 DATAGEN_TABLEBASE_PLACEHOLDERS = frozenset({
     'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
@@ -182,6 +189,31 @@ class Test(Model):
     datagen_environment_contract_sha256 = CharField(
         max_length=64, default='', blank=True,
     )
+    # Protocol v41 freezes the complete publisher-facing identity before the
+    # chunk map exists. Legacy DATAGEN rows keep protocol 0 and empty fields.
+    datagen_publication_protocol = IntegerField(default=0)
+    datagen_campaign_id = CharField(max_length=128, default='', blank=True)
+    datagen_external_workload_id = CharField(
+        max_length=128, default='', blank=True,
+    )
+    datagen_role = CharField(max_length=128, default='', blank=True)
+    datagen_cohort = CharField(max_length=128, default='', blank=True)
+    datagen_publication_contract = JSONField(default=dict, blank=True)
+    datagen_publication_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    # Redundant frozen asset columns prevent a rewritten contract plus a
+    # recomputed self-hash from silently changing the publisher's inputs.
+    datagen_network_sha256 = CharField(max_length=64, default='', blank=True)
+    datagen_network_bytes = BigIntegerField(default=0)
+    datagen_book_kind = CharField(max_length=32, default='', blank=True)
+    datagen_book_source = CharField(max_length=2048, default='', blank=True)
+    datagen_book_text_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    datagen_book_raw_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
 
     # Collection of all individual Result() objects
     games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
@@ -228,6 +260,12 @@ class Test(Model):
 
     def is_generic_datagen(self):
         return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
+
+    def is_publication_datagen(self):
+        return (
+            self.is_generic_datagen()
+            and self.datagen_publication_protocol == DATAGEN_PUBLICATION_PROTOCOL
+        )
 
     def datagen_requires_producer_artifact(self):
         return self.is_generic_datagen() and self.datagen_producer_required
@@ -341,12 +379,48 @@ class Test(Model):
             and contract_sha256 == self.datagen_environment_contract_sha256
         )
 
+    def freeze_datagen_publication_contract(self, network, book):
+        if not self.is_publication_datagen():
+            raise ValueError('Only protocol v41 DATAGEN has a publication contract')
+        self.datagen_network_sha256 = network['sha256']
+        self.datagen_network_bytes = network['bytes']
+        self.datagen_book_kind = book['kind']
+        self.datagen_book_source = book['source'] or ''
+        self.datagen_book_text_sha256 = book['text_sha256'] or ''
+        self.datagen_book_raw_sha256 = book['raw_sha256'] or ''
+        document = build_publication_contract(self, network, book)
+        self.datagen_publication_contract = document
+        self.datagen_publication_contract_sha256 = canonical_json_sha256(document)
+
+    def datagen_publication_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return self.datagen_publication_protocol == 0
+        return publication_contract_is_current(self)
+
     def datagen_total_chunks(self):
         if not self.datagen_positions_per_chunk:
             return 0
         return (
             self.datagen_total_count + self.datagen_positions_per_chunk - 1
         ) // self.datagen_positions_per_chunk
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(datagen_publication_protocol__in=[0, 41]),
+                name='datagen_publication_protocol_valid',
+            ),
+            UniqueConstraint(
+                fields=['datagen_campaign_id', 'datagen_external_workload_id'],
+                condition=Q(datagen_publication_protocol=41),
+                name='unique_datagen_v41_campaign_workload',
+            ),
+            UniqueConstraint(
+                fields=['datagen_campaign_id', 'datagen_role', 'datagen_cohort'],
+                condition=Q(datagen_publication_protocol=41),
+                name='unique_datagen_v41_campaign_role_cohort',
+            ),
+        ]
 
 class DatagenChunk(Model):
 

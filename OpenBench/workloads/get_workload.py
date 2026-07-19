@@ -296,9 +296,22 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'play_reverses' : test.play_reverses,
     }
 
-    book_config = OPENBENCH_CONFIG['books'].get(
-        test.book_name, {'sha': None, 'source': None}
+    publication_datagen = (
+        getattr(test, 'datagen_publication_protocol', 0) == 41
     )
+    if publication_datagen:
+        if not test.datagen_publication_contract_is_current():
+            raise ValueError('DATAGEN publication contract is stale')
+        frozen_book = test.datagen_publication_contract['book']
+        book_config = {
+            'sha': frozen_book['text_sha256'],
+            'raw_sha': frozen_book['raw_sha256'],
+            'source': frozen_book['source'],
+        }
+    else:
+        book_config = OPENBENCH_CONFIG['books'].get(
+            test.book_name, {'sha': None, 'source': None}
+        )
     workload['test']['book'] = {
         'name'   : test.book_name,
         # ``sha`` preserves OpenBench's historical UTF-8/text-normalized
@@ -328,6 +341,11 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         ),
         'tablebase_family' : engine_tablebase_family(test.dev_engine),
     }
+    if publication_datagen:
+        workload['test']['dev'].update({
+            'repo': test.dev_repo,
+            'requested_ref': test.dev.name,
+        })
 
     workload['test']['base'] = {
         'id'           : test.base.id,
@@ -377,6 +395,15 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'environment_lease': datagen_chunk.environment_lease,
             'environment_lease_sha256': (
                 datagen_chunk.environment_lease_sha256
+            ),
+            'publication_protocol': test.datagen_publication_protocol,
+            'publication_contract': (
+                test.datagen_publication_contract
+                if test.is_publication_datagen() else None
+            ),
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256
+                if test.is_publication_datagen() else None
             ),
         }
         workload['distribution'] = None

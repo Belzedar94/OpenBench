@@ -26,6 +26,7 @@ import django.contrib.auth
 
 import OpenBench.config
 import OpenBench.datagen
+import OpenBench.datagen_publication
 import OpenBench.utils
 
 from OpenBench.workloads.create_workload import create_workload
@@ -1076,6 +1077,14 @@ def client_submit_datagen_producer(request, machine):
         )
     if test is None or chunk is None or not test.is_generic_datagen():
         return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+    if (
+        not test.datagen_producer_contract_is_current()
+        or not test.datagen_environment_contract_is_current()
+        or not test.datagen_publication_contract_is_current()
+    ):
+        return JsonResponse(
+            {'error': 'DATAGEN workload contract is stale'}, status=409
+        )
     if not test.datagen_requires_producer_artifact():
         return JsonResponse(
             {'error': 'DATAGEN workload does not request producer evidence'},
@@ -1230,6 +1239,8 @@ def client_submit_datagen_producer(request, machine):
                     not campaign.datagen_producer_required
                     or not campaign.datagen_producer_contract_sha256
                     or not campaign.datagen_producer_contract_is_current()
+                    or not campaign.datagen_environment_contract_is_current()
+                    or not campaign.datagen_publication_contract_is_current()
                     or producer_commit != campaign.dev.sha.lower()
                 ):
                     return JsonResponse(
@@ -1482,6 +1493,8 @@ def client_submit_datagen_producer(request, machine):
 def _frozen_datagen_tablebase_attestation(test, chunk, machine):
     """Reconstruct and authenticate every semantic field in one v40 lease."""
 
+    if test.is_publication_datagen():
+        return _frozen_datagen_publication_attestation(test, chunk, machine)
     if not test.datagen_tablebase_required:
         return None
     lease = chunk.environment_lease
@@ -1533,6 +1546,9 @@ def _frozen_datagen_tablebase_attestation(test, chunk, machine):
             'DATAGEN tablebase lease does not match campaign or worker'
         )
     return {
+        'protocol': 40,
+        'tablebase_required': True,
+        'publication_contract_sha256': None,
         'environment_contract_sha256': (
             test.datagen_environment_contract_sha256
         ),
@@ -1547,14 +1563,150 @@ def _frozen_datagen_tablebase_attestation(test, chunk, machine):
     }
 
 
+def _frozen_datagen_publication_attestation(test, chunk, machine):
+    """Reconstruct the complete protocol-v41 publication lease."""
+
+    lease = chunk.environment_lease
+    if (
+        machine is None
+        or not isinstance(lease, dict)
+        or not test.datagen_publication_contract_is_current()
+        or not isinstance(chunk.environment_lease_sha256, str)
+        or not re.fullmatch(r'[0-9a-f]{64}', chunk.environment_lease_sha256)
+    ):
+        raise PermissionError('DATAGEN publication lease is missing or stale')
+    leased_tablebase = lease.get('tablebase')
+    if not isinstance(leased_tablebase, dict):
+        raise PermissionError('DATAGEN publication lease is malformed')
+    worker_max = leased_tablebase.get('worker_max')
+    if type(worker_max) is not int:
+        raise PermissionError('DATAGEN publication lease is malformed')
+
+    if test.datagen_tablebase_required:
+        if (
+            not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test)
+            or worker_max < test.datagen_tablebase_max
+        ):
+            raise PermissionError(
+                'DATAGEN publication lease does not match tablebase contract'
+            )
+        expected_tablebase = {
+            'required': True,
+            'family': test.datagen_tablebase_family,
+            'required_max': test.datagen_tablebase_max,
+            'worker_max': worker_max,
+            'manifest_sha256': test.datagen_tablebase_manifest_sha256,
+        }
+        teacher_mode = test.datagen_teacher_mode
+    else:
+        expected_tablebase = {
+            'required': False,
+            'family': None,
+            'required_max': 0,
+            'worker_max': 0,
+            'manifest_sha256': None,
+        }
+        teacher_mode = None
+
+    expected_lease = {
+        'schema': OpenBench.datagen_publication.DATAGEN_PUBLICATION_LEASE_SCHEMA,
+        'protocol': 41,
+        'test_id': test.id,
+        'chunk_idx': chunk.idx,
+        'attempt': chunk.attempts,
+        'machine_id': machine.id,
+        'publication_contract_sha256': (
+            test.datagen_publication_contract_sha256
+        ),
+        'environment_contract_sha256': (
+            test.datagen_environment_contract_sha256
+        ),
+        'tablebase': expected_tablebase,
+        'teacher_mode': teacher_mode,
+    }
+    if (
+        chunk.machine_id != machine.id
+        or lease != expected_lease
+        or OpenBench.datagen_publication.canonical_json_sha256(lease)
+           != chunk.environment_lease_sha256
+    ):
+        raise PermissionError(
+            'DATAGEN publication lease does not match campaign or worker'
+        )
+    return {
+        'protocol': 41,
+        'tablebase_required': test.datagen_tablebase_required,
+        'publication_contract_sha256': (
+            test.datagen_publication_contract_sha256
+        ),
+        'environment_contract_sha256': (
+            test.datagen_environment_contract_sha256
+        ),
+        'environment_lease_sha256': chunk.environment_lease_sha256,
+        'family': test.datagen_tablebase_family,
+        'required_max': test.datagen_tablebase_max,
+        'worker_max': worker_max,
+        'manifest_sha256': (
+            test.datagen_tablebase_manifest_sha256
+            if test.datagen_tablebase_required else None
+        ),
+        'teacher_mode': test.datagen_teacher_mode or None,
+    }
+
+
 def _datagen_tablebase_attestation(request, test, chunk, machine):
     """Authenticate request evidence against the complete frozen v40 lease."""
 
     expected = _frozen_datagen_tablebase_attestation(test, chunk, machine)
     if expected is None:
         return None
+    if expected['protocol'] == 41:
+        try:
+            submitted = {
+                'protocol': 41,
+                'tablebase_required': expected['tablebase_required'],
+                'publication_contract_sha256': request.POST[
+                    'publication_contract_sha256'
+                ].lower(),
+                'environment_contract_sha256': request.POST[
+                    'environment_contract_sha256'
+                ].lower(),
+                'environment_lease_sha256': request.POST[
+                    'environment_lease_sha256'
+                ].lower(),
+                'family': request.POST.get('tablebase_family', ''),
+                'required_max': int(request.POST.get('tablebase_max', 0)),
+                'worker_max': int(request.POST.get('tablebase_worker_max', 0)),
+                'manifest_sha256': (
+                    request.POST.get('tablebase_manifest_sha256') or None
+                ),
+                'teacher_mode': request.POST.get('teacher_mode') or None,
+            }
+            for field in (
+                'publication_contract_sha256',
+                'environment_contract_sha256',
+                'environment_lease_sha256',
+            ):
+                assert re.fullmatch(r'[0-9a-f]{64}', submitted[field])
+            if submitted['manifest_sha256'] is not None:
+                submitted['manifest_sha256'] = submitted[
+                    'manifest_sha256'
+                ].lower()
+                assert re.fullmatch(
+                    r'[0-9a-f]{64}', submitted['manifest_sha256']
+                )
+        except (KeyError, TypeError, ValueError, AssertionError):
+            raise ValueError('DATAGEN upload omitted publication attestation')
+        if submitted != expected:
+            raise PermissionError(
+                'DATAGEN publication attestation does not match campaign or worker'
+            )
+        return submitted
     try:
         submitted = {
+            'protocol': 40,
+            'tablebase_required': True,
+            'publication_contract_sha256': None,
             'environment_contract_sha256': request.POST[
                 'environment_contract_sha256'
             ].lower(),
@@ -1592,6 +1744,42 @@ def _datagen_environment_receipt(
 ):
     if attestation is None:
         return {}, ''
+    if attestation['protocol'] == 41:
+        receipt = {
+            'schema': (
+                OpenBench.datagen_publication.DATAGEN_PUBLICATION_RECEIPT_SCHEMA
+            ),
+            'protocol': 41,
+            'test_id': test.id,
+            'chunk_idx': chunk.idx,
+            'attempt': chunk.attempts,
+            'machine_id': machine.id,
+            'publication_contract_sha256': (
+                attestation['publication_contract_sha256']
+            ),
+            'environment_contract_sha256': (
+                attestation['environment_contract_sha256']
+            ),
+            'environment_lease_sha256': (
+                attestation['environment_lease_sha256']
+            ),
+            'tablebase': {
+                'required': attestation['tablebase_required'],
+                'family': attestation['family'] or None,
+                'required_max': attestation['required_max'],
+                'worker_max': attestation['worker_max'],
+                'manifest_sha256': attestation['manifest_sha256'],
+            },
+            'teacher_mode': attestation['teacher_mode'],
+            'artifact': {
+                'sha256': artifact_sha256,
+                'bytes': artifact_bytes,
+            },
+            'producer': producer,
+        }
+        return receipt, OpenBench.datagen_publication.canonical_json_sha256(
+            receipt
+        )
     receipt = {
         'schema': DATAGEN_RECEIPT_SCHEMA,
         'protocol': 40,
@@ -1677,6 +1865,14 @@ def client_submit_datagen(request, machine):
         )
     if test is None or chunk is None or not test.is_generic_datagen():
         return JsonResponse({'error': 'Unknown DATAGEN chunk'}, status=404)
+    if (
+        not test.datagen_producer_contract_is_current()
+        or not test.datagen_environment_contract_is_current()
+        or not test.datagen_publication_contract_is_current()
+    ):
+        return JsonResponse(
+            {'error': 'DATAGEN workload contract is stale'}, status=409
+        )
     if chunk.attempts != lease_attempt:
         return JsonResponse(
             {'error': 'DATAGEN chunk lease attempt is stale'}, status=409
@@ -1791,7 +1987,7 @@ def client_submit_datagen(request, machine):
                 {'error': 'DATAGEN chunk already completed with different data'},
                 status=409,
             )
-        if test.datagen_tablebase_required and (
+        if tablebase_attestation is not None and (
             chunk.environment_receipt != receipt
             or chunk.environment_receipt_sha256 != receipt_sha256
         ):
@@ -1916,7 +2112,16 @@ def client_submit_datagen(request, machine):
             # PostgreSQL. Any failure rolls the chunk transition back.
             progressed = Test.objects.filter(
                 pk=test_id, finished=False, deleted=False,
-            ).update(
+            )
+            if tablebase_attestation is not None and (
+                tablebase_attestation['protocol'] == 41
+            ):
+                progressed = progressed.filter(
+                    datagen_publication_contract_sha256=(
+                        tablebase_attestation['publication_contract_sha256']
+                    )
+                )
+            progressed = progressed.update(
                 games=F('games') + chunk_position_count,
                 datagen_completed_chunks=F('datagen_completed_chunks') + 1,
                 updated=timezone.now(),
@@ -2181,6 +2386,14 @@ def api_datagen_manifest(request, test_id):
         return api_response({
             'error': 'Unable to find generic DATAGEN Workload #%d' % test_id
         })
+    if (
+        not test.datagen_producer_contract_is_current()
+        or not test.datagen_environment_contract_is_current()
+        or not test.datagen_publication_contract_is_current()
+    ):
+        return api_response({
+            'error': 'DATAGEN Workload #%d has a stale contract' % test_id
+        })
 
     chunks = list(
         test.datagen_chunks.select_related(
@@ -2198,8 +2411,17 @@ def api_datagen_manifest(request, test_id):
 
     producer_required = test.datagen_requires_producer_artifact()
     tablebase_required = test.datagen_tablebase_required
-    if tablebase_required:
-        if not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test):
+    environment_evidence_required = (
+        tablebase_required or test.is_publication_datagen()
+    )
+    environment_evidence_label = (
+        'publication' if test.is_publication_datagen() else 'tablebase'
+    )
+    if environment_evidence_required:
+        if (
+            tablebase_required
+            and not OpenBench.datagen.valid_atomic_datagen_tablebase_contract(test)
+        ):
             return api_response({
                 'error': 'DATAGEN Workload #%d has an invalid environment contract'
                          % test_id
@@ -2211,8 +2433,8 @@ def api_datagen_manifest(request, test_id):
                 )
             except PermissionError:
                 return api_response({
-                    'error': 'DATAGEN Workload #%d has inconsistent tablebase lease evidence'
-                             % test_id
+                    'error': 'DATAGEN Workload #%d has inconsistent %s lease evidence'
+                             % (test_id, environment_evidence_label)
                 })
             producer = None
             if chunk.producer_sha256:
@@ -2240,8 +2462,8 @@ def api_datagen_manifest(request, test_id):
                    != expected_receipt_sha
             ):
                 return api_response({
-                    'error': 'DATAGEN Workload #%d has inconsistent tablebase receipt evidence'
-                             % test_id
+                    'error': 'DATAGEN Workload #%d has inconsistent %s receipt evidence'
+                             % (test_id, environment_evidence_label)
                 })
     producer_builds = []
     if producer_required:
@@ -2300,7 +2522,7 @@ def api_datagen_manifest(request, test_id):
                 'commit': expected_commit,
             })
 
-    return api_response({
+    document = {
         'test_id': test.id,
         'engine': test.dev_engine,
         'producer_commit': test.dev.sha.lower(),
@@ -2343,7 +2565,25 @@ def api_datagen_manifest(request, test_id):
             }
             for chunk in chunks
         ],
-    })
+    }
+    if test.is_publication_datagen():
+        document.update({
+            'schema': (
+                OpenBench.datagen_publication.
+                DATAGEN_PUBLICATION_MANIFEST_SCHEMA
+            ),
+            'version': (
+                OpenBench.datagen_publication.
+                DATAGEN_PUBLICATION_MANIFEST_VERSION
+            ),
+            'protocol': 41,
+            'publication_contract': test.datagen_publication_contract,
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256
+            ),
+        })
+        document = OpenBench.datagen_publication.add_manifest_hash(document)
+    return api_response(document)
 
 
 @csrf_exempt

@@ -171,6 +171,9 @@
                             <textarea id="datagen_command" name="datagen_command" rows="4"></textarea>
                             <small>
                                 Use <code>&#123;PRODUCER_SHA256&#125;</code> for generator evidence.
+                                Protocol v41 additionally requires
+                                <code>&#123;NETWORK_SHA256&#125;</code> and freezes the
+                                complete publisher contract before scheduling.
                                 Atomic tablebase DATAGEN must use
                                 <code>&#123;SYZYGY&#125;</code>,
                                 <code>&#123;SYZYGY_MANIFEST_SHA256&#125;</code>,
@@ -197,6 +200,30 @@
                                 <option value="pure"> pure </option>
                                 <option value="true"> true (legacy-playing) </option>
                             </select>
+                        </div>
+                        <h3> Publication Contract </h3>
+                        <div class="row">
+                            <label for="datagen_publication_protocol"> Protocol </label>
+                            <select id="datagen_publication_protocol" name="datagen_publication_protocol">
+                                <option selected value="0"> Legacy / no publication contract </option>
+                                <option value="41"> v41 authenticated publication </option>
+                            </select>
+                        </div>
+                        <div class="row">
+                            <label for="datagen_campaign_id"> Campaign ID </label>
+                            <input id="datagen_campaign_id" name="datagen_campaign_id">
+                        </div>
+                        <div class="row">
+                            <label for="datagen_external_workload_id"> External Workload ID </label>
+                            <input id="datagen_external_workload_id" name="datagen_external_workload_id">
+                        </div>
+                        <div class="row">
+                            <label for="datagen_role"> Role </label>
+                            <input id="datagen_role" name="datagen_role">
+                        </div>
+                        <div class="row">
+                            <label for="datagen_cohort"> Cohort </label>
+                            <input id="datagen_cohort" name="datagen_cohort">
                         </div>
                     </div>
 

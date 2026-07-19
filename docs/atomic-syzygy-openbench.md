@@ -59,9 +59,10 @@ syzygy "{SYZYGY}" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SY
 ```
 
 Publishable presets additionally pass
-`producer_sha256 {PRODUCER_SHA256}` so OpenBench binds every chunk to the exact
-content-addressed generator executable. This provenance option is separate from
-the four-field Syzygy environment wire.
+`network_sha256 {NETWORK_SHA256}` and `producer_sha256 {PRODUCER_SHA256}` so
+OpenBench binds every chunk to the exact registered network and
+content-addressed generator executable. These publication identities are
+separate from the four-field Syzygy environment wire.
 
 `syzygy_wdl` is an explicit N-MAN limit and `syzygy_adj` remains disabled.
 Teacher mode is explicit and byte-exact: `pure` or `true`; `true` means the
@@ -115,9 +116,10 @@ impact and do not replace that conformance evidence.
 
 ## Deployment
 
-This capability uses worker protocol version 40 so workers auto-update and
+The current client uses worker protocol version 41 so workers auto-update and
 re-register with the tablebase advertisement. Migration `0007` adds frozen
-campaign contracts and per-chunk leases/receipts; run it normally after a DB
-and Media backup. Validate on an isolated `:8001` clone first. Restart the
-production server and capable workers only in a coordinated idle window, and
-never use `--fake` for `0007`.
+environment contracts and per-chunk leases/receipts; migration `0008` adds the
+opt-in publication contract and uniqueness constraints. Run both normally
+after a DB and Media backup. Validate on an isolated `:8001` clone first.
+Restart the production server and capable workers only in a coordinated idle
+window, and never use `--fake` for `0007` or `0008`.
