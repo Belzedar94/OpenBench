@@ -19,13 +19,36 @@ sys.path.insert(0, '..')
 from atomicdb.engine import Engine  # noqa: E402
 
 
-def provision_engine(server):
-    """Descarga el motor de referencia del servidor, con sha256 verificado.
-    Reutiliza la copia local si ya coincide."""
+def _fetch_verified(server, entry, dest):
+    """Descarga un archivo del manifest con sha256 verificado; reutiliza la
+    copia local si ya coincide."""
     import hashlib
     import os
-    import platform
     import stat
+
+    def _ok():
+        with open(dest, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest() == entry['sha256']
+
+    if not (os.path.exists(dest) and _ok()):
+        print(f"downloading {entry['file']} ({entry['size_mb']} MB)...",
+              flush=True)
+        r = requests.get(server + '/atomicdb/engines/' + entry['file'],
+                         timeout=600)
+        r.raise_for_status()
+        if hashlib.sha256(r.content).hexdigest() != entry['sha256']:
+            sys.exit(f"download of {entry['file']} failed the sha256 check")
+        with open(dest, 'wb') as f:
+            f.write(r.content)
+        if os.name != 'nt':
+            os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC)
+
+
+def provision_engine(server):
+    """Descarga el motor de referencia (y su red NNUE si el binario no la
+    lleva embebida), todo sha256-verificado."""
+    import os
+    import platform
 
     key = f'{platform.system().lower()}-{platform.machine().lower()}'
     key = {'windows-amd64': 'windows-x86_64',
@@ -38,23 +61,11 @@ def provision_engine(server):
     b = man['binaries'][key]
     os.makedirs('Engines', exist_ok=True)
     dest = os.path.join('Engines', b['file'])
-
-    def _ok():
-        with open(dest, 'rb') as f:
-            return hashlib.sha256(f.read()).hexdigest() == b['sha256']
-
-    if not (os.path.exists(dest) and _ok()):
-        print(f"downloading engine {b['file']} ({b['size_mb']} MB)...",
-              flush=True)
-        r = requests.get(server + '/atomicdb/engines/' + b['file'],
-                         timeout=600)
-        r.raise_for_status()
-        if hashlib.sha256(r.content).hexdigest() != b['sha256']:
-            sys.exit('engine download failed the sha256 check')
-        with open(dest, 'wb') as f:
-            f.write(r.content)
-        if os.name != 'nt':
-            os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC)
+    _fetch_verified(server, b, dest)
+    if b.get('needs_net') and 'net' in man:
+        # la red va al cwd del worker: el default EvalFile del motor la
+        # resuelve desde ahi
+        _fetch_verified(server, man['net'], man['net']['file'])
     print(f'engine ready: {dest}', flush=True)
     return dest
 
