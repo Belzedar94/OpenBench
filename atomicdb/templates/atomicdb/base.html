@@ -74,6 +74,11 @@ details summary{cursor:pointer;color:var(--dim);font-size:.85rem;margin:.6rem 0 
 .verdict{padding:.5rem .9rem;border-radius:8px;background:var(--panel);
   border:1px solid #3a362f;margin:.8rem 0;font-weight:600}
 .verdict.won{border-color:var(--won)}.verdict.lost{border-color:var(--lost)}
+.reqbtn{display:inline-block;padding:.4rem .9rem;border-radius:8px;
+  background:var(--panel);border:1px solid #4a463f;color:var(--fg);
+  font:inherit;font-size:.85rem;cursor:pointer}
+.reqbtn:hover:not(:disabled){border-color:var(--won)}
+.reqbtn:disabled{color:var(--dim);cursor:default}
 .feed{list-style:none}
 .feed li{padding:.45rem .2rem;border-bottom:1px solid #2c2925;font-size:.92rem}
 .feed .t{color:var(--dim);font-size:.8rem;margin-right:.6rem}

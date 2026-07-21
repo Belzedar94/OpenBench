@@ -11,10 +11,13 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from . import ingest, logic
-from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
+from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
+                     RequestLog)
 
 LEASE_MINUTES = 30
 BATCH_SIZE = 25
+REQUESTS_PER_IP_HOUR = 30
+REQUEST_QUEUE_MAX = 200
 
 
 def _auth(request):
@@ -37,14 +40,15 @@ def api_lease(request):
         stale = timezone.now() - timedelta(minutes=LEASE_MINUTES)
         AnalysisTask.objects.filter(state='LEASED', leased_at__lt=stale) \
                             .update(state='PENDING', machine='')
+        # '-source': USER > AUTO alfabeticamente, las peticiones van primero
         batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
                      .filter(state='PENDING')
-                     .order_by('-position__priority')[:BATCH_SIZE])
+                     .order_by('-source', '-position__priority')[:BATCH_SIZE])
         if not batch:
             ingest.next_tasks(BATCH_SIZE)
             batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
                          .filter(state='PENDING')
-                         .order_by('-position__priority')[:BATCH_SIZE])
+                         .order_by('-source', '-position__priority')[:BATCH_SIZE])
         for t in batch:
             t.state, t.machine, t.leased_at = 'LEASED', machine, timezone.now()
             t.attempts += 1
@@ -82,6 +86,35 @@ def api_submit(request):
     task.state, task.completed = 'COMPLETED', timezone.now()
     task.save(update_fields=['state', 'completed'])
     return JsonResponse({'ok': True, 'summary': summary})
+
+
+@csrf_exempt
+def api_request(request, key):
+    """Peticion publica de analisis (estilo chessdb.cn), sin cuenta.
+    Protecciones: rate-limit por IP, dedup ip+posicion, tope global de cola."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    # ultima entrada de XFF: la puso nuestro nginx, el cliente no puede falsearla
+    ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
+          or request.META.get('REMOTE_ADDR', '0.0.0.0'))
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return JsonResponse({'status': 'unknown-position'}, status=404)
+    hour_ago = timezone.now() - timedelta(hours=1)
+    if RequestLog.objects.filter(ip=ip, created__gte=hour_ago,
+                                 position=pos).exists():
+        return JsonResponse({'status': 'already-requested'})
+    if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
+                         .count() >= REQUESTS_PER_IP_HOUR:
+        return JsonResponse({'status': 'rate-limited'}, status=429)
+    if AnalysisTask.objects.filter(state='PENDING', source='USER') \
+                           .count() >= REQUEST_QUEUE_MAX:
+        return JsonResponse({'status': 'queue-full'}, status=503)
+    outcome = ingest.request_analysis(pos)
+    if outcome in ('queued', 'already-queued'):
+        RequestLog.objects.create(ip=ip, position=pos)
+    return JsonResponse({'status': outcome})
 
 
 # ---------------- paginas publicas ----------------
@@ -192,6 +225,8 @@ def home(request):
     total = Position.objects.count()
     closed = Position.objects.exclude(status='UNKNOWN').count()
     analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
+    requested = AnalysisTask.objects.filter(state='PENDING',
+                                            source='USER').count()
     nodes = Position.objects.aggregate(n=__import__('django').db.models.Sum(
         'nodes_invested'))['n'] or 0
     root_key = logic.key_of(logic.start_fen())
@@ -204,6 +239,7 @@ def home(request):
     root = ingest.get_or_create_position(logic.start_fen())
     return render(request, 'atomicdb/home.html', {
         'total': total, 'closed': closed, 'analyses': analyses, 'nodes': nodes,
+        'requested': requested,
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_key': root.key,

@@ -186,6 +186,14 @@ def _still_reachable(pos):
     return parents.filter(parent__status='UNKNOWN').exists()
 
 
+def budget_for(pos):
+    """Escalera por visita + salto directo si el motor ya vio mate."""
+    budget = BUDGET_LADDER[min(pos.visits, len(BUDGET_LADDER) - 1)]
+    if abs(pos.eval_cp or 0) >= MATE_BAND:
+        budget = max(budget, BUDGET_LADDER[2])  # extraer la PV entera
+    return budget
+
+
 def next_tasks(n):
     """Selector global best-first sobre todo el arbol (sin campanas)."""
     refresh_priorities()
@@ -198,16 +206,29 @@ def next_tasks(n):
             pos.priority = -1e9   # rama muerta: fuera de la cola
             pos.save(update_fields=['priority'])
             continue
-        gen = pos.visits
-        budget = BUDGET_LADDER[min(gen, len(BUDGET_LADDER) - 1)]
-        if abs(pos.eval_cp or 0) >= MATE_BAND:
-            budget = max(budget, BUDGET_LADDER[2])  # extraer la PV entera
         task, _ = AnalysisTask.objects.get_or_create(
-            position=pos, generation=gen,
-            defaults={'budget_nodes': budget})
+            position=pos, generation=pos.visits,
+            defaults={'budget_nodes': budget_for(pos)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
+
+
+def request_analysis(pos):
+    """Peticion publica: encola (o promociona) la tarea de esta posicion.
+    Devuelve 'queued' | 'already-queued' | 'already-solved'."""
+    if pos.status != 'UNKNOWN':
+        return 'already-solved'
+    task, created = AnalysisTask.objects.get_or_create(
+        position=pos, generation=pos.visits,
+        defaults={'budget_nodes': budget_for(pos), 'source': 'USER'})
+    if created:
+        return 'queued'
+    if task.state == 'PENDING' and task.source != 'USER':
+        task.source = 'USER'   # promocion: al frente de la cola
+        task.save(update_fields=['source'])
+        return 'queued'
+    return 'already-queued'
 
 
 def close_by_tb(position_key, wdl):
