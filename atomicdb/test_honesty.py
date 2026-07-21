@@ -33,6 +33,13 @@ class PublicHonestyTests(TestCase):
         response = self.client.get('/atomicdb/api/query', {'fen': pos.fen})
         self.assertEqual(response.json()['trust'], 'VERIFIED')
 
+    def test_historical_mate_without_proof_is_unclassified(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        pos.status, pos.closure, pos.proof = 'WHITE_WIN', 'MATE_PV', None
+        pos.save()
+        response = self.client.get('/atomicdb/api/query', {'fen': pos.fen})
+        self.assertEqual(response.json()['trust'], 'UNCLASSIFIED')
+
     def test_disputed_unknown_is_visible(self):
         pos = ingest.get_or_create_position(logic.start_fen())
         pos.proof = 'DISPUTED'

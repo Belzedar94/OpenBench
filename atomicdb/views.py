@@ -531,7 +531,7 @@ def _trust_for(pos):
     if pos.proof:
         return pos.proof
     if pos.closure in ('MATE_PV', 'MINIMAX'):
-        return 'ENGINE'
+        return 'UNCLASSIFIED'
     return 'UNPROVEN'
 
 
