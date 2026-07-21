@@ -11,10 +11,17 @@ from django.utils import timezone
 from . import logic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
-# Sondas profundas estilo chessdb.cn: evals fiables y mates detectados valen
-# mas que anchura barata; 2M nodos ~ 1s en un worker tipico.
-BUDGET_LADDER = [2_000_000, 8_000_000, 32_000_000, 128_000_000, 512_000_000]
+# Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
+# profundidad se compra por sonda; evals fiables valen mas que anchura barata.
+BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
+                 2_000_000_000]
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
+
+
+def multipv_for(visits):
+    """Anchura al sembrar (primeras visitas), profundidad en los peldanos
+    altos: MultiPV 3 alli gana ~1-2 plies."""
+    return 5 if visits < 3 else 3
 
 
 def get_or_create_position(fen, campaign=None):
@@ -229,7 +236,8 @@ def next_tasks(n):
             continue
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
-            defaults={'budget_nodes': budget_for(pos)})
+            defaults={'budget_nodes': budget_for(pos),
+                      'multipv': multipv_for(pos.visits)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -269,7 +277,8 @@ def request_analysis(pos):
         return 'already-solved'
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
-        defaults={'budget_nodes': budget_for(pos), 'source': 'USER'})
+        defaults={'budget_nodes': budget_for(pos), 'source': 'USER',
+                  'multipv': multipv_for(pos.visits)})
     if created:
         return 'queued'
     if task.state == 'PENDING' and task.source != 'USER':

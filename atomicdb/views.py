@@ -18,7 +18,7 @@ from . import ingest, logic
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      RequestLog, WorkerPing)
 
-LEASE_MINUTES = 30
+LEASE_MINUTES = 60   # 2B nodos deben caber en maquinas de ~1 MNps
 BATCH_SIZE = 25
 REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
