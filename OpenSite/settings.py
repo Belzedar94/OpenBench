@@ -168,4 +168,4 @@ USE_TZ = True
 STATIC_URL = '/static/'
 WHITENOISE_USE_FINDERS = True
 
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
