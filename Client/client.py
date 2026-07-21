@@ -27,6 +27,7 @@ import tempfile
 import time
 import traceback
 import zipfile
+from pathlib import PurePosixPath
 
 class BadVersionException(Exception):
     def __init__(self, message='Wrong Client Version'):
@@ -66,6 +67,27 @@ def has_worker():
         return True
     except ImportError:
         return False
+
+
+def archive_client_root(zip_file):
+
+    # GitHub replaces slashes in refs when naming the archive root. Discover
+    # that root from the archive instead of assuming it is OpenBench-<ref>.
+    roots = set()
+    has_client = False
+    for info in zip_file.infolist():
+        path = PurePosixPath(info.filename)
+        if path.is_absolute() or '..' in path.parts or not path.parts:
+            raise ValueError('Unsafe Client archive member')
+        roots.add(path.parts[0])
+        has_client = has_client or path.parts[1:] == ('Client', 'client.py')
+
+    if len(roots) != 1 or not has_client:
+        raise ValueError('Client archive has an unexpected layout')
+    root = roots.pop()
+    if not root.startswith('OpenBench-'):
+        raise ValueError('Client archive has an unexpected root')
+    return root
 
 def custom_help(default_help):
 
@@ -140,10 +162,11 @@ def download_client_files(args):
             # Extract the zip with a temp file
             with tempfile.TemporaryDirectory() as temp_dir:
                 with zipfile.ZipFile(temp_zip_file) as zip_file:
+                    archive_root = archive_client_root(zip_file)
                     zip_file.extractall(temp_dir)
 
                 # Copy all files except client.py
-                client_dir = os.path.join(temp_dir, 'OpenBench-%s' % (repo_ref), 'Client')
+                client_dir = os.path.join(temp_dir, archive_root, 'Client')
                 for root, dirs, files in os.walk(client_dir):
                     for file in files:
                         if file != 'client.py':

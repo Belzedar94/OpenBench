@@ -2,8 +2,10 @@
 
 OpenBench can route Atomic tablebase workloads only to workers that own the
 authenticated 3--6-man Atomic corpus. This is worker capability plumbing; it
-does not add a new workload type, result protocol, database table, or stopping
-rule. Atomic Syzygy measurements use ordinary fixed-game (`GAMES`) workloads.
+supports ordinary fixed-game (`GAMES`) measurements and an opt-in v40
+environment contract for generic `DATAGEN`. It does not add a statistical
+stopping rule: GAMES still finishes by game count and DATAGEN by its immutable
+chunk map.
 
 ## Worker-local corpus
 
@@ -28,6 +30,10 @@ Both flags are required together. At startup the client:
   an official-MD5 pass to the exact inventory and to postdate its files; and
 - advertises the Atomic maximum cardinality and inventory SHA-256.
 
+Before every tablebase-backed DATAGEN launch, the client repeats the inventory,
+hardlink, marker, and completeness checks. The resolved command is logged only
+by SHA-256; worker-local paths are never printed.
+
 The Atomic engine configuration pins that capability:
 
 ```json
@@ -43,6 +49,32 @@ per-side `SyzygyProbeLimit` values are preserved.
 Atomic workloads must set `syzygy_adj=DISABLED`: cutechess-ob's tablebase
 adjudicator consumes orthodox `.rtbw` files. Engine probing remains enabled via
 `syzygy_wdl=6-MAN`.
+
+## Generic DATAGEN with Atomic tables
+
+Tablebase-backed DATAGEN must use all four environment placeholders:
+
+```text
+syzygy "{SYZYGY}" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}
+```
+
+Publishable presets additionally pass
+`network_sha256 {NETWORK_SHA256}` and `producer_sha256 {PRODUCER_SHA256}` so
+OpenBench binds every chunk to the exact registered network and
+content-addressed generator executable. These publication identities are
+separate from the four-field Syzygy environment wire.
+
+`syzygy_wdl` is an explicit N-MAN limit and `syzygy_adj` remains disabled.
+Teacher mode is explicit and byte-exact: `pure` or `true`; `true` means the
+legacy-playing teacher. The scheduler requires the exact Atomic manifest and
+sufficient cardinality. At claim time the server freezes that authenticated
+worker capability in a hashed lease; at upload it creates a hashed receipt
+binding the lease to the exact output bytes. Neither document contains the
+worker-local tablebase path.
+
+The depth-7 `pure` and `true` presets are canaries, kept separate from the
+legacy depth-6 default. Do not activate them until the Atomic engine bridge,
+golden vectors, and a local A/B format check are green.
 
 ## Four fixed-game measurements
 
@@ -84,7 +116,10 @@ impact and do not replace that conformance evidence.
 
 ## Deployment
 
-This capability bumps the worker protocol version so workers auto-update and
-re-register with the new tablebase advertisement. Restart the server after the
-configuration lands, then restart capable workers with both Atomic flags. No
-database migration or `--run-syncdb` step is introduced by this change.
+The current client uses worker protocol version 41 so workers auto-update and
+re-register with the tablebase advertisement. Migration `0007` adds frozen
+environment contracts and per-chunk leases/receipts; migration `0008` adds the
+opt-in publication contract and uniqueness constraints. Run both normally
+after a DB and Media backup. Validate on an isolated `:8001` clone first.
+Restart the production server and capable workers only in a coordinated idle
+window, and never use `--fake` for `0007` or `0008`.

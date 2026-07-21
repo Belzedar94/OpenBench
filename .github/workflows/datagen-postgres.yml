@@ -1,0 +1,43 @@
+name: DATAGEN PostgreSQL races
+
+on:
+  pull_request:
+  push:
+    branches: [spell-runner]
+
+jobs:
+  datagen-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: openbench_test
+          POSTGRES_USER: openbench
+          POSTGRES_PASSWORD: openbench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openbench -d openbench_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPENBENCH_POSTGRES_DB: openbench_test
+      OPENBENCH_POSTGRES_USER: openbench
+      OPENBENCH_POSTGRES_PASSWORD: openbench
+      OPENBENCH_POSTGRES_HOST: 127.0.0.1
+      OPENBENCH_POSTGRES_PORT: 5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt -r Client/requirements.txt
+      - run: python -c "import cpuinfo, psutil, requests"
+      - run: python manage.py migrate --noinput
+      - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
+      - run: python -m unittest UnitTests.test_datagen_worker -v
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py check

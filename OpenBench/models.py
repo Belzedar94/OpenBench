@@ -18,10 +18,30 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+import hashlib
+import json
+import string
+
 from django.db.models import CharField, IntegerField, BigIntegerField, BooleanField, FloatField
 from django.db.models import JSONField, ForeignKey, DateTimeField, OneToOneField, TextField
-from django.db.models import CASCADE, PROTECT, SET_NULL, Model, UniqueConstraint
+from django.db.models import (
+    CASCADE, PROTECT, SET_NULL, CheckConstraint, Model, Q, UniqueConstraint,
+)
 from django.contrib.auth.models import User
+
+from OpenBench.datagen_publication import (
+    DATAGEN_PUBLICATION_PROTOCOL,
+    build_publication_contract,
+    canonical_json_sha256,
+    publication_contract_is_current,
+)
+
+
+DATAGEN_TABLEBASE_PLACEHOLDERS = frozenset({
+    'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
+})
+DATAGEN_ENVIRONMENT_SCHEMA = 'openbench-datagen-environment-v40'
+DATAGEN_RECEIPT_SCHEMA = 'openbench-datagen-tablebase-receipt-v40'
 
 class Engine(Model):
 
@@ -147,6 +167,54 @@ class Test(Model):
     datagen_positions_per_chunk = BigIntegerField(default=0)
     datagen_base_seed           = BigIntegerField(default=0)
     datagen_completed_chunks    = IntegerField(default=0)
+    # Frozen when the chunk map is initialized.  Runtime authorization must
+    # never be derived from the mutable command text after workers have begun.
+    datagen_producer_required        = BooleanField(default=False)
+    datagen_producer_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    # Durable reservation counters make producer admission independent of the
+    # number of chunks and prevent upload -> requeue quota bypasses.
+    datagen_producer_build_count = IntegerField(default=0)
+    datagen_producer_build_bytes = BigIntegerField(default=0)
+    # Optional tablebase-backed DATAGEN is an explicit, frozen opt-in.  Paths
+    # are worker-local and are deliberately never persisted; only the corpus
+    # identity and the deterministic probe limit enter the campaign contract.
+    datagen_tablebase_required = BooleanField(default=False)
+    datagen_tablebase_family = CharField(max_length=16, default='', blank=True)
+    datagen_tablebase_max = IntegerField(default=0)
+    datagen_tablebase_manifest_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    datagen_teacher_mode = CharField(max_length=32, default='', blank=True)
+    datagen_environment_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    # Protocol v41 freezes the complete publisher-facing identity before the
+    # chunk map exists. Legacy DATAGEN rows keep protocol 0 and empty fields.
+    datagen_publication_protocol = IntegerField(default=0)
+    datagen_campaign_id = CharField(max_length=128, default='', blank=True)
+    datagen_external_workload_id = CharField(
+        max_length=128, default='', blank=True,
+    )
+    datagen_role = CharField(max_length=128, default='', blank=True)
+    datagen_cohort = CharField(max_length=128, default='', blank=True)
+    datagen_publication_contract = JSONField(default=dict, blank=True)
+    datagen_publication_contract_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    # Redundant frozen asset columns prevent a rewritten contract plus a
+    # recomputed self-hash from silently changing the publisher's inputs.
+    datagen_network_sha256 = CharField(max_length=64, default='', blank=True)
+    datagen_network_bytes = BigIntegerField(default=0)
+    datagen_book_kind = CharField(max_length=32, default='', blank=True)
+    datagen_book_source = CharField(max_length=2048, default='', blank=True)
+    datagen_book_text_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    datagen_book_raw_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
 
     # Collection of all individual Result() objects
     games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
@@ -194,12 +262,166 @@ class Test(Model):
     def is_generic_datagen(self):
         return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
 
+    def is_publication_datagen(self):
+        return (
+            self.is_generic_datagen()
+            and self.datagen_publication_protocol == DATAGEN_PUBLICATION_PROTOCOL
+        )
+
+    def datagen_requires_producer_artifact(self):
+        return self.is_generic_datagen() and self.datagen_producer_required
+
+    @staticmethod
+    def producer_requirement_from_command(command):
+        try:
+            return any(
+                name == 'PRODUCER_SHA256'
+                for _literal, name, _format_spec, _conversion
+                in string.Formatter().parse(command)
+            )
+        except ValueError:
+            return False
+
+    @classmethod
+    def producer_contract_for_command(cls, command):
+        required = cls.producer_requirement_from_command(command)
+        contract = json.dumps({
+            'command': command,
+            'producer_artifact_required': required,
+            'protocol': 39,
+            'schema': 'openbench-datagen-producer-v39',
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return required, hashlib.sha256(contract).hexdigest()
+
+    def freeze_datagen_producer_contract(self):
+        required, contract_sha256 = self.producer_contract_for_command(
+            self.datagen_command
+        )
+        self.datagen_producer_required = required
+        self.datagen_producer_contract_sha256 = contract_sha256
+
+    def datagen_producer_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return True
+        required, contract_sha256 = self.producer_contract_for_command(
+            self.datagen_command
+        )
+        return (
+            required == self.datagen_producer_required
+            and contract_sha256 == self.datagen_producer_contract_sha256
+        )
+
+    @staticmethod
+    def datagen_template_fields(command):
+        try:
+            return {
+                name for _literal, name, _format_spec, _conversion
+                in string.Formatter().parse(command) if name is not None
+            }
+        except ValueError:
+            return set()
+
+    @classmethod
+    def tablebase_requirement_from_command(cls, command):
+        return bool(cls.datagen_template_fields(command)
+                    & DATAGEN_TABLEBASE_PLACEHOLDERS)
+
+    @classmethod
+    def environment_contract_for_command(
+        cls, command, family='', maximum=0, manifest_sha256='', teacher_mode='',
+    ):
+        required = cls.tablebase_requirement_from_command(command)
+        contract = json.dumps({
+            'protocol': 40,
+            'schema': DATAGEN_ENVIRONMENT_SCHEMA,
+            'tablebase': {
+                'required': required,
+                'family': family if required else '',
+                'max': int(maximum) if required else 0,
+                'manifest_sha256': (
+                    manifest_sha256.lower() if required else ''
+                ),
+            },
+            'teacher_mode': teacher_mode,
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return required, hashlib.sha256(contract).hexdigest()
+
+    def freeze_datagen_environment_contract(
+        self, family='', maximum=0, manifest_sha256='', teacher_mode='',
+    ):
+        required, contract_sha256 = self.environment_contract_for_command(
+            self.datagen_command,
+            family,
+            maximum,
+            manifest_sha256,
+            teacher_mode,
+        )
+        self.datagen_tablebase_required = required
+        self.datagen_tablebase_family = family if required else ''
+        self.datagen_tablebase_max = int(maximum) if required else 0
+        self.datagen_tablebase_manifest_sha256 = (
+            manifest_sha256.lower() if required else ''
+        )
+        self.datagen_teacher_mode = teacher_mode
+        self.datagen_environment_contract_sha256 = contract_sha256
+
+    def datagen_environment_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return True
+        required, contract_sha256 = self.environment_contract_for_command(
+            self.datagen_command,
+            self.datagen_tablebase_family,
+            self.datagen_tablebase_max,
+            self.datagen_tablebase_manifest_sha256,
+            self.datagen_teacher_mode,
+        )
+        return (
+            required == self.datagen_tablebase_required
+            and contract_sha256 == self.datagen_environment_contract_sha256
+        )
+
+    def freeze_datagen_publication_contract(self, network, book):
+        if not self.is_publication_datagen():
+            raise ValueError('Only protocol v41 DATAGEN has a publication contract')
+        self.datagen_network_sha256 = network['sha256']
+        self.datagen_network_bytes = network['bytes']
+        self.datagen_book_kind = book['kind']
+        self.datagen_book_source = book['source'] or ''
+        self.datagen_book_text_sha256 = book['text_sha256'] or ''
+        self.datagen_book_raw_sha256 = book['raw_sha256'] or ''
+        document = build_publication_contract(self, network, book)
+        self.datagen_publication_contract = document
+        self.datagen_publication_contract_sha256 = canonical_json_sha256(document)
+
+    def datagen_publication_contract_is_current(self):
+        if not self.is_generic_datagen():
+            return self.datagen_publication_protocol == 0
+        return publication_contract_is_current(self)
+
     def datagen_total_chunks(self):
         if not self.datagen_positions_per_chunk:
             return 0
         return (
             self.datagen_total_count + self.datagen_positions_per_chunk - 1
         ) // self.datagen_positions_per_chunk
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(datagen_publication_protocol__in=[0, 41]),
+                name='datagen_publication_protocol_valid',
+            ),
+            UniqueConstraint(
+                fields=['datagen_campaign_id', 'datagen_external_workload_id'],
+                condition=Q(datagen_publication_protocol=41),
+                name='unique_datagen_v41_campaign_workload',
+            ),
+            UniqueConstraint(
+                fields=['datagen_campaign_id', 'datagen_role', 'datagen_cohort'],
+                condition=Q(datagen_publication_protocol=41),
+                name='unique_datagen_v41_campaign_role_cohort',
+            ),
+        ]
 
 class DatagenChunk(Model):
 
@@ -214,6 +436,24 @@ class DatagenChunk(Model):
     status      = CharField(max_length=16, default=PENDING)
     sha256      = CharField(max_length=64, default='', blank=True)
     bytes       = BigIntegerField(default=0)
+    producer_sha256 = CharField(max_length=64, default='', blank=True)
+    producer_bytes  = BigIntegerField(default=0)
+    producer_commit = CharField(max_length=40, default='', blank=True)
+    producer_build = ForeignKey(
+        'DatagenProducerBuild', SET_NULL,
+        related_name='chunks', null=True, blank=True,
+    )
+    # Server-generated immutable receipt binding an authenticated worker
+    # capability to the exact uploaded output.  Empty for legacy/non-tablebase
+    # DATAGEN chunks.
+    environment_receipt = JSONField(default=dict, blank=True)
+    environment_receipt_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
+    environment_lease = JSONField(default=dict, blank=True)
+    environment_lease_sha256 = CharField(
+        max_length=64, default='', blank=True,
+    )
     machine     = ForeignKey(
         'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)
     attempts    = IntegerField(default=0)
@@ -237,6 +477,123 @@ class DatagenChunk(Model):
 
     def seed(self):
         return self.test.datagen_base_seed + self.idx
+
+
+class DatagenProducerArtifact(Model):
+
+    # The executable itself is immutable content-addressed evidence. Campaign
+    # build rows bind commit/contract; chunk strings remain wire-compatible
+    # denormalized evidence backed by the producer_build FK.
+    STAGING   = 'STAGING'
+    AVAILABLE = 'AVAILABLE'
+    CORRUPT   = 'CORRUPT'
+    UNVERIFIED = 'UNVERIFIED'
+
+    sha256 = CharField(max_length=64, unique=True)
+    bytes  = BigIntegerField()
+    state = CharField(max_length=16, default=STAGING)
+    staging_name = CharField(max_length=512, default='', blank=True)
+    reference_count = BigIntegerField(default=0)
+    created = DateTimeField(auto_now_add=True)
+    updated = DateTimeField(auto_now=True)
+    last_verified = DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(bytes__gt=0), name='datagen_producer_bytes_positive',
+            ),
+            CheckConstraint(
+                check=Q(reference_count__gte=0),
+                name='datagen_producer_refcount_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(state__in=[
+                    'STAGING', 'AVAILABLE', 'CORRUPT', 'UNVERIFIED',
+                ]),
+                name='datagen_producer_state_valid',
+            ),
+        ]
+
+    def __str__(self):
+        return 'DATAGEN producer %s' % self.sha256
+
+    def filename(self):
+        return 'datagen-producers/sha256/%s/%s' % (
+            self.sha256[:2], self.sha256,
+        )
+
+
+class DatagenProducerBuild(Model):
+
+    test = ForeignKey('Test', CASCADE, related_name='datagen_producer_builds')
+    artifact = ForeignKey(
+        'DatagenProducerArtifact', PROTECT, related_name='campaign_builds',
+    )
+    owner = ForeignKey(
+        User, PROTECT, related_name='datagen_producer_builds',
+    )
+    commit = CharField(max_length=40)
+    contract_sha256 = CharField(max_length=64)
+    created = DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['test', 'artifact'],
+                name='unique_datagen_campaign_producer',
+            ),
+        ]
+
+    def __str__(self):
+        return 'DATAGEN #%d producer %s' % (self.test_id, self.artifact.sha256)
+
+
+class DatagenProducerQuota(Model):
+
+    # A single locked row serializes physical CAS reservations on every
+    # database backend, including PostgreSQL where aggregate scans alone race.
+    key = CharField(max_length=16, primary_key=True, default='global')
+    artifact_count = BigIntegerField(default=0)
+    reserved_bytes = BigIntegerField(default=0)
+    updated = DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(key='global'), name='datagen_global_quota_singleton',
+            ),
+            CheckConstraint(
+                check=Q(artifact_count__gte=0),
+                name='datagen_global_artifacts_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(reserved_bytes__gte=0),
+                name='datagen_global_bytes_nonnegative',
+            ),
+        ]
+
+
+class DatagenProducerOwnerQuota(Model):
+
+    owner = OneToOneField(
+        User, CASCADE, primary_key=True, related_name='datagen_producer_quota',
+    )
+    build_count = BigIntegerField(default=0)
+    reserved_bytes = BigIntegerField(default=0)
+    updated = DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            CheckConstraint(
+                check=Q(build_count__gte=0),
+                name='datagen_owner_builds_nonnegative',
+            ),
+            CheckConstraint(
+                check=Q(reserved_bytes__gte=0),
+                name='datagen_owner_bytes_nonnegative',
+            ),
+        ]
 
 class LogEvent(Model):
 

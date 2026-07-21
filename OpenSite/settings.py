@@ -32,7 +32,13 @@ ALLOWED_HOSTS = ['*']
 # tunnels (their subdomain rotates on every tunnel restart).
 CSRF_TRUSTED_ORIGINS = [
     o for o in os.environ.get('OPENBENCH_TRUSTED_ORIGINS',
-                              'https://*.trycloudflare.com').split(',') if o]
+                              'https://belzedar.duckdns.org,https://*.trycloudflare.com').split(',') if o]
+
+# Trust X-Forwarded-Proto only when the application is known to sit behind a
+# proxy that strips the client-supplied header and sets its own value.  DATAGEN
+# producer/manifest HTTP Basic authentication relies on request.is_secure().
+if os.environ.get('OPENBENCH_TRUST_X_FORWARDED_PROTO', 'False') == 'True':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 HTML_MINIFY   = True
 APPEND_SLASH  = True
@@ -107,6 +113,20 @@ DATABASES = {
     }
 }
 
+# Production and CI can exercise the row-lock/CAS path on PostgreSQL without
+# maintaining a second settings module. SQLite remains the zero-config local
+# default used by existing installations.
+if os.environ.get('OPENBENCH_POSTGRES_DB'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ['OPENBENCH_POSTGRES_DB'],
+        'USER': os.environ.get('OPENBENCH_POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.environ.get('OPENBENCH_POSTGRES_PASSWORD', ''),
+        'HOST': os.environ.get('OPENBENCH_POSTGRES_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('OPENBENCH_POSTGRES_PORT', '5432'),
+        'CONN_MAX_AGE': 0,
+    }
+
 
 # Password validation
 # https://docs.djangoproject.com/en/2.0/ref/settings/#auth-password-validators
@@ -146,7 +166,3 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 WHITENOISE_USE_FINDERS = True
-
-# --- Proxy HTTPS (nginx) : NO borrar - sin esto el CSRF de registro da 403 ---
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-CSRF_TRUSTED_ORIGINS = ["https://belzedar.duckdns.org"]

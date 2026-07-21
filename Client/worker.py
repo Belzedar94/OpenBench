@@ -35,6 +35,7 @@ import queue
 import re
 import requests
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -75,13 +76,15 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 38 # Client version to send to the Server
+CLIENT_VERSION   = 41 # Client version to send to the Server
 TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
 DATAGEN_TRANSFER_RETRIES = 3
 DATAGEN_TRANSFER_RETRY_DELAY = 5
+ATOMIC_DATAGEN_TABLEBASE_MIN = 3
+ATOMIC_DATAGEN_TABLEBASE_MAX = 6
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -358,6 +361,7 @@ class ServerReporter:
         datagen = (config.workload or {}).get('test', {}).get('datagen')
         if datagen:
             payload.setdefault('chunk_idx', datagen['chunk_idx'])
+            payload.setdefault('attempt', datagen['attempt'])
 
         payload['machine_id'] = config.machine_id
         payload['secret']     = config.secret_token
@@ -502,14 +506,97 @@ class ServerReporter:
         return ServerReporter.report(config, 'clientSubmitPGN', payload, files)
 
     @staticmethod
-    def report_datagen(config, path, sha256, byte_count):
+    def report_datagen_producer(
+        config, path, sha256, byte_count, commit, metadata_only=False
+    ):
 
         payload = {
             'test_id': config.workload['test']['id'],
             'chunk_idx': config.workload['test']['datagen']['chunk_idx'],
+            'attempt': config.workload['test']['datagen']['attempt'],
+            'sha256': sha256,
+            'bytes': byte_count,
+            'commit': commit,
+            'metadata_only': int(metadata_only),
+        }
+
+        target = url_join(config.server, 'clientSubmitDatagenProducer')
+        payload['machine_id'] = config.machine_id
+        payload['secret'] = config.secret_token
+
+        if metadata_only:
+            response = requests.post(
+                target,
+                data=payload,
+                timeout=TIMEOUT_HTTP,
+            )
+        else:
+            with open(path, 'rb') as data:
+                response = requests.post(
+                    target,
+                    data=payload,
+                    files={
+                        'file': (
+                            os.path.basename(path), data, 'application/octet-stream'
+                        )
+                    },
+                    timeout=(TIMEOUT_HTTP, 600),
+                )
+
+        try:
+            body = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise RuntimeError(
+                'DATAGEN producer upload returned a non-JSON response'
+            )
+
+        if 'Bad Client Version' in body.get('error', ''):
+            raise BadVersionException()
+        if response.status_code != 200 or 'error' in body:
+            raise RuntimeError(
+                body.get('error', 'DATAGEN producer upload failed')
+            )
+        return body
+
+    @staticmethod
+    def report_datagen(
+        config, path, sha256, byte_count, producer=None, tablebase=None
+    ):
+
+        payload = {
+            'test_id': config.workload['test']['id'],
+            'chunk_idx': config.workload['test']['datagen']['chunk_idx'],
+            'attempt': config.workload['test']['datagen']['attempt'],
             'sha256': sha256,
             'bytes': byte_count,
         }
+        if producer is not None:
+            payload.update({
+                'producer_sha256': producer['sha256'],
+                'producer_bytes': producer['bytes'],
+                'producer_commit': producer['commit'],
+            })
+        if tablebase is not None:
+            payload.update({
+                'environment_contract_sha256': (
+                    tablebase['environment_contract_sha256']
+                ),
+                'environment_lease_sha256': tablebase[
+                    'environment_lease_sha256'
+                ],
+                'tablebase_family': tablebase['family'] or '',
+                'tablebase_max': tablebase['required_max'],
+                'tablebase_worker_max': tablebase['worker_max'],
+                'tablebase_manifest_sha256': (
+                    tablebase['manifest_sha256'] or ''
+                ),
+                'teacher_mode': tablebase['teacher_mode'] or '',
+            })
+            if tablebase.get('publication_contract_sha256'):
+                payload['publication_contract_sha256'] = tablebase[
+                    'publication_contract_sha256'
+                ]
 
         target = url_join(config.server, 'clientSubmitDatagen')
         payload['machine_id'] = config.machine_id
@@ -529,6 +616,8 @@ class ServerReporter:
             response.raise_for_status()
             raise RuntimeError('DATAGEN upload returned a non-JSON response')
 
+        if 'Bad Client Version' in body.get('error', ''):
+            raise BadVersionException()
         if response.status_code != 200 or 'error' in body:
             raise RuntimeError(body.get('error', 'DATAGEN upload failed'))
         return body
@@ -1171,6 +1260,18 @@ def tablebase_capability(config, family):
     raise ValueError('Unknown tablebase family: %s' % (family))
 
 
+def tablebase_manifest(config, family):
+
+    if family == 'atomic':
+        return config.atomic_syzygy_manifest_sha256
+    # The legacy standard-Syzygy capability has no authenticated inventory
+    # contract.  It remains valid for gameplay, but cannot satisfy the new
+    # provenance-bearing DATAGEN path.
+    if family == 'standard':
+        return None
+    raise ValueError('Unknown tablebase family: %s' % (family))
+
+
 def split_tablebase_paths(path_value):
 
     return path_value.split(':' if IS_LINUX else ';')
@@ -1619,14 +1720,84 @@ def terminate_datagen_process(process):
             pass
 
 
+def _open_datagen_regular(path):
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise OSError('DATAGEN artifact is not a regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or (before.st_dev, before.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise OSError('DATAGEN artifact changed while opening')
+        return os.fdopen(descriptor, 'rb'), after
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def datagen_file_sha256(path):
+    data, before = _open_datagen_regular(path)
+
     digest = hashlib.sha256()
     byte_count = 0
-    with open(path, 'rb') as data:
+    with data:
         while block := data.read(1024 * 1024):
             digest.update(block)
             byte_count += len(block)
+        after = os.fstat(data.fileno())
+
+    identity = lambda stat: (
+        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+    )
+    if identity(before) != identity(after) or byte_count != after.st_size:
+        raise OSError('DATAGEN artifact changed while hashing')
     return digest.hexdigest(), byte_count
+
+
+def snapshot_datagen_producer(source_path, snapshot_path):
+    """Copy and hash one private executable snapshot from a stable descriptor."""
+
+    source, before = _open_datagen_regular(source_path)
+    target_flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
+    )
+    target_fd = None
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        target_fd = os.open(snapshot_path, target_flags, 0o700)
+        with source, os.fdopen(target_fd, 'wb') as target:
+            target_fd = None
+            while block := source.read(1024 * 1024):
+                digest.update(block)
+                byte_count += len(block)
+                target.write(block)
+            target.flush()
+            os.fsync(target.fileno())
+            after = os.fstat(source.fileno())
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+        )
+        if identity(before) != identity(after) or byte_count != after.st_size:
+            raise OSError('DATAGEN producer changed while snapshotting')
+        os.chmod(snapshot_path, 0o700)
+        return digest.hexdigest(), byte_count
+    except Exception:
+        if target_fd is not None:
+            os.close(target_fd)
+        try:
+            if os.path.lexists(snapshot_path):
+                os.remove(snapshot_path)
+        except OSError:
+            pass
+        raise
 
 
 def compress_datagen_output(source_path, target_path, heartbeat):
@@ -1664,19 +1835,86 @@ def compress_datagen_output(source_path, target_path, heartbeat):
                 raise DatagenStopped()
 
 
-def upload_datagen_output(config, path, sha256, byte_count, heartbeat):
+def upload_datagen_producer(
+    config, path, sha256, byte_count, commit, heartbeat
+):
+    """Bind a cached producer, uploading its bytes only when the CAS needs them."""
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            response = ServerReporter.report_datagen_producer(
+                config,
+                None,
+                sha256,
+                byte_count,
+                commit,
+                metadata_only=True,
+            )
+            if response.get('upload_required') is True:
+                response = ServerReporter.report_datagen_producer(
+                    config, path, sha256, byte_count, commit
+                )
+            expected = {
+                'sha256': sha256,
+                'bytes': byte_count,
+                'commit': commit,
+            }
+            for field, value in expected.items():
+                if response.get(field) != value:
+                    raise RuntimeError(
+                        'DATAGEN producer response mismatched %s' % field
+                    )
+            return expected
+        except BadVersionException:
+            raise
+        except Exception as error:
+            if attempt + 1 == DATAGEN_TRANSFER_RETRIES:
+                raise DatagenTransientError(
+                    'DATAGEN producer upload failed after %d attempts: %s'
+                    % (DATAGEN_TRANSFER_RETRIES, error)
+                ) from error
+            traceback.print_exc()
+            if heartbeat.stop_requested.wait(DATAGEN_TRANSFER_RETRY_DELAY):
+                raise DatagenStopped()
+
+
+def upload_datagen_output(
+    config, path, sha256, byte_count, heartbeat, producer=None, tablebase=None
+):
     """Upload one immutable archive with bounded transport retries."""
 
     for attempt in range(DATAGEN_TRANSFER_RETRIES):
         try:
-            response = ServerReporter.report_datagen(
-                config, path, sha256, byte_count
-            )
+            if tablebase is None:
+                if producer is None:
+                    response = ServerReporter.report_datagen(
+                        config, path, sha256, byte_count
+                    )
+                else:
+                    response = ServerReporter.report_datagen(
+                        config, path, sha256, byte_count, producer
+                    )
+            else:
+                response = ServerReporter.report_datagen(
+                    config,
+                    path,
+                    sha256,
+                    byte_count,
+                    producer=producer,
+                    tablebase=tablebase,
+                )
             for field in ('completed_chunks', 'total_chunks'):
                 if field not in response:
                     raise RuntimeError(
                         'DATAGEN upload response omitted %s' % field
                     )
+            if tablebase is not None and not re.fullmatch(
+                r'[0-9a-f]{64}',
+                response.get('environment_receipt_sha256', ''),
+            ):
+                raise RuntimeError(
+                    'DATAGEN upload response omitted tablebase receipt'
+                )
             return response
         except BadVersionException:
             raise
@@ -1747,12 +1985,414 @@ def clean_datagen_workspace(output_path):
     return errors
 
 
-def render_datagen_command(config, output_path, network_path=None):
+def datagen_publication_contract(config):
+    data = config.workload['test']['datagen']
+    protocol = data.get('publication_protocol', 0)
+    if protocol in (None, 0):
+        return None
+    if protocol != 41:
+        raise DatagenConfigurationError(
+            'DATAGEN publication protocol is malformed or unsupported'
+        )
+    document = data.get('publication_contract')
+    digest = str(data.get('publication_contract_sha256', '')).lower()
+    if not isinstance(document, dict) or not re.fullmatch(
+        r'[0-9a-f]{64}', digest
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN publication contract is missing'
+        )
+    try:
+        encoded = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode('utf-8')
+    except (TypeError, ValueError):
+        raise DatagenConfigurationError(
+            'DATAGEN publication contract is not canonical JSON'
+        ) from None
+    if hashlib.sha256(encoded).hexdigest() != digest:
+        raise DatagenConfigurationError(
+            'DATAGEN publication contract hash is invalid'
+        )
+
+    test = config.workload['test']
+    dev = test['dev']
+    book = test['book']
+    try:
+        generation = document['generation']
+        engine = document['engine']
+        network = document['network']
+        frozen_book = document['book']
+        producer = document['producer']
+        syzygy = document['syzygy']
+        teacher = document['teacher']
+        command = data['command']
+        publication_ids_valid = all(
+            isinstance(document.get(field), str)
+            and re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,127}', document[field])
+            for field in ('campaign_id', 'external_workload_id', 'role', 'cohort')
+        )
+        network_valid = (
+            set(network) == {'name', 'openbench_id', 'sha256', 'bytes'}
+            and isinstance(network['name'], str)
+            and bool(network['name'])
+            and isinstance(network['openbench_id'], str)
+            and re.fullmatch(r'[0-9A-F]{8}', network['openbench_id'])
+            and isinstance(network['sha256'], str)
+            and re.fullmatch(r'[0-9a-f]{64}', network['sha256'])
+            and network['sha256'].upper().startswith(network['openbench_id'])
+            and type(network['bytes']) is int
+            and network['bytes'] > 0
+        )
+        if frozen_book.get('name') == 'NONE':
+            book_valid = frozen_book == {
+                'kind': 'builtin-startpos',
+                'name': 'NONE',
+                'source': None,
+                'text_sha256': None,
+                'raw_sha256': None,
+            }
+        else:
+            book_valid = (
+                set(frozen_book) == {
+                    'kind', 'name', 'source', 'text_sha256', 'raw_sha256',
+                }
+                and frozen_book.get('kind') == 'file'
+                and isinstance(frozen_book.get('name'), str)
+                and bool(frozen_book.get('name'))
+                and isinstance(frozen_book.get('source'), str)
+                and bool(frozen_book.get('source').strip())
+                and len(frozen_book.get('source')) <= 2048
+                and re.fullmatch(
+                    r'[0-9a-f]{64}', frozen_book.get('text_sha256', '')
+                )
+                and re.fullmatch(
+                    r'[0-9a-f]{64}', frozen_book.get('raw_sha256', '')
+                )
+            )
+        generation_valid = (
+            type(generation.get('total_count')) is int
+            and 0 < generation['total_count'] <= 2**63 - 1
+            and type(generation.get('positions_per_chunk')) is int
+            and 0 < generation['positions_per_chunk'] <= 2**63 - 1
+            and type(generation.get('base_seed')) is int
+            and 0 <= generation['base_seed'] <= 2**63 - 1
+        )
+        if generation_valid:
+            total_chunks = (
+                generation['total_count']
+                + generation['positions_per_chunk'] - 1
+            ) // generation['positions_per_chunk']
+            generation_valid = (
+                generation['base_seed'] + total_chunks - 1 <= 2**63 - 1
+            )
+        producer_valid = (
+            type(producer.get('required')) is bool
+            and re.fullmatch(
+                r'[0-9a-f]{64}', producer.get('contract_sha256', '')
+            )
+        )
+        syzygy_valid = (
+            type(syzygy.get('required')) is bool
+            and re.fullmatch(
+                r'[0-9a-f]{64}',
+                syzygy.get('environment_contract_sha256', ''),
+            )
+        )
+        if syzygy_valid and syzygy['required']:
+            syzygy_valid = (
+                syzygy.get('family') == 'atomic'
+                and type(syzygy.get('max')) is int
+                and syzygy['max'] in range(3, 7)
+                and re.fullmatch(
+                    r'[0-9a-f]{64}', syzygy.get('manifest_sha256', '')
+                )
+                and teacher == {'mode': teacher.get('mode')}
+                and teacher.get('mode') in {'pure', 'true'}
+            )
+        elif syzygy_valid:
+            syzygy_valid = (
+                syzygy.get('family') is None
+                and syzygy.get('max') == 0
+                and syzygy.get('manifest_sha256') is None
+                and teacher == {'mode': None}
+            )
+        engine_valid = (
+            isinstance(engine.get('name'), str)
+            and bool(engine['name'])
+            and isinstance(engine.get('repo'), str)
+            and bool(engine['repo'])
+            and isinstance(engine.get('source'), str)
+            and bool(engine['source'])
+            and isinstance(engine.get('requested_ref'), str)
+            and bool(engine['requested_ref'])
+            and re.fullmatch(r'[0-9a-f]{40}', engine.get('commit', ''))
+            and type(engine.get('bench')) is int
+            and engine['bench'] > 0
+            and isinstance(engine.get('options'), str)
+        )
+        expected = (
+            document.get('schema') == 'openbench-datagen-publication-contract-v41'
+            and document.get('protocol') == 41
+            and publication_ids_valid
+            and network_valid
+            and book_valid
+            and generation_valid
+            and producer_valid
+            and syzygy_valid
+            and engine_valid
+            and engine['name'] == dev['engine']
+            and engine['repo'] == dev['repo']
+            and engine['source'] == dev['source']
+            and engine['requested_ref'] == dev['requested_ref']
+            and engine['commit'] == str(dev['sha']).lower()
+            and engine['bench'] == dev['bench']
+            and engine['options'] == dev['options']
+            and network['openbench_id'] == str(dev['network']).upper()
+            and network['name'] == dev['netname']
+            and frozen_book['name'] == book['name']
+            and frozen_book['source'] == book['source']
+            and frozen_book['text_sha256'] == book['sha']
+            and frozen_book['raw_sha256'] == book.get('raw_sha')
+            and generation['command'] == command
+            and generation['command_sha256']
+                == hashlib.sha256(command.encode('utf-8')).hexdigest()
+            and generation['total_count'] == data['total_count']
+            and generation['positions_per_chunk'] == data['positions_per_chunk']
+            and generation['base_seed'] == data['base_seed']
+            and generation['seed_method'] == 'base-plus-chunk-index-v1'
+            and producer['required'] == data['producer_artifact_required']
+            and producer['contract_sha256'] == data['producer_contract_sha256']
+            and syzygy['required'] == data['tablebase_required']
+            and syzygy['family'] == (data['tablebase_family'] or None)
+            and syzygy['max'] == data['tablebase_max']
+            and syzygy['manifest_sha256']
+                == (data['tablebase_manifest_sha256'] or None)
+            and syzygy['environment_contract_sha256']
+                == data['environment_contract_sha256']
+            and teacher['mode'] == (data['teacher_mode'] or None)
+        )
+    except (KeyError, TypeError, AttributeError):
+        expected = False
+    if not expected:
+        raise DatagenConfigurationError(
+            'DATAGEN publication contract does not match the assigned workload'
+        )
+    return document
+
+
+def datagen_tablebase_attestation(config):
+    data = config.workload['test']['datagen']
+    publication = datagen_publication_contract(config)
+    if not data.get('tablebase_required') and publication is None:
+        return None
+
+    lease = data.get('environment_lease')
+    lease_sha256 = str(data.get('environment_lease_sha256', '')).lower()
+    if not isinstance(lease, dict):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase lease is missing'
+        )
+    encoded_lease = json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode('utf-8')
+    if hashlib.sha256(encoded_lease).hexdigest() != lease_sha256:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase lease hash is invalid'
+        )
+    lease_tablebase = lease.get('tablebase', {})
+    family = lease_tablebase.get('family')
+    required_max = int(lease_tablebase.get('required_max', 0))
+    leased_worker_max = int(lease_tablebase.get('worker_max', 0))
+    manifest_value = lease_tablebase.get('manifest_sha256')
+    expected_manifest = (
+        manifest_value.lower() if isinstance(manifest_value, str) else None
+    )
+    expected_contract = str(
+        lease.get('environment_contract_sha256', '')
+    ).lower()
+    teacher_mode = lease.get('teacher_mode', '')
+    test = config.workload['test']
+
+    if publication is not None:
+        schema = 'openbench-datagen-publication-lease-v41'
+        protocol = 41
+    else:
+        schema = 'openbench-datagen-tablebase-lease-v40'
+        protocol = 40
+    if (
+        lease.get('schema') != schema
+        or lease.get('protocol') != protocol
+        or lease.get('test_id') != test.get('id')
+        or lease.get('chunk_idx') != data.get('chunk_idx')
+        or lease.get('attempt') != data.get('attempt')
+        or str(lease.get('machine_id')) != str(config.machine_id)
+        or (
+            publication is not None
+            and lease.get('publication_contract_sha256')
+                != data.get('publication_contract_sha256')
+        )
+        or test.get('syzygy_adj') != 'DISABLED'
+        or (data.get('tablebase_family') or None) != family
+        or int(data.get('tablebase_max', 0)) != required_max
+        or (data.get('tablebase_manifest_sha256') or None) != expected_manifest
+        or str(data.get('environment_contract_sha256', '')).lower()
+           != expected_contract
+        or (data.get('teacher_mode') or None) != teacher_mode
+        or not re.fullmatch(r'[0-9a-f]{64}', expected_contract)
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase contract is malformed or unsupported'
+        )
+
+    if data.get('tablebase_required'):
+        if (
+            lease_tablebase.get('required', True) is not True
+            or family != 'atomic'
+            or required_max not in range(
+                ATOMIC_DATAGEN_TABLEBASE_MIN,
+                ATOMIC_DATAGEN_TABLEBASE_MAX + 1,
+            )
+            or test.get('syzygy_wdl') != '%d-MAN' % required_max
+            or test['dev'].get('tablebase_family') != family
+            or not re.fullmatch(r'[0-9a-f]{64}', expected_manifest)
+            or teacher_mode not in ['pure', 'true']
+        ):
+            raise DatagenConfigurationError(
+                'DATAGEN tablebase contract is malformed or unsupported'
+            )
+        path, worker_max = tablebase_capability(config, family)
+        worker_manifest = tablebase_manifest(config, family)
+    else:
+        if (
+            publication is None
+            or lease_tablebase != {
+                'required': False,
+                'family': None,
+                'required_max': 0,
+                'worker_max': 0,
+                'manifest_sha256': None,
+            }
+            or teacher_mode is not None
+        ):
+            raise DatagenConfigurationError(
+                'DATAGEN publication environment is malformed or unsupported'
+            )
+        path, worker_max, worker_manifest = None, 0, None
+    worker_manifest = (
+        worker_manifest.lower() if isinstance(worker_manifest, str) else None
+    )
+    if data.get('tablebase_required') and (
+        not path or worker_max < required_max
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN requires %d-man %s tablebases; worker has %d-man'
+            % (required_max, family, worker_max)
+        )
+    if worker_max != leased_worker_max:
+        raise DatagenConfigurationError(
+            'DATAGEN worker capability changed after lease assignment'
+        )
+    if data.get('tablebase_required') and worker_manifest != expected_manifest:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory does not match the pinned manifest'
+        )
+
+    return {
+        'path': path,
+        'tablebase_required': bool(data.get('tablebase_required')),
+        'family': family or '',
+        'required_max': required_max,
+        'worker_max': worker_max,
+        'manifest_sha256': worker_manifest,
+        'environment_contract_sha256': expected_contract,
+        'environment_lease_sha256': lease_sha256,
+        'teacher_mode': teacher_mode,
+        'publication_contract_sha256': (
+            data.get('publication_contract_sha256')
+            if publication is not None else None
+        ),
+    }
+
+
+def revalidate_datagen_tablebase_inventory(config, tablebase):
+    """Re-authenticate the worker-local corpus immediately before launch."""
+
+    if tablebase is None or not tablebase.get('tablebase_required'):
+        return
+    family = tablebase.get('family')
+    if family != 'atomic':
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase revalidation requires the Atomic family'
+        )
+
+    path, worker_max = tablebase_capability(config, family)
+    manifest_path = getattr(config, 'atomic_syzygy_manifest', None)
+    expected_manifest = tablebase.get('manifest_sha256')
+    leased_worker_max = tablebase.get('worker_max')
+    required_max = tablebase.get('required_max')
+    if (
+        not path
+        or path != tablebase.get('path')
+        or not manifest_path
+        or worker_max != leased_worker_max
+        or not isinstance(required_max, int)
+        or worker_max < required_max
+    ):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase capability changed before generator launch'
+        )
+
+    try:
+        observed_manifest = validate_tablebase_inventory(
+            path, manifest_path, ('.atbw', '.atbz')
+        )
+        complete = validate_syzygy_exists(
+            path, worker_max, ('.atbw', '.atbz')
+        )
+    except (OSError, TypeError, ValueError):
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory failed pre-launch revalidation'
+        ) from None
+    if observed_manifest != expected_manifest or not complete:
+        raise DatagenConfigurationError(
+            'DATAGEN tablebase inventory changed before generator launch'
+        )
+
+
+def render_datagen_command(
+    config, output_path, network_path=None, producer=None, tablebase=None
+):
     data = config.workload['test']['datagen']
     book = config.workload['test']['book']
     book_name = book['name']
     book_path = 'NONE' if book_name.upper() == 'NONE' else os.path.join('Books', book_name)
     book_raw_sha = book.get('raw_sha') or book.get('sha')
+    publication = datagen_publication_contract(config)
+    if (
+        data.get('tablebase_required') or publication is not None
+    ) and tablebase is None:
+        tablebase = datagen_tablebase_attestation(config)
+    network_sha256 = None
+    if publication is not None:
+        network_sha256 = publication['network']['sha256']
+        if (
+            not network_path
+            or datagen_file_sha256(network_path) != (
+                network_sha256,
+                publication['network']['bytes'],
+            )
+        ):
+            raise DatagenConfigurationError(
+                'DATAGEN network SHA-256/bytes do not match the publication contract'
+            )
+    authenticated_tablebase = (
+        tablebase is not None and tablebase.get('tablebase_required')
+    )
     values = {
         'SEED': str(data['seed']),
         'COUNT': str(data['chunk_count']),
@@ -1765,15 +2405,48 @@ def render_datagen_command(config, output_path, network_path=None):
         'NETWORK': (
             'NONE' if not network_path else network_path.replace('\\', '/')
         ),
+        'NETWORK_SHA256': network_sha256 or 'NONE',
+        'PRODUCER_SHA256': (
+            'NONE' if producer is None else producer['sha256'].lower()
+        ),
+        'SYZYGY': (
+            'NONE' if not authenticated_tablebase
+            else tablebase['path'].replace('\\', '/')
+        ),
+        'SYZYGY_MANIFEST_SHA256': (
+            'NONE' if not authenticated_tablebase else tablebase['manifest_sha256']
+        ),
+        'SYZYGY_MAX': (
+            '0' if not authenticated_tablebase else str(tablebase['required_max'])
+        ),
+        'TEACHER_MODE': data.get('teacher_mode', '') or 'NONE',
     }
+    if data.get('producer_artifact_required') and producer is None:
+        raise DatagenConfigurationError(
+            'DATAGEN command requires an authenticated producer artifact'
+        )
     return data['command'].format_map(values)
 
 
 def run_datagen_command(
-    config, engine, output_path, log_path, heartbeat, network_path=None
+    config, engine, output_path, log_path, heartbeat, network_path=None,
+    producer=None, tablebase=None,
 ):
-    command = render_datagen_command(config, output_path, network_path)
-    print('DATAGEN command: %s' % command)
+    if tablebase is not None:
+        revalidate_datagen_tablebase_inventory(config, tablebase)
+    command = render_datagen_command(
+        config, output_path, network_path, producer, tablebase
+    )
+    command_sha256 = hashlib.sha256(command.encode('utf-8')).hexdigest()
+    print(
+        'DATAGEN command prepared: sha256=%s tablebase=%s'
+        % (
+            command_sha256,
+            'authenticated'
+            if tablebase is not None and tablebase.get('tablebase_required')
+            else 'none',
+        )
+    )
 
     with open(log_path, 'wb') as log:
         process = Popen(
@@ -1811,8 +2484,12 @@ def complete_datagen_workload(config):
     compressed_path = output_path + '.bz2'
     log_path = os.path.join('Datagen', stem + '.log')
     setup_complete = False
+    producer = None
+    producer_snapshot_path = None
+    tablebase = None
 
     try:
+        tablebase = datagen_tablebase_attestation(config)
         cleanup_errors = clean_datagen_workspace(output_path)
         try:
             if os.path.isfile(log_path):
@@ -1852,14 +2529,74 @@ def complete_datagen_workload(config):
             if heartbeat.stop_requested.is_set():
                 raise DatagenStopped()
 
-            run_datagen_command(
+            if chunk.get('producer_artifact_required'):
+                producer_path = os.path.join('Engines', dev_name)
+                # Preserve .exe on Windows (and any explicit executable
+                # suffix elsewhere) while keeping the snapshot private to this
+                # exact chunk attempt.
+                producer_snapshot_path = (
+                    output_path + '.producer' + os.path.splitext(producer_path)[1]
+                )
+                try:
+                    producer_sha256, producer_bytes = snapshot_datagen_producer(
+                        producer_path, producer_snapshot_path
+                    )
+                    snapshot_identity = datagen_file_sha256(
+                        producer_snapshot_path
+                    )
+                    if snapshot_identity != (producer_sha256, producer_bytes):
+                        raise OSError(
+                            'DATAGEN producer snapshot changed after copy'
+                        )
+                except Exception as error:
+                    raise DatagenTransientError(
+                        'DATAGEN producer snapshot failed: %s' % error
+                    ) from error
+                producer_commit = test['dev']['sha'].lower()
+                producer = upload_datagen_producer(
+                    config,
+                    producer_snapshot_path,
+                    producer_sha256,
+                    producer_bytes,
+                    producer_commit,
+                    heartbeat,
+                )
+                # Upload can be long on a slow worker. Authenticate the private
+                # snapshot once more immediately before it becomes the Popen
+                # image, rather than trusting the earlier copy-time identity.
+                if datagen_file_sha256(producer_snapshot_path) != (
+                    producer_sha256, producer_bytes
+                ):
+                    raise DatagenTransientError(
+                        'DATAGEN producer snapshot changed before launch'
+                    )
+
+            generator_args = (
                 config,
-                os.path.join('Engines', dev_name),
+                (
+                    producer_snapshot_path
+                    if producer_snapshot_path is not None
+                    else os.path.join('Engines', dev_name)
+                ),
                 output_path,
                 log_path,
                 heartbeat,
                 dev_network,
             )
+            # Preserve the legacy call shape for ordinary DATAGEN and existing
+            # test/extension hooks.  The extra keyword exists only on the new
+            # tablebase-backed path.
+            if tablebase is None:
+                if producer is None:
+                    run_datagen_command(*generator_args)
+                else:
+                    run_datagen_command(*generator_args, producer)
+            else:
+                run_datagen_command(
+                    *generator_args,
+                    producer=producer,
+                    tablebase=tablebase,
+                )
 
             compress_datagen_output(output_path, compressed_path, heartbeat)
             try:
@@ -1869,7 +2606,13 @@ def complete_datagen_workload(config):
                     'DATAGEN archive hashing failed: %s' % error
                 ) from error
             response = upload_datagen_output(
-                config, compressed_path, sha256, byte_count, heartbeat
+                config,
+                compressed_path,
+                sha256,
+                byte_count,
+                heartbeat,
+                producer,
+                tablebase,
             )
 
             print(

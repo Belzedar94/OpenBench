@@ -10,6 +10,21 @@ MANIFEST_SHA256 = "3d4b7fd0ab387f4f60da2078f612c9e8890e6026f551aebe8631efc157788
 NETWORK = "atomic_run3b_e202_l05.nnue"
 NETWORK_SHA256 = "99DC67EABF26A64FAEECA3A88B4C38597A840B8D4A874B9F2CF658C6F92A04A6"
 BOOK_SHA256 = "28ED51C2F42E723D5E127D2D3F21C0BFA4A9B318615AFDB299B93EA62DEA2B1E"
+BOOKS_V2_RELEASE = (
+    "https://github.com/Belzedar94/Atomic-Stockfish/releases/download/"
+    "openbench-books-v2-1b-20260721"
+)
+BOOKS_V2 = {
+    "ATOMIC_V3_1B_opening_train.epd": "41edcb8a19b3ba93383f3554db7610431e2068162289d6b6adda99d389fcf3ea",
+    "ATOMIC_V3_1B_opening_val.epd": "e5f542f9deb52a42ac134dfb6fd5462e2525b72c6a491775f0faf2068a6f60f8",
+    "ATOMIC_V3_1B_opening_test.epd": "1db7affb90ac368635e1cdedef2e8adfbf27b32c8fe5e8855810c2f0863a072b",
+    "ATOMIC_V3_1B_midgame_train.epd": "e1625b508003c9030c6a02cf3e70bf357b195cdfdb96b22038850a2dc9b6f476",
+    "ATOMIC_V3_1B_midgame_val.epd": "d0352e8694d8142c3e429b2151899aa7edf6c9dd7fba085cacf967dd6a86e215",
+    "ATOMIC_V3_1B_midgame_test.epd": "1808560bb5a9ddbc847ed8589cc4240c50af775451baaa3f4ac7a60d7423b9c6",
+    "ATOMIC_V3_1B_endgame_train.epd": "fe699812f008205ba1f0b74908fd69604f9e5f63b78318a449c11ba20cf9672a",
+    "ATOMIC_V3_1B_endgame_val.epd": "de13ac5d08ee19b3963c58ab14513c1903762cb3a31790eb490cd49c03ac41b6",
+    "ATOMIC_V3_1B_endgame_test.epd": "37f2f0b3188e65f38df5fcabffa5f8d772769df80f9d25d3676ed9395a23f03f",
+}
 
 
 def load_json(path):
@@ -26,6 +41,9 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.syzygy_book = load_json("Books/ATOMIC_syzygy_6man.epd.json")
 
     def test_engines_and_books_are_registered(self):
+        self.assertEqual(
+            self.general["client_repo_ref"], "agent/atomic-syzygy-datagen-v1"
+        )
         self.assertIn("Atomic-Stockfish", self.general["engines"])
         self.assertIn("Fairy-Stockfish-Atomic-Baseline", self.general["engines"])
         self.assertIn("ATOMIC_openings.epd", self.general["books"])
@@ -39,6 +57,20 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.syzygy_book["sha"],
             "ad83b0f3b8ee08d0f61f2f9afa11c1c72978ad0462d63a306c32697c92c5b449",
         )
+
+    def test_atomic_v3_1b_books_are_registered_and_pinned(self):
+        configured = [name for name in self.general["books"] if name in BOOKS_V2]
+        self.assertEqual(configured, list(BOOKS_V2))
+        for name, expected_sha in BOOKS_V2.items():
+            self.assertLessEqual(len(name), 32, name)
+            descriptor = load_json("Books/%s.json" % name)
+            self.assertEqual(descriptor["sha"], expected_sha, name)
+            self.assertEqual(descriptor["raw_sha"], expected_sha, name)
+            self.assertEqual(
+                descriptor["source"],
+                "%s/%s.zip" % (BOOKS_V2_RELEASE, name),
+                name,
+            )
 
     def test_atomic_build_defaults_and_tablebase_pin(self):
         defaults = self.engine["test_presets"]["default"]
@@ -165,6 +197,90 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.assertIn(option, command)
         self.assertIn("network_sha256 " + NETWORK_SHA256, command)
         self.assertIn("book_sha256 {BOOK_SHA256}", command)
+
+    def test_atomic_syzygy_datagen_canaries_are_explicit_and_separate(self):
+        presets = self.engine["datagen_presets"]
+        expected = {
+            "Atomic Syzygy depth-7 pure canary": "pure",
+            "Atomic Syzygy depth-7 true canary": "true",
+        }
+        self.assertEqual(
+            {name for name in presets if name.endswith("canary")}, set(expected)
+        )
+
+        for name, teacher_mode in expected.items():
+            preset = presets[name]
+            command = preset["datagen_command"]
+            self.assertEqual(preset["datagen_teacher_mode"], teacher_mode)
+            self.assertEqual(preset["syzygy_wdl"], "6-MAN")
+            self.assertEqual(preset["syzygy_adj"], "DISABLED")
+            self.assertIn("out {OUT} depth 7 nodes 0", command)
+            self.assertNotIn("out {OUT} depth 6 nodes 0", command)
+            for placeholder in (
+                "{PRODUCER_SHA256}",
+                "{SYZYGY}",
+                "{SYZYGY_MANIFEST_SHA256}",
+                "{SYZYGY_MAX}",
+                "{TEACHER_MODE}",
+            ):
+                self.assertIn(placeholder, command, name)
+            self.assertIn(
+                "producer_sha256 {PRODUCER_SHA256}", command
+            )
+            self.assertIn('syzygy "{SYZYGY}"', command)
+            self.assertIn(
+                "syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256}", command
+            )
+            self.assertIn("syzygy_max {SYZYGY_MAX}", command)
+            self.assertIn("teacher_mode {TEACHER_MODE}", command)
+
+    def test_atomic_v3_1b_preset_contains_only_campaign_invariants(self):
+        preset = self.engine["datagen_presets"][
+            "Atomic V3 1B pure depth-7 Syzygy6 invariant-only"
+        ]
+        self.assertEqual(
+            preset["dev_branch"], "01a74371d6c947bb03ae12a8cff6a35044d3aa0b"
+        )
+        self.assertEqual(preset["dev_bench"], 338376)
+        self.assertEqual(preset["dev_network"], NETWORK)
+        self.assertEqual(preset["book_name"], "NONE")
+        self.assertEqual(preset["datagen_total_count"], "")
+        self.assertEqual(preset["datagen_positions_per_chunk"], "")
+        self.assertEqual(preset["datagen_base_seed"], "")
+        self.assertEqual(preset["datagen_teacher_mode"], "pure")
+        self.assertEqual(preset["priority"], 6)
+        self.assertEqual(preset["datagen_publication_protocol"], "41")
+        self.assertEqual(
+            preset["datagen_campaign_id"],
+            "atomic-v3-run3b-d7-syzygy6-1b-20260719-final",
+        )
+        for field in (
+            "datagen_external_workload_id",
+            "datagen_role",
+            "datagen_cohort",
+        ):
+            self.assertEqual(preset[field], "", field)
+        self.assertEqual(preset["syzygy_wdl"], "6-MAN")
+        self.assertEqual(preset["syzygy_adj"], "DISABLED")
+        command = preset["datagen_command"]
+        self.assertIn("depth 7 nodes 0", command)
+        self.assertIn("teacher_mode {TEACHER_MODE}", command)
+        self.assertNotIn("depth 6 nodes 0", command)
+
+    def test_dedicated_datagen_form_renders_v41_publication_fields(self):
+        template = (ROOT / "Templates/OpenBench/create_workload.html").read_text(
+            encoding="utf-8"
+        )
+        dedicated = template.split('{% elif workload == "DATAGEN" %}', 1)[1]
+        for field in (
+            "datagen_teacher_mode",
+            "datagen_publication_protocol",
+            "datagen_campaign_id",
+            "datagen_external_workload_id",
+            "datagen_role",
+            "datagen_cohort",
+        ):
+            self.assertIn('id="%s"' % field, dedicated, field)
 
 
 if __name__ == "__main__":
