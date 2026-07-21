@@ -165,8 +165,6 @@ def _friendly_events(events):
         san = _san_line(key) if key else ''
         if e.kind == 'NODE_CLOSED':
             txt = f"Solved: {pl.get('status', '?')} via {pl.get('closure', '?')}"
-        elif e.kind == 'WALL':
-            txt = f"Wall detected at {pl.get('eval', '?')}cp"
         elif e.kind == 'CAMPAIGN_CLOSED':
             txt = f"Campaign {pl.get('campaign', '?')} SOLVED: {pl.get('status', '?')}"
             key = ''
@@ -193,7 +191,7 @@ def _child_moves(pos):
 def home(request):
     total = Position.objects.count()
     closed = Position.objects.exclude(status='UNKNOWN').count()
-    walls = Position.objects.filter(is_wall=True).count()
+    analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
     nodes = Position.objects.aggregate(n=__import__('django').db.models.Sum(
         'nodes_invested'))['n'] or 0
     root_key = logic.key_of(logic.start_fen())
@@ -205,7 +203,7 @@ def home(request):
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
     return render(request, 'atomicdb/home.html', {
-        'total': total, 'closed': closed, 'walls': walls, 'nodes': nodes,
+        'total': total, 'closed': closed, 'analyses': analyses, 'nodes': nodes,
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_key': root.key,
@@ -276,12 +274,6 @@ def explore(request, key):
         'board': _ctx_board(pos.fen),
         'stm': 'White' if pos.fen.split()[1] == 'w' else 'Black',
         'verdict_css': _status_css(pos.status, pos.eval_cp)})
-
-
-def walls(request):
-    ws = Position.objects.filter(is_wall=True).order_by('-eval_cp')[:100]
-    items = [{'pos': w, 'board': _ctx_board(w.fen)} for w in ws]
-    return render(request, 'atomicdb/walls.html', {'items': items})
 
 
 def method(request):

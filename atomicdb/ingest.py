@@ -11,7 +11,6 @@ from django.utils import timezone
 from . import logic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
-WALL_VISITS = 5
 BUDGET_LADDER = [100_000, 400_000, 1_600_000, 6_400_000, 25_600_000]
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 
@@ -96,16 +95,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
         pos.last_analysis = lines[:8]
         if best_move:
             pos.best_move = best_move
-        prev_eval = pos.eval_cp
         if best_eval is not None:
             pos.eval_cp = best_eval
-        # muro (§4.3): escalera agotada sin progreso
-        if (pos.visits >= WALL_VISITS and pos.status == 'UNKNOWN'
-                and prev_eval is not None and best_eval is not None
-                and abs(best_eval - prev_eval) < 30):
-            pos.is_wall = True
-            DBEvent.objects.create(kind='WALL', payload={
-                'key': pos.key, 'fen': pos.fen, 'eval': best_eval})
         pos.save()
 
     changed = backup_cascade([pos.key])
@@ -173,7 +164,7 @@ def _emit_closure_events(pos):
 def refresh_priorities():
     """§4.1 — recalculo global por lotes (llamado por el selector)."""
     dirty = []
-    for pos in Position.objects.filter(status='UNKNOWN', is_wall=False) \
+    for pos in Position.objects.filter(status='UNKNOWN') \
                                .iterator(chunk_size=2000):
         e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
         prio = (min(e, 1500) / 100.0          # cercania al cierre
@@ -199,7 +190,7 @@ def next_tasks(n):
     """Selector global best-first sobre todo el arbol (sin campanas)."""
     refresh_priorities()
     tasks = []
-    for pos in Position.objects.filter(status='UNKNOWN', is_wall=False) \
+    for pos in Position.objects.filter(status='UNKNOWN') \
                                .order_by('-priority')[:4 * n]:
         if len(tasks) >= n:
             break
