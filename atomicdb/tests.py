@@ -621,12 +621,12 @@ class ArrowTests(TestCase):
         p.best_move = 'g1f3'
         p.save()
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
-        self.assertContains(r, 'board-arrow')
+        self.assertContains(r, '<svg class="board-arrow"')
 
     def test_no_arrow_without_best_move(self):
         p = ingest.get_or_create_position(logic.start_fen())
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
-        self.assertNotContains(r, 'board-arrow')
+        self.assertNotContains(r, '<svg class="board-arrow"')
 
 
 class DtmRefineTests(TestCase):
