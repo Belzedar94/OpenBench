@@ -1,0 +1,55 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB — mapa de la conquista{% endblock %}
+{% block content %}
+
+<div class="metrics">
+  <div class="metric"><div class="v">{{ total }}</div><div class="l">posiciones</div></div>
+  <div class="metric"><div class="v">{{ closed }}</div><div class="l">cerradas exactas</div></div>
+  <div class="metric"><div class="v">{{ nodes }}</div><div class="l">nodos de motor</div></div>
+  <div class="metric"><div class="v">{{ walls }}</div><div class="l">muros</div></div>
+</div>
+
+<h2>Primeros movimientos <span class="dim">— desde la posición inicial</span></h2>
+{% if first_moves %}
+<div class="tiles">
+  {% for m in first_moves %}
+  <a class="tile {{ m.css }}" href="/atomicdb/explore/{{ m.key }}/">
+    <div class="mv">{{ m.uci }}</div>
+    <div class="ev">
+      {% if m.status == 'WHITE_WIN' %}WON{% elif m.status == 'BLACK_WIN' %}LOST
+      {% elif m.status == 'DRAW' %}DRAW
+      {% elif m.eval is not None %}{{ m.eval }}cp{% else %}—{% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="dim">El árbol aún no tiene la posición inicial expandida.
+  <a href="/atomicdb/explore/{{ root_key }}/">Explorar la raíz</a>.</p>
+{% endif %}
+
+<h2>Campañas</h2>
+{% if campaigns %}
+<table>
+  <tr><th>Campaña</th><th>Línea</th><th>Estado</th></tr>
+  {% for c in campaigns %}
+  <tr>
+    <td><a href="/atomicdb/explore/{{ c.root_id }}/">{{ c.name }}</a></td>
+    <td class="dim">{{ c.line_san }}</td>
+    <td>{% if c.active %}<span class="chip hot"></span>en curso
+        {% else %}<span class="chip won"></span>cerrada{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="dim">Sin campañas todavía.</p>{% endif %}
+
+<h2>Hitos</h2>
+<ul class="feed">
+  {% for e in events %}
+  <li><span class="t">{{ e.ts|date:"d M H:i" }}</span>
+    <strong>{{ e.kind }}</strong>
+    <span class="dim">{{ e.payload }}</span></li>
+  {% empty %}<li class="dim">Aún sin eventos.</li>{% endfor %}
+</ul>
+
+{% endblock %}

@@ -5,6 +5,7 @@ from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 import OpenBench.urls
 
 urlpatterns = [
+    path(r'atomicdb/', include('atomicdb.urls')),
     path(r'admin/', admin.site.urls),
     path(r'', include(OpenBench.urls.urlpatterns)),
 ]

@@ -1,0 +1,27 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB — método{% endblock %}
+{% block content %}
+<h2 style="margin-top:0">Qué significa «resuelto» aquí</h2>
+<p>AtomicDB construye un árbol persistente de Atomic Chess que el motor
+(Atomic-Stockfish) profundiza nodo a nodo. Un subárbol queda
+<strong>cerrado</strong> solo por tres vías exactas:</p>
+<ul style="margin:.8rem 0 .8rem 1.4rem">
+<li><strong>TERMINAL</strong> — la posición es mate/ahogado/explosión del rey,
+  verificado por nuestro propio generador de jugadas (no por el motor).</li>
+<li><strong>MATE_PV</strong> — el motor anuncia mate y su línea completa se
+  re-verifica jugada a jugada hasta el terminal. Un score de mate por sí solo
+  jamás cierra nada.</li>
+<li><strong>MINIMAX</strong> — retropropagación de tres valores sobre la lista
+  COMPLETA de jugadas legales (generada por nosotros; el motor nunca filtra).</li>
+</ul>
+<p>La evaluación del motor (los números en centipawns) <em>nunca</em> cierra un
+nodo: solo ordena qué explorar. Los resultados son
+<strong>«resueltos en la práctica»</strong> — el estándar de la wiki
+Solved-games de Fairy-Stockfish — y no pruebas game-theoretic: la identidad de
+posición no modela el historial de repeticiones (limitación conocida y
+declarada). Para una certificación formal existe un roadmap de segundo nivel.</p>
+<h2>Contribuir</h2>
+<p>Crea una cuenta en <a href="/register/">el registro de OpenBench</a> y
+ejecuta el worker de análisis apuntando a este servidor. Cada lote que
+completes queda atribuido a tu usuario.</p>
+{% endblock %}

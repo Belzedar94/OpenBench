@@ -50,6 +50,7 @@ MEDIA_URL  = '/Media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'Media')
 
 INSTALLED_APPS = [
+    'atomicdb',
     'OpenBench',
     'OpenBench.templatetags',
     'django.contrib.admin',
