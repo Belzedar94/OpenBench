@@ -154,3 +154,42 @@ class IngestTests(TestCase):
                                         'mate': 1, 'pv': [mating_move]}], 1000)
         r2 = ingest.ingest_analysis(p.key, [], 1000)
         self.assertEqual(r2.get('skipped'), 'already-closed')
+
+
+class TablebaseTests(TestCase):
+
+    def test_applicability(self):
+        from . import logic
+        self.assertTrue(logic.tb_applicable('4k3/8/8/8/8/8/8/QK6 w - - 0 1'))
+        # derechos de enroque: NO aplicable
+        self.assertFalse(logic.tb_applicable(
+            '4k3/8/8/8/8/8/8/R3K3 w Q - 0 1'))
+        # mas de 6 piezas: NO aplicable
+        self.assertFalse(logic.tb_applicable(
+            'rnbqkbnr/8/8/8/8/8/8/RNBQKBNR w - - 0 1'))
+
+    def test_wdl_mapping(self):
+        from . import logic
+        self.assertEqual(logic.wdl_to_status(2, True), 'WHITE_WIN')
+        self.assertEqual(logic.wdl_to_status(2, False), 'BLACK_WIN')
+        self.assertEqual(logic.wdl_to_status(-2, True), 'BLACK_WIN')
+        # cursed win / blessed loss = tablas practicas bajo regla de 50
+        self.assertEqual(logic.wdl_to_status(1, True), 'DRAW')
+        self.assertEqual(logic.wdl_to_status(-1, False), 'DRAW')
+
+    def test_close_by_tb(self):
+        from . import ingest
+        p = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
+        self.assertTrue(ingest.close_by_tb(p.key, 2))
+        p.refresh_from_db()
+        self.assertEqual(p.status, 'WHITE_WIN')
+        self.assertEqual(p.closure, 'TB')
+        # idempotente / no re-cierra
+        self.assertFalse(ingest.close_by_tb(p.key, -2))
+
+    def test_close_by_tb_rejects_castling(self):
+        from . import ingest
+        p = ingest.get_or_create_position('4k3/8/8/8/8/8/8/R3K3 w Q - 0 1')
+        self.assertFalse(ingest.close_by_tb(p.key, 2))
+        p.refresh_from_db()
+        self.assertEqual(p.status, 'UNKNOWN')

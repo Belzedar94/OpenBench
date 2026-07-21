@@ -70,6 +70,13 @@ def api_submit(request):
     if task.state == 'COMPLETED':
         return JsonResponse({'ok': True, 'dup': True})
 
+    tb_wdl = request.POST.get('tb_wdl')
+    if tb_wdl not in (None, ''):
+        closed = ingest.close_by_tb(task.position_id, int(tb_wdl))
+        task.state, task.completed = 'COMPLETED', timezone.now()
+        task.save(update_fields=['state', 'completed'])
+        return JsonResponse({'ok': True, 'summary': {'tb_closed': closed}})
+
     summary = ingest.ingest_analysis(task.position_id, lines,
                                      task.budget_nodes,
                                      machine=request.POST.get('machine', ''))

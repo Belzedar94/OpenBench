@@ -188,3 +188,21 @@ def next_tasks(n, campaign=None):
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
+
+
+def close_by_tb(position_key, wdl):
+    """Cierra una posicion con el WDL probeado por un worker (perspectiva del
+    que mueve). Verifica aplicabilidad server-side; el valor viene del worker
+    (estandar practico, worker propio)."""
+    with transaction.atomic():
+        pos = Position.objects.select_for_update().get(key=position_key)
+        if pos.status != 'UNKNOWN' or not logic.tb_applicable(pos.fen):
+            return False
+        stm_white = pos.fen.split()[1] == 'w'
+        pos.status = logic.wdl_to_status(int(wdl), stm_white)
+        pos.closure = 'TB'
+        pos.save(update_fields=['status', 'closure', 'updated'])
+        DBEvent.objects.create(kind='NODE_CLOSED', payload={
+            'key': pos.key, 'status': pos.status, 'closure': 'TB'})
+    backup_cascade([position_key])
+    return True
