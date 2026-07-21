@@ -217,9 +217,9 @@ def next_tasks(n):
 
 
 def bootstrap_root(budget=None):
-    """Base inicial solida: una pasada profunda (32M por defecto) para CADA
+    """Base inicial solida: una pasada profunda (512M por defecto) para CADA
     movimiento desde startpos, servida antes que el selector (source USER)."""
-    budget = budget or BUDGET_LADDER[2]
+    budget = budget or BUDGET_LADDER[-1]
     root = get_or_create_position(logic.start_fen())
     expand(root)
     made = 0

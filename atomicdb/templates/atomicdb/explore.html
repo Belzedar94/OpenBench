@@ -83,7 +83,7 @@
         <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
         <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-        <td>{% if m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+        <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% empty %}

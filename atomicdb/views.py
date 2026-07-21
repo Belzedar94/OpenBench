@@ -261,6 +261,7 @@ def _child_moves(pos):
     moves = []
     for e in Edge.objects.filter(parent=pos).select_related('child'):
         c = e.child
+        mate = None
         if c.status == win:
             score, rank = 10_000, 10_001
         elif c.status == loss:
@@ -272,8 +273,25 @@ def _child_moves(pos):
             rank = score
         else:
             score, rank = None, -9_999.5   # sin analizar: encima de perder
+        if c.status in (win, loss):
+            # distancia de mate donde hay linea verificada; la jugada de la
+            # fila cuenta como primer ply
+            plies = None
+            if c.closure == 'TERMINAL':
+                plies = 1
+            elif c.closure == 'MATE_PV' and c.won_line:
+                plies = 1 + len(c.won_line.split())
+            if plies is not None:
+                n = (plies + 1) // 2
+                mate = n if c.status == win else -n
+                # mates cortos primero al ganar; resistencia larga primero al perder
+                rank += ((999 - min(n, 999)) if c.status == win
+                         else min(n, 999)) * 1e-3
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
                       'closure': c.closure, 'score': score, 'rank': rank,
+                      'mate': mate,
+                      'mate_str': None if mate is None else
+                      (f'M{mate}' if mate > 0 else f'-M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
     moves.sort(key=lambda m: -m['rank'])
     return moves
@@ -353,7 +371,7 @@ def api_query(request):
     score = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
-              'score': m['score'], 'visits': m['visits']}
+              'score': m['score'], 'mate': m['mate'], 'visits': m['visits']}
              for m in _child_moves(pos)]
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
