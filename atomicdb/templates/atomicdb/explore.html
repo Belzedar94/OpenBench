@@ -22,13 +22,13 @@
     {% include "atomicdb/_board.html" %}
     <div class="verdict {{ verdict_css }}">
       {% if pos.status == 'UNKNOWN' %}
-        UNSOLVED · {{ stm }} to move{% if pos.eval_cp is not None %} · best line {{ pos.eval_cp }}cp{% endif %}
+        UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% endif %}
       {% else %}
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
       {% endif %}
     </div>
     {% if pos.status == 'UNKNOWN' %}
-    <p style="margin:.4rem 0">
+    <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
     </p>
@@ -83,7 +83,7 @@
         <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
         <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-        <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+        <td>{% if m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% empty %}

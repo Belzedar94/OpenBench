@@ -3,12 +3,28 @@
 {% block content %}
 
 <div class="metrics">
-  <div class="metric"><div class="v">{{ total }}</div><div class="l">positions</div></div>
-  <div class="metric"><div class="v">{{ closed }}</div><div class="l">solved exactly</div></div>
-  <div class="metric"><div class="v">{{ nodes }}</div><div class="l">engine nodes</div></div>
-  <div class="metric"><div class="v">{{ analyses }}</div><div class="l">analyses</div></div>
-  <div class="metric"><div class="v">{{ requested }}</div><div class="l">in queue</div></div>
+  <div class="metric"><div class="v">{{ total_h }}</div><div class="l">positions</div></div>
+  <div class="metric"><div class="v">{{ closed_h }}</div><div class="l">solved exactly</div></div>
+  <div class="metric"><div class="v">{{ nodes_h }}</div><div class="l">engine nodes</div></div>
+  <div class="metric"><div class="v">{{ analyses_h }}</div><div class="l">analyses</div></div>
+  <div class="metric"><div class="v">{{ requested_h }}</div><div class="l">in queue</div></div>
 </div>
+
+{% if first_moves %}
+<div class="progress">
+  <div class="pbar">{% for m in first_moves %}<span class="pseg {{ m.css }}"
+    title="{{ m.uci }}"></span>{% endfor %}</div>
+  <div class="pkpis dim">Root conquest: {{ solved_first }}/{{ n_first }} first moves solved
+    · {{ solved_pct }}% of all positions solved
+    · last 24h: {{ closed_24h_h }} closures, {{ nodes_24h_h }} nodes</div>
+</div>
+{% endif %}
+
+<form class="fenbox" method="post" action="/atomicdb/fen/">{% csrf_token %}
+  <input name="fen" placeholder="Paste any FEN to jump to that position" required
+    spellcheck="false" autocomplete="off">
+  <button class="reqbtn">Go</button>
+</form>
 
 <div class="cols">
   <div>
@@ -26,7 +42,7 @@
     <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
     <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
         {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-    <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+    <td>{% if m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
     <td class="dim">{{ m.visits }}</td>
   </tr>
   {% endfor %}

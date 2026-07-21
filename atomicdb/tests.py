@@ -311,6 +311,56 @@ class MachineVisibilityTests(TestCase):
         self.assertEqual(ping.tasks_done, 1)
 
 
+class PovTests(TestCase):
+    """La vista muestra scores del QUE MUEVE (chessdb.cn); el arbol interno
+    sigue en White-POV."""
+
+    def _black_parent_with_children(self):
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        ingest.expand(p)
+        edges = list(Edge.objects.filter(parent=p).select_related('child'))
+        return p, edges[0].child, edges[1].child, edges[2].child
+
+    def test_moves_table_mover_pov_black(self):
+        from .views import _child_moves
+        p, a, b, c = self._black_parent_with_children()
+        a.status, a.closure = 'WHITE_WIN', 'MINIMAX'
+        a.save()
+        b.eval_cp = 670   # White-POV: buena para blancas = mala para el mover
+        b.save()
+        c.eval_cp = 254
+        c.save()
+        moves = _child_moves(p)
+        self.assertEqual(moves[-1]['key'], a.key)      # WHITE_WIN al final
+        self.assertEqual(moves[-1]['score'], -10_000)  # y en negativo
+        self.assertEqual([m['key'] for m in moves[:2]],
+                         [c.key, b.key])               # -254 antes que -670
+
+    def test_query_api_start_position(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(p)
+        r = self.client.get('/atomicdb/api/query',
+                            {'fen': logic.start_fen()})
+        d = r.json()
+        self.assertEqual(d['status'], 'UNKNOWN')
+        self.assertEqual(len(d['moves']), 20)
+
+    def test_query_api_rejects_garbage(self):
+        r = self.client.get('/atomicdb/api/query', {'fen': 'lol nope'})
+        self.assertEqual(r.status_code, 400)
+
+    def test_fen_jump_redirects_and_creates(self):
+        ingest.get_or_create_position(logic.start_fen())
+        r = self.client.post('/atomicdb/fen/', {'fen': logic.start_fen()})
+        self.assertEqual(r.status_code, 302)
+        new_fen = logic.apply_move(logic.start_fen(), 'e2e4')
+        r2 = self.client.post('/atomicdb/fen/', {'fen': new_fen})
+        self.assertEqual(r2.status_code, 302)
+        self.assertTrue(Position.objects.filter(
+            key=logic.key_of(logic.canonical_fen(new_fen))).exists())
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):
