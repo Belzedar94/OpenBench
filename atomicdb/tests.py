@@ -4,7 +4,7 @@ completitud de movegen, backup determinista bajo replay."""
 from django.test import TestCase
 
 from . import ingest, logic
-from .models import Edge, Position
+from .models import AnalysisTask, Edge, Position
 
 
 class LogicTests(TestCase):
@@ -441,6 +441,35 @@ class SolvedExploreTests(TestCase):
         self.assertIn('unexplored', html)
         self.assertIn(f'/atomicdb/goto/{p.key}/d7d5/', html)
         self.assertNotIn('Not expanded yet', html)
+
+
+class TbRoutingTests(TestCase):
+    """Tareas sondeables en TB se reservan a workers con tablebases, salvo
+    que no haya otra cosa que servir."""
+
+    def _lease(self, tb):
+        import json
+        r = self.client.post('/atomicdb/api/lease',
+                             {'username': 'u', 'password': 'p', 'tb': tb})
+        return [t['fen'] for t in json.loads(r.content)['tasks']]
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        self.tbpos = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
+        self.normal = ingest.get_or_create_position(logic.start_fen())
+
+    def test_tb_task_waits_for_tb_worker(self):
+        AnalysisTask.objects.create(position=self.tbpos, budget_nodes=1000)
+        AnalysisTask.objects.create(position=self.normal, budget_nodes=1000)
+        fens = self._lease('0')
+        self.assertNotIn(self.tbpos.fen, fens)
+        self.assertIn(self.normal.fen, fens)
+        self.assertIn(self.tbpos.fen, self._lease('1'))
+
+    def test_tb_task_served_when_nothing_else(self):
+        AnalysisTask.objects.create(position=self.tbpos, budget_nodes=1000)
+        self.assertIn(self.tbpos.fen, self._lease('0'))
 
 
 class WitnessTests(TestCase):

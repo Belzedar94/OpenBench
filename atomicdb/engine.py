@@ -29,9 +29,10 @@ class Engine:
                 return
 
     def analyse(self, fen, nodes, multipv):
-        """Devuelve lines=[{'move','eval_cp','mate','pv'}] perspectiva blanca."""
+        """Devuelve lines=[{'move','eval_cp','mate','pv'}] perspectiva blanca.
+        Sin ucinewgame a proposito: la TT sobrevive entre tareas, asi que las
+        revisitas y los vecinos del mismo lote arrancan en caliente."""
         self._send(f'setoption name MultiPV value {multipv}')
-        self._send('ucinewgame')
         self._send(f'position fen {fen}')
         self._send(f'go nodes {nodes}')
         best, lines = {}, {}
