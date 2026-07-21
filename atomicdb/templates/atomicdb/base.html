@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -47,21 +47,23 @@ th{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:1px
   text-align:left;padding:.45rem .6rem;border-bottom:1px solid #3a362f}
 td{padding:.5rem .6rem;border-bottom:1px solid #2c2925}
 tr:hover td{background:var(--panel2)}
-.board{display:grid;grid-template-columns:repeat(8,1fr);width:min(420px,92vw);
+.boardwrap{position:relative;width:min(440px,92vw)}
+.board{display:grid;grid-template-columns:repeat(8,1fr);width:100%;
   aspect-ratio:1;border-radius:6px;overflow:hidden;
   box-shadow:0 4px 18px rgba(0,0,0,.5)}
-.sq{display:flex;align-items:center;justify-content:center;
-  font-size:clamp(22px,5.2vw,34px);line-height:1}
+.sq{position:relative;display:flex;align-items:center;justify-content:center}
 .sq.l{background:var(--sq-l)}.sq.d{background:var(--sq-d)}
-.sq span{filter:drop-shadow(0 1px 1px rgba(0,0,0,.45))}
+.sq img{width:88%;height:88%;display:block}
+.coord{position:absolute;font-size:.62rem;font-weight:700;opacity:.75;
+  pointer-events:none}
+.coord.file{right:3px;bottom:1px}
+.coord.rank{left:3px;top:1px}
+.sq.l .coord{color:var(--sq-d)}.sq.d .coord{color:var(--sq-l)}
 .cols{display:grid;grid-template-columns:auto 1fr;gap:1.6rem;align-items:start}
 @media(max-width:820px){.cols{grid-template-columns:1fr}}
 .verdict{padding:.5rem .9rem;border-radius:8px;background:var(--panel);
   border:1px solid #3a362f;margin:.8rem 0;font-weight:600}
 .verdict.won{border-color:var(--won)}.verdict.lost{border-color:var(--lost)}
-.evbar{position:relative;height:10px;background:#333;border-radius:5px;width:120px;
-  display:inline-block;vertical-align:middle;overflow:hidden}
-.evbar i{position:absolute;top:0;bottom:0;left:0;background:#eee;border-radius:5px}
 .feed{list-style:none}
 .feed li{padding:.45rem .2rem;border-bottom:1px solid #2c2925;font-size:.92rem}
 .feed .t{color:var(--dim);font-size:.8rem;margin-right:.6rem}
@@ -75,14 +77,15 @@ footer{margin:3rem 0 1rem;text-align:center;color:var(--dim);font-size:.8rem}
 <header>
   <h1><a href="/atomicdb/" style="color:inherit">Atomic<span>DB</span></a></h1>
   <nav>
-    <a href="/atomicdb/">Mapa</a>
-    <a href="/atomicdb/walls/">Muros</a>
-    <a href="/atomicdb/method/">Método</a>
+    <a href="/atomicdb/">Map</a>
+    <a href="/atomicdb/walls/">Walls</a>
+    <a href="/atomicdb/method/">Method</a>
     <a href="/index/">OpenBench</a>
   </nav>
 </header>
 <main>{% block content %}{% endblock %}</main>
-<footer>AtomicDB — resolución práctica de Atomic Chess · resultados etiquetados
-  «practical», no certificados game-theoretic</footer>
+<footer>AtomicDB, a practical solving effort for Atomic Chess. Results are
+  labeled "practical", not game-theoretic certificates. Piece set: cburnett
+  (lichess), CC BY-SA.</footer>
 </body>
 </html>
