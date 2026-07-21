@@ -78,6 +78,7 @@ class AnalysisTask(models.Model):
 
     position     = models.ForeignKey(Position, on_delete=models.CASCADE)
     budget_nodes = models.BigIntegerField()
+    nodes_searched = models.BigIntegerField(default=0)  # nodos REALES buscados
     multipv      = models.IntegerField(default=5)
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
     source       = models.CharField(max_length=4, choices=Source.choices,

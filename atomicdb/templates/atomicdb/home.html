@@ -13,8 +13,8 @@
 {% if first_moves %}
 <div class="progress">
   <div class="pkpis dim">Root conquest: {{ solved_first }}/{{ n_first }} first moves solved
-    · {{ solved_pct }}% of all positions solved
-    · last 24h: {{ closed_24h_h }} closures, {{ nodes_24h_h }} nodes</div>
+    · {{ solved_pct }}% of tree positions solved
+    · last 24h: {{ closed_24h_h }} closures, {{ nodes_24h_h }} nodes searched</div>
 </div>
 {% endif %}
 
@@ -31,7 +31,7 @@
     <ul class="feed">
       {% for q in analyzing %}
       <li><span class="chip hot"></span>
-        <a href="/atomicdb/explore/{{ q.key }}/">{{ q.san }}</a>
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>
         <span class="dim" style="font-size:.8rem">&nbsp;{{ q.budget }} nodes · {{ q.machine }}</span></li>
       {% endfor %}
     </ul>
@@ -43,7 +43,7 @@
     <ul class="feed">
       {% for q in upnext %}
       <li><span class="t">{{ forloop.counter }}</span>
-        <a href="/atomicdb/explore/{{ q.key }}/">{{ q.san }}</a></li>
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a></li>
       {% endfor %}
     </ul>
     {% else %}<p class="dim">Queue is empty.</p>{% endif %}

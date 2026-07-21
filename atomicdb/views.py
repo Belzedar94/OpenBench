@@ -122,11 +122,16 @@ def api_submit(request):
         task.save(update_fields=['state', 'completed'])
         return JsonResponse({'ok': True, 'summary': {'tb_closed': closed}})
 
+    try:
+        searched = max(0, int(request.POST.get('nodes', 0) or 0))
+    except ValueError:
+        searched = 0
     summary = ingest.ingest_analysis(task.position_id, lines,
-                                     task.budget_nodes,
+                                     searched or task.budget_nodes,
                                      machine=request.POST.get('machine', ''))
     task.state, task.completed = 'COMPLETED', timezone.now()
-    task.save(update_fields=['state', 'completed'])
+    task.nodes_searched = searched
+    task.save(update_fields=['state', 'completed', 'nodes_searched'])
     WorkerPing.objects.filter(machine=request.POST.get('machine', ''),
                               user=user.username).update(
         tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
@@ -215,8 +220,10 @@ def goto(request, key, uci):
     return redirect(f'/atomicdb/explore/{child.key}/')
 
 
-def _san_line(key, max_plies=16):
-    """Linea SAN numerada hasta la raiz para milestones ("1. Nf3 f6 ...")."""
+def _san_line(key, max_plies=16, keep_head=False):
+    """Linea SAN numerada hasta la raiz ("1. Nf3 f6 ..."). Al truncar,
+    keep_head conserva el PRINCIPIO (para ver el opening); por defecto se
+    conserva el final (milestones: las jugadas que cerraron)."""
     try:
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
@@ -232,10 +239,15 @@ def _san_line(key, max_plies=16):
             parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
             n += 1
     prefix = '' if top.fen == logic.start_fen() else '… '
+    suffix = ''
     if len(parts) > max_plies:
-        parts = parts[-max_plies:]
-        prefix = '… '
-    return prefix + ' '.join(parts)
+        if keep_head:
+            parts = parts[:max_plies]
+            suffix = ' …'
+        else:
+            parts = parts[-max_plies:]
+            prefix = '… '
+    return prefix + ' '.join(parts) + suffix
 
 
 def _friendly_events(events):
@@ -358,7 +370,7 @@ def home(request):
                                         ts__gte=day_ago).count()
     nodes_24h = AnalysisTask.objects.filter(
         state='COMPLETED', completed__gte=day_ago).aggregate(
-        n=Sum('budget_nodes'))['n'] or 0
+        n=Sum('nodes_searched'))['n'] or 0
     root_key = logic.key_of(logic.start_fen())
     try:
         first_moves = _child_moves(Position.objects.get(key=root_key))
@@ -371,7 +383,9 @@ def home(request):
                                               leased_at__gte=recent)
                   .select_related('position').order_by('-leased_at')[:5])
     analyzing = [{'key': t.position_id,
-                  'san': _san_line(t.position_id, 12) or 'start position',
+                  'san': _san_line(t.position_id, 10, keep_head=True)
+                  or 'start position',
+                  'full': _san_line(t.position_id, 64) or 'start position',
                   'budget': _human(t.budget_nodes), 'machine': t.machine}
                  for t in leased]
     leased_keys = {t.position_id for t in leased}
@@ -382,7 +396,9 @@ def home(request):
         if pos.key in leased_keys:
             continue
         upnext.append({'key': pos.key,
-                       'san': _san_line(pos.key, 12) or 'start position'})
+                       'san': _san_line(pos.key, 10, keep_head=True)
+                       or 'start position',
+                       'full': _san_line(pos.key, 64) or 'start position'})
         if len(upnext) >= 5:
             break
     events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
