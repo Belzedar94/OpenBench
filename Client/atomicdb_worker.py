@@ -114,7 +114,7 @@ def main():
     if not a.engine:
         a.engine = provision_engine(a.S)
     auth = {'username': a.U, 'password': a.P, 'machine': f'{a.U}-atomicdb',
-            'threads': a.T, 'hash': a.hash,
+            'threads': a.T, 'hash': a.hash, 'tb': '1' if tb else '0',
             'os': f'{platform.system()} {platform.release()}'}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)

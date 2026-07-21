@@ -52,13 +52,20 @@ def api_lease(request):
                             .update(state='PENDING', machine='')
         # '-source': USER > AUTO alfabeticamente, las peticiones van primero
         batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
-                     .filter(state='PENDING')
+                     .select_related('position').filter(state='PENDING')
                      .order_by('-source', '-position__priority')[:BATCH_SIZE])
         if not batch:
             ingest.next_tasks(BATCH_SIZE)
             batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
-                         .filter(state='PENDING')
+                         .select_related('position').filter(state='PENDING')
                          .order_by('-source', '-position__priority')[:BATCH_SIZE])
+        # enrutado TB: lo sondeable en tablebases espera a un worker que las
+        # tenga, salvo que no haya nada mas que servir
+        if request.POST.get('tb') != '1' and batch:
+            keep = [t for t in batch
+                    if not logic.tb_applicable(t.position.fen)]
+            if keep:
+                batch = keep
         for t in batch:
             t.state, t.machine, t.leased_at = 'LEASED', machine, timezone.now()
             t.attempts += 1
