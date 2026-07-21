@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Worker de AtomicDB: pide lotes de analisis, corre Atomic-Stockfish y
 devuelve MultiPV. Independiente del client.py de OpenBench (deliberado:
-cero riesgo sobre SPRT/DATAGEN). Uso:
+cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
-  python atomicdb_worker.py -U user -P pass -S https://servidor \
-      --engine ruta/Atomic-Stockfish.exe -T 8 [--once]
+  python atomicdb_worker.py -U user -P pass -S https://servidor -T 8
+
+--engine ruta/binario permite usar una build propia en su lugar.
 """
 
 import argparse
@@ -16,6 +17,46 @@ import requests
 
 sys.path.insert(0, '..')
 from atomicdb.engine import Engine  # noqa: E402
+
+
+def provision_engine(server):
+    """Descarga el motor de referencia del servidor, con sha256 verificado.
+    Reutiliza la copia local si ya coincide."""
+    import hashlib
+    import os
+    import platform
+    import stat
+
+    key = f'{platform.system().lower()}-{platform.machine().lower()}'
+    key = {'windows-amd64': 'windows-x86_64',
+           'linux-amd64': 'linux-x86_64'}.get(key, key)
+    man = requests.get(server + '/atomicdb/engines/manifest.json',
+                       timeout=60).json()
+    if key not in man['binaries']:
+        sys.exit(f'no prebuilt engine for {key}: pass --engine with your own '
+                 f'build (prebuilts: {", ".join(sorted(man["binaries"]))})')
+    b = man['binaries'][key]
+    os.makedirs('Engines', exist_ok=True)
+    dest = os.path.join('Engines', b['file'])
+
+    def _ok():
+        with open(dest, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest() == b['sha256']
+
+    if not (os.path.exists(dest) and _ok()):
+        print(f"downloading engine {b['file']} ({b['size_mb']} MB)...",
+              flush=True)
+        r = requests.get(server + '/atomicdb/engines/' + b['file'],
+                         timeout=600)
+        r.raise_for_status()
+        if hashlib.sha256(r.content).hexdigest() != b['sha256']:
+            sys.exit('engine download failed the sha256 check')
+        with open(dest, 'wb') as f:
+            f.write(r.content)
+        if os.name != 'nt':
+            os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC)
+    print(f'engine ready: {dest}', flush=True)
+    return dest
 
 
 def probe_tb(tb, fen):
@@ -39,7 +80,8 @@ def main():
     ap.add_argument('-U', required=True)
     ap.add_argument('-P', required=True)
     ap.add_argument('-S', required=True)
-    ap.add_argument('--engine', required=True)
+    ap.add_argument('--engine', default='',
+                    help='binario propio (opcional; sin el se descarga el de referencia)')
     ap.add_argument('-T', type=int, default=4)
     ap.add_argument('--hash', type=int, default=512)
     ap.add_argument('--syzygy', default='', help='dirs de TB atomicas separados por ;')
@@ -58,6 +100,8 @@ def main():
         print(f'syzygy: {len(dirs)} dirs', flush=True)
 
     import platform
+    if not a.engine:
+        a.engine = provision_engine(a.S)
     auth = {'username': a.U, 'password': a.P, 'machine': f'{a.U}-atomicdb',
             'threads': a.T, 'hash': a.hash,
             'os': f'{platform.system()} {platform.release()}'}
