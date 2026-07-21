@@ -54,6 +54,10 @@ tr:hover td{background:var(--panel2)}
   box-shadow:0 4px 18px rgba(0,0,0,.5)}
 .sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .sq.sel{outline:3px solid var(--hot);outline-offset:-3px;z-index:1}
+.sq.dest::before{content:'';position:absolute;width:26%;height:26%;
+  border-radius:50%;background:rgba(30,90,30,.55);z-index:2}
+.sq.dest:has(img)::before{width:92%;height:92%;background:none;
+  border:4px solid rgba(30,90,30,.55)}
 .raw{font:11px/1.5 ui-monospace,Consolas,monospace;color:var(--dim);
   background:var(--panel);border:1px solid #3a362f;border-radius:6px;
   padding:.5rem .7rem;overflow-x:auto;white-space:pre}

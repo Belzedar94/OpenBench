@@ -13,22 +13,30 @@
   const legal = new Set({{ legal_ucis|safe }});
   const key = document.getElementById('board').dataset.key;
   let from = null;
+  function showDests(fromSq) {
+    for (const u of legal) {
+      if (u.startsWith(fromSq)) {
+        const d = document.querySelector(`#board .sq[data-sq="${u.slice(2, 4)}"]`);
+        if (d) d.classList.add('dest');
+      }
+    }
+  }
   document.querySelectorAll('#board .sq').forEach(el => {
     el.addEventListener('click', () => {
       const sq = el.dataset.sq;
       if (from === null) {
-        if (el.querySelector('img')) { from = sq; el.classList.add('sel'); }
+        if (el.querySelector('img')) { from = sq; el.classList.add('sel'); showDests(sq); }
         return;
       }
       const uci = from + sq;
-      document.querySelectorAll('#board .sq.sel')
-              .forEach(x => x.classList.remove('sel'));
+      document.querySelectorAll('#board .sq.sel, #board .sq.dest')
+              .forEach(x => x.classList.remove('sel', 'dest'));
       if (legal.has(uci)) {
         window.location = `/atomicdb/goto/${key}/${uci}/`;
       } else if (legal.has(uci + 'q')) {
         window.location = `/atomicdb/goto/${key}/${uci}q/`;
       } else if (el.querySelector('img') && sq !== from) {
-        from = sq; el.classList.add('sel');
+        from = sq; el.classList.add('sel'); showDests(sq);
       } else {
         from = null;
       }
