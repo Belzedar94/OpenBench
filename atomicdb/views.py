@@ -65,6 +65,10 @@ def api_lease(request):
         stale = timezone.now() - timedelta(minutes=LEASE_MINUTES)
         AnalysisTask.objects.filter(state='LEASED', leased_at__lt=stale) \
                             .update(state='PENDING', machine='')
+        # un worker secuencial nunca pide lote con leases vivos: si esta
+        # maquina tiene leases colgando, son de un predecesor muerto
+        AnalysisTask.objects.filter(state='LEASED', machine=machine) \
+                            .update(state='PENDING', machine='')
         # '-source': USER > AUTO alfabeticamente, las peticiones van primero
         batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
                      .select_related('position').filter(state='PENDING')

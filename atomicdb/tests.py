@@ -595,6 +595,26 @@ class TbRoutingTests(TestCase):
         self.assertIn(self.tbpos.fen, self._lease('0'))
 
 
+class LeaseReclaimTests(TestCase):
+    """Leases colgados de un predecesor muerto con el mismo nombre de maquina
+    se reclaman al instante en el siguiente lease, no a la hora."""
+
+    def test_same_machine_reclaims_stuck_leases(self):
+        import json
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        AnalysisTask.objects.create(position=p, budget_nodes=1000,
+                                    state='LEASED', machine='m1',
+                                    leased_at=timezone.now())
+        r = self.client.post('/atomicdb/api/lease',
+                             {'username': 'u', 'password': 'p',
+                              'machine': 'm1', 'tb': '1'})
+        fens = [t['fen'] for t in json.loads(r.content)['tasks']]
+        self.assertIn(p.fen, fens)   # reclamada y re-servida al instante
+
+
 class SearchmovesTests(TestCase):
     """El lease manda las jugadas vivas: el motor no re-deriva lo demostrado."""
 
