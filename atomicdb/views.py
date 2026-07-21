@@ -153,6 +153,34 @@ def _status_css(status, eval_cp):
     return 'hot' if e >= 500 else ('warm' if e >= 200 else 'cold')
 
 
+def _line_to_root(pos, max_plies=64):
+    """Camino canonico (determinista) hacia arriba; con transposiciones se
+    elige siempre el padre de key minima. Devuelve (top, [(san, child_key)...])
+    en orden de juego, con SAN via pyffish desde el nodo superior."""
+    import pyffish as pf
+    steps = []
+    cur, seen = pos, {pos.key}
+    while len(steps) < max_plies:
+        e = (Edge.objects.filter(child=cur).select_related('parent')
+             .order_by('parent_id').first())
+        if e is None or e.parent_id in seen:
+            break
+        steps.append((e.move_uci, cur.key))
+        seen.add(e.parent_id)
+        cur = e.parent
+    steps.reverse()
+    fen, out = cur.fen, []
+    for uci, child_key in steps:
+        try:
+            san = pf.get_san('atomic', fen, uci)
+        except Exception:
+            san = uci
+        out.append({'san': san, 'key': child_key,
+                    'white': fen.split()[1] == 'w'})
+        fen = logic.apply_move(fen, uci)
+    return cur, out
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -170,8 +198,18 @@ def explore(request, key):
                               -(m['eval'] or -99999)))
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
+    top, line = _line_to_root(pos)
+    numbered, n = [], 1
+    for i, st in enumerate(line):
+        if st['white']:
+            numbered.append({'num': f'{n}.', 'san': st['san'], 'key': st['key']})
+        else:
+            pre = f'{n}...' if i == 0 else ''
+            numbered.append({'num': pre, 'san': st['san'], 'key': st['key']})
+            n += 1
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
+        'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'board': _ctx_board(pos.fen),
         'stm': 'White' if pos.fen.split()[1] == 'w' else 'Black',
         'verdict_css': _status_css(pos.status, pos.eval_cp)})

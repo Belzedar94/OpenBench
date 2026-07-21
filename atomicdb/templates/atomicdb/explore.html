@@ -2,11 +2,20 @@
 {% block title %}AtomicDB explorer{% endblock %}
 {% block content %}
 
-<div class="crumb">
-  {% if parents %}reached from:
-    {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
-  {% else %}root{% endif %}
+{% if line %}
+<div class="linebox">
+  {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
+  {% for st in line %}<a href="/atomicdb/explore/{{ st.key }}/"
+    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% endfor %}
 </div>
+{% else %}
+<div class="crumb">root position</div>
+{% endif %}
+{% if parents|length > 1 %}
+<div class="crumb">transpositions from:
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+</div>
+{% endif %}
 
 <div class="cols">
   <div>
