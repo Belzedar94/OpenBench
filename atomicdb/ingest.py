@@ -197,20 +197,73 @@ def _emit_closure_events(pos):
 
 
 DEAD = -1e9   # lapida: rama muerta, fuera de la cola para siempre
+REGRET_WEIGHT = 3.0      # unidades de prioridad por cada 100cp de regret
+DISCONNECTED_REGRET = 5  # posiciones sin camino a la raiz (cajetin FEN)
+
+
+def _regret_from_root():
+    """Descenso por variante principal (estilo chessdb.cn): regret(pos) =
+    suma, a lo largo del mejor camino desde la raiz, de cuanto peor es cada
+    jugada respecto a la mejor alternativa del minimax en ese punto. Bajo la
+    linea principal ~0; bajo un opening refutado, todo el subarbol carga con
+    la diferencia. Dijkstra sobre el DAG (gaps >= 0, transposiciones toman
+    la mejor ruta). Hijos sin eval heredan el regret del padre (optimismo)."""
+    import heapq
+
+    val, white_stm = {}, {}
+    for key, fen, eval_cp, status in Position.objects.values_list(
+            'key', 'fen', 'eval_cp', 'status'):
+        val[key] = {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000,
+                    'DRAW': 0}.get(status, eval_cp)
+        white_stm[key] = fen.split()[1] == 'w'
+    children = {}
+    for pid, cid in Edge.objects.values_list('parent_id', 'child_id'):
+        children.setdefault(pid, []).append(cid)
+
+    INF = float('inf')
+    regret = dict.fromkeys(val, INF)
+    root_key = logic.key_of(logic.start_fen())
+    if root_key in regret:
+        regret[root_key] = 0.0
+    heap = [(0.0, root_key)]
+    while heap:
+        r, k = heapq.heappop(heap)
+        if r > regret.get(k, INF):
+            continue
+        kids = children.get(k, ())
+        if not kids:
+            continue
+        known = [val[c] for c in kids if val.get(c) is not None]
+        best = (max(known) if white_stm[k] else min(known)) if known else None
+        for c in kids:
+            v = val.get(c)
+            gap = 0.0
+            if v is not None and best is not None:
+                gap = (best - v) if white_stm[k] else (v - best)
+            nr = r + gap
+            if nr < regret.get(c, INF):
+                regret[c] = nr
+                heapq.heappush(heap, (nr, c))
+    return regret
 
 
 def refresh_priorities():
-    """§4.1 — recalculo global por lotes (llamado por el selector).
-    Respeta las lapidas: si no, las ramas muertas con eval de mate
-    resucitarian a lo alto de la cola y matarian de hambre al selector."""
+    """§4.1 — recalculo global (llamado por el selector). Prioridad =
+    cercania al cierre local - regret acumulado desde la raiz - visitas.
+    Respeta las lapidas (las ramas muertas no resucitan)."""
+    regret = _regret_from_root()
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
                                .iterator(chunk_size=2000):
         e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
+        r = regret.get(pos.key, float('inf'))
+        runits = DISCONNECTED_REGRET if r == float('inf') \
+            else min(r, 3000) / 100.0
         prio = (min(e, 1500) / 100.0          # cercania al cierre
                 + (50.0 if e >= MATE_BAND else 0.0)  # mate visto: rematar
                 + (2.0 if not pos.expanded else 0.0)
+                - REGRET_WEIGHT * runits      # relevancia hacia la raiz
                 - 1.5 * pos.visits)           # frescura
         if pos.priority != prio:
             pos.priority = prio

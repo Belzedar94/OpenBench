@@ -198,15 +198,35 @@ class TablebaseTests(TestCase):
 class SelectorTests(TestCase):
 
     def test_global_best_first_by_eval(self):
-        # sin campanas: gana el nodo de eval mas decisivo del arbol entero
+        # gana el nodo conectado de eval mas decisivo
         a = ingest.get_or_create_position(logic.start_fen())
-        b = ingest.get_or_create_position(
-            logic.apply_move(logic.start_fen(), 'e2e4'))
-        a.eval_cp, a.expanded = 50, True
+        ingest.expand(a)
+        a.eval_cp = 50
+        a.save()
+        b = Edge.objects.get(parent=a, move_uci='e2e4').child
         b.eval_cp, b.expanded = 800, True
-        a.save(), b.save()
+        b.save()
         tasks = ingest.next_tasks(1)
         self.assertEqual(tasks[0].position_id, b.key)
+
+    def test_priority_prefers_root_relevant_lines(self):
+        # mismo |eval|: el nieto bajo la mejor primera jugada puntua muy por
+        # encima del nieto bajo un opening refutado (regret desde la raiz)
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        good = Edge.objects.get(parent=root, move_uci='g1f3').child
+        bad = Edge.objects.get(parent=root, move_uci='a2a3').child
+        good.eval_cp, bad.eval_cp = 441, -191
+        good.save(), bad.save()
+        ingest.expand(good), ingest.expand(bad)
+        g_kid = Edge.objects.filter(parent=good).first().child
+        b_kid = Edge.objects.filter(parent=bad).first().child
+        for kid in (g_kid, b_kid):
+            kid.eval_cp, kid.expanded = 600, True
+            kid.save()
+        ingest.refresh_priorities()
+        g_kid.refresh_from_db(), b_kid.refresh_from_db()
+        self.assertGreater(g_kid.priority, b_kid.priority + 10)
 
     def test_mate_band_boost_and_budget_jump(self):
         p = ingest.get_or_create_position(logic.start_fen())
