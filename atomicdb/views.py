@@ -83,6 +83,15 @@ def api_submit(request):
     if task.state == 'COMPLETED':
         return JsonResponse({'ok': True, 'dup': True})
 
+    try:
+        elapsed = min(max(float(request.POST.get('elapsed', 0) or 0), 0.0),
+                      86_400.0)
+    except ValueError:
+        elapsed = 0.0
+    if elapsed:
+        Position.objects.filter(key=task.position_id).update(
+            time_invested=F('time_invested') + elapsed)
+
     tb_wdl = request.POST.get('tb_wdl')
     if tb_wdl not in (None, ''):
         closed = ingest.close_by_tb(task.position_id, int(tb_wdl))
@@ -431,6 +440,8 @@ def explore(request, key):
         'board': _ctx_board(pos.fen),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
+        'nodes_h': _human(pos.nodes_invested),
+        'time_str': f'{pos.time_invested:,.1f}s',
         'verdict_css': _move_css(pos.status, eval_stm, win)})
 
 

@@ -85,6 +85,7 @@ def main():
                 try:
                     rr = requests.post(a.S + '/atomicdb/api/submit', data={
                         **auth, 'task_id': t['id'], 'lines': '[]',
+                        'elapsed': f'{time.time() - t0:.2f}',
                         'tb_wdl': wdl}, timeout=60)
                     print(f"task {t['id']} TB wdl={wdl} -> "
                           f"{rr.json().get('summary')}", flush=True)
@@ -95,6 +96,7 @@ def main():
             try:
                 rr = requests.post(a.S + '/atomicdb/api/submit', data={
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
+                    'elapsed': f'{time.time() - t0:.2f}',
                 }, timeout=120)
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
