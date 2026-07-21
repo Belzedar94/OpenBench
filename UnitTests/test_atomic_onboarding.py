@@ -248,6 +248,7 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.assertEqual(preset["datagen_positions_per_chunk"], "")
         self.assertEqual(preset["datagen_base_seed"], "")
         self.assertEqual(preset["datagen_teacher_mode"], "pure")
+        self.assertEqual(preset["priority"], 6)
         self.assertEqual(preset["datagen_publication_protocol"], "41")
         self.assertEqual(
             preset["datagen_campaign_id"],

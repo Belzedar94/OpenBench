@@ -203,7 +203,7 @@
             "datagen_external_workload_id"   : "",
             "datagen_role"                   : "",
             "datagen_cohort"                 : "",
-            "priority"                       : 100,
+            "priority"                       : 6,
             "throughput"                     : 1000,
             "syzygy_wdl"                     : "6-MAN",
             "syzygy_adj"                     : "DISABLED"
