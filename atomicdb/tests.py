@@ -146,6 +146,36 @@ class IngestTests(TestCase):
         self.assertEqual(p.status, 'WHITE_WIN')
         del res
 
+    def _find_mate_in_2_line(self):
+        """Busca (pos, [m1, respuesta, m2]) donde m2 remata tras una
+        respuesta legal cualquiera: el fixture minimo de un cierre MATE_PV."""
+        for s in ['7k/5ppp/8/8/8/8/8/QK6 w - - 0 1',
+                  '6rk/6pp/8/8/8/8/8/QK6 w - - 0 1']:
+            s = logic.canonical_fen(s)
+            for m1 in logic.legal_moves(s):
+                c = logic.apply_move(s, m1)
+                if logic.terminal_status(c) is not None:
+                    continue
+                for r in logic.legal_moves(c):
+                    d = logic.apply_move(c, r)
+                    if logic.terminal_status(d) is not None:
+                        continue
+                    for m2 in logic.legal_moves(d):
+                        t = logic.terminal_status(logic.apply_move(d, m2))
+                        if t and t[0] == 'WHITE_WIN':
+                            return s, [m1, r, m2]
+        return None, None
+
+    def test_mate_pv_closure_emits_event(self):
+        from .models import DBEvent
+        s, pv = self._find_mate_in_2_line()
+        self.assertIsNotNone(s)
+        p = ingest.get_or_create_position(s)
+        ingest.ingest_analysis(p.key, [{'move': pv[0], 'eval_cp': 9998,
+                                        'mate': 2, 'pv': pv}], 1000)
+        self.assertTrue(DBEvent.objects.filter(
+            kind='NODE_CLOSED', payload__closure='MATE_PV').exists())
+
     def test_ingest_idempotent_when_closed(self):
         lt = LogicTests()
         pos_fen, mating_move, _ = lt._find_mate_in_1()
