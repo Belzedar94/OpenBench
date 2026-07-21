@@ -31,14 +31,16 @@ move (chessdb.cn convention). Unknown positions return 404; use the FEN box
 or the explorer to add them to the tree.</p>
 <p>To contribute compute, create an account via
 <a href="/register/">the OpenBench registration</a>
-(instant activation), then run the analysis worker. You need python3 and an
-Atomic-Stockfish binary
-(<a href="https://github.com/Belzedar94/Atomic-Stockfish">build from source</a>
-or grab a release):</p>
+(instant activation), then run the analysis worker. All you need is python3:
+the worker downloads the reference engine on first run (sha256 verified;
+Windows and Linux x86-64 prebuilts, CPU from ~2013 onwards):</p>
 <div class="raw">git clone https://github.com/Belzedar94/OpenBench
 cd OpenBench/Client
 pip install requests chess
-python atomicdb_worker.py -U your_user -P your_pass     -S https://belzedar.duckdns.org     --engine path/to/Atomic-Stockfish.exe     -T 8 --hash 1024</div>
+python atomicdb_worker.py -U your_user -P your_pass     -S https://belzedar.duckdns.org     -T 8 --hash 1024</div>
+<p class="dim" style="font-size:.9rem">Have your own
+<a href="https://github.com/Belzedar94/Atomic-Stockfish">Atomic-Stockfish</a>
+build? Point at it with <code>--engine path/to/binary</code>.</p>
 <p class="dim" style="font-size:.9rem">-T is the engine thread count per task
 (any number, no need to be a multiple of anything) and --hash is the engine
 hash in MB: higher budgets benefit from more hash, so if you can spare RAM,
