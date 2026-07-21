@@ -95,14 +95,16 @@ def _board_rows(fen):
     return rows
 
 
-UNICODE = {'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗',
-           'N': '♘', 'P': '♙', 'k': '♚', 'q': '♛',
-           'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'}
+def _piece_code(ch):
+    if not ch:
+        return ''
+    color = 'w' if ch.isupper() else 'b'
+    return color + ch.upper()
 
 
 def _ctx_board(fen):
     rows = _board_rows(fen)
-    return [[(UNICODE.get(p, ''), (r + c) % 2 == 1)
+    return [[(_piece_code(p), (r + c) % 2 == 1)
              for c, p in enumerate(row)] for r, row in enumerate(rows)]
 
 
@@ -164,7 +166,7 @@ def explore(request, key):
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'board': _ctx_board(pos.fen),
-        'stm': 'blancas' if pos.fen.split()[1] == 'w' else 'negras',
+        'stm': 'White' if pos.fen.split()[1] == 'w' else 'Black',
         'verdict_css': _status_css(pos.status, pos.eval_cp)})
 
 

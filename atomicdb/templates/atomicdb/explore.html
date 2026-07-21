@@ -1,47 +1,43 @@
 {% extends "atomicdb/base.html" %}
-{% block title %}AtomicDB — explorar{% endblock %}
+{% block title %}AtomicDB explorer{% endblock %}
 {% block content %}
 
 <div class="crumb">
-  {% if parents %}llegas desde:
+  {% if parents %}reached from:
     {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
-  {% else %}raíz{% endif %}
+  {% else %}root{% endif %}
 </div>
 
 <div class="cols">
   <div>
-    <div class="board">
-      {% for row in board %}{% for piece, dark in row %}
-        <div class="sq {% if dark %}d{% else %}l{% endif %}"><span>{{ piece }}</span></div>
-      {% endfor %}{% endfor %}
-    </div>
+    {% include "atomicdb/_board.html" %}
     <div class="verdict {{ verdict_css }}">
       {% if pos.status == 'UNKNOWN' %}
-        FRONTERA — mueven {{ stm }}{% if pos.eval_cp is not None %} · mejor línea {{ pos.eval_cp }}cp{% endif %}
+        FRONTIER, {{ stm }} to move{% if pos.eval_cp is not None %} · best line {{ pos.eval_cp }}cp{% endif %}
       {% else %}
-        {{ pos.status }} <span class="dim">(practical, vía {{ pos.closure }})</span>
+        {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
       {% endif %}
     </div>
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
-    <p class="dim" style="font-size:.8rem">visitas {{ pos.visits }} ·
-      nodos {{ pos.nodes_invested }}{% if pos.is_wall %} · <strong style="color:var(--hot)">MURO</strong>{% endif %}</p>
+    <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
+      nodes {{ pos.nodes_invested }}{% if pos.is_wall %} · <strong style="color:var(--hot)">WALL</strong>{% endif %}</p>
   </div>
 
   <div>
-    <h2 style="margin-top:0">Jugadas</h2>
+    <h2 style="margin-top:0">Moves</h2>
     <table>
-      <tr><th></th><th>jugada</th><th>estado</th><th>eval</th><th>visitas</th></tr>
+      <tr><th></th><th>move</th><th>state</th><th>eval</th><th>visits</th></tr>
       {% for m in moves %}
       <tr>
         <td><span class="chip {{ m.css }}"></span></td>
         <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
-        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">frontera</span>
+        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">frontier</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-        <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% empty %}
-      <tr><td colspan="5" class="dim">Sin expandir todavía — el frente llegará aquí.</td></tr>
+      <tr><td colspan="5" class="dim">Not expanded yet. The frontier will reach this node.</td></tr>
       {% endfor %}
     </table>
   </div>

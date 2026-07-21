@@ -1,0 +1,8 @@
+{% load static %}
+<div class="boardwrap"><div class="board">
+{% for row in board %}{% for piece, dark in row %}
+  <div class="sq {% if dark %}d{% else %}l{% endif %}">
+    {% if piece %}<img src="{% static 'atomicdb/pieces/' %}{{ piece }}.svg" alt="{{ piece }}">{% endif %}
+  </div>
+{% endfor %}{% endfor %}
+</div></div>
