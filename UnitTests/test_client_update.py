@@ -1,5 +1,6 @@
 import io
 import importlib.util
+import json
 import tempfile
 import unittest
 import zipfile
@@ -25,6 +26,22 @@ def client_archive(*members):
 
 
 class ClientUpdateTests(unittest.TestCase):
+
+    def test_production_ref_is_compatible_with_legacy_bootstrap(self):
+        config = json.loads((ROOT / 'Config' / 'config.json').read_text())
+        repo_ref = config['client_repo_ref']
+        self.assertRegex(repo_ref, r'^[0-9a-f]{40}$')
+        archive_root = 'OpenBench-%s' % repo_ref
+        payload = client_archive(
+            ('%s/Client/client.py' % archive_root, b'bootstrap'),
+            ('%s/Client/worker.py' % archive_root, b'worker'),
+        )
+        with tempfile.TemporaryDirectory() as target:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                archive.extractall(target)
+            legacy_client_dir = Path(target, 'OpenBench-%s' % repo_ref, 'Client')
+            self.assertTrue(legacy_client_dir.is_dir())
+            self.assertTrue(Path(legacy_client_dir, 'worker.py').is_file())
 
     def test_branch_with_slash_uses_the_archive_root(self):
         archive_root = 'OpenBench-agent-atomic-syzygy-datagen-v1'

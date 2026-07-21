@@ -42,7 +42,8 @@ class AtomicOnboardingTests(unittest.TestCase):
 
     def test_engines_and_books_are_registered(self):
         self.assertEqual(
-            self.general["client_repo_ref"], "agent/atomic-syzygy-datagen-v1"
+            self.general["client_repo_ref"],
+            "175b59a2c468ff4b88fc961a448bdda06f4e633e",
         )
         self.assertIn("Atomic-Stockfish", self.general["engines"])
         self.assertIn("Fairy-Stockfish-Atomic-Baseline", self.general["engines"])
