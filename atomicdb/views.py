@@ -345,10 +345,30 @@ def home(request):
         first_moves = []
     solved_first = sum(1 for m in first_moves if m['status'] != 'UNKNOWN')
     solved_pct = round(100.0 * closed / total, 1) if total else 0.0
+    recent = timezone.now() - timedelta(minutes=10)
+    leased = list(AnalysisTask.objects.filter(state='LEASED',
+                                              leased_at__gte=recent)
+                  .select_related('position').order_by('-leased_at')[:5])
+    analyzing = [{'key': t.position_id,
+                  'san': _san_line(t.position_id, 12) or 'start position',
+                  'budget': _human(t.budget_nodes), 'machine': t.machine}
+                 for t in leased]
+    leased_keys = {t.position_id for t in leased}
+    upnext = []
+    for pos in Position.objects.filter(status='UNKNOWN',
+                                       priority__gt=-1e8) \
+                               .order_by('-priority')[:12]:
+        if pos.key in leased_keys:
+            continue
+        upnext.append({'key': pos.key,
+                       'san': _san_line(pos.key, 12) or 'start position'})
+        if len(upnext) >= 5:
+            break
     events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
     return render(request, 'atomicdb/home.html', {
+        'analyzing': analyzing, 'upnext': upnext,
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),
         'requested_h': _human(requested),
