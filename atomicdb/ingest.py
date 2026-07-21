@@ -216,6 +216,33 @@ def next_tasks(n):
     return tasks
 
 
+def bootstrap_root(budget=None):
+    """Base inicial solida: una pasada profunda (32M por defecto) para CADA
+    movimiento desde startpos, servida antes que el selector (source USER)."""
+    budget = budget or BUDGET_LADDER[2]
+    root = get_or_create_position(logic.start_fen())
+    expand(root)
+    made = 0
+    for e in Edge.objects.filter(parent=root).select_related('child'):
+        c = e.child
+        if c.status != 'UNKNOWN':
+            continue
+        task = AnalysisTask.objects.filter(position=c, state='PENDING').first()
+        if task:
+            task.budget_nodes = max(task.budget_nodes, budget)
+            task.source = 'USER'
+            task.save(update_fields=['budget_nodes', 'source'])
+        else:
+            gen = c.visits
+            while AnalysisTask.objects.filter(position=c,
+                                              generation=gen).exists():
+                gen += 1
+            AnalysisTask.objects.create(position=c, generation=gen,
+                                        budget_nodes=budget, source='USER')
+        made += 1
+    return made
+
+
 def request_analysis(pos):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Devuelve 'queued' | 'already-queued' | 'already-solved'."""
