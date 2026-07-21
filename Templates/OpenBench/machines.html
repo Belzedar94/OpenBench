@@ -8,6 +8,7 @@
 
         <tr class="table-header">
             <th>#</th>
+            <th>Project</th>
             <th>User</th>
             <th>Name</th>
             <th>System</th>
@@ -19,6 +20,7 @@
         {% for machine in machines %}
             <tr>
                 <td class="numeric"><a href="/machines/{{machine.id}}/">{{machine.id}}</a></td>
+                <td>OpenBench</td>
                 <td>{{machine.user.username|capfirst}}</td>
                 <td>{{machine.info.machine_name}}</td>
                 <td>{{machine.info.os_name}}</td>
@@ -33,6 +35,19 @@
                 </td>
                 <td class="numeric">{{machine.info.concurrency}}</td>
                 <td class="numeric">{{machine.dev_mnps|twoDigitPrecision}}M / {{machine.base_mnps|twoDigitPrecision}}M</td>
+            </tr>
+        {% endfor %}
+
+        {% for w in atomic_workers %}
+            <tr>
+                <td class="numeric">-</td>
+                <td><a href="/atomicdb/">AtomicDB</a></td>
+                <td>{{w.user|capfirst}}</td>
+                <td>{{w.machine}}</td>
+                <td>{{w.os}}</td>
+                <td><a href="/atomicdb/">analysis tree</a></td>
+                <td class="numeric">{{w.threads}}</td>
+                <td class="numeric">{{w.tasks_done}} tasks</td>
             </tr>
         {% endfor %}
 

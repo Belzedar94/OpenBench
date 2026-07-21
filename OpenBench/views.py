@@ -461,7 +461,14 @@ def events_errors(request, page=1):
 def machines(request, machineid=None):
 
     if machineid == None:
-        data = { 'machines' : OpenBench.utils.getRecentMachines() }
+        import datetime as _dt
+        from django.utils import timezone as _tz
+        from atomicdb.models import WorkerPing
+        cutoff = _tz.now() - _dt.timedelta(minutes=5)
+        data = {
+            'machines'       : OpenBench.utils.getRecentMachines(),
+            'atomic_workers' : WorkerPing.objects.filter(last_seen__gte=cutoff),
+        }
         return render(request, 'machines.html', data)
 
     try:
