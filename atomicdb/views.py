@@ -19,7 +19,8 @@ from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      RequestLog, WorkerPing)
 
 LEASE_MINUTES = 60   # 2B nodos deben caber en maquinas de ~1 MNps
-BATCH_SIZE = 25
+BATCH_SIZE = 3   # lotes cortos: con sondas de 128M-2B, las peticiones USER
+                 # entran en minutos y el overhead de lease es despreciable
 REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
 

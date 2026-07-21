@@ -33,23 +33,49 @@
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
     </p>
     <script>
-    document.getElementById('reqbtn').addEventListener('click', function () {
-      const b = this;
-      b.disabled = true;
-      fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
-        .then(r => r.json())
-        .then(d => {
-          b.textContent = {
-            'queued': 'Queued, a worker will pick it up',
-            'already-queued': 'Already in the queue',
-            'already-requested': 'You already requested this one',
-            'rate-limited': 'Hourly limit reached, try later',
-            'queue-full': 'Queue is full, try later',
-            'already-solved': 'Already solved',
-          }[d.status] || 'Something went wrong';
-        })
-        .catch(() => { b.textContent = 'Network error'; b.disabled = false; });
-    });
+    (function () {
+      const btn = document.getElementById('reqbtn');
+      const fen = '{{ pos.fen|escapejs }}';
+      const visits0 = {{ pos.visits }};
+      const status0 = '{{ pos.status }}';
+      function poll(tries) {
+        if (tries <= 0) {
+          btn.textContent = 'Still queued, check back in a while';
+          return;
+        }
+        fetch('/atomicdb/api/query?fen=' + encodeURIComponent(fen))
+          .then(r => r.json())
+          .then(d => {
+            if (d.visits > visits0 || d.status !== status0) {
+              btn.textContent = 'Analysis arrived, reloading...';
+              location.reload();
+            } else {
+              setTimeout(() => poll(tries - 1), 10000);
+            }
+          })
+          .catch(() => setTimeout(() => poll(tries - 1), 10000));
+      }
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
+          .then(r => r.json())
+          .then(d => {
+            btn.textContent = {
+              'queued': 'Queued, waiting for a worker...',
+              'already-queued': 'In the queue, waiting for a worker...',
+              'already-requested': 'Already requested, waiting...',
+              'rate-limited': 'Hourly limit reached, try later',
+              'queue-full': 'Queue is full, try later',
+              'already-solved': 'Already solved',
+            }[d.status] || 'Something went wrong';
+            if (['queued', 'already-queued',
+                 'already-requested'].includes(d.status)) {
+              poll(36);   // espera activa ~6 min, luego rendirse con gracia
+            }
+          })
+          .catch(() => { btn.textContent = 'Network error'; btn.disabled = false; });
+      });
+    })();
     </script>
     {% endif %}
     {% if pos.won_line %}

@@ -232,19 +232,23 @@ class SelectorTests(TestCase):
 
 class RequestTests(TestCase):
 
-    def test_request_queues_user_task(self):
+    def test_request_queues_user_task_with_floor(self):
         from .models import AnalysisTask
         p = ingest.get_or_create_position(logic.start_fen())
         self.assertEqual(ingest.request_analysis(p), 'queued')
         t = AnalysisTask.objects.get(position=p)
         self.assertEqual((t.source, t.state), ('USER', 'PENDING'))
+        # posicion fresca: no la sonda minima, sino el suelo de peticiones
+        self.assertGreaterEqual(t.budget_nodes, ingest.BUDGET_LADDER[2])
 
     def test_request_promotes_existing_auto_task(self):
         from .models import AnalysisTask
         p = ingest.get_or_create_position(logic.start_fen())
-        ingest.next_tasks(1)   # crea la tarea AUTO
+        ingest.next_tasks(1)   # crea la tarea AUTO (peldano bajo)
         self.assertEqual(ingest.request_analysis(p), 'queued')
-        self.assertEqual(AnalysisTask.objects.get(position=p).source, 'USER')
+        t = AnalysisTask.objects.get(position=p)
+        self.assertEqual(t.source, 'USER')
+        self.assertGreaterEqual(t.budget_nodes, ingest.BUDGET_LADDER[2])
 
     def test_request_on_solved_position(self):
         from .models import AnalysisTask

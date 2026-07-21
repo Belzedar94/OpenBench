@@ -276,19 +276,24 @@ def bootstrap_root(budget=None):
 
 def request_analysis(pos):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
+    Suelo de 128M: quien pide analisis merece profundidad de verdad.
     Devuelve 'queued' | 'already-queued' | 'already-solved'."""
     if pos.status != 'UNKNOWN':
         return 'already-solved'
+    floor = max(budget_for(pos), BUDGET_LADDER[2])
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
-        defaults={'budget_nodes': budget_for(pos), 'source': 'USER',
+        defaults={'budget_nodes': floor, 'source': 'USER',
                   'multipv': multipv_for(pos.visits)})
     if created:
         return 'queued'
-    if task.state == 'PENDING' and task.source != 'USER':
+    if task.state == 'PENDING':
+        task.budget_nodes = max(task.budget_nodes, floor)
+        promoted = task.source != 'USER'
         task.source = 'USER'   # promocion: al frente de la cola
-        task.save(update_fields=['source'])
-        return 'queued'
+        task.save(update_fields=['source', 'budget_nodes'])
+        if promoted:
+            return 'queued'
     return 'already-queued'
 
 
