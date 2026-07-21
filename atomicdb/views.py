@@ -10,7 +10,9 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
-from django.db.models import F
+import re
+
+from django.db.models import F, Sum
 
 from . import ingest, logic
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
@@ -218,17 +220,53 @@ def _friendly_events(events):
     return out
 
 
+def _human(n):
+    """3322 -> '3,322'; 108600000 -> '108.6M'; 2400000000 -> '2.40B'."""
+    n = n or 0
+    if n >= 1_000_000_000_000:
+        return f'{n / 1e12:.2f}T'
+    if n >= 1_000_000_000:
+        return f'{n / 1e9:.2f}B'
+    if n >= 1_000_000:
+        return f'{n / 1e6:.1f}M'
+    return f'{n:,}'
+
+
+def _move_css(status, score, win_status):
+    """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
+    if status == 'DRAW':
+        return 'draw'
+    if status != 'UNKNOWN':
+        return 'won' if status == win_status else 'lost'
+    e = abs(score or 0)
+    return 'hot' if e >= 500 else ('warm' if e >= 200 else 'cold')
+
+
 def _child_moves(pos):
-    """Tabla de movimientos hijos, formato compartido home/explorador."""
+    """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
+    El almacenamiento interno sigue siendo White-POV; solo la vista voltea.
+    Orden: victorias del que mueve, luego por score, derrotas al final."""
+    stm_white = pos.fen.split()[1] == 'w'
+    win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
     moves = []
     for e in Edge.objects.filter(parent=pos).select_related('child'):
         c = e.child
+        if c.status == win:
+            score, rank = 10_000, 10_001
+        elif c.status == loss:
+            score, rank = -10_000, -10_001
+        elif c.status == 'DRAW':
+            score, rank = 0, 0
+        elif c.eval_cp is not None:
+            score = c.eval_cp if stm_white else -c.eval_cp
+            rank = score
+        else:
+            score, rank = None, -9_999.5   # sin analizar: encima de perder
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
-                      'closure': c.closure, 'eval': c.eval_cp,
-                      'visits': c.visits, 'css': _status_css(c.status, c.eval_cp)})
-    moves.sort(key=lambda m: ({'WHITE_WIN': 0, 'UNKNOWN': 1, 'DRAW': 2,
-                               'BLACK_WIN': 3}[m['status']],
-                              -(m['eval'] or -99999)))
+                      'closure': c.closure, 'score': score, 'rank': rank,
+                      'visits': c.visits, 'css': _move_css(c.status, score, win)})
+    moves.sort(key=lambda m: -m['rank'])
     return moves
 
 
@@ -238,34 +276,102 @@ def home(request):
     analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
     requested = AnalysisTask.objects.filter(state='PENDING',
                                             source='USER').count()
-    nodes = Position.objects.aggregate(n=__import__('django').db.models.Sum(
-        'nodes_invested'))['n'] or 0
+    nodes = Position.objects.aggregate(n=Sum('nodes_invested'))['n'] or 0
+    day_ago = timezone.now() - timedelta(hours=24)
+    closed_24h = DBEvent.objects.filter(kind='NODE_CLOSED',
+                                        ts__gte=day_ago).count()
+    nodes_24h = AnalysisTask.objects.filter(
+        state='COMPLETED', completed__gte=day_ago).aggregate(
+        n=Sum('budget_nodes'))['n'] or 0
     root_key = logic.key_of(logic.start_fen())
     try:
         first_moves = _child_moves(Position.objects.get(key=root_key))
     except Position.DoesNotExist:
         first_moves = []
+    solved_first = sum(1 for m in first_moves if m['status'] != 'UNKNOWN')
+    solved_pct = round(100.0 * closed / total, 1) if total else 0.0
     events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
     return render(request, 'atomicdb/home.html', {
-        'total': total, 'closed': closed, 'analyses': analyses, 'nodes': nodes,
-        'requested': requested,
+        'total_h': _human(total), 'closed_h': _human(closed),
+        'analyses_h': _human(analyses), 'nodes_h': _human(nodes),
+        'requested_h': _human(requested),
+        'solved_first': solved_first, 'n_first': len(first_moves),
+        'solved_pct': solved_pct,
+        'closed_24h_h': _human(closed_24h), 'nodes_24h_h': _human(nodes_24h),
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_key': root.key,
         'legal_ucis': logic.legal_moves(root.fen)})
 
 
-def _status_css(status, eval_cp):
-    if status == 'WHITE_WIN':
-        return 'won'
-    if status == 'BLACK_WIN':
-        return 'lost'
-    if status == 'DRAW':
-        return 'draw'
-    e = abs(eval_cp or 0)
-    return 'hot' if e >= 500 else ('warm' if e >= 200 else 'cold')
+FEN_SHAPE = re.compile(
+    r'^[pnbrqkPNBRQK1-8]+(/[pnbrqkPNBRQK1-8]+){7} [wb]'
+    r' (-|[KQkqA-Ha-h]+) (-|[a-h][36])( \d+ \d+)?$')
+
+
+def _parse_public_fen(raw):
+    """Validacion estricta de FEN publica ANTES de pasarla a pyffish."""
+    raw = ' '.join(raw.replace('_', ' ').split())
+    if len(raw) > 100 or not FEN_SHAPE.match(raw):
+        raise ValueError('malformed fen')
+    board = raw.split()[0]
+    if board.count('K') != 1 or board.count('k') != 1:
+        raise ValueError('need both kings')
+    for rank in board.split('/'):
+        if sum(int(c) if c.isdigit() else 1 for c in rank) != 8:
+            raise ValueError('bad rank')
+    if len(raw.split()) == 4:
+        raw += ' 0 1'
+    fen = logic.canonical_fen(raw)
+    logic.legal_moves(fen)   # pyffish la acepta
+    return fen
+
+
+def api_query(request):
+    """API publica de consulta por FEN. Scores en perspectiva del que mueve
+    (convencion chessdb.cn); el arbol interno almacena White-POV."""
+    try:
+        fen = _parse_public_fen(request.GET.get('fen', ''))
+    except Exception:
+        return JsonResponse({'error': 'invalid fen'}, status=400)
+    try:
+        pos = Position.objects.get(key=logic.key_of(fen))
+    except Position.DoesNotExist:
+        return JsonResponse({'error': 'unknown position'}, status=404)
+    stm_white = pos.fen.split()[1] == 'w'
+    score = None if pos.eval_cp is None else (
+        pos.eval_cp if stm_white else -pos.eval_cp)
+    moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
+              'score': m['score'], 'visits': m['visits']}
+             for m in _child_moves(pos)]
+    return JsonResponse({
+        'fen': pos.fen, 'key': pos.key, 'status': pos.status,
+        'closure': pos.closure, 'score': score, 'best_move': pos.best_move,
+        'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
+
+
+def fen_jump(request):
+    """Cajetin de FEN: salta a la posicion; si no existe la crea, bajo el
+    mismo rate-limit por IP que las peticiones de analisis."""
+    if request.method != 'POST':
+        return redirect('/atomicdb/')
+    try:
+        fen = _parse_public_fen(request.POST.get('fen', ''))
+    except Exception:
+        return render(request, 'atomicdb/missing.html', status=400)
+    key = logic.key_of(fen)
+    if not Position.objects.filter(key=key).exists():
+        ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
+              or request.META.get('REMOTE_ADDR', '0.0.0.0'))
+        hour_ago = timezone.now() - timedelta(hours=1)
+        if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
+                             .count() >= REQUESTS_PER_IP_HOUR:
+            return render(request, 'atomicdb/missing.html', status=429)
+        pos = ingest.get_or_create_position(fen)
+        RequestLog.objects.create(ip=ip, position=pos)
+    return redirect(f'/atomicdb/explore/{key}/')
 
 
 def _line_to_root(pos, max_plies=64):
@@ -314,13 +420,18 @@ def explore(request, key):
             pre = f'{n}...' if i == 0 else ''
             numbered.append({'num': pre, 'san': st['san'], 'key': st['key']})
             n += 1
+    stm_white = pos.fen.split()[1] == 'w'
+    win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    eval_stm = None if pos.eval_cp is None else (
+        pos.eval_cp if stm_white else -pos.eval_cp)
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'board_key': pos.key, 'legal_ucis': legal_ucis,
         'board': _ctx_board(pos.fen),
-        'stm': 'White' if pos.fen.split()[1] == 'w' else 'Black',
-        'verdict_css': _status_css(pos.status, pos.eval_cp)})
+        'stm': 'White' if stm_white else 'Black',
+        'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
+        'verdict_css': _move_css(pos.status, eval_stm, win)})
 
 
 def method(request):

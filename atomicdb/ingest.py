@@ -11,7 +11,9 @@ from django.utils import timezone
 from . import logic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
-BUDGET_LADDER = [100_000, 400_000, 1_600_000, 6_400_000, 25_600_000]
+# Sondas profundas estilo chessdb.cn: evals fiables y mates detectados valen
+# mas que anchura barata; 2M nodos ~ 1s en un worker tipico.
+BUDGET_LADDER = [2_000_000, 8_000_000, 32_000_000, 128_000_000, 512_000_000]
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 
 

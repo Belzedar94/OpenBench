@@ -25,6 +25,10 @@ A second-tier formal certification roadmap exists separately.</p>
 <strong>Request analysis</strong> button. Requests jump to the front of the
 worker queue, so pointing the search at a line you care about is one click.
 Limits apply per visitor to keep the queue healthy.</p>
+<p>Programmatic access: <code>GET /atomicdb/api/query?fen=...</code> returns
+the stored verdict, score and move list as JSON. Scores are from the side to
+move (chessdb.cn convention). Unknown positions return 404; use the FEN box
+or the explorer to add them to the tree.</p>
 <p>To contribute compute, create an account via
 <a href="/register/">the OpenBench registration</a>
 (instant activation), then run the analysis worker. You need python3 and an

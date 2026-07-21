@@ -79,6 +79,19 @@ details summary{cursor:pointer;color:var(--dim);font-size:.85rem;margin:.6rem 0 
   font:inherit;font-size:.85rem;cursor:pointer}
 .reqbtn:hover:not(:disabled){border-color:var(--won)}
 .reqbtn:disabled{color:var(--dim);cursor:default}
+.reqrow{display:flex;align-items:center;gap:.8rem;margin:.7rem 0}
+.progress{margin:.9rem 0 1.1rem}
+.pbar{display:flex;gap:3px;height:12px;margin-bottom:.45rem}
+.pseg{flex:1;border-radius:3px;background:#3a362f}
+.pseg.won{background:var(--won)}.pseg.lost{background:var(--lost)}
+.pseg.draw{background:#8a8578}.pseg.hot{background:#e8a33d}
+.pseg.warm{background:#c9b458}.pseg.cold{background:#55514a}
+.pkpis{font-size:.85rem}
+.fenbox{display:flex;gap:.6rem;margin:0 0 1.2rem}
+.fenbox input{flex:1;max-width:560px;padding:.45rem .7rem;border-radius:8px;
+  background:var(--panel);border:1px solid #4a463f;color:var(--fg);
+  font:12px/1.4 ui-monospace,Consolas,monospace}
+.fenbox input:focus{outline:none;border-color:var(--won)}
 .feed{list-style:none}
 .feed li{padding:.45rem .2rem;border-bottom:1px solid #2c2925;font-size:.92rem}
 .feed .t{color:var(--dim);font-size:.8rem;margin-right:.6rem}
