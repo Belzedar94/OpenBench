@@ -79,7 +79,11 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                 if logic.verify_mate_pv(child.fen, pv_rest, winner_white):
                     child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
                     child.closure = 'MATE_PV'
-                    child.save(update_fields=['status', 'closure', 'updated'])
+                    child.won_line = ' '.join(pv_rest)
+                    if pv_rest:
+                        child.best_move = pv_rest[0]
+                    child.save(update_fields=['status', 'closure', 'won_line',
+                                              'best_move', 'updated'])
                     closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
@@ -129,6 +133,13 @@ def backup_cascade(seed_keys):
             dirty = False
             if new_status != pos.status and pos.status == 'UNKNOWN':
                 pos.status, pos.closure = new_status, 'MINIMAX'
+                # testigo del minimax: la arista hacia el mejor hijo exacto
+                want = new_status
+                witness = next((e for e in edges if e.child.status == want),
+                               None) or next(
+                    (e for e in edges if e.child.status != 'UNKNOWN'), None)
+                if witness:
+                    pos.best_move = witness.move_uci
                 dirty = True
                 _emit_closure_events(pos)
             if new_eval is not None and new_eval != pos.eval_cp:
