@@ -33,8 +33,10 @@ import math
 
 import OpenBench.utils
 import OpenBench.views
+import OpenBench.datagen_publication
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from OpenBench.datagen import MAX_LEGACY_DATAGEN_GAMES, initialize_chunks
 from OpenBench.models import *
 from OpenBench.config import OPENBENCH_CONFIG
@@ -231,57 +233,151 @@ def create_new_datagen(request):
     if errors:
         return None, errors
 
-    with transaction.atomic():
-        test = Test()
-        test.author = request.user.username
-        test.book_name = request.POST['book_name']
-        test.upload_pgns = 'FALSE'
+    publication_network = None
+    publication_book = None
+    if OpenBench.datagen_publication.publication_requested(request.POST):
+        try:
+            selected_network = Network.objects.get(
+                engine=request.POST['dev_engine'],
+                sha256=request.POST['dev_network'],
+            )
+            publication_network = (
+                OpenBench.datagen_publication.capture_network_identity(
+                    selected_network, settings.MEDIA_ROOT
+                )
+            )
+            publication_book = (
+                OpenBench.datagen_publication.capture_book_identity(
+                    request.POST['book_name'], OPENBENCH_CONFIG['books']
+                )
+            )
+        except (
+            KeyError,
+            Network.DoesNotExist,
+            OpenBench.datagen_publication.PublicationContractError,
+        ) as error:
+            return None, [str(error) or 'Unable to freeze DATAGEN publication assets']
 
-        engine = get_engine(*dev_info)
-        test.dev = test.base = engine
-        test.dev_repo = test.base_repo = request.POST['dev_repo']
-        test.dev_engine = test.base_engine = request.POST['dev_engine']
-        test.dev_options = test.base_options = request.POST.get('dev_options', '')
-        test.dev_network = test.base_network = request.POST.get('dev_network', '')
-        test.dev_time_control = test.base_time_control = ''
+        campaign_id = request.POST['datagen_campaign_id'].strip()
+        workload_id = request.POST['datagen_external_workload_id'].strip()
+        role = request.POST['datagen_role'].strip()
+        cohort = request.POST['datagen_cohort'].strip()
+        if Test.objects.filter(
+            datagen_publication_protocol=41,
+            datagen_campaign_id=campaign_id,
+            datagen_external_workload_id=workload_id,
+        ).exists():
+            return None, ['DATAGEN campaign already contains this external workload id']
+        if Test.objects.filter(
+            datagen_publication_protocol=41,
+            datagen_campaign_id=campaign_id,
+            datagen_role=role,
+            datagen_cohort=cohort,
+        ).exists():
+            return None, ['DATAGEN campaign already contains this role/cohort slot']
 
-        test.datagen_command = request.POST['datagen_command'].strip()
-        test.datagen_total_count = int(request.POST['datagen_total_count'])
-        test.datagen_positions_per_chunk = int(request.POST['datagen_positions_per_chunk'])
-        test.datagen_base_seed = int(request.POST['datagen_base_seed'])
+    try:
+        with transaction.atomic():
+            test = Test()
+            test.author = request.user.username
+            test.book_name = request.POST['book_name']
+            test.upload_pgns = 'FALSE'
 
-        # Generic DATAGEN completion uses the 64-bit position counters below.
-        # max_games is only a legacy signed-32-bit summary, so preserve exact
-        # values while representable and saturate that non-canonical mirror.
-        test.max_games = min(
-            test.datagen_total_count, MAX_LEGACY_DATAGEN_GAMES
-        )
-        test.workload_size = 1
-        test.priority = int(request.POST['priority'])
-        test.throughput = int(request.POST['throughput'])
+            engine = get_engine(*dev_info)
+            test.dev = test.base = engine
+            test.dev_repo = test.base_repo = request.POST['dev_repo']
+            test.dev_engine = test.base_engine = request.POST['dev_engine']
+            test.dev_options = test.base_options = request.POST.get('dev_options', '')
+            test.dev_network = test.base_network = request.POST.get('dev_network', '')
+            test.dev_time_control = test.base_time_control = ''
 
-        test.syzygy_wdl = 'DISABLED'
-        test.syzygy_adj = 'DISABLED'
-        test.win_adj = 'None'
-        test.draw_adj = 'None'
+            test.datagen_command = request.POST['datagen_command'].strip()
+            test.datagen_total_count = int(request.POST['datagen_total_count'])
+            test.datagen_positions_per_chunk = int(request.POST['datagen_positions_per_chunk'])
+            test.datagen_base_seed = int(request.POST['datagen_base_seed'])
 
-        test.test_mode = 'DATAGEN'
-        test.awaiting = not dev_has_all
-        test.use_tri = False
-        test.use_penta = False
+            # Generic DATAGEN completion uses the 64-bit position counters below.
+            # max_games is only a legacy signed-32-bit summary, so preserve exact
+            # values while representable and saturate that non-canonical mirror.
+            test.max_games = min(
+                test.datagen_total_count, MAX_LEGACY_DATAGEN_GAMES
+            )
+            test.workload_size = 1
+            test.priority = int(request.POST['priority'])
+            test.throughput = int(request.POST['throughput'])
 
-        if test.dev_network:
-            name = Network.objects.get(
-                engine=test.dev_engine, sha256=test.dev_network
-            ).name
-            test.dev_netname = test.base_netname = name
+            template_fields = Test.datagen_template_fields(test.datagen_command)
+            tablebase_required = bool(
+                template_fields & DATAGEN_TABLEBASE_PLACEHOLDERS
+            )
+            engine_config = OPENBENCH_CONFIG['engines'][test.dev_engine]
+            if tablebase_required:
+                test.syzygy_wdl = request.POST['syzygy_wdl']
+                tablebase_family = engine_config.get(
+                    'tablebase_family', 'standard'
+                )
+                tablebase_max = int(test.syzygy_wdl.split('-')[0])
+                tablebase_manifest = engine_config[
+                    'tablebase_manifest_sha256'
+                ].lower()
+            else:
+                test.syzygy_wdl = 'DISABLED'
+                tablebase_family = ''
+                tablebase_max = 0
+                tablebase_manifest = ''
+            test.syzygy_adj = 'DISABLED'
+            test.win_adj = 'None'
+            test.draw_adj = 'None'
 
-        test.save()
-        initialize_chunks(test)
+            teacher_mode = (
+                request.POST.get('datagen_teacher_mode', '')
+                if 'TEACHER_MODE' in template_fields else ''
+            )
+            test.freeze_datagen_environment_contract(
+                tablebase_family,
+                tablebase_max,
+                tablebase_manifest,
+                teacher_mode,
+            )
 
-        profile = Profile.objects.get(user=request.user)
-        profile.tests += 1
-        profile.save()
+            test.test_mode = 'DATAGEN'
+            test.awaiting = not dev_has_all
+            test.use_tri = False
+            test.use_penta = False
+
+            if test.dev_network:
+                name = Network.objects.get(
+                    engine=test.dev_engine, sha256=test.dev_network
+                ).name
+                test.dev_netname = test.base_netname = name
+
+            if publication_network is not None:
+                test.datagen_publication_protocol = 41
+                test.datagen_campaign_id = request.POST[
+                    'datagen_campaign_id'
+                ].strip()
+                test.datagen_external_workload_id = request.POST[
+                    'datagen_external_workload_id'
+                ].strip()
+                test.datagen_role = request.POST['datagen_role'].strip()
+                test.datagen_cohort = request.POST['datagen_cohort'].strip()
+                test.freeze_datagen_producer_contract()
+                test.freeze_datagen_publication_contract(
+                    publication_network, publication_book
+                )
+
+            test.save()
+            initialize_chunks(test)
+
+            profile = Profile.objects.get(user=request.user)
+            profile.tests += 1
+            profile.save()
+    except OpenBench.datagen_publication.PublicationContractError as error:
+        return None, [str(error)]
+    except IntegrityError:
+        if publication_network is None:
+            raise
+        return None, ['DATAGEN publication campaign slot was created concurrently']
 
     return test, None
 

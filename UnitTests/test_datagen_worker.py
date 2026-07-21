@@ -1,5 +1,6 @@
 import bz2
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -74,7 +75,327 @@ def config():
     )
 
 
+def tablebase_config(teacher_mode='pure'):
+    cfg = config()
+    cfg.atomic_syzygy_path = r'C:\Atomic Tables\combined'
+    cfg.atomic_syzygy_max = 6
+    cfg.atomic_syzygy_manifest_sha256 = 'b' * 64
+    test = cfg.workload['test']
+    test['syzygy_wdl'] = '6-MAN'
+    test['syzygy_adj'] = 'DISABLED'
+    test['dev']['tablebase_family'] = 'atomic'
+    data = test['datagen']
+    data.update({
+        'command': (
+            'generate seed {SEED} count {COUNT} threads {THREADS} '
+            'out {OUT} syzygy "{SYZYGY}" '
+            'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+            'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+        ),
+        'tablebase_required': True,
+        'tablebase_family': 'atomic',
+        'tablebase_max': 6,
+        'tablebase_manifest_sha256': 'b' * 64,
+        'teacher_mode': teacher_mode,
+        'environment_contract_sha256': 'c' * 64,
+    })
+    lease = {
+        'schema': 'openbench-datagen-tablebase-lease-v40',
+        'protocol': 40,
+        'test_id': test['id'],
+        'chunk_idx': data['chunk_idx'],
+        'attempt': data['attempt'],
+        'machine_id': cfg.machine_id,
+        'environment_contract_sha256': 'c' * 64,
+        'tablebase': {
+            'family': 'atomic',
+            'required_max': 6,
+            'worker_max': 6,
+            'manifest_sha256': 'b' * 64,
+        },
+        'teacher_mode': teacher_mode,
+    }
+    data['environment_lease'] = lease
+    data['environment_lease_sha256'] = hashlib.sha256(
+        json.dumps(lease, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+    return cfg
+
+
+def publication_config(tablebase=False):
+    cfg = tablebase_config() if tablebase else config()
+    test = cfg.workload['test']
+    data = test['datagen']
+    network_bytes = b'v41-worker-network'
+    network_sha256 = hashlib.sha256(network_bytes).hexdigest()
+    network_id = network_sha256[:8].upper()
+    test['dev'].update({
+        'repo': 'https://github.com/example/engine',
+        'requested_ref': 'branch',
+        'options': '',
+        'network': network_id,
+        'netname': 'network.nnue',
+    })
+    test['book'] = {
+        'name': 'NONE',
+        'sha': None,
+        'raw_sha': None,
+        'source': None,
+    }
+    command = (
+        'generate seed {SEED} count {COUNT} threads {THREADS} '
+        'book {BOOK} book_sha256 {BOOK_SHA256} '
+        'network {NETWORK} network_sha256 {NETWORK_SHA256}'
+    )
+    if tablebase:
+        command += (
+            ' syzygy {SYZYGY} '
+            'syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} '
+            'syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE}'
+        )
+    command += ' out {OUT}'
+    data.update({
+        'command': command,
+        'base_seed': 100,
+        'producer_artifact_required': False,
+        'producer_contract_sha256': 'd' * 64,
+        'publication_protocol': 41,
+    })
+    if not tablebase:
+        test.update({'syzygy_wdl': 'DISABLED', 'syzygy_adj': 'DISABLED'})
+        test['dev']['tablebase_family'] = 'atomic'
+        data.update({
+            'tablebase_required': False,
+            'tablebase_family': '',
+            'tablebase_max': 0,
+            'tablebase_manifest_sha256': '',
+            'teacher_mode': '',
+            'environment_contract_sha256': 'c' * 64,
+        })
+    contract = {
+        'schema': 'openbench-datagen-publication-contract-v41',
+        'protocol': 41,
+        'campaign_id': 'atomic-campaign',
+        'external_workload_id': 'opening-train',
+        'role': 'train',
+        'cohort': 'opening',
+        'engine': {
+            'name': test['dev']['engine'],
+            'repo': test['dev']['repo'],
+            'source': test['dev']['source'],
+            'requested_ref': test['dev']['requested_ref'],
+            'commit': test['dev']['sha'],
+            'bench': test['dev']['bench'],
+            'options': test['dev']['options'],
+        },
+        'network': {
+            'name': test['dev']['netname'],
+            'openbench_id': network_id,
+            'sha256': network_sha256,
+            'bytes': len(network_bytes),
+        },
+        'book': {
+            'kind': 'builtin-startpos',
+            'name': 'NONE',
+            'source': None,
+            'text_sha256': None,
+            'raw_sha256': None,
+        },
+        'generation': {
+            'command': command,
+            'command_sha256': hashlib.sha256(command.encode()).hexdigest(),
+            'total_count': data['total_count'],
+            'positions_per_chunk': data['positions_per_chunk'],
+            'base_seed': data['base_seed'],
+            'seed_method': 'base-plus-chunk-index-v1',
+        },
+        'producer': {
+            'required': False,
+            'contract_sha256': data['producer_contract_sha256'],
+        },
+        'teacher': {'mode': data['teacher_mode'] or None},
+        'syzygy': {
+            'required': data['tablebase_required'],
+            'family': data['tablebase_family'] or None,
+            'max': data['tablebase_max'],
+            'manifest_sha256': data['tablebase_manifest_sha256'] or None,
+            'environment_contract_sha256': data[
+                'environment_contract_sha256'
+            ],
+        },
+    }
+    contract_sha256 = hashlib.sha256(json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode()).hexdigest()
+    data['publication_contract'] = contract
+    data['publication_contract_sha256'] = contract_sha256
+    tablebase_lease = {
+        'required': data['tablebase_required'],
+        'family': data['tablebase_family'] or None,
+        'required_max': data['tablebase_max'],
+        'worker_max': data['tablebase_max'],
+        'manifest_sha256': data['tablebase_manifest_sha256'] or None,
+    }
+    lease = {
+        'schema': 'openbench-datagen-publication-lease-v41',
+        'protocol': 41,
+        'test_id': test['id'],
+        'chunk_idx': data['chunk_idx'],
+        'attempt': data['attempt'],
+        'machine_id': cfg.machine_id,
+        'publication_contract_sha256': contract_sha256,
+        'environment_contract_sha256': data['environment_contract_sha256'],
+        'tablebase': tablebase_lease,
+        'teacher_mode': data['teacher_mode'] or None,
+    }
+    data['environment_lease'] = lease
+    data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode()).hexdigest()
+    return cfg, network_bytes
+
+
 class DatagenWorkerTests(unittest.TestCase):
+
+    def test_v41_worker_validates_contract_lease_and_full_network_before_launch(self):
+        cfg, network_bytes = publication_config()
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        self.assertFalse(attestation['tablebase_required'])
+        self.assertEqual(
+            attestation['publication_contract_sha256'],
+            cfg.workload['test']['datagen'][
+                'publication_contract_sha256'
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            network = os.path.join(directory, 'network.nnue')
+            Path(network).write_bytes(network_bytes)
+            rendered = worker.render_datagen_command(
+                cfg, os.path.join('Datagen', 'chunk.bin'), network
+            )
+            self.assertIn(
+                'network_sha256 '
+                + hashlib.sha256(network_bytes).hexdigest(),
+                rendered,
+            )
+            Path(network).write_bytes(network_bytes + b'drift')
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError, 'network.*bytes'
+            ):
+                worker.render_datagen_command(
+                    cfg, os.path.join('Datagen', 'chunk.bin'), network
+                )
+
+    def test_v41_worker_rejects_network_byte_count_drift_even_when_rehashed(self):
+        cfg, network_bytes = publication_config()
+        data = cfg.workload['test']['datagen']
+        data['publication_contract']['network']['bytes'] += 1
+        data['publication_contract_sha256'] = hashlib.sha256(json.dumps(
+            data['publication_contract'],
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()).hexdigest()
+        data['environment_lease']['publication_contract_sha256'] = data[
+            'publication_contract_sha256'
+        ]
+        data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+            data['environment_lease'], sort_keys=True, separators=(',', ':')
+        ).encode()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            network = os.path.join(directory, 'network.nnue')
+            Path(network).write_bytes(network_bytes)
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError, 'network.*bytes'
+            ):
+                worker.render_datagen_command(
+                    cfg, os.path.join('Datagen', 'chunk.bin'), network
+                )
+
+    def test_v41_worker_rejects_semantic_contract_drift_even_when_rehashed(self):
+        cfg, _ = publication_config(tablebase=True)
+        data = cfg.workload['test']['datagen']
+        data['publication_contract']['generation']['base_seed'] += 1
+        data['publication_contract_sha256'] = hashlib.sha256(json.dumps(
+            data['publication_contract'],
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode()).hexdigest()
+        data['environment_lease']['publication_contract_sha256'] = data[
+            'publication_contract_sha256'
+        ]
+        data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+            data['environment_lease'],
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode()).hexdigest()
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'does not match'
+        ):
+            worker.datagen_tablebase_attestation(cfg)
+
+    def test_v41_report_carries_publication_binding_without_local_paths(self):
+        cfg, _ = publication_config()
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {'completed_chunks': 1, 'total_chunks': 1}
+        with tempfile.NamedTemporaryFile(delete=False) as output:
+            output.write(b'archive')
+            path = output.name
+        try:
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                worker.ServerReporter.report_datagen(
+                    cfg,
+                    path,
+                    hashlib.sha256(b'archive').hexdigest(),
+                    len(b'archive'),
+                    tablebase=attestation,
+                )
+            payload = post.call_args.kwargs['data']
+            self.assertEqual(
+                payload['publication_contract_sha256'],
+                cfg.workload['test']['datagen'][
+                    'publication_contract_sha256'
+                ],
+            )
+            self.assertNotIn('path', json.dumps(payload).lower())
+        finally:
+            os.remove(path)
+
+    def test_atomic_v40_rejects_seven_man_even_with_matching_worker_inventory(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_max = 7
+        test = cfg.workload['test']
+        data = test['datagen']
+        test['syzygy_wdl'] = '7-MAN'
+        data['tablebase_max'] = 7
+        data['environment_lease']['tablebase']['required_max'] = 7
+        data['environment_lease']['tablebase']['worker_max'] = 7
+        data['environment_lease_sha256'] = hashlib.sha256(
+            json.dumps(
+                data['environment_lease'],
+                sort_keys=True,
+                separators=(',', ':'),
+            ).encode()
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'malformed or unsupported'
+        ):
+            worker.datagen_tablebase_attestation(cfg)
 
     def test_workload_log_identifies_datagen_chunk_instead_of_match(self):
         cfg = config()
@@ -153,6 +474,177 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertIn(
             'book_sha256 ' + ('ABCDEF0123456789' * 4), rendered
         )
+
+    def test_tablebase_template_uses_frozen_authenticated_lease(self):
+        cfg = tablebase_config()
+        rendered = worker.render_datagen_command(
+            cfg, os.path.join('Datagen', 'chunk.bin')
+        )
+        self.assertIn('syzygy "C:/Atomic Tables/combined"', rendered)
+        self.assertIn('syzygy_manifest_sha256 ' + ('b' * 64), rendered)
+        self.assertIn('syzygy_max 6', rendered)
+        self.assertIn('teacher_mode pure', rendered)
+
+    def test_tablebase_template_fails_closed_on_capability_mismatch(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_max = 5
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'requires 6-man'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_manifest_sha256 = 'd' * 64
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'pinned manifest'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+        cfg = tablebase_config('')
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'malformed or unsupported'
+        ):
+            worker.render_datagen_command(cfg, 'Datagen/chunk.bin')
+
+    def test_tablebase_report_sends_attestation_without_local_path(self):
+        cfg = tablebase_config('true')
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'completed_chunks': 1,
+                'total_chunks': 8,
+                'environment_receipt_sha256': 'e' * 64,
+            },
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            chunk = Path(cwd, 'chunk.bz2')
+            chunk.write_bytes(b'BZh9')
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                body = worker.ServerReporter.report_datagen(
+                    cfg,
+                    str(chunk),
+                    'f' * 64,
+                    4,
+                    tablebase=attestation,
+                )
+
+        sent = post.call_args.kwargs['data']
+        self.assertEqual(sent['tablebase_family'], 'atomic')
+        self.assertEqual(sent['tablebase_max'], 6)
+        self.assertEqual(sent['tablebase_worker_max'], 6)
+        self.assertEqual(sent['tablebase_manifest_sha256'], 'b' * 64)
+        self.assertEqual(sent['teacher_mode'], 'true')
+        self.assertNotIn('path', sent)
+        self.assertNotIn('C:\\Atomic', repr(sent))
+        self.assertEqual(body['environment_receipt_sha256'], 'e' * 64)
+
+    def test_prelaunch_revalidation_rejects_inventory_mutated_after_startup(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root, '6-wdl')
+            runtime = Path(root, 'combined')
+            source.mkdir()
+            runtime.mkdir()
+            source_file = source / 'KPPPPvK.atbw'
+            source_file.write_bytes(b'good')
+            os.link(source_file, runtime / source_file.name)
+            inventory = [{
+                'directory': source.name,
+                'name': source_file.name,
+                'bytes': 4,
+            }]
+            raw_manifest = json.dumps(inventory).encode()
+            manifest = Path(root, 'inventory.json')
+            manifest.write_bytes(raw_manifest)
+            manifest_sha256 = hashlib.sha256(raw_manifest).hexdigest()
+            marker = source / '.acquisition-complete.json'
+            marker.write_text(json.dumps({
+                'schema': 'atomic-syzygy-acquisition-v1',
+                'directory': source.name,
+                'files': 1,
+                'bytes': 4,
+                'source_inventory_sha256': manifest_sha256,
+                'official_md5_verification': 'pass',
+            }))
+
+            cfg = tablebase_config()
+            cfg.atomic_syzygy_path = str(runtime)
+            cfg.atomic_syzygy_manifest = str(manifest)
+            cfg.atomic_syzygy_manifest_sha256 = manifest_sha256
+            data = cfg.workload['test']['datagen']
+            data['tablebase_manifest_sha256'] = manifest_sha256
+            data['environment_lease']['tablebase'][
+                'manifest_sha256'
+            ] = manifest_sha256
+            data['environment_lease_sha256'] = hashlib.sha256(
+                json.dumps(
+                    data['environment_lease'],
+                    sort_keys=True,
+                    separators=(',', ':'),
+                ).encode()
+            ).hexdigest()
+            attestation = worker.datagen_tablebase_attestation(cfg)
+
+            # Simulate same-size corruption after startup/capability advert.
+            source_file.write_bytes(b'evil')
+            marker_mtime = marker.stat().st_mtime_ns
+            os.utime(
+                source_file,
+                ns=(source_file.stat().st_atime_ns, marker_mtime + 1_000_000),
+            )
+            with mock.patch.object(
+                worker, 'validate_syzygy_exists', return_value=True
+            ), self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'failed pre-launch revalidation',
+            ) as raised:
+                worker.revalidate_datagen_tablebase_inventory(cfg, attestation)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertNotIn(root, str(raised.exception))
+
+    def test_datagen_command_log_is_hashed_and_never_contains_local_path(self):
+        cfg = tablebase_config()
+        cfg.atomic_syzygy_manifest = 'inventory.json'
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        process = SimpleNamespace(
+            stdin=SimpleNamespace(
+                write=mock.Mock(), flush=mock.Mock(), close=mock.Mock()
+            ),
+            poll=mock.Mock(return_value=0),
+            returncode=0,
+        )
+
+        with tempfile.TemporaryDirectory() as cwd:
+            output = os.path.join(cwd, 'chunk.bin')
+            log = os.path.join(cwd, 'engine.log')
+            Path(output).write_bytes(b'data')
+            rendered = worker.render_datagen_command(
+                cfg, output, tablebase=attestation
+            )
+            command_sha256 = hashlib.sha256(rendered.encode()).hexdigest()
+            with mock.patch.object(
+                worker, 'revalidate_datagen_tablebase_inventory'
+            ) as revalidate, mock.patch.object(
+                worker, 'Popen', return_value=process
+            ), mock.patch('builtins.print') as printed:
+                worker.run_datagen_command(
+                    cfg,
+                    'engine.exe',
+                    output,
+                    log,
+                    heartbeat,
+                    tablebase=attestation,
+                )
+
+        revalidate.assert_called_once_with(cfg, attestation)
+        messages = '\n'.join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn(command_sha256, messages)
+        self.assertNotIn(cfg.atomic_syzygy_path, messages)
+        self.assertNotIn(cfg.atomic_syzygy_path.replace('\\', '/'), messages)
+        self.assertNotIn(rendered, messages)
 
     def test_opening_book_verifies_normalized_and_raw_identities(self):
         raw = b'fen-one\r\nfen-two\r\n'
@@ -931,7 +1423,7 @@ class DatagenWorkerTests(unittest.TestCase):
         heartbeat = SimpleNamespace(stop_requested=threading.Event())
         response = SimpleNamespace(
             status_code=200,
-            json=lambda: {'error': 'Bad Client Version: expected 39'},
+            json=lambda: {'error': 'Bad Client Version: expected 40'},
         )
         with mock.patch.object(
             worker.requests, 'post', return_value=response

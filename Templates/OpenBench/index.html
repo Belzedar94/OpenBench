@@ -4,6 +4,17 @@
 
 {% block content %}
 
+    {% if dashboard_metrics %}
+        <div class="index-metrics" aria-label="OpenBench capacity metrics">
+            {% for metric in dashboard_metrics.cards %}
+                <section class="index-metric" data-metric="{{metric.slug}}" title="{{metric.tooltip}}">
+                    <div class="index-metric-title">{{metric.label}}</div>
+                    <div class="index-metric-value">{{metric.value}}</div>
+                </section>
+            {% endfor %}
+        </div>
+    {% endif %}
+
     <table class="test-list stripes hoverable">
 
         <!-- Only show Pending tests for the front page of the Index -->

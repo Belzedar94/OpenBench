@@ -1,7 +1,7 @@
 {
-    "client_version"  : 39,
+    "client_version"  : 41,
     "client_repo_url" : "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref" : "spell-runner",
+    "client_repo_ref" : "175b59a2c468ff4b88fc961a448bdda06f4e633e",
 
     "use_cross_approval"          : false,
     "require_login_to_view"       : false,
@@ -26,7 +26,16 @@
         "shatranj_unbalanced2.epd",
         "spell_openings.epd",
         "ATOMIC_openings.epd",
-        "ATOMIC_syzygy_6man.epd"
+        "ATOMIC_syzygy_6man.epd",
+        "ATOMIC_V3_1B_opening_train.epd",
+        "ATOMIC_V3_1B_opening_val.epd",
+        "ATOMIC_V3_1B_opening_test.epd",
+        "ATOMIC_V3_1B_midgame_train.epd",
+        "ATOMIC_V3_1B_midgame_val.epd",
+        "ATOMIC_V3_1B_midgame_test.epd",
+        "ATOMIC_V3_1B_endgame_train.epd",
+        "ATOMIC_V3_1B_endgame_val.epd",
+        "ATOMIC_V3_1B_endgame_test.epd"
     ],
 
     "engines": [

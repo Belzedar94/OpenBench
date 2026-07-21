@@ -5,6 +5,25 @@ OpenBench: hoy sirve a **Spell-Stockfish**; el siguiente inquilino es **Atomic-S
 Escrita el 2026-07-12. Si algo de aquí contradice el código, gana el código — y actualiza
 este documento.
 
+## 0. Override operativo vigente (2026-07-21)
+
+- La única instancia oficial y permanente es **https://belzedar.duckdns.org**.
+  Todo test, DATAGEN, worker y cambio de prioridad oficial debe apuntar allí y
+  quedar visible en esa web.
+- Las referencias posteriores a servidores locales describen historia o entornos
+  de desarrollo. Local (`:8000`/`:8001`) sólo puede usarse para pruebas rápidas,
+  aisladas y desechables; nunca para reproducir la cola viva ni para producción.
+- Límite de esta torre: **8 threads por worker OpenBench como máximo**, salvo
+  autorización posterior y explícita del propietario.
+- Pausa temporal vigente desde 2026-07-21: no ejecutar ningún worker. Sólo
+  publicar/configurar DATAGEN en la instancia oficial hasta que el propietario
+  autorice reanudar workers.
+- Incidente 2026-07-21: se copió DB/Media operacional a `:8001` y se inició un
+  worker T30 creyendo que era una cola compartida de producción. El workload no
+  podía aparecer en la web permanente y duplicó trabajo de Spell. Se detuvieron
+  esos procesos antes de generar Atomic. No repetir: la prueba mínima de destino
+  es que el workload sea visible en `belzedar.duckdns.org` antes de arrancar un worker.
+
 ## 1. Qué es esto
 
 Fork de `sscg13/OpenBench@shatranj` (que a su vez es fork del OpenBench de AndyGrant),
@@ -262,11 +281,29 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   antes de ejecutarlo; el servidor rehashea, guarda por contenido y liga
   SHA/tamaño/commit al chunk. No desplegar v39 a mitad de una campaña v38.
 
+- El protocolo v40 añade el entorno Atomic Syzygy opt-in. El grupo
+  `{SYZYGY}`, `{SYZYGY_MANIFEST_SHA256}`, `{SYZYGY_MAX}` y `{TEACHER_MODE}`
+  exige pin de inventario, limite N-MAN y teacher byte-exacto `pure|true`.
+  Scheduler, lease, upload receipt y manifest fallan cerrados; nunca persistir
+  la ruta local. `syzygy_adj` permanece siempre `DISABLED`. No desplegar v40 ni
+  lanzar sus canaries depth-7 antes del bridge/golden/A-B local verde.
+
+- El protocolo v41 añade el contrato opt-in de publicación. Congela identidad
+  de campaña/workload/role/cohort, motor+commit+bench, red completa, libro
+  text/raw, comando/count/seed, productor y entorno. Cada chunk recibe lease y
+  receipt ligados al hash del contrato incluso sin Syzygy; la API final publica
+  schema/version, contrato completo y self-hash. La red se hashea desde sus
+  bytes registrados y el libro congela sus identidades text/raw configuradas al
+  crear el workload; cualquier drift posterior falla cerrado. No convertir
+  workloads legacy a v41 por backfill.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
-  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}` y `{PRODUCER_SHA256}`. `BOOK_SHA256` es la identidad raw de
+  `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}`, `{NETWORK_SHA256}` y
+  `{PRODUCER_SHA256}`. v41 exige los cuatro placeholders de libro/red. Atomic Syzygy
+  usa ademas el grupo v40 completo descrito arriba. `BOOK_SHA256` es la identidad raw de
   los bytes extraídos (o la identidad histórica si el manifiesto no publica
   `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.
 - Dimensionar los chunks para 20–40 minutos. Los heartbeats mantienen un lease

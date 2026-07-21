@@ -32,7 +32,7 @@ ALLOWED_HOSTS = ['*']
 # tunnels (their subdomain rotates on every tunnel restart).
 CSRF_TRUSTED_ORIGINS = [
     o for o in os.environ.get('OPENBENCH_TRUSTED_ORIGINS',
-                              'https://*.trycloudflare.com').split(',') if o]
+                              'https://belzedar.duckdns.org,https://*.trycloudflare.com').split(',') if o]
 
 # Trust X-Forwarded-Proto only when the application is known to sit behind a
 # proxy that strips the client-supplied header and sets its own value.  DATAGEN

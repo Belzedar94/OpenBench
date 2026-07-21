@@ -246,3 +246,114 @@ el servidor dev `:8001`. Se limpiaron el binario cacheado, la copia local del
 libro, PGN, sidecars y `__pycache__` generados en `Client/`. Se conservaron la
 DB dev, los ocho chunks canónicos de `Media/datagen/1` y las evidencias bajo
 `.scratch/`. `git status -sb` quedó sin cambios y no se hizo push.
+
+## Cabecera de métricas del index (2026-07-16)
+
+### Alcance y commit
+
+La cabecera estilo fishtest se implementó en el clon dev, rama `datagen-mode`,
+en el commit local `08bf920` (`feat(ui): add cached index capacity metrics`). No
+se escribió en `../openbench-spell`, no se lanzó ningún build/engine, no se
+tocaron procesos ajenos y no hubo push. La implementación no añade modelos ni
+campos: reutiliza `Machine`, `Result`, `Test` y `DatagenChunk`.
+La hoja nueva fuerza `OPENBENCH_STATIC_VERSION = 'v6'` para no reutilizar el
+CSS `v5` que ya había servido DATAGEN.
+
+### Cómputo de los cuatro cajetines
+
+1. **Cores.** Suma `Machine.info.concurrency` de máquinas cuyo `updated` está
+   dentro de los últimos 3 minutos. El nombre visible sigue fishtest, pero el
+   valor representa hilos de worker, tal como pide el contrato.
+2. **Nodes/sec.** `clientSubmitNPS` guarda en `Machine.mnps` la media por hilo de
+   los benches concurrentes. La capacidad total es
+   `Σ(mnps × 1e6 × concurrency)` sólo para las mismas máquinas vivas. El
+   formateador usa sufijos compactos (`1.06G`, `850M`, etc.).
+3. **Games/min.** `Result` es acumulativo y conserva sólo el último `updated`,
+   no un evento por submit. Sin migración, el servidor mantiene snapshots
+   proceso-locales de `Result.games` y calcula el delta real entre el primer y
+   el último snapshot de una ventana móvil de hasta 10 minutos. Tras reiniciar,
+   el primer muestreo sólo puede atribuir con seguridad el acumulado de filas
+   actualizadas cuyos tests también nacieron dentro de la ventana; los tests
+   antiguos arrancan en 0 hasta disponer del segundo snapshot. Es una
+   aproximación explícita y conservadora, documentada en el tooltip.
+4. **Time remaining.** El tooltip comienza por `ESTIMATE` y aplica:
+   - DATAGEN genérico: para cada test,
+     `rate = posiciones_completadas / (ahora - primer_chunk_completado)` y
+     `segundos = posiciones_restantes / rate`. Ésta es la fórmula exacta sobre
+     el progreso persistido y el ritmo medido solicitado.
+   - SPRT: trabajo restante =
+     `max(mediana_histórica_resuelta - games, 0)`. La mediana se carga una vez
+     por proceso usando sólo SPRT finalizados cuyo `currentllr` alcanzó un
+     bound; sin historia válida usa 15.000.
+   - SPSA: si existen `iterations` y `pairs_per`, quedan
+     `max(2 × iterations × pairs_per - games, 0)` partidas. Un SPSA sin esos
+     campos se excluye y el número excluido aparece en el tooltip.
+   - GAMES y DATAGEN legacy usan el resto exacto `max_games - games`.
+   - Total: suma los segundos DATAGEN por test y añade
+     `60 × partidas_restantes / games_per_min`. Se formatea como minutos,
+     horas o días. Sin máquinas vivas muestra `—`; con trabajo pendiente pero
+     ritmo todavía nulo/desconocido muestra `∞`.
+
+Todo el cálculo completo está detrás de una variable módulo con TTL de 30 s y
+lock; los pageviews dentro del TTL reutilizan el mismo resultado y no vuelven a
+consultar la DB. La mediana SPRT queda además memoizada durante toda la vida del
+proceso.
+
+### Gates automatizados
+
+| Gate | Estado | Evidencia |
+|---|---|---|
+| Unit tests nuevos | **PASS** | 6/6: máquinas viva/muerta, NPS `1.06G`, DATAGEN 500/1.000 a 5 pos/s con ETA 100 s, mediana SPRT 2.000 y delta 100 games/min, SPSA y caché/render. |
+| Suite Django completa | **PASS** | `Found 34 test(s)`; `Ran 34 tests in 3.546s`; `OK`. |
+| Suite cliente completa | **PASS** | `Ran 27 tests in 0.100s`; `OK`. |
+| Django check | **PASS** | `System check identified no issues (0 silenced).` |
+| Esquema | **PASS** | `manage.py makemigrations --check --dry-run` → `No changes detected`. |
+
+### Gate E2E en `:8001`
+
+Se comprobó el puerto antes de cada arranque. Hubo dos pasadas secuenciales del
+mismo servidor dev: la primera validó el HTML y se apagó (PID 22784); tras
+detectar y corregir el cache-buster, la pasada final fue:
+
+```text
+python manage.py runserver 127.0.0.1:8001 --noreload
+listener PID 24404
+```
+
+`GET /index/` respondió **200**, se detectaron exactamente cuatro cards y
+`GET /static/style.css?v6` respondió **200** con la cuadrícula de cuatro
+columnas. La DB dev conservada tenía DATAGEN #1 terminado y aprobado con
+16.000/16.000 posiciones (8 chunks), DATAGEN #4 con 4/4 (1 chunk), y el SPRT
+#2 terminado manualmente con 4 partidas pero LLR sin resolver. Ninguna máquina
+tenía heartbeat en los últimos 3 minutos y ningún `Result` se había actualizado
+en los últimos 10; por eso los valores reales y plausibles fueron Cores `0`,
+Nodes/sec `0`, Games/min `0` y Time remaining `—`.
+
+HTML relevante devuelto por el servidor:
+
+```html
+<div aria-label="OpenBench capacity metrics" class="index-metrics">
+<section class="index-metric" data-metric="cores" title="Worker threads from machines updated in the last 3 minutes.">
+<div class="index-metric-title">Cores</div>
+<div class="index-metric-value">0</div>
+</section>
+<section class="index-metric" data-metric="nodes-sec" title="Sum of clientSubmitNPS across live worker threads (reported per-thread speed multiplied by concurrency).">
+<div class="index-metric-title">Nodes/sec</div>
+<div class="index-metric-value">0</div>
+</section>
+<section class="index-metric" data-metric="games-min" title="10-minute rolling delta of Result.games sampled in memory; the database has only each row's latest updated timestamp.">
+<div class="index-metric-title">Games/min</div>
+<div class="index-metric-value">0</div>
+</section>
+<section class="index-metric" data-metric="time-remaining" title="ESTIMATE: generic DATAGEN uses remaining positions divided by each test's measured positions/sec; gameplay uses remaining expected games divided by the 10-minute games/min rate. Active SPRTs assume 15000.0 total games (resolved-history median; 15000 fallback). No machine heartbeat was seen in the last 3 minutes.">
+<div class="index-metric-title">Time remaining</div>
+<div class="index-metric-value">—</div>
+</section>
+</div>
+```
+
+Al terminar la pasada final se validó que el listener seguía siendo exactamente
+el PID 24404 y que su command line seguía apuntando a
+`manage.py runserver 127.0.0.1:8001
+--noreload`; se detuvo sólo ese PID. Estado final: proceso detenido y
+`PORT_8001_LISTENER_AFTER=none`. Producción `:8000` no se inspeccionó ni tocó.
