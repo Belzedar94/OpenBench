@@ -89,7 +89,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
             # cierre por mate verificado (§3.2)
             mate = ln.get('mate')
             if mate is not None and child.status == 'UNKNOWN' and ln.get('pv'):
-                winner_white = (mate > 0) == stm_white
+                # Engine y worker ya normalizan `mate` a perspectiva blanca.
+                winner_white = mate > 0
                 pv_rest = ln['pv'][1:]  # pv[0] es `uci`: verificamos desde el hijo
                 if logic.verify_mate_pv(child.fen, pv_rest, winner_white):
                     child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
