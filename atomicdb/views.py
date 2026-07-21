@@ -274,10 +274,12 @@ def _child_moves(pos):
         else:
             score, rank = None, -9_999.5   # sin analizar: encima de perder
         if c.status in (win, loss):
-            # distancia de mate donde hay linea verificada; la jugada de la
-            # fila cuenta como primer ply
+            # distancia de mate: mate_in propagado por minimax; fallback a la
+            # linea verificada. La jugada de la fila cuenta como primer ply.
             plies = None
-            if c.closure == 'TERMINAL':
+            if c.mate_in is not None:
+                plies = 1 + c.mate_in
+            elif c.closure == 'TERMINAL':
                 plies = 1
             elif c.closure == 'MATE_PV' and c.won_line:
                 plies = 1 + len(c.won_line.split())
@@ -438,7 +440,11 @@ def explore(request, key):
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
     top, line = _line_to_root(pos)
-    legal_ucis = logic.legal_moves(pos.fen) if pos.status == 'UNKNOWN' else []
+    # tambien en posiciones resueltas: se puede explorar la winning line
+    legal_ucis = ([] if pos.closure == 'TERMINAL'
+                  else logic.legal_moves(pos.fen))
+    known = {m['uci'] for m in moves}
+    unexplored = [u for u in legal_ucis if u not in known]
     numbered, n = [], 1
     for i, st in enumerate(line):
         if st['white']:
@@ -460,6 +466,10 @@ def explore(request, key):
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
+        'unexplored': unexplored,
+        'verdict_mate': (f'M{(pos.mate_in + 1) // 2}'
+                         if pos.status != 'UNKNOWN' and pos.mate_in
+                         else None),
         'verdict_css': _move_css(pos.status, eval_stm, win)})
 
 

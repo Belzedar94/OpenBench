@@ -25,8 +25,8 @@ def get_or_create_position(fen, campaign=None):
     if created:
         t = logic.terminal_status(fen)
         if t:
-            pos.status, pos.closure = t[0], 'TERMINAL'
-            pos.save(update_fields=['status', 'closure'])
+            pos.status, pos.closure, pos.mate_in = t[0], 'TERMINAL', 0
+            pos.save(update_fields=['status', 'closure', 'mate_in'])
     return pos
 
 
@@ -82,10 +82,11 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                     child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
                     child.closure = 'MATE_PV'
                     child.won_line = ' '.join(pv_rest)
+                    child.mate_in = len(pv_rest)   # linea probada (cota superior)
                     if pv_rest:
                         child.best_move = pv_rest[0]
                     child.save(update_fields=['status', 'closure', 'won_line',
-                                              'best_move', 'updated'])
+                                              'mate_in', 'best_move', 'updated'])
                     closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
@@ -135,6 +136,21 @@ def backup_cascade(seed_keys):
                     (e for e in edges if e.child.status != 'UNKNOWN'), None)
                 if witness:
                     pos.best_move = witness.move_uci
+                # DTM practico: min para el ganador, max para el perdedor;
+                # un hijo sin distancia (cierre TB) la deja en desconocida
+                stm_white_pos = pos.fen.split()[1] == 'w'
+                mover_win = 'WHITE_WIN' if stm_white_pos else 'BLACK_WIN'
+                if new_status == mover_win:
+                    winners = [e for e in edges if e.child.status == new_status
+                               and e.child.mate_in is not None]
+                    if winners:
+                        best = min(winners, key=lambda e: e.child.mate_in)
+                        pos.mate_in = 1 + best.child.mate_in
+                        pos.best_move = best.move_uci  # el mate probado mas corto
+                elif new_status != 'DRAW':
+                    dists = [e.child.mate_in for e in edges]
+                    if all(d is not None for d in dists):
+                        pos.mate_in = 1 + max(dists)
                 dirty = True
                 _emit_closure_events(pos)
             if new_eval is not None and new_eval != pos.eval_cp:
