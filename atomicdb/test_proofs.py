@@ -101,6 +101,36 @@ class VerifyMatesCommandTests(TestCase):
         self.assertIn(pos.key, err.getvalue())
 
     @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate',
+           return_value='INCONCLUSIVE')
+    def test_command_processes_shortest_witness_first(self, prove):
+        long = self._mate_position(FORCED_MATE_FEN, FORCED_MATE_PV)
+        short = self._mate_position(COOPERATIVE_FEN, ['g6f7'])
+
+        call_command('verify_mates', limit=1, batch_size=1,
+                     stdout=StringIO())
+
+        long.refresh_from_db()
+        short.refresh_from_db()
+        self.assertIsNone(long.proof)
+        self.assertEqual(short.proof, 'ENGINE')
+        self.assertEqual(prove.call_args.args[0], short.fen)
+
+    @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate')
+    def test_command_error_does_not_block_later_witnesses(self, prove):
+        short = self._mate_position(COOPERATIVE_FEN, ['g6f7'])
+        long = self._mate_position(FORCED_MATE_FEN, FORCED_MATE_PV)
+        prove.side_effect = [RuntimeError('synthetic failure'), 'INCONCLUSIVE']
+
+        call_command('verify_mates', batch_size=1, stdout=StringIO(),
+                     stderr=StringIO())
+
+        short.refresh_from_db()
+        long.refresh_from_db()
+        self.assertIsNone(short.proof)
+        self.assertEqual(long.proof, 'ENGINE')
+        self.assertEqual(prove.call_count, 2)
+
+    @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate',
            return_value='NO_MATE')
     def test_disputed_is_reported_but_existing_closure_is_not_reverted(
             self, prove):
