@@ -86,6 +86,20 @@ class VerifyMatesCommandTests(TestCase):
         pos.refresh_from_db()
         self.assertEqual(pos.proof, 'ENGINE')
 
+    def test_missing_historical_witness_is_left_unclassified(self):
+        pos = self._mate_position()
+        pos.won_line = None
+        pos.save(update_fields=['won_line'])
+        out, err = StringIO(), StringIO()
+
+        call_command('verify_mates', stdout=out, stderr=err)
+
+        pos.refresh_from_db()
+        self.assertIsNone(pos.proof)
+        self.assertIn('MISSING=1', out.getvalue())
+        self.assertIn('UNCLASSIFIED=1', out.getvalue())
+        self.assertIn(pos.key, err.getvalue())
+
     @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate',
            return_value='NO_MATE')
     def test_disputed_is_reported_but_existing_closure_is_not_reverted(

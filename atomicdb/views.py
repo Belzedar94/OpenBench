@@ -25,6 +25,10 @@ REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
 
 
+class _SubmitRejected(Exception):
+    pass
+
+
 def _auth(request):
     user = authenticate(username=request.POST.get('username', ''),
                         password=request.POST.get('password', ''))
@@ -125,39 +129,71 @@ def api_submit(request):
         return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
 
     machine = request.POST.get('machine', '')
-    with transaction.atomic():
-        try:
+    try:
+        snapshot = AnalysisTask.objects.select_related('position').get(id=task_id)
+    except AnalysisTask.DoesNotExist:
+        return JsonResponse({'error': 'malformed: unknown task'}, status=400)
+    if snapshot.state == 'COMPLETED':
+        return JsonResponse({'ok': True, 'dup': True})
+    if snapshot.state != 'LEASED':
+        return JsonResponse({'error': 'not-leased'}, status=400)
+    if not machine or machine != snapshot.machine:
+        return JsonResponse({'error': 'not-your-lease'}, status=409)
+
+    tb_prepared = None
+    mate_proofs = None
+    if parsed_wdl is not None:
+        tb_prepared = ingest.prepare_tb_closure(
+            snapshot.position_id, parsed_wdl, user=user)
+        if tb_prepared is None:
+            return JsonResponse({'error': 'tb-rejected'}, status=409)
+    else:
+        mate_proofs = ingest.prepare_mate_proofs(snapshot.position.fen, lines)
+
+    try:
+        with transaction.atomic():
+            claimed = AnalysisTask.objects.filter(
+                id=task_id, state='LEASED', machine=machine,
+                attempts=snapshot.attempts, leased_at=snapshot.leased_at,
+            ).update(state='COMPLETED')
+            if claimed != 1:
+                current = AnalysisTask.objects.get(id=task_id)
+                if current.state == 'COMPLETED':
+                    return JsonResponse({'ok': True, 'dup': True})
+                if current.state != 'LEASED':
+                    return JsonResponse({'error': 'not-leased'}, status=400)
+                if (current.machine == machine
+                        and (current.attempts != snapshot.attempts
+                             or current.leased_at != snapshot.leased_at)):
+                    return JsonResponse({'error': 'stale-lease'}, status=409)
+                return JsonResponse({'error': 'not-your-lease'}, status=409)
+
             task = (AnalysisTask.objects.select_for_update()
                     .select_related('position').get(id=task_id))
-        except AnalysisTask.DoesNotExist:
-            return JsonResponse({'error': 'malformed: unknown task'}, status=400)
-        if task.state == 'COMPLETED':
-            return JsonResponse({'ok': True, 'dup': True})
-        if task.state != 'LEASED':
-            return JsonResponse({'error': 'not-leased'}, status=400)
-        if not machine or machine != task.machine:
-            return JsonResponse({'error': 'not-your-lease'}, status=409)
+            searched = min(searched, 2 * task.budget_nodes)
+            if parsed_wdl is not None:
+                closed = ingest._apply_prepared_tb(
+                    task.position_id, tb_prepared)
+                if not closed:
+                    raise _SubmitRejected
+                summary = {'tb_closed': True}
+            else:
+                summary = ingest.ingest_analysis(
+                    task.position_id, lines, searched, machine=machine,
+                    mate_proofs=mate_proofs)
 
-        searched = min(searched, 2 * task.budget_nodes)
-        if elapsed:
-            Position.objects.filter(key=task.position_id).update(
-                time_invested=F('time_invested') + elapsed)
-
-        if parsed_wdl is not None:
-            closed = ingest.close_by_tb(task.position_id, parsed_wdl, user=user)
-            if not closed:
-                return JsonResponse({'error': 'tb-rejected'}, status=409)
-            summary = {'tb_closed': closed}
-        else:
-            summary = ingest.ingest_analysis(
-                task.position_id, lines, searched or task.budget_nodes,
-                machine=machine)
-
-        task.state, task.completed = 'COMPLETED', timezone.now()
-        task.nodes_searched = searched
-        task.save(update_fields=['state', 'completed', 'nodes_searched'])
-        WorkerPing.objects.filter(machine=machine, user=user.username).update(
-            tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+            if elapsed:
+                Position.objects.filter(key=task.position_id).update(
+                    time_invested=F('time_invested') + elapsed)
+            task.state, task.machine = 'COMPLETED', machine
+            task.completed = timezone.now()
+            task.nodes_searched = searched
+            task.save(update_fields=[
+                'state', 'machine', 'completed', 'nodes_searched'])
+            WorkerPing.objects.filter(machine=machine, user=user.username).update(
+                tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+    except _SubmitRejected:
+        return JsonResponse({'error': 'tb-rejected'}, status=409)
     return JsonResponse({'ok': True, 'summary': summary})
 
 

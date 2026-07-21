@@ -62,10 +62,43 @@ def expand(pos):
     return children
 
 
-def ingest_analysis(position_key, lines, nodes_budget, machine=''):
+def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000):
+    """Run all CPU-heavy mate checks before opening a write transaction."""
+    legal = set(logic.legal_moves(parent_fen))
+    prepared = {}
+    for index, line in enumerate(lines):
+        move = line.get('move')
+        pv = line.get('pv')
+        mate = line.get('mate')
+        if (mate is None or not isinstance(pv, list) or not pv
+                or move not in legal or pv[0] != move):
+            continue
+        try:
+            child_fen = logic.apply_move(parent_fen, move)
+        except Exception:
+            continue
+        winner_white = mate > 0
+        pv_rest = pv[1:]
+        if not logic.verify_mate_pv(child_fen, pv_rest, winner_white):
+            continue
+        proof_result = logic.prove_forced_mate(
+            child_fen, winner_white, max_plies=len(pv_rest) + 2,
+            budget_positions=budget_positions, hint_pv=pv_rest)
+        prepared[index] = (winner_white, pv_rest, proof_result)
+    return prepared
+
+
+def ingest_analysis(position_key, lines, nodes_budget, machine='',
+                    mate_proofs=None):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
     Devuelve dict con resumen."""
+    if mate_proofs is None:
+        snapshot = Position.objects.only('fen', 'status').get(key=position_key)
+        if snapshot.status != 'UNKNOWN':
+            return {'skipped': 'already-closed'}
+        mate_proofs = prepare_mate_proofs(snapshot.fen, lines)
+
     with transaction.atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if pos.status != 'UNKNOWN':
@@ -77,7 +110,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
         # evals de hijos reportados por el motor
         best_eval, best_move = None, None
         closed_here = 0
-        for ln in lines:
+        for index, ln in enumerate(lines):
             uci = ln['move']
             try:
                 edge = Edge.objects.select_related('child').get(parent=pos, move_uci=uci)
@@ -93,41 +126,33 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                 child.eval_cp = ev
                 child.save(update_fields=['eval_cp', 'updated'])
             # cierre por mate verificado (§3.2)
-            mate = ln.get('mate')
-            if mate is not None and child.status == 'UNKNOWN' and ln.get('pv'):
-                # Engine y worker ya normalizan `mate` a perspectiva blanca.
-                winner_white = mate > 0
-                pv_rest = ln['pv'][1:]  # pv[0] es `uci`: verificamos desde el hijo
-                if logic.verify_mate_pv(child.fen, pv_rest, winner_white):
-                    proof_result = logic.prove_forced_mate(
-                        child.fen, winner_white,
-                        max_plies=len(pv_rest) + 2,
-                        hint_pv=pv_rest,
-                    )
-                    if proof_result == 'NO_MATE':
-                        child.proof = 'DISPUTED'
-                        child.won_line = ' '.join(pv_rest)
-                        child.save(update_fields=['proof', 'won_line', 'updated'])
-                        DBEvent.objects.create(kind='MATE_PROOF_DISPUTED', payload={
-                            'key': child.key, 'parent': pos.key,
-                            'winner': 'WHITE' if winner_white else 'BLACK',
-                            'max_plies': len(pv_rest) + 2,
-                        })
-                        _queue_disputed_reanalysis(child)
-                        continue
-                    child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
-                    child.closure = 'MATE_PV'
-                    child.proof = ('ANDOR' if proof_result == 'PROVEN'
-                                   else 'ENGINE')
+            prepared_proof = mate_proofs.get(index)
+            if child.status == 'UNKNOWN' and prepared_proof is not None:
+                winner_white, pv_rest, proof_result = prepared_proof
+                if proof_result == 'NO_MATE':
+                    child.proof = 'DISPUTED'
                     child.won_line = ' '.join(pv_rest)
-                    child.mate_in = len(pv_rest)   # linea probada (cota superior)
-                    if pv_rest:
-                        child.best_move = pv_rest[0]
-                    child.save(update_fields=['status', 'closure', 'proof',
-                                              'won_line', 'mate_in',
-                                              'best_move', 'updated'])
-                    _emit_closure_events(child)   # tambien cuenta y sale en feed
-                    closed_here += 1
+                    child.save(update_fields=['proof', 'won_line', 'updated'])
+                    DBEvent.objects.create(kind='MATE_PROOF_DISPUTED', payload={
+                        'key': child.key, 'parent': pos.key,
+                        'winner': 'WHITE' if winner_white else 'BLACK',
+                        'max_plies': len(pv_rest) + 2,
+                    })
+                    _queue_disputed_reanalysis(child)
+                    continue
+                child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
+                child.closure = 'MATE_PV'
+                child.proof = ('ANDOR' if proof_result == 'PROVEN'
+                               else 'ENGINE')
+                child.won_line = ' '.join(pv_rest)
+                child.mate_in = len(pv_rest)   # linea probada (cota superior)
+                if pv_rest:
+                    child.best_move = pv_rest[0]
+                child.save(update_fields=['status', 'closure', 'proof',
+                                          'won_line', 'mate_in',
+                                          'best_move', 'updated'])
+                _emit_closure_events(child)   # tambien cuenta y sale en feed
+                closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
                                    or (not stm_white and ev < best_eval)):
@@ -469,48 +494,58 @@ def _queue_disputed_reanalysis(pos):
         multipv=multipv_for(pos.visits), source='AUTO')
 
 
-def close_by_tb(position_key, wdl, user=None):
-    """Cierra con WDL del lado al turno, dentro de una frontera verificable.
+def _tb_rejected(position_key, reason, **payload):
+    DBEvent.objects.create(kind='TB_REJECTED', payload={
+        'key': position_key, 'reason': reason, **payload})
 
-    Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
-    fijado. Las posiciones de seis piezas solo se aceptan de identidades
-    explicitamente confiables porque el set completo no reside en el VPS.
-    Todo rechazo queda registrado y nunca muta el arbol.
-    """
+
+def prepare_tb_closure(position_key, wdl, user=None):
+    """Validate and, for <=5 men, probe TB before any encompassing write tx."""
+    try:
+        pos = Position.objects.only('key', 'fen', 'status').get(
+            key=position_key)
+    except Position.DoesNotExist:
+        return None
+    if pos.status != 'UNKNOWN' or not logic.tb_applicable(pos.fen):
+        return None
+    try:
+        wdl = int(wdl)
+    except (TypeError, ValueError):
+        wdl = 99
+    if wdl not in (-2, -1, 0, 1, 2):
+        _tb_rejected(pos.key, 'invalid-wdl', worker_wdl=wdl)
+        return None
+
+    men = logic.piece_count(pos.fen)
+    if men <= 5:
+        server_wdl = tb.probe_wdl(pos.fen, max_pieces=5)
+        if server_wdl is None or int(server_wdl) != wdl:
+            _tb_rejected(
+                pos.key,
+                'server-probe-unavailable' if server_wdl is None
+                else 'wdl-mismatch',
+                worker_wdl=wdl, server_wdl=server_wdl)
+            return None
+    else:
+        trusted = set(getattr(settings, 'ATOMICDB_TB_TRUSTED', ()))
+        username = getattr(user, 'username', '') if user is not None else ''
+        if not (getattr(user, 'is_staff', False) or username in trusted):
+            _tb_rejected(pos.key, 'untrusted-six-piece', worker_wdl=wdl,
+                         username=username)
+            return None
+    return {'key': pos.key, 'fen': pos.fen, 'wdl': wdl}
+
+
+def _apply_prepared_tb(position_key, prepared):
+    """Apply a server-validated TB result inside the caller's transaction."""
+    if prepared is None or prepared.get('key') != position_key:
+        return False
     with transaction.atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
-        if pos.status != 'UNKNOWN' or not logic.tb_applicable(pos.fen):
+        if (pos.status != 'UNKNOWN' or pos.fen != prepared.get('fen')
+                or not logic.tb_applicable(pos.fen)):
             return False
-        try:
-            wdl = int(wdl)
-        except (TypeError, ValueError):
-            wdl = 99
-        if wdl not in (-2, -1, 0, 1, 2):
-            DBEvent.objects.create(kind='TB_REJECTED', payload={
-                'key': pos.key, 'reason': 'invalid-wdl', 'worker_wdl': wdl})
-            return False
-
-        men = logic.piece_count(pos.fen)
-        if men <= 5:
-            server_wdl = tb.probe_wdl(pos.fen, max_pieces=5)
-            if server_wdl is None or int(server_wdl) != wdl:
-                DBEvent.objects.create(kind='TB_REJECTED', payload={
-                    'key': pos.key,
-                    'reason': ('server-probe-unavailable' if server_wdl is None
-                               else 'wdl-mismatch'),
-                    'worker_wdl': wdl,
-                    'server_wdl': server_wdl,
-                })
-                return False
-        else:
-            trusted = set(getattr(settings, 'ATOMICDB_TB_TRUSTED', ()))
-            username = getattr(user, 'username', '') if user is not None else ''
-            if not (getattr(user, 'is_staff', False) or username in trusted):
-                DBEvent.objects.create(kind='TB_REJECTED', payload={
-                    'key': pos.key, 'reason': 'untrusted-six-piece',
-                    'worker_wdl': wdl, 'username': username,
-                })
-                return False
+        wdl = prepared['wdl']
         stm_white = pos.fen.split()[1] == 'w'
         pos.status = logic.wdl_to_status(wdl, stm_white)
         pos.closure = 'TB'
@@ -519,3 +554,15 @@ def close_by_tb(position_key, wdl, user=None):
             'key': pos.key, 'status': pos.status, 'closure': 'TB'})
     backup_cascade([position_key])
     return True
+
+
+def close_by_tb(position_key, wdl, user=None):
+    """Cierra con WDL del lado al turno, dentro de una frontera verificable.
+
+    Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
+    fijado. Las posiciones de seis piezas solo se aceptan de identidades
+    explicitamente confiables porque el set completo no reside en el VPS.
+    Todo rechazo queda registrado y nunca muta el arbol.
+    """
+    prepared = prepare_tb_closure(position_key, wdl, user=user)
+    return _apply_prepared_tb(position_key, prepared)

@@ -39,8 +39,7 @@ class Command(BaseCommand):
                 cursor.execute('PRAGMA busy_timeout = 30000')
 
         counts = {'ANDOR': 0, 'ENGINE': 0, 'DISPUTED': 0,
-                  'SKIPPED': 0, 'ERROR': 0}
-        disputed = []
+                  'MISSING': 0, 'SKIPPED': 0, 'ERROR': 0}
         processed = 0
         after_key = ''
 
@@ -70,6 +69,11 @@ class Command(BaseCommand):
                     self.stderr.write(
                         f"ERROR {snapshot['key']}: MATE_PV has status "
                         f"{snapshot['status']!r}")
+                    continue
+                if not hint:
+                    counts['MISSING'] += 1
+                    self.stderr.write(
+                        f"MISSING {snapshot['key']}: no won_line; left NULL")
                     continue
                 try:
                     verdict = logic.prove_forced_mate(
@@ -120,8 +124,6 @@ class Command(BaseCommand):
 
                 counts[proof] += 1
                 processed += 1
-                if proof == 'DISPUTED':
-                    disputed.append((snapshot['key'], snapshot['fen']))
 
         # Re-run the idempotent confidence backup from every classified mate.
         # Doing this as a final phase also repairs ancestors after an earlier
@@ -133,9 +135,22 @@ class Command(BaseCommand):
             ingest.backup_cascade(proof_seeds)
 
         self.stdout.write(
-            'verify_mates: '
+            'verify_mates run: '
             + ' '.join(f'{name}={value}' for name, value in counts.items()))
-        if disputed:
+
+        mate_positions = Position.objects.filter(closure='MATE_PV')
+        totals = {
+            proof: mate_positions.filter(proof=proof).count()
+            for proof in ('ANDOR', 'ENGINE', 'DISPUTED')
+        }
+        totals['UNCLASSIFIED'] = mate_positions.filter(proof__isnull=True).count()
+        self.stdout.write(
+            'verify_mates totals: '
+            + ' '.join(f'{name}={value}' for name, value in totals.items()))
+
+        disputed = mate_positions.filter(proof='DISPUTED').order_by('key') \
+            .values_list('key', 'fen')
+        if disputed.exists():
             self.stdout.write('DISPUTED positions (not reverted):')
             for key, fen in disputed:
                 self.stdout.write(f'  {key} {fen}')
