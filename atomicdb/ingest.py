@@ -100,6 +100,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                         child.best_move = pv_rest[0]
                     child.save(update_fields=['status', 'closure', 'won_line',
                                               'mate_in', 'best_move', 'updated'])
+                    _emit_closure_events(child)   # tambien cuenta y sale en feed
                     closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
