@@ -390,6 +390,59 @@ class BootstrapTests(TestCase):
         self.assertEqual(AnalysisTask.objects.filter(source='USER').count(), 20)
 
 
+class DtmTests(TestCase):
+    """mate_in: min+1 para el ganador, max+1 para el perdedor, y un hijo
+    sin distancia (cierre TB) la deja en desconocida sin impedir el cierre."""
+
+    def test_win_takes_min_plus_one(self):
+        lt = LogicTests()
+        pos_fen, mating_move, _ = lt._find_mate_in_1()
+        p = ingest.get_or_create_position(pos_fen)
+        ingest.ingest_analysis(p.key, [{'move': mating_move, 'eval_cp': 9999,
+                                        'mate': 1, 'pv': [mating_move]}], 1000)
+        p.refresh_from_db()
+        # hijo TERMINAL (mate_in 0) -> padre gana en 1 ply
+        self.assertEqual((p.status, p.mate_in), ('WHITE_WIN', 1))
+
+    def _all_children_lost(self, dists):
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        ingest.expand(p)
+        edges = list(Edge.objects.filter(parent=p).select_related('child'))
+        for i, e in enumerate(edges):
+            c = e.child
+            c.status, c.closure = 'WHITE_WIN', 'MATE_PV'
+            c.mate_in = dists(i)
+            c.save()
+        ingest.backup_cascade([edges[0].child.key])
+        p.refresh_from_db()
+        return p
+
+    def test_loss_takes_max_plus_one(self):
+        p = self._all_children_lost(lambda i: 4 if i == 0 else 2)
+        self.assertEqual((p.status, p.mate_in), ('WHITE_WIN', 5))
+
+    def test_tb_child_leaves_distance_unknown(self):
+        p = self._all_children_lost(lambda i: None if i == 0 else 2)
+        self.assertEqual(p.status, 'WHITE_WIN')   # cierra igual
+        self.assertIsNone(p.mate_in)              # sin numero inventado
+
+
+class SolvedExploreTests(TestCase):
+
+    def test_solved_position_lists_legal_moves(self):
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        p.status, p.closure = 'WHITE_WIN', 'MATE_PV'
+        p.won_line = 'd7d5'
+        p.save()
+        r = self.client.get(f'/atomicdb/explore/{p.key}/')
+        html = r.content.decode()
+        self.assertIn('unexplored', html)
+        self.assertIn(f'/atomicdb/goto/{p.key}/d7d5/', html)
+        self.assertNotIn('Not expanded yet', html)
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

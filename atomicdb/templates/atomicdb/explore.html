@@ -24,7 +24,7 @@
       {% if pos.status == 'UNKNOWN' %}
         UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% endif %}
       {% else %}
-        {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
+        {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}
       {% endif %}
     </div>
     {% if pos.status == 'UNKNOWN' %}
@@ -86,9 +86,19 @@
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
-      {% empty %}
-      <tr><td colspan="5" class="dim">Not expanded yet. The search will reach this node.</td></tr>
       {% endfor %}
+      {% for u in unexplored %}
+      <tr>
+        <td><span class="chip cold"></span></td>
+        <td><a href="/atomicdb/goto/{{ pos.key }}/{{ u }}/"><strong>{{ u }}</strong></a></td>
+        <td><span class="dim">unexplored</span></td>
+        <td><span class="dim">-</span></td>
+        <td class="dim">-</td>
+      </tr>
+      {% endfor %}
+      {% if not moves and not unexplored %}
+      <tr><td colspan="5" class="dim">Terminal position: the game ended here.</td></tr>
+      {% endif %}
     </table>
   </div>
 </div>
