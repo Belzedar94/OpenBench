@@ -443,6 +443,27 @@ class SolvedExploreTests(TestCase):
         self.assertNotIn('Not expanded yet', html)
 
 
+class SeedNotStompTests(TestCase):
+
+    def test_parent_lines_do_not_overwrite_child_eval(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        e = Edge.objects.filter(parent=root, move_uci='g1f3') \
+                        .select_related('child').first()
+        deep = e.child
+        deep.eval_cp = 441   # analisis directo profundo del hijo
+        deep.save()
+        ingest.ingest_analysis(root.key, [
+            {'move': 'g1f3', 'eval_cp': 306, 'mate': None, 'pv': ['g1f3']},
+            {'move': 'e2e4', 'eval_cp': 150, 'mate': None, 'pv': ['e2e4']},
+        ], nodes_budget=1000)
+        deep.refresh_from_db()
+        self.assertEqual(deep.eval_cp, 441)   # no pisado
+        e2 = Edge.objects.filter(parent=root, move_uci='e2e4') \
+                         .select_related('child').first()
+        self.assertEqual(e2.child.eval_cp, 150)   # vacio: sembrado
+
+
 class TbRoutingTests(TestCase):
     """Tareas sondeables en TB se reservan a workers con tablebases, salvo
     que no haya otra cosa que servir."""

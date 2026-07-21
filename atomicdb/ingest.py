@@ -69,10 +69,13 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                 continue  # el motor propuso algo que nuestro movegen no reconoce: fuera
             child = edge.child
             ev = ln.get('eval_cp')
-            if ev is not None and child.status == 'UNKNOWN':
-                if child.eval_cp is None or True:
-                    child.eval_cp = ev
-                    child.save(update_fields=['eval_cp', 'updated'])
+            # solo SIEMBRA hijos sin eval: el valor propio del hijo (analisis
+            # directo o backup de su subarbol) es mas fiable que la linea
+            # MultiPV del padre y no debe ser pisado
+            if ev is not None and child.status == 'UNKNOWN' \
+                    and child.eval_cp is None:
+                child.eval_cp = ev
+                child.save(update_fields=['eval_cp', 'updated'])
             # cierre por mate verificado (§3.2)
             mate = ln.get('mate')
             if mate is not None and child.status == 'UNKNOWN' and ln.get('pv'):
