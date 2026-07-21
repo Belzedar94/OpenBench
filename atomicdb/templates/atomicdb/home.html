@@ -12,8 +12,6 @@
 
 {% if first_moves %}
 <div class="progress">
-  <div class="pbar">{% for m in first_moves %}<span class="pseg {{ m.css }}"
-    title="{{ m.uci }}"></span>{% endfor %}</div>
   <div class="pkpis dim">Root conquest: {{ solved_first }}/{{ n_first }} first moves solved
     · {{ solved_pct }}% of all positions solved
     · last 24h: {{ closed_24h_h }} closures, {{ nodes_24h_h }} nodes</div>
