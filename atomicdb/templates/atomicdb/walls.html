@@ -1,0 +1,20 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB — muros{% endblock %}
+{% block content %}
+<h2 style="margin-top:0">Muros <span class="dim">— donde el motor se atasca. ¿Ves el plan que él no ve?</span></h2>
+{% for it in items %}
+<div class="cols" style="margin-bottom:1.4rem">
+  <div class="board" style="width:min(260px,80vw)">
+    {% for row in it.board %}{% for piece, dark in row %}
+      <div class="sq {% if dark %}d{% else %}l{% endif %}"><span>{{ piece }}</span></div>
+    {% endfor %}{% endfor %}
+  </div>
+  <div>
+    <p><a href="/atomicdb/explore/{{ it.pos.key }}/"><strong>explorar</strong></a>
+      · eval estancado {{ it.pos.eval_cp }}cp · {{ it.pos.visits }} visitas ·
+      {{ it.pos.nodes_invested }} nodos</p>
+    <p class="dim" style="font-size:.8rem;word-break:break-all">{{ it.pos.fen }}</p>
+  </div>
+</div>
+{% empty %}<p class="dim">Cero muros — el frente fluye.</p>{% endfor %}
+{% endblock %}

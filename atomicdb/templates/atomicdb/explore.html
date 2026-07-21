@@ -1,0 +1,50 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB — explorar{% endblock %}
+{% block content %}
+
+<div class="crumb">
+  {% if parents %}llegas desde:
+    {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+  {% else %}raíz{% endif %}
+</div>
+
+<div class="cols">
+  <div>
+    <div class="board">
+      {% for row in board %}{% for piece, dark in row %}
+        <div class="sq {% if dark %}d{% else %}l{% endif %}"><span>{{ piece }}</span></div>
+      {% endfor %}{% endfor %}
+    </div>
+    <div class="verdict {{ verdict_css }}">
+      {% if pos.status == 'UNKNOWN' %}
+        FRONTERA — mueven {{ stm }}{% if pos.eval_cp is not None %} · mejor línea {{ pos.eval_cp }}cp{% endif %}
+      {% else %}
+        {{ pos.status }} <span class="dim">(practical, vía {{ pos.closure }})</span>
+      {% endif %}
+    </div>
+    <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
+    <p class="dim" style="font-size:.8rem">visitas {{ pos.visits }} ·
+      nodos {{ pos.nodes_invested }}{% if pos.is_wall %} · <strong style="color:var(--hot)">MURO</strong>{% endif %}</p>
+  </div>
+
+  <div>
+    <h2 style="margin-top:0">Jugadas</h2>
+    <table>
+      <tr><th></th><th>jugada</th><th>estado</th><th>eval</th><th>visitas</th></tr>
+      {% for m in moves %}
+      <tr>
+        <td><span class="chip {{ m.css }}"></span></td>
+        <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
+        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">frontera</span>
+            {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
+        <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td class="dim">{{ m.visits }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" class="dim">Sin expandir todavía — el frente llegará aquí.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+
+{% endblock %}
