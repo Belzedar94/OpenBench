@@ -229,6 +229,34 @@ class SelectorTests(TestCase):
         tasks = ingest.next_tasks(50)
         self.assertNotIn(child.key, [t.position_id for t in tasks])
 
+    def test_tombstones_survive_refresh_no_starvation(self):
+        # zombis con eval de mate NO deben resucitar en cada refresh ni
+        # matar de hambre a las posiciones vivas de menor prioridad
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        root.status, root.closure = 'WHITE_WIN', 'MATE_PV'
+        root.save()
+        for e in Edge.objects.filter(parent=root).select_related('child'):
+            e.child.eval_cp = -10_000   # banda de mate: prioridad maxima
+            e.child.save()
+        live = ingest.get_or_create_position(
+            '4k3/8/8/8/8/8/4P3/4K3 w - - 0 1')
+        live.eval_cp = 50   # viva pero modesta
+        live.save()
+        ingest.next_tasks(3)              # entierra a los 20 zombis
+        tasks = ingest.next_tasks(3)      # el refresh NO debe resucitarlos
+        self.assertIn(live.key, [t.position_id for t in tasks])
+
+    def test_new_edge_revives_tombstoned_position(self):
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        p.priority = ingest.DEAD
+        p.save()
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)   # crea la arista root->e2e4: revive
+        p.refresh_from_db()
+        self.assertGreaterEqual(p.priority, 0.0)
+
 
 class RequestTests(TestCase):
 

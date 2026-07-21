@@ -209,6 +209,9 @@ def goto(request, key, uci):
                                           campaign=pos.campaign)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                defaults={'child': child})
+    if child.priority <= ingest.DEAD / 2:
+        child.priority = 0.0   # ruta nueva: revive de la lapida
+        child.save(update_fields=['priority'])
     return redirect(f'/atomicdb/explore/{child.key}/')
 
 
