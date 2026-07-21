@@ -305,10 +305,13 @@ class MachineVisibilityTests(TestCase):
         ping = WorkerPing.objects.get(machine='u-atomicdb')
         self.assertEqual((ping.threads, ping.hash_mb, ping.os,
                           ping.tasks_done), (8, 1024, 'TestOS 1', 0))
-        submit = dict(payload, task_id=tasks[0]['id'], lines='[]')
+        submit = dict(payload, task_id=tasks[0]['id'], lines='[]',
+                      elapsed='2.5')
         self.client.post('/atomicdb/api/submit', submit)
         ping.refresh_from_db()
         self.assertEqual(ping.tasks_done, 1)
+        pos = Position.objects.get(fen=tasks[0]['fen'])
+        self.assertEqual(pos.time_invested, 2.5)
 
 
 class PovTests(TestCase):

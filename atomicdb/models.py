@@ -35,6 +35,7 @@ class Position(models.Model):
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
     depth_invested = models.IntegerField(default=0)
     nodes_invested = models.BigIntegerField(default=0)
+    time_invested  = models.FloatField(default=0.0)   # segundos de motor acumulados
     visits    = models.IntegerField(default=0)
     priority  = models.FloatField(default=0.0, db_index=True)      # selector (§4.1)
     campaign  = models.ForeignKey('Campaign', null=True, on_delete=models.SET_NULL,
