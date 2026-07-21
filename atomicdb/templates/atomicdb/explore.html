@@ -18,6 +18,16 @@
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
       {% endif %}
     </div>
+    {% if pos.won_line %}
+    <p style="font-size:.85rem"><span class="dim">winning line:</span>
+      <strong>{{ pos.won_line }}</strong></p>
+    {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
+    <p style="font-size:.85rem"><span class="dim">witness move:</span>
+      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span></p>
+    {% elif pos.status != 'UNKNOWN' and pos.closure == 'MATE_PV' and not pos.won_line %}
+    <p class="dim" style="font-size:.8rem">closed before line recording was added;
+      the mate was verified move by move at closure time</p>
+    {% endif %}
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
       nodes {{ pos.nodes_invested }}{% if pos.is_wall %} · <strong style="color:var(--hot)">WALL</strong>{% endif %}</p>

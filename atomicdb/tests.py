@@ -193,3 +193,18 @@ class TablebaseTests(TestCase):
         self.assertFalse(ingest.close_by_tb(p.key, 2))
         p.refresh_from_db()
         self.assertEqual(p.status, 'UNKNOWN')
+
+
+class WitnessTests(TestCase):
+
+    def test_mate_pv_closure_records_line(self):
+        from . import ingest
+        lt = LogicTests()
+        pos_fen, mating_move, _ = lt._find_mate_in_1()
+        p = ingest.get_or_create_position(pos_fen)
+        ingest.ingest_analysis(p.key, [{'move': mating_move, 'eval_cp': 9999,
+                                        'mate': 1, 'pv': [mating_move]}], 1000)
+        p.refresh_from_db()
+        # el padre cerro por MINIMAX con testigo = la jugada de mate
+        self.assertEqual(p.status, 'WHITE_WIN')
+        self.assertEqual(p.best_move, mating_move)
