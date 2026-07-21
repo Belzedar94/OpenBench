@@ -36,7 +36,6 @@ class Position(models.Model):
     depth_invested = models.IntegerField(default=0)
     nodes_invested = models.BigIntegerField(default=0)
     visits    = models.IntegerField(default=0)
-    is_wall   = models.BooleanField(default=False, db_index=True)
     priority  = models.FloatField(default=0.0, db_index=True)      # selector (§4.1)
     campaign  = models.ForeignKey('Campaign', null=True, on_delete=models.SET_NULL,
                                   related_name='positions')
