@@ -1,8 +1,39 @@
 {% load static %}
-<div class="boardwrap"><div class="board">
-{% for row in board %}{% for piece, dark in row %}
-  <div class="sq {% if dark %}d{% else %}l{% endif %}">
-    {% if piece %}<img src="{% static 'atomicdb/pieces/' %}{{ piece }}.svg" alt="{{ piece }}">{% endif %}
+<div class="boardwrap"><div class="board" id="board"
+  data-key="{{ board_key }}">
+{% for row in board %}{% for piece, dark, sq in row %}
+  <div class="sq {% if dark %}d{% else %}l{% endif %}" data-sq="{{ sq }}">
+    {% if piece %}<img src="{% static 'atomicdb/pieces/' %}{{ piece }}.svg" alt="{{ piece }}" draggable="false">{% endif %}
   </div>
 {% endfor %}{% endfor %}
 </div></div>
+{% if legal_ucis %}
+<script>
+(function(){
+  const legal = new Set({{ legal_ucis|safe }});
+  const key = document.getElementById('board').dataset.key;
+  let from = null;
+  document.querySelectorAll('#board .sq').forEach(el => {
+    el.addEventListener('click', () => {
+      const sq = el.dataset.sq;
+      if (from === null) {
+        if (el.querySelector('img')) { from = sq; el.classList.add('sel'); }
+        return;
+      }
+      const uci = from + sq;
+      document.querySelectorAll('#board .sq.sel')
+              .forEach(x => x.classList.remove('sel'));
+      if (legal.has(uci)) {
+        window.location = `/atomicdb/goto/${key}/${uci}/`;
+      } else if (legal.has(uci + 'q')) {
+        window.location = `/atomicdb/goto/${key}/${uci}q/`;
+      } else if (el.querySelector('img') && sq !== from) {
+        from = sq; el.classList.add('sel');
+      } else {
+        from = null;
+      }
+    });
+  });
+})();
+</script>
+{% endif %}

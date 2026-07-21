@@ -6,7 +6,7 @@ from datetime import timedelta
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.http import JsonResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -111,8 +111,46 @@ def _piece_code(ch):
 
 def _ctx_board(fen):
     rows = _board_rows(fen)
-    return [[(_piece_code(p), (r + c) % 2 == 1)
-             for c, p in enumerate(row)] for r, row in enumerate(rows)]
+    out = []
+    for r, row in enumerate(rows):
+        rank = 8 - r
+        out.append([(_piece_code(p), (r + c) % 2 == 1,
+                     'abcdefgh'[c] + str(rank))
+                    for c, p in enumerate(row)])
+    return out
+
+
+def goto(request, key, uci):
+    """Navegacion jugando: valida la jugada, crea/encuentra el hijo y salta."""
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return redirect('/atomicdb/')
+    if uci not in logic.legal_moves(pos.fen):
+        return redirect(f'/atomicdb/explore/{key}/')
+    child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
+                                          campaign=pos.campaign)
+    Edge.objects.get_or_create(parent=pos, move_uci=uci,
+                               defaults={'child': child})
+    return redirect(f'/atomicdb/explore/{child.key}/')
+
+
+def _friendly_events(events):
+    out = []
+    for e in events:
+        pl = e.payload or {}
+        key = pl.get('key', '')
+        if e.kind == 'NODE_CLOSED':
+            txt = f"Solved: {pl.get('status', '?')} via {pl.get('closure', '?')}"
+        elif e.kind == 'WALL':
+            txt = f"Wall detected at {pl.get('eval', '?')}cp"
+        elif e.kind == 'CAMPAIGN_CLOSED':
+            txt = f"Campaign {pl.get('campaign', '?')} SOLVED: {pl.get('status', '?')}"
+            key = ''
+        else:
+            txt = e.kind
+        out.append({'ts': e.ts, 'text': txt, 'key': key})
+    return out
 
 
 def home(request):
@@ -134,12 +172,15 @@ def home(request):
         first_moves.sort(key=lambda m: -(m['eval'] or 0))
     except Position.DoesNotExist:
         pass
-    events = DBEvent.objects.order_by('-ts')[:12]
+    events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
     campaigns = Campaign.objects.order_by('-created')[:6]
+    root = ingest.get_or_create_position(logic.start_fen())
     return render(request, 'atomicdb/home.html', {
         'total': total, 'closed': closed, 'walls': walls, 'nodes': nodes,
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
-        'root_key': root_key})
+        'root_key': root_key, 'board': _ctx_board(root.fen),
+        'board_key': root.key,
+        'legal_ucis': logic.legal_moves(root.fen)})
 
 
 def _status_css(status, eval_cp):
@@ -199,6 +240,7 @@ def explore(request, key):
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
     top, line = _line_to_root(pos)
+    legal_ucis = logic.legal_moves(pos.fen) if pos.status == 'UNKNOWN' else []
     numbered, n = [], 1
     for i, st in enumerate(line):
         if st['white']:
@@ -210,6 +252,7 @@ def explore(request, key):
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
+        'board_key': pos.key, 'legal_ucis': legal_ucis,
         'board': _ctx_board(pos.fen),
         'stm': 'White' if pos.fen.split()[1] == 'w' else 'Black',
         'verdict_css': _status_css(pos.status, pos.eval_cp)})

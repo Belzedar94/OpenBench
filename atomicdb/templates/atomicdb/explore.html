@@ -22,7 +22,7 @@
     {% include "atomicdb/_board.html" %}
     <div class="verdict {{ verdict_css }}">
       {% if pos.status == 'UNKNOWN' %}
-        FRONTIER, {{ stm }} to move{% if pos.eval_cp is not None %} · best line {{ pos.eval_cp }}cp{% endif %}
+        UNSOLVED · {{ stm }} to move{% if pos.eval_cp is not None %} · best line {{ pos.eval_cp }}cp{% endif %}
       {% else %}
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
       {% endif %}
@@ -39,7 +39,21 @@
     {% endif %}
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
-      nodes {{ pos.nodes_invested }}{% if pos.is_wall %} · <strong style="color:var(--hot)">WALL</strong>{% endif %}</p>
+      nodes {{ pos.nodes_invested }}</p>
+    {% if pos.last_analysis %}
+    <details>
+      <summary>raw engine output (last analysis)</summary>
+      <div class="raw">{% for ln in pos.last_analysis %}{{ forloop.counter }}. {{ ln.move }}  {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}{{ ln.eval_cp }}cp{% endif %}  pv {{ ln.pv|join:" " }}
+{% endfor %}</div>
+    </details>
+    {% endif %}
+    {% if pos.last_analysis %}
+    <details>
+      <summary>raw engine output (last analysis)</summary>
+      <div class="raw">{% for ln in pos.last_analysis %}{{ forloop.counter }}. {{ ln.move }}  {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}{{ ln.eval_cp }}cp{% endif %}  pv {{ ln.pv|join:" " }}
+{% endfor %}</div>
+    </details>
+    {% endif %}
   </div>
 
   <div>
@@ -50,13 +64,13 @@
       <tr>
         <td><span class="chip {{ m.css }}"></span></td>
         <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
-        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">frontier</span>
+        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% empty %}
-      <tr><td colspan="5" class="dim">Not expanded yet. The frontier will reach this node.</td></tr>
+      <tr><td colspan="5" class="dim">Not expanded yet. The search will reach this node.</td></tr>
       {% endfor %}
     </table>
   </div>

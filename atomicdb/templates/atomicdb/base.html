@@ -52,7 +52,12 @@ tr:hover td{background:var(--panel2)}
   grid-template-rows:repeat(8,1fr);width:100%;
   aspect-ratio:1;border-radius:6px;overflow:hidden;
   box-shadow:0 4px 18px rgba(0,0,0,.5)}
-.sq{position:relative;display:flex;align-items:center;justify-content:center}
+.sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.sq.sel{outline:3px solid var(--hot);outline-offset:-3px;z-index:1}
+.raw{font:11px/1.5 ui-monospace,Consolas,monospace;color:var(--dim);
+  background:var(--panel);border:1px solid #3a362f;border-radius:6px;
+  padding:.5rem .7rem;overflow-x:auto;white-space:pre}
+details summary{cursor:pointer;color:var(--dim);font-size:.85rem;margin:.6rem 0 .3rem}
 .sq.l{background:var(--sq-l)}.sq.d{background:var(--sq-d)}
 .sq img{width:88%;height:88%;display:block}
 .coord{position:absolute;font-size:.62rem;font-weight:700;opacity:.75;
@@ -84,7 +89,6 @@ footer{margin:3rem 0 1rem;text-align:center;color:var(--dim);font-size:.8rem}
   <h1><a href="/atomicdb/" style="color:inherit">Atomic<span>DB</span></a></h1>
   <nav>
     <a href="/atomicdb/">Map</a>
-    <a href="/atomicdb/walls/">Walls</a>
     <a href="/atomicdb/method/">Method</a>
     <a href="/index/">OpenBench</a>
   </nav>
