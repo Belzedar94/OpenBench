@@ -33,6 +33,20 @@ def _auth(request):
 
 # ---------------- API worker ----------------
 
+def _live_moves(task):
+    """Jugadas sin resolver de la posicion: el motor no debe gastar ni un
+    nodo re-derivando defensas ya demostradas (go searchmoves). Vacio = sin
+    restriccion (nada resuelto aun, o posicion sin expandir)."""
+    pos = task.position
+    if not pos.expanded:
+        return []
+    edges = list(Edge.objects.filter(parent=pos).select_related('child'))
+    live = [e.move_uci for e in edges if e.child.status == 'UNKNOWN']
+    if 0 < len(live) < len(edges):
+        return live
+    return []
+
+
 @csrf_exempt
 def api_lease(request):
     user = _auth(request)
@@ -74,7 +88,8 @@ def api_lease(request):
 
     return JsonResponse({'tasks': [
         {'id': t.id, 'fen': t.position.fen, 'budget_nodes': t.budget_nodes,
-         'multipv': t.multipv} for t in batch]})
+         'multipv': t.multipv, 'searchmoves': _live_moves(t)}
+        for t in batch]})
 
 
 @csrf_exempt
