@@ -5,10 +5,13 @@ Flujo por resultado de analisis (§2):
   (terminal / MATE_PV) -> backup minimax en cascada hacia arriba -> eventos.
 """
 
+import time
+
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from . import logic
+from . import logic, tb
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
@@ -16,6 +19,9 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
+CASCADE_GUARD_LIMIT = 100_000
+PRIORITY_REFRESH_SECONDS = 30.0
+_priority_refresh_cache = {'at': 0.0}
 
 
 def multipv_for(visits):
@@ -93,14 +99,33 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
                 winner_white = mate > 0
                 pv_rest = ln['pv'][1:]  # pv[0] es `uci`: verificamos desde el hijo
                 if logic.verify_mate_pv(child.fen, pv_rest, winner_white):
+                    proof_result = logic.prove_forced_mate(
+                        child.fen, winner_white,
+                        max_plies=len(pv_rest) + 2,
+                        hint_pv=pv_rest,
+                    )
+                    if proof_result == 'NO_MATE':
+                        child.proof = 'DISPUTED'
+                        child.won_line = ' '.join(pv_rest)
+                        child.save(update_fields=['proof', 'won_line', 'updated'])
+                        DBEvent.objects.create(kind='MATE_PROOF_DISPUTED', payload={
+                            'key': child.key, 'parent': pos.key,
+                            'winner': 'WHITE' if winner_white else 'BLACK',
+                            'max_plies': len(pv_rest) + 2,
+                        })
+                        _queue_disputed_reanalysis(child)
+                        continue
                     child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
                     child.closure = 'MATE_PV'
+                    child.proof = ('ANDOR' if proof_result == 'PROVEN'
+                                   else 'ENGINE')
                     child.won_line = ' '.join(pv_rest)
                     child.mate_in = len(pv_rest)   # linea probada (cota superior)
                     if pv_rest:
                         child.best_move = pv_rest[0]
-                    child.save(update_fields=['status', 'closure', 'won_line',
-                                              'mate_in', 'best_move', 'updated'])
+                    child.save(update_fields=['status', 'closure', 'proof',
+                                              'won_line', 'mate_in',
+                                              'best_move', 'updated'])
                     _emit_closure_events(child)   # tambien cuenta y sale en feed
                     closed_here += 1
             if ev is not None and (best_eval is None
@@ -129,7 +154,7 @@ def backup_cascade(seed_keys):
         frontier.add(pid)
     changed_total = 0
     guard = 0
-    while frontier and guard < 100_000:
+    while frontier and guard < CASCADE_GUARD_LIMIT:
         guard += 1
         key = frontier.pop()
         pos = Position.objects.get(key=key)
@@ -148,6 +173,7 @@ def backup_cascade(seed_keys):
             dirty = False
             if new_status != pos.status and pos.status == 'UNKNOWN':
                 pos.status, pos.closure = new_status, 'MINIMAX'
+                pos.proof = _minimax_proof(pos, edges, new_status)
                 # testigo del minimax: la arista hacia el mejor hijo exacto
                 want = new_status
                 witness = next((e for e in edges if e.child.status == want),
@@ -172,7 +198,12 @@ def backup_cascade(seed_keys):
                         pos.mate_in = 1 + max(dists)
                 dirty = True
                 _emit_closure_events(pos)
-            elif pos.status in ('WHITE_WIN', 'BLACK_WIN'):
+            if pos.closure == 'MINIMAX' and pos.status != 'UNKNOWN':
+                inherited = _minimax_proof(pos, edges, pos.status)
+                if inherited != pos.proof:
+                    pos.proof = inherited
+                    dirty = True
+            if pos.status in ('WHITE_WIN', 'BLACK_WIN'):
                 # refinamiento retroactivo del DTM: si aparece (o se acorta)
                 # una linea probada mas corta, la distancia y el testigo
                 # mejoran y la mejora se propaga hacia arriba
@@ -205,11 +236,36 @@ def backup_cascade(seed_keys):
                 for e in Edge.objects.filter(child=pos).values_list(
                         'parent_id', flat=True):
                     frontier.add(e)
+    if frontier:
+        DBEvent.objects.create(kind='CASCADE_GUARD', payload={
+            'iterations': guard, 'remaining': len(frontier),
+            'seed_count': len(seed_keys),
+        })
     return changed_total
 
 
 def _status_eval(status):
     return {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000, 'DRAW': 0}.get(status)
+
+
+def _child_is_verified(child):
+    return (child.closure in ('TERMINAL', 'TB')
+            or child.proof == 'ANDOR')
+
+
+def _minimax_proof(pos, edges, status):
+    """Inherit the weakest assurance needed by this exact backup shape."""
+    if not edges or status == 'UNKNOWN':
+        return None
+    stm_white = pos.fen.split()[1] == 'w'
+    mover_win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    if status == mover_win:
+        witnesses = [e.child for e in edges if e.child.status == status]
+        return ('ANDOR' if any(_child_is_verified(c) for c in witnesses)
+                else 'ENGINE')
+    # Losses and draws require complete coverage, so every child matters.
+    return ('ANDOR' if all(_child_is_verified(e.child) for e in edges)
+            else 'ENGINE')
 
 
 def _emit_closure_events(pos):
@@ -277,6 +333,11 @@ def refresh_priorities():
     """§4.1 — recalculo global (llamado por el selector). Prioridad =
     cercania al cierre local - regret acumulado desde la raiz - visitas.
     Respeta las lapidas (las ramas muertas no resucitan)."""
+    now = time.monotonic()
+    cached = _priority_refresh_cache
+    if cached['at'] and now - cached['at'] < PRIORITY_REFRESH_SECONDS:
+        return False
+
     regret = _regret_from_root()
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
@@ -296,6 +357,8 @@ def refresh_priorities():
             dirty.append(pos)
     for i in range(0, len(dirty), 500):
         Position.objects.bulk_update(dirty[i:i + 500], ['priority'])
+    cached['at'] = now
+    return True
 
 
 def _still_reachable(pos):
@@ -385,16 +448,71 @@ def request_analysis(pos):
     return 'already-queued'
 
 
-def close_by_tb(position_key, wdl):
-    """Cierra una posicion con el WDL probeado por un worker (perspectiva del
-    que mueve). Verifica aplicabilidad server-side; el valor viene del worker
-    (estandar practico, worker propio)."""
+def _queue_disputed_reanalysis(pos):
+    """Queue one maximum-budget follow-up without disturbing live leases."""
+    pending = (AnalysisTask.objects.filter(position=pos, state='PENDING')
+               .order_by('-generation').first())
+    if pending is not None:
+        pending.budget_nodes = max(pending.budget_nodes, BUDGET_LADDER[-1])
+        pending.multipv = max(pending.multipv, multipv_for(pos.visits))
+        pending.save(update_fields=['budget_nodes', 'multipv'])
+        return pending
+
+    generation = max(pos.visits, 0)
+    used = set(AnalysisTask.objects.filter(position=pos)
+               .values_list('generation', flat=True))
+    while generation in used:
+        generation += 1
+    return AnalysisTask.objects.create(
+        position=pos, generation=generation,
+        budget_nodes=BUDGET_LADDER[-1],
+        multipv=multipv_for(pos.visits), source='AUTO')
+
+
+def close_by_tb(position_key, wdl, user=None):
+    """Cierra con WDL del lado al turno, dentro de una frontera verificable.
+
+    Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
+    fijado. Las posiciones de seis piezas solo se aceptan de identidades
+    explicitamente confiables porque el set completo no reside en el VPS.
+    Todo rechazo queda registrado y nunca muta el arbol.
+    """
     with transaction.atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if pos.status != 'UNKNOWN' or not logic.tb_applicable(pos.fen):
             return False
+        try:
+            wdl = int(wdl)
+        except (TypeError, ValueError):
+            wdl = 99
+        if wdl not in (-2, -1, 0, 1, 2):
+            DBEvent.objects.create(kind='TB_REJECTED', payload={
+                'key': pos.key, 'reason': 'invalid-wdl', 'worker_wdl': wdl})
+            return False
+
+        men = logic.piece_count(pos.fen)
+        if men <= 5:
+            server_wdl = tb.probe_wdl(pos.fen, max_pieces=5)
+            if server_wdl is None or int(server_wdl) != wdl:
+                DBEvent.objects.create(kind='TB_REJECTED', payload={
+                    'key': pos.key,
+                    'reason': ('server-probe-unavailable' if server_wdl is None
+                               else 'wdl-mismatch'),
+                    'worker_wdl': wdl,
+                    'server_wdl': server_wdl,
+                })
+                return False
+        else:
+            trusted = set(getattr(settings, 'ATOMICDB_TB_TRUSTED', ()))
+            username = getattr(user, 'username', '') if user is not None else ''
+            if not (getattr(user, 'is_staff', False) or username in trusted):
+                DBEvent.objects.create(kind='TB_REJECTED', payload={
+                    'key': pos.key, 'reason': 'untrusted-six-piece',
+                    'worker_wdl': wdl, 'username': username,
+                })
+                return False
         stm_white = pos.fen.split()[1] == 'w'
-        pos.status = logic.wdl_to_status(int(wdl), stm_white)
+        pos.status = logic.wdl_to_status(wdl, stm_white)
         pos.closure = 'TB'
         pos.save(update_fields=['status', 'closure', 'updated'])
         DBEvent.objects.create(kind='NODE_CLOSED', payload={

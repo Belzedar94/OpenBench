@@ -22,6 +22,12 @@ class Closure(models.TextChoices):
     TERMINAL= 'TERMINAL'  # la propia posicion es terminal (mate/ahogado/explosion)
 
 
+class Proof(models.TextChoices):
+    ANDOR    = 'ANDOR'     # mate forzado verificado exhaustivamente
+    ENGINE   = 'ENGINE'    # witness legal; certificacion agoto su presupuesto
+    DISPUTED = 'DISPUTED'  # busqueda exhaustiva contradijo el witness
+
+
 class Position(models.Model):
     key       = models.CharField(max_length=64, primary_key=True)  # sha256 hex
     fen       = models.TextField()                                 # canonica (sin contadores)
@@ -29,6 +35,7 @@ class Position(models.Model):
     status    = models.CharField(max_length=10, choices=Status.choices,
                                  default=Status.UNKNOWN, db_index=True)
     closure   = models.CharField(max_length=8, choices=Closure.choices, null=True)
+    proof     = models.CharField(max_length=8, choices=Proof.choices, null=True)
     best_move = models.CharField(max_length=8, null=True)          # uci, heuristica
     won_line  = models.TextField(null=True)   # PV verificada del cierre (testigo)
     mate_in   = models.IntegerField(null=True)  # plies hasta mate, linea probada mas corta

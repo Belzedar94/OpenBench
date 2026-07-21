@@ -102,43 +102,62 @@ def api_submit(request):
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
     try:
-        task = AnalysisTask.objects.get(id=int(request.POST['task_id']))
+        task_id = int(request.POST['task_id'])
         lines = json.loads(request.POST['lines'])
-        assert isinstance(lines, list) and len(lines) <= 32
+        if not isinstance(lines, list) or len(lines) > 32:
+            raise ValueError('lines must be a list with at most 32 entries')
     except Exception as e:
         return JsonResponse({'error': f'malformed: {e}'}, status=400)
-    if task.state == 'COMPLETED':
-        return JsonResponse({'ok': True, 'dup': True})
 
     try:
         elapsed = min(max(float(request.POST.get('elapsed', 0) or 0), 0.0),
                       86_400.0)
     except ValueError:
         elapsed = 0.0
-    if elapsed:
-        Position.objects.filter(key=task.position_id).update(
-            time_invested=F('time_invested') + elapsed)
-
-    tb_wdl = request.POST.get('tb_wdl')
-    if tb_wdl not in (None, ''):
-        closed = ingest.close_by_tb(task.position_id, int(tb_wdl))
-        task.state, task.completed = 'COMPLETED', timezone.now()
-        task.save(update_fields=['state', 'completed'])
-        return JsonResponse({'ok': True, 'summary': {'tb_closed': closed}})
-
     try:
         searched = max(0, int(request.POST.get('nodes', 0) or 0))
     except ValueError:
         searched = 0
-    summary = ingest.ingest_analysis(task.position_id, lines,
-                                     searched or task.budget_nodes,
-                                     machine=request.POST.get('machine', ''))
-    task.state, task.completed = 'COMPLETED', timezone.now()
-    task.nodes_searched = searched
-    task.save(update_fields=['state', 'completed', 'nodes_searched'])
-    WorkerPing.objects.filter(machine=request.POST.get('machine', ''),
-                              user=user.username).update(
-        tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+    tb_wdl = request.POST.get('tb_wdl')
+    try:
+        parsed_wdl = None if tb_wdl in (None, '') else int(tb_wdl)
+    except ValueError:
+        return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
+
+    machine = request.POST.get('machine', '')
+    with transaction.atomic():
+        try:
+            task = (AnalysisTask.objects.select_for_update()
+                    .select_related('position').get(id=task_id))
+        except AnalysisTask.DoesNotExist:
+            return JsonResponse({'error': 'malformed: unknown task'}, status=400)
+        if task.state == 'COMPLETED':
+            return JsonResponse({'ok': True, 'dup': True})
+        if task.state != 'LEASED':
+            return JsonResponse({'error': 'not-leased'}, status=400)
+        if not machine or machine != task.machine:
+            return JsonResponse({'error': 'not-your-lease'}, status=409)
+
+        searched = min(searched, 2 * task.budget_nodes)
+        if elapsed:
+            Position.objects.filter(key=task.position_id).update(
+                time_invested=F('time_invested') + elapsed)
+
+        if parsed_wdl is not None:
+            closed = ingest.close_by_tb(task.position_id, parsed_wdl, user=user)
+            if not closed:
+                return JsonResponse({'error': 'tb-rejected'}, status=409)
+            summary = {'tb_closed': closed}
+        else:
+            summary = ingest.ingest_analysis(
+                task.position_id, lines, searched or task.budget_nodes,
+                machine=machine)
+
+        task.state, task.completed = 'COMPLETED', timezone.now()
+        task.nodes_searched = searched
+        task.save(update_fields=['state', 'completed', 'nodes_searched'])
+        WorkerPing.objects.filter(machine=machine, user=user.username).update(
+            tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
     return JsonResponse({'ok': True, 'summary': summary})
 
 
@@ -356,7 +375,7 @@ def _child_moves(pos):
                       'closure': c.closure, 'score': score, 'rank': rank,
                       'mate': mate,
                       'mate_str': None if mate is None else
-                      (f'M{mate}' if mate > 0 else f'-M{-mate}'),
+                      (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
     moves.sort(key=lambda m: -m['rank'])
     return moves
@@ -468,6 +487,7 @@ def api_query(request):
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
 
 
+
 def fen_jump(request):
     """Cajetin de FEN: salta a la posicion; si no existe la crea, bajo el
     mismo rate-limit por IP que las peticiones de analisis."""
@@ -555,7 +575,7 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,
-        'verdict_mate': (f'M{(pos.mate_in + 1) // 2}'
+        'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
                          else None),
         'verdict_css': _move_css(pos.status, eval_stm, win)})

@@ -49,6 +49,19 @@ TEMPLATE_PATH = os.path.join(PROJECT_PATH, 'Templates')
 MEDIA_URL  = '/Media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'Media')
 
+# AtomicDB authoritative tablebase verification.  Paths use the same
+# semicolon-separated convention as Client/atomicdb_worker.py --syzygy.
+ATOMICDB_TB_PATHS = [
+    path for path in os.environ.get(
+        'ATOMICDB_TB_PATHS', '/opt/openbench/atomic-syzygy-345/'
+    ).split(';') if path
+]
+ATOMICDB_TB_TRUSTED = [
+    username.strip() for username in os.environ.get(
+        'ATOMICDB_TB_TRUSTED', 'belzedar'
+    ).split(',') if username.strip()
+]
+
 INSTALLED_APPS = [
     'atomicdb',
     'OpenBench',
