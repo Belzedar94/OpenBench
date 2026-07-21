@@ -24,6 +24,32 @@
   <button class="reqbtn">Go</button>
 </form>
 
+<div class="queue">
+  <div>
+    <h2 style="margin-top:0">Now analyzing</h2>
+    {% if analyzing %}
+    <ul class="feed">
+      {% for q in analyzing %}
+      <li><span class="chip hot"></span>
+        <a href="/atomicdb/explore/{{ q.key }}/">{{ q.san }}</a>
+        <span class="dim" style="font-size:.8rem">&nbsp;{{ q.budget }} nodes · {{ q.machine }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="dim">No active analyses right now.</p>{% endif %}
+  </div>
+  <div>
+    <h2 style="margin-top:0">Up next</h2>
+    {% if upnext %}
+    <ul class="feed">
+      {% for q in upnext %}
+      <li><span class="t">{{ forloop.counter }}</span>
+        <a href="/atomicdb/explore/{{ q.key }}/">{{ q.san }}</a></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="dim">Queue is empty.</p>{% endif %}
+  </div>
+</div>
+
 <div class="cols">
   <div>
     <h2 style="margin-top:0">Play to explore <span class="dim">click a piece, then a square</span></h2>

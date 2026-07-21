@@ -220,8 +220,18 @@ def main():
                 except Exception as e:
                     print(f'tb submit error: {e}', flush=True)
                 continue
-            lines = eng.analyse(t['fen'], t['budget_nodes'], t['multipv'],
-                                t.get('searchmoves'))
+            try:
+                lines = eng.analyse(t['fen'], t['budget_nodes'],
+                                    t['multipv'], t.get('searchmoves'))
+            except Exception as e:
+                print(f'engine failure: {e}; reiniciando motor', flush=True)
+                try:
+                    eng.close()
+                except Exception:
+                    pass
+                eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
+                             syzygy=a.syzygy)
+                continue   # la tarea vuelve sola al caducar su lease
             try:
                 rr = requests.post(a.S + '/atomicdb/api/submit', data={
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),

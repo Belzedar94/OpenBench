@@ -599,6 +599,21 @@ class SearchmovesTests(TestCase):
         self.assertEqual(self._lease_task(p)['searchmoves'], [])
 
 
+class HomeQueueTests(TestCase):
+
+    def test_home_shows_analysis_queue(self):
+        from django.utils import timezone
+        p = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(p)
+        AnalysisTask.objects.create(position=p, budget_nodes=8_000_000,
+                                    state='LEASED', machine='m1',
+                                    leased_at=timezone.now())
+        r = self.client.get('/atomicdb/')
+        self.assertContains(r, 'Now analyzing')
+        self.assertContains(r, 'Up next')
+        self.assertContains(r, 'start position')
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):
