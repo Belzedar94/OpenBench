@@ -614,6 +614,25 @@ class HomeQueueTests(TestCase):
         self.assertContains(r, 'start position')
 
 
+class NodesAccountingTests(TestCase):
+
+    def test_actual_nodes_recorded_not_budget(self):
+        import json
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        ingest.get_or_create_position(logic.start_fen())
+        payload = {'username': 'u', 'password': 'p', 'machine': 'm', 'tb': '1'}
+        lease = self.client.post('/atomicdb/api/lease', payload)
+        t = json.loads(lease.content)['tasks'][0]
+        self.client.post('/atomicdb/api/submit',
+                         dict(payload, task_id=t['id'], lines='[]',
+                              nodes='12345'))
+        task = AnalysisTask.objects.get(id=t['id'])
+        self.assertEqual(task.nodes_searched, 12345)
+        pos = Position.objects.get(fen=t['fen'])
+        self.assertEqual(pos.nodes_invested, 12345)  # reales, no presupuesto
+
+
 class ArrowTests(TestCase):
 
     def test_best_move_arrow_rendered(self):

@@ -232,10 +232,16 @@ def main():
                 eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
                              syzygy=a.syzygy)
                 continue   # la tarea vuelve sola al caducar su lease
+            searched = 0
+            for ln in lines:
+                m = re.search(r' nodes (\d+)', ln.get('raw', ''))
+                if m:
+                    searched = max(searched, int(m.group(1)))
             try:
                 rr = requests.post(a.S + '/atomicdb/api/submit', data={
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
                     'elapsed': f'{time.time() - t0:.2f}',
+                    'nodes': searched,
                 }, timeout=120)
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
