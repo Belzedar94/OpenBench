@@ -4,6 +4,7 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 from django.db.models import Q
 from django.db.models.functions import Length
+from django.utils import timezone
 
 from atomicdb import ingest, logic
 from atomicdb.models import DBEvent, Position
@@ -45,6 +46,7 @@ class Command(BaseCommand):
         processed = 0
         after_witness_len = None
         after_key = ''
+        deferred = set()
 
         missing = Position.objects.filter(
             closure='MATE_PV', proof__isnull=True,
@@ -80,9 +82,15 @@ class Command(BaseCommand):
             for snapshot in rows:
                 after_witness_len = snapshot['witness_len']
                 after_key = snapshot['key']
+                # A concurrent edit can move a skipped row later in the
+                # length ordering.  Advance past it without proving it twice
+                # in this run; a fresh invocation retries every proof=NULL.
+                if snapshot['key'] in deferred:
+                    continue
                 hint = (snapshot['won_line'] or '').split()
                 winner_is_white = snapshot['status'] == 'WHITE_WIN'
                 if snapshot['status'] not in ('WHITE_WIN', 'BLACK_WIN'):
+                    deferred.add(snapshot['key'])
                     counts['ERROR'] += 1
                     self.stderr.write(
                         f"ERROR {snapshot['key']}: MATE_PV has status "
@@ -90,6 +98,7 @@ class Command(BaseCommand):
                     continue
                 if not hint:
                     # Defensive fallback; the query excludes known blanks.
+                    deferred.add(snapshot['key'])
                     counts['MISSING'] += 1
                     continue
                 try:
@@ -100,6 +109,7 @@ class Command(BaseCommand):
                         hint_pv=hint,
                     )
                 except Exception as exc:  # leave proof NULL for a later resume
+                    deferred.add(snapshot['key'])
                     counts['ERROR'] += 1
                     self.stderr.write(
                         f"ERROR {snapshot['key']}: {type(exc).__name__}: {exc}")
@@ -111,30 +121,30 @@ class Command(BaseCommand):
                     'NO_MATE': 'DISPUTED',
                 }[verdict]
 
-                # The expensive proof runs outside the transaction.  Lock only
-                # long enough to compare the snapshot and store one position.
+                # The expensive proof runs outside the transaction.  Persist
+                # it with one compare-and-swap UPDATE: unlike a SELECT followed
+                # by UPDATE, this does not require SQLite to upgrade a stale
+                # read snapshot while the live web process is also writing.
                 with transaction.atomic():
-                    current = Position.objects.select_for_update().get(
-                        key=snapshot['key'])
-                    unchanged = (
-                        current.proof is None
-                        and current.closure == snapshot['closure']
-                        and current.status == snapshot['status']
-                        and current.fen == snapshot['fen']
-                        and current.won_line == snapshot['won_line']
-                    )
-                    if not unchanged:
+                    updated = Position.objects.filter(
+                        key=snapshot['key'],
+                        proof__isnull=True,
+                        closure=snapshot['closure'],
+                        status=snapshot['status'],
+                        fen=snapshot['fen'],
+                        won_line=snapshot['won_line'],
+                    ).update(proof=proof, updated=timezone.now())
+                    if updated != 1:
+                        deferred.add(snapshot['key'])
                         counts['SKIPPED'] += 1
                         continue
-                    current.proof = proof
-                    current.save(update_fields=['proof', 'updated'])
                     if proof == 'DISPUTED':
                         DBEvent.objects.create(
                             kind='MATE_PROOF_DISPUTED',
                             payload={
-                                'key': current.key,
-                                'status': current.status,
-                                'closure': current.closure,
+                                'key': snapshot['key'],
+                                'status': snapshot['status'],
+                                'closure': snapshot['closure'],
                                 'max_plies': len(hint) + 2,
                             },
                         )

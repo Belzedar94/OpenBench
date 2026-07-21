@@ -130,6 +130,24 @@ class VerifyMatesCommandTests(TestCase):
         self.assertEqual(long.proof, 'ENGINE')
         self.assertEqual(prove.call_count, 2)
 
+    @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate')
+    def test_command_cas_skips_a_changed_witness(self, prove):
+        pos = self._mate_position()
+
+        def change_witness(*args, **kwargs):
+            current = Position.objects.get(key=pos.key)
+            current.won_line = current.won_line + ' a1a2'
+            current.save(update_fields=['won_line'])
+            return 'INCONCLUSIVE'
+
+        prove.side_effect = change_witness
+        out = StringIO()
+        call_command('verify_mates', stdout=out)
+
+        pos.refresh_from_db()
+        self.assertIsNone(pos.proof)
+        self.assertIn('SKIPPED=1', out.getvalue())
+
     @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate',
            return_value='NO_MATE')
     def test_disputed_is_reported_but_existing_closure_is_not_reverted(
