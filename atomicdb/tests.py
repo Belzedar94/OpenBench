@@ -614,6 +614,43 @@ class HomeQueueTests(TestCase):
         self.assertContains(r, 'start position')
 
 
+class ArrowTests(TestCase):
+
+    def test_best_move_arrow_rendered(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        p.best_move = 'g1f3'
+        p.save()
+        r = self.client.get(f'/atomicdb/explore/{p.key}/')
+        self.assertContains(r, 'board-arrow')
+
+    def test_no_arrow_without_best_move(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        r = self.client.get(f'/atomicdb/explore/{p.key}/')
+        self.assertNotContains(r, 'board-arrow')
+
+
+class DtmRefineTests(TestCase):
+
+    def test_shorter_mate_refines_distance_and_witness(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        a = Edge.objects.get(parent=root, move_uci='e2e4').child
+        a.status, a.closure, a.mate_in = 'WHITE_WIN', 'MATE_PV', 4
+        a.save()
+        ingest.backup_cascade([a.key])
+        root.refresh_from_db()
+        self.assertEqual((root.status, root.mate_in, root.best_move),
+                         ('WHITE_WIN', 5, 'e2e4'))
+        # aparece un mate probado mas corto por otra jugada: refina y
+        # actualiza el testigo
+        b = Edge.objects.get(parent=root, move_uci='d2d4').child
+        b.status, b.closure, b.mate_in = 'WHITE_WIN', 'MATE_PV', 2
+        b.save()
+        ingest.backup_cascade([b.key])
+        root.refresh_from_db()
+        self.assertEqual((root.mate_in, root.best_move), (3, 'd2d4'))
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

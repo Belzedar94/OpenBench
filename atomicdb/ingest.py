@@ -170,6 +170,30 @@ def backup_cascade(seed_keys):
                         pos.mate_in = 1 + max(dists)
                 dirty = True
                 _emit_closure_events(pos)
+            elif pos.status in ('WHITE_WIN', 'BLACK_WIN'):
+                # refinamiento retroactivo del DTM: si aparece (o se acorta)
+                # una linea probada mas corta, la distancia y el testigo
+                # mejoran y la mejora se propaga hacia arriba
+                stm_white_pos = pos.fen.split()[1] == 'w'
+                mover_win = 'WHITE_WIN' if stm_white_pos else 'BLACK_WIN'
+                if pos.status == mover_win:
+                    winners = [e for e in edges
+                               if e.child.status == pos.status
+                               and e.child.mate_in is not None]
+                    if winners:
+                        best = min(winners, key=lambda e: e.child.mate_in)
+                        if (pos.mate_in is None
+                                or 1 + best.child.mate_in < pos.mate_in):
+                            pos.mate_in = 1 + best.child.mate_in
+                            pos.best_move = best.move_uci
+                            dirty = True
+                else:
+                    dists = [e.child.mate_in for e in edges]
+                    if dists and all(d is not None for d in dists):
+                        new_mate = 1 + max(dists)
+                        if new_mate != pos.mate_in:
+                            pos.mate_in = new_mate
+                            dirty = True
             if new_eval is not None and new_eval != pos.eval_cp:
                 pos.eval_cp = new_eval
                 dirty = True

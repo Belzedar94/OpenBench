@@ -267,6 +267,27 @@ def _human(n):
     return f'{n:,}'
 
 
+def _arrow(uci):
+    """Coordenadas (en % del tablero) de la flecha del mejor movimiento,
+    con la punta retraida para que la cabeza no invada la casilla."""
+    if not uci or len(uci) < 4:
+        return None
+    try:
+        x1 = (ord(uci[0]) - 96 - 0.5) * 12.5
+        y1 = (8 - int(uci[1]) + 0.5) * 12.5
+        x2 = (ord(uci[2]) - 96 - 0.5) * 12.5
+        y2 = (8 - int(uci[3]) + 0.5) * 12.5
+    except ValueError:
+        return None
+    dx, dy = x2 - x1, y2 - y1
+    dist = (dx * dx + dy * dy) ** 0.5
+    if dist > 4:
+        x2 -= dx / dist * 3.2
+        y2 -= dy / dist * 3.2
+    return {'x1': f'{x1:.2f}', 'y1': f'{y1:.2f}',
+            'x2': f'{x2:.2f}', 'y2': f'{y2:.2f}'}
+
+
 def _move_css(status, score, win_status):
     """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
     if status == 'DRAW':
@@ -377,7 +398,7 @@ def home(request):
         'closed_24h_h': _human(closed_24h), 'nodes_24h_h': _human(nodes_24h),
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
         'root_key': root_key, 'board': _ctx_board(root.fen),
-        'board_key': root.key,
+        'board_key': root.key, 'arrow': _arrow(root.best_move),
         'legal_ucis': logic.legal_moves(root.fen)})
 
 
@@ -508,6 +529,7 @@ def explore(request, key):
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'board_key': pos.key, 'legal_ucis': legal_ucis,
         'board': _ctx_board(pos.fen),
+        'arrow': None if pos.closure == 'TERMINAL' else _arrow(pos.best_move),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),
