@@ -517,6 +517,40 @@ class TbRoutingTests(TestCase):
         self.assertIn(self.tbpos.fen, self._lease('0'))
 
 
+class SearchmovesTests(TestCase):
+    """El lease manda las jugadas vivas: el motor no re-deriva lo demostrado."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+
+    def _lease_task(self, pos):
+        import json
+        r = self.client.post('/atomicdb/api/lease',
+                             {'username': 'u', 'password': 'p', 'tb': '1'})
+        return next(t for t in json.loads(r.content)['tasks']
+                    if t['fen'] == pos.fen)
+
+    def test_lease_restricts_to_unsolved_moves(self):
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        ingest.expand(p)
+        edges = list(Edge.objects.filter(parent=p).select_related('child'))
+        solved = edges[0]
+        solved.child.status, solved.child.closure = 'WHITE_WIN', 'MATE_PV'
+        solved.child.save()
+        AnalysisTask.objects.create(position=p, budget_nodes=1000)
+        task = self._lease_task(p)
+        self.assertNotIn(solved.move_uci, task['searchmoves'])
+        self.assertEqual(len(task['searchmoves']), len(edges) - 1)
+
+    def test_no_restriction_when_nothing_solved(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(p)
+        AnalysisTask.objects.create(position=p, budget_nodes=1000)
+        self.assertEqual(self._lease_task(p)['searchmoves'], [])
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

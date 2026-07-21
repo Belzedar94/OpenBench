@@ -28,13 +28,16 @@ class Engine:
             if not line or line.startswith(token):
                 return
 
-    def analyse(self, fen, nodes, multipv):
+    def analyse(self, fen, nodes, multipv, searchmoves=None):
         """Devuelve lines=[{'move','eval_cp','mate','pv'}] perspectiva blanca.
         Sin ucinewgame a proposito: la TT sobrevive entre tareas, asi que las
         revisitas y los vecinos del mismo lote arrancan en caliente."""
         self._send(f'setoption name MultiPV value {multipv}')
         self._send(f'position fen {fen}')
-        self._send(f'go nodes {nodes}')
+        go = f'go nodes {nodes}'
+        if searchmoves:
+            go += ' searchmoves ' + ' '.join(searchmoves)
+        self._send(go)
         best, lines = {}, {}
         stm_white = fen.split()[1] == 'w'
         while True:

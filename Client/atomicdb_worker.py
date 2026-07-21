@@ -43,12 +43,17 @@ class Engine:
             if not line or line.startswith(token):
                 return
 
-    def analyse(self, fen, nodes, multipv):
+    def analyse(self, fen, nodes, multipv, searchmoves=None):
         """Devuelve lines=[{'move','eval_cp','mate','pv','raw'}] White-POV.
-        Sin ucinewgame a proposito: la TT sobrevive entre tareas."""
+        Sin ucinewgame a proposito: la TT sobrevive entre tareas.
+        searchmoves restringe la raiz a las jugadas vivas (no pegajoso:
+        aplica solo a este go, verificado empiricamente)."""
         self._send(f'setoption name MultiPV value {multipv}')
         self._send(f'position fen {fen}')
-        self._send(f'go nodes {nodes}')
+        go = f'go nodes {nodes}'
+        if searchmoves:
+            go += ' searchmoves ' + ' '.join(searchmoves)
+        self._send(go)
         lines = {}
         stm_white = fen.split()[1] == 'w'
         while True:
@@ -215,7 +220,8 @@ def main():
                 except Exception as e:
                     print(f'tb submit error: {e}', flush=True)
                 continue
-            lines = eng.analyse(t['fen'], t['budget_nodes'], t['multipv'])
+            lines = eng.analyse(t['fen'], t['budget_nodes'], t['multipv'],
+                                t.get('searchmoves'))
             try:
                 rr = requests.post(a.S + '/atomicdb/api/submit', data={
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
