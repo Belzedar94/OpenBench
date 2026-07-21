@@ -55,7 +55,8 @@
 <ul class="feed">
   {% for e in events %}
   <li><span class="t">{{ e.ts|date:"M d H:i" }}</span>
-    {{ e.text }}
+    {{ e.text }}{% if e.san %}
+    <span class="dim" style="font-size:.85rem">&nbsp;{{ e.san }}</span>{% endif %}
     {% if e.key %} <a href="/atomicdb/explore/{{ e.key }}/">view</a>{% endif %}</li>
   {% empty %}<li class="dim">No events yet.</li>{% endfor %}
 </ul>

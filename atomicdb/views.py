@@ -135,11 +135,35 @@ def goto(request, key, uci):
     return redirect(f'/atomicdb/explore/{child.key}/')
 
 
+def _san_line(key, max_plies=16):
+    """Linea SAN numerada hasta la raiz para milestones ("1. Nf3 f6 ...")."""
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return ''
+    top, line = _line_to_root(pos)
+    if not line:
+        return ''
+    parts, n = [], 1
+    for i, st in enumerate(line):
+        if st['white']:
+            parts.append(f"{n}. {st['san']}")
+        else:
+            parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
+            n += 1
+    prefix = '' if top.fen == logic.start_fen() else '… '
+    if len(parts) > max_plies:
+        parts = parts[-max_plies:]
+        prefix = '… '
+    return prefix + ' '.join(parts)
+
+
 def _friendly_events(events):
     out = []
     for e in events:
         pl = e.payload or {}
         key = pl.get('key', '')
+        san = _san_line(key) if key else ''
         if e.kind == 'NODE_CLOSED':
             txt = f"Solved: {pl.get('status', '?')} via {pl.get('closure', '?')}"
         elif e.kind == 'WALL':
@@ -149,7 +173,7 @@ def _friendly_events(events):
             key = ''
         else:
             txt = e.kind
-        out.append({'ts': e.ts, 'text': txt, 'key': key})
+        out.append({'ts': e.ts, 'text': txt, 'key': key, 'san': san})
     return out
 
 
