@@ -111,6 +111,9 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        # OB datagen + AtomicDB share this file: wait out writer bursts
+        # instead of raising "database is locked" (DB itself runs WAL)
+        'OPTIONS': {'timeout': 30},
     }
 }
 
