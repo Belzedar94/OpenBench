@@ -361,6 +361,19 @@ class PovTests(TestCase):
             key=logic.key_of(logic.canonical_fen(new_fen))).exists())
 
 
+class BootstrapTests(TestCase):
+
+    def test_bootstrap_root_deep_pass(self):
+        from .models import AnalysisTask
+        self.assertEqual(ingest.bootstrap_root(), 20)
+        tasks = AnalysisTask.objects.filter(source='USER', state='PENDING')
+        self.assertEqual(tasks.count(), 20)
+        self.assertTrue(all(t.budget_nodes >= ingest.BUDGET_LADDER[2]
+                            for t in tasks))
+        ingest.bootstrap_root()   # idempotente: promociona, no duplica
+        self.assertEqual(AnalysisTask.objects.filter(source='USER').count(), 20)
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):
