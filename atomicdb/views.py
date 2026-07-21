@@ -484,8 +484,19 @@ def api_query(request):
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'best_move': pos.best_move,
+        'tier': 'PRACTICAL', 'trust': _trust_for(pos),
+        'history_scope': 'COUNTERS_AND_REPETITION_IGNORED',
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
 
+
+def _trust_for(pos):
+    if pos.closure in ('TERMINAL', 'TB'):
+        return 'VERIFIED'
+    if pos.proof:
+        return pos.proof
+    if pos.closure in ('MATE_PV', 'MINIMAX'):
+        return 'ENGINE'
+    return 'UNPROVEN'
 
 
 def fen_jump(request):
