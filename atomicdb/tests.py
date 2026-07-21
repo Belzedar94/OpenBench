@@ -443,6 +443,26 @@ class SolvedExploreTests(TestCase):
         self.assertNotIn('Not expanded yet', html)
 
 
+class PartialExpansionTests(TestCase):
+
+    def test_partial_edges_do_not_poison_eval(self):
+        # /goto/ crea aristas sueltas; un hijo perdido NO debe poner el eval
+        # del padre a 10000 mientras la lista de movimientos este incompleta
+        p = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        p.eval_cp = 441
+        p.save()
+        child = ingest.get_or_create_position(
+            logic.apply_move(p.fen, 'd7d5'))
+        Edge.objects.create(parent=p, move_uci='d7d5', child=child)
+        child.status, child.closure = 'WHITE_WIN', 'MATE_PV'
+        child.save()
+        ingest.backup_cascade([child.key])
+        p.refresh_from_db()
+        self.assertEqual(p.status, 'UNKNOWN')   # cierre ya exigia expansion
+        self.assertEqual(p.eval_cp, 441)        # y ahora el eval tambien
+
+
 class SeedNotStompTests(TestCase):
 
     def test_parent_lines_do_not_overwrite_child_eval(self):

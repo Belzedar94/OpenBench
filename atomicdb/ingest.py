@@ -135,7 +135,11 @@ def backup_cascade(seed_keys):
                      _status_eval(e.child.status) for e in edges]
             new_status = (pos.status if pos.status != 'UNKNOWN' else
                           logic.backup_status(pos.fen, pos.expanded, statuses))
-            new_eval = logic.backup_eval(pos.fen, evals)
+            # minimax de evals SOLO con lista de movimientos completa: sobre
+            # una expansion parcial (aristas de /goto/) el min/max es basura
+            # optimista (p.ej. un unico hijo perdido pondria 10000)
+            new_eval = (logic.backup_eval(pos.fen, evals)
+                        if pos.expanded else None)
             dirty = False
             if new_status != pos.status and pos.status == 'UNKNOWN':
                 pos.status, pos.closure = new_status, 'MINIMAX'
