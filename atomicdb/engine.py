@@ -48,7 +48,8 @@ class Engine:
                 kind, val = m.group(2), int(m.group(3))
                 pv = m.group(4).split()
                 entry = {'move': pv[0], 'pv': pv,
-                         'eval_cp': None, 'mate': None}
+                         'eval_cp': None, 'mate': None,
+                         'raw': line.strip()}
                 if kind == 'cp':
                     entry['eval_cp'] = val if stm_white else -val
                 else:

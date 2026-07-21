@@ -43,18 +43,10 @@
     {% if pos.last_analysis %}
     <details>
       <summary>raw engine output (last analysis)</summary>
-      <div class="raw">{% for ln in pos.last_analysis %}{{ forloop.counter }}. {{ ln.move }}  {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}{{ ln.eval_cp }}cp{% endif %}  pv {{ ln.pv|join:" " }}
+      <div class="raw">{% for ln in pos.last_analysis %}{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}
 {% endfor %}</div>
     </details>
-    {% endif %}
-    {% if pos.last_analysis %}
-    <details>
-      <summary>raw engine output (last analysis)</summary>
-      <div class="raw">{% for ln in pos.last_analysis %}{{ forloop.counter }}. {{ ln.move }}  {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}{{ ln.eval_cp }}cp{% endif %}  pv {{ ln.pv|join:" " }}
-{% endfor %}</div>
-    </details>
-    {% endif %}
-  </div>
+    {% endif %}  </div>
 
   <div>
     <h2 style="margin-top:0">Moves</h2>
