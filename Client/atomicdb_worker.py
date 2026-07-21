@@ -57,7 +57,10 @@ def main():
             tb.add_directory(d)
         print(f'syzygy: {len(dirs)} dirs', flush=True)
 
-    auth = {'username': a.U, 'password': a.P, 'machine': f'{a.U}-atomicdb'}
+    import platform
+    auth = {'username': a.U, 'password': a.P, 'machine': f'{a.U}-atomicdb',
+            'threads': a.T, 'hash': a.hash,
+            'os': f'{platform.system()} {platform.release()}'}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash)
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)
 

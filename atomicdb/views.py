@@ -10,9 +10,11 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+from django.db.models import F
+
 from . import ingest, logic
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
-                     RequestLog)
+                     RequestLog, WorkerPing)
 
 LEASE_MINUTES = 30
 BATCH_SIZE = 25
@@ -34,6 +36,12 @@ def api_lease(request):
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
     machine = request.POST.get('machine', user.username)
+    ping, _ = WorkerPing.objects.get_or_create(machine=machine,
+                                               user=user.username)
+    ping.threads = int(request.POST.get('threads', 0) or 0)
+    ping.hash_mb = int(request.POST.get('hash', 0) or 0)
+    ping.os = request.POST.get('os', '')[:64]
+    ping.save()   # auto_now refresca last_seen
 
     with transaction.atomic():
         # recuperar leases caducados
@@ -85,6 +93,9 @@ def api_submit(request):
                                      machine=request.POST.get('machine', ''))
     task.state, task.completed = 'COMPLETED', timezone.now()
     task.save(update_fields=['state', 'completed'])
+    WorkerPing.objects.filter(machine=request.POST.get('machine', ''),
+                              user=user.username).update(
+        tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
     return JsonResponse({'ok': True, 'summary': summary})
 
 

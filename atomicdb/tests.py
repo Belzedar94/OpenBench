@@ -289,6 +289,28 @@ class RequestTests(TestCase):
         self.assertEqual(r.json()['status'], 'already-requested')
 
 
+class MachineVisibilityTests(TestCase):
+
+    def test_lease_and_submit_update_ping(self):
+        import json
+        from django.contrib.auth.models import User
+        from .models import WorkerPing
+        User.objects.create_user('u', password='p')
+        ingest.get_or_create_position(logic.start_fen())
+        payload = {'username': 'u', 'password': 'p', 'machine': 'u-atomicdb',
+                   'threads': 8, 'hash': 1024, 'os': 'TestOS 1'}
+        lease = self.client.post('/atomicdb/api/lease', payload)
+        tasks = json.loads(lease.content)['tasks']
+        self.assertTrue(tasks)
+        ping = WorkerPing.objects.get(machine='u-atomicdb')
+        self.assertEqual((ping.threads, ping.hash_mb, ping.os,
+                          ping.tasks_done), (8, 1024, 'TestOS 1', 0))
+        submit = dict(payload, task_id=tasks[0]['id'], lines='[]')
+        self.client.post('/atomicdb/api/submit', submit)
+        ping.refresh_from_db()
+        self.assertEqual(ping.tasks_done, 1)
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

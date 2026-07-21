@@ -104,3 +104,18 @@ class RequestLog(models.Model):
     ip       = models.GenericIPAddressField(db_index=True)
     position = models.ForeignKey(Position, on_delete=models.CASCADE)
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class WorkerPing(models.Model):
+    """Presencia de workers de AtomicDB, para la pagina /machines/."""
+    machine    = models.CharField(max_length=64)
+    user       = models.CharField(max_length=64)
+    threads    = models.IntegerField(default=0)
+    hash_mb    = models.IntegerField(default=0)
+    os         = models.CharField(max_length=64, default='')
+    tasks_done = models.IntegerField(default=0)
+    last_seen  = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['machine', 'user'],
+                                               name='uniq_worker_machine')]
