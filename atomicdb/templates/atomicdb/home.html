@@ -9,7 +9,13 @@
   <div class="metric"><div class="v">{{ walls }}</div><div class="l">walls</div></div>
 </div>
 
-<h2>First moves <span class="dim">from the starting position</span></h2>
+<div class="cols">
+  <div>
+    <h2 style="margin-top:0">Play to explore <span class="dim">click a piece, then a square</span></h2>
+    {% include "atomicdb/_board.html" %}
+  </div>
+  <div>
+<h2 style="margin-top:0">First moves <span class="dim">from the starting position</span></h2>
 {% if first_moves %}
 <div class="tiles">
   {% for m in first_moves %}
@@ -27,6 +33,8 @@
 <p class="dim">The tree does not include the starting position yet.
   <a href="/atomicdb/explore/{{ root_key }}/">Explore the root</a>.</p>
 {% endif %}
+  </div>
+</div>
 
 <h2>Campaigns</h2>
 {% if campaigns %}
@@ -47,8 +55,8 @@
 <ul class="feed">
   {% for e in events %}
   <li><span class="t">{{ e.ts|date:"M d H:i" }}</span>
-    <strong>{{ e.kind }}</strong>
-    <span class="dim">{{ e.payload }}</span></li>
+    {{ e.text }}
+    {% if e.key %} <a href="/atomicdb/explore/{{ e.key }}/">view</a>{% endif %}</li>
   {% empty %}<li class="dim">No events yet.</li>{% endfor %}
 </ul>
 

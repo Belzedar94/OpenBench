@@ -31,6 +31,7 @@ class Position(models.Model):
     closure   = models.CharField(max_length=8, choices=Closure.choices, null=True)
     best_move = models.CharField(max_length=8, null=True)          # uci, heuristica
     won_line  = models.TextField(null=True)   # PV verificada del cierre (testigo)
+    last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
     depth_invested = models.IntegerField(default=0)
     nodes_invested = models.BigIntegerField(default=0)

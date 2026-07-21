@@ -92,6 +92,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine=''):
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
+        pos.last_analysis = lines[:8]
         if best_move:
             pos.best_move = best_move
         prev_eval = pos.eval_cp
