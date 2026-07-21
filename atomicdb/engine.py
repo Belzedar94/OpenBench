@@ -6,13 +6,15 @@ import subprocess
 
 
 class Engine:
-    def __init__(self, path, threads=1, hash_mb=256):
+    def __init__(self, path, threads=1, hash_mb=256, syzygy=''):
         self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
         self._send('uci')
         self._wait('uciok')
         self._send(f'setoption name Threads value {threads}')
         self._send(f'setoption name Hash value {hash_mb}')
+        if syzygy:
+            self._send(f'setoption name SyzygyPath value {syzygy}')
         self._send('isready')
         self._wait('readyok')
 
@@ -51,6 +53,9 @@ class Engine:
                          'eval_cp': None, 'mate': None,
                          'raw': line.strip()}
                 if kind == 'cp':
+                    # scores TB del motor (fuera de escala de mate): clamp para
+                    # que prioricen (banda >=9000) sin fingir distancia de mate
+                    val = max(-9_500, min(9_500, val))
                     entry['eval_cp'] = val if stm_white else -val
                 else:
                     entry['mate'] = val if stm_white else -val
