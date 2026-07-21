@@ -13,6 +13,7 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
 WALL_VISITS = 5
 BUDGET_LADDER = [100_000, 400_000, 1_600_000, 6_400_000, 25_600_000]
+MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 
 
 def get_or_create_position(fen, campaign=None):
@@ -169,31 +170,47 @@ def _emit_closure_events(pos):
         camp.save(update_fields=['active'])
 
 
-def refresh_priorities(campaign=None):
-    """§4.1 — recalculo simple por lotes (llamado por el selector)."""
-    qs = Position.objects.filter(status='UNKNOWN', is_wall=False)
-    if campaign:
-        qs = qs.filter(campaign=campaign)
-    for pos in qs.iterator(chunk_size=2000):
+def refresh_priorities():
+    """§4.1 — recalculo global por lotes (llamado por el selector)."""
+    dirty = []
+    for pos in Position.objects.filter(status='UNKNOWN', is_wall=False) \
+                               .iterator(chunk_size=2000):
         e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
         prio = (min(e, 1500) / 100.0          # cercania al cierre
+                + (50.0 if e >= MATE_BAND else 0.0)  # mate visto: rematar
                 + (2.0 if not pos.expanded else 0.0)
                 - 1.5 * pos.visits)           # frescura
         if pos.priority != prio:
             pos.priority = prio
-            pos.save(update_fields=['priority'])
+            dirty.append(pos)
+    for i in range(0, len(dirty), 500):
+        Position.objects.bulk_update(dirty[i:i + 500], ['priority'])
 
 
-def next_tasks(n, campaign=None):
-    """Selector: crea/devuelve hasta n AnalysisTask PENDING."""
-    refresh_priorities(campaign)
-    qs = Position.objects.filter(status='UNKNOWN', is_wall=False)
-    if campaign:
-        qs = qs.filter(campaign=campaign)
+def _still_reachable(pos):
+    """Con todos los padres cerrados, analizarlo ya no influye arriba."""
+    parents = Edge.objects.filter(child=pos)
+    if not parents.exists():
+        return True   # raiz o semilla sin padres
+    return parents.filter(parent__status='UNKNOWN').exists()
+
+
+def next_tasks(n):
+    """Selector global best-first sobre todo el arbol (sin campanas)."""
+    refresh_priorities()
     tasks = []
-    for pos in qs.order_by('-priority')[:n]:
+    for pos in Position.objects.filter(status='UNKNOWN', is_wall=False) \
+                               .order_by('-priority')[:4 * n]:
+        if len(tasks) >= n:
+            break
+        if not _still_reachable(pos):
+            pos.priority = -1e9   # rama muerta: fuera de la cola
+            pos.save(update_fields=['priority'])
+            continue
         gen = pos.visits
         budget = BUDGET_LADDER[min(gen, len(BUDGET_LADDER) - 1)]
+        if abs(pos.eval_cp or 0) >= MATE_BAND:
+            budget = max(budget, BUDGET_LADDER[2])  # extraer la PV entera
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=gen,
             defaults={'budget_nodes': budget})

@@ -37,20 +37,20 @@
   </div>
 </div>
 
-<h2>Campaigns</h2>
+<h2>Watched lines</h2>
 {% if campaigns %}
 <table>
-  <tr><th>Campaign</th><th>Line</th><th>State</th></tr>
+  <tr><th>Line</th><th>Moves</th><th>State</th></tr>
   {% for c in campaigns %}
   <tr>
     <td><a href="/atomicdb/explore/{{ c.root_id }}/">{{ c.name }}</a></td>
     <td class="dim">{{ c.line_san }}</td>
-    <td>{% if c.active %}<span class="chip hot"></span>running
-        {% else %}<span class="chip won"></span>closed{% endif %}</td>
+    <td>{% if c.active %}<span class="chip hot"></span>open
+        {% else %}<span class="chip won"></span>solved{% endif %}</td>
   </tr>
   {% endfor %}
 </table>
-{% else %}<p class="dim">No campaigns yet.</p>{% endif %}
+{% else %}<p class="dim">No watched lines yet.</p>{% endif %}
 
 <h2>Milestones</h2>
 <ul class="feed">

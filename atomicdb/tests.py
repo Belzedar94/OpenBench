@@ -195,6 +195,41 @@ class TablebaseTests(TestCase):
         self.assertEqual(p.status, 'UNKNOWN')
 
 
+class SelectorTests(TestCase):
+
+    def test_global_best_first_by_eval(self):
+        # sin campanas: gana el nodo de eval mas decisivo del arbol entero
+        a = ingest.get_or_create_position(logic.start_fen())
+        b = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        a.eval_cp, a.expanded = 50, True
+        b.eval_cp, b.expanded = 800, True
+        a.save(), b.save()
+        tasks = ingest.next_tasks(1)
+        self.assertEqual(tasks[0].position_id, b.key)
+
+    def test_mate_band_boost_and_budget_jump(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        p.eval_cp = 9_997   # mate visto por el motor, aun sin cerrar
+        p.save()
+        tasks = ingest.next_tasks(1)
+        self.assertEqual(tasks[0].position_id, p.key)
+        self.assertGreaterEqual(tasks[0].budget_nodes,
+                                ingest.BUDGET_LADDER[2])
+
+    def test_dead_branch_not_selected(self):
+        # hijos cuyo unico padre esta cerrado: analizarlos no influye arriba
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        root.status, root.closure = 'WHITE_WIN', 'MATE_PV'
+        root.save()
+        child = Edge.objects.filter(parent=root).first().child
+        child.eval_cp = 900
+        child.save()
+        tasks = ingest.next_tasks(50)
+        self.assertNotIn(child.key, [t.position_id for t in tasks])
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

@@ -41,8 +41,7 @@ def api_lease(request):
                      .filter(state='PENDING')
                      .order_by('-position__priority')[:BATCH_SIZE])
         if not batch:
-            camp = Campaign.objects.filter(active=True).first()
-            ingest.next_tasks(BATCH_SIZE, campaign=camp)
+            ingest.next_tasks(BATCH_SIZE)
             batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
                          .filter(state='PENDING')
                          .order_by('-position__priority')[:BATCH_SIZE])
