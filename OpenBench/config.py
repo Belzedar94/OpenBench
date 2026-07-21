@@ -253,6 +253,11 @@ def verify_engine_datagen_preset(datagen_preset):
         'datagen_positions_per_chunk',
         'datagen_base_seed',
         'datagen_teacher_mode',
+        'datagen_publication_protocol',
+        'datagen_campaign_id',
+        'datagen_external_workload_id',
+        'datagen_role',
+        'datagen_cohort',
     ]
 
     for key in datagen_preset.keys():

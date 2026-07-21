@@ -188,6 +188,27 @@
             "syzygy_adj"    : "DISABLED"
         },
 
+        "Atomic V3 1B pure depth-7 Syzygy6 invariant-only" : {
+            "dev_branch"                    : "01a74371d6c947bb03ae12a8cff6a35044d3aa0b",
+            "dev_bench"                     : 338376,
+            "dev_network"                   : "atomic_run3b_e202_l05.nnue",
+            "book_name"                     : "NONE",
+            "datagen_command"               : "openbench_generate_training_data threads {THREADS} hash 512 network {NETWORK} network_sha256 {NETWORK_SHA256} producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 7 nodes 0 eval_limit 10000 eval_diff_limit 32000 random_move_min_ply 1 random_move_max_ply 20 random_move_count 8 random_move_like_apery 0 random_multi_pv 4 random_multi_pv_diff 200 random_multi_pv_depth 6 write_min_ply 5 write_max_ply 400 keep_draws 1 adjudicate_draws_by_score true adjudicate_draws_by_insufficient_material true filter_captures true filter_checks false filter_promotions true syzygy \"{SYZYGY}\" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE} set_recommended_uci_options",
+            "datagen_total_count"            : "",
+            "datagen_positions_per_chunk"    : "",
+            "datagen_base_seed"              : "",
+            "datagen_teacher_mode"           : "pure",
+            "datagen_publication_protocol"   : "41",
+            "datagen_campaign_id"            : "atomic-v3-run3b-d7-syzygy6-1b-20260719-final",
+            "datagen_external_workload_id"   : "",
+            "datagen_role"                   : "",
+            "datagen_cohort"                 : "",
+            "priority"                       : 100,
+            "throughput"                     : 1000,
+            "syzygy_wdl"                     : "6-MAN",
+            "syzygy_adj"                     : "DISABLED"
+        },
+
         "Atomic Syzygy depth-7 true canary" : {
             "datagen_command": "openbench_generate_training_data threads {THREADS} hash 512 network {NETWORK} network_sha256 {NETWORK_SHA256} producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 7 nodes 0 eval_limit 10000 eval_diff_limit 32000 random_move_min_ply 1 random_move_max_ply 20 random_move_count 8 random_move_like_apery 0 random_multi_pv 4 random_multi_pv_diff 200 random_multi_pv_depth 6 write_min_ply 5 write_max_ply 400 keep_draws 1 adjudicate_draws_by_score true adjudicate_draws_by_insufficient_material true filter_captures true filter_checks false filter_promotions true syzygy \"{SYZYGY}\" syzygy_manifest_sha256 {SYZYGY_MANIFEST_SHA256} syzygy_max {SYZYGY_MAX} teacher_mode {TEACHER_MODE} set_recommended_uci_options",
             "datagen_teacher_mode": "true",
