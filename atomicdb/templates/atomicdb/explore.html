@@ -27,6 +27,31 @@
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>
       {% endif %}
     </div>
+    {% if pos.status == 'UNKNOWN' %}
+    <p style="margin:.4rem 0">
+      <button class="reqbtn" id="reqbtn">Request analysis</button>
+      <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
+    </p>
+    <script>
+    document.getElementById('reqbtn').addEventListener('click', function () {
+      const b = this;
+      b.disabled = true;
+      fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+          b.textContent = {
+            'queued': 'Queued, a worker will pick it up',
+            'already-queued': 'Already in the queue',
+            'already-requested': 'You already requested this one',
+            'rate-limited': 'Hourly limit reached, try later',
+            'queue-full': 'Queue is full, try later',
+            'already-solved': 'Already solved',
+          }[d.status] || 'Something went wrong';
+        })
+        .catch(() => { b.textContent = 'Network error'; b.disabled = false; });
+    });
+    </script>
+    {% endif %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
       <strong>{{ pos.won_line }}</strong></p>

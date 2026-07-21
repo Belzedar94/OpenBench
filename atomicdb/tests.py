@@ -230,6 +230,65 @@ class SelectorTests(TestCase):
         self.assertNotIn(child.key, [t.position_id for t in tasks])
 
 
+class RequestTests(TestCase):
+
+    def test_request_queues_user_task(self):
+        from .models import AnalysisTask
+        p = ingest.get_or_create_position(logic.start_fen())
+        self.assertEqual(ingest.request_analysis(p), 'queued')
+        t = AnalysisTask.objects.get(position=p)
+        self.assertEqual((t.source, t.state), ('USER', 'PENDING'))
+
+    def test_request_promotes_existing_auto_task(self):
+        from .models import AnalysisTask
+        p = ingest.get_or_create_position(logic.start_fen())
+        ingest.next_tasks(1)   # crea la tarea AUTO
+        self.assertEqual(ingest.request_analysis(p), 'queued')
+        self.assertEqual(AnalysisTask.objects.get(position=p).source, 'USER')
+
+    def test_request_on_solved_position(self):
+        from .models import AnalysisTask
+        p = ingest.get_or_create_position(logic.start_fen())
+        p.status, p.closure = 'DRAW', 'MINIMAX'
+        p.save()
+        self.assertEqual(ingest.request_analysis(p), 'already-solved')
+        self.assertFalse(AnalysisTask.objects.filter(position=p).exists())
+
+    def test_user_requests_leased_first(self):
+        import json
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        a = ingest.get_or_create_position(logic.start_fen())
+        b = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        a.eval_cp, a.expanded = 800, True   # prioridad alta
+        b.eval_cp, b.expanded = 50, True    # prioridad baja
+        a.save(), b.save()
+        ingest.next_tasks(2)                # tareas AUTO para ambas
+        r = self.client.post(f'/atomicdb/request/{b.key}/')
+        self.assertEqual(r.json()['status'], 'queued')
+        lease = self.client.post('/atomicdb/api/lease',
+                                 {'username': 'u', 'password': 'p'})
+        tasks = json.loads(lease.content)['tasks']
+        self.assertEqual(tasks[0]['fen'], b.fen)  # USER antes que mejor prio
+
+    def test_request_rate_limited(self):
+        from .models import RequestLog
+        a = ingest.get_or_create_position(logic.start_fen())
+        b = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        for _ in range(30):
+            RequestLog.objects.create(ip='127.0.0.1', position=a)
+        r = self.client.post(f'/atomicdb/request/{b.key}/')
+        self.assertEqual(r.status_code, 429)
+
+    def test_request_dedup_same_ip_position(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        self.client.post(f'/atomicdb/request/{p.key}/')
+        r = self.client.post(f'/atomicdb/request/{p.key}/')
+        self.assertEqual(r.json()['status'], 'already-requested')
+
+
 class WitnessTests(TestCase):
 
     def test_mate_pv_closure_records_line(self):

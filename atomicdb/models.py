@@ -70,10 +70,16 @@ class AnalysisTask(models.Model):
         LEASED    = 'LEASED'
         COMPLETED = 'COMPLETED'
 
+    class Source(models.TextChoices):
+        AUTO = 'AUTO'   # selector best-first
+        USER = 'USER'   # peticion publica: se sirve primero
+
     position     = models.ForeignKey(Position, on_delete=models.CASCADE)
     budget_nodes = models.BigIntegerField()
     multipv      = models.IntegerField(default=5)
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
+    source       = models.CharField(max_length=4, choices=Source.choices,
+                                    default=Source.AUTO, db_index=True)
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')
@@ -91,3 +97,10 @@ class DBEvent(models.Model):
     ts      = models.DateTimeField(auto_now_add=True, db_index=True)
     kind    = models.CharField(max_length=32)     # SUBTREE_CLOSED, WALL, CAMPAIGN...
     payload = models.JSONField(default=dict)
+
+
+class RequestLog(models.Model):
+    """Peticiones publicas de analisis (rate-limit y dedup por IP)."""
+    ip       = models.GenericIPAddressField(db_index=True)
+    position = models.ForeignKey(Position, on_delete=models.CASCADE)
+    created  = models.DateTimeField(auto_now_add=True, db_index=True)
