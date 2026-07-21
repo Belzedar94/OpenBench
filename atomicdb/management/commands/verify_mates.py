@@ -2,6 +2,8 @@
 
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
+from django.db.models import Q
+from django.db.models.functions import Length
 
 from atomicdb import ingest, logic
 from atomicdb.models import DBEvent, Position
@@ -41,7 +43,15 @@ class Command(BaseCommand):
         counts = {'ANDOR': 0, 'ENGINE': 0, 'DISPUTED': 0,
                   'MISSING': 0, 'SKIPPED': 0, 'ERROR': 0}
         processed = 0
+        after_witness_len = None
         after_key = ''
+
+        missing = Position.objects.filter(
+            closure='MATE_PV', proof__isnull=True,
+        ).filter(Q(won_line__isnull=True) | Q(won_line='')).order_by('key')
+        for key in missing.values_list('key', flat=True):
+            counts['MISSING'] += 1
+            self.stderr.write(f'MISSING {key}: no won_line; left NULL')
 
         while limit is None or processed < limit:
             take = batch_size
@@ -49,18 +59,26 @@ class Command(BaseCommand):
                 take = min(take, limit - processed)
             if take <= 0:
                 break
-            rows = list(
-                Position.objects.filter(
-                    closure='MATE_PV', proof__isnull=True,
-                    key__gt=after_key,
-                ).order_by('key').values(
-                    'key', 'fen', 'status', 'closure', 'won_line',
-                )[:take]
+            pending = Position.objects.filter(
+                closure='MATE_PV', proof__isnull=True,
+                won_line__isnull=False,
+            ).exclude(won_line='').annotate(
+                witness_len=Length('won_line'),
             )
+            if after_witness_len is not None:
+                pending = pending.filter(
+                    Q(witness_len__gt=after_witness_len)
+                    | Q(witness_len=after_witness_len, key__gt=after_key)
+                )
+            rows = list(pending.order_by('witness_len', 'key').values(
+                'key', 'fen', 'status', 'closure', 'won_line',
+                'witness_len',
+            )[:take])
             if not rows:
                 break
 
             for snapshot in rows:
+                after_witness_len = snapshot['witness_len']
                 after_key = snapshot['key']
                 hint = (snapshot['won_line'] or '').split()
                 winner_is_white = snapshot['status'] == 'WHITE_WIN'
@@ -71,9 +89,8 @@ class Command(BaseCommand):
                         f"{snapshot['status']!r}")
                     continue
                 if not hint:
+                    # Defensive fallback; the query excludes known blanks.
                     counts['MISSING'] += 1
-                    self.stderr.write(
-                        f"MISSING {snapshot['key']}: no won_line; left NULL")
                     continue
                 try:
                     verdict = logic.prove_forced_mate(
