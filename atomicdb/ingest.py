@@ -47,6 +47,9 @@ def expand(pos):
         child = get_or_create_position(child_fen, campaign=pos.campaign)
         Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                    defaults={'child': child})
+        if child.priority <= DEAD / 2:
+            child.priority = 0.0   # ruta nueva via transposicion: revive
+            child.save(update_fields=['priority'])
         children.append(child)
     pos.expanded = True
     pos.save(update_fields=['expanded'])
@@ -193,10 +196,16 @@ def _emit_closure_events(pos):
         camp.save(update_fields=['active'])
 
 
+DEAD = -1e9   # lapida: rama muerta, fuera de la cola para siempre
+
+
 def refresh_priorities():
-    """§4.1 — recalculo global por lotes (llamado por el selector)."""
+    """§4.1 — recalculo global por lotes (llamado por el selector).
+    Respeta las lapidas: si no, las ramas muertas con eval de mate
+    resucitarian a lo alto de la cola y matarian de hambre al selector."""
     dirty = []
-    for pos in Position.objects.filter(status='UNKNOWN') \
+    for pos in Position.objects.filter(status='UNKNOWN',
+                                       priority__gt=DEAD / 2) \
                                .iterator(chunk_size=2000):
         e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
         prio = (min(e, 1500) / 100.0          # cercania al cierre
@@ -235,7 +244,7 @@ def next_tasks(n):
         if len(tasks) >= n:
             break
         if not _still_reachable(pos):
-            pos.priority = -1e9   # rama muerta: fuera de la cola
+            pos.priority = DEAD   # lapida (refresh_priorities la respeta)
             pos.save(update_fields=['priority'])
             continue
         task, _ = AnalysisTask.objects.get_or_create(
