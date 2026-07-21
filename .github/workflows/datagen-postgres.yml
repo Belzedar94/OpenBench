@@ -39,5 +39,6 @@ jobs:
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
       - run: python -m unittest UnitTests.test_datagen_worker -v
+      - run: python manage.py test atomicdb --verbosity 2
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py check
