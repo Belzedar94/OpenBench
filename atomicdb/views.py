@@ -177,6 +177,20 @@ def _friendly_events(events):
     return out
 
 
+def _child_moves(pos):
+    """Tabla de movimientos hijos, formato compartido home/explorador."""
+    moves = []
+    for e in Edge.objects.filter(parent=pos).select_related('child'):
+        c = e.child
+        moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
+                      'closure': c.closure, 'eval': c.eval_cp,
+                      'visits': c.visits, 'css': _status_css(c.status, c.eval_cp)})
+    moves.sort(key=lambda m: ({'WHITE_WIN': 0, 'UNKNOWN': 1, 'DRAW': 2,
+                               'BLACK_WIN': 3}[m['status']],
+                              -(m['eval'] or -99999)))
+    return moves
+
+
 def home(request):
     total = Position.objects.count()
     closed = Position.objects.exclude(status='UNKNOWN').count()
@@ -184,18 +198,10 @@ def home(request):
     nodes = Position.objects.aggregate(n=__import__('django').db.models.Sum(
         'nodes_invested'))['n'] or 0
     root_key = logic.key_of(logic.start_fen())
-    first_moves = []
     try:
-        root = Position.objects.get(key=root_key)
-        for e in Edge.objects.filter(parent=root).select_related('child'):
-            c = e.child
-            first_moves.append({
-                'uci': e.move_uci, 'key': c.key, 'status': c.status,
-                'eval': c.eval_cp,
-                'css': _status_css(c.status, c.eval_cp)})
-        first_moves.sort(key=lambda m: -(m['eval'] or 0))
+        first_moves = _child_moves(Position.objects.get(key=root_key))
     except Position.DoesNotExist:
-        pass
+        first_moves = []
     events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
@@ -251,16 +257,7 @@ def explore(request, key):
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return render(request, 'atomicdb/missing.html', status=404)
-    edges = list(Edge.objects.filter(parent=pos).select_related('child'))
-    moves = []
-    for e in edges:
-        c = e.child
-        moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
-                      'closure': c.closure, 'eval': c.eval_cp,
-                      'visits': c.visits, 'css': _status_css(c.status, c.eval_cp)})
-    moves.sort(key=lambda m: ({'WHITE_WIN': 0, 'UNKNOWN': 1, 'DRAW': 2,
-                               'BLACK_WIN': 3}[m['status']],
-                              -(m['eval'] or -99999)))
+    moves = _child_moves(pos)
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
     top, line = _line_to_root(pos)

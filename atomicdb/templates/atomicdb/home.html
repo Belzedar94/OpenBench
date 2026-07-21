@@ -17,18 +17,19 @@
   <div>
 <h2 style="margin-top:0">First moves <span class="dim">from the starting position</span></h2>
 {% if first_moves %}
-<div class="tiles">
+<table>
+  <tr><th></th><th>move</th><th>state</th><th>eval</th><th>visits</th></tr>
   {% for m in first_moves %}
-  <a class="tile {{ m.css }}" href="/atomicdb/explore/{{ m.key }}/">
-    <div class="mv">{{ m.uci }}</div>
-    <div class="ev">
-      {% if m.status == 'WHITE_WIN' %}WON{% elif m.status == 'BLACK_WIN' %}LOST
-      {% elif m.status == 'DRAW' %}DRAW
-      {% elif m.eval is not None %}{{ m.eval }}cp{% else %}unexplored{% endif %}
-    </div>
-  </a>
+  <tr>
+    <td><span class="chip {{ m.css }}"></span></td>
+    <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
+    <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
+        {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
+    <td>{% if m.eval is not None %}{{ m.eval }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+    <td class="dim">{{ m.visits }}</td>
+  </tr>
   {% endfor %}
-</div>
+</table>
 {% else %}
 <p class="dim">The tree does not include the starting position yet.
   <a href="/atomicdb/explore/{{ root_key }}/">Explore the root</a>.</p>
