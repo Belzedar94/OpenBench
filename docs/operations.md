@@ -72,3 +72,17 @@ gradual worker-v41 restart, and a one-chunk smoke test. Do not use `--fake` for
 `0007` or `0008`, do not deploy midway through an active campaign, and retain the prior
 application and backup for rollback. Migration `0009` is the empty merge node
 that joins the production profile-default branch with the v41 DATAGEN branch.
+
+## Deploy y archivado (desde 2026-07-21)
+
+- **Deploy de un comando**: `/opt/openbench` es clon git de
+  github.com/Belzedar94/OpenBench (rama spell-runner). Publicar = merge a esa
+  rama en GitHub + `ssh root@178.104.66.19 /opt/openbench/deploy.sh`
+  (fetch+reset+pip+migrate+restart+health-check). Copias de los scripts del
+  server en `Scripts/deploy.sh` y `Scripts/archive_manifest.py`.
+- **Archivado automático**: tarea de Windows "OpenBench-Archive-Pull" (cada
+  hora) ejecuta `Scripts/archive_pull.py` en la torre: descarga los chunks
+  COMPLETED a `F:\OpenBench\archive\datagen\<test>\`, verifica sha256 contra
+  el manifiesto del server y solo entonces purga el fichero remoto
+  (fail-closed). Log en `F:\OpenBench\archive\archive.log`. El disco del VPS
+  (40GB) queda así acotado aunque se encolen datasets de miles de millones.
