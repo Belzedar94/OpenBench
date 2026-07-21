@@ -340,6 +340,19 @@ class PovTests(TestCase):
         self.assertEqual([m['key'] for m in moves[:2]],
                          [c.key, b.key])               # -254 antes que -670
 
+    def test_mate_distance_label(self):
+        from .views import _child_moves
+        p, a, b, c = self._black_parent_with_children()
+        # a: mate verificado con linea de 3 plies tras la jugada de la fila
+        a.status, a.closure = 'WHITE_WIN', 'MATE_PV'
+        a.won_line = 'd1h5 g7g6 h5e8'
+        a.save()
+        moves = _child_moves(p)
+        row = next(m for m in moves if m['key'] == a.key)
+        # 1 ply de la fila + 3 de la linea = 4 plies -> mate en 2, del rival
+        self.assertEqual(row['mate_str'], '-M2')
+        self.assertEqual(row['score'], -10_000)
+
     def test_query_api_start_position(self):
         p = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(p)
@@ -371,7 +384,7 @@ class BootstrapTests(TestCase):
         self.assertEqual(ingest.bootstrap_root(), 20)
         tasks = AnalysisTask.objects.filter(source='USER', state='PENDING')
         self.assertEqual(tasks.count(), 20)
-        self.assertTrue(all(t.budget_nodes >= ingest.BUDGET_LADDER[2]
+        self.assertTrue(all(t.budget_nodes >= ingest.BUDGET_LADDER[-1]
                             for t in tasks))
         ingest.bootstrap_root()   # idempotente: promociona, no duplica
         self.assertEqual(AnalysisTask.objects.filter(source='USER').count(), 20)
