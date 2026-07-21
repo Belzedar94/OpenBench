@@ -1,6 +1,8 @@
 """M1 gate (spec §7): mates conocidos cierran, fortalezas sinteticas NO,
 completitud de movegen, backup determinista bajo replay."""
 
+from unittest import mock
+
 from django.test import TestCase
 
 from . import ingest, logic
@@ -168,8 +170,8 @@ class IngestTests(TestCase):
 
     def test_mate_pv_closure_emits_event(self):
         from .models import DBEvent
-        s, pv = self._find_mate_in_2_line()
-        self.assertIsNotNone(s)
+        from .test_proofs import FORCED_MATE_FEN, FORCED_MATE_PV
+        s, pv = FORCED_MATE_FEN, FORCED_MATE_PV
         p = ingest.get_or_create_position(s)
         ingest.ingest_analysis(p.key, [{'move': pv[0], 'eval_cp': 9998,
                                         'mate': 2, 'pv': pv}], 1000)
@@ -207,10 +209,12 @@ class TablebaseTests(TestCase):
         self.assertEqual(logic.wdl_to_status(1, True), 'DRAW')
         self.assertEqual(logic.wdl_to_status(-1, False), 'DRAW')
 
-    def test_close_by_tb(self):
+    @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=2)
+    def test_close_by_tb(self, probe):
         from . import ingest
         p = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
         self.assertTrue(ingest.close_by_tb(p.key, 2))
+        probe.assert_called_once_with(p.fen, max_pieces=5)
         p.refresh_from_db()
         self.assertEqual(p.status, 'WHITE_WIN')
         self.assertEqual(p.closure, 'TB')
@@ -226,6 +230,11 @@ class TablebaseTests(TestCase):
 
 
 class SelectorTests(TestCase):
+
+    def setUp(self):
+        # The production cache intentionally spans requests; each TestCase
+        # starts from a freshly flushed database and therefore resets it.
+        ingest._priority_refresh_cache['at'] = 0.0
 
     def test_global_best_first_by_eval(self):
         # gana el nodo conectado de eval mas decisivo
@@ -432,7 +441,7 @@ class PovTests(TestCase):
         moves = _child_moves(p)
         row = next(m for m in moves if m['key'] == a.key)
         # 1 ply de la fila + 3 de la linea = 4 plies -> mate en 2, del rival
-        self.assertEqual(row['mate_str'], '-M2')
+        self.assertEqual(row['mate_str'], '-≤M2')
         self.assertEqual(row['score'], -10_000)
 
     def test_query_api_start_position(self):

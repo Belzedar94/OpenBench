@@ -76,6 +76,94 @@ def verify_mate_pv(root_fen, pv_ucis, winner_is_white):
     return t[0] == want
 
 
+def prove_forced_mate(fen, winner_is_white, max_plies,
+                      budget_positions=200_000, hint_pv=None):
+    """Prove a bounded forced mate with an exhaustive AND/OR search.
+
+    The result is one of ``PROVEN``, ``INCONCLUSIVE`` or ``NO_MATE``:
+
+    * on the winner's turn, one proven continuation is sufficient;
+    * on the defender's turn, every legal continuation must be proven;
+    * a repeated position on the current branch is a failed branch;
+    * a non-terminal leaf at ``max_plies`` is a failed branch; and
+    * exhausting ``budget_positions`` makes the whole attempt inconclusive.
+
+    ``hint_pv`` affects move ordering only.  It never changes the set of
+    moves searched or the result of a search that fits in the budget.
+
+    Positions are counted on entry, including the root.  Repeated positions
+    are rejected before entry and therefore do not consume the budget.
+    Deliberately avoid a transposition cache here: whether a continuation
+    repeats depends on the complete branch history, which is not part of
+    AtomicDB's canonical FEN.
+    """
+    max_plies = int(max_plies)
+    budget_positions = int(budget_positions)
+    if max_plies < 0:
+        raise ValueError('max_plies must be non-negative')
+    if budget_positions < 0:
+        raise ValueError('budget_positions must be non-negative')
+
+    root = canonical_fen(fen)
+    winner_status = 'WHITE_WIN' if winner_is_white else 'BLACK_WIN'
+    hint = tuple(hint_pv or ())
+    visited = 0
+
+    class _BudgetExhausted(Exception):
+        pass
+
+    def search(node_fen, plies_left, path, remaining_hint):
+        nonlocal visited
+        if visited >= budget_positions:
+            raise _BudgetExhausted
+        visited += 1
+
+        # Generate the legal set once on non-terminal nodes.  Calling
+        # terminal_status() unconditionally would make pyffish generate it a
+        # second time, which is material at the 200k-position ceiling.
+        immediate, _ = pf.is_immediate_game_end(VARIANT, node_fen, [])
+        moves = list(legal_moves(node_fen))
+        if immediate or not moves:
+            terminal = terminal_status(node_fen)
+            return terminal is not None and terminal[0] == winner_status
+        if plies_left == 0:
+            return False
+        hinted = remaining_hint[0] if remaining_hint else None
+        if hinted in moves:
+            moves.remove(hinted)
+            moves.insert(0, hinted)
+
+        winner_to_move = ((node_fen.split()[1] == 'w')
+                          == bool(winner_is_white))
+        if winner_to_move:
+            for move in moves:
+                child = apply_move(node_fen, move)
+                if child in path:
+                    continue
+                child_hint = (remaining_hint[1:]
+                              if move == hinted else ())
+                if search(child, plies_left - 1, path | {child},
+                          child_hint):
+                    return True
+            return False
+
+        # Defender node: a single failed reply refutes the bounded proof.
+        for move in moves:
+            child = apply_move(node_fen, move)
+            if child in path:
+                return False
+            child_hint = remaining_hint[1:] if move == hinted else ()
+            if not search(child, plies_left - 1, path | {child}, child_hint):
+                return False
+        return True
+
+    try:
+        return ('PROVEN' if search(root, max_plies, {root}, hint)
+                else 'NO_MATE')
+    except _BudgetExhausted:
+        return 'INCONCLUSIVE'
+
+
 # ---------- backup minimax (§3.3) ----------
 
 def _wins_for_stm(status, stm_white):

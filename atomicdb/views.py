@@ -25,6 +25,10 @@ REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
 
 
+class _SubmitRejected(Exception):
+    pass
+
+
 def _auth(request):
     user = authenticate(username=request.POST.get('username', ''),
                         password=request.POST.get('password', ''))
@@ -102,43 +106,94 @@ def api_submit(request):
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
     try:
-        task = AnalysisTask.objects.get(id=int(request.POST['task_id']))
+        task_id = int(request.POST['task_id'])
         lines = json.loads(request.POST['lines'])
-        assert isinstance(lines, list) and len(lines) <= 32
+        if not isinstance(lines, list) or len(lines) > 32:
+            raise ValueError('lines must be a list with at most 32 entries')
     except Exception as e:
         return JsonResponse({'error': f'malformed: {e}'}, status=400)
-    if task.state == 'COMPLETED':
-        return JsonResponse({'ok': True, 'dup': True})
 
     try:
         elapsed = min(max(float(request.POST.get('elapsed', 0) or 0), 0.0),
                       86_400.0)
     except ValueError:
         elapsed = 0.0
-    if elapsed:
-        Position.objects.filter(key=task.position_id).update(
-            time_invested=F('time_invested') + elapsed)
-
-    tb_wdl = request.POST.get('tb_wdl')
-    if tb_wdl not in (None, ''):
-        closed = ingest.close_by_tb(task.position_id, int(tb_wdl))
-        task.state, task.completed = 'COMPLETED', timezone.now()
-        task.save(update_fields=['state', 'completed'])
-        return JsonResponse({'ok': True, 'summary': {'tb_closed': closed}})
-
     try:
         searched = max(0, int(request.POST.get('nodes', 0) or 0))
     except ValueError:
         searched = 0
-    summary = ingest.ingest_analysis(task.position_id, lines,
-                                     searched or task.budget_nodes,
-                                     machine=request.POST.get('machine', ''))
-    task.state, task.completed = 'COMPLETED', timezone.now()
-    task.nodes_searched = searched
-    task.save(update_fields=['state', 'completed', 'nodes_searched'])
-    WorkerPing.objects.filter(machine=request.POST.get('machine', ''),
-                              user=user.username).update(
-        tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+    tb_wdl = request.POST.get('tb_wdl')
+    try:
+        parsed_wdl = None if tb_wdl in (None, '') else int(tb_wdl)
+    except ValueError:
+        return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
+
+    machine = request.POST.get('machine', '')
+    try:
+        snapshot = AnalysisTask.objects.select_related('position').get(id=task_id)
+    except AnalysisTask.DoesNotExist:
+        return JsonResponse({'error': 'malformed: unknown task'}, status=400)
+    if snapshot.state == 'COMPLETED':
+        return JsonResponse({'ok': True, 'dup': True})
+    if snapshot.state != 'LEASED':
+        return JsonResponse({'error': 'not-leased'}, status=400)
+    if not machine or machine != snapshot.machine:
+        return JsonResponse({'error': 'not-your-lease'}, status=409)
+
+    tb_prepared = None
+    mate_proofs = None
+    if parsed_wdl is not None:
+        tb_prepared = ingest.prepare_tb_closure(
+            snapshot.position_id, parsed_wdl, user=user)
+        if tb_prepared is None:
+            return JsonResponse({'error': 'tb-rejected'}, status=409)
+    else:
+        mate_proofs = ingest.prepare_mate_proofs(snapshot.position.fen, lines)
+
+    try:
+        with transaction.atomic():
+            claimed = AnalysisTask.objects.filter(
+                id=task_id, state='LEASED', machine=machine,
+                attempts=snapshot.attempts, leased_at=snapshot.leased_at,
+            ).update(state='COMPLETED')
+            if claimed != 1:
+                current = AnalysisTask.objects.get(id=task_id)
+                if current.state == 'COMPLETED':
+                    return JsonResponse({'ok': True, 'dup': True})
+                if current.state != 'LEASED':
+                    return JsonResponse({'error': 'not-leased'}, status=400)
+                if (current.machine == machine
+                        and (current.attempts != snapshot.attempts
+                             or current.leased_at != snapshot.leased_at)):
+                    return JsonResponse({'error': 'stale-lease'}, status=409)
+                return JsonResponse({'error': 'not-your-lease'}, status=409)
+
+            task = (AnalysisTask.objects.select_for_update()
+                    .select_related('position').get(id=task_id))
+            searched = min(searched, 2 * task.budget_nodes)
+            if parsed_wdl is not None:
+                closed = ingest._apply_prepared_tb(
+                    task.position_id, tb_prepared)
+                if not closed:
+                    raise _SubmitRejected
+                summary = {'tb_closed': True}
+            else:
+                summary = ingest.ingest_analysis(
+                    task.position_id, lines, searched, machine=machine,
+                    mate_proofs=mate_proofs)
+
+            if elapsed:
+                Position.objects.filter(key=task.position_id).update(
+                    time_invested=F('time_invested') + elapsed)
+            task.state, task.machine = 'COMPLETED', machine
+            task.completed = timezone.now()
+            task.nodes_searched = searched
+            task.save(update_fields=[
+                'state', 'machine', 'completed', 'nodes_searched'])
+            WorkerPing.objects.filter(machine=machine, user=user.username).update(
+                tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+    except _SubmitRejected:
+        return JsonResponse({'error': 'tb-rejected'}, status=409)
     return JsonResponse({'ok': True, 'summary': summary})
 
 
@@ -356,7 +411,7 @@ def _child_moves(pos):
                       'closure': c.closure, 'score': score, 'rank': rank,
                       'mate': mate,
                       'mate_str': None if mate is None else
-                      (f'M{mate}' if mate > 0 else f'-M{-mate}'),
+                      (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
     moves.sort(key=lambda m: -m['rank'])
     return moves
@@ -465,7 +520,19 @@ def api_query(request):
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'best_move': pos.best_move,
+        'tier': 'PRACTICAL', 'trust': _trust_for(pos),
+        'history_scope': 'COUNTERS_AND_REPETITION_IGNORED',
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
+
+
+def _trust_for(pos):
+    if pos.closure in ('TERMINAL', 'TB'):
+        return 'VERIFIED'
+    if pos.proof:
+        return pos.proof
+    if pos.closure in ('MATE_PV', 'MINIMAX'):
+        return 'ENGINE'
+    return 'UNPROVEN'
 
 
 def fen_jump(request):
@@ -555,7 +622,7 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,
-        'verdict_mate': (f'M{(pos.mate_in + 1) // 2}'
+        'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
                          else None),
         'verdict_css': _move_css(pos.status, eval_stm, win)})
