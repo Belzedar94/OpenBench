@@ -110,3 +110,27 @@ def backup_eval(fen, child_evals):
     if not vals:
         return None
     return max(vals) if stm_white else min(vals)
+
+
+# ---------- tablebase (§3.1, applicability-lite) ----------
+
+def piece_count(fen):
+    return sum(ch.isalpha() for ch in fen.split()[0])
+
+
+def tb_applicable(fen, max_men=6):
+    """Cierre TB solo sin derechos de enroque, sin ep pendiente y <=max_men.
+    Los contadores canonicos van a 0, asi que wdl=+-2 es decisivo bajo regla
+    de 50 y |wdl|<=1 (cursed/blessed) es tablas practicas."""
+    parts = fen.split()
+    return (piece_count(fen) <= max_men
+            and parts[2] == '-'
+            and parts[3] == '-')
+
+
+def wdl_to_status(wdl, stm_white):
+    if wdl >= 2:
+        return 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    if wdl <= -2:
+        return 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    return 'DRAW'

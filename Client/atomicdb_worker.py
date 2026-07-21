@@ -18,6 +18,22 @@ sys.path.insert(0, '..')
 from atomicdb.engine import Engine  # noqa: E402
 
 
+def probe_tb(tb, fen):
+    if tb is None:
+        return None
+    parts = fen.split()
+    if parts[2] != '-' or parts[3] != '-':
+        return None
+    if sum(ch.isalpha() for ch in parts[0]) > 6:
+        return None
+    try:
+        import chess.variant
+        board = chess.variant.AtomicBoard(fen)
+        return tb.probe_wdl(board)
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-U', required=True)
@@ -26,8 +42,20 @@ def main():
     ap.add_argument('--engine', required=True)
     ap.add_argument('-T', type=int, default=4)
     ap.add_argument('--hash', type=int, default=512)
+    ap.add_argument('--syzygy', default='', help='dirs de TB atomicas separados por ;')
     ap.add_argument('--once', action='store_true')
     a = ap.parse_args()
+
+    tb = None
+    if a.syzygy:
+        import chess.syzygy
+        import chess.variant
+        dirs = [d for d in a.syzygy.split(';') if d]
+        tb = chess.syzygy.open_tablebase(dirs[0],
+                                         VariantBoard=chess.variant.AtomicBoard)
+        for d in dirs[1:]:
+            tb.add_directory(d)
+        print(f'syzygy: {len(dirs)} dirs', flush=True)
 
     auth = {'username': a.U, 'password': a.P, 'machine': f'{a.U}-atomicdb'}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash)
@@ -49,6 +77,17 @@ def main():
             continue
         for t in tasks:
             t0 = time.time()
+            wdl = probe_tb(tb, t['fen'])
+            if wdl is not None:
+                try:
+                    rr = requests.post(a.S + '/atomicdb/api/submit', data={
+                        **auth, 'task_id': t['id'], 'lines': '[]',
+                        'tb_wdl': wdl}, timeout=60)
+                    print(f"task {t['id']} TB wdl={wdl} -> "
+                          f"{rr.json().get('summary')}", flush=True)
+                except Exception as e:
+                    print(f'tb submit error: {e}', flush=True)
+                continue
             lines = eng.analyse(t['fen'], t['budget_nodes'], t['multipv'])
             try:
                 rr = requests.post(a.S + '/atomicdb/api/submit', data={
