@@ -14,10 +14,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,7 +30,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072201
+ATOMICDB_WORKER_BUILD = 2026072203
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -38,10 +40,86 @@ SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
 SUBMIT_READ_TIMEOUT_SECONDS = 600
 SUBMIT_RETRY_INITIAL_SECONDS = 15
 SUBMIT_RETRY_MAX_SECONDS = 300
+HEARTBEAT_INTERVAL_SECONDS = 60
+HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
+MAX_REPORTED_NPS = 10 ** 12
 
 
 class WorkerUpdateError(Exception):
     pass
+
+
+class LeaseRequestError(Exception):
+    """Lease outcome whose commit status is known or indeterminate."""
+
+    def __init__(self, message, ambiguous=True):
+        super().__init__(message)
+        self.ambiguous = ambiguous
+
+
+class CurrentTaskState:
+    """Thread-safe snapshot of the assignment currently making progress.
+
+    A live Python process is not sufficient evidence that Stockfish is alive.
+    Heartbeats expose the assignment only while its UCI ``nodes`` counter has
+    advanced recently; after the grace period the server is free to let the
+    lease expire and fence a replacement assignment with a new lease token.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._task_id = None
+        self._lease_token = ''
+        self._nps = 0
+        self._last_nodes = -1
+        self._progress_at = 0.0
+
+    def start(self, task_id, lease_token=''):
+        with self._lock:
+            self._task_id = task_id
+            self._lease_token = lease_token or ''
+            self._nps = 0
+            self._last_nodes = -1
+            # Give a newly started engine one grace window to report its first
+            # UCI node counter.
+            self._progress_at = self._clock()
+
+    def progress(self, nodes, elapsed):
+        try:
+            nodes = int(nodes)
+            elapsed = float(elapsed)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if nodes < 0 or elapsed <= 0:
+            return
+        with self._lock:
+            if self._task_id is None or nodes <= self._last_nodes:
+                return
+            self._last_nodes = nodes
+            self._nps = min(MAX_REPORTED_NPS,
+                            max(0, round(nodes / elapsed)))
+            self._progress_at = self._clock()
+
+    def clear(self):
+        with self._lock:
+            self._task_id = None
+            self._lease_token = ''
+            self._nps = 0
+            self._last_nodes = -1
+            self._progress_at = 0.0
+
+    def snapshot(self):
+        with self._lock:
+            if (self._task_id is None
+                    or self._clock() - self._progress_at
+                    > HEARTBEAT_PROGRESS_GRACE_SECONDS):
+                return None
+            return {
+                'id': self._task_id,
+                'lease_token': self._lease_token,
+                'nps': self._nps,
+            }
 
 
 def _worker_build(source):
@@ -341,6 +419,50 @@ def _submit_until_definitive(server, payload, task_id):
             time.sleep(delay)
 
 
+def _heartbeat_loop(server, auth, current_task, stop):
+    """Keep capacity visible during long blocking engine searches."""
+    while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+        try:
+            current = current_task.snapshot()
+            payload = dict(auth, worker_build=ATOMICDB_WORKER_BUILD,
+                           nps=current['nps'] if current else 0)
+            if current:
+                payload.update(task_id=current['id'],
+                               lease_token=current['lease_token'])
+            requests.post(server + '/atomicdb/api/heartbeat', data=payload,
+                          timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
+                    .raise_for_status()
+        except requests.RequestException as exc:
+            print(f'heartbeat skipped: {exc}', flush=True)
+
+
+def _request_tasks(server, auth, lease_session):
+    """Request one lease while preserving replay semantics.
+
+    Transport failures, 5xx responses and malformed 2xx bodies may all occur
+    after the assignment committed, so their nonce must be retried unchanged.
+    A valid 2xx payload or a definitive 4xx response ends the logical request.
+    """
+    try:
+        response = requests.post(
+            server + '/atomicdb/api/lease',
+            data=dict(auth, lease_session=lease_session), timeout=60)
+    except requests.RequestException as exc:
+        raise LeaseRequestError(str(exc), ambiguous=True) from exc
+    status = response.status_code
+    if 400 <= status < 500:
+        raise LeaseRequestError(f'HTTP {status}', ambiguous=False)
+    if not 200 <= status < 300:
+        raise LeaseRequestError(f'HTTP {status}', ambiguous=True)
+    try:
+        payload = response.json()
+    except (ValueError, TypeError) as exc:
+        raise LeaseRequestError(f'invalid JSON: {exc}', ambiguous=True) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get('tasks'), list):
+        raise LeaseRequestError('invalid lease response schema', ambiguous=True)
+    return payload['tasks']
+
+
 class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
 
@@ -366,7 +488,7 @@ class Engine:
             if not line or line.startswith(token):
                 return
 
-    def analyse(self, fen, nodes, multipv, searchmoves=None):
+    def analyse(self, fen, nodes, multipv, searchmoves=None, progress=None):
         """Devuelve lines=[{'move','eval_cp','mate','pv','raw'}] White-POV.
         Sin ucinewgame a proposito: la TT sobrevive entre tareas.
         searchmoves restringe la raiz a las jugadas vivas (no pegajoso:
@@ -378,6 +500,7 @@ class Engine:
             go += ' searchmoves ' + ' '.join(searchmoves)
         self._send(go)
         lines = {}
+        started = time.monotonic()
         stm_white = fen.split()[1] == 'w'
         while True:
             line = self.p.stdout.readline()
@@ -385,6 +508,11 @@ class Engine:
                 break
             if line.startswith('bestmove'):
                 break
+            if progress:
+                found_nodes = re.search(r' nodes (\d+)', line)
+                if found_nodes:
+                    progress(int(found_nodes.group(1)),
+                             max(time.monotonic() - started, 1e-6))
             m = re.match(
                 r'info depth \d+ seldepth \d+ multipv (\d+) score '
                 r'(cp|mate) (-?\d+) .*? pv (.+)', line)
@@ -517,10 +645,21 @@ def main():
     machine = f'{a.U}-{platform.node() or "worker"}-atomicdb'[:64]
     auth = {'username': a.U, 'password': a.P, 'machine': machine,
             'threads': a.T, 'hash': a.hash, 'tb': '1' if tb else '0',
-            'os': f'{platform.system()} {platform.release()}'}
+            'os': f'{platform.system()} {platform.release()}',
+            'worker_build': ATOMICDB_WORKER_BUILD}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
+    heartbeat_stop = threading.Event()
+    current_task = CurrentTaskState()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop, args=(a.S, auth, current_task, heartbeat_stop),
+        name='atomicdb-heartbeat', daemon=True)
+    heartbeat_thread.start()
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)
     next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
+    # Idempotency nonce for one logical lease request. Preserve it only across
+    # transport/ambiguous-response failures where the server may have committed;
+    # rotate only after a valid 2xx payload or a definitive 4xx rejection.
+    lease_session = secrets.token_urlsafe(24)
 
     while True:
         # This is deliberately the only periodic update checkpoint: the prior
@@ -534,12 +673,14 @@ def main():
                     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
                                  syzygy=a.syzygy)
         try:
-            r = requests.post(a.S + '/atomicdb/api/lease', data=auth, timeout=60)
-            tasks = r.json().get('tasks', [])
-        except Exception as e:
-            print(f'lease error: {e}; reintento en 30s', flush=True)
+            tasks = _request_tasks(a.S, auth, lease_session)
+        except LeaseRequestError as e:
+            if not e.ambiguous:
+                lease_session = secrets.token_urlsafe(24)
+            print(f'lease response error: {e}; reintento en 30s', flush=True)
             time.sleep(30)
             continue
+        lease_session = secrets.token_urlsafe(24)
         if not tasks:
             print('sin tareas; espero 60s', flush=True)
             if a.once:
@@ -547,6 +688,7 @@ def main():
             time.sleep(60)
             continue
         for t in tasks:
+            current_task.start(t['id'], t.get('lease_token', ''))
             t0 = time.time()
             wdl = probe_tb(tb, t['fen'])
             if wdl is not None:
@@ -554,15 +696,20 @@ def main():
                     rr = _submit_until_definitive(a.S, {
                         **auth, 'task_id': t['id'], 'lines': '[]',
                         'elapsed': f'{time.time() - t0:.2f}',
-                        'tb_wdl': wdl}, t['id'])
+                        'tb_wdl': wdl,
+                        'lease_token': t.get('lease_token', '')}, t['id'])
                     print(f"task {t['id']} TB wdl={wdl} -> "
                           f"{rr.json().get('summary')}", flush=True)
                 except Exception as e:
                     print(f'tb submit error: {e}', flush=True)
+                current_task.clear()
                 continue
             try:
-                lines = eng.analyse(t['fen'], t['budget_nodes'],
-                                    t['multipv'], t.get('searchmoves'))
+                lines = eng.analyse(
+                    t['fen'], t['budget_nodes'], t['multipv'],
+                    t.get('searchmoves'),
+                    progress=current_task.progress,
+                )
             except Exception as e:
                 print(f'engine failure: {e}; reiniciando motor', flush=True)
                 try:
@@ -571,6 +718,7 @@ def main():
                     pass
                 eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
                              syzygy=a.syzygy)
+                current_task.clear()
                 continue   # la tarea vuelve sola al caducar su lease
             searched = 0
             for ln in lines:
@@ -582,14 +730,18 @@ def main():
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
                     'elapsed': f'{time.time() - t0:.2f}',
                     'nodes': searched,
+                    'lease_token': t.get('lease_token', ''),
                 }, t['id'])
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
                 s = f'submit error: {e}'
             print(f"task {t['id']} ({t['budget_nodes']}n, "
                   f"{time.time()-t0:.1f}s) -> {s}", flush=True)
+            current_task.clear()
         if a.once:
             break
+    heartbeat_stop.set()
+    heartbeat_thread.join(timeout=2)
     eng.close()
 
 

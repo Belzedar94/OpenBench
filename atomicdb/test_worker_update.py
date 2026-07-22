@@ -1,5 +1,6 @@
 import stat
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -246,3 +247,129 @@ class WorkerAutoUpdateTests(SimpleTestCase):
 
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
+
+    @mock.patch('Client.atomicdb_worker.requests.post')
+    def test_heartbeat_publishes_token_build_and_live_nps(self, post):
+        class StopAfterOne:
+            calls = 0
+
+            def wait(self, _seconds):
+                self.calls += 1
+                return self.calls > 1
+
+        post.return_value.raise_for_status.return_value = None
+        now = [100.0]
+        current = atomicdb_worker.CurrentTaskState(clock=lambda: now[0])
+        current.start(3016, 'opaque-token-3016')
+        current.progress(6_230_000, 1.0)
+
+        atomicdb_worker._heartbeat_loop(
+            'https://example.invalid', {'machine': 'm1'}, current,
+            StopAfterOne())
+
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0],
+                         'https://example.invalid/atomicdb/api/heartbeat')
+        self.assertEqual(post.call_args.kwargs['data'], {
+            'machine': 'm1',
+            'worker_build': atomicdb_worker.ATOMICDB_WORKER_BUILD,
+            'task_id': 3016,
+            'lease_token': 'opaque-token-3016',
+            'nps': 6_230_000,
+        })
+
+    def test_current_task_snapshot_is_coherent_during_concurrent_updates(self):
+        state = atomicdb_worker.CurrentTaskState(clock=lambda: 100.0)
+        expected = {(3016, 'token-a'), (3017, 'token-b')}
+        failures = []
+        started = threading.Event()
+
+        def writer():
+            started.set()
+            for _ in range(2_000):
+                state.start(3016, 'token-a')
+                state.start(3017, 'token-b')
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        started.wait()
+        while thread.is_alive():
+            snapshot = state.snapshot()
+            if snapshot and (snapshot['id'], snapshot['lease_token']) not in expected:
+                failures.append(snapshot)
+                break
+        thread.join()
+
+        self.assertEqual(failures, [])
+        self.assertIn((state.snapshot()['id'], state.snapshot()['lease_token']),
+                      expected)
+
+    @mock.patch('Client.atomicdb_worker.requests.post')
+    def test_stale_engine_progress_is_omitted_from_heartbeat(self, post):
+        class StopAfterOne:
+            calls = 0
+
+            def wait(self, _seconds):
+                self.calls += 1
+                return self.calls > 1
+
+        post.return_value.raise_for_status.return_value = None
+        now = [100.0]
+        current = atomicdb_worker.CurrentTaskState(clock=lambda: now[0])
+        current.start(3016, 'expired-token')
+        current.progress(128_000_000, 100.0)
+        now[0] += atomicdb_worker.HEARTBEAT_PROGRESS_GRACE_SECONDS + 1
+
+        atomicdb_worker._heartbeat_loop(
+            'https://example.invalid', {'machine': 'm1'}, current,
+            StopAfterOne())
+
+        payload = post.call_args.kwargs['data']
+        self.assertNotIn('task_id', payload)
+        self.assertNotIn('lease_token', payload)
+        self.assertEqual(payload['nps'], 0)
+        self.assertEqual(payload['worker_build'],
+                         atomicdb_worker.ATOMICDB_WORKER_BUILD)
+
+    @mock.patch('Client.atomicdb_worker.requests.post')
+    def test_valid_lease_response_uses_the_logical_request_nonce(self, post):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {'tasks': [{'id': 3016}]}
+
+        tasks = atomicdb_worker._request_tasks(
+            'https://example.invalid', {'machine': 'm1'}, 'request-nonce-a')
+
+        self.assertEqual(tasks, [{'id': 3016}])
+        self.assertEqual(post.call_args.kwargs['data']['lease_session'],
+                         'request-nonce-a')
+
+    @mock.patch('Client.atomicdb_worker.requests.post')
+    def test_indeterminate_lease_responses_require_same_nonce_retry(self, post):
+        for status, payload in ((500, {'tasks': []}), (200, None)):
+            post.reset_mock()
+            post.return_value.status_code = status
+            if payload is None:
+                post.return_value.json.side_effect = ValueError('truncated')
+            else:
+                post.return_value.json.side_effect = None
+                post.return_value.json.return_value = payload
+
+            with self.assertRaises(atomicdb_worker.LeaseRequestError) as caught:
+                atomicdb_worker._request_tasks(
+                    'https://example.invalid', {'machine': 'm1'},
+                    'request-nonce-a')
+
+            self.assertTrue(caught.exception.ambiguous)
+            self.assertEqual(post.call_args.kwargs['data']['lease_session'],
+                             'request-nonce-a')
+
+    @mock.patch('Client.atomicdb_worker.requests.post')
+    def test_definitive_lease_rejection_allows_nonce_rotation(self, post):
+        post.return_value.status_code = 403
+
+        with self.assertRaises(atomicdb_worker.LeaseRequestError) as caught:
+            atomicdb_worker._request_tasks(
+                'https://example.invalid', {'machine': 'm1'},
+                'request-nonce-a')
+
+        self.assertFalse(caught.exception.ambiguous)

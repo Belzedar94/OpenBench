@@ -18,6 +18,10 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 # profundidad se compra por sonda; evals fiables valen mas que anchura barata.
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
+# Visitor-requested reanalysis is deliberately steeper than autonomous tree
+# exploration: 128M -> 512M -> 2B -> 10B, then stays at 10B.
+REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
+                         10_000_000_000]
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 CASCADE_GUARD_LIMIT = 100_000
 PRIORITY_REFRESH_SECONDS = 30.0
@@ -478,23 +482,61 @@ def request_analysis(pos):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     Devuelve 'queued' | 'already-queued' | 'already-solved'."""
-    if pos.status != 'UNKNOWN':
-        return 'already-solved'
-    floor = max(budget_for(pos), BUDGET_LADDER[2])
-    task, created = AnalysisTask.objects.get_or_create(
-        position=pos, generation=pos.visits,
-        defaults={'budget_nodes': floor, 'source': 'USER',
-                  'multipv': multipv_for(pos.visits)})
-    if created:
-        return 'queued'
-    if task.state == 'PENDING':
-        task.budget_nodes = max(task.budget_nodes, floor)
-        promoted = task.source != 'USER'
-        task.source = 'USER'   # promocion: al frente de la cola
-        task.save(update_fields=['source', 'budget_nodes'])
-        if promoted:
+    # The caller may hold a stale Position instance while another submit has
+    # just advanced visits. Lock and refresh before choosing the generation so
+    # a 512M/2B/10B request cannot accidentally target the completed rung.
+    with transaction.atomic():
+        pos = Position.objects.select_for_update().get(pk=pos.pk)
+        if pos.status != 'UNKNOWN':
+            return 'already-solved'
+        completed_max = (AnalysisTask.objects.filter(
+            position=pos, state=AnalysisTask.TState.COMPLETED)
+            .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
+            .first())
+        floor = REQUEST_BUDGET_LADDER[0]
+        if completed_max is not None:
+            floor = REQUEST_BUDGET_LADDER[-1]
+            for candidate in REQUEST_BUDGET_LADDER:
+                if candidate > completed_max:
+                    floor = candidate
+                    break
+        floor = max(floor, budget_for(pos))
+        task, created = AnalysisTask.objects.get_or_create(
+            position=pos, generation=pos.visits,
+            defaults={'budget_nodes': floor, 'source': 'USER',
+                      'multipv': multipv_for(pos.visits)})
+        if created:
             return 'queued'
-    return 'already-queued'
+        if task.state == 'PENDING':
+            task.budget_nodes = max(task.budget_nodes, floor)
+            promoted = task.source != 'USER'
+            task.source = 'USER'   # promocion: al frente de la cola
+            task.save(update_fields=['source', 'budget_nodes'])
+            if promoted:
+                return 'queued'
+        elif task.state == 'LEASED' and task.budget_nodes < floor:
+            # The running engine cannot change its ``go nodes`` command. Keep
+            # the user's deeper request as the next generation instead of
+            # logging it as satisfied and silently losing it for an hour.
+            follow_up = (AnalysisTask.objects.filter(
+                position=pos, state=AnalysisTask.TState.PENDING,
+                generation__gt=task.generation)
+                .order_by('generation').first())
+            if follow_up is None:
+                generation = max(pos.visits + 1, task.generation + 1)
+                while AnalysisTask.objects.filter(
+                        position=pos, generation=generation).exists():
+                    generation += 1
+                AnalysisTask.objects.create(
+                    position=pos, generation=generation,
+                    budget_nodes=floor, source='USER',
+                    multipv=multipv_for(generation))
+            else:
+                follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
+                follow_up.source = 'USER'
+                follow_up.save(update_fields=['budget_nodes', 'source'])
+            return 'queued'
+        return 'already-queued'
 
 
 def _queue_disputed_reanalysis(pos):

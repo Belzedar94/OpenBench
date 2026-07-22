@@ -1,12 +1,7 @@
 {% load static %}
-<div class="boardwrap"><div class="board" id="board"
-  data-key="{{ board_key }}">
-{% for row in board %}{% for piece, dark, sq in row %}
-  <div class="sq {% if dark %}d{% else %}l{% endif %}" data-sq="{{ sq }}">
-    {% if piece %}<img src="{% static 'atomicdb/pieces/' %}{{ piece }}.svg" alt="{{ piece }}" draggable="false">{% endif %}
-  </div>
-{% endfor %}{% endfor %}
-</div>
+<div class="boardwrap"><div class="atomic-board cg-wrap brown cburnett" id="board"
+  data-key="{{ board_key }}" data-fen="{{ board_fen }}"
+  data-turn="{{ board_turn }}" aria-label="Atomic chess board"></div>
 {% if arrow %}
 <svg class="board-arrow" viewBox="0 0 100 100" preserveAspectRatio="none">
   <defs><marker id="ah" viewBox="0 0 10 10" refX="6.5" refY="5"
@@ -18,41 +13,15 @@
 </svg>
 {% endif %}
 </div>
+{{ legal_ucis|json_script:"atomicdb-legal-moves" }}
+<script type="module" src="{% static 'atomicdb/board.js' %}"></script>
+<noscript><p class="dim">Enable JavaScript for the interactive board; legal
+  moves remain available below.</p></noscript>
 {% if legal_ucis %}
-<script>
-(function(){
-  const legal = new Set({{ legal_ucis|safe }});
-  const key = document.getElementById('board').dataset.key;
-  let from = null;
-  function showDests(fromSq) {
-    for (const u of legal) {
-      if (u.startsWith(fromSq)) {
-        const d = document.querySelector(`#board .sq[data-sq="${u.slice(2, 4)}"]`);
-        if (d) d.classList.add('dest');
-      }
-    }
-  }
-  document.querySelectorAll('#board .sq').forEach(el => {
-    el.addEventListener('click', () => {
-      const sq = el.dataset.sq;
-      if (from === null) {
-        if (el.querySelector('img')) { from = sq; el.classList.add('sel'); showDests(sq); }
-        return;
-      }
-      const uci = from + sq;
-      document.querySelectorAll('#board .sq.sel, #board .sq.dest')
-              .forEach(x => x.classList.remove('sel', 'dest'));
-      if (legal.has(uci)) {
-        window.location = `/atomicdb/goto/${key}/${uci}/`;
-      } else if (legal.has(uci + 'q')) {
-        window.location = `/atomicdb/goto/${key}/${uci}q/`;
-      } else if (el.querySelector('img') && sq !== from) {
-        from = sq; el.classList.add('sel'); showDests(sq);
-      } else {
-        from = null;
-      }
-    });
-  });
-})();
-</script>
+<details class="board-legal">
+  <summary>Keyboard move list</summary>
+  <nav aria-label="Legal moves">
+    {% for uci in legal_ucis %}<a href="/atomicdb/goto/{{ board_key }}/{{ uci }}/">{{ uci }}</a>{% endfor %}
+  </nav>
+</details>
 {% endif %}

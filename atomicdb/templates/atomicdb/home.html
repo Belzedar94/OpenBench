@@ -8,6 +8,10 @@
   <div class="metric"><div class="v">{{ nodes_h }}</div><div class="l">engine nodes</div></div>
   <div class="metric"><div class="v">{{ analyses_h }}</div><div class="l">analyses</div></div>
   <div class="metric"><div class="v">{{ requested_h }}</div><div class="l">in queue</div></div>
+  <div class="metric" title="Workers with a heartbeat in the last 3 minutes"><div class="v">{{ workers_h }}</div><div class="l">active workers</div></div>
+  <div class="metric" title="Threads reported by active AtomicDB workers"><div class="v">{{ cores_h }}</div><div class="l">active cores</div></div>
+  <div class="metric" title="Sum of each active worker's latest reported engine speed"><div class="v">{{ compute_nps_h }}</div><div class="l">nodes / sec</div></div>
+  <div class="metric" title="Completed AtomicDB analyses per minute, averaged over 10 minutes"><div class="v">{{ positions_pm_h }}</div><div class="l">positions / min</div></div>
 </div>
 
 {% if first_moves %}
@@ -52,7 +56,7 @@
 
 <div class="cols">
   <div>
-    <h2 style="margin-top:0">Play to explore <span class="dim">click a piece, then a square</span></h2>
+    <h2 style="margin-top:0">Play to explore <span class="dim">drag a piece or click two squares</span></h2>
     {% include "atomicdb/_board.html" %}
   </div>
   <div>
@@ -98,7 +102,10 @@
   {% for e in events %}
   <li><span class="t">{{ e.ts|date:"M d H:i" }}</span>
     {{ e.text }}{% if e.san %}
-    <span class="dim" style="font-size:.85rem">&nbsp;{{ e.san }}</span>{% endif %}
+    <details class="milestone-line dim">
+      <summary class="qline" title="{{ e.full }}">&nbsp;{{ e.san }}</summary>
+      <span class="milestone-full">{{ e.full }}</span>
+    </details>{% endif %}
     {% if e.key %} <a href="/atomicdb/explore/{{ e.key }}/">view</a>{% endif %}</li>
   {% empty %}<li class="dim">No events yet.</li>{% endfor %}
 </ul>

@@ -86,6 +86,7 @@ class AnalysisTask(models.Model):
     position     = models.ForeignKey(Position, on_delete=models.CASCADE)
     budget_nodes = models.BigIntegerField()
     nodes_searched = models.BigIntegerField(default=0)  # nodos REALES buscados
+    elapsed_seconds = models.FloatField(default=0.0)  # tiempo reportado por el motor
     multipv      = models.IntegerField(default=5)
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
     source       = models.CharField(max_length=4, choices=Source.choices,
@@ -94,6 +95,15 @@ class AnalysisTask(models.Model):
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')
     leased_at    = models.DateTimeField(null=True)
+    # Separate keepalive preserves the immutable assignment timestamp while
+    # preventing a healthy multi-hour search from being leased a second time.
+    lease_heartbeat_at = models.DateTimeField(null=True)
+    # Opaque fencing token for builds that understand assignment identities.
+    # Blank remains the compatibility marker for leases issued to old workers.
+    lease_token = models.CharField(max_length=64, default='')
+    # Stable for one worker process. It makes a lost lease HTTP response
+    # replayable without letting a different same-machine process steal it.
+    lease_session = models.CharField(max_length=64, default='')
     attempts     = models.IntegerField(default=0)
     created      = models.DateTimeField(auto_now_add=True)
     completed    = models.DateTimeField(null=True)
@@ -101,6 +111,8 @@ class AnalysisTask(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(
             fields=['position', 'generation'], name='uniq_task_per_generation')]
+        indexes = [models.Index(fields=['state', 'completed'],
+                                name='atomic_task_state_done')]
 
 
 class DBEvent(models.Model):
@@ -124,6 +136,9 @@ class WorkerPing(models.Model):
     hash_mb    = models.IntegerField(default=0)
     os         = models.CharField(max_length=64, default='')
     tasks_done = models.IntegerField(default=0)
+    current_task_id = models.BigIntegerField(null=True)
+    last_nps   = models.BigIntegerField(default=0)
+    nps_updated = models.DateTimeField(null=True)
     last_seen  = models.DateTimeField(auto_now=True, db_index=True)
 
     class Meta:
