@@ -1196,6 +1196,7 @@ class MilestoneLineTests(TestCase):
         self.assertContains(response, 'class="milestone-line dim"')
 
     def test_multiple_labels_batch_parent_queries_by_depth(self):
+        import pyffish as pf
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
         from .views import _line_labels_many
@@ -1207,10 +1208,16 @@ class MilestoneLineTests(TestCase):
         right = self._play(right, 'e7e6')
         right = self._play(right, 'd2d3')
 
-        with CaptureQueriesContext(connection) as queries:
-            labels = _line_labels_many([left.key, right.key])
+        with mock.patch('pyffish.get_san_moves',
+                        wraps=pf.get_san_moves) as batched_san, \
+                mock.patch('atomicdb.views.logic.apply_move',
+                           side_effect=AssertionError(
+                               'valid labels must use batched SAN')):
+            with CaptureQueriesContext(connection) as queries:
+                labels = _line_labels_many([left.key, right.key])
 
         self.assertEqual(set(labels), {left.key, right.key})
+        self.assertEqual(batched_san.call_count, 2)
         # One target lookup plus one batched parent query per ply, not one
         # ancestry query per target and ply.
         self.assertLessEqual(len(queries), 4)

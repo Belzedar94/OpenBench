@@ -599,15 +599,30 @@ def _lines_to_root(keys, max_plies=512):
 
     result = {}
     for key, top in current.items():
-        fen, line = top.fen, []
-        for uci, child_key in reversed(steps[key]):
-            try:
-                san = pf.get_san('atomic', fen, uci)
-            except Exception:
-                san = uci
-            line.append({'san': san, 'key': child_key,
-                         'white': fen.split()[1] == 'w'})
-            fen = logic.apply_move(fen, uci)
+        ordered = list(reversed(steps[key]))
+        ucis = [uci for uci, _child_key in ordered]
+        try:
+            # One C++ call parses and advances the full line. Calling
+            # get_san()+get_fen() for every ply dominated the home page once
+            # milestones grew into long PVs (roughly 500 crossings/request).
+            sans = list(pf.get_san_moves('atomic', top.fen, ucis))
+            if len(sans) != len(ordered):
+                raise ValueError('incomplete SAN line')
+        except Exception:
+            # Preserve the previous per-ply behaviour if this PyFFish build
+            # cannot batch a line or returns an incomplete result.
+            sans, fen = [], top.fen
+            for uci in ucis:
+                try:
+                    sans.append(pf.get_san('atomic', fen, uci))
+                except Exception:
+                    sans.append(uci)
+                fen = logic.apply_move(fen, uci)
+        white = top.fen.split()[1] == 'w'
+        line = []
+        for (_uci, child_key), san in zip(ordered, sans):
+            line.append({'san': san, 'key': child_key, 'white': white})
+            white = not white
         result[key] = (top, line)
     return result
 
