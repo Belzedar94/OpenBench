@@ -24,6 +24,9 @@ DATAGEN_RATE_WINDOW = datetime.timedelta(hours=3)
 DATAGEN_NODES_OVERHEAD = 18.0
 # Last-resort nodes assumption when the command has no parsable `nodes` token.
 DATAGEN_ASSUMED_NODES = 10000
+# Historical per-test rates need a real time span: same-second or backfilled
+# completion timestamps would otherwise fabricate absurd rates.
+DATAGEN_HISTORY_MIN_SPAN = datetime.timedelta(minutes=30)
 # Capacity fallback when no gameplay rate was ever measured: one game occupies
 # one worker thread for roughly this long at the STC-ish controls in use here.
 SECONDS_PER_GAME_THREAD = 45.0
@@ -40,7 +43,7 @@ _cache_timestamp = None
 _cache_value = None
 _result_samples = deque()
 _sprt_expected_games = None
-_historical_datagen_rate = None
+_historical_datagen_rates = None
 _last_gameplay_rate = None
 _state_lock = threading.Lock()
 
@@ -49,13 +52,13 @@ def reset_index_metrics_state():
     """Clear process-local state. Public so deterministic tests can reset it."""
 
     global _cache_timestamp, _cache_value, _sprt_expected_games
-    global _historical_datagen_rate, _last_gameplay_rate
+    global _historical_datagen_rates, _last_gameplay_rate
     with _state_lock:
         _cache_timestamp = None
         _cache_value = None
         _result_samples.clear()
         _sprt_expected_games = None
-        _historical_datagen_rate = None
+        _historical_datagen_rates = None
         _last_gameplay_rate = None
 
 
@@ -137,10 +140,11 @@ def _compute_index_metrics(now):
         'ESTIMATE: full queue, priority-sequential, always absolute — when a '
         'rate is uncertain the pessimistic candidate wins. Generic DATAGEN '
         'uses the measured chunk-completion rate (3h sliding window, first '
-        'chunk anchors the clock); without 2 completed chunks it takes the '
-        'SLOWEST of the historical per-test datagen rate (median across all '
-        'tests with 2+ completed chunks, idle time included) and fleet-NPS / '
-        '(nodes × %.0f), assuming %d nodes when the command names none. '
+        'chunk anchors the clock); without 2 completed chunks it uses the '
+        'SAME variant\'s historical rate (per-engine median over tests with '
+        '2+ completed chunks spanning 30m+, idle time included), else '
+        'fleet-NPS / (nodes × %.0f), assuming %d nodes when the command '
+        'names none. '
         'Gameplay divides remaining expected games by the live 10-minute '
         'rate, else the last measured rate, else a %.0fs-per-game-thread '
         'capacity model. Active SPRTs assume the resolved-history median '
@@ -288,18 +292,21 @@ def _historical_sprt_games():
     return _sprt_expected_games
 
 
-def _historical_datagen_pos_per_second():
-    """Median per-test datagen rate over every test with 2+ completed chunks.
+def _historical_datagen_rates_per_engine():
+    """Median historical datagen rate per engine (variant), pos/sec.
 
-    Computed once per server process from all-time completion intervals, so
-    worker downtime between chunks is priced in — deliberately pessimistic,
-    which is the requested bias for queued datagen that has not started.
-    Returns 0.0 when the server has no usable datagen history yet.
+    Datagen pipelines differ wildly per variant (measured on this server:
+    spell run7 36.8 pos/s over 6 days including worker downtime, atomic 375M
+    positions at 7192 pos/s in 14h), so a cross-variant prior is useless.
+    Each test with 2+ completed chunks spanning at least 30 minutes yields
+    one all-time interval rate — idle time priced in, deliberately
+    pessimistic — and each engine takes the median over its own tests.
+    Computed once per server process.
     """
 
-    global _historical_datagen_rate
-    if _historical_datagen_rate is not None:
-        return _historical_datagen_rate
+    global _historical_datagen_rates
+    if _historical_datagen_rates is not None:
+        return _historical_datagen_rates
 
     per_test = defaultdict(list)
     rows = (
@@ -311,19 +318,27 @@ def _historical_datagen_pos_per_second():
     for test_id, completed, count in rows:
         per_test[test_id].append((completed, max(count, 0)))
 
-    rates = []
-    for completions in per_test.values():
+    engines = dict(
+        Test.objects.filter(id__in=list(per_test))
+        .values_list('id', 'dev_engine')
+    )
+
+    rates_per_engine = defaultdict(list)
+    for test_id, completions in per_test.items():
         if len(completions) < 2:
             continue
         span = (completions[-1][0] - completions[0][0]).total_seconds()
-        if span <= 0:
+        if span < DATAGEN_HISTORY_MIN_SPAN.total_seconds():
             continue
         positions = sum(count for _completed, count in completions[1:])
-        if positions > 0:
-            rates.append(positions / span)
+        if positions > 0 and engines.get(test_id):
+            rates_per_engine[engines[test_id]].append(positions / span)
 
-    _historical_datagen_rate = statistics.median(rates) if rates else 0.0
-    return _historical_datagen_rate
+    _historical_datagen_rates = {
+        engine: statistics.median(rates)
+        for engine, rates in rates_per_engine.items()
+    }
+    return _historical_datagen_rates
 
 
 def _sprt_remaining_games(test, median):
@@ -384,17 +399,18 @@ def _heuristic_datagen_rate(command, fleet_nps):
     return fleet_nps / (nodes * DATAGEN_NODES_OVERHEAD)
 
 
-def _fallback_datagen_rate(command, fleet_nps):
-    """Slowest available estimate for datagen without a measured rate."""
+def _fallback_datagen_rate(test, fleet_nps):
+    """Best estimate for datagen without a measured rate.
 
-    candidates = []
-    historical = _historical_datagen_pos_per_second()
-    if historical > 0:
-        candidates.append(historical)
-    heuristic = _heuristic_datagen_rate(command, fleet_nps)
-    if heuristic:
-        candidates.append(heuristic)
-    return min(candidates) if candidates else None
+    Real history of the SAME variant beats any guess: it embeds the true
+    filter overheads and worker downtime of that pipeline. Only a variant
+    with no datagen history at all falls back to the nodes heuristic.
+    """
+
+    variant_rate = _historical_datagen_rates_per_engine().get(test.dev_engine)
+    if variant_rate:
+        return variant_rate
+    return _heuristic_datagen_rate(test.datagen_command, fleet_nps)
 
 
 def _remaining_work(now, expected_sprt_games, fleet_nps):
@@ -406,7 +422,7 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
             deleted=False,
         ).only(
             'id', 'test_mode', 'games', 'max_games', 'spsa',
-            'currentllr', 'lowerllr', 'upperllr',
+            'currentllr', 'lowerllr', 'upperllr', 'dev_engine',
             'datagen_command', 'datagen_total_count',
         )
     )
@@ -468,7 +484,7 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
 
             rate = _measured_datagen_rate(completions[test.id], now)
             if rate is None:
-                rate = _fallback_datagen_rate(test.datagen_command, fleet_nps)
+                rate = _fallback_datagen_rate(test, fleet_nps)
                 if rate is None:
                     # Only reachable with zero live fleet NPS and no history;
                     # the card renders '—' without live machines anyway.

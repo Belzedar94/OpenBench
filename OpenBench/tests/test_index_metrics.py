@@ -158,29 +158,62 @@ class IndexMetricsTests(TestCase):
         )
         self.assertEqual(metrics['cards'][3]['value'], '<1m')
 
-    def test_datagen_unparsable_nodes_uses_pessimistic_history(self):
-        # Sin `nodes` parseable el valor sigue siendo ABSOLUTO: gana el
-        # candidato mas lento entre la mediana historica (5 pos/s, medida
-        # del test hermano) y la heuristica con 10k nodos asumidos (11.1).
+    def test_datagen_without_rate_uses_same_variant_history(self):
+        # "Ya hicimos un datagen de atomic": un test encolado sin chunks
+        # hereda la tasa historica de SU variante (aqui 1.0 pos/s del test
+        # hermano, span 30m — la guarda de span descarta historiales con
+        # timestamps degenerados), no la heuristica generica.
         self.make_machine(2, 1.0, self.now)
-        self.make_datagen(
-            chunks=2, per_chunk=500, command='datagen count {COUNT} out {OUT}'
+        queued = self.make_datagen(
+            chunks=2, per_chunk=1800,
+            command='datagen count {COUNT} out {OUT}',
         )
-        measured = self.make_datagen(chunks=4, per_chunk=500)
+        measured = self.make_datagen(chunks=4, per_chunk=1800)
         self.complete_chunk(
-            measured, 0, self.now - datetime.timedelta(seconds=200)
+            measured, 0, self.now - datetime.timedelta(seconds=3600)
         )
         self.complete_chunk(
-            measured, 1, self.now - datetime.timedelta(seconds=100)
+            measured, 1, self.now - datetime.timedelta(seconds=1800)
         )
 
         metrics = get_index_metrics(now=self.now)
 
-        # Medido: 1000 restantes a 5 pos/s = 200s. Sin nodes: 1000 restantes
-        # a min(5 historico, 11.1 heuristica) = 5 pos/s = 200s. Total 400s.
-        self.assertAlmostEqual(metrics['time_remaining_seconds'], 400.0)
+        # Medido: 3600 restantes a 1.0 pos/s = 3600s. Encolado: 3600
+        # restantes a 1.0 pos/s historicos de la variante = 3600s.
+        self.assertAlmostEqual(metrics['time_remaining_seconds'], 7200.0)
         self.assertTrue(metrics['datagen_estimated'])
-        self.assertEqual(metrics['cards'][3]['value'], '7m')
+        self.assertEqual(metrics['cards'][3]['value'], '2h 0m')
+
+    def test_datagen_variant_history_does_not_cross_engines(self):
+        # La historia de una variante NO contamina a otra (medido en el
+        # server: spell 36.8 pos/s vs atomic 7191.7 — incomparables). La
+        # variante sin historia cae a la heuristica de flota.
+        self.make_machine(2, 1.0, self.now)
+        history = self.make_datagen(chunks=2, per_chunk=1800)
+        self.complete_chunk(
+            history, 0, self.now - datetime.timedelta(seconds=7200)
+        )
+        self.complete_chunk(
+            history, 1, self.now - datetime.timedelta(seconds=3600)
+        )
+        self.make_datagen(chunks=2, per_chunk=500)
+        other = self.make_datagen(chunks=2, per_chunk=500)
+        Test.objects.filter(id=other.id).update(
+            dev_engine='OtherEng', base_engine='OtherEng'
+        )
+
+        metrics = get_index_metrics(now=self.now)
+
+        # history: completo (0 restante). Mismo engine: 1000 a 0.5 pos/s
+        # historicos = 2000s. OtherEng sin historia: 1000 a 2e6/(1000x18)
+        # = 111.1 pos/s = 9s.
+        heuristic = 2e6 / (1000 * 18.0)
+        self.assertAlmostEqual(
+            metrics['time_remaining_seconds'],
+            1000 / 0.5 + 1000 / heuristic,
+            places=1,
+        )
+        self.assertTrue(metrics['datagen_estimated'])
 
     def test_sprt_uses_resolved_history_median_and_rolling_game_delta(self):
         self.make_machine(4, 1.0, self.now)
