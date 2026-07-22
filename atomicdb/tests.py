@@ -660,6 +660,14 @@ class SearchmovesTests(TestCase):
 
 class HomeQueueTests(TestCase):
 
+    @staticmethod
+    def _play(parent, uci):
+        child = ingest.get_or_create_position(
+            logic.apply_move(parent.fen, uci))
+        Edge.objects.get_or_create(parent=parent, move_uci=uci,
+                                   defaults={'child': child})
+        return child
+
     def test_home_shows_analysis_queue(self):
         from django.utils import timezone
         p = ingest.get_or_create_position(logic.start_fen())
@@ -671,6 +679,28 @@ class HomeQueueTests(TestCase):
         self.assertContains(r, 'Now analyzing')
         self.assertContains(r, 'Up next')
         self.assertContains(r, 'start position')
+
+    def test_up_next_line_stops_at_start_position_before_numbering(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+
+        # A reversible knight loop gives the start position an incoming edge.
+        # Path reconstruction must still stop at the real root instead of
+        # walking past it and presenting 2.Ng1 as the artificial "1.Ng1".
+        nf3 = self._play(root, 'g1f3')
+        nh6 = self._play(nf3, 'g8h6')
+        ng1 = self._play(nh6, 'f3g1')
+        self.assertEqual(self._play(ng1, 'h6g8'), root)
+
+        f6 = self._play(nf3, 'f7f6')
+        target = self._play(f6, 'e2e3')
+        target.priority = 999
+        target.save(update_fields=['priority'])
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(response.context['upnext'][0]['key'], target.key)
+        self.assertEqual(response.context['upnext'][0]['san'],
+                         '1. Nf3 f6 2. e3')
 
 
 class NodesAccountingTests(TestCase):

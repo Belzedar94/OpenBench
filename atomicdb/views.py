@@ -606,11 +606,16 @@ def fen_jump(request):
 def _line_to_root(pos, max_plies=64):
     """Camino canonico (determinista) hacia arriba; con transposiciones se
     elige siempre el padre de key minima. Devuelve (top, [(san, child_key)...])
-    en orden de juego, con SAN via pyffish desde el nodo superior."""
+    en orden de juego, con SAN via pyffish desde el nodo superior. La posicion
+    inicial es una frontera absoluta aunque un ciclo reversible haya creado
+    aristas entrantes hacia ella."""
     import pyffish as pf
     steps = []
     cur, seen = pos, {pos.key}
+    start_key = logic.key_of(logic.start_fen())
     while len(steps) < max_plies:
+        if cur.key == start_key:
+            break
         e = (Edge.objects.filter(child=cur).select_related('parent')
              .order_by('parent_id').first())
         if e is None or e.parent_id in seen:
