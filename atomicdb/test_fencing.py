@@ -58,9 +58,23 @@ class SubmitFencingTests(TestCase):
         task = self._task('LEASED', 'machine-a')
         first = self._submit(task)
         self.assertEqual(first.status_code, 200)
-        second = self._submit(task)
+        with mock.patch('atomicdb.ingest.prepare_mate_proofs',
+                        side_effect=AssertionError('must not recompute')):
+            second = self._submit(task)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json(), {'ok': True, 'dup': True})
+
+    def test_oversized_pv_is_rejected_before_claiming_the_task(self):
+        task = self._task('LEASED', 'machine-a')
+        response = self._submit(task, lines=json.dumps([{
+            'move': 'e2e4', 'pv': ['e2e4'] * 513,
+            'eval_cp': 12, 'mate': None,
+        }]))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('excessively long PV', response.json()['error'])
+        task.refresh_from_db()
+        self.assertEqual(task.state, 'LEASED')
 
     def test_reported_nodes_are_clamped_to_twice_budget(self):
         task = self._task('LEASED', 'machine-a')

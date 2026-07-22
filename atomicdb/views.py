@@ -1,6 +1,8 @@
 """API de AtomicDB (worker) + paginas publicas del Explorer."""
 
 import json
+import logging
+import time
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
@@ -23,6 +25,10 @@ BATCH_SIZE = 3   # lotes cortos: con sondas de 128M-2B, las peticiones USER
                  # entran en minutos y el overhead de lease es despreciable
 REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
+MAX_SUBMIT_LINES_BYTES = 512 * 1024
+MAX_SUBMIT_PV_PLIES = 512
+
+logger = logging.getLogger(__name__)
 
 
 class _SubmitRejected(Exception):
@@ -102,14 +108,39 @@ def api_lease(request):
 
 @csrf_exempt
 def api_submit(request):
+    submit_started = time.monotonic()
     user = _auth(request)
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
     try:
         task_id = int(request.POST['task_id'])
-        lines = json.loads(request.POST['lines'])
+        raw_lines = request.POST['lines']
+        if len(raw_lines.encode('utf-8')) > MAX_SUBMIT_LINES_BYTES:
+            raise ValueError('lines payload is too large')
+        lines = json.loads(raw_lines)
         if not isinstance(lines, list) or len(lines) > 32:
             raise ValueError('lines must be a list with at most 32 entries')
+        for line in lines:
+            if not isinstance(line, dict):
+                raise ValueError('each line must be an object')
+            move = line.get('move')
+            if not isinstance(move, str) or not move or len(move) > 16:
+                raise ValueError('invalid root move')
+            for score_name in ('eval_cp', 'mate'):
+                score = line.get(score_name)
+                if score is not None and (not isinstance(score, int)
+                                          or isinstance(score, bool)):
+                    raise ValueError(f'invalid {score_name}')
+            pv = line.get('pv')
+            if pv is not None and (not isinstance(pv, list)
+                                   or len(pv) > MAX_SUBMIT_PV_PLIES
+                                   or any(not isinstance(item, str)
+                                          or len(item) > 16 for item in pv)):
+                raise ValueError('invalid or excessively long PV')
+            raw = line.get('raw')
+            if raw is not None and (not isinstance(raw, str)
+                                    or len(raw) > 65_536):
+                raise ValueError('raw line is too large')
     except Exception as e:
         return JsonResponse({'error': f'malformed: {e}'}, status=400)
 
@@ -140,6 +171,7 @@ def api_submit(request):
     if not machine or machine != snapshot.machine:
         return JsonResponse({'error': 'not-your-lease'}, status=409)
 
+    prepare_started = time.monotonic()
     tb_prepared = None
     mate_proofs = None
     if parsed_wdl is not None:
@@ -149,7 +181,9 @@ def api_submit(request):
             return JsonResponse({'error': 'tb-rejected'}, status=409)
     else:
         mate_proofs = ingest.prepare_mate_proofs(snapshot.position.fen, lines)
+    prepare_seconds = time.monotonic() - prepare_started
 
+    transaction_started = time.monotonic()
     try:
         with transaction.atomic():
             claimed = AnalysisTask.objects.filter(
@@ -194,6 +228,18 @@ def api_submit(request):
                 tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
     except _SubmitRejected:
         return JsonResponse({'error': 'tb-rejected'}, status=409)
+    transaction_seconds = time.monotonic() - transaction_started
+    total_seconds = time.monotonic() - submit_started
+    logger.info(
+        'AtomicDB submit task=%s machine=%s kind=%s lines=%s '
+        'prepare_seconds=%.3f transaction_seconds=%.3f total_seconds=%.3f',
+        task_id, machine, 'tb' if parsed_wdl is not None else 'engine',
+        len(lines), prepare_seconds, transaction_seconds, total_seconds)
+    summary['submit_timing_seconds'] = {
+        'prepare': round(prepare_seconds, 3),
+        'transaction': round(transaction_seconds, 3),
+        'total': round(total_seconds, 3),
+    }
     return JsonResponse({'ok': True, 'summary': summary})
 
 

@@ -4,6 +4,7 @@ minimax de tres valores. Todo lo exacto pasa por aqui; el motor solo
 aporta evals y candidatos."""
 
 import hashlib
+import time
 
 import pyffish as pf
 
@@ -55,12 +56,14 @@ def terminal_status(fen):
 
 # ---------- verificacion de PV de mate (§3.2) ----------
 
-def verify_mate_pv(root_fen, pv_ucis, winner_is_white):
+def verify_mate_pv(root_fen, pv_ucis, winner_is_white, deadline=None):
     """True si la PV es legal jugada a jugada, sin repetir posiciones,
     y acaba en terminal ganado por `winner`. Rechaza todo lo demas."""
     fen = canonical_fen(root_fen)
     seen = {fen}
     for uci in pv_ucis:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         if terminal_status(fen) is not None:
             return False                      # terminal antes de agotar la PV
         if uci not in legal_moves(fen):
@@ -69,6 +72,8 @@ def verify_mate_pv(root_fen, pv_ucis, winner_is_white):
         if fen in seen:
             return False                      # repeticion interna
         seen.add(fen)
+    if deadline is not None and time.monotonic() >= deadline:
+        return False
     t = terminal_status(fen)
     if t is None:
         return False
@@ -77,7 +82,8 @@ def verify_mate_pv(root_fen, pv_ucis, winner_is_white):
 
 
 def prove_forced_mate(fen, winner_is_white, max_plies,
-                      budget_positions=200_000, hint_pv=None):
+                      budget_positions=200_000, hint_pv=None,
+                      deadline=None):
     """Prove a bounded forced mate with an exhaustive AND/OR search.
 
     The result is one of ``PROVEN``, ``INCONCLUSIVE`` or ``NO_MATE``:
@@ -86,7 +92,8 @@ def prove_forced_mate(fen, winner_is_white, max_plies,
     * on the defender's turn, every legal continuation must be proven;
     * a repeated position on the current branch is a failed branch;
     * a non-terminal leaf at ``max_plies`` is a failed branch; and
-    * exhausting ``budget_positions`` makes the whole attempt inconclusive.
+    * exhausting ``budget_positions`` or reaching the optional absolute
+      monotonic ``deadline`` makes the whole attempt inconclusive.
 
     ``hint_pv`` affects move ordering only.  It never changes the set of
     moves searched or the result of a search that fits in the budget.
@@ -114,7 +121,8 @@ def prove_forced_mate(fen, winner_is_white, max_plies,
 
     def search(node_fen, plies_left, path, remaining_hint):
         nonlocal visited
-        if visited >= budget_positions:
+        if (visited >= budget_positions
+                or (deadline is not None and time.monotonic() >= deadline)):
             raise _BudgetExhausted
         visited += 1
 
