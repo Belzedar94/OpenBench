@@ -84,28 +84,99 @@ class IndexMetricsTests(TestCase):
         self.assertEqual(metrics['nodes_per_second'], 1.06e9)
         self.assertEqual(metrics['cards'][1]['value'], '1.06G')
 
-    def test_partial_datagen_uses_rate_since_first_completed_chunk(self):
-        self.make_machine(2, 1.0, self.now)
+    def make_datagen(self, chunks=4, per_chunk=500, command=None):
         test = self.make_test(
             test_mode='DATAGEN',
-            datagen_command='datagen count {COUNT} out {OUT}',
-            datagen_total_count=1000,
-            datagen_positions_per_chunk=500,
+            datagen_command=(
+                command or 'datagen nodes 1000 count {COUNT} out {OUT}'
+            ),
+            datagen_total_count=chunks * per_chunk,
+            datagen_positions_per_chunk=per_chunk,
             datagen_base_seed=10,
-            max_games=1000,
+            max_games=chunks * per_chunk,
         )
         initialize_chunks(test)
-        DatagenChunk.objects.filter(test=test, idx=0).update(
-            status=DatagenChunk.COMPLETED,
-            completed=self.now - datetime.timedelta(seconds=100),
+        return test
+
+    def complete_chunk(self, test, idx, completed):
+        DatagenChunk.objects.filter(test=test, idx=idx).update(
+            status=DatagenChunk.COMPLETED, completed=completed,
+        )
+
+    def test_datagen_rate_measures_intervals_between_completions(self):
+        # Incidente 2026-07-22: con la tasa medida desde el primer chunk
+        # completado hasta `now`, el KPI decia "4h" para una run de una
+        # semana justo despues del primer chunk. Los intervalos ENTRE
+        # completions excluyen las posiciones del chunk ancla.
+        self.make_machine(2, 1.0, self.now)
+        test = self.make_datagen(chunks=4, per_chunk=500)
+        self.complete_chunk(test, 0, self.now - datetime.timedelta(seconds=300))
+        self.complete_chunk(test, 1, self.now - datetime.timedelta(seconds=200))
+        self.complete_chunk(test, 2, self.now - datetime.timedelta(seconds=100))
+
+        metrics = get_index_metrics(now=self.now)
+
+        # 1000 posiciones (chunks 1 y 2) en 200s = 5 pos/s; queda 1 chunk.
+        self.assertEqual(metrics['datagen_remaining_positions'], 500)
+        self.assertAlmostEqual(metrics['datagen_positions_per_second'], 5.0)
+        self.assertFalse(metrics['datagen_estimated'])
+        self.assertAlmostEqual(metrics['time_remaining_seconds'], 100.0)
+        self.assertEqual(metrics['cards'][3]['value'], '2m')
+
+    def test_datagen_single_completion_falls_back_to_fleet_heuristic(self):
+        # Un solo chunk completado no da intervalo: antes esto inflaba la
+        # tasa (posiciones/minutos-desde-la-subida). Ahora usa la heuristica
+        # de flota: nps / (nodes x overhead).
+        self.make_machine(2, 1.0, self.now)  # 2 threads x 1 Mnps = 2e6 nps
+        test = self.make_datagen(chunks=2, per_chunk=500)
+        self.complete_chunk(test, 0, self.now - datetime.timedelta(seconds=60))
+
+        metrics = get_index_metrics(now=self.now)
+
+        expected_rate = 2e6 / (1000 * 18.0)
+        self.assertEqual(metrics['datagen_remaining_positions'], 500)
+        self.assertAlmostEqual(
+            metrics['datagen_positions_per_second'], expected_rate
+        )
+        self.assertTrue(metrics['datagen_estimated'])
+        self.assertAlmostEqual(
+            metrics['time_remaining_seconds'], 500 / expected_rate
+        )
+        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
+
+    def test_datagen_without_completions_still_counts_via_heuristic(self):
+        # "Ni siquiera tiene en cuenta el datagen de atomic": tests DATAGEN
+        # encolados sin ningun chunk completado deben sumar tiempo estimado
+        # en lugar de aportar cero segundos.
+        self.make_machine(2, 1.0, self.now)
+        self.make_datagen(chunks=4, per_chunk=500)
+
+        metrics = get_index_metrics(now=self.now)
+
+        expected_rate = 2e6 / (1000 * 18.0)
+        self.assertAlmostEqual(
+            metrics['time_remaining_seconds'], 2000 / expected_rate
+        )
+        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
+
+    def test_datagen_unparsable_nodes_reports_lower_bound(self):
+        self.make_machine(2, 1.0, self.now)
+        self.make_datagen(
+            chunks=2, per_chunk=500, command='datagen count {COUNT} out {OUT}'
+        )
+        measured = self.make_datagen(chunks=4, per_chunk=500)
+        self.complete_chunk(
+            measured, 0, self.now - datetime.timedelta(seconds=200)
+        )
+        self.complete_chunk(
+            measured, 1, self.now - datetime.timedelta(seconds=100)
         )
 
         metrics = get_index_metrics(now=self.now)
 
-        self.assertEqual(metrics['datagen_remaining_positions'], 500)
-        self.assertAlmostEqual(metrics['datagen_positions_per_second'], 5.0)
-        self.assertAlmostEqual(metrics['time_remaining_seconds'], 100.0)
-        self.assertEqual(metrics['cards'][3]['value'], '2m')
+        # La parte medible (5 pos/s, 1000 restantes) aparece como cota.
+        self.assertAlmostEqual(metrics['time_remaining_seconds'], 200.0)
+        self.assertTrue(metrics['cards'][3]['value'].startswith('≥ '))
 
     def test_sprt_uses_resolved_history_median_and_rolling_game_delta(self):
         self.make_machine(4, 1.0, self.now)
@@ -166,8 +237,51 @@ class IndexMetricsTests(TestCase):
 
         self.assertEqual(metrics['game_remaining'], 80)
         self.assertEqual(metrics['excluded_spsa'], 1)
-        self.assertTrue(math.isinf(metrics['time_remaining_seconds']))
+        # Sin ratio medido, 80 partidas contra la capacidad de 2 threads
+        # (60/45 partidas/min por thread) — antes esto colapsaba a infinito.
+        capacity = 2 * 60.0 / 45.0
+        self.assertAlmostEqual(
+            metrics['time_remaining_seconds'], 80 * 60.0 / capacity
+        )
+        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
         self.assertIn('1 SPSA workload(s)', metrics['cards'][3]['tooltip'])
+
+    def test_sprt_llr_extrapolation_and_stall_floor(self):
+        from OpenBench import index_metrics as im
+        median = 2000.0
+
+        moving = self.make_test(
+            test_mode='SPRT', games=4000,
+            lowerllr=-2.0, currentllr=1.5, upperllr=2.0,
+        )
+        self.assertAlmostEqual(
+            im._sprt_remaining_games(moving, median), 4000 / 0.75 - 4000
+        )
+
+        # LLR ~0 con la mediana ya superada: suelo del 25% en vez de cero.
+        stalled = self.make_test(
+            test_mode='SPRT', games=4000,
+            lowerllr=-2.0, currentllr=0.05, upperllr=2.0,
+        )
+        self.assertAlmostEqual(
+            im._sprt_remaining_games(stalled, median), 500.0
+        )
+
+        # Progreso hacia el bound INFERIOR tambien cuenta como progreso.
+        failing = self.make_test(
+            test_mode='SPRT', games=1000,
+            lowerllr=-2.0, currentllr=-1.0, upperllr=2.0,
+        )
+        self.assertAlmostEqual(
+            im._sprt_remaining_games(failing, median), 1000.0
+        )
+
+    def test_gameplay_uses_last_measured_rate_when_starved(self):
+        from OpenBench import index_metrics as im
+        im._last_gameplay_rate = (50.0, self.now)
+        seconds, estimated = im._gameplay_seconds(8, 0.0, 1000)
+        self.assertAlmostEqual(seconds, 1200.0)
+        self.assertTrue(estimated)
 
     def test_metrics_are_cached_for_thirty_seconds(self):
         machine = self.make_machine(2, 10.0, self.now)
@@ -195,16 +309,30 @@ class IndexMetricsTests(TestCase):
 
     def test_queued_sprt_does_not_poison_datagen_estimate(self):
         # Incidente 2026-07-17: SPRTs encoladas (0 games/min) con datagen
-        # activo y medido colapsaban el total a infinito. Deben reportar
-        # la parte finita como cota inferior.
+        # activo y medido colapsaban el total a infinito. Sin NINGUNA via de
+        # estimacion (0 cores) la parte finita se reporta como cota inferior.
         from OpenBench import index_metrics as im
-        seconds, lower = im._remaining_seconds(
-            has_live_machines=True,
-            games_per_minute=0.0,
-            game_remaining=5000,
-            datagen_seconds=3600.0,
-            datagen_rate_unknown=False,
-            excluded_spsa=0,
+        gameplay, estimated = im._gameplay_seconds(
+            cores=0, games_per_minute=0.0, game_remaining=5000
+        )
+        self.assertIsNone(gameplay)
+        self.assertFalse(estimated)
+
+        seconds, prefix = im._combine_remaining(
+            True, 3600.0, False, False, gameplay, estimated, 5000, 0
         )
         self.assertEqual(seconds, 3600.0)
-        self.assertTrue(lower)
+        self.assertEqual(prefix, '≥ ')
+
+        # Con cores vivos, la cola de gameplay se estima por capacidad y el
+        # total pasa a ser '~' en lugar de una cota.
+        gameplay, estimated = im._gameplay_seconds(
+            cores=32, games_per_minute=0.0, game_remaining=5000
+        )
+        self.assertAlmostEqual(gameplay, 5000 * 60.0 / (32 * 60.0 / 45.0))
+        self.assertTrue(estimated)
+        seconds, prefix = im._combine_remaining(
+            True, 3600.0, False, False, gameplay, estimated, 5000, 0
+        )
+        self.assertAlmostEqual(seconds, 3600.0 + gameplay)
+        self.assertEqual(prefix, '~')
