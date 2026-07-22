@@ -21,6 +21,10 @@ BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 CASCADE_GUARD_LIMIT = 100_000
 PRIORITY_REFRESH_SECONDS = 30.0
+# A legal terminal mate PV remains useful ENGINE evidence when the stronger
+# exhaustive AND/OR certificate cannot be produced promptly.  This is one
+# shared wall-clock allowance for the complete online submission.
+ONLINE_MATE_PROOF_SECONDS = 20.0
 _priority_refresh_cache = {'at': 0.0}
 
 
@@ -62,10 +66,19 @@ def expand(pos):
     return children
 
 
-def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000):
-    """Run all CPU-heavy mate checks before opening a write transaction."""
+def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
+                        deadline_seconds=ONLINE_MATE_PROOF_SECONDS):
+    """Run CPU-heavy mate checks before opening a write transaction.
+
+    Deadline exhaustion degrades a legally verified terminal PV to ENGINE
+    evidence (``INCONCLUSIVE``).  It must never manufacture either an ANDOR
+    proof or a dispute.
+    """
+    deadline = (None if deadline_seconds is None else
+                time.monotonic() + max(0.0, float(deadline_seconds)))
     legal = set(logic.legal_moves(parent_fen))
     prepared = {}
+    candidates = []
     for index, line in enumerate(lines):
         move = line.get('move')
         pv = line.get('pv')
@@ -79,11 +92,22 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000):
             continue
         winner_white = mate > 0
         pv_rest = pv[1:]
-        if not logic.verify_mate_pv(child_fen, pv_rest, winner_white):
+        if not logic.verify_mate_pv(
+                child_fen, pv_rest, winner_white, deadline=deadline):
             continue
-        proof_result = logic.prove_forced_mate(
-            child_fen, winner_white, max_plies=len(pv_rest) + 2,
-            budget_positions=budget_positions, hint_pv=pv_rest)
+        candidates.append((len(pv_rest), index, child_fen,
+                           winner_white, pv_rest))
+
+    # Certify shortest witnesses first while preserving original MultiPV
+    # indexes for the ingestion map.
+    for _, index, child_fen, winner_white, pv_rest in sorted(candidates):
+        if deadline is not None and time.monotonic() >= deadline:
+            proof_result = 'INCONCLUSIVE'
+        else:
+            proof_result = logic.prove_forced_mate(
+                child_fen, winner_white, max_plies=len(pv_rest) + 2,
+                budget_positions=budget_positions, hint_pv=pv_rest,
+                deadline=deadline)
         prepared[index] = (winner_white, pv_rest, proof_result)
     return prepared
 

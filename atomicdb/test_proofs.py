@@ -46,6 +46,27 @@ class ForcedMateProofTests(SimpleTestCase):
             'INCONCLUSIVE',
         )
 
+    def test_inconclusive_when_wall_deadline_has_expired(self):
+        self.assertEqual(
+            logic.prove_forced_mate(
+                FORCED_MATE_FEN, True, 3, budget_positions=200_000,
+                hint_pv=FORCED_MATE_PV, deadline=0),
+            'INCONCLUSIVE',
+        )
+
+    @patch('atomicdb.ingest.logic.prove_forced_mate')
+    @patch('atomicdb.ingest.logic.verify_mate_pv', return_value=True)
+    def test_online_proof_deadline_is_shared_and_fail_safe(
+            self, verify, prove):
+        prepared = ingest.prepare_mate_proofs(FORCED_MATE_FEN, [{
+            'move': FORCED_MATE_PV[0],
+            'pv': FORCED_MATE_PV,
+            'mate': 2,
+        }], deadline_seconds=0)
+
+        self.assertEqual(prepared[0][2], 'INCONCLUSIVE')
+        prove.assert_not_called()
+
     def test_no_mate_for_cooperative_but_non_forced_line(self):
         self.assertTrue(logic.verify_mate_pv(
             COOPERATIVE_FEN, COOPERATIVE_PV, True))

@@ -17,6 +17,49 @@ import time
 
 import requests
 
+SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
+SUBMIT_READ_TIMEOUT_SECONDS = 600
+SUBMIT_RETRY_INITIAL_SECONDS = 15
+SUBMIT_RETRY_MAX_SECONDS = 300
+
+
+def _submit_until_definitive(server, payload, task_id):
+    """Keep one immutable result until the server answers definitively."""
+    failures = 0
+    transient_statuses = {408, 425, 429}
+    while True:
+        try:
+            response = requests.post(
+                server + '/atomicdb/api/submit', data=payload,
+                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
+                         SUBMIT_READ_TIMEOUT_SECONDS))
+            if (response.status_code >= 500
+                    or response.status_code in transient_statuses):
+                raise requests.RequestException(
+                    f'transient HTTP {response.status_code}')
+            if 200 <= response.status_code < 300:
+                try:
+                    body = response.json()
+                except Exception as exc:
+                    raise requests.RequestException(
+                        'non-JSON success response') from exc
+                if not isinstance(body, dict) or not body.get('ok'):
+                    raise requests.RequestException(
+                        'success response did not acknowledge the submit')
+            elif not 400 <= response.status_code < 500:
+                raise requests.RequestException(
+                    f'indeterminate HTTP {response.status_code}')
+            return response
+        except requests.RequestException as exc:
+            failures += 1
+            delay = min(
+                SUBMIT_RETRY_INITIAL_SECONDS
+                * (2 ** min(failures - 1, 5)),
+                SUBMIT_RETRY_MAX_SECONDS)
+            print(f'task {task_id} submit transport error: {exc}; '
+                  f'retrying the same result in {delay}s', flush=True)
+            time.sleep(delay)
+
 
 class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
@@ -212,10 +255,10 @@ def main():
             wdl = probe_tb(tb, t['fen'])
             if wdl is not None:
                 try:
-                    rr = requests.post(a.S + '/atomicdb/api/submit', data={
+                    rr = _submit_until_definitive(a.S, {
                         **auth, 'task_id': t['id'], 'lines': '[]',
                         'elapsed': f'{time.time() - t0:.2f}',
-                        'tb_wdl': wdl}, timeout=60)
+                        'tb_wdl': wdl}, t['id'])
                     print(f"task {t['id']} TB wdl={wdl} -> "
                           f"{rr.json().get('summary')}", flush=True)
                 except Exception as e:
@@ -239,11 +282,11 @@ def main():
                 if m:
                     searched = max(searched, int(m.group(1)))
             try:
-                rr = requests.post(a.S + '/atomicdb/api/submit', data={
+                rr = _submit_until_definitive(a.S, {
                     **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
                     'elapsed': f'{time.time() - t0:.2f}',
                     'nodes': searched,
-                }, timeout=120)
+                }, t['id'])
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
                 s = f'submit error: {e}'
