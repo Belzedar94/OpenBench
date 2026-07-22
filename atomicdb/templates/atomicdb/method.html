@@ -48,7 +48,15 @@ python atomicdb_worker.py -U your_user -P your_pass     -S https://belzedar.duck
 <p class="dim" style="font-size:.9rem">The worker is a single self-contained
 file (it also lives in the
 <a href="https://github.com/Belzedar94/OpenBench">OpenBench repo</a> under
-<code>Client/</code> if you prefer git).</p>
+<code>Client/</code> if you prefer git). It checks the official HTTPS source
+for updates at startup and between completed task batches, validates the new
+file, keeps the previous version as a backup, and restarts itself without
+interrupting a search or an uncertain result submission. Use
+<code>--no-auto-update</code> only if you intentionally maintain a custom
+worker file.</p>
+<p class="dim" style="font-size:.9rem">Existing copies from before build
+<code>2026072201</code> need one final manual download because they do not yet
+contain the updater. From that build onward, no repeated download is needed.</p>
 <p class="dim" style="font-size:.9rem">Have your own
 <a href="https://github.com/Belzedar94/Atomic-Stockfish">Atomic-Stockfish</a>
 build? Point at it with <code>--engine path/to/binary</code>.</p>

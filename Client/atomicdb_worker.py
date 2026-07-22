@@ -9,18 +9,294 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 """
 
 import argparse
+import ast
+import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
+# Bump this integer for every published change to this worker.  It is the
+# downgrade/replay guard used by the self-updater; do not reuse a build number.
+ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
+ATOMICDB_WORKER_BUILD = 2026072201
+WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
+WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
+WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
+WORKER_UPDATE_MAX_BYTES = 1024 * 1024
 SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
 SUBMIT_READ_TIMEOUT_SECONDS = 600
 SUBMIT_RETRY_INITIAL_SECONDS = 15
 SUBMIT_RETRY_MAX_SECONDS = 300
+
+
+class WorkerUpdateError(Exception):
+    pass
+
+
+def _worker_build(source):
+    """Validate worker structure and read its build without executing it."""
+    try:
+        text = source.decode('utf-8', errors='strict')
+        tree = ast.parse(text)
+    except (UnicodeError, SyntaxError) as exc:
+        raise WorkerUpdateError(f'invalid worker source: {exc}') from exc
+
+    names = ('ATOMICDB_WORKER_UPDATE_PROTOCOL', 'ATOMICDB_WORKER_BUILD')
+    values = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        assigned = [target.id for target in node.targets
+                    if isinstance(target, ast.Name) and target.id in names]
+        if not assigned:
+            continue
+        if len(node.targets) != 1 or len(assigned) != 1:
+            raise WorkerUpdateError(
+                'worker version assignments must be simple')
+        name = assigned[0]
+        if name in values:
+            raise WorkerUpdateError(f'duplicate worker assignment: {name}')
+        if (not isinstance(node.value, ast.Constant)
+                or not isinstance(node.value.value, int)
+                or isinstance(node.value.value, bool)):
+            raise WorkerUpdateError(
+                f'worker assignment is not an integer: {name}')
+        values[name] = node.value.value
+
+    protocol = values.get('ATOMICDB_WORKER_UPDATE_PROTOCOL')
+    build = values.get('ATOMICDB_WORKER_BUILD')
+    if protocol != ATOMICDB_WORKER_UPDATE_PROTOCOL:
+        raise WorkerUpdateError('unsupported or missing update protocol')
+    if build is None:
+        raise WorkerUpdateError('missing worker build')
+
+    functions = {node.name for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    required_functions = {
+        'main', '_install_worker_update', '_submit_until_definitive'}
+    if not required_functions.issubset(functions) or 'Engine' not in classes:
+        raise WorkerUpdateError('worker source is missing required structure')
+
+    has_main_guard = any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == '__name__'
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.Eq)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value == '__main__'
+        and any(isinstance(child, ast.Expr)
+                and isinstance(child.value, ast.Call)
+                and isinstance(child.value.func, ast.Name)
+                and child.value.func.id == 'main'
+                for child in node.body)
+        for node in tree.body)
+    if not has_main_guard:
+        raise WorkerUpdateError('worker source is missing its main guard')
+    return build
+
+
+def _download_worker(server):
+    """Fetch the worker only from a fixed path on the exact HTTPS origin."""
+    origin = urlparse(server)
+    if (origin.scheme != 'https' or not origin.hostname
+            or origin.username or origin.password):
+        raise WorkerUpdateError(
+            'auto-update requires a credential-free HTTPS -S URL')
+    url = server.rstrip('/') + '/atomicdb/engines/atomicdb_worker.py'
+    # The query prevents an intermediary from replaying an old cached worker.
+    url += f'?current_build={ATOMICDB_WORKER_BUILD}&_={int(time.time())}'
+    response = None
+    try:
+        response = requests.get(
+            url,
+            timeout=(WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS,
+                     WORKER_UPDATE_READ_TIMEOUT_SECONDS),
+            stream=True,
+            allow_redirects=False,
+            headers={
+                'Cache-Control': 'no-cache',
+                'Accept-Encoding': 'identity',
+            },
+        )
+        if 300 <= response.status_code < 400:
+            raise WorkerUpdateError('worker download redirected')
+        response.raise_for_status()
+        final = urlparse(response.url)
+        if ((final.scheme, final.hostname, final.port)
+                != (origin.scheme, origin.hostname, origin.port)):
+            raise WorkerUpdateError('worker download changed origin')
+        encoding = response.headers.get('Content-Encoding', 'identity').lower()
+        if encoding != 'identity':
+            raise WorkerUpdateError('worker download used unexpected encoding')
+        declared = response.headers.get('Content-Length')
+        if declared is not None:
+            try:
+                declared = int(declared)
+            except ValueError as exc:
+                raise WorkerUpdateError('invalid worker Content-Length') from exc
+            if declared < 1 or declared > WORKER_UPDATE_MAX_BYTES:
+                raise WorkerUpdateError('worker download has an invalid size')
+        chunks = []
+        received = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > WORKER_UPDATE_MAX_BYTES:
+                raise WorkerUpdateError('worker download exceeds the size limit')
+            chunks.append(chunk)
+        if declared is not None and received != declared:
+            raise WorkerUpdateError('worker download length mismatch')
+        if received == 0:
+            raise WorkerUpdateError('worker download is empty')
+        return b''.join(chunks)
+    except requests.RequestException as exc:
+        raise WorkerUpdateError(f'worker download failed: {exc}') from exc
+    finally:
+        if response is not None:
+            response.close()
+
+
+@contextmanager
+def _worker_update_lock(script):
+    """Best-effort cross-platform lock for workers sharing one script."""
+    lock_path = script.with_name(script.name + '.update.lock')
+    handle = open(lock_path, 'a+b')
+    locked = False
+    try:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b'0')
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        locked = True
+        yield True
+    finally:
+        if locked:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
+
+
+def _atomic_write(path, content, mode):
+    """Write and fsync a sibling temp, then atomically replace path."""
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp',
+                                     dir=str(path.parent))
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, mode)
+        if (hashlib.sha256(temp.read_bytes()).digest()
+                != hashlib.sha256(content).digest()):
+            raise WorkerUpdateError('staged worker hash mismatch')
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _install_worker_update(server, script_path=None):
+    """Install a newer official worker. Return True when restart is needed.
+
+    All errors are fail-open: the currently running, known-good worker remains
+    in memory and callers may continue processing tasks.
+    """
+    script = Path(script_path or os.path.abspath(__file__))
+    try:
+        candidate = _download_worker(server)
+        remote_build = _worker_build(candidate)
+        candidate.decode('utf-8', errors='strict')
+        compile(candidate, str(script), 'exec')
+        if remote_build < ATOMICDB_WORKER_BUILD:
+            raise WorkerUpdateError(
+                f'refusing worker downgrade {ATOMICDB_WORKER_BUILD}->{remote_build}')
+        if remote_build == ATOMICDB_WORKER_BUILD:
+            return False
+        if script.is_symlink() or not script.is_file():
+            raise WorkerUpdateError('worker script is not a regular file')
+        with _worker_update_lock(script) as acquired:
+            if not acquired:
+                return False
+            current = script.read_bytes()
+            disk_build = _worker_build(current)
+            if current == candidate:
+                # Another worker installed it while this process kept running.
+                return True
+            if disk_build > remote_build:
+                raise WorkerUpdateError(
+                    f'refusing worker downgrade {disk_build}->{remote_build}')
+            if disk_build == remote_build:
+                raise WorkerUpdateError(
+                    f'worker build {remote_build} was reused with different bytes')
+            mode = stat.S_IMODE(script.stat().st_mode)
+            backup = script.with_name(script.name + '.previous')
+            _atomic_write(backup, current, mode)
+            _atomic_write(script, candidate, mode)
+            if script.read_bytes() != candidate:
+                raise WorkerUpdateError('installed worker verification failed')
+        print(f'AtomicDB worker update: build {ATOMICDB_WORKER_BUILD} -> '
+              f'{remote_build}; restarting between batches', flush=True)
+        return True
+    # Updating is optional infrastructure: a bug, permission problem or odd
+    # HTTP response here must never stop a known-good analysis worker.
+    except Exception as exc:
+        print(f'AtomicDB worker auto-update skipped: {exc}', flush=True)
+        return False
+
+
+def _restart_updated_worker(script_path=None):
+    """Exec the installed worker; keep running old code if exec itself fails.
+
+    The validated new file stays on disk and ``.previous`` remains available
+    for manual recovery. Automatic rollback here would race with another
+    process that already restarted successfully from the shared script.
+    """
+    script = Path(script_path or os.path.abspath(__file__))
+    try:
+        os.execv(sys.executable,
+                 [sys.executable, str(script), *sys.argv[1:]])
+    except OSError as exc:
+        print(f'AtomicDB worker restart failed: {exc}; the validated update '
+              'is installed and will load on the next start', flush=True)
+        return False
+    return True
 
 
 def _submit_until_definitive(server, payload, task_id):
@@ -213,7 +489,12 @@ def main():
     ap.add_argument('--hash', type=int, default=512)
     ap.add_argument('--syzygy', default='', help='dirs de TB atomicas separados por ;')
     ap.add_argument('--once', action='store_true')
+    ap.add_argument('--no-auto-update', action='store_true',
+                    help='no actualizar este archivo desde el servidor oficial')
     a = ap.parse_args()
+
+    if not a.no_auto_update and _install_worker_update(a.S):
+        _restart_updated_worker()
 
     tb = None
     if a.syzygy:
@@ -235,8 +516,19 @@ def main():
             'os': f'{platform.system()} {platform.release()}'}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)
+    next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
 
     while True:
+        # This is deliberately the only periodic update checkpoint: the prior
+        # leased batch has been fully analysed and definitively submitted.
+        if (not a.no_auto_update
+                and time.monotonic() >= next_update_check):
+            next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
+            if _install_worker_update(a.S):
+                eng.close()
+                if not _restart_updated_worker():
+                    eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
+                                 syzygy=a.syzygy)
         try:
             r = requests.post(a.S + '/atomicdb/api/lease', data=auth, timeout=60)
             tasks = r.json().get('tasks', [])
