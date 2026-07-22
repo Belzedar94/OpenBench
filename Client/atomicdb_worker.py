@@ -32,6 +32,7 @@ ATOMICDB_WORKER_BUILD = 2026072201
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
+WORKER_UPDATE_TOTAL_TIMEOUT_SECONDS = 60
 WORKER_UPDATE_MAX_BYTES = 1024 * 1024
 SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
 SUBMIT_READ_TIMEOUT_SECONDS = 600
@@ -152,7 +153,10 @@ def _download_worker(server):
                 raise WorkerUpdateError('worker download has an invalid size')
         chunks = []
         received = 0
+        deadline = time.monotonic() + WORKER_UPDATE_TOTAL_TIMEOUT_SECONDS
         for chunk in response.iter_content(chunk_size=64 * 1024):
+            if time.monotonic() > deadline:
+                raise WorkerUpdateError('worker download exceeded its deadline')
             if not chunk:
                 continue
             received += len(chunk)

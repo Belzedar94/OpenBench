@@ -142,6 +142,22 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
+    @mock.patch('Client.atomicdb_worker.time.monotonic')
+    @mock.patch('Client.atomicdb_worker.requests.get')
+    def test_trickling_response_has_a_total_deadline(self, get, monotonic):
+        get.return_value = _Response(_source(
+            atomicdb_worker.ATOMICDB_WORKER_BUILD + 1))
+        monotonic.side_effect = [
+            100,
+            100 + atomicdb_worker.WORKER_UPDATE_TOTAL_TIMEOUT_SECONDS + 1,
+        ]
+
+        changed = atomicdb_worker._install_worker_update(
+            'https://example.invalid', self.script)
+
+        self.assertFalse(changed)
+        self.assertEqual(self.script.read_bytes(), self.current)
+
     @mock.patch('Client.atomicdb_worker._atomic_write')
     @mock.patch('Client.atomicdb_worker.requests.get')
     def test_write_failure_is_fail_open(self, get, atomic_write):
