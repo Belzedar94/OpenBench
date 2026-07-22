@@ -1,5 +1,4 @@
 import datetime
-import math
 
 from django.contrib.auth.models import User
 from django.test import Client, TestCase
@@ -125,8 +124,8 @@ class IndexMetricsTests(TestCase):
 
     def test_datagen_single_completion_falls_back_to_fleet_heuristic(self):
         # Un solo chunk completado no da intervalo: antes esto inflaba la
-        # tasa (posiciones/minutos-desde-la-subida). Ahora usa la heuristica
-        # de flota: nps / (nodes x overhead).
+        # tasa (posiciones/minutos-desde-la-subida). Sin historia previa,
+        # usa la heuristica de flota: nps / (nodes x overhead).
         self.make_machine(2, 1.0, self.now)  # 2 threads x 1 Mnps = 2e6 nps
         test = self.make_datagen(chunks=2, per_chunk=500)
         self.complete_chunk(test, 0, self.now - datetime.timedelta(seconds=60))
@@ -142,7 +141,7 @@ class IndexMetricsTests(TestCase):
         self.assertAlmostEqual(
             metrics['time_remaining_seconds'], 500 / expected_rate
         )
-        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
+        self.assertEqual(metrics['cards'][3]['value'], '<1m')
 
     def test_datagen_without_completions_still_counts_via_heuristic(self):
         # "Ni siquiera tiene en cuenta el datagen de atomic": tests DATAGEN
@@ -157,9 +156,12 @@ class IndexMetricsTests(TestCase):
         self.assertAlmostEqual(
             metrics['time_remaining_seconds'], 2000 / expected_rate
         )
-        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
+        self.assertEqual(metrics['cards'][3]['value'], '<1m')
 
-    def test_datagen_unparsable_nodes_reports_lower_bound(self):
+    def test_datagen_unparsable_nodes_uses_pessimistic_history(self):
+        # Sin `nodes` parseable el valor sigue siendo ABSOLUTO: gana el
+        # candidato mas lento entre la mediana historica (5 pos/s, medida
+        # del test hermano) y la heuristica con 10k nodos asumidos (11.1).
         self.make_machine(2, 1.0, self.now)
         self.make_datagen(
             chunks=2, per_chunk=500, command='datagen count {COUNT} out {OUT}'
@@ -174,9 +176,11 @@ class IndexMetricsTests(TestCase):
 
         metrics = get_index_metrics(now=self.now)
 
-        # La parte medible (5 pos/s, 1000 restantes) aparece como cota.
-        self.assertAlmostEqual(metrics['time_remaining_seconds'], 200.0)
-        self.assertTrue(metrics['cards'][3]['value'].startswith('≥ '))
+        # Medido: 1000 restantes a 5 pos/s = 200s. Sin nodes: 1000 restantes
+        # a min(5 historico, 11.1 heuristica) = 5 pos/s = 200s. Total 400s.
+        self.assertAlmostEqual(metrics['time_remaining_seconds'], 400.0)
+        self.assertTrue(metrics['datagen_estimated'])
+        self.assertEqual(metrics['cards'][3]['value'], '7m')
 
     def test_sprt_uses_resolved_history_median_and_rolling_game_delta(self):
         self.make_machine(4, 1.0, self.now)
@@ -235,15 +239,17 @@ class IndexMetricsTests(TestCase):
 
         metrics = get_index_metrics(now=self.now)
 
-        self.assertEqual(metrics['game_remaining'], 80)
+        # La SPSA sin metadata ya no desaparece: se le carga la mediana SPRT
+        # (fallback 15000 al no haber historia resuelta).
+        self.assertEqual(metrics['game_remaining'], 80 + 15000)
         self.assertEqual(metrics['excluded_spsa'], 1)
-        # Sin ratio medido, 80 partidas contra la capacidad de 2 threads
-        # (60/45 partidas/min por thread) — antes esto colapsaba a infinito.
+        # Sin ratio medido, contra la capacidad de 2 threads (60/45
+        # partidas/min por thread) — antes esto colapsaba a infinito.
         capacity = 2 * 60.0 / 45.0
         self.assertAlmostEqual(
-            metrics['time_remaining_seconds'], 80 * 60.0 / capacity
+            metrics['time_remaining_seconds'], 15080 * 60.0 / capacity
         )
-        self.assertTrue(metrics['cards'][3]['value'].startswith('~'))
+        self.assertEqual(metrics['cards'][3]['value'], '3d 22h')
         self.assertIn('1 SPSA workload(s)', metrics['cards'][3]['tooltip'])
 
     def test_sprt_llr_extrapolation_and_stall_floor(self):
@@ -307,32 +313,20 @@ class IndexMetricsTests(TestCase):
             self.assertContains(response, label)
         self.assertContains(response, b'ESTIMATE:')
 
-    def test_queued_sprt_does_not_poison_datagen_estimate(self):
+    def test_starved_gameplay_always_gets_absolute_estimate(self):
         # Incidente 2026-07-17: SPRTs encoladas (0 games/min) con datagen
-        # activo y medido colapsaban el total a infinito. Sin NINGUNA via de
-        # estimacion (0 cores) la parte finita se reporta como cota inferior.
+        # activo colapsaban el total a infinito. Ahora SIEMPRE hay numero:
+        # capacidad por threads, con suelo de 1 thread en el caso degenerado.
         from OpenBench import index_metrics as im
-        gameplay, estimated = im._gameplay_seconds(
-            cores=0, games_per_minute=0.0, game_remaining=5000
-        )
-        self.assertIsNone(gameplay)
-        self.assertFalse(estimated)
 
-        seconds, prefix = im._combine_remaining(
-            True, 3600.0, False, False, gameplay, estimated, 5000, 0
-        )
-        self.assertEqual(seconds, 3600.0)
-        self.assertEqual(prefix, '≥ ')
-
-        # Con cores vivos, la cola de gameplay se estima por capacidad y el
-        # total pasa a ser '~' en lugar de una cota.
         gameplay, estimated = im._gameplay_seconds(
             cores=32, games_per_minute=0.0, game_remaining=5000
         )
         self.assertAlmostEqual(gameplay, 5000 * 60.0 / (32 * 60.0 / 45.0))
         self.assertTrue(estimated)
-        seconds, prefix = im._combine_remaining(
-            True, 3600.0, False, False, gameplay, estimated, 5000, 0
+
+        gameplay, estimated = im._gameplay_seconds(
+            cores=0, games_per_minute=0.0, game_remaining=5000
         )
-        self.assertAlmostEqual(seconds, 3600.0 + gameplay)
-        self.assertEqual(prefix, '~')
+        self.assertAlmostEqual(gameplay, 5000 * 60.0 / (60.0 / 45.0))
+        self.assertTrue(estimated)

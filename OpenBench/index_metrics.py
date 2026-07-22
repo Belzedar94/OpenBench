@@ -1,5 +1,4 @@
 import datetime
-import math
 import re
 import statistics
 import threading
@@ -18,11 +17,13 @@ SPRT_GAMES_FALLBACK = 15000
 
 # Steady-state datagen rate: sliding window over chunk completion timestamps.
 DATAGEN_RATE_WINDOW = datetime.timedelta(hours=3)
-# Fallback for datagen without two completed chunks: kept positions cost about
-# this many times the nominal `nodes` per position once filters, random-move
-# replays and discarded games are paid for. Measured on run8 (2026-07-22):
-# fleet 15.1M nps, nodes 10000, 84 positions/sec -> overhead 17.96.
+# Fallback for datagen without a measurable or historical rate: kept positions
+# cost about this many times the nominal `nodes` per position once filters,
+# random-move replays and discarded games are paid for. Measured on run8
+# (2026-07-22): fleet 15.1M nps, nodes 10000, 84 positions/sec -> 17.96.
 DATAGEN_NODES_OVERHEAD = 18.0
+# Last-resort nodes assumption when the command has no parsable `nodes` token.
+DATAGEN_ASSUMED_NODES = 10000
 # Capacity fallback when no gameplay rate was ever measured: one game occupies
 # one worker thread for roughly this long at the STC-ish controls in use here.
 SECONDS_PER_GAME_THREAD = 45.0
@@ -39,6 +40,7 @@ _cache_timestamp = None
 _cache_value = None
 _result_samples = deque()
 _sprt_expected_games = None
+_historical_datagen_rate = None
 _last_gameplay_rate = None
 _state_lock = threading.Lock()
 
@@ -47,12 +49,13 @@ def reset_index_metrics_state():
     """Clear process-local state. Public so deterministic tests can reset it."""
 
     global _cache_timestamp, _cache_value, _sprt_expected_games
-    global _last_gameplay_rate
+    global _historical_datagen_rate, _last_gameplay_rate
     with _state_lock:
         _cache_timestamp = None
         _cache_value = None
         _result_samples.clear()
         _sprt_expected_games = None
+        _historical_datagen_rate = None
         _last_gameplay_rate = None
 
 
@@ -105,23 +108,14 @@ def _compute_index_metrics(now):
         cores, games_per_minute, work['game_remaining']
     )
 
-    remaining_seconds, prefix = _combine_remaining(
-        bool(machines),
-        work['datagen_seconds'],
-        work['datagen_estimated'],
-        work['datagen_rate_unknown'],
-        gameplay_seconds,
-        gameplay_estimated,
-        work['game_remaining'],
-        work['excluded_spsa'],
-    )
-
-    if not machines or remaining_seconds is None:
+    # Absolute by design: every queued workload contributes its best (and,
+    # when uncertain, pessimistic) estimate. No bounds, no infinities.
+    if not machines:
+        remaining_seconds = None
         remaining_display = '—'
-    elif math.isinf(remaining_seconds):
-        remaining_display = '∞'
     else:
-        remaining_display = prefix + _format_duration(remaining_seconds)
+        remaining_seconds = work['datagen_seconds'] + gameplay_seconds
+        remaining_display = _format_duration(remaining_seconds)
 
     games_tooltip = (
         '10-minute rolling delta of Result.games sampled in memory; '
@@ -133,23 +127,28 @@ def _compute_index_metrics(now):
     )
 
     partial = (
-        ' %d SPSA workload(s) without usable iterations/pairs_per are excluded.'
+        ' %d SPSA workload(s) without usable iterations/pairs_per are '
+        'assumed at the SPRT-median games.'
         % work['excluded_spsa']
         if work['excluded_spsa']
         else ''
     )
     time_tooltip = (
-        'ESTIMATE: full queue, priority-sequential. Generic DATAGEN uses the '
-        'measured chunk-completion rate (3h sliding window, first chunk '
-        'anchors the clock); with fewer than 2 completed chunks it falls back '
-        'to fleet-NPS / (nodes × %.0f). Gameplay divides remaining expected '
-        'games by the live 10-minute rate, else the last measured rate, else '
-        'a %.0fs-per-game-thread capacity model. Active SPRTs assume the '
-        'resolved-history median (%.1f; %d fallback), extrapolated by LLR '
-        'progress and floored at %.0f%% of the median when stalled. '
-        '"~" marks heuristic components; "≥" marks unestimable remainders.%s'
+        'ESTIMATE: full queue, priority-sequential, always absolute — when a '
+        'rate is uncertain the pessimistic candidate wins. Generic DATAGEN '
+        'uses the measured chunk-completion rate (3h sliding window, first '
+        'chunk anchors the clock); without 2 completed chunks it takes the '
+        'SLOWEST of the historical per-test datagen rate (median across all '
+        'tests with 2+ completed chunks, idle time included) and fleet-NPS / '
+        '(nodes × %.0f), assuming %d nodes when the command names none. '
+        'Gameplay divides remaining expected games by the live 10-minute '
+        'rate, else the last measured rate, else a %.0fs-per-game-thread '
+        'capacity model. Active SPRTs assume the resolved-history median '
+        '(%.1f; %d fallback), extrapolated by LLR progress and floored at '
+        '%.0f%% of the median when stalled.%s'
         % (
             DATAGEN_NODES_OVERHEAD,
+            DATAGEN_ASSUMED_NODES,
             SECONDS_PER_GAME_THREAD,
             expected_sprt_games,
             SPRT_GAMES_FALLBACK,
@@ -289,6 +288,44 @@ def _historical_sprt_games():
     return _sprt_expected_games
 
 
+def _historical_datagen_pos_per_second():
+    """Median per-test datagen rate over every test with 2+ completed chunks.
+
+    Computed once per server process from all-time completion intervals, so
+    worker downtime between chunks is priced in — deliberately pessimistic,
+    which is the requested bias for queued datagen that has not started.
+    Returns 0.0 when the server has no usable datagen history yet.
+    """
+
+    global _historical_datagen_rate
+    if _historical_datagen_rate is not None:
+        return _historical_datagen_rate
+
+    per_test = defaultdict(list)
+    rows = (
+        DatagenChunk.objects.filter(status=DatagenChunk.COMPLETED)
+        .exclude(completed=None)
+        .order_by('completed')
+        .values_list('test_id', 'completed', 'position_count')
+    )
+    for test_id, completed, count in rows:
+        per_test[test_id].append((completed, max(count, 0)))
+
+    rates = []
+    for completions in per_test.values():
+        if len(completions) < 2:
+            continue
+        span = (completions[-1][0] - completions[0][0]).total_seconds()
+        if span <= 0:
+            continue
+        positions = sum(count for _completed, count in completions[1:])
+        if positions > 0:
+            rates.append(positions / span)
+
+    _historical_datagen_rate = statistics.median(rates) if rates else 0.0
+    return _historical_datagen_rate
+
+
 def _sprt_remaining_games(test, median):
     """Expected further games for one active SPRT.
 
@@ -336,15 +373,28 @@ def _measured_datagen_rate(completions, now):
 
 
 def _heuristic_datagen_rate(command, fleet_nps):
-    """Fleet-capacity guess for datagen without two completed chunks."""
+    """Fleet-capacity guess from the command's nodes-per-position budget."""
 
+    if fleet_nps <= 0:
+        return None
     match = _NODES_RE.search(command or '')
-    if not match or fleet_nps <= 0:
-        return None
-    nodes = int(match.group(1))
+    nodes = int(match.group(1)) if match else DATAGEN_ASSUMED_NODES
     if nodes <= 0:
-        return None
+        nodes = DATAGEN_ASSUMED_NODES
     return fleet_nps / (nodes * DATAGEN_NODES_OVERHEAD)
+
+
+def _fallback_datagen_rate(command, fleet_nps):
+    """Slowest available estimate for datagen without a measured rate."""
+
+    candidates = []
+    historical = _historical_datagen_pos_per_second()
+    if historical > 0:
+        candidates.append(historical)
+    heuristic = _heuristic_datagen_rate(command, fleet_nps)
+    if heuristic:
+        candidates.append(heuristic)
+    return min(candidates) if candidates else None
 
 
 def _remaining_work(now, expected_sprt_games, fleet_nps):
@@ -374,7 +424,10 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
             iterations = _positive_int((test.spsa or {}).get('iterations'))
             pairs_per = _positive_int((test.spsa or {}).get('pairs_per'))
             if iterations is None or pairs_per is None:
+                # No metadata to size it: charge the SPRT-median profile
+                # rather than dropping the workload from the total.
                 excluded_spsa += 1
+                game_remaining += expected_sprt_games
                 continue
             game_remaining += max(2 * iterations * pairs_per - test.games, 0)
         elif test.test_mode in ['GAMES', 'DATAGEN']:
@@ -386,7 +439,6 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
     datagen_seconds = 0.0
     datagen_positions_per_second = 0.0
     datagen_estimated = False
-    datagen_rate_unknown = False
 
     if datagen_tests:
         completions = defaultdict(list)
@@ -416,9 +468,10 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
 
             rate = _measured_datagen_rate(completions[test.id], now)
             if rate is None:
-                rate = _heuristic_datagen_rate(test.datagen_command, fleet_nps)
+                rate = _fallback_datagen_rate(test.datagen_command, fleet_nps)
                 if rate is None:
-                    datagen_rate_unknown = True
+                    # Only reachable with zero live fleet NPS and no history;
+                    # the card renders '—' without live machines anyway.
                     continue
                 datagen_estimated = True
 
@@ -432,17 +485,17 @@ def _remaining_work(now, expected_sprt_games, fleet_nps):
         'datagen_positions_per_second': datagen_positions_per_second,
         'datagen_seconds': datagen_seconds,
         'datagen_estimated': datagen_estimated,
-        'datagen_rate_unknown': datagen_rate_unknown,
     }
 
 
 def _gameplay_seconds(cores, games_per_minute, game_remaining):
-    """Seconds for queued gameplay -> (seconds or None, heuristic flag).
+    """Seconds for queued gameplay -> (seconds, heuristic flag). Never None.
 
     While a max-priority datagen monopolizes every worker the live gameplay
     rate is zero, but the queued SPRTs still cost real time once the datagen
     drains. Prefer the last measured rate this process saw; fall back to a
-    per-thread capacity model so a cold process still reports the queue.
+    per-thread capacity model (at least one thread) so the queue always
+    contributes an absolute number.
     """
 
     if game_remaining <= 0:
@@ -452,48 +505,8 @@ def _gameplay_seconds(cores, games_per_minute, game_remaining):
     if _last_gameplay_rate is not None:
         rate, _measured_at = _last_gameplay_rate
         return 60.0 * game_remaining / rate, True
-    if cores > 0:
-        capacity = cores * 60.0 / SECONDS_PER_GAME_THREAD
-        return 60.0 * game_remaining / capacity, True
-    return None, False
-
-
-def _combine_remaining(
-    has_live_machines,
-    datagen_seconds,
-    datagen_estimated,
-    datagen_rate_unknown,
-    gameplay_seconds,
-    gameplay_estimated,
-    game_remaining,
-    excluded_spsa,
-):
-    """Total the priority-sequential components -> (seconds, display prefix)."""
-
-    if not has_live_machines:
-        return None, ''
-
-    known_seconds = datagen_seconds
-    unknown = datagen_rate_unknown
-
-    if gameplay_seconds is None:
-        unknown = unknown or game_remaining > 0
-    else:
-        known_seconds += gameplay_seconds
-
-    if known_seconds == 0:
-        if unknown:
-            return math.inf, ''
-        # If every active workload is an unestimable SPSA, avoid claiming zero.
-        if excluded_spsa:
-            return None, ''
-
-    prefix = ''
-    if unknown:
-        prefix = '≥ '
-    elif datagen_estimated or gameplay_estimated:
-        prefix = '~'
-    return known_seconds, prefix
+    capacity = max(cores, 1) * 60.0 / SECONDS_PER_GAME_THREAD
+    return 60.0 * game_remaining / capacity, True
 
 
 def _number(value):
