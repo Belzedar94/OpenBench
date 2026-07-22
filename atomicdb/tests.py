@@ -1,9 +1,11 @@
 """M1 gate (spec §7): mates conocidos cierran, fortalezas sinteticas NO,
 completitud de movegen, backup determinista bajo replay."""
 
+from datetime import timedelta
 from unittest import mock
 
 from django.test import TestCase
+from django.utils import timezone
 
 from . import ingest, logic
 from .models import AnalysisTask, Edge, Position
@@ -337,6 +339,95 @@ class RequestTests(TestCase):
         self.assertEqual(t.source, 'USER')
         self.assertGreaterEqual(t.budget_nodes, ingest.BUDGET_LADDER[2])
 
+    def test_reanalysis_uses_128m_512m_2b_10b_staircase(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        expected = ingest.REQUEST_BUDGET_LADDER
+        for generation, budget in enumerate(expected):
+            self.assertEqual(ingest.request_analysis(p), 'queued')
+            task = AnalysisTask.objects.get(position=p,
+                                             generation=generation)
+            self.assertEqual(task.budget_nodes, budget)
+            task.state = 'COMPLETED'
+            task.save(update_fields=['state'])
+            p.visits = generation + 1
+            p.save(update_fields=['visits'])
+
+        self.assertEqual(ingest.request_analysis(p), 'queued')
+        self.assertEqual(AnalysisTask.objects.get(
+            position=p, generation=len(expected)).budget_nodes, expected[-1])
+
+    def test_reanalysis_refreshes_stale_position_before_selecting_rung(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        AnalysisTask.objects.create(
+            position=p, generation=0, budget_nodes=128_000_000,
+            state=AnalysisTask.TState.COMPLETED)
+        # Deliberately leave ``p`` stale, as happens when submit advances the
+        # position between the page render and the public request.
+        Position.objects.filter(pk=p.pk).update(visits=1)
+
+        self.assertEqual(ingest.request_analysis(p), 'queued')
+
+        follow_up = AnalysisTask.objects.get(position=p, generation=1)
+        self.assertEqual(follow_up.budget_nodes, 512_000_000)
+
+    def test_request_during_shallow_lease_preserves_deep_follow_up(self):
+        from .models import RequestLog
+        p = ingest.get_or_create_position(logic.start_fen())
+        running = AnalysisTask.objects.create(
+            position=p, generation=0, budget_nodes=8_000_000,
+            state=AnalysisTask.TState.LEASED, machine='m1',
+            leased_at=timezone.now())
+
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.json()['status'], 'queued')
+        follow_up = AnalysisTask.objects.get(position=p, generation=1)
+        self.assertEqual((follow_up.state, follow_up.source,
+                          follow_up.budget_nodes),
+                         ('PENDING', 'USER', 128_000_000))
+        running.refresh_from_db()
+        self.assertEqual(running.budget_nodes, 8_000_000)
+        self.assertTrue(RequestLog.objects.filter(position=p).exists())
+
+        lease_payload = {
+            'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'session-m2',
+        }
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        premature = self.client.post('/atomicdb/api/lease', lease_payload)
+        self.assertNotIn(follow_up.id,
+                         [row['id'] for row in premature.json()['tasks']])
+
+        Position.objects.filter(pk=p.pk).update(visits=1)
+        running.state = AnalysisTask.TState.COMPLETED
+        running.save(update_fields=['state'])
+        ready = self.client.post('/atomicdb/api/lease', lease_payload)
+        self.assertEqual(ready.json()['tasks'][0]['id'], follow_up.id)
+
+    def test_deep_follow_up_is_not_run_after_shallow_visit_solves_position(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        AnalysisTask.objects.create(
+            position=p, generation=0, budget_nodes=8_000_000,
+            state=AnalysisTask.TState.LEASED, machine='m1',
+            leased_at=timezone.now())
+        self.assertEqual(ingest.request_analysis(p), 'queued')
+        follow_up = AnalysisTask.objects.get(position=p, generation=1)
+        Position.objects.filter(pk=p.pk).update(
+            visits=1, status='DRAW', closure='MINIMAX')
+
+        response = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'session-m2',
+        })
+
+        self.assertNotIn(follow_up.id,
+                         [row['id'] for row in response.json()['tasks']])
+        self.assertEqual(self.client.get('/atomicdb/').context['requested_h'],
+                         '0')
+
     def test_request_on_solved_position(self):
         from .models import AnalysisTask
         p = ingest.get_or_create_position(logic.start_fen())
@@ -392,17 +483,97 @@ class MachineVisibilityTests(TestCase):
                    'threads': 8, 'hash': 1024, 'os': 'TestOS 1'}
         lease = self.client.post('/atomicdb/api/lease', payload)
         tasks = json.loads(lease.content)['tasks']
-        self.assertTrue(tasks)
+        self.assertEqual(len(tasks), 1)
         ping = WorkerPing.objects.get(machine='u-atomicdb')
         self.assertEqual((ping.threads, ping.hash_mb, ping.os,
                           ping.tasks_done), (8, 1024, 'TestOS 1', 0))
+        self.assertEqual(ping.current_task_id, tasks[0]['id'])
+        self.assertIsNotNone(AnalysisTask.objects.get(
+            pk=tasks[0]['id']).lease_heartbeat_at)
         submit = dict(payload, task_id=tasks[0]['id'], lines='[]',
-                      elapsed='2.5')
+                      elapsed='2.5', nodes='1000')
         self.client.post('/atomicdb/api/submit', submit)
         ping.refresh_from_db()
         self.assertEqual(ping.tasks_done, 1)
+        self.assertIsNone(ping.current_task_id)
+        self.assertEqual(ping.last_nps, 400)
+        self.assertIsNotNone(ping.nps_updated)
         pos = Position.objects.get(fen=tasks[0]['fen'])
         self.assertEqual(pos.time_invested, 2.5)
+        task = AnalysisTask.objects.get(id=tasks[0]['id'])
+        self.assertEqual(task.elapsed_seconds, 2.5)
+
+    def test_heartbeat_tracks_current_task_and_keeps_original_lease_time(self):
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+        from .models import WorkerPing
+        User.objects.create_user('u', password='p')
+        pos = ingest.get_or_create_position(logic.start_fen())
+        original_lease = timezone.now() - timedelta(minutes=59)
+        task = AnalysisTask.objects.create(
+            position=pos, budget_nodes=1000, state='LEASED', machine='m1',
+            leased_at=original_lease)
+
+        response = self.client.post('/atomicdb/api/heartbeat', {
+            'username': 'u', 'password': 'p', 'machine': 'm1',
+            'threads': 8, 'hash': 512, 'os': 'TestOS', 'task_id': task.id,
+            'nps': 1_250_000,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        ping = WorkerPing.objects.get(machine='m1', user='u')
+        self.assertEqual((ping.current_task_id, ping.threads, ping.last_nps),
+                         (task.id, 8, 1_250_000))
+        task.refresh_from_db()
+        self.assertEqual(task.state, 'LEASED')
+        self.assertEqual(task.leased_at, original_lease)
+        self.assertIsNotNone(task.lease_heartbeat_at)
+
+    def test_capacity_touch_does_not_overwrite_concurrent_telemetry(self):
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory
+        from .models import WorkerPing
+        from .views import _touch_worker
+        user = User.objects.create_user('u', password='p')
+        stamp = timezone.now() - timedelta(minutes=5)
+        ping = WorkerPing.objects.create(
+            machine='m1', user='u', tasks_done=7, current_task_id=99,
+            last_nps=123_456, nps_updated=stamp)
+        request = RequestFactory().post('/atomicdb/api/heartbeat', {
+            'machine': 'm1', 'threads': 8, 'hash': 512, 'os': 'TestOS',
+        })
+
+        _touch_worker(request, user)
+
+        ping.refresh_from_db()
+        self.assertEqual((ping.tasks_done, ping.current_task_id, ping.last_nps),
+                         (7, 99, 123_456))
+        self.assertEqual(ping.nps_updated, stamp)
+
+    def test_non_finite_elapsed_is_safely_ignored(self):
+        import json
+        from django.contrib.auth.models import User
+        from .models import WorkerPing
+        User.objects.create_user('u', password='p')
+        ingest.get_or_create_position(logic.start_fen())
+        payload = {'username': 'u', 'password': 'p', 'machine': 'm1'}
+        task = self.client.post('/atomicdb/api/lease', payload).json()['tasks'][0]
+
+        response = self.client.post('/atomicdb/api/submit', {
+            **payload, 'task_id': task['id'], 'lines': json.dumps([]),
+            'elapsed': 'nan', 'nodes': '1000',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AnalysisTask.objects.get(pk=task['id']).elapsed_seconds,
+                         0.0)
+        self.assertEqual(WorkerPing.objects.get(machine='m1').last_nps, 0)
+
+    def test_heartbeat_rejects_bad_credentials(self):
+        response = self.client.post('/atomicdb/api/heartbeat', {
+            'username': 'nobody', 'password': 'wrong', 'machine': 'm1',
+        })
+        self.assertEqual(response.status_code, 403)
 
 
 class PovTests(TestCase):
@@ -581,13 +752,16 @@ class TbRoutingTests(TestCase):
 
     def _lease(self, tb):
         import json
+        self.lease_number += 1
         r = self.client.post('/atomicdb/api/lease',
-                             {'username': 'u', 'password': 'p', 'tb': tb})
+                             {'username': 'u', 'password': 'p', 'tb': tb,
+                              'machine': f'm{self.lease_number}'})
         return [t['fen'] for t in json.loads(r.content)['tasks']]
 
     def setUp(self):
         from django.contrib.auth.models import User
         User.objects.create_user('u', password='p')
+        self.lease_number = 0
         self.tbpos = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
         self.normal = ingest.get_or_create_position(logic.start_fen())
 
@@ -603,25 +777,248 @@ class TbRoutingTests(TestCase):
         AnalysisTask.objects.create(position=self.tbpos, budget_nodes=1000)
         self.assertIn(self.tbpos.fen, self._lease('0'))
 
+    def test_non_tb_worker_scans_past_more_than_four_tb_tasks(self):
+        tb_fens = [
+            '4k3/8/8/8/8/8/8/QK6 w - - 0 1',
+            '4k3/8/8/8/8/8/8/1QK5 w - - 0 1',
+            '4k3/8/8/8/8/8/8/2QK4 w - - 0 1',
+            '4k3/8/8/8/8/8/8/3QK3 w - - 0 1',
+            '4k3/8/8/8/8/8/8/4QK2 w - - 0 1',
+        ]
+        for priority, fen in enumerate(tb_fens, start=10):
+            pos = ingest.get_or_create_position(fen)
+            pos.priority = priority
+            pos.save(update_fields=['priority'])
+            AnalysisTask.objects.get_or_create(
+                position=pos, generation=0, defaults={'budget_nodes': 1000})
+        self.normal.priority = 0
+        self.normal.save(update_fields=['priority'])
+        AnalysisTask.objects.create(position=self.normal, budget_nodes=1000)
+
+        self.assertEqual(self._lease('0'), [self.normal.fen])
+
 
 class LeaseReclaimTests(TestCase):
-    """Leases colgados de un predecesor muerto con el mismo nombre de maquina
-    se reclaman al instante en el siguiente lease, no a la hora."""
+    """Only stale leases are recycled; healthy same-machine work is fenced."""
 
-    def test_same_machine_reclaims_stuck_leases(self):
+    def test_same_machine_does_not_steal_healthy_lease(self):
         import json
         from django.contrib.auth.models import User
         from django.utils import timezone
         User.objects.create_user('u', password='p')
         p = ingest.get_or_create_position(logic.start_fen())
-        AnalysisTask.objects.create(position=p, budget_nodes=1000,
-                                    state='LEASED', machine='m1',
-                                    leased_at=timezone.now())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=1000, state='LEASED', machine='m1',
+            leased_at=timezone.now(), lease_heartbeat_at=timezone.now(),
+            attempts=1, lease_token='healthy-token')
         r = self.client.post('/atomicdb/api/lease',
                              {'username': 'u', 'password': 'p',
-                              'machine': 'm1', 'tb': '1'})
+                              'machine': 'm1', 'tb': '1',
+                              'worker_build': '2026072203'})
         fens = [t['fen'] for t in json.loads(r.content)['tasks']]
-        self.assertIn(p.fen, fens)   # reclamada y re-servida al instante
+        self.assertEqual(fens, [])
+        task.refresh_from_db()
+        self.assertEqual((task.state, task.machine, task.attempts,
+                          task.lease_token),
+                         ('LEASED', 'm1', 1, 'healthy-token'))
+
+    def test_same_machine_recycles_only_stale_lease(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=1000, state='LEASED', machine='m1',
+            leased_at=timezone.now() - timedelta(hours=2),
+            lease_heartbeat_at=timezone.now() - timedelta(hours=2),
+            attempts=1, lease_token='old-token')
+
+        response = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'm1', 'tb': '1',
+            'worker_build': '2026072203',
+        })
+
+        leased = response.json()['tasks'][0]
+        task.refresh_from_db()
+        self.assertEqual(leased['id'], task.id)
+        self.assertEqual(task.attempts, 2)
+        self.assertNotEqual(task.lease_token, 'old-token')
+        self.assertEqual(leased['lease_token'], task.lease_token)
+
+    def test_assignment_token_fences_stale_same_machine_process(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        AnalysisTask.objects.create(position=p, budget_nodes=1000)
+        payload = {
+            'username': 'u', 'password': 'p', 'machine': 'm1', 'tb': '1',
+            'worker_build': '2026072203',
+        }
+        leased = self.client.post('/atomicdb/api/lease', payload).json()['tasks'][0]
+        self.assertTrue(leased['lease_token'])
+
+        stale_heartbeat = self.client.post('/atomicdb/api/heartbeat', {
+            **payload, 'task_id': leased['id'], 'lease_token': 'old-token',
+            'nps': '123',
+        })
+        stale_submit = self.client.post('/atomicdb/api/submit', {
+            **payload, 'task_id': leased['id'], 'lease_token': 'old-token',
+            'lines': '[]', 'elapsed': '1', 'nodes': '1000',
+        })
+        valid_submit = self.client.post('/atomicdb/api/submit', {
+            **payload, 'task_id': leased['id'],
+            'lease_token': leased['lease_token'], 'lines': '[]',
+            'elapsed': '1', 'nodes': '1000',
+        })
+
+        self.assertEqual((stale_heartbeat.status_code,
+                          stale_heartbeat.json()['error']),
+                         (409, 'stale-lease'))
+        self.assertEqual((stale_submit.status_code,
+                          stale_submit.json()['error']),
+                         (409, 'stale-lease'))
+        self.assertEqual(valid_submit.status_code, 200)
+
+    def test_recycled_task_waits_for_token_capable_worker(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=1000, state='PENDING', attempts=1)
+
+        legacy = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'legacy', 'tb': '1',
+        })
+        task.refresh_from_db()
+        self.assertNotIn(task.id,
+                         [row['id'] for row in legacy.json()['tasks']])
+        self.assertEqual((task.state, task.machine), ('PENDING', ''))
+
+        modern = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'modern', 'tb': '1',
+            'worker_build': '2026072203',
+        }).json()['tasks'][0]
+        task.refresh_from_db()
+        self.assertEqual(modern['id'], task.id)
+        self.assertTrue(modern['lease_token'])
+
+    def test_deep_first_attempt_waits_for_token_capable_worker(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=10_000_000_000, state='PENDING')
+
+        legacy = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'legacy', 'tb': '1',
+        }).json()['tasks']
+        self.assertNotIn(task.id, [row['id'] for row in legacy])
+
+        modern = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'modern', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'modern-session',
+        }).json()['tasks'][0]
+        self.assertEqual(modern['id'], task.id)
+
+    def test_same_session_replays_lost_lease_response_idempotently(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(position=p, budget_nodes=1000)
+        payload = {
+            'username': 'u', 'password': 'p', 'machine': 'm1', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'process-session-a',
+        }
+
+        first = self.client.post('/atomicdb/api/lease', payload).json()['tasks'][0]
+        task.refresh_from_db()
+        assigned = (task.attempts, task.leased_at, task.lease_token)
+        replay = self.client.post('/atomicdb/api/lease', payload).json()['tasks'][0]
+        task.refresh_from_db()
+
+        self.assertEqual((replay['id'], replay['lease_token']),
+                         (first['id'], first['lease_token']))
+        self.assertEqual((task.attempts, task.leased_at, task.lease_token),
+                         assigned)
+
+        other_process = self.client.post('/atomicdb/api/lease', {
+            **payload, 'lease_session': 'process-session-b',
+        })
+        self.assertEqual(other_process.json()['tasks'], [])
+
+    def test_recent_heartbeat_prevents_expired_assignment_reclaim(self):
+        import json
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=10_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(hours=2),
+            lease_heartbeat_at=timezone.now(),
+            lease_token='modern-live-token', lease_session='live-session')
+
+        self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'm2-session',
+        })
+
+        task.refresh_from_db()
+        self.assertEqual((task.state, task.machine), ('LEASED', 'm1'))
+
+    def test_predeploy_tokenless_deep_lease_gets_drain_window(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=10_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(hours=2),
+            lease_heartbeat_at=None, lease_token='')
+
+        self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'm2-session',
+        })
+
+        task.refresh_from_db()
+        self.assertEqual((task.state, task.machine), ('LEASED', 'm1'))
+
+    def test_postdeploy_tokenless_lease_recycles_after_one_hour(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        old = timezone.now() - timedelta(hours=2)
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=128_000_000, state='LEASED',
+            machine='legacy', leased_at=old, lease_heartbeat_at=old,
+            lease_token='', attempts=1)
+
+        self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'modern', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'modern-session',
+        })
+
+        task.refresh_from_db()
+        self.assertEqual((task.state, task.machine), ('LEASED', 'modern'))
+        self.assertTrue(task.lease_token)
+
+    def test_stale_assignment_and_stale_heartbeat_are_reclaimed(self):
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+        User.objects.create_user('u', password='p')
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, budget_nodes=10_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(hours=2),
+            lease_heartbeat_at=timezone.now() - timedelta(hours=2),
+            lease_token='modern-old-token', lease_session='old-session')
+
+        self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
+            'worker_build': '2026072203', 'lease_session': 'm2-session',
+        })
+
+        task.refresh_from_db()
+        self.assertEqual((task.state, task.machine), ('LEASED', 'm2'))
 
 
 class SearchmovesTests(TestCase):
@@ -679,6 +1076,7 @@ class HomeQueueTests(TestCase):
         self.assertContains(r, 'Now analyzing')
         self.assertContains(r, 'Up next')
         self.assertContains(r, 'start position')
+        self.assertEqual(len(r.context['analyzing']), 1)
 
     def test_up_next_line_stops_at_start_position_before_numbering(self):
         root = ingest.get_or_create_position(logic.start_fen())
@@ -701,6 +1099,155 @@ class HomeQueueTests(TestCase):
         self.assertEqual(response.context['upnext'][0]['key'], target.key)
         self.assertEqual(response.context['upnext'][0]['san'],
                          '1. Nf3 f6 2. e3')
+
+    def test_long_running_current_task_stays_in_now_analyzing(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .models import WorkerPing
+        root = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=root, budget_nodes=2_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(minutes=25),
+            lease_heartbeat_at=timezone.now(), lease_token='modern-token')
+        ping = WorkerPing.objects.create(
+            machine='m1', user='u', threads=8, current_task_id=task.id)
+        WorkerPing.objects.filter(pk=ping.pk).update(last_seen=timezone.now())
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(len(response.context['analyzing']), 1)
+        self.assertEqual(response.context['analyzing'][0]['key'], root.key)
+        self.assertEqual(response.context['analyzing'][0]['budget'], '2.00B')
+
+    def test_modern_worker_without_progress_is_not_now_analyzing(self):
+        from .models import WorkerPing
+        root = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=root, budget_nodes=10_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(minutes=10),
+            lease_heartbeat_at=timezone.now(), lease_token='modern-token')
+        ping = WorkerPing.objects.create(
+            machine='m1', user='u', threads=8, current_task_id=None)
+        WorkerPing.objects.filter(pk=ping.pk).update(last_seen=timezone.now())
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(response.context['analyzing'], [])
+
+    def test_legacy_worker_with_stale_ping_still_shows_valid_lease(self):
+        from .models import WorkerPing
+        root = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=root, budget_nodes=2_000_000_000, state='LEASED',
+            machine='legacy', leased_at=timezone.now() - timedelta(minutes=25))
+        ping = WorkerPing.objects.create(machine='legacy', user='u', threads=8)
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            last_seen=timezone.now() - timedelta(minutes=25))
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(response.context['analyzing'][0]['key'],
+                         task.position_id)
+
+    def test_multi_hour_heartbeat_task_stays_visible(self):
+        from .models import WorkerPing
+        root = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=root, budget_nodes=10_000_000_000, state='LEASED',
+            machine='m1', leased_at=timezone.now() - timedelta(hours=2),
+            lease_heartbeat_at=timezone.now(), lease_token='modern-token')
+        ping = WorkerPing.objects.create(
+            machine='m1', user='u', threads=8, current_task_id=task.id)
+        WorkerPing.objects.filter(pk=ping.pk).update(last_seen=timezone.now())
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(response.context['analyzing'][0]['key'],
+                         task.position_id)
+
+
+class MilestoneLineTests(TestCase):
+
+    @staticmethod
+    def _play(parent, uci):
+        child = ingest.get_or_create_position(logic.apply_move(parent.fen, uci))
+        Edge.objects.create(parent=parent, move_uci=uci, child=child)
+        return child
+
+    def test_milestone_preview_starts_at_opening_and_full_line_is_hoverable(self):
+        from .models import DBEvent
+        root = ingest.get_or_create_position(logic.start_fen())
+        current = root
+        moves = ('g1f3', 'g8f6', 'b1c3', 'b8c6', 'e2e3', 'e7e6',
+                 'd2d3', 'd7d6', 'f1e2', 'f8e7', 'e1g1', 'e8g8')
+        for uci in moves:
+            current = self._play(current, uci)
+        DBEvent.objects.create(kind='NODE_CLOSED', payload={
+            'key': current.key, 'status': 'WHITE_WIN', 'closure': 'MATE_PV',
+        })
+
+        response = self.client.get('/atomicdb/')
+        event = response.context['events'][0]
+
+        self.assertTrue(event['san'].startswith('1. Nf3 Nf6'))
+        self.assertTrue(event['san'].endswith('…'))
+        self.assertIn('6. O-O O-O', event['full'])
+        self.assertContains(response, f'title="{event["full"]}"')
+        self.assertContains(response, 'class="milestone-line dim"')
+
+    def test_multiple_labels_batch_parent_queries_by_depth(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from .views import _line_labels_many
+        root = ingest.get_or_create_position(logic.start_fen())
+        left = self._play(root, 'g1f3')
+        left = self._play(left, 'g8f6')
+        left = self._play(left, 'b1c3')
+        right = self._play(root, 'e2e4')
+        right = self._play(right, 'e7e6')
+        right = self._play(right, 'd2d3')
+
+        with CaptureQueriesContext(connection) as queries:
+            labels = _line_labels_many([left.key, right.key])
+
+        self.assertEqual(set(labels), {left.key, right.key})
+        # One target lookup plus one batched parent query per ply, not one
+        # ancestry query per target and ply.
+        self.assertLessEqual(len(queries), 4)
+
+
+class BoardInteractionTests(TestCase):
+
+    def test_board_uses_vendored_chessground_with_keyboard_fallback(self):
+        from pathlib import Path
+        from django.conf import settings
+        root = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.get('/atomicdb/')
+        self.assertContains(response, 'atomicdb/board.js')
+        self.assertContains(response, 'data-fen=')
+        self.assertContains(response, 'Keyboard move list')
+        self.assertContains(response,
+                            f'/atomicdb/goto/{root.key}/g1f3/')
+        self.assertNotContains(response, 'draggable="false"')
+        board_js = (Path(settings.BASE_DIR) / 'atomicdb' / 'static' /
+                    'atomicdb' / 'board.js').read_text(encoding='utf-8')
+        self.assertIn('Chessground(board', board_js)
+        self.assertIn('draggable:', board_js)
+        self.assertIn('/atomicdb/goto/', board_js)
+
+    def test_terminal_board_still_initializes_chessground(self):
+        from django.template.loader import render_to_string
+        html = render_to_string('atomicdb/_board.html', {
+            'board_key': 'terminal',
+            'board_fen': '7k/8/8/8/8/8/8/K7 b - - 0 1',
+            'board_turn': 'black',
+            'legal_ucis': [],
+            'arrow': None,
+        })
+
+        self.assertIn('atomicdb/board.js', html)
+        self.assertIn('atomicdb-legal-moves', html)
+        self.assertNotIn('Keyboard move list', html)
 
 
 class NodesAccountingTests(TestCase):

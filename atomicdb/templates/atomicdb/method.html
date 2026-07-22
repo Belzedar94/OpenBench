@@ -33,6 +33,9 @@ A second-tier formal certification roadmap exists separately.</p>
 <strong>Request analysis</strong> button. Requests jump to the front of the
 worker queue, so pointing the search at a line you care about is one click.
 Limits apply per visitor to keep the queue healthy.</p>
+<p class="dim" style="font-size:.9rem">Repeated visitor requests buy genuinely
+deeper searches: 128M, 512M, 2B and then 10B nodes. A healthy worker keeps a
+multi-hour lease alive explicitly, so a deep task cannot be assigned twice.</p>
 <p>Programmatic access: <code>GET /atomicdb/api/query?fen=...</code> returns
 the stored verdict, score and move list as JSON. Scores are from the side to
 move (chessdb.cn convention). Unknown positions return 404; use the FEN box

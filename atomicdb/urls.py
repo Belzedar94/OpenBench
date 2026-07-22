@@ -11,5 +11,6 @@ urlpatterns = [
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),
     path('api/lease', views.api_lease),
+    path('api/heartbeat', views.api_heartbeat),
     path('api/submit', views.api_submit),
 ]

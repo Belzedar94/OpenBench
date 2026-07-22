@@ -2,6 +2,8 @@
 
 import json
 import logging
+import math
+import secrets
 import time
 from datetime import timedelta
 
@@ -14,15 +16,23 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import F, Sum
+from django.db.models import F, Q, Sum
 
 from . import ingest, logic
+from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      RequestLog, WorkerPing)
 
-LEASE_MINUTES = 60   # 2B nodos deben caber en maquinas de ~1 MNps
-BATCH_SIZE = 3   # lotes cortos: con sondas de 128M-2B, las peticiones USER
-                 # entran en minutos y el overhead de lease es despreciable
+LEASE_MINUTES = 10
+LEGACY_LEASE_MINUTES = 24 * 60
+POST_DEPLOY_LEGACY_LEASE_MINUTES = 60
+LEGACY_DISPLAY_MINUTES = 60
+# One task per lease is intentional. It makes the queue truthful and prevents
+# a later task in a sequential batch expiring before the worker even starts it.
+TASK_REFILL_COUNT = 4
+LEASE_TOKEN_BUILD = 2026072203
+LEGACY_MAX_BUDGET = 128_000_000
+MAX_REPORTED_NPS = 1_000_000_000_000
 REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
@@ -39,6 +49,30 @@ def _auth(request):
     user = authenticate(username=request.POST.get('username', ''),
                         password=request.POST.get('password', ''))
     return user
+
+
+def _touch_worker(request, user):
+    """Refresh capacity without changing, extending or reclaiming any lease."""
+    machine = request.POST.get('machine', user.username)[:64]
+    try:
+        threads = max(0, int(request.POST.get('threads', 0) or 0))
+        hash_mb = max(0, int(request.POST.get('hash', 0) or 0))
+    except ValueError:
+        threads, hash_mb = 0, 0
+    now = timezone.now()
+    capacity = {
+        'threads': threads,
+        'hash_mb': hash_mb,
+        'os': request.POST.get('os', '')[:64],
+        'last_seen': now,
+    }
+    ping, created = WorkerPing.objects.get_or_create(
+        machine=machine, user=user.username, defaults=capacity)
+    if not created:
+        # Do not save the stale model instance: submit and heartbeat update
+        # telemetry concurrently and a full save could roll those fields back.
+        WorkerPing.objects.filter(pk=ping.pk).update(**capacity)
+    return ping
 
 
 # ---------------- API worker ----------------
@@ -62,48 +96,194 @@ def api_lease(request):
     user = _auth(request)
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
-    machine = request.POST.get('machine', user.username)
-    ping, _ = WorkerPing.objects.get_or_create(machine=machine,
-                                               user=user.username)
-    ping.threads = int(request.POST.get('threads', 0) or 0)
-    ping.hash_mb = int(request.POST.get('hash', 0) or 0)
-    ping.os = request.POST.get('os', '')[:64]
-    ping.save()   # auto_now refresca last_seen
+    ping = _touch_worker(request, user)
+    machine = ping.machine
+
+    try:
+        worker_build = int(request.POST.get('worker_build', 0) or 0)
+    except ValueError:
+        worker_build = 0
+    supports_lease_token = worker_build >= LEASE_TOKEN_BUILD
+    lease_session = request.POST.get('lease_session', '')[:64]
+    active_task_id = None
 
     with transaction.atomic():
         # recuperar leases caducados
-        stale = timezone.now() - timedelta(minutes=LEASE_MINUTES)
-        AnalysisTask.objects.filter(state='LEASED', leased_at__lt=stale) \
-                            .update(state='PENDING', machine='')
-        # un worker secuencial nunca pide lote con leases vivos: si esta
-        # maquina tiene leases colgando, son de un predecesor muerto
-        AnalysisTask.objects.filter(state='LEASED', machine=machine) \
-                            .update(state='PENDING', machine='')
-        # '-source': USER > AUTO alfabeticamente, las peticiones van primero
-        batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
-                     .select_related('position').filter(state='PENDING')
-                     .order_by('-source', '-position__priority')[:BATCH_SIZE])
-        if not batch:
-            ingest.next_tasks(BATCH_SIZE)
-            batch = list(AnalysisTask.objects.select_for_update(skip_locked=True)
-                         .select_related('position').filter(state='PENDING')
-                         .order_by('-source', '-position__priority')[:BATCH_SIZE])
-        # enrutado TB: lo sondeable en tablebases espera a un worker que las
-        # tenga, salvo que no haya nada mas que servir
-        if request.POST.get('tb') != '1' and batch:
-            keep = [t for t in batch
-                    if not logic.tb_applicable(t.position.fen)]
-            if keep:
-                batch = keep
-        for t in batch:
-            t.state, t.machine, t.leased_at = 'LEASED', machine, timezone.now()
-            t.attempts += 1
-            t.save(update_fields=['state', 'machine', 'leased_at', 'attempts'])
+        now = timezone.now()
+        stale = now - timedelta(minutes=LEASE_MINUTES)
+        legacy_stale = now - timedelta(minutes=LEGACY_LEASE_MINUTES)
+        post_legacy_stale = now - timedelta(
+            minutes=POST_DEPLOY_LEGACY_LEASE_MINUTES)
+        AnalysisTask.objects.filter(
+            state='LEASED', lease_token__gt='', leased_at__lt=stale,
+        ).filter(
+            Q(lease_heartbeat_at__isnull=True)
+            | Q(lease_heartbeat_at__lt=stale)
+        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
+                 lease_token='', lease_session='')
+        # A pre-deploy worker cannot heartbeat or fence a deep result. Give
+        # already-running tokenless work a one-time long drain window; new
+        # legacy assignments below are limited to short first attempts.
+        AnalysisTask.objects.filter(
+            state='LEASED', lease_token='', lease_heartbeat_at__isnull=False,
+            lease_heartbeat_at__lt=post_legacy_stale,
+        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
+                 lease_session='')
+        AnalysisTask.objects.filter(
+            state='LEASED', lease_token='', lease_heartbeat_at__isnull=True,
+            leased_at__lt=legacy_stale,
+        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
+                 lease_session='')
+
+        # A second process using the same machine identity must not steal a
+        # healthy assignment. The per-assignment token below fences old
+        # processes once a genuinely stale lease is recycled.
+        active_same_machine = (AnalysisTask.objects.select_for_update()
+            .select_related('position')
+            .filter(state='LEASED', machine=machine)
+            .filter(Q(lease_token='', lease_heartbeat_at__isnull=True,
+                      leased_at__gte=legacy_stale)
+                    | Q(lease_token='',
+                        lease_heartbeat_at__gte=post_legacy_stale)
+                    | Q(lease_token__gt='', lease_heartbeat_at__gte=stale)
+                    | Q(lease_token__gt='', lease_heartbeat_at__isnull=True,
+                        leased_at__gte=stale))
+            .order_by('leased_at', 'id').first())
+
+        def choose_pending():
+            # Scan the ordered queue, rather than an arbitrary prefix: a
+            # non-TB worker must not receive a TB task merely because several
+            # TB positions happen to be ahead of the first compatible task.
+            first = None
+            supports_tb = request.POST.get('tb') == '1'
+            queryset = (AnalysisTask.objects
+                .select_for_update(skip_locked=True)
+                .select_related('position').filter(state='PENDING')
+                .order_by('-source', '-position__priority', 'id'))
+            for candidate in queryset.iterator(chunk_size=64):
+                # A queued follow-up is an intent for the next visit, not a
+                # parallel analysis. It becomes runnable only after the prior
+                # generation commits, and never runs if that visit solved the
+                # position outright.
+                if (candidate.position.status != 'UNKNOWN'
+                        or candidate.generation > candidate.position.visits):
+                    continue
+                # A tokenless first attempt remains compatible with a worker
+                # that was already deployed before this protocol. Once an
+                # attempt has been recycled, only a token-capable build may
+                # take it: otherwise the deceased process could submit against
+                # a new tokenless lease with the same machine identity.
+                if (not supports_lease_token
+                        and (candidate.attempts > 0
+                             or candidate.budget_nodes > LEGACY_MAX_BUDGET)):
+                    continue
+                if first is None:
+                    first = candidate
+                if supports_tb or not logic.tb_applicable(candidate.position.fen):
+                    return candidate
+            # Preserve the historic fallback when every queued task is TB.
+            return first
+
+        batch = []
+        replayed = False
+        if active_same_machine is not None:
+            if (supports_lease_token and lease_session
+                    and secrets.compare_digest(
+                        active_same_machine.lease_session, lease_session)):
+                # The first HTTP response may have been lost after commit.
+                # Replay the exact task/token without changing the attempt.
+                batch = [active_same_machine]
+                replayed = True
+            else:
+                active_task_id = active_same_machine.id
+        else:
+            chosen = choose_pending()
+            if chosen is None:
+                ingest.next_tasks(TASK_REFILL_COUNT)
+                chosen = choose_pending()
+            if chosen is not None:
+                batch = [chosen]
+        if not replayed:
+            assigned_at = timezone.now()
+            for t in batch:
+                t.state, t.machine, t.leased_at = 'LEASED', machine, assigned_at
+                t.lease_heartbeat_at = assigned_at
+                t.lease_token = (secrets.token_urlsafe(32)
+                                 if supports_lease_token else '')
+                t.lease_session = (lease_session
+                                   if supports_lease_token else '')
+                t.attempts += 1
+                t.save(update_fields=['state', 'machine', 'leased_at',
+                                      'lease_heartbeat_at', 'lease_token',
+                                      'lease_session', 'attempts'])
+
+    # With one task per lease, the server can expose the exact current task
+    # immediately even to the previous worker build, before its first heartbeat.
+    if batch:
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            current_task_id=batch[0].id,
+            last_nps=0,
+            nps_updated=None,
+            last_seen=timezone.now(),
+        )
+    elif active_task_id is not None:
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            current_task_id=active_task_id,
+            last_seen=timezone.now(),
+        )
+    else:
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            current_task_id=None,
+            last_nps=0,
+            nps_updated=None,
+            last_seen=timezone.now(),
+        )
 
     return JsonResponse({'tasks': [
         {'id': t.id, 'fen': t.position.fen, 'budget_nodes': t.budget_nodes,
-         'multipv': t.multipv, 'searchmoves': _live_moves(t)}
+         'multipv': t.multipv, 'searchmoves': _live_moves(t),
+         'lease_token': t.lease_token}
         for t in batch]})
+
+
+@csrf_exempt
+def api_heartbeat(request):
+    """Publish live work and keep only that authenticated assignment alive."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    user = _auth(request)
+    if user is None:
+        return JsonResponse({'error': 'bad credentials'}, status=403)
+    ping = _touch_worker(request, user)
+    try:
+        heartbeat_nps = max(0, min(int(request.POST.get('nps', 0) or 0),
+                                   MAX_REPORTED_NPS))
+    except ValueError:
+        return JsonResponse({'error': 'invalid nps'}, status=400)
+    raw_task_id = request.POST.get('task_id', '')
+    current_task_id = None
+    if raw_task_id:
+        try:
+            candidate = int(raw_task_id)
+        except ValueError:
+            return JsonResponse({'error': 'invalid task_id'}, status=400)
+        keepalive_at = timezone.now()
+        lease_token = request.POST.get('lease_token', '')
+        renewed = (AnalysisTask.objects
+            .filter(id=candidate, state='LEASED', machine=ping.machine)
+            .filter(Q(lease_token='') | Q(lease_token=lease_token))
+            .update(lease_heartbeat_at=keepalive_at))
+        if renewed == 1:
+            current_task_id = candidate
+        else:
+            return JsonResponse({'error': 'stale-lease'}, status=409)
+    updates = {'current_task_id': current_task_id,
+               'last_seen': timezone.now(),
+               'last_nps': heartbeat_nps if current_task_id else 0,
+               'nps_updated': timezone.now() if current_task_id else None}
+    WorkerPing.objects.filter(pk=ping.pk).update(**updates)
+    return JsonResponse({'ok': True, 'machine': ping.machine,
+                         'current_task_id': current_task_id})
 
 
 @csrf_exempt
@@ -145,9 +325,11 @@ def api_submit(request):
         return JsonResponse({'error': f'malformed: {e}'}, status=400)
 
     try:
-        elapsed = min(max(float(request.POST.get('elapsed', 0) or 0), 0.0),
-                      86_400.0)
-    except ValueError:
+        elapsed = float(request.POST.get('elapsed', 0) or 0)
+        if not math.isfinite(elapsed):
+            raise ValueError
+        elapsed = min(max(elapsed, 0.0), 86_400.0)
+    except (TypeError, ValueError):
         elapsed = 0.0
     try:
         searched = max(0, int(request.POST.get('nodes', 0) or 0))
@@ -160,16 +342,21 @@ def api_submit(request):
         return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
 
     machine = request.POST.get('machine', '')
+    provided_lease_token = request.POST.get('lease_token', '')
     try:
         snapshot = AnalysisTask.objects.select_related('position').get(id=task_id)
     except AnalysisTask.DoesNotExist:
         return JsonResponse({'error': 'malformed: unknown task'}, status=400)
-    if snapshot.state == 'COMPLETED':
-        return JsonResponse({'ok': True, 'dup': True})
-    if snapshot.state != 'LEASED':
+    if snapshot.state not in ('LEASED', 'COMPLETED'):
         return JsonResponse({'error': 'not-leased'}, status=400)
     if not machine or machine != snapshot.machine:
         return JsonResponse({'error': 'not-your-lease'}, status=409)
+    if (snapshot.lease_token
+            and not secrets.compare_digest(snapshot.lease_token,
+                                           provided_lease_token)):
+        return JsonResponse({'error': 'stale-lease'}, status=409)
+    if snapshot.state == 'COMPLETED':
+        return JsonResponse({'ok': True, 'dup': True})
 
     prepare_started = time.monotonic()
     tb_prepared = None
@@ -189,6 +376,7 @@ def api_submit(request):
             claimed = AnalysisTask.objects.filter(
                 id=task_id, state='LEASED', machine=machine,
                 attempts=snapshot.attempts, leased_at=snapshot.leased_at,
+                lease_token=snapshot.lease_token,
             ).update(state='COMPLETED')
             if claimed != 1:
                 current = AnalysisTask.objects.get(id=task_id)
@@ -198,7 +386,8 @@ def api_submit(request):
                     return JsonResponse({'error': 'not-leased'}, status=400)
                 if (current.machine == machine
                         and (current.attempts != snapshot.attempts
-                             or current.leased_at != snapshot.leased_at)):
+                             or current.leased_at != snapshot.leased_at
+                             or current.lease_token != snapshot.lease_token)):
                     return JsonResponse({'error': 'stale-lease'}, status=409)
                 return JsonResponse({'error': 'not-your-lease'}, status=409)
 
@@ -222,10 +411,23 @@ def api_submit(request):
             task.state, task.machine = 'COMPLETED', machine
             task.completed = timezone.now()
             task.nodes_searched = searched
+            task.elapsed_seconds = elapsed
             task.save(update_fields=[
-                'state', 'machine', 'completed', 'nodes_searched'])
+                'state', 'machine', 'completed', 'nodes_searched',
+                'elapsed_seconds'])
+            ping_updates = {
+                'tasks_done': F('tasks_done') + 1,
+                'last_seen': timezone.now(),
+            }
+            if searched > 0 and elapsed > 0:
+                ping_updates.update({
+                    'last_nps': min(round(searched / elapsed),
+                                    MAX_REPORTED_NPS),
+                    'nps_updated': timezone.now(),
+                })
+            ping_updates['current_task_id'] = None
             WorkerPing.objects.filter(machine=machine, user=user.username).update(
-                tasks_done=F('tasks_done') + 1, last_seen=timezone.now())
+                **ping_updates)
     except _SubmitRejected:
         return JsonResponse({'error': 'tb-rejected'}, status=409)
     transaction_seconds = time.monotonic() - transaction_started
@@ -263,7 +465,8 @@ def api_request(request, key):
     if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
                          .count() >= REQUESTS_PER_IP_HOUR:
         return JsonResponse({'status': 'rate-limited'}, status=429)
-    if AnalysisTask.objects.filter(state='PENDING', source='USER') \
+    if AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                   position__status='UNKNOWN') \
                            .count() >= REQUEST_QUEUE_MAX:
         return JsonResponse({'status': 'queue-full'}, status=503)
     outcome = ingest.request_analysis(pos)
@@ -325,15 +528,10 @@ def goto(request, key, uci):
     return redirect(f'/atomicdb/explore/{child.key}/')
 
 
-def _san_line(key, max_plies=16, keep_head=False):
+def _format_san_line(top, line, max_plies=16, keep_head=False):
     """Linea SAN numerada hasta la raiz ("1. Nf3 f6 ..."). Al truncar,
-    keep_head conserva el PRINCIPIO (para ver el opening); por defecto se
-    conserva el final (milestones: las jugadas que cerraron)."""
-    try:
-        pos = Position.objects.get(key=key)
-    except Position.DoesNotExist:
-        return ''
-    top, line = _line_to_root(pos)
+    keep_head conserva el PRINCIPIO (para ver el opening); de lo contrario se
+    conserva el final."""
     if not line:
         return ''
     parts, n = [], 1
@@ -355,12 +553,101 @@ def _san_line(key, max_plies=16, keep_head=False):
     return prefix + ' '.join(parts) + suffix
 
 
-def _friendly_events(events):
+def _lines_to_root(keys, max_plies=512):
+    """Resolve many breadcrumbs together, batching one parent query per ply.
+
+    The home page contains queue rows and milestones with heavily overlapping
+    ancestry. Resolving each independently caused hundreds of small queries.
+    """
+    import pyffish as pf
+
+    keys = list(dict.fromkeys(key for key in keys if key))
+    positions = Position.objects.only('key', 'fen').in_bulk(keys)
+    current = {key: positions[key] for key in keys if key in positions}
+    active = set(current)
+    seen = {key: {key} for key in current}
+    steps = {key: [] for key in current}
+    start_key = logic.key_of(logic.start_fen())
+
+    for _ in range(max_plies):
+        child_ids = {current[key].key for key in active
+                     if current[key].key != start_key}
+        if not child_ids:
+            break
+        first_parent = {}
+        edges = (Edge.objects.filter(child_id__in=child_ids)
+                 .select_related('parent')
+                 .only('child_id', 'move_uci', 'parent__key', 'parent__fen')
+                 .order_by('child_id', 'parent_id'))
+        for edge in edges:
+            first_parent.setdefault(edge.child_id, edge)
+        next_active = set()
+        for key in active:
+            cur = current[key]
+            if cur.key == start_key:
+                continue
+            edge = first_parent.get(cur.key)
+            if edge is None or edge.parent_id in seen[key]:
+                continue
+            steps[key].append((edge.move_uci, cur.key))
+            seen[key].add(edge.parent_id)
+            current[key] = edge.parent
+            next_active.add(key)
+        active = next_active
+        if not active:
+            break
+
+    result = {}
+    for key, top in current.items():
+        fen, line = top.fen, []
+        for uci, child_key in reversed(steps[key]):
+            try:
+                san = pf.get_san('atomic', fen, uci)
+            except Exception:
+                san = uci
+            line.append({'san': san, 'key': child_key,
+                         'white': fen.split()[1] == 'w'})
+            fen = logic.apply_move(fen, uci)
+        result[key] = (top, line)
+    return result
+
+
+def _line_labels_many(keys, preview_plies=10):
+    resolved = _lines_to_root(keys)
+    labels = {}
+    for key, (top, line) in resolved.items():
+        full = _format_san_line(top, line, max_plies=512, keep_head=True)
+        preview = _format_san_line(top, line, max_plies=preview_plies,
+                                   keep_head=True)
+        labels[key] = (preview, full)
+    return labels
+
+
+def _line_labels(key, preview_plies=10):
+    """Opening-first preview and full breadcrumb from one batched traversal."""
+    return _line_labels_many([key], preview_plies).get(key, ('', ''))
+
+
+def _san_line(key, max_plies=16, keep_head=False):
+    """Backward-compatible single label helper."""
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return ''
+    top, line = _line_to_root(pos, max_plies=max(64, max_plies))
+    return _format_san_line(top, line, max_plies=max_plies,
+                            keep_head=keep_head)
+
+
+def _friendly_events(events, labels=None):
     out = []
     for e in events:
         pl = e.payload or {}
         key = pl.get('key', '')
-        san = _san_line(key) if key else ''
+        if key:
+            san, full = (labels or {}).get(key) or _line_labels(key)
+        else:
+            san, full = '', ''
         if e.kind == 'NODE_CLOSED':
             txt = f"Solved: {pl.get('status', '?')} via {pl.get('closure', '?')}"
         elif e.kind == 'CAMPAIGN_CLOSED':
@@ -368,7 +655,8 @@ def _friendly_events(events):
             key = ''
         else:
             txt = e.kind
-        out.append({'ts': e.ts, 'text': txt, 'key': key, 'san': san})
+        out.append({'ts': e.ts, 'text': txt, 'key': key, 'san': san,
+                    'full': full})
     return out
 
 
@@ -467,8 +755,8 @@ def home(request):
     total = Position.objects.count()
     closed = Position.objects.exclude(status='UNKNOWN').count()
     analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
-    requested = AnalysisTask.objects.filter(state='PENDING',
-                                            source='USER').count()
+    requested = AnalysisTask.objects.filter(
+        state='PENDING', source='USER', position__status='UNKNOWN').count()
     nodes = Position.objects.aggregate(n=Sum('nodes_invested'))['n'] or 0
     day_ago = timezone.now() - timedelta(hours=24)
     closed_24h = DBEvent.objects.filter(kind='NODE_CLOSED',
@@ -483,42 +771,102 @@ def home(request):
         first_moves = []
     solved_first = sum(1 for m in first_moves if m['status'] != 'UNKNOWN')
     solved_pct = round(100.0 * closed / total, 1) if total else 0.0
-    recent = timezone.now() - timedelta(minutes=10)
-    leased = list(AnalysisTask.objects.filter(state='LEASED',
-                                              leased_at__gte=recent)
-                  .select_related('position').order_by('-leased_at')[:5])
-    analyzing = [{'key': t.position_id,
-                  'san': _san_line(t.position_id, 10, keep_head=True)
-                  or 'start position',
-                  'full': _san_line(t.position_id, 64) or 'start position',
-                  'budget': _human(t.budget_nodes), 'machine': t.machine}
-                 for t in leased]
+    now = timezone.now()
+    live_cutoff = now - timedelta(seconds=180)
+    live_pings = list(WorkerPing.objects.filter(last_seen__gte=live_cutoff)
+                      .order_by('machine'))
+    lease_cutoff = now - timedelta(minutes=LEASE_MINUTES)
+    legacy_display_cutoff = now - timedelta(minutes=LEGACY_DISPLAY_MINUTES)
+    candidate_leases = list(AnalysisTask.objects.filter(
+        state='LEASED',
+    ).filter(
+        Q(lease_token='', leased_at__gte=legacy_display_cutoff)
+        | Q(lease_token__gt='', lease_heartbeat_at__gte=lease_cutoff)
+        | Q(lease_token__gt='', lease_heartbeat_at__isnull=True,
+            leased_at__gte=lease_cutoff)
+    ).select_related('position').order_by('machine', 'leased_at', 'id'))
+    legacy_leases_by_machine = {}
+    leases_by_id = {task.id: task for task in candidate_leases}
+    for task in candidate_leases:
+        if not task.lease_token:
+            legacy_leases_by_machine.setdefault(task.machine, task)
+    # Prefer the exact task from a fresh worker. Still-valid leases remain a
+    # compatibility fallback for the previous worker build, which only touched
+    # WorkerPing at lease/submit boundaries.
+    leased = []
+    selected_ids = set()
+    selected_machines = set()
+    for ping in live_pings:
+        task = leases_by_id.get(ping.current_task_id)
+        if task is None:
+            # Old workers did not publish an exact task heartbeat. Modern
+            # workers deliberately clear current_task_id when engine nodes
+            # stop advancing, so falling back for tokenized leases would call
+            # a hung engine "Now analyzing" for up to another hour.
+            task = legacy_leases_by_machine.get(ping.machine)
+        if task is not None:
+            leased.append(task)
+            selected_ids.add(task.id)
+            selected_machines.add(task.machine)
+    for task in candidate_leases:
+        if task.lease_token:
+            continue
+        if task.id in selected_ids or task.machine in selected_machines:
+            continue
+        leased.append(task)
+        selected_machines.add(task.machine)
+    leased = leased[:5]
     leased_keys = {t.position_id for t in leased}
-    upnext = []
+    upnext_positions = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=-1e8) \
                                .order_by('-priority')[:12]:
         if pos.key in leased_keys:
             continue
-        upnext.append({'key': pos.key,
-                       'san': _san_line(pos.key, 10, keep_head=True)
-                       or 'start position',
-                       'full': _san_line(pos.key, 64) or 'start position'})
-        if len(upnext) >= 5:
+        upnext_positions.append(pos)
+        if len(upnext_positions) >= 5:
             break
-    events = _friendly_events(DBEvent.objects.order_by('-ts')[:12])
+    event_rows = list(DBEvent.objects.order_by('-ts')[:12])
+    event_keys = [(event.payload or {}).get('key', '') for event in event_rows]
+    labels = _line_labels_many(
+        [task.position_id for task in leased]
+        + [pos.key for pos in upnext_positions] + event_keys)
+    analyzing = []
+    for task in leased:
+        preview, full = labels.get(task.position_id, ('', ''))
+        analyzing.append({'key': task.position_id,
+                          'san': preview or 'start position',
+                          'full': full or 'start position',
+                          'budget': _human(task.budget_nodes),
+                          'machine': task.machine})
+    upnext = []
+    for pos in upnext_positions:
+        preview, full = labels.get(pos.key, ('', ''))
+        upnext.append({'key': pos.key,
+                       'san': preview or 'start position',
+                       'full': full or 'start position'})
+    events = _friendly_events(event_rows, labels)
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
+    compute = worker_metrics()
     return render(request, 'atomicdb/home.html', {
         'analyzing': analyzing, 'upnext': upnext,
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),
         'requested_h': _human(requested),
+        'workers_h': _human(compute['workers']),
+        'cores_h': _human(compute['cores']),
+        'compute_nps_h': _human(compute['nps']),
+        'positions_pm_h': (f"{compute['positions_per_minute']:.1f}"
+                           if compute['positions_per_minute'] < 100
+                           else _human(round(compute['positions_per_minute']))),
         'solved_first': solved_first, 'n_first': len(first_moves),
         'solved_pct': solved_pct,
         'closed_24h_h': _human(closed_24h), 'nodes_24h_h': _human(nodes_24h),
         'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
         'root_key': root_key, 'board': _ctx_board(root.fen),
+        'board_fen': root.fen,
+        'board_turn': 'white' if root.fen.split()[1] == 'w' else 'black',
         'board_key': root.key, 'arrow': _arrow(root.best_move),
         'legal_ucis': logic.legal_moves(root.fen)})
 
@@ -666,6 +1014,7 @@ def explore(request, key):
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'board_key': pos.key, 'legal_ucis': legal_ucis,
+        'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
         'arrow': None if pos.closure == 'TERMINAL' else _arrow(pos.best_move),
         'stm': 'White' if stm_white else 'Black',
