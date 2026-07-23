@@ -16,7 +16,8 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import F, Q, Sum
+from django.db.models import Case, F, IntegerField, Q, Sum, Value, When, Window
+from django.db.models.functions import RowNumber
 
 from . import ingest, logic
 from .metrics import worker_metrics
@@ -37,6 +38,14 @@ REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 200
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
+# Breadcrumb reconstruction is public-request work. Keep the cycle-safe
+# reverse search useful for recent rows that are not in a materialized map
+# yet, but put hard ceilings on graph fan-out and memory.
+LINEAGE_SEARCH_MAX_PLIES = 64
+LINEAGE_SEARCH_MAX_NODES = 1024
+LINEAGE_SEARCH_MAX_FRONTIER = 64
+LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD = 16
+LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
 
 logger = logging.getLogger(__name__)
 
@@ -531,17 +540,23 @@ def goto(request, key, uci):
 def _format_san_line(top, line, max_plies=16, keep_head=False):
     """Linea SAN numerada hasta la raiz ("1. Nf3 f6 ..."). Al truncar,
     keep_head conserva el PRINCIPIO (para ver el opening); de lo contrario se
-    conserva el final."""
+    conserva el final. Un fragmento que no alcanza startpos queda sin numeros:
+    el FEN canonico no conserva el ply absoluto y no debemos inventar "1..."."""
     if not line:
-        return ''
-    parts, n = [], 1
-    for i, st in enumerate(line):
-        if st['white']:
-            parts.append(f"{n}. {st['san']}")
-        else:
-            parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
-            n += 1
-    prefix = '' if top.fen == logic.start_fen() else '… '
+        return '' if top.fen == logic.start_fen() else '…'
+    from_start = top.fen == logic.start_fen()
+    parts = []
+    if from_start:
+        n = 1
+        for i, st in enumerate(line):
+            if st['white']:
+                parts.append(f"{n}. {st['san']}")
+            else:
+                parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
+                n += 1
+    else:
+        parts = [st['san'] for st in line]
+    prefix = '' if from_start else '… '
     suffix = ''
     if len(parts) > max_plies:
         if keep_head:
@@ -553,53 +568,142 @@ def _format_san_line(top, line, max_plies=16, keep_head=False):
     return prefix + ' '.join(parts) + suffix
 
 
-def _lines_to_root(keys, max_plies=512):
-    """Resolve many breadcrumbs together, batching one parent query per ply.
+def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
+    """Resolve canonical minimum-ply breadcrumbs from startpos in batches.
 
     The home page contains queue rows and milestones with heavily overlapping
     ancestry. Resolving each independently caused hundreds of small queries.
+    A single-parent greedy walk is not safe here: reversible moves and
+    transpositions can make the lexicographically first parent enter a cycle
+    even though another parent leads to startpos. Reverse BFS explores every
+    parent at the current distance, remains cycle-safe, and uses one Edge query
+    per ply for all requested positions, up to the public-search ceilings.
     """
     import pyffish as pf
 
     keys = list(dict.fromkeys(key for key in keys if key))
     positions = Position.objects.only('key', 'fen').in_bulk(keys)
-    current = {key: positions[key] for key in keys if key in positions}
-    active = set(current)
-    seen = {key: {key} for key in current}
-    steps = {key: [] for key in current}
     start_key = logic.key_of(logic.start_fen())
+    states = {}
+    for key in keys:
+        if key not in positions:
+            continue
+        states[key] = {
+            'frontier': {key},
+            'seen': {key},
+            # For every discovered ancestor: the first edge towards target.
+            'toward_target': {},
+            'nodes': {key: positions[key]},
+            'distance': {key: 0},
+            'sources': [],
+            'found_start': key == start_key,
+        }
+    active = {
+        key for key, state in states.items() if not state['found_start']
+    }
 
-    for _ in range(max_plies):
-        child_ids = {current[key].key for key in active
-                     if current[key].key != start_key}
+    for _ in range(min(max_plies, LINEAGE_SEARCH_MAX_PLIES)):
+        child_ids = set()
+        for key in active:
+            child_ids.update(states[key]['frontier'])
         if not child_ids:
             break
-        first_parent = {}
+        parents_by_child = {}
+        root_first = Case(
+            When(parent_id=start_key, then=Value(0)),
+            default=Value(1), output_field=IntegerField(),
+        )
         edges = (Edge.objects.filter(child_id__in=child_ids)
                  .select_related('parent')
                  .only('child_id', 'move_uci', 'parent__key', 'parent__fen')
-                 .order_by('child_id', 'parent_id'))
+                 .annotate(_lineage_rank=Window(
+                     expression=RowNumber(),
+                     partition_by=[F('child_id')],
+                     order_by=(
+                         root_first.asc(), F('parent_id').asc(),
+                         F('move_uci').asc(),
+                     ),
+                 ))
+                 .filter(_lineage_rank__lte=
+                         LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD)
+                 # Rank-first ordering gives every frontier child its best
+                 # parent before any child receives a second one. The root
+                 # edge, when present, is always rank 1.
+                 .order_by('_lineage_rank', 'child_id',
+                           'parent_id', 'move_uci')
+                 [:LINEAGE_SEARCH_MAX_EDGE_ROWS])
         for edge in edges:
-            first_parent.setdefault(edge.child_id, edge)
+            parents_by_child.setdefault(edge.child_id, []).append(edge)
         next_active = set()
-        for key in active:
-            cur = current[key]
-            if cur.key == start_key:
+        for key in sorted(active):
+            state = states[key]
+            next_frontier = set()
+            for child_key in sorted(state['frontier']):
+                child_parents = parents_by_child.get(child_key, ())
+                if not child_parents:
+                    state['sources'].append(
+                        (state['distance'][child_key], child_key))
+                for edge in child_parents:
+                    parent_key = edge.parent_id
+                    if parent_key in state['seen']:
+                        continue
+                    # Always admit startpos when it is on this layer. Other
+                    # ancestry is bounded so a highly transposed component
+                    # cannot turn the public home page into a graph scan.
+                    if (parent_key != start_key
+                            and (len(state['seen'])
+                                 >= LINEAGE_SEARCH_MAX_NODES
+                                 or len(next_frontier)
+                                 >= LINEAGE_SEARCH_MAX_FRONTIER)):
+                        continue
+                    state['seen'].add(parent_key)
+                    state['nodes'][parent_key] = edge.parent
+                    state['distance'][parent_key] = (
+                        state['distance'][child_key] + 1)
+                    state['toward_target'][parent_key] = (
+                        child_key, edge.move_uci)
+                    next_frontier.add(parent_key)
+            state['frontier'] = next_frontier
+            if start_key in state['seen']:
+                state['found_start'] = True
                 continue
-            edge = first_parent.get(cur.key)
-            if edge is None or edge.parent_id in seen[key]:
-                continue
-            steps[key].append((edge.move_uci, cur.key))
-            seen[key].add(edge.parent_id)
-            current[key] = edge.parent
-            next_active.add(key)
+            if next_frontier:
+                next_active.add(key)
         active = next_active
         if not active:
             break
 
     result = {}
-    for key, top in current.items():
-        ordered = list(reversed(steps[key]))
+    for key, state in states.items():
+        if state['found_start']:
+            top_key = start_key
+        elif state['sources']:
+            # Prefer the available boundary that provides the most context.
+            _distance, top_key = min(
+                state['sources'],
+                key=lambda source: (-source[0], source[1]),
+            )
+        else:
+            # A closed cyclic component or the max-depth boundary: retain the
+            # longest acyclic context found, but do not pretend it is move 1.
+            top_key = min(
+                state['seen'],
+                key=lambda node_key: (-state['distance'][node_key], node_key),
+            )
+
+        ordered = []
+        cursor = top_key
+        while cursor != key:
+            step = state['toward_target'].get(cursor)
+            if step is None:
+                ordered = []
+                top_key = key
+                break
+            child_key, move_uci = step
+            ordered.append((move_uci, child_key))
+            cursor = child_key
+
+        top = state['nodes'][top_key]
         ucis = [uci for uci, _child_key in ordered]
         try:
             # One C++ call parses and advances the full line. Calling
@@ -967,36 +1071,28 @@ def fen_jump(request):
 
 
 def _line_to_root(pos, max_plies=64):
-    """Camino canonico (determinista) hacia arriba; con transposiciones se
-    elige siempre el padre de key minima. Devuelve (top, [(san, child_key)...])
-    en orden de juego, con SAN via pyffish desde el nodo superior. La posicion
-    inicial es una frontera absoluta aunque un ciclo reversible haya creado
-    aristas entrantes hacia ella."""
-    import pyffish as pf
-    steps = []
-    cur, seen = pos, {pos.key}
-    start_key = logic.key_of(logic.start_fen())
-    while len(steps) < max_plies:
-        if cur.key == start_key:
-            break
-        e = (Edge.objects.filter(child=cur).select_related('parent')
-             .order_by('parent_id').first())
-        if e is None or e.parent_id in seen:
-            break
-        steps.append((e.move_uci, cur.key))
-        seen.add(e.parent_id)
-        cur = e.parent
-    steps.reverse()
-    fen, out = cur.fen, []
-    for uci, child_key in steps:
-        try:
-            san = pf.get_san('atomic', fen, uci)
-        except Exception:
-            san = uci
-        out.append({'san': san, 'key': child_key,
-                    'white': fen.split()[1] == 'w'})
-        fen = logic.apply_move(fen, uci)
-    return cur, out
+    """Single-position wrapper around the shared cycle-safe reconstruction."""
+    return _lines_to_root([pos.key], max_plies=max_plies)[pos.key]
+
+
+def _numbered_line(top, line):
+    """Explorer breadcrumb tokens, numbered only when move 1 is known."""
+    if top.fen != logic.start_fen():
+        return [
+            {'num': '', 'san': step['san'], 'key': step['key']}
+            for step in line
+        ]
+    numbered, n = [], 1
+    for i, step in enumerate(line):
+        if step['white']:
+            number = f'{n}.'
+        else:
+            number = f'{n}...' if i == 0 else ''
+            n += 1
+        numbered.append({
+            'num': number, 'san': step['san'], 'key': step['key'],
+        })
+    return numbered
 
 
 def explore(request, key):
@@ -1013,14 +1109,7 @@ def explore(request, key):
                   else logic.legal_moves(pos.fen))
     known = {m['uci'] for m in moves}
     unexplored = [u for u in legal_ucis if u not in known]
-    numbered, n = [], 1
-    for i, st in enumerate(line):
-        if st['white']:
-            numbered.append({'num': f'{n}.', 'san': st['san'], 'key': st['key']})
-        else:
-            pre = f'{n}...' if i == 0 else ''
-            numbered.append({'num': pre, 'san': st['san'], 'key': st['key']})
-            n += 1
+    numbered = _numbered_line(top, line)
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     eval_stm = None if pos.eval_cp is None else (
