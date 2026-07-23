@@ -9,7 +9,7 @@
     {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% endfor %}
 </div>
 {% else %}
-<div class="crumb">root position</div>
+<div class="crumb">{% if line_from_root %}root position{% else %}&hellip; lineage unavailable{% endif %}</div>
 {% endif %}
 {% if parents|length > 1 %}
 <div class="crumb">transpositions from:

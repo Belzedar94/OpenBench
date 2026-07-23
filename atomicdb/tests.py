@@ -1171,7 +1171,10 @@ class MilestoneLineTests(TestCase):
     @staticmethod
     def _play(parent, uci):
         child = ingest.get_or_create_position(logic.apply_move(parent.fen, uci))
-        Edge.objects.create(parent=parent, move_uci=uci, child=child)
+        edge, _created = Edge.objects.get_or_create(
+            parent=parent, move_uci=uci, defaults={'child': child})
+        if edge.child_id != child.key:
+            raise AssertionError('fixture edge points to an unexpected child')
         return child
 
     def test_milestone_preview_starts_at_opening_and_full_line_is_hoverable(self):
@@ -1194,6 +1197,92 @@ class MilestoneLineTests(TestCase):
         self.assertIn('6. O-O O-O', event['full'])
         self.assertContains(response, f'title="{event["full"]}"')
         self.assertContains(response, 'class="milestone-line dim"')
+
+    def test_reversible_transposition_uses_shortest_startpos_line(self):
+        """A reversible queen/bishop loop must not cut the opening at Bf8."""
+        from .models import DBEvent
+        root = ingest.get_or_create_position(logic.start_fen())
+        current = root
+        # This is the production shape that exposed the bug. Moves 13-14 return
+        # to the same canonical position, so the Edge graph contains a cycle.
+        moves = (
+            'g1f3', 'f7f6', 'e2e3', 'd7d5', 'f3g5', 'c8g4',
+            'f2f3', 'f6g5', 'b1c3', 'c7c6', 'c3b5', 'c6b5',
+            'd2d4', 'e7e6', 'e3e4', 'a7a6', 'g2g3', 'g8f6',
+            'c2c3', 'b7b5', 'h2h3', 'g7g6', 'c1g5', 'f8h6',
+            'd1b3', 'h6f8', 'b3d1', 'f8h6', 'f1e2', 'a6a5',
+            'd1b3', 'e8g8', 'b3a3', 'a5a4',
+        )
+        for uci in moves:
+            current = self._play(current, uci)
+        current.priority = 100.0
+        current.save(update_fields=['priority'])
+        DBEvent.objects.create(kind='NODE_CLOSED', payload={
+            'key': current.key, 'status': 'WHITE_WIN', 'closure': 'MATE_PV',
+        })
+
+        response = self.client.get('/atomicdb/')
+        event = response.context['events'][0]
+
+        self.assertTrue(event['full'].startswith('1. Nf3 f6'))
+        self.assertIn('13. Be2 a5', event['full'])
+        self.assertNotIn('Bf8', event['full'])
+        self.assertNotIn('1... Bf8', event['full'])
+        self.assertFalse(event['full'].startswith('…'))
+        queued = next(
+            row for row in response.context['upnext']
+            if row['key'] == current.key)
+        self.assertTrue(queued['full'].startswith('1. Nf3 f6'))
+
+        explorer = self.client.get(f'/atomicdb/explore/{current.key}/')
+        self.assertTrue(explorer.context['line_from_root'])
+        self.assertEqual(explorer.context['line'][0]['num'], '1.')
+        self.assertEqual(explorer.context['line'][0]['san'], 'Nf3')
+        self.assertNotContains(explorer, '1... Bf8')
+
+    def test_disconnected_fragment_does_not_invent_move_number(self):
+        from .views import _line_labels, _line_to_root, _numbered_line
+        # Deliberately omit the startpos -> Nf3 edge. The canonical FEN knows
+        # whose turn it is, but its fullmove counter was intentionally erased.
+        top = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        target = self._play(top, 'g8f6')
+
+        preview, full = _line_labels(target.key)
+        resolved_top, line = _line_to_root(target)
+        orphan_preview, orphan_full = _line_labels(top.key)
+        orphan_page = self.client.get(f'/atomicdb/explore/{top.key}/')
+
+        self.assertEqual(preview, '… Nf6')
+        self.assertEqual(full, '… Nf6')
+        self.assertEqual((orphan_preview, orphan_full), ('…', '…'))
+        self.assertContains(orphan_page, 'lineage unavailable')
+        self.assertFalse(orphan_page.context['line_from_root'])
+        self.assertEqual(resolved_top.key, top.key)
+        self.assertEqual(_numbered_line(resolved_top, line), [{
+            'num': '', 'san': 'Nf6', 'key': target.key,
+        }])
+
+    def test_sql_parent_cap_keeps_direct_startpos_edge(self):
+        from .views import _line_labels
+        root = ingest.get_or_create_position(logic.start_fen())
+        target = self._play(root, 'e2e4')
+        # Pathological extra parents sort before/after the real root by key.
+        # Even with a one-row SQL budget, startpos must receive rank 1.
+        for index in range(20):
+            fake = Position.objects.create(
+                key=f'{index + 1:064x}', fen=logic.start_fen())
+            Edge.objects.create(
+                parent=fake, move_uci='a1a2', child=target)
+
+        with mock.patch(
+                'atomicdb.views.LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD', 1), \
+                mock.patch(
+                    'atomicdb.views.LINEAGE_SEARCH_MAX_EDGE_ROWS', 1):
+            preview, full = _line_labels(target.key)
+
+        self.assertEqual(preview, '1. e4')
+        self.assertEqual(full, '1. e4')
 
     def test_multiple_labels_batch_parent_queries_by_depth(self):
         import pyffish as pf
