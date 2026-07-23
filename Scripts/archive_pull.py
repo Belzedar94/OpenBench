@@ -6,7 +6,7 @@ import hashlib, os, subprocess, sys, datetime
 
 KEY  = os.path.expanduser(r"~\.ssh\spellbench_key")
 HOST = "root@178.104.66.19"
-ARCH = r"F:\OpenBench\archive"
+ARCH = r"D:\OpenBench\archive"
 LOG  = os.path.join(ARCH, "archive.log")
 
 def ssh(*cmd, **kw):
