@@ -85,7 +85,8 @@ White-POV; any mover-POV panel must say so explicitly.
 - Filters cover state, closure, trust and work state.
 - Tiny siblings collapse into a labelled `+N moves` rectangle and expand on
   zoom.
-- Refresh preserves focus, selection and camera.
+- Refresh preserves focus, selection and camera when they are still present in
+  the bounded snapshot.
 - URL parameters encode branch and selected position for shareable views.
 
 The visual delight comes from meaningful zoom transitions, board
@@ -236,7 +237,8 @@ Backend:
 
 Front-end:
 
-- zoom, selection, URL restoration and live refresh preserve state;
+- zoom, selection, URL restoration and live refresh preserve state when it is
+  still present in the bounded snapshot;
 - complete opening line works with hover, focus and tap;
 - secondary transpositions are discoverable;
 - child aggregation expands predictably;
@@ -248,3 +250,112 @@ Front-end:
 
 The product principle is simple: **a stable quantitative map for understanding
 the whole solving effort, and a local graph for understanding transpositions**.
+
+### Reproducible front-end contract check
+
+The pure layout tests cover residual width preservation (including a
+`100 = 60 + 40` truncated branch), an all-hidden branch, and deep-link
+first-move/lineage behavior:
+
+```console
+node --check atomicdb/static/atomicdb/conquest-map.js
+node atomicdb/test_conquest_layout.cjs
+```
+
+## Phase-0 implementation contract
+
+The backend implementation lives in `atomicdb/conquest_map.py`.  It deliberately
+does not add a model, write solver rows or run graph traversal in a web request.
+Build and publish the next observational snapshot with:
+
+```bash
+python manage.py build_conquest_map
+```
+
+The default destination is
+`Media/atomicdb/conquest-map-v1.json.gz`; production may override it with
+`ATOMICDB_MAP_SNAPSHOT_PATH`.  Publication writes a same-directory temporary
+file, flushes it and calls `os.replace()`.  The artifact has schema
+`atomicdb.map.snapshot.v1` and a SHA-256 identity over every field except the
+identity itself.  A prior authenticated artifact supplies stable display-parent
+choices.  A missing or corrupt artifact produces HTTP 503; the endpoint never
+falls back to the live database.
+
+The public endpoint is:
+
+```text
+GET /atomicdb/api/map/v1
+    ?root=<startpos-reachable-position-key>
+    &weight=frontier|explored|compute
+    &limit=1..600
+    &depth=1..32
+```
+
+It returns schema `atomicdb.map.v1`, semantic metadata, the snapshot identity,
+and a hierarchical `root`.  Every visible node includes its exact position
+fields, full SAN/UCI line from move 1, aggregate metrics, work state,
+transposition count, and explicit `zoomable`, `truncated` and
+`hidden_children` fields.  Direct links also receive a compact `lineage`
+(one full SAN/UCI line plus position key/depth/move per ancestor) and stable
+start-position `first_moves`, independently of the requested zoom root.
+Responses have a weak content ETag, support 304 and gzip, and are capped at
+2 MiB uncompressed.
+
+Snapshot input is decompressed in 64 KiB chunks up to the hard uncompressed
+budget.  A corrupt artifact is negative-cached by path, nanosecond mtime and
+compressed size, so repeated public requests do not repeatedly spend CPU on
+the same bad gzip; replacing the file invalidates that failure automatically.
+
+Metric definitions in v1:
+
+- `positions`: unique startpos-reachable positions attributed below the node,
+  including the node itself;
+- `closed`: positions whose exact practical status is not `UNKNOWN`;
+- `unknown`: positions whose exact status remains `UNKNOWN`;
+- `frontier`: unknown positions above the scheduler tombstone boundary
+  (`priority > -500,000,000`);
+- `historical`: positions at or below that tombstone boundary;
+- `nodes` / `seconds`: cumulative engine investment stored on attributed
+  positions;
+- `active_tasks` / `queued_tasks`: current `LEASED` / `PENDING` tasks;
+- `transpositions`: alternate reachable incoming edges, including reversible
+  links back to startpos.
+
+`eval_cp` remains heuristic and White-POV.  `status`, `closure` and `proof`
+remain exact/trust fields and are never inferred from evaluation.  The
+synthetic 100k gate runs with `ATOMICDB_MAP_SCALE_TESTS=1`; the explicit 1M gate
+uses `ATOMICDB_MAP_SCALE_TESTS=1000000`.
+
+## Operations and rollout
+
+The map is observational: deploying it must not restart, pause or reprioritize
+solver workers. Apply the migration, capture the first real hourly progress
+bucket, and build the first map artifact before exposing the navigation link:
+
+```bash
+python manage.py migrate
+python manage.py capture_atomicdb_progress --json
+python manage.py build_conquest_map
+```
+
+Keep the commands as separate scheduled jobs. Recommended starting cadences are
+once per hour for progress and every five minutes for the map. Retain
+stdout/stderr for both. A map build publishes only after complete validation
+and an atomic rename; a failed build leaves the last valid artifact in place.
+The web endpoint never performs a live traversal and returns 503 when no valid
+artifact exists.
+
+After rollout, verify:
+
+```text
+GET  /atomicdb/map/
+GET  /atomicdb/api/map/v1?limit=600&depth=8
+HEAD /atomicdb/api/map/v1?limit=600&depth=8
+```
+
+The GET must return schema `atomicdb.map.v1`, at most 600 marks and a snapshot
+timestamp. The HEAD must return the same ETag and content-encoding choice
+without a body. (Django's development server intentionally omits
+`Content-Length` on HEAD as permitted by RFC 9110.) Repeating GET with
+`If-None-Match` must return 304. Do not delete the previous artifact or
+progress rows during deployment.

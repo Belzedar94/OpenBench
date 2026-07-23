@@ -55,6 +55,14 @@ TEMPLATE_PATH = os.path.join(PROJECT_PATH, 'Templates')
 MEDIA_URL  = '/Media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'Media')
 
+# Conquest Map snapshots are observational, immutable inputs to the public
+# read-only API.  The builder publishes this file with os.replace(); web
+# requests never fall back to traversing the live solver database.
+ATOMICDB_MAP_SNAPSHOT_PATH = os.environ.get(
+    'ATOMICDB_MAP_SNAPSHOT_PATH',
+    os.path.join(MEDIA_ROOT, 'atomicdb', 'conquest-map-v1.json.gz'),
+)
+
 # AtomicDB authoritative tablebase verification.  Paths use the same
 # semicolon-separated convention as Client/atomicdb_worker.py --syzygy.
 ATOMICDB_TB_PATHS = [

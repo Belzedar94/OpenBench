@@ -5,6 +5,7 @@ atomicdb-tier1-spec.md. Disciplina central: eval (heuristico) y status
 (exacto) nunca se mezclan — eval ordena la exploracion, status cierra.
 """
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -144,3 +145,60 @@ class WorkerPing(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=['machine', 'user'],
                                                name='uniq_worker_machine')]
+
+
+class ProgressSnapshot(models.Model):
+    """Append-only hourly observation for the future Progress view.
+
+    These are cumulative counters observed at capture time, not reconstructed
+    history and not deltas.  ``bucket_start`` is always the start of a UTC
+    hour when written by ``capture_atomicdb_progress``.
+    """
+
+    bucket_start = models.DateTimeField(unique=True)
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    positions_total = models.BigIntegerField(default=0)
+    positions_unknown = models.BigIntegerField(default=0)
+    positions_closed = models.BigIntegerField(default=0)
+    positions_expanded = models.BigIntegerField(default=0)
+
+    engine_nodes_total = models.BigIntegerField(default=0)
+    engine_seconds_total = models.FloatField(default=0.0)
+    analyses_completed = models.BigIntegerField(default=0)
+
+    tasks_pending = models.BigIntegerField(default=0)
+    tasks_leased = models.BigIntegerField(default=0)
+    tasks_retried = models.BigIntegerField(default=0)
+    lease_retries_total = models.BigIntegerField(default=0)
+    recorded_rejections_total = models.BigIntegerField(default=0)
+
+    active_workers = models.BigIntegerField(default=0)
+    active_threads = models.BigIntegerField(default=0)
+    active_nps = models.BigIntegerField(default=0)
+
+    closure_terminal = models.BigIntegerField(default=0)
+    closure_tb = models.BigIntegerField(default=0)
+    closure_mate_pv = models.BigIntegerField(default=0)
+    closure_minimax = models.BigIntegerField(default=0)
+    closure_unclassified = models.BigIntegerField(default=0)
+
+    trust_verified = models.BigIntegerField(default=0)
+    trust_andor = models.BigIntegerField(default=0)
+    trust_engine = models.BigIntegerField(default=0)
+    trust_disputed = models.BigIntegerField(default=0)
+    trust_unclassified = models.BigIntegerField(default=0)
+
+    class Meta:
+        ordering = ['bucket_start']
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('ProgressSnapshot rows are append-only')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('ProgressSnapshot rows are append-only')
+
+    def __str__(self):
+        return f'AtomicDB progress {self.bucket_start.isoformat()}'

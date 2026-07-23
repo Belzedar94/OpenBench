@@ -1248,14 +1248,15 @@ class DatagenWorkerTests(unittest.TestCase):
                      ) as report:
                     with self.assertRaisesRegex(
                         worker.DatagenTransientError,
-                        'upload failed after 3 attempts',
+                        'upload failed after %d attempts'
+                        % worker.DATAGEN_TRANSFER_RETRIES,
                     ):
                         worker.complete_workload(cfg)
             finally:
                 os.chdir(previous)
 
-        self.assertEqual(upload.call_count, 3)
-        self.assertEqual(report.call_count, 3)
+        self.assertEqual(upload.call_count, worker.DATAGEN_TRANSFER_RETRIES)
+        self.assertEqual(report.call_count, worker.DATAGEN_TRANSFER_RETRIES)
         self.assertEqual(cfg.blacklist, [])
 
     def test_bzip2_failure_requeues_without_blacklisting_workload(self):
@@ -1290,13 +1291,14 @@ class DatagenWorkerTests(unittest.TestCase):
                      ) as report:
                     with self.assertRaisesRegex(
                         worker.DatagenTransientError,
-                        'bzip2 compression failed after 3 attempts',
+                        'bzip2 compression failed after %d attempts'
+                        % worker.DATAGEN_TRANSFER_RETRIES,
                     ):
                         worker.complete_workload(cfg)
             finally:
                 os.chdir(previous)
 
-        self.assertEqual(compress.call_count, 3)
+        self.assertEqual(compress.call_count, worker.DATAGEN_TRANSFER_RETRIES)
         report.assert_called_once()
         self.assertIn('transient failure', report.call_args.args[1])
         self.assertEqual(cfg.blacklist, [])
