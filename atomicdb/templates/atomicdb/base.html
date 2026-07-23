@@ -15,14 +15,16 @@
   --sq-l:#f0d9b5;--sq-d:#b58863;--accent:#7fa650;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:16px/1.5 'Segoe UI',system-ui,sans-serif}
+body{background:var(--bg);color:var(--text);font:16px/1.5 'Segoe UI',system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
-header{display:flex;align-items:baseline;gap:1.2rem;padding:.9rem 1.4rem;
+header{display:flex;align-items:center;gap:1.35rem;padding:.9rem 1.4rem;
   background:var(--panel);border-bottom:1px solid #3a362f}
-header h1{font-size:1.25rem;letter-spacing:.5px}
+header h1{flex:0 0 auto;font-size:1.25rem;letter-spacing:.5px}
 header h1 span{color:var(--hot)}
-header nav a{margin-right:1rem;color:var(--dim)}
+header nav{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem 1rem;min-width:0}
+header nav a{color:var(--dim);white-space:nowrap}
 header nav a:hover{color:var(--text)}
 main{max-width:1100px;margin:1.4rem auto;padding:0 1.2rem}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
@@ -132,6 +134,14 @@ h2{margin:1.6rem 0 .7rem;font-size:1.1rem}
 .linebox a:hover{background:var(--panel2);text-decoration:none}
 .linebox a.cur{background:var(--accent);color:#141310;font-weight:700}
 footer{margin:3rem 0 1rem;text-align:center;color:var(--dim);font-size:.8rem}
+@media(max-width:560px){
+  header{display:flex;align-items:center;gap:.8rem;padding:.58rem .75rem}
+  header h1{margin:0}
+  header h1 a{display:inline-flex;align-items:center;min-height:2.75rem}
+  header nav{flex:1 1 auto;flex-wrap:nowrap;gap:.85rem;overflow-x:auto;padding-bottom:.08rem;
+    scrollbar-color:#4b463f transparent;scrollbar-width:thin}
+  header nav a{display:inline-flex;align-items:center;min-height:2.75rem;font-size:.86rem}
+}
 </style>
 {% block extra_head %}{% endblock %}
 </head>

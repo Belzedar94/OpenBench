@@ -119,6 +119,151 @@
     return Boolean(payload && requestUrl === currentPayloadUrl);
   }
 
+  function compactText(value, pixelWidth, averageCharacterWidth) {
+    const text = String(value || '');
+    const width = Number(pixelWidth);
+    const characterWidth = Number(averageCharacterWidth) || 6.4;
+    if (!text || !Number.isFinite(width) || width <= characterWidth) return '';
+    const capacity = Math.max(1, Math.floor(width / characterWidth));
+    if (text.length <= capacity) return text;
+    if (capacity === 1) return '\u2026';
+    return `${text.slice(0, capacity - 1).trimEnd()}\u2026`;
+  }
+
+  function verticalGeometry(viewportHeight, levels) {
+    const viewport = Math.max(368, Number(viewportHeight) || 496);
+    const rowCount = Math.max(1, Math.floor(Number(levels) || 1));
+    const band = Math.max(31, Math.min(
+      57, viewport / Math.max(5, rowCount),
+    ));
+    const rowsHeight = Math.ceil(rowCount * band);
+    const frameHeight = Math.min(
+      viewport, Math.max(160, rowsHeight),
+    );
+    return {
+      band,
+      contentHeight: Math.max(frameHeight, rowsHeight),
+      frameHeight,
+      viewportHeight: viewport,
+    };
+  }
+
+  function isExpandable(entry) {
+    if (!entry) return false;
+    const data = entry.data || {};
+    return Boolean(
+      entry.children && entry.children.length
+      || data.zoomable
+      || data.truncated,
+    );
+  }
+
+  function keyboardTarget(entry, key, accepts, orderedEntries) {
+    if (!entry) return null;
+    const allowed = typeof accepts === 'function' ? accepts : () => true;
+    const ordered = Array.isArray(orderedEntries)
+      ? orderedEntries.filter(allowed) : [];
+    if (key === 'Home') return ordered[0] || null;
+    if (key === 'End') return ordered[ordered.length - 1] || null;
+    if (key === 'ArrowUp') {
+      let parent = entry.parent || null;
+      while (parent && !allowed(parent)) parent = parent.parent || null;
+      return parent;
+    }
+    if (key === 'ArrowDown') {
+      const pending = Array.from(entry.children || []);
+      while (pending.length) {
+        const descendant = pending.shift();
+        if (allowed(descendant)) return descendant;
+        pending.push(...(descendant.children || []));
+      }
+      return null;
+    }
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      const siblings = (entry.parent ? entry.parent.children : [entry])
+        .filter(allowed);
+      if (!siblings.length) return null;
+      const index = siblings.indexOf(entry);
+      if (index < 0) return siblings[0];
+      const offset = key === 'ArrowLeft' ? -1 : 1;
+      return siblings[(index + offset + siblings.length) % siblings.length];
+    }
+    return null;
+  }
+
+  function navigationState(
+    entries, selectedKey, currentRovingKey, focusKey,
+  ) {
+    const candidates = Array.isArray(entries) ? entries : [];
+    const keys = new Set(candidates.map((entry) => entry.data.key));
+    const logicalSelection = String(selectedKey || '');
+    const choices = [
+      logicalSelection,
+      String(currentRovingKey || ''),
+      String(focusKey || ''),
+    ];
+    const rovingKey = choices.find((key) => key && keys.has(key))
+      || (candidates[0] ? candidates[0].data.key : '');
+    return {
+      selectedKey: logicalSelection,
+      rovingKey,
+    };
+  }
+
+  function densityPlan(entries, readPixelWidth, minimumWidth) {
+    const source = Array.isArray(entries) ? entries : [];
+    const readWidth = typeof readPixelWidth === 'function'
+      ? readPixelWidth : () => 0;
+    const threshold = Math.max(0, Number(minimumWidth) || 4);
+    const visible = source.filter(
+      (entry) => Number(readWidth(entry)) >= threshold,
+    );
+    const visibleSet = new Set(visible);
+    const omittedBranches = new Map();
+
+    source.forEach((entry) => {
+      if (visibleSet.has(entry)) return;
+      let branch = entry;
+      let owner = entry.parent || null;
+      while (owner && !visibleSet.has(owner)) {
+        branch = owner;
+        owner = owner.parent || null;
+      }
+      if (!owner || !owner.data || !branch.data) return;
+      const ownerKey = owner.data.key;
+      const branchKey = branch.data.key;
+      if (!omittedBranches.has(ownerKey)) {
+        omittedBranches.set(ownerKey, new Set());
+      }
+      omittedBranches.get(ownerKey).add(branchKey);
+    });
+
+    const omittedByKey = new Map();
+    omittedBranches.forEach((branches, key) => {
+      omittedByKey.set(key, branches.size);
+    });
+    return {visible, omittedByKey};
+  }
+
+  function filterFeedback(totalCount, sourceMatchCount, renderedMatchCount) {
+    const total = Math.max(0, Number(totalCount) || 0);
+    const sourceMatches = Math.max(0, Number(sourceMatchCount) || 0);
+    const renderedMatches = Math.max(0, Number(renderedMatchCount) || 0);
+    if (renderedMatches > 0) return null;
+    if (sourceMatches > 0) {
+      return {
+        reason: 'too-fine',
+        message: `${sourceMatches} of ${total} territories match, but ${
+          sourceMatches === 1 ? 'it is' : 'they are'
+        } inside branches too narrow to display at this zoom. Zoom into a first move or clear the filters.`,
+      };
+    }
+    return {
+      reason: 'no-matches',
+      message: `0 of ${total} territories match the current filters.`,
+    };
+  }
+
   return {
     withResidualTree,
     leafWeight,
@@ -127,6 +272,13 @@
     lineageParent,
     etagForCurrentPayload,
     canReuseNotModified,
+    compactText,
+    verticalGeometry,
+    isExpandable,
+    keyboardTarget,
+    navigationState,
+    densityPlan,
+    filterFeedback,
   };
 }));
 
@@ -195,6 +347,9 @@
     dataUrl: '',
     hierarchy: null,
     index: new Map(),
+    keyboardKeys: new Set(),
+    densityOmitted: new Map(),
+    rovingKey: '',
     focusKey: '',
     selectedKey: '',
     firstMoves: [],
@@ -204,6 +359,8 @@
     loading: false,
     resizeTimer: null,
     lastWidth: 0,
+    lastContainerWidth: 0,
+    viewportCeiling: 0,
   };
 
   const statusNames = {
@@ -377,6 +534,8 @@
   function showStatus(message, kind) {
     elements.status.hidden = false;
     elements.status.className = `map-status ${kind || ''}`.trim();
+    elements.status.dataset.mode = kind || 'loading';
+    delete elements.status.dataset.reason;
     elements.status.replaceChildren();
     if (!kind) {
       const spinner = document.createElement('span');
@@ -389,6 +548,71 @@
 
   function hideStatus() {
     elements.status.hidden = true;
+    delete elements.status.dataset.mode;
+    delete elements.status.dataset.reason;
+  }
+
+  function showFilterFeedback(force) {
+    if (!state.data || (state.loading && !force)) return;
+    const territories = visibleNodes().filter(
+      (entry) => !entry.data.residual,
+    );
+    const matches = territories.filter(
+      (entry) => matchesFilters(entry.data),
+    );
+    const feedback = layout.filterFeedback(
+      territories.length,
+      matches.length,
+      state.keyboardKeys.size,
+    );
+    if (!feedback) {
+      if (elements.status.dataset.mode === 'filters') hideStatus();
+      return;
+    }
+
+    elements.status.hidden = false;
+    elements.status.className = 'map-status empty';
+    elements.status.dataset.mode = 'filters';
+    elements.status.dataset.reason = feedback.reason;
+    elements.status.replaceChildren();
+    const message = document.createElement('span');
+    message.textContent = feedback.message;
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'map-action';
+    clear.textContent = 'Clear filters';
+    clear.addEventListener('click', () => {
+      Object.keys(state.filters).forEach((key) => {
+        state.filters[key] = 'all';
+      });
+      setInputsFromState();
+      handleFilter();
+      window.requestAnimationFrame(() => elements.statusFilter.focus());
+    });
+    elements.status.append(message, clear);
+  }
+
+  function enhanceInteractionHelp() {
+    const help = document.querySelector('.map-help');
+    if (!help || help.querySelector('[data-pointer-help]')) return;
+    help.setAttribute('aria-label', 'Map interaction help');
+    [
+      ['Click / tap', 'select'],
+      ['Double-click', 'zoom'],
+    ].forEach(([gesture, action]) => {
+      const command = document.createElement('span');
+      command.className = 'map-key-command';
+      command.dataset.pointerHelp = '';
+      const keySet = document.createElement('span');
+      keySet.className = 'map-key-set';
+      const key = document.createElement('kbd');
+      key.textContent = gesture;
+      keySet.appendChild(key);
+      const label = document.createElement('span');
+      label.textContent = action;
+      command.append(keySet, label);
+      help.appendChild(command);
+    });
   }
 
   function setInputsFromState() {
@@ -521,15 +745,28 @@
     if (hierarchyNode.data.residual) hierarchyNode = hierarchyNode.parent;
     updateInspector(hierarchyNode, true);
     renderTextFallback();
-    if (focusElement) {
-      window.requestAnimationFrame(() => {
-        const mark = elements.svg.querySelector(
-          `[data-key="${window.CSS && CSS.escape
-            ? CSS.escape(hierarchyNode.data.key) : hierarchyNode.data.key}"]`,
-        );
-        if (mark) mark.focus({preventScroll: true});
-      });
-    }
+    if (focusElement) focusMark(hierarchyNode.data.key);
+  }
+
+  function markForKey(key) {
+    return Array.from(elements.svg.querySelectorAll('[data-key]')).find(
+      (mark) => mark.getAttribute('data-key') === key,
+    ) || null;
+  }
+
+  function focusMark(key) {
+    window.requestAnimationFrame(() => {
+      const mark = markForKey(key) || markForKey(state.rovingKey);
+      if (!mark) return;
+      mark.focus({preventScroll: true});
+      if (typeof mark.scrollIntoView === 'function') {
+        mark.scrollIntoView({
+          block: 'nearest',
+          inline: 'nearest',
+          behavior: 'auto',
+        });
+      }
+    });
   }
 
   function plainHierarchy(data, parent, depth) {
@@ -600,11 +837,17 @@
   }
 
   function chartLabel(entry, pixelWidth) {
-    const hidden = safeNumber(entry.data.hidden_children);
+    const hidden = safeNumber(entry.data.hidden_children)
+      + safeNumber(state.densityOmitted.get(entry.data.key));
     if (hidden > 0 && pixelWidth > 80) {
-      return `${moveLabel(entry.data)} · +${human(hidden)}`;
+      return layout.compactText(
+        `${moveLabel(entry.data)} · +${human(hidden)}`,
+        Math.max(0, pixelWidth - 12),
+      );
     }
-    return moveLabel(entry.data);
+    return layout.compactText(
+      moveLabel(entry.data), Math.max(0, pixelWidth - 12),
+    );
   }
 
   function ariaLabel(entry) {
@@ -623,6 +866,11 @@
       trustName(trustOf(entry.data)),
       icon,
       entry.data.truncated ? 'More descendants available' : '',
+      state.densityOmitted.get(entry.data.key)
+        ? `${state.densityOmitted.get(entry.data.key)} fine branch${
+          state.densityOmitted.get(entry.data.key) === 1 ? '' : 'es'
+        } hidden at this zoom`
+        : '',
     ].filter(Boolean).join(', ');
   }
 
@@ -641,27 +889,98 @@
     return nodes.slice(0, 600);
   }
 
+  function interactiveNodes() {
+    return visibleNodes().filter((entry) => (
+      !entry.data.residual && matchesFilters(entry.data)
+    ));
+  }
+
+  function rovingFocusKey(nodes) {
+    const entries = nodes || interactiveNodes();
+    return layout.navigationState(
+      entries,
+      state.selectedKey,
+      state.rovingKey,
+      state.focusKey,
+    ).rovingKey;
+  }
+
+  function reconcileSelection() {
+    const nodes = interactiveNodes();
+    state.rovingKey = rovingFocusKey(nodes);
+    return state.index.get(state.selectedKey) || focusNode();
+  }
+
+  function resetChartFrame() {
+    elements.svgWrap.style.height = '';
+    elements.svgWrap.style.minHeight = '';
+    elements.svgWrap.style.maxHeight = '';
+    elements.svgWrap.style.overflowY = '';
+    elements.svg.style.height = '';
+    elements.svg.style.minHeight = '';
+    elements.svg.style.maxHeight = '';
+    state.viewportCeiling = 0;
+  }
+
   function renderChart() {
     if (!d3 || !state.hierarchy) return;
     const focus = focusNode();
     const width = Math.max(320, elements.svgWrap.clientWidth || 800);
-    const height = Math.max(368, elements.svgWrap.clientHeight || 496);
-    const band = Math.max(31, Math.min(57, height / Math.max(
-      5, state.hierarchy.height - focus.depth + 1,
-    )));
+    const sourceNodes = visibleNodes();
     const xScale = d3.scaleLinear()
       .domain([focus.x0, focus.x1])
       .range([0, width]);
-    const nodes = visibleNodes();
+    const pixelWidth = (entry) => Math.max(
+      0, xScale(entry.x1) - xScale(entry.x0) - 1,
+    );
+    const density = layout.densityPlan(sourceNodes, pixelWidth, 4);
+    const nodes = density.visible;
+    state.densityOmitted = density.omittedByKey;
+    const levels = nodes.reduce(
+      (maximum, entry) => Math.max(maximum, entry.depth - focus.depth + 1),
+      1,
+    );
+    if (!state.viewportCeiling) {
+      state.viewportCeiling = Math.max(
+        368, elements.svgWrap.clientHeight || 496,
+      );
+    }
+    const geometry = layout.verticalGeometry(state.viewportCeiling, levels);
+    const height = geometry.contentHeight;
+    const band = geometry.band;
+    const isVisibleMark = (entry) => matchesFilters(entry.data);
+    const isKeyboardMark = (entry) => (
+      !entry.data.residual && isVisibleMark(entry)
+    );
+    const keyboardNodes = nodes.filter(isKeyboardMark);
+    state.keyboardKeys = new Set(
+      keyboardNodes.map((entry) => entry.data.key),
+    );
+    const tabKey = rovingFocusKey(keyboardNodes);
+    state.rovingKey = tabKey;
+    elements.svgWrap.style.height = `${geometry.frameHeight}px`;
+    elements.svgWrap.style.minHeight = `${geometry.frameHeight}px`;
+    elements.svgWrap.style.maxHeight = `${geometry.frameHeight}px`;
+    elements.svgWrap.style.overflowY = (
+      height > geometry.frameHeight ? 'auto' : 'hidden'
+    );
+    // The responsive stylesheet declares #map-svg with ID specificity.
+    // Mark the runtime content height important so the SVG and its adaptive
+    // frame cannot diverge at narrow breakpoints.
+    elements.svg.style.setProperty('height', `${height}px`, 'important');
+    elements.svg.style.setProperty('min-height', `${height}px`, 'important');
+    elements.svg.style.setProperty('max-height', `${height}px`, 'important');
     const svg = d3.select(elements.svg)
       .attr('viewBox', `0 0 ${width} ${height}`)
-      .attr('preserveAspectRatio', 'none');
+      .attr('preserveAspectRatio', 'none')
+      .attr('aria-busy', 'false');
+    svg.interrupt();
     const join = svg.selectAll('g.map-node')
       .data(nodes, (entry) => entry.data.key);
-    join.exit()
-      .transition().duration(reducedMotion ? 0 : 180)
-      .attr('opacity', 0)
-      .remove();
+    // Exiting marks stop being interactive immediately. Keeping them around
+    // for a fade made the advertised 600-node budget temporarily untrue and
+    // exposed stale treeitems to assistive technology after every zoom.
+    join.exit().interrupt().remove();
     const enter = join.enter().append('g')
       .attr('class', 'map-node')
       .attr('opacity', 0)
@@ -674,13 +993,31 @@
     enter.append('title');
     const merged = enter.merge(join)
       .attr('data-key', (entry) => entry.data.key)
-      .attr('aria-level', (entry) => entry.depth + 1)
-      .attr('aria-expanded', (entry) => Boolean(
-        entry.children || entry.data.zoomable,
+      .attr('role', (entry) => (
+        isKeyboardMark(entry) ? 'treeitem' : 'presentation'
       ))
-      .attr('aria-label', ariaLabel)
+      .attr('aria-level', (entry) => (
+        isKeyboardMark(entry) ? entry.depth + 1 : null
+      ))
+      .attr('aria-expanded', (entry) => (
+        isKeyboardMark(entry) && layout.isExpandable(entry) ? 'true' : null
+      ))
+      .attr('aria-selected', (entry) => (
+        isKeyboardMark(entry)
+          ? (entry.data.key === state.selectedKey ? 'true' : 'false')
+          : null
+      ))
+      .attr('aria-hidden', (entry) => (
+        isKeyboardMark(entry) ? null : 'true'
+      ))
+      .attr('aria-label', (entry) => (
+        isKeyboardMark(entry) ? ariaLabel(entry) : null
+      ))
+      .attr('pointer-events', (entry) => (
+        isVisibleMark(entry) ? null : 'none'
+      ))
       .attr('tabindex', (entry) => (
-        entry.data.key === state.selectedKey ? 0 : -1
+        entry.data.key === tabKey ? 0 : -1
       ))
       .attr('class', (entry) => {
         const classes = [
@@ -696,7 +1033,7 @@
       })
       .on('click', function (event, entry) {
         event.stopPropagation();
-        selectNode(entry, false);
+        selectNode(entry, true);
       })
       .on('dblclick', function (event, entry) {
         event.preventDefault();
@@ -741,7 +1078,7 @@
       .attr('x', 6)
       .attr('y', Math.min(18, band * .43))
       .attr('display', (entry) => (
-        xScale(entry.x1) - xScale(entry.x0) > 31 ? null : 'none'
+        xScale(entry.x1) - xScale(entry.x0) > 37 ? null : 'none'
       ))
       .text((entry) => chartLabel(
         entry, xScale(entry.x1) - xScale(entry.x0),
@@ -753,33 +1090,38 @@
         xScale(entry.x1) - xScale(entry.x0) > 62 && band > 39
           ? null : 'none'
       ))
-      .text((entry) => iconFor(entry.data));
+      .text((entry) => layout.compactText(
+        iconFor(entry.data),
+        Math.max(0, xScale(entry.x1) - xScale(entry.x0) - 12),
+        5.2,
+      ));
     merged.select('title').text(ariaLabel);
     state.lastWidth = width;
+    state.lastContainerWidth = Math.max(
+      320, elements.svgWrap.parentElement.clientWidth || width,
+    );
   }
 
   function handleNodeKeydown(event, entry) {
-    let target = null;
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      zoomTo(entry);
+      if (event.key === 'Enter' && layout.isExpandable(entry)) {
+        zoomTo(entry, true);
+      } else {
+        selectNode(entry, true);
+      }
       return;
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      zoomOut();
+      zoomOut(true);
       return;
     }
-    if (event.key === 'ArrowUp') target = entry.parent;
-    if (event.key === 'ArrowDown') {
-      target = entry.children && entry.children[0];
-    }
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      const siblings = entry.parent ? entry.parent.children : [entry];
-      const index = siblings.indexOf(entry);
-      const offset = event.key === 'ArrowLeft' ? -1 : 1;
-      target = siblings[(index + offset + siblings.length) % siblings.length];
-    }
+    const ordered = interactiveNodes().filter(
+      (candidate) => state.keyboardKeys.has(candidate.data.key),
+    );
+    const allowed = (candidate) => ordered.includes(candidate);
+    const target = layout.keyboardTarget(entry, event.key, allowed, ordered);
     if (target) {
       event.preventDefault();
       selectNode(target, true);
@@ -843,22 +1185,25 @@
     return false;
   }
 
-  function setFocus(entry) {
+  function setFocus(entry, restoreKeyboardFocus) {
     if (!entry) return;
     state.focusKey = entry.data.key;
     const selected = state.index.get(state.selectedKey);
     if (!selected || !isWithinBranch(selected, entry)) {
       state.selectedKey = entry.data.key;
     }
+    reconcileSelection();
     renderBreadcrumbs();
     renderFirstMoves();
     renderChart();
     renderTextFallback();
     updateInspector(state.index.get(state.selectedKey) || entry, false);
     updateUrl();
+    elements.svgWrap.scrollTop = 0;
+    if (restoreKeyboardFocus) focusMark(state.selectedKey || state.focusKey);
   }
 
-  async function zoomTo(entry) {
+  async function zoomTo(entry, restoreKeyboardFocus) {
     if (!entry) return;
     if (entry.data.residual) entry = entry.parent;
     if ((entry.data.truncated || (!entry.children && entry.data.zoomable))
@@ -866,33 +1211,50 @@
       state.requestedBranch = entry.data.key;
       state.requestedSelection = entry.data.key;
       await loadMap(entry.data.key, 'zoom');
+      if (restoreKeyboardFocus) {
+        focusMark(state.selectedKey || state.focusKey);
+      }
       return;
     }
-    setFocus(entry);
+    if (layout.isExpandable(entry)) {
+      setFocus(entry, restoreKeyboardFocus);
+    } else {
+      selectNode(entry, restoreKeyboardFocus);
+    }
   }
 
-  function zoomOut() {
+  function zoomOut(restoreKeyboardFocus) {
     const focus = focusNode();
     if (focus && focus.parent) {
-      setFocus(focus.parent);
+      setFocus(focus.parent, restoreKeyboardFocus);
       return;
     }
     const parent = layout.lineageParent(state.lineage, state.apiRoot);
     if (parent) {
       state.requestedBranch = parent.key;
       state.requestedSelection = parent.key;
-      loadMap(parent.key, 'zoom-out');
+      loadMap(parent.key, 'zoom-out').then(() => {
+        if (restoreKeyboardFocus) {
+          focusMark(state.selectedKey || state.focusKey);
+        }
+      });
       return;
     }
     if (state.apiRoot !== host.dataset.rootKey) {
       state.requestedBranch = '';
       state.requestedSelection = '';
-      loadMap(host.dataset.rootKey, 'zoom-out');
+      loadMap(host.dataset.rootKey, 'zoom-out').then(() => {
+        if (restoreKeyboardFocus) {
+          focusMark(state.selectedKey || state.focusKey);
+        }
+      });
     }
   }
 
   function renderFirstMoves() {
     elements.firstMoves.replaceChildren();
+    elements.firstMoves.setAttribute('role', 'group');
+    elements.firstMoves.setAttribute('aria-label', 'Selectable first moves');
     if (!state.firstMoves.length) {
       const empty = document.createElement('span');
       empty.className = 'strip-placeholder';
@@ -907,7 +1269,14 @@
       button.className = 'first-move-button';
       if (state.focusKey === node.key) button.classList.add('is-focus');
       button.style.setProperty('--status-colour', statusColours[statusOf(node)]);
-      button.setAttribute('role', 'listitem');
+      button.setAttribute(
+        'aria-pressed', state.focusKey === node.key ? 'true' : 'false',
+      );
+      button.setAttribute('aria-label', [
+        moveLabel(node),
+        `${human(metrics[metricFields[state.weight]])} ${state.weight}`,
+        statusNames[statusOf(node)],
+      ].join(', '));
       button.title = node.line_san || moveLabel(node);
       const move = document.createElement('span');
       move.className = 'move';
@@ -989,6 +1358,7 @@
     const requestedSelection = state.requestedSelection || state.selectedKey;
     state.selectedKey = state.index.has(requestedSelection)
       ? requestedSelection : state.focusKey;
+    reconcileSelection();
     state.requestedBranch = '';
     state.requestedSelection = '';
     renderFirstMoves();
@@ -1006,6 +1376,7 @@
     elements.stamp.lastElementChild.textContent = stampText;
     if (d3) {
       hideStatus();
+      showFilterFeedback(true);
     } else {
       showStatus(
         'The visual renderer is unavailable; the complete accessible map table is loaded below.',
@@ -1036,6 +1407,8 @@
       if (state.abortController) state.abortController.abort();
     }
     state.loading = true;
+    elements.stage.setAttribute('aria-busy', 'true');
+    elements.svg.setAttribute('aria-busy', 'true');
     const controller = new AbortController();
     state.abortController = controller;
     const query = new URLSearchParams({
@@ -1068,6 +1441,7 @@
         }
         if (d3) {
           hideStatus();
+          showFilterFeedback(true);
         } else {
           showStatus(
             'The visual renderer is unavailable; the complete accessible map table is loaded below.',
@@ -1106,6 +1480,8 @@
         state.loading = false;
         state.abortController = null;
         elements.refresh.disabled = false;
+        elements.stage.setAttribute('aria-busy', 'false');
+        elements.svg.setAttribute('aria-busy', 'false');
       }
     }
   }
@@ -1115,9 +1491,12 @@
     state.filters.closure = elements.closureFilter.value;
     state.filters.work = elements.workFilter.value;
     state.filters.trust = elements.trustFilter.value;
+    const selected = reconcileSelection();
     renderChart();
     renderTextFallback();
+    if (selected) updateInspector(selected, false);
     updateUrl();
+    showFilterFeedback();
   }
 
   document.querySelectorAll('input[name="weight"]').forEach((radio) => {
@@ -1162,6 +1541,14 @@
       window.clearTimeout(state.resizeTimer);
       state.resizeTimer = window.setTimeout(() => {
         if (state.hierarchy) {
+          const containerWidth = Math.max(
+            320,
+            elements.svgWrap.parentElement.clientWidth
+              || elements.svgWrap.clientWidth
+              || 800,
+          );
+          if (containerWidth === state.lastContainerWidth) return;
+          resetChartFrame();
           state.hierarchy = hierarchyFor(state.data.root);
           renderChart();
         }
@@ -1171,7 +1558,12 @@
   } else {
     window.addEventListener('resize', () => {
       window.clearTimeout(state.resizeTimer);
-      state.resizeTimer = window.setTimeout(renderChart, 120);
+      state.resizeTimer = window.setTimeout(() => {
+        if (!state.hierarchy) return;
+        resetChartFrame();
+        state.hierarchy = hierarchyFor(state.data.root);
+        renderChart();
+      }, 120);
     });
   }
 
@@ -1182,6 +1574,7 @@
   }, 60000);
 
   setInputsFromState();
+  enhanceInteractionHelp();
   renderBoard(host.dataset.rootFen, 'start position');
   if (!d3) {
     showStatus(

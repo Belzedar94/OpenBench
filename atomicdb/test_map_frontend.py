@@ -26,6 +26,15 @@ class ConquestMapPageTests(SimpleTestCase):
         self.assertContains(response, 'id="map-svg"')
         self.assertContains(response, 'role="tree"')
         self.assertContains(response, 'Accessible tree table')
+        self.assertContains(response, 'aria-label="Keyboard navigation"')
+        self.assertContains(response, 'class="map-key-command"', count=5)
+        self.assertContains(response, 'class="map-table-line"')
+        self.assertContains(response, 'class="map-table-fact"')
+        self.assertContains(response, 'class="strip-scroll-cue"')
+        self.assertContains(response, 'id="map-pattern-unknown"')
+        self.assertContains(response, 'id="map-pattern-white-win"')
+        self.assertContains(response, 'id="map-pattern-black-win"')
+        self.assertContains(response, 'id="map-pattern-draw"')
         self.assertContains(response, 'atomicdb/conquest-map.css')
         self.assertContains(response, 'atomicdb/conquest-map.js')
         self.assertContains(response, 'atomicdb/vendor/d3/d3.v7.9.0.min.js')
@@ -90,7 +99,34 @@ class ConquestMapStaticContractTests(SimpleTestCase):
         )
         self.assertIn('@media(prefers-reduced-motion:reduce)', style)
         self.assertIn('@media(forced-colors:active)', style)
-        self.assertIn('@media(max-width:480px)', style)
+        self.assertIn('@media(max-width:520px)', style)
+
+    def test_frontend_css_guards_dense_and_long_content_at_all_breakpoints(self):
+        style = (self.static_root / 'conquest-map.css').read_text(
+            encoding='utf-8',
+        )
+
+        for token in [
+            '.snapshot-stamp > span:last-child',
+            '.strip-scroll-cue',
+            '.map-stage{',
+            'align-items:start',
+            'fill:url(#map-pattern-white-win)',
+            'text-overflow:ellipsis',
+            '.map-key-command',
+            '.map-key-set',
+            'overflow-wrap:anywhere',
+            '.opening-line',
+            'max-height:5.05rem',
+            '.map-fallback table',
+            'min-width:43rem',
+            '@media(max-width:960px)',
+            '@media(max-width:640px)',
+            '@media(max-width:360px)',
+            '.inspector-metrics{grid-template-columns:1fr}',
+            '.inspector-actions{grid-template-columns:1fr}',
+        ]:
+            self.assertIn(token, style)
 
     def test_d3_is_pinned_vendored_and_licensed(self):
         vendor = self.static_root / 'vendor' / 'd3'
