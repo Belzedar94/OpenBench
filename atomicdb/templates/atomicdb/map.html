@@ -93,6 +93,9 @@
     <div class="first-move-strip" id="first-move-strip" role="list">
       <span class="strip-placeholder">Loading openings…</span>
     </div>
+    <span class="strip-scroll-cue" aria-hidden="true">
+      Scroll / swipe <b>→</b>
+    </span>
   </section>
 
   <nav class="map-breadcrumbs" id="map-breadcrumbs"
@@ -109,7 +112,33 @@
     <div class="map-visual">
       <div class="map-svg-wrap" id="map-svg-wrap">
         <svg id="map-svg" role="tree"
-          aria-label="Zoomable AtomicDB opening tree"></svg>
+          aria-label="Zoomable AtomicDB opening tree">
+          <defs aria-hidden="true">
+            <pattern id="map-pattern-unknown" width="6" height="6"
+              patternUnits="userSpaceOnUse">
+              <rect width="6" height="6" fill="#4d4943"></rect>
+              <circle cx="1.5" cy="1.5" r=".65" fill="#777069"></circle>
+            </pattern>
+            <pattern id="map-pattern-white-win" width="8" height="8"
+              patternUnits="userSpaceOnUse">
+              <rect width="8" height="8" fill="#456f2a"></rect>
+              <path d="M-2,8 L8,-2 M2,10 L10,2"
+                stroke="#739855" stroke-width="1"></path>
+            </pattern>
+            <pattern id="map-pattern-black-win" width="8" height="8"
+              patternUnits="userSpaceOnUse">
+              <rect width="8" height="8" fill="#8a3030"></rect>
+              <path d="M-2,-2 L10,10 M-2,6 L2,10 M6,-2 L10,2"
+                stroke="#b85c5c" stroke-width="1"></path>
+            </pattern>
+            <pattern id="map-pattern-draw" width="8" height="8"
+              patternUnits="userSpaceOnUse">
+              <rect width="8" height="8" fill="#376b9c"></rect>
+              <path d="M0,2.5 H8 M0,6.5 H8"
+                stroke="#6690b7" stroke-width="1"></path>
+            </pattern>
+          </defs>
+        </svg>
       </div>
       <div class="map-legend" aria-label="Map legend">
         <span><i class="legend-swatch unknown"></i> Unknown</span>
@@ -120,11 +149,28 @@
         <span><i class="legend-outline queued"></i> Queued</span>
         <span><b aria-hidden="true">↗</b> Transposition</span>
       </div>
-      <p class="map-help">
-        <kbd>←</kbd><kbd>→</kbd> siblings · <kbd>↑</kbd> parent ·
-        <kbd>↓</kbd> child · <kbd>Enter</kbd> zoom ·
-        <kbd>Esc</kbd> zoom out
-      </p>
+      <div class="map-help" role="note" aria-label="Keyboard navigation">
+        <span class="map-key-command">
+          <span class="map-key-set"><kbd>←</kbd><kbd>→</kbd></span>
+          <span>siblings</span>
+        </span>
+        <span class="map-key-command">
+          <span class="map-key-set"><kbd>↑</kbd></span>
+          <span>parent</span>
+        </span>
+        <span class="map-key-command">
+          <span class="map-key-set"><kbd>↓</kbd></span>
+          <span>child</span>
+        </span>
+        <span class="map-key-command">
+          <span class="map-key-set"><kbd>Enter</kbd></span>
+          <span>zoom</span>
+        </span>
+        <span class="map-key-command">
+          <span class="map-key-set"><kbd>Esc</kbd></span>
+          <span>zoom out</span>
+        </span>
+      </div>
     </div>
 
     <aside class="map-inspector" id="map-inspector"
@@ -164,6 +210,10 @@
         screen-reader-friendly table.</p>
       <div class="table-scroll">
         <table>
+          <colgroup>
+            <col class="map-table-line">
+            <col span="4" class="map-table-fact">
+          </colgroup>
           <thead><tr>
             <th scope="col">Opening line</th>
             <th scope="col">State</th>
