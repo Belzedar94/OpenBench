@@ -9,10 +9,12 @@ import time
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count, Max
 from django.utils import timezone
 
-from . import logic, tb
-from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
+from . import logic, scheduling, tb
+from .models import (AnalysisTask, Campaign, CohortMembership, DBEvent, Edge,
+                     Position, SchedulingCohort)
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
 # profundidad se compra por sonda; evals fiables valen mas que anchura barata.
@@ -29,7 +31,7 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # exhaustive AND/OR certificate cannot be produced promptly.  This is one
 # shared wall-clock allowance for the complete online submission.
 ONLINE_MATE_PROOF_SECONDS = 20.0
-_priority_refresh_cache = {'at': 0.0}
+_priority_refresh_cache = {'at': 0.0, 'signature': None}
 
 
 def multipv_for(visits):
@@ -382,35 +384,131 @@ def _regret_from_root():
     return regret
 
 
-def refresh_priorities():
+def refresh_priorities(reconcile_tasks=True):
     """§4.1 — recalculo global (llamado por el selector). Prioridad =
     cercania al cierre local - regret acumulado desde la raiz - visitas.
     Respeta las lapidas (las ramas muertas no resucitan)."""
     now = time.monotonic()
     cached = _priority_refresh_cache
-    if cached['at'] and now - cached['at'] < PRIORITY_REFRESH_SECONDS:
+    theory_mode = getattr(
+        settings, 'ATOMICDB_THEORY_SCHEDULER_MODE', 'OFF').upper()
+    policy_version = getattr(
+        settings, 'ATOMICDB_THEORY_POLICY_VERSION', '')
+    bundle_sha256 = getattr(
+        settings, 'ATOMICDB_THEORY_BUNDLE_SHA256', '')
+    cohort_revision = {'count': 0, 'last': None}
+    membership_count = 0
+    if theory_mode != 'OFF':
+        cohort_revision = SchedulingCohort.objects.filter(
+            active=True, policy_version=policy_version,
+            manifest_sha256=bundle_sha256).aggregate(
+                count=Count('id'), last=Max('updated'))
+        membership_count = CohortMembership.objects.filter(
+            cohort__active=True,
+            cohort__policy_version=policy_version,
+            cohort__manifest_sha256=bundle_sha256).count()
+    signature = (
+        theory_mode,
+        policy_version,
+        bundle_sha256,
+        bool(reconcile_tasks),
+        float(getattr(settings, 'ATOMICDB_THEORY_MAX_BOOST', 12.0)),
+        cohort_revision['count'],
+        (cohort_revision['last'].isoformat()
+         if cohort_revision['last'] is not None else ''),
+        membership_count,
+    )
+    if (cached['at'] and cached.get('signature') == signature
+            and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
         return False
 
     regret = _regret_from_root()
+    theory_by_key = {}
+    stale_compute_by_key = {}
+    if theory_mode != 'OFF':
+        for key, slug, tier in CohortMembership.objects.filter(
+                cohort__active=True,
+                cohort__policy_version=policy_version,
+                cohort__manifest_sha256=bundle_sha256).values_list(
+                    'position_key', 'cohort__slug',
+                    'cohort__priority_level').distinct():
+            theory_by_key.setdefault(key, []).append((slug, tier))
+
+        # Only imported keys need a decay denominator.  Reading compact task
+        # telemetry in Python works identically on SQLite and PostgreSQL and
+        # avoids backend-specific arithmetic casts.
+        if theory_by_key:
+            for key, seconds, threads in AnalysisTask.objects.filter(
+                    position_id__in=theory_by_key,
+                    state=AnalysisTask.TState.COMPLETED).values_list(
+                        'position_id', 'elapsed_seconds', 'threads_at_lease'):
+                attempts, core_hours = stale_compute_by_key.get(
+                    key, (0, 0.0))
+                stale_compute_by_key[key] = (
+                    attempts + 1,
+                    core_hours
+                    + max(0.0, float(seconds or 0.0))
+                    * max(1, int(threads or 0)) / 3600.0)
+
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
                                .iterator(chunk_size=2000):
-        e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
         r = regret.get(pos.key, float('inf'))
-        runits = DISCONNECTED_REGRET if r == float('inf') \
-            else min(r, 3000) / 100.0
-        prio = (min(e, 1500) / 100.0          # cercania al cierre
-                + (50.0 if e >= MATE_BAND else 0.0)  # mate visto: rematar
-                + (2.0 if not pos.expanded else 0.0)
-                - REGRET_WEIGHT * runits      # relevancia hacia la raiz
-                - 1.5 * pos.visits)           # frescura
-        if pos.priority != prio:
-            pos.priority = prio
+        attempts, core_hours = stale_compute_by_key.get(pos.key, (0, 0.0))
+        cohorts = theory_by_key.get(pos.key, ())
+        score = scheduling.score_candidate(
+            eval_cp=pos.eval_cp,
+            regret_cp=r,
+            expanded=pos.expanded,
+            visits=pos.visits,
+            source=('THEORY' if cohorts else 'AUTO'),
+            cohorts=cohorts,
+            attempts_since_progress=max(attempts, pos.visits),
+            core_hours_since_progress=core_hours,
+            max_boost=getattr(settings, 'ATOMICDB_THEORY_MAX_BOOST', 12.0),
+            shadow=theory_mode != 'ACTIVE')
+        # An imported match is the unit of observation.  Leaving unrelated
+        # positions as NULL avoids rewriting/indexing the whole DAG merely
+        # because SHADOW mode is enabled.
+        shadow_priority = (
+            score.proposed_priority
+            if theory_mode != 'OFF' and cohorts
+            else None)
+        if (pos.priority != score.selection_priority
+                or pos.theory_boost != score.theory_boost
+                or pos.shadow_priority != shadow_priority):
+            pos.priority = score.selection_priority
+            pos.theory_boost = score.theory_boost
+            pos.shadow_priority = shadow_priority
             dirty.append(pos)
     for i in range(0, len(dirty), 500):
-        Position.objects.bulk_update(dirty[i:i + 500], ['priority'])
+        Position.objects.bulk_update(
+            dirty[i:i + 500],
+            ['priority', 'theory_boost', 'shadow_priority'])
+    if not reconcile_tasks:
+        pass
+    elif theory_mode != 'ACTIVE':
+        AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.THEORY).update(
+                source=AnalysisTask.Source.AUTO)
+    else:
+        AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.THEORY,
+            position__theory_boost__lte=0).update(
+                source=AnalysisTask.Source.AUTO)
+        # Activation may happen after AUTO work was already materialised.
+        # Promote only idle autonomous work.  USER and live leases are a hard
+        # boundary and must never be rewritten by a community prior.
+        AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.AUTO,
+            position__theory_boost__gt=0).update(
+                source=AnalysisTask.Source.THEORY)
     cached['at'] = now
+    cached['signature'] = signature
     return True
 
 
@@ -442,10 +540,34 @@ def next_tasks(n):
             pos.priority = DEAD   # lapida (refresh_priorities la respeta)
             pos.save(update_fields=['priority'])
             continue
-        task, _ = AnalysisTask.objects.get_or_create(
+        theory_active = (
+            getattr(settings, 'ATOMICDB_THEORY_SCHEDULER_MODE', 'OFF').upper()
+            == 'ACTIVE' and pos.theory_boost > 0)
+        source = (AnalysisTask.Source.THEORY
+                  if theory_active else AnalysisTask.Source.AUTO)
+        task, created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget_for(pos),
-                      'multipv': multipv_for(pos.visits)})
+                      'multipv': multipv_for(pos.visits),
+                      'source': source})
+        if created and theory_active:
+            cohorts = list(CohortMembership.objects.filter(
+                position_key=pos.key, cohort__active=True,
+                cohort__policy_version=getattr(
+                    settings, 'ATOMICDB_THEORY_POLICY_VERSION', ''),
+                cohort__manifest_sha256=getattr(
+                    settings, 'ATOMICDB_THEORY_BUNDLE_SHA256', ''),
+            ).values_list('cohort__slug', flat=True).distinct())
+            DBEvent.objects.create(kind='THEORY_TASK_CREATED', payload={
+                'key': pos.key,
+                'task_id': task.id,
+                'base_priority': pos.priority - pos.theory_boost,
+                'theory_boost': pos.theory_boost,
+                'final_priority': pos.priority,
+                'cohorts': sorted(cohorts),
+                'policy_version': getattr(
+                    settings, 'ATOMICDB_THEORY_POLICY_VERSION', ''),
+            })
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks

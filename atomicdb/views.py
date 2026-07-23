@@ -7,6 +7,7 @@ import secrets
 import time
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.http import JsonResponse
@@ -16,12 +17,12 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import F, Q, Sum
+from django.db.models import Case, F, IntegerField, Q, Sum, Value, When
 
 from . import ingest, logic
 from .metrics import worker_metrics
-from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
-                     RequestLog, WorkerPing)
+from .models import (AnalysisTask, Campaign, CohortMembership, DBEvent, Edge,
+                     Position, RequestLog, WorkerPing)
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -72,6 +73,11 @@ def _touch_worker(request, user):
         # Do not save the stale model instance: submit and heartbeat update
         # telemetry concurrently and a full save could roll those fields back.
         WorkerPing.objects.filter(pk=ping.pk).update(**capacity)
+        # The caller uses this same instance to snapshot lease capacity.  Keep
+        # only the fields just written in sync without refreshing unrelated
+        # telemetry that another request may be updating concurrently.
+        for field, value in capacity.items():
+            setattr(ping, field, value)
     return ping
 
 
@@ -159,7 +165,11 @@ def api_lease(request):
             queryset = (AnalysisTask.objects
                 .select_for_update(skip_locked=True)
                 .select_related('position').filter(state='PENDING')
-                .order_by('-source', '-position__priority', 'id'))
+                .annotate(_source_rank=Case(
+                    When(source=AnalysisTask.Source.USER, then=Value(3)),
+                    When(source=AnalysisTask.Source.THEORY, then=Value(2)),
+                    default=Value(1), output_field=IntegerField()))
+                .order_by('-_source_rank', '-position__priority', 'id'))
             for candidate in queryset.iterator(chunk_size=64):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
@@ -212,10 +222,12 @@ def api_lease(request):
                                  if supports_lease_token else '')
                 t.lease_session = (lease_session
                                    if supports_lease_token else '')
+                t.threads_at_lease = max(0, ping.threads)
                 t.attempts += 1
                 t.save(update_fields=['state', 'machine', 'leased_at',
                                       'lease_heartbeat_at', 'lease_token',
-                                      'lease_session', 'attempts'])
+                                      'lease_session', 'threads_at_lease',
+                                      'attempts'])
 
     # With one task per lease, the server can expose the exact current task
     # immediately even to the previous worker build, before its first heartbeat.
@@ -859,7 +871,9 @@ def home(request):
         preview, full = labels.get(pos.key, ('', ''))
         upnext.append({'key': pos.key,
                        'san': preview or 'start position',
-                       'full': full or 'start position'})
+                       'full': full or 'start position',
+                       'theory_boost': pos.theory_boost,
+                       'shadow_priority': pos.shadow_priority})
     events = _friendly_events(event_rows, labels)
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
@@ -1025,6 +1039,17 @@ def explore(request, key):
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     eval_stm = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
+    theory_cohorts = list(CohortMembership.objects.filter(
+        position_key=pos.key,
+        cohort__active=True,
+        cohort__policy_version=getattr(
+            settings, 'ATOMICDB_THEORY_POLICY_VERSION', ''),
+        cohort__manifest_sha256=getattr(
+            settings, 'ATOMICDB_THEORY_BUNDLE_SHA256', ''),
+    ).values(
+        'cohort__slug', 'cohort__label', 'cohort__priority_level',
+        'cohort__evidence_level', 'source_id', 'source_url',
+    ).order_by('cohort__slug', 'source_id'))
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
@@ -1036,6 +1061,9 @@ def explore(request, key):
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
+        'theory_cohorts': theory_cohorts,
+        'theory_mode': getattr(
+            settings, 'ATOMICDB_THEORY_SCHEDULER_MODE', 'OFF').upper(),
         'unexplored': unexplored,
         'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
