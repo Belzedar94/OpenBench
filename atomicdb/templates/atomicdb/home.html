@@ -47,7 +47,12 @@
     <ul class="feed">
       {% for q in upnext %}
       <li><span class="t">{{ forloop.counter }}</span>
-        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a></li>
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>
+        {% if q.shadow_priority is not None %}
+        <span class="dim" title="Untrusted community evidence; visible in shadow mode but not used by the live queue">
+          &nbsp;theory shadow +{{ q.theory_boost|floatformat:1 }}
+        </span>
+        {% endif %}</li>
       {% endfor %}
     </ul>
     {% else %}<p class="dim">Queue is empty.</p>{% endif %}

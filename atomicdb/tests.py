@@ -454,6 +454,48 @@ class RequestTests(TestCase):
         tasks = json.loads(lease.content)['tasks']
         self.assertEqual(tasks[0]['fen'], b.fen)  # USER antes que mejor prio
 
+    def test_source_order_is_explicit_user_theory_auto(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('u', password='p')
+        root = ingest.get_or_create_position(logic.start_fen())
+        fen_theory = logic.apply_move(root.fen, 'e2e4')
+        fen_user = logic.apply_move(root.fen, 'g1f3')
+        theory = ingest.get_or_create_position(fen_theory)
+        user = ingest.get_or_create_position(fen_user)
+        root.priority, theory.priority, user.priority = 999, 10, -10
+        root.save(update_fields=['priority'])
+        theory.save(update_fields=['priority'])
+        user.save(update_fields=['priority'])
+        AnalysisTask.objects.create(
+            position=root, budget_nodes=1000,
+            source=AnalysisTask.Source.AUTO)
+        AnalysisTask.objects.create(
+            position=theory, budget_nodes=1000,
+            source=AnalysisTask.Source.THEORY)
+        AnalysisTask.objects.create(
+            position=user, budget_nodes=1000,
+            source=AnalysisTask.Source.USER)
+
+        order = []
+        for index in range(3):
+            response = self.client.post('/atomicdb/api/lease', {
+                'username': 'u', 'password': 'p',
+                'machine': f'm{index}', 'tb': '1',
+                'worker_build': '2026072203',
+                'lease_session': f'session-{index}',
+            })
+            task_id = response.json()['tasks'][0]['id']
+            task = AnalysisTask.objects.get(pk=task_id)
+            order.append(task.source)
+            task.state = AnalysisTask.TState.COMPLETED
+            task.save(update_fields=['state'])
+
+        self.assertEqual(order, [
+            AnalysisTask.Source.USER,
+            AnalysisTask.Source.THEORY,
+            AnalysisTask.Source.AUTO,
+        ])
+
     def test_request_rate_limited(self):
         from .models import RequestLog
         a = ingest.get_or_create_position(logic.start_fen())
@@ -502,6 +544,7 @@ class MachineVisibilityTests(TestCase):
         self.assertEqual(pos.time_invested, 2.5)
         task = AnalysisTask.objects.get(id=tasks[0]['id'])
         self.assertEqual(task.elapsed_seconds, 2.5)
+        self.assertEqual(task.threads_at_lease, 8)
 
     def test_heartbeat_tracks_current_task_and_keeps_original_lease_time(self):
         from django.contrib.auth.models import User
@@ -543,12 +586,14 @@ class MachineVisibilityTests(TestCase):
             'machine': 'm1', 'threads': 8, 'hash': 512, 'os': 'TestOS',
         })
 
-        _touch_worker(request, user)
+        touched = _touch_worker(request, user)
 
         ping.refresh_from_db()
         self.assertEqual((ping.tasks_done, ping.current_task_id, ping.last_nps),
                          (7, 99, 123_456))
         self.assertEqual(ping.nps_updated, stamp)
+        self.assertEqual((touched.threads, touched.hash_mb, touched.os),
+                         (8, 512, 'TestOS'))
 
     def test_non_finite_elapsed_is_safely_ignored(self):
         import json

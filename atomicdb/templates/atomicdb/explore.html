@@ -91,6 +91,26 @@
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
       nodes {{ nodes_h }} · {{ time_str }}</p>
+    {% if theory_cohorts %}
+    <details>
+      <summary>Community theory hints
+        <span class="dim">({{ theory_mode|lower }}, scheduling only)</span>
+      </summary>
+      <p class="dim" style="font-size:.8rem">
+        These public studies and discussions may only propose queue order.
+        They cannot create moves, evaluations, closures or proofs.
+      </p>
+      <ul class="feed">
+        {% for hint in theory_cohorts %}
+        <li><strong>{{ hint.cohort__priority_level }}</strong>
+          {{ hint.cohort__label }}
+          <span class="dim">{{ hint.cohort__evidence_level }} ·
+            {% if hint.source_url %}<a href="{{ hint.source_url }}" rel="noreferrer">{{ hint.source_id }}</a>
+            {% else %}{{ hint.source_id }}{% endif %}</span></li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
     {% if pos.last_analysis %}
     <details>
       <summary>raw engine output (last analysis)</summary>

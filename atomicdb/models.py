@@ -46,6 +46,11 @@ class Position(models.Model):
     time_invested  = models.FloatField(default=0.0)   # segundos de motor acumulados
     visits    = models.IntegerField(default=0)
     priority  = models.FloatField(default=0.0, db_index=True)      # selector (§4.1)
+    # Community/theory evidence is scheduling-only.  Keeping the proposed
+    # score beside the live priority lets shadow mode remain observable without
+    # changing queue order or any proof-bearing field.
+    theory_boost = models.FloatField(default=0.0)
+    shadow_priority = models.FloatField(null=True, db_index=True)
     campaign  = models.ForeignKey('Campaign', null=True, on_delete=models.SET_NULL,
                                   related_name='positions')
     updated   = models.DateTimeField(auto_now=True)
@@ -73,6 +78,83 @@ class Campaign(models.Model):
     created  = models.DateTimeField(auto_now_add=True)
 
 
+class SchedulingCohort(models.Model):
+    """Untrusted theory provenance used only to order practical searches."""
+
+    class PriorityLevel(models.TextChoices):
+        P0 = 'P0'
+        P1 = 'P1'
+        P2 = 'P2'
+        P3 = 'P3'
+
+    class EvidenceLevel(models.TextChoices):
+        E0 = 'E0'
+        E1 = 'E1'
+        E2 = 'E2'
+        E3 = 'E3'
+        E4 = 'E4'
+
+    # A cohort slug is stable inside one policy, while a later policy version
+    # may intentionally re-score the same named route.  Keeping both versions
+    # addressable makes rollback possible without rewriting historical rows.
+    slug = models.SlugField(max_length=64)
+    label = models.CharField(max_length=160)
+    # Deliberately not a Position FK: importing hints must not populate the
+    # proof DAG.  A cohort starts influencing scheduling only after the same
+    # canonical key is independently discovered by AtomicDB.
+    root_fen = models.TextField()
+    root_key = models.CharField(max_length=64, db_index=True)
+    priority_level = models.CharField(
+        max_length=2, choices=PriorityLevel.choices)
+    evidence_level = models.CharField(
+        max_length=2, choices=EvidenceLevel.choices)
+    manifest_sha256 = models.CharField(max_length=64)
+    policy_version = models.CharField(max_length=32)
+    decay_policy = models.JSONField(default=dict)
+    metadata = models.JSONField(default=dict)
+    active = models.BooleanField(default=True, db_index=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['policy_version', 'slug'],
+            name='uniq_theory_policy_slug')]
+        indexes = [models.Index(
+            fields=['policy_version', 'active'],
+            name='atomic_theory_policy_active')]
+
+
+class CohortMembership(models.Model):
+    """One provenance path from a theory source to a canonical position key."""
+
+    cohort = models.ForeignKey(
+        SchedulingCohort, on_delete=models.CASCADE,
+        related_name='memberships')
+    position_key = models.CharField(max_length=64, db_index=True)
+    fen = models.TextField()
+    ply = models.PositiveIntegerField(default=0)
+    role = models.CharField(max_length=32, default='SEED')
+    source_id = models.CharField(max_length=128)
+    source_url = models.URLField(max_length=512, blank=True)
+    artifact_sha256 = models.CharField(max_length=64, blank=True)
+    path_uci = models.TextField(default='')
+    # Fixed-width identity keeps the uniqueness constraint portable and avoids
+    # PostgreSQL B-tree entry limits on very long study paths.
+    path_sha256 = models.CharField(max_length=64)
+    provenance_kind = models.CharField(max_length=32, default='STUDY')
+    metadata = models.JSONField(default=dict)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['cohort', 'position_key', 'source_id', 'path_sha256'],
+            name='uniq_cohort_position_provenance')]
+        indexes = [models.Index(
+            fields=['position_key', 'cohort'],
+            name='atomic_cohort_position')]
+
+
 class AnalysisTask(models.Model):
     class TState(models.TextChoices):
         PENDING   = 'PENDING'
@@ -80,8 +162,9 @@ class AnalysisTask(models.Model):
         COMPLETED = 'COMPLETED'
 
     class Source(models.TextChoices):
-        AUTO = 'AUTO'   # selector best-first
-        USER = 'USER'   # peticion publica: se sirve primero
+        AUTO   = 'AUTO'    # selector best-first
+        THEORY = 'THEORY'  # prior no confiable; nunca cierra una posicion
+        USER   = 'USER'    # peticion publica: se sirve primero
 
     position     = models.ForeignKey(Position, on_delete=models.CASCADE)
     budget_nodes = models.BigIntegerField()
@@ -89,7 +172,7 @@ class AnalysisTask(models.Model):
     elapsed_seconds = models.FloatField(default=0.0)  # tiempo reportado por el motor
     multipv      = models.IntegerField(default=5)
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
-    source       = models.CharField(max_length=4, choices=Source.choices,
+    source       = models.CharField(max_length=6, choices=Source.choices,
                                     default=Source.AUTO, db_index=True)
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
@@ -104,6 +187,9 @@ class AnalysisTask(models.Model):
     # Stable for one worker process. It makes a lost lease HTTP response
     # replayable without letting a different same-machine process steal it.
     lease_session = models.CharField(max_length=64, default='')
+    # Snapshot at assignment time.  elapsed_seconds * threads_at_lease is the
+    # comparable compute denominator for theory cohort scorecards.
+    threads_at_lease = models.PositiveIntegerField(default=0)
     attempts     = models.IntegerField(default=0)
     created      = models.DateTimeField(auto_now_add=True)
     completed    = models.DateTimeField(null=True)

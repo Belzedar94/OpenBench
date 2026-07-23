@@ -10,7 +10,9 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
+import math
 import os
+import re
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +69,41 @@ ATOMICDB_TB_TRUSTED = [
         'ATOMICDB_TB_TRUSTED', 'belzedar'
     ).split(',') if username.strip()
 ]
+
+# Theory/community evidence is untrusted and may only influence scheduling.
+# SHADOW is the safe deployment default: proposed priorities are persisted for
+# inspection, while the live queue continues to use the original base score.
+ATOMICDB_THEORY_SCHEDULER_MODE = os.environ.get(
+    'ATOMICDB_THEORY_SCHEDULER_MODE', 'SHADOW').upper()
+if ATOMICDB_THEORY_SCHEDULER_MODE not in ('OFF', 'SHADOW', 'ACTIVE'):
+    raise ValueError(
+        'ATOMICDB_THEORY_SCHEDULER_MODE must be OFF, SHADOW or ACTIVE')
+ATOMICDB_THEORY_POLICY_VERSION = os.environ.get(
+    'ATOMICDB_THEORY_POLICY_VERSION', 'atomic-theory-shadow-v1')
+if not re.fullmatch(
+        r'[a-z0-9][a-z0-9._-]{0,31}', ATOMICDB_THEORY_POLICY_VERSION):
+    raise ValueError(
+        'ATOMICDB_THEORY_POLICY_VERSION must be a non-empty lowercase '
+        'version token of at most 32 characters')
+ATOMICDB_THEORY_BUNDLE_SHA256 = os.environ.get(
+    'ATOMICDB_THEORY_BUNDLE_SHA256',
+    'a6261fbf26b2eb4a80fac2b4ae545e16297c17db074c698d563bff7ba4790464')
+if not re.fullmatch(r'[0-9a-f]{64}', ATOMICDB_THEORY_BUNDLE_SHA256):
+    raise ValueError(
+        'ATOMICDB_THEORY_BUNDLE_SHA256 must be a lowercase SHA-256 digest')
+ATOMICDB_THEORY_MAX_BOOST = float(os.environ.get(
+    'ATOMICDB_THEORY_MAX_BOOST', '12.0'))
+if (not math.isfinite(ATOMICDB_THEORY_MAX_BOOST)
+        or not 0.0 <= ATOMICDB_THEORY_MAX_BOOST <= 12.0):
+    raise ValueError(
+        'ATOMICDB_THEORY_MAX_BOOST must be finite and between 0 and 12')
+ATOMICDB_THEORY_ACTIVE_ACK = os.environ.get(
+    'ATOMICDB_THEORY_ACTIVE_ACK', '')
+if (ATOMICDB_THEORY_SCHEDULER_MODE == 'ACTIVE'
+        and ATOMICDB_THEORY_ACTIVE_ACK != ATOMICDB_THEORY_POLICY_VERSION):
+    raise ValueError(
+        'ACTIVE theory scheduling requires '
+        'ATOMICDB_THEORY_ACTIVE_ACK=<policy version>')
 
 INSTALLED_APPS = [
     'atomicdb',
