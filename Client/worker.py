@@ -81,8 +81,12 @@ TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
-DATAGEN_TRANSFER_RETRIES = 3
-DATAGEN_TRANSFER_RETRY_DELAY = 5
+# Six attempts with 45s spacing ride out flaky residential-upstream windows
+# during ~180MB chunk uploads; the heartbeat thread keeps the lease fresh
+# throughout, so patience here is free (observed 3x SSLWantWriteError bursts
+# on 2026-07-23 that a 3x5s policy could not survive).
+DATAGEN_TRANSFER_RETRIES = 6
+DATAGEN_TRANSFER_RETRY_DELAY = 45
 ATOMIC_DATAGEN_TABLEBASE_MIN = 3
 ATOMIC_DATAGEN_TABLEBASE_MAX = 6
 
