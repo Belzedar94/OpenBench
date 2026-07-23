@@ -1,0 +1,196 @@
+{% extends "atomicdb/base.html" %}
+{% load static %}
+
+{% block title %}Conquest Map · AtomicDB{% endblock %}
+{% block main_class %}conquest-main{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'atomicdb/conquest-map.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="conquest" id="conquest-map"
+  data-api="/atomicdb/api/map/v1"
+  data-root-key="{{ root_key }}"
+  data-root-fen="{{ root_fen }}"
+  data-piece-base="{% static 'atomicdb/pieces/' %}">
+  <section class="conquest-hero" aria-labelledby="conquest-title">
+    <div>
+      <p class="eyebrow">Atomic chess · practical solving effort</p>
+      <h1 id="conquest-title">Conquest Map</h1>
+      <p class="conquest-lede">A living map of every attributed branch: what is
+        known, where the frontier is growing and where compute is working now.</p>
+    </div>
+    <div class="snapshot-stamp" id="map-snapshot-stamp">
+      <span class="snapshot-pulse" aria-hidden="true"></span>
+      <span>Waiting for snapshot</span>
+    </div>
+  </section>
+
+  <section class="map-toolbar" aria-label="Map controls">
+    <fieldset class="segmented" id="map-weight">
+      <legend>Rectangle width</legend>
+      <label><input type="radio" name="weight" value="frontier" checked>
+        <span>Frontier</span></label>
+      <label><input type="radio" name="weight" value="explored">
+        <span>Explored</span></label>
+      <label><input type="radio" name="weight" value="compute">
+        <span>Compute</span></label>
+    </fieldset>
+    <div class="map-filters">
+      <label>Status
+        <select id="map-filter-status">
+          <option value="all">All positions</option>
+          <option value="UNKNOWN">Unknown</option>
+          <option value="WHITE_WIN">White win</option>
+          <option value="BLACK_WIN">Black win</option>
+          <option value="DRAW">Draw</option>
+        </select>
+      </label>
+      <label>Closure
+        <select id="map-filter-closure">
+          <option value="all">Any closure</option>
+          <option value="TERMINAL">Terminal</option>
+          <option value="TB">Tablebase</option>
+          <option value="MATE_PV">Mate PV</option>
+          <option value="MINIMAX">Minimax</option>
+          <option value="NONE">No closure</option>
+        </select>
+      </label>
+      <label>Work
+        <select id="map-filter-work">
+          <option value="all">Any work state</option>
+          <option value="active">Analyzing now</option>
+          <option value="queued">Queued</option>
+          <option value="idle">Idle</option>
+        </select>
+      </label>
+      <label>Trust
+        <select id="map-filter-trust">
+          <option value="all">Any evidence</option>
+          <option value="verified">Verified</option>
+          <option value="proven">AND/OR proof</option>
+          <option value="engine">Engine evidence</option>
+          <option value="disputed">Disputed</option>
+          <option value="unproven">Unproven</option>
+        </select>
+      </label>
+    </div>
+    <button class="map-action" id="map-refresh" type="button">
+      <span aria-hidden="true">↻</span> Refresh
+    </button>
+  </section>
+
+  <section class="first-moves" aria-labelledby="first-moves-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Opening compass</p>
+        <h2 id="first-moves-title">First moves</h2>
+      </div>
+      <p class="section-note">Every opening remains selectable, regardless of
+        how much territory has been explored.</p>
+    </div>
+    <div class="first-move-strip" id="first-move-strip" role="list">
+      <span class="strip-placeholder">Loading openings…</span>
+    </div>
+  </section>
+
+  <nav class="map-breadcrumbs" id="map-breadcrumbs"
+    aria-label="Current map branch">
+    <span class="dim">Start position</span>
+  </nav>
+
+  <div class="map-status" id="map-status" role="status" aria-live="polite">
+    <span class="map-spinner" aria-hidden="true"></span>
+    Loading the latest solver snapshot…
+  </div>
+
+  <section class="map-stage" id="map-stage" aria-label="Conquest map workspace">
+    <div class="map-visual">
+      <div class="map-svg-wrap" id="map-svg-wrap">
+        <svg id="map-svg" role="tree"
+          aria-label="Zoomable AtomicDB opening tree"></svg>
+      </div>
+      <div class="map-legend" aria-label="Map legend">
+        <span><i class="legend-swatch unknown"></i> Unknown</span>
+        <span><i class="legend-swatch white-win"></i> White win</span>
+        <span><i class="legend-swatch black-win"></i> Black win</span>
+        <span><i class="legend-swatch draw"></i> Draw</span>
+        <span><i class="legend-outline active"></i> Analyzing</span>
+        <span><i class="legend-outline queued"></i> Queued</span>
+        <span><b aria-hidden="true">↗</b> Transposition</span>
+      </div>
+      <p class="map-help">
+        <kbd>←</kbd><kbd>→</kbd> siblings · <kbd>↑</kbd> parent ·
+        <kbd>↓</kbd> child · <kbd>Enter</kbd> zoom ·
+        <kbd>Esc</kbd> zoom out
+      </p>
+    </div>
+
+    <aside class="map-inspector" id="map-inspector"
+      aria-labelledby="inspector-title">
+      <div class="inspector-kicker" id="inspector-kicker">Select a territory</div>
+      <h2 id="inspector-title">Start position</h2>
+      <p class="opening-line" id="inspector-line">Move through the map to inspect
+        a complete opening line.</p>
+      <div class="map-board" id="map-board" role="img"
+        aria-label="Atomic chess start position"></div>
+      <div class="verdict-row">
+        <span class="verdict-pill unknown" id="inspector-status">Unknown</span>
+        <span class="trust-pill" id="inspector-trust">Unproven</span>
+      </div>
+      <dl class="inspector-metrics">
+        <div><dt>Evaluation</dt><dd id="inspector-eval">—</dd></div>
+        <div><dt>Frontier</dt><dd id="inspector-frontier">—</dd></div>
+        <div><dt>Positions</dt><dd id="inspector-positions">—</dd></div>
+        <div><dt>Engine nodes</dt><dd id="inspector-nodes">—</dd></div>
+        <div><dt>Compute time</dt><dd id="inspector-time">—</dd></div>
+        <div><dt>Transpositions</dt><dd id="inspector-transpositions">—</dd></div>
+      </dl>
+      <div class="work-summary" id="inspector-work">No active work</div>
+      <div class="inspector-actions">
+        <button type="button" class="map-action primary" id="map-zoom-selected"
+          disabled>Zoom into branch</button>
+        <a class="map-action" id="map-open-explorer"
+          href="/atomicdb/">Open in Explorer</a>
+      </div>
+    </aside>
+  </section>
+
+  <section class="map-fallback" aria-labelledby="map-table-title">
+    <details>
+      <summary id="map-table-title">Accessible tree table</summary>
+      <p class="dim">The same visible positions in a keyboard- and
+        screen-reader-friendly table.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th scope="col">Opening line</th>
+            <th scope="col">State</th>
+            <th scope="col">Frontier</th>
+            <th scope="col">Work</th>
+            <th scope="col">Evidence</th>
+          </tr></thead>
+          <tbody id="map-text-rows">
+            <tr><td colspan="5">Loading map data…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <noscript>
+    <div class="map-noscript">
+      <h2>JavaScript is required for the visual map</h2>
+      <p>The solver data remains available through the
+        <a href="/atomicdb/">AtomicDB overview</a> and individual position
+        pages.</p>
+    </div>
+  </noscript>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{% static 'atomicdb/vendor/d3/d3.v7.9.0.min.js' %}"></script>
+<script src="{% static 'atomicdb/conquest-map.js' %}" defer></script>
+{% endblock %}

@@ -1045,3 +1045,16 @@ def explore(request, key):
 
 def method(request):
     return render(request, 'atomicdb/method.html')
+
+
+def conquest_map(request):
+    """Public shell for the snapshot-backed Conquest Map.
+
+    Rendering this page never walks or mutates the solver graph.  The
+    versioned map endpoint supplies the bounded display-tree projection.
+    """
+    root_fen = logic.start_fen()
+    return render(request, 'atomicdb/map.html', {
+        'root_key': logic.key_of(root_fen),
+        'root_fen': root_fen,
+    })

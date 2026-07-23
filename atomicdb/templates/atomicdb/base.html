@@ -133,19 +133,22 @@ h2{margin:1.6rem 0 .7rem;font-size:1.1rem}
 .linebox a.cur{background:var(--accent);color:#141310;font-weight:700}
 footer{margin:3rem 0 1rem;text-align:center;color:var(--dim);font-size:.8rem}
 </style>
+{% block extra_head %}{% endblock %}
 </head>
 <body>
 <header>
   <h1><a href="/atomicdb/" style="color:inherit">Atomic<span>DB</span></a></h1>
   <nav>
-    <a href="/atomicdb/">Map</a>
+    <a href="/atomicdb/">Overview</a>
+    <a href="/atomicdb/map/">Conquest Map</a>
     <a href="/atomicdb/method/">Method</a>
     <a href="/index/">OpenBench</a>
   </nav>
 </header>
-<main>{% block content %}{% endblock %}</main>
+<main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
 <footer>AtomicDB, a practical solving effort for Atomic Chess. Results are
   labeled "practical", not game-theoretic certificates. Piece set: cburnett
   (lichess), CC BY-SA.</footer>
+{% block extra_scripts %}{% endblock %}
 </body>
 </html>
