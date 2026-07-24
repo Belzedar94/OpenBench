@@ -22,12 +22,12 @@ class AtomicOpeningCatalogTests(SimpleTestCase):
     def test_committed_catalog_has_audited_baseline(self):
         catalog = openings.load_catalog()
         self.assertRegex(openings.catalog_sha256(), r'^[0-9a-f]{64}$')
-        self.assertEqual(len(catalog), 350)
+        self.assertEqual(len(catalog), 356)
         records = [
             record for opening in catalog.values()
             for record in opening.records
         ]
-        self.assertEqual(len(records), 407)
+        self.assertEqual(len(records), 415)
         self.assertEqual(
             sum(record.source_kind == 'atomix' for record in records),
             176,
@@ -52,6 +52,9 @@ class AtomicOpeningCatalogTests(SimpleTestCase):
             'Two Knights Opening', 'Boat', 'Reversed Boat',
             'Fantasy Knight', 'Midnight', 'ZA', 'Yokke',
             'Right Horse', 'Mahiru',
+            'Wayward Queen', 'Cowboy Attack', 'Fake Cowboy Attack',
+            'Xeransis Attack', 'Chronatog Scambit',
+            'Chronatog Gambit', 'Russian Attack', 'Villager Defense',
         }.issubset(modern_names))
 
     def test_lookup_key_is_json_serializable(self):
@@ -89,12 +92,86 @@ class AtomicOpeningCatalogTests(SimpleTestCase):
         )
         self.assertEqual(transposed['name'], 'Two Knights Opening')
 
-    def test_line_retains_last_exact_named_position(self):
+    def test_unnamed_continuation_does_not_inherit_ancestor_name(self):
         match = openings.match_line(
             ['g1f3', 'f7f6', 'b1c3', 'a7a6'])
-        self.assertEqual(match['name'], 'Two Knights Opening')
-        self.assertEqual(match['matched_ply'], 3)
-        self.assertFalse(match['exact'])
+        self.assertIsNone(match)
+
+    def test_current_community_names_match_only_the_confirmed_positions(self):
+        cases = [
+            (
+                ['e2e3', 'e7e6', 'd1h5'],
+                'Wayward Queen',
+            ),
+            (
+                [
+                    'e2e3', 'e7e6', 'd1h5', 'g7g6', 'g1f3', 'd8h4',
+                    'g2g3', 'f7f6', 'h5h7',
+                ],
+                'Cowboy Attack',
+            ),
+            (
+                [
+                    'e2e3', 'e7e6', 'd1h5', 'g7g6', 'g1f3', 'd8h4',
+                    'g2g3', 'h4b4', 'c2c3', 'f7f6', 'h5h7',
+                ],
+                'Fake Cowboy Attack',
+            ),
+            (
+                ['g1h3', 'h7h6', 'd2d4', 'e7e6', 'e2e4', 'b8a6'],
+                'Xeransis Attack',
+            ),
+            (
+                [
+                    'g1f3', 'f7f6', 'e2e3', 'e7e6',
+                    'f3d4', 'f8b4', 'c2c3', 'b4c3',
+                ],
+                'Chronatog Scambit',
+            ),
+            (
+                [
+                    'g1f3', 'f7f6', 'f3d4', 'g8h6', 'e2e3',
+                    'h6g4', 'f2f4', 'b7b5', 'h2h3',
+                ],
+                'Russian Attack',
+            ),
+            (
+                ['g1f3', 'd7d6'],
+                'Villager Defense',
+            ),
+        ]
+        for ucis, expected_name in cases:
+            with self.subTest(expected_name):
+                match = openings.match_line(ucis)
+                self.assertEqual(match['name'], expected_name)
+                self.assertTrue(match['exact'])
+                self.assertEqual(match['matched_ply'], len(ucis))
+
+    def test_current_names_preserve_only_atomic_source_aliases(self):
+        chronatog = openings.match_line([
+            'g1f3', 'f7f6', 'e2e3', 'e7e6',
+            'f3d4', 'f8b4', 'c2c3', 'b4c3',
+        ])
+        self.assertEqual(chronatog['name'], 'Chronatog Scambit')
+        self.assertIn('Chronatog Gambit', chronatog['aliases'])
+
+        russian = openings.match_line([
+            'g1f3', 'f7f6', 'f3d4', 'g8h6', 'e2e3',
+            'h6g4', 'f2f4', 'b7b5', 'h2h3',
+        ])
+        self.assertEqual(russian['name'], 'Russian Attack')
+        self.assertIn(
+            'Trojanknight-Opossum, Mainline, 5.h3 Variation',
+            russian['aliases'],
+        )
+
+    def test_cowboy_reference_san_records_the_atomic_capture(self):
+        for expected_name in ('Cowboy Attack', 'Fake Cowboy Attack'):
+            opening = next(
+                candidate for candidate in openings.load_catalog().values()
+                if candidate.name == expected_name
+            )
+            self.assertTrue(opening.reference_line_san.endswith('Qxh7'))
 
     def test_illegal_line_fails_closed(self):
         with self.assertRaises(openings.InvalidOpeningLine):
@@ -152,6 +229,29 @@ class AtomicOpeningCatalogTests(SimpleTestCase):
         ):
             openings.validate_catalog(payload, deep=False)
 
+    def test_modern_atomic_identity_allowlist_fails_closed(self):
+        payload = json.loads(
+            openings.CATALOG_PATH.read_text(encoding='utf-8'))
+        entry = next(
+            candidate for candidate in payload['entries']
+            if candidate['name'] == 'Wayward Queen'
+        )
+        record = next(
+            candidate for candidate in entry['records']
+            if candidate['id'] == 'community-wayward-queen'
+        )
+        record['name'] = 'Orthodox Replacement'
+        entry['name'] = 'Orthodox Replacement'
+        entry['names'] = ['Orthodox Replacement']
+        entry['aliases'] = []
+        payload['catalog_sha256'] = openings._catalog_digest(payload)
+
+        with self.assertRaisesRegex(
+            openings.OpeningCatalogError,
+            'audited modern Atomic identities differ',
+        ):
+            openings.validate_catalog(payload, deep=False)
+
     def test_management_command_structural_validation(self):
         call_command('validate_atomic_openings', '--no-deep')
 
@@ -163,5 +263,5 @@ class AtomicOpeningDeepValidationTests(SimpleTestCase):
             openings.CATALOG_PATH.read_text(encoding='utf-8'))
         result = openings.validate_catalog(
             payload, deep=True, require_atomix=True)
-        self.assertEqual(result['positions'], 350)
-        self.assertEqual(result['source_records'], 407)
+        self.assertEqual(result['positions'], 356)
+        self.assertEqual(result['source_records'], 415)

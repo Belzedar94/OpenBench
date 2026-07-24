@@ -8,7 +8,7 @@ add load or migrations to AtomicDB.
 The committed artifact contains:
 
 - every legal Encyclopedia of Atomic Openings (EAO) record;
-- 23 separately audited modern canonical names and community aliases,
+- 31 separately audited modern canonical names and community aliases,
   including the named The House theory index and dedicated studies; and
 - when supplied to the compiler, ATOMIX names as lower-priority
   `legacy_alias` evidence.
@@ -20,6 +20,12 @@ ATOMIX `legacy_alias`.
 
 Lower-priority names and every factual evidence URL/label/hash remain attached
 to the position. Source commentary is not copied.
+
+Opening recognition is exact-position-only. Transpositions to a named Atomic
+position work, but an unnamed continuation does not inherit an ancestor's
+label. Orthodox opening catalogues are not an authority: a name must be
+attested specifically for Atomic chess under
+[`docs/atomicdb-opening-authority.md`](../../docs/atomicdb-opening-authority.md).
 
 Build from audited source artifacts:
 
@@ -33,7 +39,7 @@ python Scripts\build_atomic_openings_catalog.py `
 
 Remove `--check` only when intentionally rebuilding the committed artifact.
 An unreviewed equal-precedence naming conflict fails the build; the three
-known historical conflicts have explicit primary-record overrides in
+known equal-precedence historical conflicts have explicit primary-record overrides in
 `atomicdb.openings`, while all other names remain visible as aliases.
 
 Validate the committed catalogue by replaying every line under PyFFish Atomic

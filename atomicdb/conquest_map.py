@@ -803,6 +803,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
     root_line_san, root_line_uci = _materialise_line(nodes, root_lineage)
     metadata = snapshot['snapshot']
     start_key = metadata['start_key']
+    lineage_keys = [start_key] + root_lineage
 
     def compact_opening(exact_match, *, exact=True, matched_ply=None):
         if exact_match is None:
@@ -853,33 +854,13 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             summary['opening'] = opening
         return summary
 
-    # Opening recognition is position-key based.  Scanning the already-built
-    # lineage backwards finds the last named ancestor in O(depth) without
-    # replaying a potentially very deep line through PyFFish on every request.
-    lineage_keys = [metadata['start_key']] + root_lineage
-    root_opening = None
-    for ply, lineage_key in reversed(list(enumerate(lineage_keys))):
-        match = openings.lookup_key(lineage_key)
-        if match is not None:
-            root_opening = compact_opening(
-                match, exact=lineage_key == root_key, matched_ply=ply)
-            break
-
-    def render_node(key, line_san, line_uci, inherited_opening=None):
+    def render_node(key, line_san, line_uci):
         node = nodes[key]
         children = visible_children.get(key, ())
         all_children = node['k']
         exact_match = openings.lookup_key(key)
-        if exact_match is not None:
-            current_opening = compact_opening(
-                exact_match, exact=True, matched_ply=node['d'])
-        elif inherited_opening is not None:
-            current_opening = {
-                **inherited_opening,
-                'exact': False,
-            }
-        else:
-            current_opening = None
+        current_opening = compact_opening(
+            exact_match, exact=True, matched_ply=node['d'])
 
         rendered_children = []
         for child_key in children:
@@ -890,7 +871,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             )
             child_line_uci = line_uci + [child['u']]
             rendered_children.append(render_node(
-                child_key, child_line_san, child_line_uci, current_opening))
+                child_key, child_line_san, child_line_uci))
         rendered = compact_summary(key, current_opening)
         rendered.update({
             'best_move': node['b'],
@@ -935,8 +916,8 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
                 'alternate reachable incoming edges not used as display parent'
             ),
             'opening': (
-                'position-key exact match; otherwise the last named position '
-                'on the stable display lineage'
+                'position-key exact match only; unnamed continuations do not '
+                'inherit an ancestor label'
             ),
         },
         'request': {
@@ -978,7 +959,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             for key in nodes[start_key]['k']
         ],
         'root': render_node(
-            root_key, root_line_san, root_line_uci, root_opening),
+            root_key, root_line_san, root_line_uci),
     }
     return document
 

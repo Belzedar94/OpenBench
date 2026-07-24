@@ -3,9 +3,10 @@
 The source material is compiled into ``data/atomic_openings_v1.json``.  Runtime
 lookups never depend on SAN spelling or a move-prefix: an opening is keyed by
 AtomicDB's canonical position identity.  Consequently transpositions work
-without special cases, and :func:`match_line` can retain the last named
-position after the played line has moved beyond it (the same recognition
-semantics used by Lichess).
+without special cases.  :func:`match_line` validates the complete route but
+returns a name only when the current Atomic position is explicitly catalogued;
+an earlier, merely ancestral opening name is never carried into an unnamed
+continuation.
 
 The compiler intentionally discards source commentary.  It keeps only factual
 name/line associations and their minimal provenance (labels, URLs and hashes).
@@ -56,11 +57,83 @@ PRIMARY_RECORD_OVERRIDES = frozenset({
 # while retaining a freshly recomputed outer digest.
 AUDITED_EAO_RECORDS = 208
 AUDITED_EAO_UNIQUE_NAMES = 191
-AUDITED_MODERN_RECORDS = 23
+AUDITED_MODERN_RECORDS = 31
 AUDITED_ATOMIX_RECORDS = 176
-AUDITED_FULL_RECORDS = 407
-AUDITED_FULL_POSITIONS = 350
-AUDITED_MODERN_EAO_POSITIONS = 214
+AUDITED_FULL_RECORDS = 415
+AUDITED_FULL_POSITIONS = 356
+AUDITED_MODERN_EAO_POSITIONS = 220
+
+# Modern claims are deliberately pinned by source ID, exact Atomic position,
+# and spelling.  Counts alone would let a same-sized orthodox opening import
+# replace an audited Atomic association after recomputing the outer digest.
+# Adding or renaming a modern record therefore requires an explicit code review
+# of this allowlist as well as rebuilding the static artifact.
+AUDITED_MODERN_IDENTITIES = frozenset({
+    ('community-yokke', 'Yokke',
+     '0ace7dd665cd3b49695dca7594510454acdb07134808e3c1afd6efc7d2224053'),
+    ('community-wayward-queen', 'Wayward Queen',
+     '140d50ef40a7c993ca386f1fc51afb0db9b9f0dfdd81449428c317f985eb1d3d'),
+    ('theory-swapped-atomic-attack', 'Swapped Atomic Attack',
+     '1ee388b727361c31c9dfef9e294ceae0fafa78f7ebcd3fb70ba5c26d33dd4cc0'),
+    ('theory-vlasov-defence', 'Vlasov Defence',
+     '25b5e56f91f8088692494649ef41e4f75e4e9c53c2252c6cd83f9663efcf8edc'),
+    ('theory-classical-defence', 'Classical Defence',
+     '25e93feb7e279d38f92407f9636dc1ad7f443e6e9a4f3c57d3cc289063f683d3'),
+    ('community-trojanknight-opening', 'TrojanKnight Opening',
+     '269150855fc38863f2c3e0e4ba057f2fa36c62d8d2650d5f7cd7365431d17d1c'),
+    ('community-fake-cowboy-attack', 'Fake Cowboy Attack',
+     '28b162c33ae8dde0adba14fa85dec5bbf6c01bcdd0e8d341900acccea0933a52'),
+    ('theory-boat', 'Boat',
+     '2eab1cfcdaa0e2cc50d8677b512fad27da05b0237c0f56463b880a5c1a447e82'),
+    ('community-fantasy-knight', 'Fantasy Knight',
+     '3588797ac5ca94f609d2f44799454bbb539cb57970bdf95229b61523a9410b94'),
+    ('community-russian-attack', 'Russian Attack',
+     '4e1fd5ca4be4c79eacb1a0782c24dd381ce0bec1237ba4f55e83bfce629d7655'),
+    ('theory-reversed-boat', 'Reversed Boat',
+     '5752b088578f963daa44e340afa1eb864cbc3d51ad92e9d1ff48f7545eb3bdaa'),
+    ('community-cowboy-attack', 'Cowboy Attack',
+     '5c194dfd93bba4fc772fb8ff7dc8e083cc730ceb46e24adbab7586dd682b40b9'),
+    ('community-trk-spam', 'TRK Spam',
+     '725ff5ff8cc3c35198f7350e8c318a83b04adfdc79701ba7dd40d689f69f53de'),
+    ('community-mahiru', 'Mahiru',
+     '755a6921f95ca306faa18c13533e9abbd9f06bb128c0df05a6f5d0837b07e5f0'),
+    ('theory-apostador-defence', 'Apostador Defence',
+     '75adcc2254ca2d9ad38d5ec1d1664c8e796523ac4b965d6fd5dc847bb4452fb1'),
+    ('theory-two-pawns-defence', 'Two Pawns Defence',
+     '7e11bbf6837e9b79f12a43e1f4947c4434541fd4d5b20a030fd03b8eb8c73ce9'),
+    ('community-caveman-attack', 'Caveman Attack',
+     '85bd447e0fdf1f2ceb93ce6a6b7b9cdbe4c51fe3aac602da967ca5944e9dd6cc'),
+    ('community-xeransis-attack', 'Xeransis Attack',
+     '92e9991a097f12893d60cc51e300ec1e188c6e2291cff4bf974281da6a0cd132'),
+    ('theory-two-knights-opening', 'Two Knights Opening',
+     '973d2a56a0c497e578aaf388fbc56c9104860eea0f0914bcc1957946cfc118a5'),
+    ('community-two-knights-attack', 'Two Knights Attack',
+     '973d2a56a0c497e578aaf388fbc56c9104860eea0f0914bcc1957946cfc118a5'),
+    ('community-midnight', 'Midnight',
+     '98fe63ed037a3692560832bece250a21cb57fa336d93e87a58bc4e7e789aef64'),
+    ('theory-atomic-defence', 'Atomic Defence',
+     'a1b0313caecdb14bca570efbab75fd0fdc70109aed6f77e2c9ac462e2c938c46'),
+    ('community-za-d5', 'ZA',
+     'a1b0313caecdb14bca570efbab75fd0fdc70109aed6f77e2c9ac462e2c938c46'),
+    ('community-russian-attack-h3', 'Russian Attack',
+     'a2dedf6617a90613d90e0e9545cea63c7221a99caee3f91b08e33dd2d4fe4634'),
+    ('community-villager-defense', 'Villager Defense',
+     'aa863834e8d555ba990fee76149fac3c2e2897564d94540db385cfe9e56d51d8'),
+    ('theory-atomic-attack', 'Atomic Attack',
+     'b3de0f0a5f0c458e42155134d98ae7e69f6c219e8e9a8e1431ee816f1a3a51c8'),
+    ('theory-tipau-siggemannen-counterattack',
+     'Tipau-Siggemannen Counterattack',
+     'b76291a93e0620f34e73747e258c4774b958e3989e8fb4e27a6e7fbfc7fcfb01'),
+    ('community-chronatog-scambit', 'Chronatog Scambit',
+     'c55b8a57414a0332debd00ff972208de33684ad940e874b17f0774990866b6e4'),
+    ('community-chronatog-gambit', 'Chronatog Gambit',
+     'c55b8a57414a0332debd00ff972208de33684ad940e874b17f0774990866b6e4'),
+    ('community-trojanknight-modern-defence',
+     'TrojanKnight Opening: Modern Defence',
+     'cc3652d8b5a97a140df33778b0b697fa8f63be323ac920c49a7ffbe7889cc682'),
+    ('community-right-horse', 'Right Horse',
+     'f26f35026eb72339c1557d077d5d00cfdac1fbd3fb832eccb1621605f6df96b2'),
+})
 
 _ROOT_FIELDS = frozenset({
     'schema', 'ruleset', 'sources', 'counts', 'entries', 'catalog_sha256',
@@ -190,7 +263,7 @@ class Opening:
 
 @dataclass(frozen=True)
 class OpeningLineMatch:
-    """The deepest exact named position encountered while replaying a line."""
+    """The exact named Atomic position reached by replaying a legal line."""
 
     opening: Opening
     matched_ply: int
@@ -742,6 +815,22 @@ def validate_catalog(
     if counts != expected_counts:
         raise OpeningCatalogError(
             f'catalog counts differ: recorded={counts} actual={expected_counts}')
+    modern_identities = frozenset(
+        (
+            str(record['id']),
+            str(record['name']),
+            str(entry['position_key']),
+        )
+        for entry in entries
+        for record in entry['records']
+        if record['source_kind'] == 'modern'
+    )
+    if modern_identities != AUDITED_MODERN_IDENTITIES:
+        missing = sorted(AUDITED_MODERN_IDENTITIES - modern_identities)
+        extra = sorted(modern_identities - AUDITED_MODERN_IDENTITIES)
+        raise OpeningCatalogError(
+            'audited modern Atomic identities differ: '
+            f'missing={missing} extra={extra}')
     source_record_counts = {
         kind: sum(
             record['source_kind'] == kind for record in source_records)
@@ -890,18 +979,16 @@ def match_fen(fen: str) -> Opening | None:
 
 
 def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
-    """Return the last exact named position encountered on a legal UCI line.
+    """Return the exact named position reached by a legal UCI line.
 
     The match is position-based.  A transposed route therefore recognizes the
-    same opening, and later unnamed moves retain the deepest prior match.
-    Illegal moves raise :class:`InvalidOpeningLine` rather than producing a
-    misleading partial result.
+    same opening.  An unnamed continuation returns ``None`` rather than
+    inheriting a generic ancestor label.  Illegal moves raise
+    :class:`InvalidOpeningLine` rather than producing a misleading partial
+    result.
     """
     fen = logic.start_fen()
-    last: tuple[Opening, int] | None = None
-    start_match = match_key(logic.key_of(fen))
-    if start_match is not None:
-        last = (start_match, 0)
+    ply = 0
     for ply, move in enumerate(ucis, start=1):
         if not isinstance(move, str) or not move:
             raise InvalidOpeningLine(f'invalid UCI token at ply {ply}: {move!r}')
@@ -910,19 +997,18 @@ def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
             raise InvalidOpeningLine(
                 f'illegal Atomic move at ply {ply}: {move} in {fen}')
         fen = logic.apply_move(fen, move)
-        exact = match_key(logic.key_of(fen))
-        if exact is not None:
-            last = (exact, ply)
-    if last is None:
+    current_key = logic.key_of(fen)
+    exact = match_key(current_key)
+    if exact is None:
         return None
     return OpeningLineMatch(
-        opening=last[0],
-        matched_ply=last[1],
-        current_key=logic.key_of(fen),
+        opening=exact,
+        matched_ply=ply,
+        current_key=current_key,
     )
 
 
 def match_line(ucis: Iterable[str]) -> dict[str, object] | None:
-    """Serializable last-exact-match lookup for a legal played UCI line."""
+    """Serializable exact-current-position lookup for a legal played line."""
     match = match_line_object(ucis)
     return match.as_dict() if match is not None else None

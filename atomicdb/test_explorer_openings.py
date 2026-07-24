@@ -93,7 +93,7 @@ class ExplorerOpeningRouteTests(TestCase):
             response.context['opening']['name'], 'Two Knights Opening')
         self.assertTrue(response.context['opening']['exact'])
 
-    def test_last_opening_is_retained_after_named_position(self):
+    def test_unnamed_continuation_has_no_inherited_opening(self):
         ucis = ['g1f3', 'f7f6', 'b1c3', 'a7a6']
         target = self._materialize(ucis)[-1]
 
@@ -102,11 +102,8 @@ class ExplorerOpeningRouteTests(TestCase):
             {'play': ','.join(ucis)},
         )
 
-        opening = response.context['opening']
-        self.assertEqual(opening['name'], 'Two Knights Opening')
-        self.assertEqual(opening['matched_ply'], 3)
-        self.assertFalse(opening['exact'])
-        self.assertContains(response, 'continued from ply 3')
+        self.assertIsNone(response.context['opening'])
+        self.assertNotContains(response, 'continued from ply 3')
 
     def test_goto_preserves_and_extends_validated_route(self):
         ucis = ['g1f3', 'f7f6']

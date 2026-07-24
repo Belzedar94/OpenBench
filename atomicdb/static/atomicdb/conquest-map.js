@@ -703,9 +703,7 @@
     if (node.opening && node.opening.name) {
       elements.inspectorOpening.hidden = false;
       elements.inspectorOpeningName.textContent = node.opening.name;
-      elements.inspectorOpeningState.textContent = node.opening.exact
-        ? 'exact position'
-        : `theory reached at ply ${safeNumber(node.opening.matched_ply)}`;
+      elements.inspectorOpeningState.textContent = 'exact position';
     } else {
       elements.inspectorOpening.hidden = true;
       elements.inspectorOpeningName.textContent = '';
