@@ -8,6 +8,7 @@ import time
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
+from django.db import OperationalError
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -454,8 +455,7 @@ def api_submit(request):
     return JsonResponse({'ok': True, 'summary': summary})
 
 
-@csrf_exempt
-def api_request(request, key):
+def _api_request_once(request, key):
     """Peticion publica de analisis (estilo chessdb.cn), sin cuenta.
     Protecciones: rate-limit por IP, dedup ip+posicion, tope global de cola."""
     if request.method != 'POST':
@@ -490,10 +490,33 @@ def api_request(request, key):
                                    position__status='UNKNOWN') \
                            .count() >= REQUEST_QUEUE_MAX:
         return JsonResponse({'status': 'queue-full'}, status=503)
-    outcome = ingest.request_analysis(pos)
-    if outcome in ('queued', 'already-queued'):
-        RequestLog.objects.create(ip=ip, position=pos)
+    # Task creation/promotion and its rate-limit receipt are one commit.  A
+    # lock while writing RequestLog must roll the task mutation back as well;
+    # otherwise a browser retry could accidentally request the next rung.
+    with atomic():
+        outcome = ingest.request_analysis(pos)
+        if outcome in ('queued', 'already-queued'):
+            RequestLog.objects.create(ip=ip, position=pos)
     return JsonResponse({'status': outcome})
+
+
+@csrf_exempt
+def api_request(request, key):
+    try:
+        return _api_request_once(request, key)
+    except OperationalError as error:
+        # SQLite can reject a read->write transaction upgrade immediately
+        # while the worker is committing a large analysis, even with a long
+        # busy_timeout.  The atomic task+receipt block above guarantees that a
+        # structured busy response has no committed side effect and is safe
+        # for the browser to retry.
+        message = str(error).lower()
+        if 'database is locked' not in message \
+                and 'database table is locked' not in message:
+            raise
+        response = JsonResponse({'status': 'busy'}, status=503)
+        response['Retry-After'] = '2'
+        return response
 
 
 # ---------------- paginas publicas ----------------
