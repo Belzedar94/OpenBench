@@ -514,28 +514,35 @@ def request_analysis(pos):
             task.save(update_fields=['source', 'budget_nodes'])
             if promoted:
                 return 'queued'
-        elif task.state == 'LEASED' and task.budget_nodes < floor:
-            # The running engine cannot change its ``go nodes`` command. Keep
-            # the user's deeper request as the next generation instead of
-            # logging it as satisfied and silently losing it for an hour.
-            follow_up = (AnalysisTask.objects.filter(
-                position=pos, state=AnalysisTask.TState.PENDING,
-                generation__gt=task.generation)
-                .order_by('generation').first())
-            if follow_up is None:
-                generation = max(pos.visits + 1, task.generation + 1)
-                while AnalysisTask.objects.filter(
-                        position=pos, generation=generation).exists():
-                    generation += 1
-                AnalysisTask.objects.create(
-                    position=pos, generation=generation,
-                    budget_nodes=floor, source='USER',
-                    multipv=multipv_for(generation))
-            else:
-                follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
-                follow_up.source = 'USER'
-                follow_up.save(update_fields=['budget_nodes', 'source'])
-            return 'queued'
+        elif task.state == 'LEASED':
+            if task.budget_nodes < floor:
+                # The running engine cannot change its ``go nodes`` command.
+                # Keep the user's deeper request as the next generation
+                # instead of logging it as satisfied and silently losing it.
+                follow_up = (AnalysisTask.objects.filter(
+                    position=pos, state=AnalysisTask.TState.PENDING,
+                    generation__gt=task.generation)
+                    .order_by('generation').first())
+                if follow_up is None:
+                    generation = max(pos.visits + 1, task.generation + 1)
+                    while AnalysisTask.objects.filter(
+                            position=pos, generation=generation).exists():
+                        generation += 1
+                    AnalysisTask.objects.create(
+                        position=pos, generation=generation,
+                        budget_nodes=floor, source='USER',
+                        multipv=multipv_for(generation))
+                else:
+                    follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
+                    follow_up.source = 'USER'
+                    follow_up.save(update_fields=['budget_nodes', 'source'])
+                return 'queued'
+            # The existing lease already satisfies the requested rung. Mark it
+            # as visitor-requested so subsequent clicks can be deduplicated
+            # without consuming the hourly allowance repeatedly.
+            if task.source != 'USER':
+                task.source = 'USER'
+                task.save(update_fields=['source'])
         return 'already-queued'
 
 
