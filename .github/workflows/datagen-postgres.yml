@@ -73,6 +73,7 @@ jobs:
           test ! -e "$GITHUB_WORKSPACE/atomicdb.sqlite3"
           test ! -e "$GITHUB_WORKSPACE/atomicdb.sqlite3.split-receipt.json"
           python manage.py split_atomicdb_sqlite \
+            --offline-confirmed \
             --destination "$GITHUB_WORKSPACE/atomicdb.sqlite3"
 
       - name: Authenticate, migrate, and re-authenticate the split database
