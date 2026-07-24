@@ -468,8 +468,20 @@ def api_request(request, key):
     except Position.DoesNotExist:
         return JsonResponse({'status': 'unknown-position'}, status=404)
     hour_ago = timezone.now() - timedelta(hours=1)
-    if RequestLog.objects.filter(ip=ip, created__gte=hour_ago,
-                                 position=pos).exists():
+    # A recent click is only a duplicate while the request it represented is
+    # still queued or running.  Once that task has completed, the same visitor
+    # must be able to request the next 128M -> 512M -> 2B -> 10B rung.  A
+    # RequestLog may also have been created merely by adding a new FEN, without
+    # ever creating an AnalysisTask, so the log alone is not evidence of work.
+    recent_same_position = RequestLog.objects.filter(
+        ip=ip, created__gte=hour_ago, position=pos,
+    ).exists()
+    active_user_request = AnalysisTask.objects.filter(
+        position=pos,
+        source=AnalysisTask.Source.USER,
+        state__in=(AnalysisTask.TState.PENDING, AnalysisTask.TState.LEASED),
+    ).exists()
+    if recent_same_position and active_user_request:
         return JsonResponse({'status': 'already-requested'})
     if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
                          .count() >= REQUESTS_PER_IP_HOUR:
