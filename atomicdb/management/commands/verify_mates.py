@@ -1,12 +1,12 @@
 """Retroactively certify AtomicDB's existing MATE_PV closures."""
 
 from django.core.management.base import BaseCommand
-from django.db import connection, transaction
 from django.db.models import Q
 from django.db.models.functions import Length
 from django.utils import timezone
 
 from atomicdb import ingest, logic
+from atomicdb.database import atomic, connection
 from atomicdb.models import DBEvent, Position
 
 
@@ -125,7 +125,7 @@ class Command(BaseCommand):
                 # it with one compare-and-swap UPDATE: unlike a SELECT followed
                 # by UPDATE, this does not require SQLite to upgrade a stale
                 # read snapshot while the live web process is also writing.
-                with transaction.atomic():
+                with atomic():
                     updated = Position.objects.filter(
                         key=snapshot['key'],
                         proof__isnull=True,

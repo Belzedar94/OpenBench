@@ -12,6 +12,13 @@ https://docs.djangoproject.com/en/2.0/ref/settings/
 
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
+from .atomicdb_identity import (
+    AtomicDBIdentityError,
+    split_activation_required,
+    validate_database_lineage_path,
+)
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -151,6 +158,54 @@ if os.environ.get('OPENBENCH_POSTGRES_DB'):
         'PORT': os.environ.get('OPENBENCH_POSTGRES_PORT', '5432'),
         'CONN_MAX_AGE': 0,
     }
+
+ATOMICDB_DATABASE_ALIAS = 'default'
+_explicit_atomicdb_path = os.environ.get('OPENBENCH_ATOMICDB_PATH', '').strip()
+_durable_atomicdb_path = os.path.join(BASE_DIR, 'atomicdb.sqlite3')
+_atomicdb_path = _explicit_atomicdb_path or _durable_atomicdb_path
+_atomicdb_path = os.path.realpath(os.path.abspath(
+    os.path.expanduser(_atomicdb_path)))
+_atomicdb_receipt_path = _atomicdb_path + '.split-receipt.json'
+_atomicdb_exists = os.path.isfile(_atomicdb_path)
+_atomicdb_receipt_exists = os.path.isfile(_atomicdb_receipt_path)
+_atomicdb_requested = bool(_explicit_atomicdb_path)
+
+try:
+    _activate_atomicdb_split = split_activation_required(
+        explicit_requested=_atomicdb_requested,
+        database_exists=_atomicdb_exists,
+        receipt_exists=_atomicdb_receipt_exists,
+    )
+except AtomicDBIdentityError as error:
+    raise ImproperlyConfigured(str(error)) from error
+
+if _activate_atomicdb_split:
+    if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
+        _default_sqlite_path = os.path.realpath(os.path.abspath(
+            os.path.expanduser(str(DATABASES['default']['NAME']))))
+        if os.path.normcase(_atomicdb_path) == os.path.normcase(_default_sqlite_path):
+            raise ImproperlyConfigured(
+                'OPENBENCH_ATOMICDB_PATH must differ from the default SQLite database path')
+
+    try:
+        with open(_atomicdb_receipt_path, 'rb') as receipt_file:
+            _atomicdb_receipt_bytes = receipt_file.read()
+        _atomicdb_receipt, _atomicdb_lineage = \
+            validate_database_lineage_path(
+                _atomicdb_path, _atomicdb_receipt_bytes)
+    except (OSError, AtomicDBIdentityError) as error:
+        raise ImproperlyConfigured(
+            'AtomicDB split identity validation failed: {}'.format(
+                error)) from error
+
+    DATABASES['atomicdb'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': _atomicdb_path,
+        'OPTIONS': {'timeout': 30},
+    }
+    ATOMICDB_DATABASE_ALIAS = 'atomicdb'
+
+DATABASE_ROUTERS = ['OpenSite.db_routers.AtomicDBRouter']
 
 
 # Password validation

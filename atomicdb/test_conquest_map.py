@@ -9,16 +9,16 @@ import tracemalloc
 from unittest import mock, skipUnless
 
 from django.core.management import call_command
-from django.db import connection
 from django.test import (
     SimpleTestCase,
-    TestCase,
     override_settings,
 )
 from django.test.utils import CaptureQueriesContext
 
 from . import conquest_map, ingest, logic
+from .database import connection
 from .models import AnalysisTask, Edge, Position
+from .testing import TestCase
 
 
 def _key(number):

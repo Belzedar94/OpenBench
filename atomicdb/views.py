@@ -8,7 +8,7 @@ import time
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
-from django.db import OperationalError, transaction
+from django.db import OperationalError
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -20,6 +20,7 @@ from django.db.models import Case, F, IntegerField, Q, Sum, Value, When, Window
 from django.db.models.functions import RowNumber
 
 from . import ingest, logic
+from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      RequestLog, WorkerPing)
@@ -116,7 +117,7 @@ def api_lease(request):
     lease_session = request.POST.get('lease_session', '')[:64]
     active_task_id = None
 
-    with transaction.atomic():
+    with atomic():
         # recuperar leases caducados
         now = timezone.now()
         stale = now - timedelta(minutes=LEASE_MINUTES)
@@ -381,7 +382,7 @@ def api_submit(request):
 
     transaction_started = time.monotonic()
     try:
-        with transaction.atomic():
+        with atomic():
             claimed = AnalysisTask.objects.filter(
                 id=task_id, state='LEASED', machine=machine,
                 attempts=snapshot.attempts, leased_at=snapshot.leased_at,
@@ -492,7 +493,7 @@ def _api_request_once(request, key):
     # Task creation/promotion and its rate-limit receipt are one commit.  A
     # lock while writing RequestLog must roll the task mutation back as well;
     # otherwise a browser retry could accidentally request the next rung.
-    with transaction.atomic():
+    with atomic():
         outcome = ingest.request_analysis(pos)
         if outcome in ('queued', 'already-queued'):
             RequestLog.objects.create(ip=ip, position=pos)

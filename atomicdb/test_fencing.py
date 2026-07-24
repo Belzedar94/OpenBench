@@ -2,12 +2,12 @@ import json
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.db import connection
-from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
 from . import ingest, logic
+from .database import connection
 from .models import AnalysisTask, Position
+from .testing import TestCase, TransactionTestCase
 
 
 class SubmitFencingTests(TestCase):

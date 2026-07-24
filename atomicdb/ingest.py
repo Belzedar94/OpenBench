@@ -8,10 +8,10 @@ Flujo por resultado de analisis (§2):
 import time
 
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
 from . import logic, tb
+from .database import atomic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
@@ -127,7 +127,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             return {'skipped': 'already-closed'}
         mate_proofs = prepare_mate_proofs(snapshot.fen, lines)
 
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if pos.status != 'UNKNOWN':
             return {'skipped': 'already-closed'}
@@ -485,7 +485,7 @@ def request_analysis(pos):
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(pk=pos.pk)
         if pos.status != 'UNKNOWN':
             return 'already-solved'
@@ -613,7 +613,7 @@ def _apply_prepared_tb(position_key, prepared):
     """Apply a server-validated TB result inside the caller's transaction."""
     if prepared is None or prepared.get('key') != position_key:
         return False
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if (pos.status != 'UNKNOWN' or pos.fen != prepared.get('fen')
                 or not logic.tb_applicable(pos.fen)):

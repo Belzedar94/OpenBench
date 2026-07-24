@@ -1,7 +1,6 @@
-from django.test import TestCase
-
 from . import ingest, logic
 from .models import Edge
+from .testing import TestCase
 
 
 WHITE_FORCED_FEN = '4p3/8/8/7k/n7/Kp2n3/3p4/1Q6 w - - 0 1'
