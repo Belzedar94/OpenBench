@@ -235,6 +235,23 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - Los tests solo pueden apuntar al repo registrado en `source` (no a forks personales).
 - SQLite aguanta pocos workers reportando; si la flota crece → PostgreSQL.
 - `Config/config.json` no se valida al arranque (bug upstream): revísalo a mano.
+- **Nombre del test en el índice = `prettyDevName` (mytags.py), y se rige por
+  `Engine.name`, NO por un campo "título"**. Reglas del tag: (a) si
+  `dev.name == base.name` y `dev_network != base_network` → muestra EL NOMBRE
+  DE LA RED (así acabaron tres tests llamándose `spell-v2-XL-HARD.nnue`,
+  corrección del propietario 2026-07-24); (b) en cualquier otro caso muestra
+  `dev.name`. Convención (igual que fishtest/sscg13): **el nombre descriptivo
+  de la idea vive en `Engine.name` del lado dev** (`capture-see-120`,
+  `spsa3-spell-params`, `datagen-run9-hard-50m`). El camino web (formulario
+  "Dev Branch") lo hace solo; **el camino Django/script debe crear un
+  `Engine(name=<descriptivo>, source, sha, bench)` por test** — `Engine.name`
+  es etiqueta pura: el build del worker se cachea por engine+sha+red, así que
+  renombrar no fuerza rebuilds ni rompe leases en curso.
+- **Al repuntar la red de un test dev-vs-base por Django: cambiar LOS DOS
+  LADOS** (`dev_network/dev_netname/dev.bench` Y `base_network/base_netname/
+  base.bench`). Si solo cambias dev, el SPRT mide red-vs-red en vez del
+  parámetro (mordió el 2026-07-24 en capture-see-120 y spsa3; lo destapó la
+  corrección de nombres del propietario).
 
 ## 7. Estado y pendientes (2026-07-13)
 
