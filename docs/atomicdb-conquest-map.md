@@ -1,287 +1,295 @@
-# AtomicDB Conquest Map
+# AtomicDB Atomic Move Tree
 
-Status: product and architecture decision for the public solver UI.
+Status: product, interaction and data contract for the public solver map.
 
-## Decision
+## Product decision
 
-AtomicDB's flagship visualization will be a **top-down, zoomable rectangular
-icicle**. It will be paired with a bounded **local DAG lens** in the position
-explorer and a separate **Progress** view.
+The public visualization is a **horizontal, zoomable node-link tree**. Its
+product name is **Atomic move tree**; the compact navigation label is **Move
+tree**.
 
-The global view will not be a force-directed graph. At the current scale it
-would be visually unstable, produce an unreadable hairball and hide the only
-relationships visitors actually need: opening, ply, branch size, state and
-progress.
+The page should answer four questions without requiring a legend:
 
-The intended ten-second story is:
+1. Which moves have been explored from the current position?
+2. Which branches are unresolved or solved?
+3. What is being analysed right now?
+4. What line and opening does a selected position belong to?
 
-1. how large the explored space is;
-2. which openings contain the frontier;
-3. which branches are solved, queued or being analysed;
-4. where compute is going now;
-5. how quickly the frontier is opening and closing.
+The tree is the primary object. Every other element supports reading or
+navigating it. There is no second "accessible" visualization, no permanent
+keyboard legend and no unexplained dashboard jargon.
 
-## Why the stored structure needs a visual projection
+## Why a tree is a projection of the stored graph
 
-AtomicDB is not a strict tree. A position can have several parents through
-transpositions. Because canonical position identity intentionally ignores some
-history, reversible sequences can also return to an existing key and create a
-cycle. The global visualization therefore uses a deterministic *display tree*:
+AtomicDB is a directed graph rather than a strict tree. Several move orders can
+transpose into the same canonical position, and reversible sequences can lead
+back to a previously seen key. The snapshot builder therefore produces a
+deterministic display tree:
 
 1. Compute minimum depth from Atomic startpos.
-2. For every reachable position except the root, choose one `display_parent`
-   at exactly `depth - 1`.
-3. Keep an existing valid display parent between snapshots, preventing layout
+2. Give each reachable position, except startpos, one display parent at
+   `depth - 1`.
+3. Preserve an existing valid display parent between snapshots to avoid visual
    jumps.
-4. Otherwise prefer lowest regret, then UCI, then key as deterministic ties.
-5. Keep every other parent as a transposition portal, never as a duplicated
-   visual node.
+4. Otherwise choose by lowest regret, UCI and position key, in that order.
+5. Retain other incoming edges as transposition metadata; do not duplicate the
+   position in the display tree.
 
-Every position is attributed exactly once. Cycles cannot recurse, aggregate
-widths remain additive, and the opening shown for a node is stable. A badge such
-as `↗ 3` reports alternate incoming paths; selecting the node reveals them.
+This projection guarantees that each position is drawn once, cycles cannot
+recurse and subtree totals remain additive. A selected node may expose its
+alternate incoming paths in the inspector or link to the full position
+explorer.
 
-## Global Conquest Map
+## Visual architecture
 
-The root is at the top and each horizontal band is a ply. A rectangle is either
-one attributed position or an aggregate of small siblings.
+### Layout
 
-### Width
+The implementation uses D3's tidy-tree layout (`d3.tree`):
 
-The visitor can switch the width measure:
+- the root is on the left;
+- depth increases from left to right;
+- siblings are arranged vertically;
+- links are simple curves with a clear parent-to-child direction;
+- nodes use a stable, readable card or pill size rather than quantitative
+  rectangle area;
+- a collapsed group is an explicit node such as `17 more replies`, never
+  unexplained blank space.
 
-- **Frontier** (default): still-relevant unknown positions below the node.
-- **Explored**: unique attributed positions below the node.
-- **Compute**: engine nodes invested below the node.
+Branch size, compute and evaluation never change the physical width of a node.
+They belong in labelled detail, not geometry. Blank rows are not meaningful
+data and must never be reserved by the layout.
 
-The first-move strip always gives each legal first move selectable space. An
-opening must not disappear merely because it has little data so far.
+The initial view is fitted to the available stage. Pan and zoom use
+`d3.zoom`; visible buttons provide **Zoom in**, **Zoom out** and **Fit tree**.
+The user's selection and camera survive refresh when their target still exists.
 
-### Visual encoding
+### Node language
 
-- Green: practical `WHITE_WIN`.
-- Red: practical `BLACK_WIN`.
-- Blue: practical `DRAW`.
-- Grey: `UNKNOWN`.
-- Diverging inset: White-POV evaluation for unknown nodes.
-- Gold border: actively analysed.
-- Dashed border: queued.
-- Shield icon: verified / AND-OR evidence.
-- Gear icon: engine evidence.
-- Warning icon: disputed evidence.
+A node shows only information needed for scanning:
 
-Colour is always accompanied by text, border or icon. The global map is
-White-POV; any mover-POV panel must say so explicitly.
+- move number and SAN;
+- practical state as a word or familiar icon;
+- an exact-work halo or badge when that position itself is leased or queued;
+- a disclosure control when replies are collapsed.
 
-### Interaction
+The visual language is deliberately small:
 
-- Hover, focus or tap shows the complete SAN line from move 1, FEN, state,
-  trust, evaluation, visits, nodes, time and active work.
-- Click selects a node and synchronizes board plus details without navigating.
-- Double-click or Enter zooms the selected branch to full width.
-- Escape moves one visual level upward.
-- Arrow keys move through parent, children and siblings.
-- `Open in Explorer` links to the canonical position page.
-- Filters cover state, closure, trust and work state.
-- Tiny siblings collapse into a labelled `+N moves` rectangle and expand on
-  zoom.
-- Refresh preserves focus, selection and camera when they are still present in
-  the bounded snapshot.
-- URL parameters encode branch and selected position for shareable views.
+- neutral: unresolved;
+- green: White win;
+- red: Black win;
+- blue: draw;
+- animated or high-contrast halo: analysing this exact position;
+- outlined work badge: this exact position is queued.
 
-The visual delight comes from meaningful zoom transitions, board
-synchronization, recent closures and historical replay. Continuous particles,
-3D and gratuitous motion are explicitly out of scope.
+Colour always has a textual or icon equivalent. Evaluation is not represented
+as an unlabelled bar. When useful, the selected position's evaluation appears
+as labelled text in the inspector, including its point of view and unit.
 
-## Local DAG lens
+Aggregate activity may be used to decide which ancestor paths remain visible,
+but it must not make an ancestor look as if that exact position is running.
 
-The explorer can use a node-link diagram because its scope is bounded:
+### Progressive disclosure
 
-- at most two parent generations;
-- the current position;
-- at most two child generations;
-- a hard limit of 150–250 nodes;
-- deterministic columns by ply;
-- curved secondary links for transpositions;
-- the canonical line highlighted;
-- selection synchronized with the board and move table.
+The API remains bounded, so the tree starts with the most useful branches and
+explicitly reports omitted replies. Expanding or zooming a branch requests or
+reveals more detail. A user must never infer truncation from a narrow or empty
+rectangle.
 
-This is where a transposition is explained. It is not the global project map.
+The public modes are exactly:
 
-## Progress view
+- **All branches**: show the current bounded projection.
+- **Unresolved**: show a compact round-robin sample across first-move
+  branches, retaining every ancestor needed to understand the sampled lines
+  and reporting the full match count.
+- **Active now**: retain exact leased/queued positions and enough ancestors to
+  understand where they sit.
 
-The Progress page should show:
+These modes affect visibility, not status semantics. They replace the old
+metric selectors and multi-filter control bank.
 
-- discovered, relevant unknown, closed and historical positions;
-- new frontier per hour versus closures per hour;
-- active workers, threads, nodes/s and analyses/min;
-- engine nodes and wall-clock compute;
-- closure mix: terminal, tablebase, mate PV and minimax;
-- trust mix: verified, AND-OR, engine and disputed;
-- progress by first move;
-- transposition reuse;
-- compute per closure;
-- expired leases, retries and rejected submissions.
+### Search
 
-`closed / total` is not sufficient: discovering a large legitimate subtree can
-make it fall despite real progress. The main flow metric is the balance between
-frontier created and frontier closed.
+The search box accepts a move, SAN fragment, opening name or position key.
+Results are keyboard navigable. Choosing a result selects and reveals the node,
+fits it into view and synchronizes the inspector. URL state preserves the
+selected position or branch for sharing and reload.
 
-Once hourly instrumentation exists, a 24-hour / 7-day replay can animate new
-branches and backward closure propagation. History before instrumentation must
-not be fabricated.
+### Live work rail
 
-## Data architecture
+The **Analyzing now** rail is sourced from the global `work_items` response,
+not from whichever nodes happened to fit into the current mark budget. It can
+therefore show exact active or queued positions outside the visible tree.
 
-No recursive aggregation runs in a home-page request or a submit transaction.
-A periodic snapshot job:
+Each item includes:
 
-1. bulk-reads positions, edges, tasks and worker state;
-2. separates startpos-reachable data from ad-hoc FEN requests;
-3. computes minimum depth and stable display parents;
-4. builds the attributed tree;
-5. aggregates in post-order;
-6. writes versioned compressed JSON;
-7. publishes by atomic rename.
+- exact state (`active` or `queued`);
+- full SAN and UCI lineage from startpos;
+- opening context;
+- direct navigation to reveal/select the position.
 
-The initial response contains only 300–600 visible aggregate nodes. More detail
-is lazy-loaded.
+Leased work sorts ahead of queued work. The response reports the total and
+whether the visible rail was truncated.
 
-Per aggregate, the contract includes:
+### Inspector
 
-- positions, closed, unknown and relevant frontier;
-- historical descendants;
-- nodes and time invested;
-- active and queued tasks;
+Selecting a node updates one inspector containing:
+
+- board;
+- move and complete line from move 1;
+- opening name;
+- exact practical status and closure evidence;
+- labelled evaluation, visits, engine nodes and elapsed time;
+- exact work and descendant-work summaries, clearly separated;
 - transposition count;
-- status, closure and trust breakdowns.
+- `Open in Explorer`.
 
-### Endpoints
+Generic labels such as "root" or internal scheduler terminology are not
+displayed as product copy. Startpos is simply **Start position**.
 
-- `GET /atomicdb/api/map/v1?...`
-- `GET /atomicdb/api/neighborhood/v1/<key>?parents=2&children=2`
-- `GET /atomicdb/api/progress/v1?range=30d&bucket=1h`
+## Exact and aggregate work semantics
 
-All endpoints require versioned schemas, ETags/304, compression, hard depth and
-node limits, and explicit semantic metadata (`tier`, `pov`, `weight`, snapshot
-timestamp). Polling pauses when the tab is hidden.
+The v1 response preserves the original aggregate fields for compatibility and
+adds unambiguous fields:
 
-## Front-end
+- `exact_state`: `active`, `queued` or `idle` for this position;
+- `own_active` / `own_queued`: exact task counts for this position;
+- `subtree_active` / `subtree_queued`: task counts at this position and below;
+- `descendant_active` / `descendant_queued`: subtree counts excluding this
+  exact position;
+- `state`, `active`, `queued`: retained v1 aggregate fields.
 
-The existing Django-template architecture remains:
+The tree halo and node badge use `exact_state` and `own_*`. Descendant activity
+may appear only in explicitly labelled inspector copy such as "3 running
+below".
 
-- modular, pinned D3 for partition, zoom and transitions;
-- SVG for the 300–600 visible marks;
-- server-aggregated data;
-- no React/Vue application shell;
-- Canvas/WebGL only for an optional bounded experimental mode.
+`work_items` contains globally indexed exact work, capped at 16 entries in one
+response:
 
-On mobile a first-move strip selects one full-width branch and details appear
-below the chart. The SVG has an equivalent textual/table view. Tooltips also
-work by focus and tap; keyboard navigation, AA contrast and
-`prefers-reduced-motion` are mandatory.
+- `work_items_total` reports the full count;
+- `work_items_truncated` states whether the rail is partial;
+- a snapshot may provide authenticated `work_keys`;
+- legacy authenticated snapshots without that index are scanned safely.
 
-## Delivery phases
+Snapshot validation checks that indexed work agrees with exact `wa` / `wq`
+counters. It fails closed on a mismatch.
 
-### Phase 0 — truth and performance
+## Opening inheritance
 
-- formalize depth, display parent and frontier definitions;
-- cache/fix SAN provenance;
-- build aggregate and hourly snapshots;
-- publish a metric glossary;
-- target a cached home response below 250 ms.
+Opening recognition follows the same user expectation as an opening explorer:
+the most recent named prefix remains visible until a deeper named prefix
+replaces it.
 
-### Phase 1 — Conquest Map MVP
+For every rendered node:
 
-- first-move strip;
-- zoomable icicle;
-- state/eval/work/transposition encodings;
-- synchronized details and explorer link;
-- keyboard, mobile and ETag support.
+- an exact catalog hit returns `opening.exact = true`;
+- a descendant without a new hit inherits the last name with
+  `opening.exact = false`;
+- `opening.matched_ply` remains the ply at which that name was established;
+- a later exact hit replaces the inherited opening;
+- direct deep links derive the inherited opening from the full lineage, not
+  just the bounded subtree.
 
-### Phase 2 — DAG lens
+The UI displays the opening name naturally. It does not show an "exact
+position" badge, aliases dropdown or provenance dropdown.
 
-- bounded neighborhood endpoint;
-- transposition portals and links;
-- board/PV synchronization;
-- shareable selection.
+## Interaction contract
 
-### Phase 3 — Progress
+- Click or tap selects a node.
+- Visible controls explicitly expand, collapse or focus a branch; no essential
+  action depends on double-click.
+- Enter or Space selects/activates a focused tree item and expands or collapses
+  it when it has children.
+- Arrow Up and Arrow Down move through the previous and next visible tree item.
+- Arrow Left collapses an expanded item or moves to its parent.
+- Arrow Right expands a collapsed item or moves to its first child.
+- Escape only closes transient help, dialogs or overlays. It never changes the
+  tree root or camera.
+- Search reveals a matching node.
+- The visible help button opens a compact keyboard-help popover; help is not a
+  permanent strip consuming map space.
+- Refresh, filtering and resize preserve selection whenever possible.
+- Polling pauses while the document is hidden.
+- Reduced-motion users receive immediate state changes rather than animated
+  camera transitions.
 
-- hourly history;
-- frontier balance and throughput;
-- workers, closure mix and opening comparison.
+## Accessibility
 
-### Phase 4 — replay and polish
+There is one semantic visualization:
 
-- 24-hour / 7-day replay;
-- closure propagation animation;
-- snapshot comparison and share cards;
-- reserved hooks for real proof-number/disproof-number data from Floor 2.
+- the SVG has `role="tree"` and a useful accessible name;
+- each interactive node has `role="treeitem"`;
+- nodes expose `aria-level`, `aria-posinset`, `aria-setsize`,
+  `aria-expanded` and `aria-selected` where applicable;
+- roving `tabindex` gives a single predictable keyboard entry point;
+- the selected node's accessible label includes move, status, opening and work
+  state without relying on colour;
+- status changes use a polite live region;
+- toolbar buttons have text or accessible names;
+- focus remains visible in both themes and forced-colours mode;
+- touch targets are at least 44 CSS pixels where practical.
 
-Floor-2 fields are not shown before the backend actually produces them.
+The inspector is ordinary semantic HTML following the tree in reading order.
+There is no duplicate hidden/permanent tree table. If D3 cannot load, the page
+shows a concise error and an **Open Explorer** route rather than maintaining a
+second rendering implementation.
 
-## Validation gates
+## Responsive behaviour
 
-Backend:
+The same information hierarchy is preserved at all sizes:
 
-- reversible cycles terminate;
-- every reachable position is attributed once;
-- transpositions never duplicate totals;
-- child aggregates sum to their parent;
-- display-parent choice is deterministic and stable;
-- snapshot generation does not block submits;
-- corrupt snapshots fail closed;
-- ETag/304, query and payload budgets are tested;
-- synthetic 100k then 1M-position scale runs pass.
+- **Desktop (>= 1200 px):** toolbar above; tree and inspector share the main
+  area; work rail remains visible without obscuring the canvas.
+- **Tablet (720-1099 px):** inspector moves below or into a bounded side sheet;
+  toolbar groups wrap without shrinking labels into icons only.
+- **Mobile (< 720 px):** tree keeps a useful minimum canvas, supports pan and
+  pinch zoom, and opens details below it; mode controls scroll or wrap as whole
+  labelled controls.
+- **Narrow mobile (<= 360 px):** controls remain operable, long SAN/opening
+  names ellipsize visually and remain complete in accessible labels/tooltips.
 
-Front-end:
+Resize is observed with `ResizeObserver`; fitting is not recalculated on every
+animation frame. No breakpoint creates zero-height rows or overlapping labels.
 
-- zoom, selection, URL restoration and live refresh preserve state when it is
-  still present in the bounded snapshot;
-- complete opening line works with hover, focus and tap;
-- secondary transpositions are discoverable;
-- child aggregation expands predictably;
-- 320, 768 and 1440 px layouts pass;
-- keyboard, screen-reader summary, reduced-motion and colour-vision checks pass;
-- initial marks stay at or below 600;
-- compressed initial JSON stays near 150–200 KB;
-- no main-thread task exceeds 50 ms on the reference device.
+## Themes
 
-The product principle is simple: **a stable quantitative map for understanding
-the whole solving effort, and a local graph for understanding transpositions**.
+AtomicDB supports dark and light themes through the shared theme switch. The
+tree consumes shared CSS custom properties for:
 
-### Reproducible front-end contract check
+- page, panel and elevated backgrounds;
+- primary and muted text;
+- borders and focus rings;
+- result states;
+- exact active/queued states;
+- links and selection.
 
-The pure layout tests cover residual width preservation (including a
-`100 = 60 + 40` truncated branch), an all-hidden branch, and deep-link
-first-move/lineage behavior:
+SVG colours are derived from these tokens rather than hard-coded for one
+background. Both themes must meet AA contrast for normal text and preserve
+focus in forced-colours mode. Patterns, gradients and decorative textures are
+not used to compensate for unclear status semantics.
+
+Theme choice persists using the shared AtomicDB theme mechanism; the map does
+not implement a second switch or storage key.
+
+## Backend and endpoint contract
+
+The snapshot implementation lives in `atomicdb/conquest_map.py`. It does not
+add solver models, write solver rows or traverse the live database from a web
+request.
+
+Build and atomically publish the observational snapshot with:
 
 ```console
-node --check atomicdb/static/atomicdb/conquest-map.js
-node atomicdb/test_conquest_layout.cjs
-```
-
-## Phase-0 implementation contract
-
-The backend implementation lives in `atomicdb/conquest_map.py`.  It deliberately
-does not add a model, write solver rows or run graph traversal in a web request.
-Build and publish the next observational snapshot with:
-
-```bash
 python manage.py build_conquest_map
 ```
 
 The default destination is
 `Media/atomicdb/conquest-map-v1.json.gz`; production may override it with
-`ATOMICDB_MAP_SNAPSHOT_PATH`.  Publication writes a same-directory temporary
-file, flushes it and calls `os.replace()`.  The artifact has schema
-`atomicdb.map.snapshot.v1` and a SHA-256 identity over every field except the
-identity itself.  A prior authenticated artifact supplies stable display-parent
-choices.  A missing or corrupt artifact produces HTTP 503; the endpoint never
-falls back to the live database.
+`ATOMICDB_MAP_SNAPSHOT_PATH`. Publication writes a same-directory temporary
+file, flushes it and calls `os.replace()`. A missing, invalid or inconsistent
+artifact produces HTTP 503; the endpoint never falls back to live graph
+queries.
 
-The public endpoint is:
+The endpoint remains:
 
 ```text
 GET /atomicdb/api/map/v1
@@ -291,61 +299,120 @@ GET /atomicdb/api/map/v1
     &depth=1..32
 ```
 
-It returns schema `atomicdb.map.v1`, semantic metadata, the snapshot identity,
-and a hierarchical `root`.  Every visible node includes its exact position
-fields, full SAN/UCI line from move 1, aggregate metrics, work state,
-transposition count, and explicit `zoomable`, `truncated` and
-`hidden_children` fields.  Direct links also receive a compact `lineage`
-(one full SAN/UCI line plus position key/depth/move per ancestor) and stable
-start-position `first_moves`, independently of the requested zoom root.
-Responses have a weak content ETag, support 304 and gzip, and are capped at
-2 MiB uncompressed.
+`weight` remains a backwards-compatible server-side priority for choosing
+which nodes enter a bounded response. It is not a public geometry control and
+does not alter node width.
 
-Snapshot input is decompressed in 64 KiB chunks up to the hard uncompressed
-budget.  A corrupt artifact is negative-cached by path, nanosecond mtime and
-compressed size, so repeated public requests do not repeatedly spend CPU on
-the same bad gzip; replacing the file invalidates that failure automatically.
+Responses include:
 
-Metric definitions in v1:
+- schema `atomicdb.map.v1`;
+- semantic metadata and snapshot identity;
+- hierarchical `root`;
+- stable `lineage` and `first_moves` navigation metadata;
+- full SAN/UCI line for every visible exact node;
+- exact and aggregate work fields;
+- inherited or exact opening metadata;
+- `work_items`, total and truncation fields.
 
-- `positions`: unique startpos-reachable positions attributed below the node,
-  including the node itself;
+Responses have weak content ETags, support 304 and gzip, contain no more than
+600 API nodes and are capped at 2 MiB uncompressed. Snapshot input is read
+in bounded chunks up to its hard budget. Corrupt artifacts are
+negative-cached by file identity until replaced.
+
+The legacy aggregate metric definitions remain:
+
+- `positions`: unique startpos-reachable attributed positions including the
+  node;
 - `closed`: positions whose exact practical status is not `UNKNOWN`;
 - `unknown`: positions whose exact status remains `UNKNOWN`;
-- `frontier`: unknown positions above the scheduler tombstone boundary
-  (`priority > -500,000,000`);
-- `historical`: positions at or below that tombstone boundary;
-- `nodes` / `seconds`: cumulative engine investment stored on attributed
-  positions;
-- `active_tasks` / `queued_tasks`: current `LEASED` / `PENDING` tasks;
-- `transpositions`: alternate reachable incoming edges, including reversible
-  links back to startpos.
+- `frontier`: unknown positions above the scheduler tombstone boundary;
+- `historical`: positions at or below that boundary;
+- `nodes` / `seconds`: cumulative engine investment;
+- `active_tasks` / `queued_tasks`: subtree task totals;
+- `transpositions`: alternate reachable incoming edges.
 
-`eval_cp` remains heuristic and White-POV.  `status`, `closure` and `proof`
-remain exact/trust fields and are never inferred from evaluation.  The
-synthetic 100k gate runs with `ATOMICDB_MAP_SCALE_TESTS=1`; the explicit 1M gate
-uses `ATOMICDB_MAP_SCALE_TESTS=1000000`.
+`eval_cp` is heuristic and White-POV. `status`, `closure` and `proof` are exact
+evidence fields and are never inferred from evaluation.
+
+## Performance contract
+
+- Initial API node count: at most 600.
+- Visible interactive DOM nodes: at most 300.
+- Search and filter scenes use a smaller readability budget: 40 nodes on
+  larger canvases and 24 on narrow canvases, with the total match count kept
+  visible. Broad filters sample at most 10 endpoints on larger canvases and 6
+  on narrow canvases, balanced across first-move branches; a direct search
+  instead preserves its complete target lineage.
+- Uncompressed response: at most 2 MiB.
+- Snapshot generation: offline and atomic.
+- Request path: snapshot read/cache only, never recursive SQL.
+- DOM: one SVG tree plus semantic controls/inspector, not a parallel table.
+- Rendering: keyed joins and bounded labels; no per-node board instances.
+- Work lookup: authenticated index when present, safe fallback for legacy
+  snapshots.
+- Refresh: ETag/304 and one current `AbortController`.
+- Background tabs: polling suspended.
+- Reference target: no main-thread task above 50 ms after initial parse.
+
+Large deployments must run the opt-in synthetic 100k and 1M snapshot gates.
+The visual tree remains bounded even when the stored graph is much larger.
+
+## Validation gates
+
+### Backend
+
+- reversible cycles terminate;
+- every reachable position is attributed once;
+- transpositions do not duplicate totals;
+- display-parent choice is deterministic and stable;
+- corrupt or oversized snapshots fail closed;
+- exact and aggregate task counts validate independently;
+- indexed global work agrees with position counters;
+- inherited openings survive unnamed descendants and are replaced by deeper
+  exact matches;
+- deep roots derive their opening from full lineage;
+- ETag/304, gzip, query validation and payload budgets pass;
+- synthetic 100k and explicit 1M scale runs pass.
+
+### Front-end
+
+- the heading and accessible name say **Atomic move tree**, while navigation
+  uses the compact **Move tree** label;
+- D3 tidy-tree and zoom are used; partition geometry is absent;
+- search and all three named modes work by mouse, touch and keyboard;
+- Zoom in, Zoom out, Fit tree and Keyboard help are discoverable;
+- exact work is visually distinct from descendant work;
+- global work remains reachable outside the currently rendered 300 nodes;
+- inherited opening names persist without an exact-position badge;
+- long SAN/opening text does not overlap at 320, 768 or 1440 px;
+- selection, camera and URL restoration survive compatible refreshes;
+- reduced motion, forced colours, screen-reader names and roving focus pass;
+- dark and light themes pass AA contrast and visual regression checks;
+- there is no duplicate tree table, permanent legend or permanent help strip;
+- there are no unlabelled evaluation bars or patterned status definitions.
+
+Run the focused checks with:
+
+```console
+node --check atomicdb/static/atomicdb/conquest-map.js
+python manage.py test atomicdb.test_map_frontend atomicdb.test_conquest_map
+```
 
 ## Operations and rollout
 
-The map is observational: deploying it must not restart, pause or reprioritize
-solver workers. Apply the migration, capture the first real hourly progress
-bucket, and build the first map artifact before exposing the navigation link:
+The map is observational. Deploying it must not stop, restart, pause or
+reprioritize solver or OpenBench workers.
 
-```bash
+Before exposing navigation in production:
+
+```console
 python manage.py migrate
 python manage.py capture_atomicdb_progress --json
 python manage.py build_conquest_map
 ```
 
-Keep the commands as separate scheduled jobs. Recommended starting cadences are
-once per hour for progress and every five minutes for the map. Retain
-stdout/stderr for both. A map build publishes only after complete validation
-and an atomic rename; a failed build leaves the last valid artifact in place.
-The web endpoint never performs a live traversal and returns 503 when no valid
-artifact exists.
-
-After rollout, verify:
+Keep progress capture and map generation as separate scheduled jobs. A failed
+build leaves the last valid artifact in place. After deployment verify:
 
 ```text
 GET  /atomicdb/map/
@@ -353,9 +420,10 @@ GET  /atomicdb/api/map/v1?limit=600&depth=8
 HEAD /atomicdb/api/map/v1?limit=600&depth=8
 ```
 
-The GET must return schema `atomicdb.map.v1`, at most 600 marks and a snapshot
-timestamp. The HEAD must return the same ETag and content-encoding choice
-without a body. (Django's development server intentionally omits
-`Content-Length` on HEAD as permitted by RFC 9110.) Repeating GET with
-`If-None-Match` must return 304. Do not delete the previous artifact or
-progress rows during deployment.
+The GET must return schema `atomicdb.map.v1`, at most 600 marks, exact work
+semantics and a snapshot timestamp. HEAD must return the same ETag and
+content-encoding choice without a body. Repeating GET with `If-None-Match`
+must return 304.
+
+The product principle is simple: **show the move tree first, explain exact work
+truthfully, and reveal detail only when it helps the user act.**

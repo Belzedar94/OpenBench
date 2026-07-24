@@ -6,9 +6,10 @@ import math
 import secrets
 import time
 from datetime import timedelta
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from django.contrib.auth import authenticate
+from django.core import signing
 from django.db import OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -51,6 +52,13 @@ LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
 PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
+OPENING_ANCHOR_PARAM = 'opening'
+OPENING_ANCHOR_SALT = 'atomicdb.explorer.opening-anchor.v1'
+OPENING_ANCHOR_MAX_CHARS = 1024
+# board.js predates opening anchors and carries only one ``play`` value.
+# A distinct, signed sentinel keeps drag/drop navigation working after the
+# bounded replay route rolls over, without accepting any extra replay tokens.
+OPENING_ANCHOR_PLAY_PREFIX = 'signed-opening.'
 
 logger = logging.getLogger(__name__)
 
@@ -570,19 +578,178 @@ def _ctx_board(fen):
     return out
 
 
-def _route_query(ucis):
-    """Canonical query suffix for a route whose tokens are already validated."""
-    if ucis is None or not ucis:
-        return ''
-    return '?play=' + ','.join(ucis)
+def _route_query(ucis, opening_anchor=None):
+    """Canonical query suffix for validated route or signed opening state."""
+    parts = []
+    if ucis:
+        parts.append('play=' + ','.join(ucis))
+    if opening_anchor:
+        parts.append(
+            f'{OPENING_ANCHOR_PARAM}='
+            + quote(opening_anchor, safe=''),
+        )
+    return '' if not parts else '?' + '&'.join(parts)
 
 
-def _explore_url(key, ucis=None):
-    return f'/atomicdb/explore/{key}/' + _route_query(ucis)
+def _explore_url(key, ucis=None, opening_anchor=None):
+    return (
+        f'/atomicdb/explore/{key}/'
+        + _route_query(ucis, opening_anchor)
+    )
 
 
-def _goto_url(key, uci, ucis=None):
-    return f'/atomicdb/goto/{key}/{uci}/' + _route_query(ucis)
+def _goto_url(key, uci, ucis=None, opening_anchor=None):
+    return (
+        f'/atomicdb/goto/{key}/{uci}/'
+        + _route_query(ucis, opening_anchor)
+    )
+
+
+def _signed_opening_anchor(target_key, match, route_ply):
+    """Bind the last catalogued opening to one exact explorer target.
+
+    The token is only an overflow continuation for a route that was already
+    replayed and validated.  Names never come from the token: consumers load
+    the signed opening key from the immutable catalogue again.
+    """
+    if match is None:
+        return None
+    opening_key = match.get('position_key')
+    matched_ply = match.get('matched_ply')
+    if (
+        not isinstance(opening_key, str)
+        or isinstance(matched_ply, bool)
+        or not isinstance(matched_ply, int)
+        or matched_ply < 0
+        or isinstance(route_ply, bool)
+        or not isinstance(route_ply, int)
+        or route_ply < matched_ply
+    ):
+        return None
+    exact = openings.lookup_key(opening_key)
+    if exact is None or exact.get('position_key') != opening_key:
+        return None
+    return signing.dumps(
+        {
+            'v': 1,
+            'target': target_key,
+            'opening': opening_key,
+            'matched_ply': matched_ply,
+            'route_ply': route_ply,
+        },
+        salt=OPENING_ANCHOR_SALT,
+        compress=True,
+    )
+
+
+def _validated_opening_anchor(raw, target_key):
+    """Return a catalog-backed opening match and route ply, or fail closed."""
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or len(raw) > OPENING_ANCHOR_MAX_CHARS
+    ):
+        return None, None
+    try:
+        payload = signing.loads(raw, salt=OPENING_ANCHOR_SALT)
+    except (signing.BadSignature, TypeError, ValueError):
+        return None, None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {
+            'v', 'target', 'opening', 'matched_ply', 'route_ply',
+        }
+        or payload.get('v') != 1
+        or payload.get('target') != target_key
+    ):
+        return None, None
+    opening_key = payload.get('opening')
+    matched_ply = payload.get('matched_ply')
+    route_ply = payload.get('route_ply')
+    if (
+        not isinstance(opening_key, str)
+        or isinstance(matched_ply, bool)
+        or not isinstance(matched_ply, int)
+        or matched_ply < 0
+        or isinstance(route_ply, bool)
+        or not isinstance(route_ply, int)
+        or route_ply < matched_ply
+    ):
+        return None, None
+    exact = openings.lookup_key(opening_key)
+    if exact is None or exact.get('position_key') != opening_key:
+        return None, None
+    match = dict(exact)
+    match.update({
+        'matched_ply': matched_ply,
+        'current_key': target_key,
+        'exact': opening_key == target_key,
+    })
+    return match, route_ply
+
+
+def _navigation_opening(active_ucis, raw_anchor, target_key, *,
+                        explicit_play=False):
+    """Resolve opening state and the route that navigation should propagate.
+
+    An explicitly supplied and validated ``play`` route wins.  Otherwise a
+    valid target-bound opening anchor wins over reconstructed lineage: the
+    latter may be a shorter transposition and must not erase overflow state.
+    """
+    if explicit_play and active_ucis is not None:
+        try:
+            match = openings.match_line(active_ucis)
+        except openings.InvalidOpeningLine:
+            match = None
+        return match, len(active_ucis), active_ucis
+    anchored, route_ply = _validated_opening_anchor(raw_anchor, target_key)
+    if anchored is not None:
+        return anchored, route_ply, None
+    if active_ucis is not None:
+        try:
+            match = openings.match_line(active_ucis)
+        except openings.InvalidOpeningLine:
+            match = None
+        return match, len(active_ucis), active_ucis
+    exact = openings.lookup_key(target_key)
+    if exact is None:
+        return None, None, None
+    return exact, exact['matched_ply'], None
+
+
+def _opening_after_move(current, child_key, child_ply):
+    """Advance a trusted opening anchor by one already-validated legal move."""
+    exact = openings.lookup_key(child_key)
+    if exact is not None:
+        result = dict(exact)
+        if child_ply is not None:
+            result['matched_ply'] = child_ply
+        result.update({'current_key': child_key, 'exact': True})
+        return result
+    if current is None:
+        return None
+    result = dict(current)
+    result.update({'current_key': child_key, 'exact': False})
+    return result
+
+
+def _child_navigation_state(active_ucis, current_opening, route_ply,
+                            child_key, move_uci):
+    """Choose a bounded replay route or a signed overflow anchor for a child."""
+    child_ply = None if route_ply is None else route_ply + 1
+    child_opening = _opening_after_move(
+        current_opening, child_key, child_ply)
+    child_route = (
+        None if active_ucis is None else [*active_ucis, move_uci]
+    )
+    if child_route is not None and len(child_route) <= PLAY_ROUTE_MAX_PLIES:
+        return child_route, None
+    anchor_ply = child_ply
+    if anchor_ply is None and child_opening is not None:
+        anchor_ply = child_opening.get('matched_ply')
+    child_anchor = _signed_opening_anchor(
+        child_key, child_opening, anchor_ply)
+    return None, child_anchor
 
 
 def _validated_play_route(raw, target_key):
@@ -656,16 +823,34 @@ def goto(request, key, uci):
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return redirect('/atomicdb/')
+    raw_play = request.GET.get('play')
+    board_anchor = None
+    if (
+        isinstance(raw_play, str)
+        and raw_play.startswith(OPENING_ANCHOR_PLAY_PREFIX)
+    ):
+        board_anchor = raw_play[len(OPENING_ANCHOR_PLAY_PREFIX):]
+        raw_play = None
     try:
-        route = _validated_play_route(request.GET.get('play'), key)
+        route = _validated_play_route(raw_play, key)
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if route is None:
         _top, _line, active_ucis = _canonical_route(pos)
     else:
         _top, _line, active_ucis = route
+    current_opening, route_ply, active_ucis = _navigation_opening(
+        active_ucis,
+        request.GET.get(OPENING_ANCHOR_PARAM) or board_anchor,
+        pos.key,
+        explicit_play=route is not None,
+    )
+    current_anchor = (
+        None if active_ucis is not None
+        else _signed_opening_anchor(pos.key, current_opening, route_ply)
+    )
     if uci not in logic.legal_moves(pos.fen):
-        return redirect(_explore_url(key, active_ucis))
+        return redirect(_explore_url(key, active_ucis, current_anchor))
     child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
                                           campaign=pos.campaign)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
@@ -673,8 +858,9 @@ def goto(request, key, uci):
     if child.priority <= ingest.DEAD / 2:
         child.priority = 0.0   # ruta nueva: revive de la lapida
         child.save(update_fields=['priority'])
-    child_route = None if active_ucis is None else [*active_ucis, uci]
-    return redirect(_explore_url(child.key, child_route))
+    child_route, child_anchor = _child_navigation_state(
+        active_ucis, current_opening, route_ply, child.key, uci)
+    return redirect(_explore_url(child.key, child_route, child_anchor))
 
 
 def _format_san_line(top, line, max_plies=16, keep_head=False):
@@ -1201,16 +1387,15 @@ def _line_to_root(pos, max_plies=64):
     return _lines_to_root([pos.key], max_plies=max_plies)[pos.key]
 
 
-def _numbered_line(top, line, route_ucis=None):
-    """Explorer breadcrumb tokens, numbered only when move 1 is known."""
-    if top.fen != logic.start_fen():
-        return [
-            {'num': '', 'san': step['san'], 'key': step['key']}
-            for step in line
-        ]
+def _numbered_line(top, line, route_ucis=None, opening_match=None,
+                   route_ply=None):
+    """Explorer breadcrumbs with route- or anchor-preserving destinations."""
+    from_start = top.fen == logic.start_fen()
     numbered, n = [], 1
     for i, step in enumerate(line):
-        if step['white']:
+        if not from_start:
+            number = ''
+        elif step['white']:
             number = f'{n}.'
         else:
             number = f'{n}...' if i == 0 else ''
@@ -1220,6 +1405,13 @@ def _numbered_line(top, line, route_ucis=None):
         }
         if route_ucis is not None:
             token['url'] = _explore_url(step['key'], route_ucis[:i + 1])
+        elif opening_match is not None and route_ply is not None:
+            breadcrumb_ply = route_ply - (len(line) - i - 1)
+            anchor = _signed_opening_anchor(
+                step['key'], opening_match, breadcrumb_ply)
+            if anchor is not None:
+                token['url'] = _explore_url(
+                    step['key'], opening_anchor=anchor)
         numbered.append(token)
     return numbered
 
@@ -1316,23 +1508,26 @@ def explore(request, key):
     legal_ucis = ([] if pos.closure == 'TERMINAL'
                   else logic.legal_moves(pos.fen))
     known = {m['uci'] for m in moves}
-    if active_ucis is not None:
-        try:
-            current_opening = openings.match_line(active_ucis)
-        except openings.InvalidOpeningLine:
-            current_opening = None
-    else:
-        current_opening = None
-    if current_opening is None:
-        current_opening = openings.lookup_key(pos.key)
-    current_opening = _opening_for_template(current_opening)
+    current_opening_match, route_ply, active_ucis = _navigation_opening(
+        active_ucis,
+        request.GET.get(OPENING_ANCHOR_PARAM),
+        pos.key,
+        explicit_play=explicit_route is not None,
+    )
+    current_anchor = (
+        None if active_ucis is not None
+        else _signed_opening_anchor(
+            pos.key, current_opening_match, route_ply)
+    )
+    current_opening = _opening_for_template(current_opening_match)
 
     for move in moves:
-        child_route = (
-            None if active_ucis is None
-            else [*active_ucis, move['uci']]
+        child_route, child_anchor = _child_navigation_state(
+            active_ucis, current_opening_match, route_ply,
+            move['key'], move['uci'],
         )
-        move['url'] = _explore_url(move['key'], child_route)
+        move['url'] = _explore_url(
+            move['key'], child_route, child_anchor)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening)
     unexplored = []
@@ -1343,14 +1538,32 @@ def explore(request, key):
         child_key = logic.key_of(child_fen)
         unexplored.append({
             'uci': uci,
-            'url': _goto_url(pos.key, uci, active_ucis),
+            'url': _goto_url(
+                pos.key, uci, active_ucis, current_anchor),
             'enters_opening': _exact_child_opening(
                 child_key, current_opening),
         })
-    numbered = _numbered_line(top, line, active_ucis)
-    board_play = '' if active_ucis is None else ','.join(active_ucis)
+    numbered = _numbered_line(
+        top,
+        line,
+        active_ucis,
+        current_opening_match if current_anchor else None,
+        route_ply,
+    )
+    board_play = (
+        ','.join(active_ucis)
+        if active_ucis is not None
+        else (
+            OPENING_ANCHOR_PLAY_PREFIX + current_anchor
+            if current_anchor else ''
+        )
+    )
     legal_move_links = [
-        {'uci': uci, 'url': _goto_url(pos.key, uci, active_ucis)}
+        {
+            'uci': uci,
+            'url': _goto_url(
+                pos.key, uci, active_ucis, current_anchor),
+        }
         for uci in legal_ucis
     ]
     stm_white = pos.fen.split()[1] == 'w'
@@ -1384,7 +1597,7 @@ def method(request):
 
 
 def conquest_map(request):
-    """Public shell for the snapshot-backed Conquest Map.
+    """Public shell for the snapshot-backed Atomic move tree.
 
     Rendering this page never walks or mutates the solver graph.  The
     versioned map endpoint supplies the bounded display-tree projection.

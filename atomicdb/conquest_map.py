@@ -1,4 +1,4 @@
-"""Versioned, read-only Conquest Map snapshots for AtomicDB.
+"""Versioned, read-only Atomic move-tree snapshots for AtomicDB.
 
 The live solver graph is a DAG with possible reversible cycles.  Public web
 requests must never recursively traverse that graph, so a management command
@@ -36,6 +36,7 @@ DEFAULT_MARKS = 500
 MAX_MARKS = 600
 DEFAULT_DEPTH = 16
 MAX_DEPTH = 32
+MAX_WORK_ITEMS = 16
 MAX_API_BYTES = 2 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
 SNAPSHOT_READ_CHUNK = 64 * 1024
@@ -80,6 +81,13 @@ _EXACT_UTILITY = 10 ** 15
 logger = logging.getLogger(__name__)
 _snapshot_cache = {'signature': None, 'snapshot': None, 'error': None}
 _snapshot_cache_lock = threading.Lock()
+_legacy_work_index_cache = {
+    'object_id': None,
+    'snapshot_id': None,
+    'work_keys': None,
+    'generation': 0,
+    'inflight': {},
+}
 
 
 class SnapshotError(ValueError):
@@ -192,8 +200,18 @@ def validate_snapshot(snapshot):
             raise SnapshotError('invalid transposition counters')
         if node['i'] < 0 or node['x'] < 0 or node['x'] > node['i']:
             raise SnapshotError('invalid transposition counters')
+        if any(
+            isinstance(node[field], bool)
+            or not isinstance(node[field], int)
+            or node[field] < 0
+            for field in ('wa', 'wq')
+        ):
+            raise SnapshotError('invalid exact work counter')
         _validate_metric_vector(node['m'])
         metrics = node['m']
+        if (node['wa'] > metrics[M_ACTIVE]
+                or node['wq'] > metrics[M_QUEUED]):
+            raise SnapshotError('exact work exceeds subtree work')
         if metrics[M_CLOSED] + metrics[M_UNKNOWN] != metrics[M_POSITIONS]:
             raise SnapshotError('closed/unknown aggregate mismatch')
         if sum(metrics[M_WHITE_WIN:M_STATUS_UNKNOWN + 1]) != metrics[M_POSITIONS]:
@@ -227,10 +245,38 @@ def validate_snapshot(snapshot):
         )
         if child_positions + 1 != parent['m'][M_POSITIONS]:
             raise SnapshotError('position aggregate is not additive')
+        for metric_index, own_field, label in (
+            (M_ACTIVE, 'wa', 'active'),
+            (M_QUEUED, 'wq', 'queued'),
+        ):
+            child_work = sum(
+                nodes[child_key]['m'][metric_index]
+                for child_key in parent['k']
+            )
+            if parent[own_field] + child_work != parent['m'][metric_index]:
+                raise SnapshotError(
+                    f'{label} work aggregate is not additive')
     if attributed != set(nodes) - {root_key}:
         raise SnapshotError('display tree contains unattributed nodes')
     if maximum_depth != metadata['max_depth']:
         raise SnapshotError('maximum depth mismatch')
+    work_keys = metadata.get('work_keys')
+    if work_keys is not None:
+        if not isinstance(work_keys, list):
+            raise SnapshotError('invalid exact work index')
+        if any(
+            not isinstance(key, str) or key not in nodes
+            for key in work_keys
+        ):
+            raise SnapshotError('invalid exact work index')
+        if len(work_keys) != len(set(work_keys)):
+            raise SnapshotError('invalid exact work index')
+        expected_work_keys = {
+            key for key, node in nodes.items()
+            if node['wa'] or node['wq']
+        }
+        if set(work_keys) != expected_work_keys:
+            raise SnapshotError('exact work index mismatch')
     return snapshot
 
 
@@ -264,7 +310,14 @@ def published_snapshot(path=None):
         stat = target.stat()
     except OSError as exc:
         raise SnapshotError('snapshot is unavailable') from exc
-    signature = (str(target.resolve()), stat.st_mtime_ns, stat.st_size)
+    signature = (
+        str(target.resolve()),
+        getattr(stat, 'st_dev', None),
+        getattr(stat, 'st_ino', None),
+        getattr(stat, 'st_ctime_ns', None),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
     with _snapshot_cache_lock:
         if _snapshot_cache['signature'] == signature:
             if _snapshot_cache['error'] is not None:
@@ -282,9 +335,15 @@ def published_snapshot(path=None):
 
 
 def reset_snapshot_cache():
-    """Test/deploy hook; normal publication invalidates through mtime+size."""
+    """Test/deploy hook; normal publication invalidates by file identity."""
     with _snapshot_cache_lock:
         _snapshot_cache.update(signature=None, snapshot=None, error=None)
+        _legacy_work_index_cache.update(
+            object_id=None,
+            snapshot_id=None,
+            work_keys=None,
+            generation=_legacy_work_index_cache['generation'] + 1,
+        )
 
 
 def publish_snapshot(snapshot, path):
@@ -641,6 +700,12 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
             'edges': reachable_edges,
             'max_depth': max(depth.values(), default=0),
             'unreachable_positions': len(positions) - len(reachable),
+            'work_keys': [
+                key
+                for key in sorted(
+                    reachable, key=lambda item: (depth[item], item))
+                if nodes[key]['wa'] or nodes[key]['wq']
+            ],
         },
         'nodes': nodes,
     }
@@ -708,6 +773,64 @@ def _weight(node, weight):
     if weight == 'explored':
         return node['m'][M_POSITIONS]
     return node['m'][M_NODES]
+
+
+def _snapshot_work_keys(snapshot):
+    """Return exact-work keys, including a safe legacy-snapshot fallback."""
+    metadata = snapshot['snapshot']
+    indexed = metadata.get('work_keys')
+    if indexed is not None:
+        return list(indexed)
+
+    # Production can briefly serve a pre-work-index snapshot after this code
+    # deploys.  The published artifact object is process-cached and immutable,
+    # so cache its derived index as well instead of scanning a million-node
+    # snapshot on every public API request.
+    object_id = id(snapshot)
+    snapshot_id = metadata.get('id')
+    while True:
+        with _snapshot_cache_lock:
+            if (
+                _legacy_work_index_cache['object_id'] == object_id
+                and _legacy_work_index_cache['snapshot_id'] == snapshot_id
+                and _legacy_work_index_cache['work_keys'] is not None
+            ):
+                return list(_legacy_work_index_cache['work_keys'])
+            generation = _legacy_work_index_cache['generation']
+            flight_key = (generation, object_id, snapshot_id)
+            event = _legacy_work_index_cache['inflight'].get(flight_key)
+            if event is None:
+                event = threading.Event()
+                _legacy_work_index_cache['inflight'][flight_key] = event
+                break
+        # Only callers deriving the same snapshot generation wait.  The scan
+        # itself and unrelated snapshot generations remain outside the lock.
+        event.wait()
+
+    try:
+        work_keys = tuple(
+            key for key, node in snapshot['nodes'].items()
+            if node['wa'] or node['wq']
+        )
+    except BaseException:
+        with _snapshot_cache_lock:
+            current = _legacy_work_index_cache['inflight'].pop(
+                flight_key, None)
+            if current is not None:
+                current.set()
+        raise
+
+    with _snapshot_cache_lock:
+        if _legacy_work_index_cache['generation'] == generation:
+            _legacy_work_index_cache.update(
+                object_id=object_id,
+                snapshot_id=snapshot_id,
+                work_keys=work_keys,
+            )
+        current = _legacy_work_index_cache['inflight'].pop(flight_key, None)
+        if current is not None:
+            current.set()
+    return list(work_keys)
 
 
 def _lineage_to_start(nodes, key):
@@ -821,6 +944,10 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
         node = nodes[key]
         active = node['m'][M_ACTIVE]
         queued = node['m'][M_QUEUED]
+        own_active = node['wa']
+        own_queued = node['wq']
+        descendant_active = max(0, active - own_active)
+        descendant_queued = max(0, queued - own_queued)
         summary = {
             'key': key,
             'fen': node['f'],
@@ -835,13 +962,23 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             ),
             'metrics': _expanded_metrics(node['m']),
             'work': {
+                # ``state``, ``active`` and ``queued`` retain their v1
+                # subtree semantics for existing clients.
                 'state': (
                     'active' if active else ('queued' if queued else 'idle')
                 ),
                 'active': active,
                 'queued': queued,
-                'own_active': node['wa'],
-                'own_queued': node['wq'],
+                'own_active': own_active,
+                'own_queued': own_queued,
+                'exact_state': (
+                    'active' if own_active
+                    else ('queued' if own_queued else 'idle')
+                ),
+                'subtree_active': active,
+                'subtree_queued': queued,
+                'descendant_active': descendant_active,
+                'descendant_queued': descendant_queued,
             },
             'transpositions': {
                 'incoming': node['i'],
@@ -854,13 +991,39 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             summary['opening'] = opening
         return summary
 
-    def render_node(key, line_san, line_uci):
+    def opening_for_lineage(lineage):
+        current = None
+        final_key = lineage[-1] if lineage else None
+        for lineage_key in lineage:
+            exact_match = openings.lookup_key(lineage_key)
+            if exact_match is not None:
+                current = compact_opening(
+                    exact_match,
+                    exact=lineage_key == final_key,
+                    matched_ply=nodes[lineage_key]['d'],
+                )
+        return current
+
+    def inherited_opening(opening):
+        if opening is None:
+            return None
+        return {
+            'name': opening['name'],
+            'exact': False,
+            'matched_ply': opening['matched_ply'],
+        }
+
+    def render_node(key, line_san, line_uci, ancestor_opening=None):
         node = nodes[key]
         children = visible_children.get(key, ())
         all_children = node['k']
         exact_match = openings.lookup_key(key)
-        current_opening = compact_opening(
-            exact_match, exact=True, matched_ply=node['d'])
+        current_opening = (
+            compact_opening(
+                exact_match, exact=True, matched_ply=node['d'])
+            if exact_match is not None
+            else inherited_opening(ancestor_opening)
+        )
 
         rendered_children = []
         for child_key in children:
@@ -871,7 +1034,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             )
             child_line_uci = line_uci + [child['u']]
             rendered_children.append(render_node(
-                child_key, child_line_san, child_line_uci))
+                child_key, child_line_san, child_line_uci, current_opening))
         rendered = compact_summary(key, current_opening)
         rendered.update({
             'best_move': node['b'],
@@ -885,6 +1048,31 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             'children': rendered_children,
         })
         return rendered
+
+    root_opening = opening_for_lineage(lineage_keys)
+    exact_work_keys = _snapshot_work_keys(snapshot)
+    ordered_work_keys = heapq.nsmallest(
+        MAX_WORK_ITEMS,
+        exact_work_keys,
+        key=lambda key: (
+            -int(bool(nodes[key]['wa'])),
+            -nodes[key]['wa'],
+            -nodes[key]['wq'],
+            nodes[key]['d'],
+            key,
+        ),
+    )
+    work_items = []
+    for key in ordered_work_keys:
+        lineage = _lineage_to_start(nodes, key)
+        line_san, line_uci = _materialise_line(nodes, lineage)
+        opening = opening_for_lineage([start_key] + lineage)
+        item = compact_summary(key, opening)
+        item.update({
+            'line_san': line_san,
+            'line_uci': line_uci,
+        })
+        work_items.append(item)
 
     document = {
         'schema': API_SCHEMA,
@@ -916,8 +1104,13 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
                 'alternate reachable incoming edges not used as display parent'
             ),
             'opening': (
-                'position-key exact match only; unnamed continuations do not '
-                'inherit an ancestor label'
+                'last exact position-key match on the startpos lineage; '
+                'unnamed continuations retain that label until replaced'
+            ),
+            'work': (
+                'state/active/queued are subtree-compatible v1 fields; '
+                'exact_state and own_* describe this exact position; '
+                'descendant_* exclude this exact position'
             ),
         },
         'request': {
@@ -928,6 +1121,9 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
         },
         'marks': len(selected),
         'zoomable': bool(nodes[root_key]['k']),
+        'work_items': work_items,
+        'work_items_total': len(exact_work_keys),
+        'work_items_truncated': len(exact_work_keys) > MAX_WORK_ITEMS,
         'lineage': {
             'start_key': start_key,
             'root_key': root_key,
@@ -959,7 +1155,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             for key in nodes[start_key]['k']
         ],
         'root': render_node(
-            root_key, root_line_san, root_line_uci),
+            root_key, root_line_san, root_line_uci, root_opening),
     }
     return document
 
@@ -1001,7 +1197,11 @@ def _accepts_gzip(header):
 
 def _etag_matches(header, etag):
     values = [value.strip() for value in (header or '').split(',')]
-    return '*' in values or etag in values
+    weak_etag = etag[2:] if etag.startswith('W/') else etag
+    return '*' in values or any(
+        (value[2:] if value.startswith('W/') else value) == weak_etag
+        for value in values
+    )
 
 
 def _set_cache_headers(response, etag):
@@ -1042,10 +1242,10 @@ def map_api(request):
     try:
         snapshot = published_snapshot()
     except SnapshotError as exc:
-        logger.warning('Conquest Map snapshot unavailable or corrupt: %s', exc)
+        logger.warning('Atomic move-tree snapshot unavailable or corrupt: %s', exc)
         response = _error(
             'snapshot_unavailable',
-            'Conquest Map snapshot is temporarily unavailable',
+            'Atomic move-tree snapshot is temporarily unavailable',
             503,
         )
         response['Cache-Control'] = 'no-store'
@@ -1057,19 +1257,19 @@ def map_api(request):
         document = render_map(snapshot, root_key, weight, limit, depth)
         raw = _canonical_json(document)
     except (KeyError, SnapshotError, RecursionError, ValueError):
-        logger.exception('Conquest Map snapshot cannot be rendered')
+        logger.exception('Atomic move-tree snapshot cannot be rendered')
         response = _error(
             'snapshot_unavailable',
-            'Conquest Map snapshot is temporarily unavailable',
+            'Atomic move-tree snapshot is temporarily unavailable',
             503,
         )
         response['Cache-Control'] = 'no-store'
         return response
     if len(raw) > MAX_API_BYTES:
-        logger.error('Conquest Map response exceeded %d bytes', MAX_API_BYTES)
+        logger.error('Atomic move-tree response exceeded %d bytes', MAX_API_BYTES)
         response = _error(
             'payload_budget_exceeded',
-            'Conquest Map response exceeds the payload budget',
+            'Atomic move-tree response exceeds the payload budget',
             503,
         )
         response['Cache-Control'] = 'no-store'
