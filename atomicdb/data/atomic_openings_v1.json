@@ -1,13 +1,13 @@
 {
-  "catalog_sha256": "c6fa840cae43db0be801fd8fe0dc76c854cf0007ac415cae038e0d8992a4f659",
+  "catalog_sha256": "711be81fe4ab8587cf17c2ead56dcdcb73a666c026001ba9a76681a062a3838a",
   "counts": {
     "atomix_records": 176,
     "eao_records": 208,
     "eao_unique_exact_names": 191,
-    "modern_records": 23,
-    "positions": 350,
-    "source_records": 407,
-    "unique_names": 373
+    "modern_records": 31,
+    "positions": 356,
+    "source_records": 415,
+    "unique_names": 380
   },
   "entries": [
     {
@@ -1626,6 +1626,57 @@
         "g8h6"
       ],
       "status": "legacy"
+    },
+    {
+      "aliases": [],
+      "confidence": "high",
+      "fen": "rnbqkbnr/pppp1ppp/4p3/7Q/8/4P3/PPPP1PPP/RNB1KBNR b KQkq - 0 1",
+      "name": "Wayward Queen",
+      "names": [
+        "Wayward Queen"
+      ],
+      "position_key": "140d50ef40a7c993ca386f1fc51afb0db9b9f0dfdd81449428c317f985eb1d3d",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Wayward Queen exact Atomic line",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "discord_message",
+              "label": "Wayward Queen line in The House",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1011966938181808209"
+            }
+          ],
+          "id": "community-wayward-queen",
+          "issues": [],
+          "line_san": "1. e3 e6 2. Qh5",
+          "line_uci": [
+            "e2e3",
+            "e7e6",
+            "d1h5"
+          ],
+          "name": "Wayward Queen",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        }
+      ],
+      "reference_line_san": "1. e3 e6 2. Qh5",
+      "reference_line_uci": [
+        "e2e3",
+        "e7e6",
+        "d1h5"
+      ],
+      "status": "canonical_candidate"
     },
     {
       "aliases": [],
@@ -3578,6 +3629,73 @@
         "c7c6"
       ],
       "status": "legacy_alias"
+    },
+    {
+      "aliases": [],
+      "confidence": "high",
+      "fen": "rnb1kb2/pppp4/4ppp1/8/1q6/2P1PNP1/PP1P1P1P/RNB1KB1R b KQq - 0 1",
+      "name": "Fake Cowboy Attack",
+      "names": [
+        "Fake Cowboy Attack"
+      ],
+      "position_key": "28b162c33ae8dde0adba14fa85dec5bbf6c01bcdd0e8d341900acccea0933a52",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Fake Cowboy Attack exact Atomic line",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "discord_message",
+              "label": "The House recap: fake cow attack",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1012125874490970222"
+            }
+          ],
+          "id": "community-fake-cowboy-attack",
+          "issues": [],
+          "line_san": "1. e3 e6 2. Qh5 g6 3. Nf3 Qh4 4. g3 Qb4 5. c3 f6 6. Qxh7",
+          "line_uci": [
+            "e2e3",
+            "e7e6",
+            "d1h5",
+            "g7g6",
+            "g1f3",
+            "d8h4",
+            "g2g3",
+            "h4b4",
+            "c2c3",
+            "f7f6",
+            "h5h7"
+          ],
+          "name": "Fake Cowboy Attack",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        }
+      ],
+      "reference_line_san": "1. e3 e6 2. Qh5 g6 3. Nf3 Qh4 4. g3 Qb4 5. c3 f6 6. Qxh7",
+      "reference_line_uci": [
+        "e2e3",
+        "e7e6",
+        "d1h5",
+        "g7g6",
+        "g1f3",
+        "d8h4",
+        "g2g3",
+        "h4b4",
+        "c2c3",
+        "f7f6",
+        "h5h7"
+      ],
+      "status": "canonical_candidate"
     },
     {
       "aliases": [
@@ -7771,6 +7889,74 @@
     },
     {
       "aliases": [],
+      "confidence": "high",
+      "fen": "rnb1kb2/pppp4/4ppp1/8/7q/4PNP1/PPPP1P1P/RNB1KB1R b KQq - 0 1",
+      "name": "Cowboy Attack",
+      "names": [
+        "Cowboy Attack"
+      ],
+      "position_key": "5c194dfd93bba4fc772fb8ff7dc8e083cc730ceb46e24adbab7586dd682b40b9",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Cowboy Attack exact Atomic line",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "discord_message",
+              "label": "Cowboy Attack explicitly defined in The House",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1012005081857654875"
+            },
+            {
+              "kind": "discord_message",
+              "label": "Cowboy Attack exact route repeated",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1039132579250589747"
+            }
+          ],
+          "id": "community-cowboy-attack",
+          "issues": [],
+          "line_san": "1. e3 e6 2. Qh5 g6 3. Nf3 Qh4 4. g3 f6 5. Qxh7",
+          "line_uci": [
+            "e2e3",
+            "e7e6",
+            "d1h5",
+            "g7g6",
+            "g1f3",
+            "d8h4",
+            "g2g3",
+            "f7f6",
+            "h5h7"
+          ],
+          "name": "Cowboy Attack",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        }
+      ],
+      "reference_line_san": "1. e3 e6 2. Qh5 g6 3. Nf3 Qh4 4. g3 f6 5. Qxh7",
+      "reference_line_uci": [
+        "e2e3",
+        "e7e6",
+        "d1h5",
+        "g7g6",
+        "g1f3",
+        "d8h4",
+        "g2g3",
+        "f7f6",
+        "h5h7"
+      ],
+      "status": "canonical_candidate"
+    },
+    {
+      "aliases": [],
       "confidence": "source_attested",
       "fen": "rnbqkb1r/ppp1pppp/7n/3p4/3PP3/2P5/PP3PPP/RNBQKBNR b KQkq - 0 1",
       "name": "TLM Gambit",
@@ -11464,6 +11650,68 @@
     },
     {
       "aliases": [],
+      "confidence": "high",
+      "fen": "r1bqkbnr/pppp1pp1/n3p2p/8/3PP3/7N/PPP2PPP/RNBQKB1R w KQkq - 0 1",
+      "name": "Xeransis Attack",
+      "names": [
+        "Xeransis Attack"
+      ],
+      "position_key": "92e9991a097f12893d60cc51e300ec1e188c6e2291cff4bf974281da6a0cd132",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Xeransis Attack exact Atomic position",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "lichess_study",
+              "label": "Xeransis Attack chapter",
+              "url": "https://lichess.org/study/5ChgVQ4K/xOOgtny1"
+            },
+            {
+              "kind": "discord_message",
+              "label": "The House opening-name recap",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1012125874490970222"
+            }
+          ],
+          "id": "community-xeransis-attack",
+          "issues": [],
+          "line_san": "1. Nh3 h6 2. d4 e6 3. e4 Na6",
+          "line_uci": [
+            "g1h3",
+            "h7h6",
+            "d2d4",
+            "e7e6",
+            "e2e4",
+            "b8a6"
+          ],
+          "name": "Xeransis Attack",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        }
+      ],
+      "reference_line_san": "1. Nh3 h6 2. d4 e6 3. e4 Na6",
+      "reference_line_uci": [
+        "g1h3",
+        "h7h6",
+        "d2d4",
+        "e7e6",
+        "e2e4",
+        "b8a6"
+      ],
+      "status": "canonical_candidate"
+    },
+    {
+      "aliases": [],
       "confidence": "source_attested",
       "fen": "rnbqk1nr/pppp2pp/4pp2/1B6/1b6/2N1PN2/PPPP1PPP/R1BQK2R b KQkq - 0 1",
       "name": "Nightrider Defence Fruchtzwerg Variation",
@@ -12906,15 +13154,61 @@
       "status": "legacy_alias"
     },
     {
-      "aliases": [],
-      "confidence": "source_attested",
+      "aliases": [
+        "Trojanknight-Opossum, Mainline, 5.h3 Variation"
+      ],
+      "confidence": "high",
       "fen": "rnbqkb1r/p1ppp1pp/5p2/1p6/3N1Pn1/4P2P/PPPP2P1/RNBQKB1R b KQkq - 0 1",
-      "name": "Trojanknight-Opossum, Mainline, 5.h3 Variation",
+      "name": "Russian Attack",
       "names": [
+        "Russian Attack",
         "Trojanknight-Opossum, Mainline, 5.h3 Variation"
       ],
       "position_key": "a2dedf6617a90613d90e0e9545cea63c7221a99caee3f91b08e33dd2d4fe4634",
       "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Russian Attack through 5.h3",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "lichess_study",
+              "label": "Russian Attack line continuing with 5.h3",
+              "url": "https://lichess.org/study/5ChgVQ4K/sJXVdiY0"
+            }
+          ],
+          "id": "community-russian-attack-h3",
+          "issues": [],
+          "line_san": "1. Nf3 f6 2. Nd4 Nh6 3. e3 Ng4 4. f4 b5 5. h3",
+          "line_uci": [
+            "g1f3",
+            "f7f6",
+            "f3d4",
+            "g8h6",
+            "e2e3",
+            "h6g4",
+            "f2f4",
+            "b7b5",
+            "h2h3"
+          ],
+          "name": "Russian Attack",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": {
+              "code": "C21",
+              "id": "eao-c21",
+              "labels_differ": true,
+              "name": "Trojanknight-Opossum, Mainline, 5.h3 Variation"
+            }
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        },
         {
           "code": "C21",
           "confidence": "source_attested",
@@ -12959,7 +13253,7 @@
         "b7b5",
         "h2h3"
       ],
-      "status": "legacy"
+      "status": "canonical_candidate"
     },
     {
       "aliases": [],
@@ -13813,6 +14107,60 @@
         "e5e6"
       ],
       "status": "legacy_alias"
+    },
+    {
+      "aliases": [],
+      "confidence": "high",
+      "fen": "rnbqkbnr/ppp1pppp/3p4/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 1",
+      "name": "Villager Defense",
+      "names": [
+        "Villager Defense"
+      ],
+      "position_key": "aa863834e8d555ba990fee76149fac3c2e2897564d94540db385cfe9e56d51d8",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Villager Defense exact Atomic line",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "discord_message",
+              "label": "Nf3 d6 named village defense",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1011963515742994472"
+            },
+            {
+              "kind": "discord_message",
+              "label": "The House recap: Villager defense",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1012125874490970222"
+            }
+          ],
+          "id": "community-villager-defense",
+          "issues": [],
+          "line_san": "1. Nf3 d6",
+          "line_uci": [
+            "g1f3",
+            "d7d6"
+          ],
+          "name": "Villager Defense",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        }
+      ],
+      "reference_line_san": "1. Nf3 d6",
+      "reference_line_uci": [
+        "g1f3",
+        "d7d6"
+      ],
+      "status": "canonical_candidate"
     },
     {
       "aliases": [],
@@ -15714,6 +16062,102 @@
         "h3g5"
       ],
       "status": "legacy"
+    },
+    {
+      "aliases": [
+        "Chronatog Gambit"
+      ],
+      "confidence": "high",
+      "fen": "rnbqk1nr/pppp2pp/4pp2/8/8/4P3/PP1P1PPP/RNBQKB1R w KQkq - 0 1",
+      "name": "Chronatog Scambit",
+      "names": [
+        "Chronatog Scambit",
+        "Chronatog Gambit"
+      ],
+      "position_key": "c55b8a57414a0332debd00ff972208de33684ad940e874b17f0774990866b6e4",
+      "records": [
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "project_authority",
+              "label": "Chronatog Scambit exact Atomic line",
+              "url": "https://github.com/Belzedar94/OpenBench/blob/spell-runner/docs/atomicdb-opening-authority.md#maintainer-confirmed-openings-2026-07-24"
+            },
+            {
+              "kind": "discord_message",
+              "label": "Chronatog Scambit wordplay and exact line",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1012001987912548442"
+            }
+          ],
+          "id": "community-chronatog-scambit",
+          "issues": [],
+          "line_san": "1. Nf3 f6 2. e3 e6 3. Nd4 Bb4 4. c3 Bxc3",
+          "line_uci": [
+            "g1f3",
+            "f7f6",
+            "e2e3",
+            "e7e6",
+            "f3d4",
+            "f8b4",
+            "c2c3",
+            "b4c3"
+          ],
+          "name": "Chronatog Scambit",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "canonical_candidate"
+        },
+        {
+          "code": null,
+          "confidence": "high",
+          "evidence": [
+            {
+              "kind": "discord_message",
+              "label": "Chronatog Gambit exact Atomic line",
+              "url": "https://discord.com/channels/314155682033041408/390259766036791296/1000152806159814786"
+            }
+          ],
+          "id": "community-chronatog-gambit",
+          "issues": [],
+          "line_san": "1. Nf3 f6 2. e3 e6 3. Nd4 Bb4 4. c3 Bxc3",
+          "line_uci": [
+            "g1f3",
+            "f7f6",
+            "e2e3",
+            "e7e6",
+            "f3d4",
+            "f8b4",
+            "c2c3",
+            "b4c3"
+          ],
+          "name": "Chronatog Gambit",
+          "provenance": {
+            "same_atomix_position": [],
+            "same_eao_position": null
+          },
+          "source_kind": "modern",
+          "source_line": null,
+          "status": "community_alias"
+        }
+      ],
+      "reference_line_san": "1. Nf3 f6 2. e3 e6 3. Nd4 Bb4 4. c3 Bxc3",
+      "reference_line_uci": [
+        "g1f3",
+        "f7f6",
+        "e2e3",
+        "e7e6",
+        "f3d4",
+        "f8b4",
+        "c2c3",
+        "b4c3"
+      ],
+      "status": "canonical_candidate"
     },
     {
       "aliases": [],
@@ -20324,8 +20768,8 @@
     {
       "filename": "modern-confirmed-openings.json",
       "kind": "modern",
-      "records": 23,
-      "sha256": "33c430026f9f902ae0d8678872e2c2a449a3811c3f3aa1b3e51c5196175d1ee2"
+      "records": 31,
+      "sha256": "d86416b4db0a2bfab51e23cc7b6c8ca63d92a50014af5d5db3921511224f9a35"
     },
     {
       "filename": "eao-openings.json",

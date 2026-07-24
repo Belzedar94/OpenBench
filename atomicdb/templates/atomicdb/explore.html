@@ -24,11 +24,7 @@
       <span class="opening-kicker">Atomic opening</span>
       <h2 id="opening-name">{{ opening.name }}</h2>
     </div>
-    {% if opening.exact %}
-      <span class="opening-state exact">exact position</span>
-    {% else %}
-      <span class="opening-state continued">continued from ply {{ opening.matched_ply }}</span>
-    {% endif %}
+    <span class="opening-state exact">exact position</span>
   </div>
   {% if opening.reference_line_san %}
   <p class="opening-reference"><span class="dim">Reference:</span>

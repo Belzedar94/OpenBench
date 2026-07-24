@@ -181,7 +181,7 @@ class DisplayTreeProjectionTests(SimpleTestCase):
                 self.assertTrue(child['truncated'])
                 self.assertGreater(child['hidden_children'], 0)
 
-    def test_render_annotates_exact_and_inherited_atomic_openings(self):
+    def test_render_annotates_only_exact_atomic_openings(self):
         moves = ['g1f3', 'f7f6', 'b1c3', 'a7a6']
         fens = [logic.start_fen()]
         for move in moves:
@@ -210,9 +210,7 @@ class DisplayTreeProjectionTests(SimpleTestCase):
         self.assertEqual(node['opening']['matched_ply'], 3)
 
         node = node['children'][0]
-        self.assertEqual(node['opening']['name'], 'Two Knights Opening')
-        self.assertFalse(node['opening']['exact'])
-        self.assertEqual(node['opening']['matched_ply'], 3)
+        self.assertNotIn('opening', node)
 
     def test_direct_10k_deep_root_materialises_line_once(self):
         count = 10_000
