@@ -1,9 +1,11 @@
 from contextlib import ExitStack
 from io import StringIO
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 from unittest import mock, skipUnless
 
@@ -12,6 +14,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connections
 from django.test import SimpleTestCase
+from django.test.utils import override_settings
 
 from OpenSite.atomicdb_identity import (
     LINEAGE_TABLE,
@@ -20,6 +23,7 @@ from OpenSite.atomicdb_identity import (
 
 from .management.commands._atomicdb_sqlite import (
     atomicdb_migration_names,
+    atomicdb_tables_for_migrations,
     validate_migrations,
 )
 from .models import Position
@@ -119,6 +123,92 @@ class SQLiteSplitContractTests(SimpleTestCase):
             with self.assertRaisesMessage(
                     CommandError, 'not an exact known prefix'):
                 validate_migrations(connection, allow_pending=True)
+
+    def test_historical_table_set_tracks_applied_migration_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package_name = 'atomicdb_pending_test_migrations'
+            package = Path(temporary) / package_name
+            package.mkdir()
+            (package / '__init__.py').touch()
+            (package / '0001_initial.py').write_text(
+                """
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    initial = True
+    dependencies = []
+    operations = [
+        migrations.CreateModel(
+            name='Base',
+            fields=[
+                ('id', models.AutoField(primary_key=True)),
+            ],
+        ),
+    ]
+""".lstrip(),
+                encoding='utf-8',
+            )
+            (package / '0002_future_table.py').write_text(
+                """
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = [('atomicdb', '0001_initial')]
+    operations = [
+        migrations.CreateModel(
+            name='FutureTable',
+            fields=[
+                ('id', models.AutoField(primary_key=True)),
+            ],
+        ),
+        migrations.AddField(
+            model_name='base',
+            name='future',
+            field=models.ManyToManyField(to='atomicdb.futuretable'),
+        ),
+    ]
+""".lstrip(),
+                encoding='utf-8',
+            )
+            (package / '0003_pending.py').write_text(
+                """
+from django.db import migrations
+
+
+class Migration(migrations.Migration):
+    dependencies = [('atomicdb', '0002_future_table')]
+    operations = []
+""".lstrip(),
+                encoding='utf-8',
+            )
+            sys.path.insert(0, temporary)
+            importlib.invalidate_caches()
+            try:
+                with override_settings(
+                        MIGRATION_MODULES={'atomicdb': package_name}):
+                    self.assertEqual(
+                        atomicdb_tables_for_migrations(('0001_initial',)),
+                        ('atomicdb_base',),
+                    )
+                    self.assertEqual(
+                        atomicdb_tables_for_migrations((
+                            '0001_initial',
+                            '0002_future_table',
+                        )),
+                        (
+                            'atomicdb_base',
+                            'atomicdb_base_future',
+                            'atomicdb_futuretable',
+                        ),
+                    )
+            finally:
+                sys.path.remove(temporary)
+                for module_name in tuple(sys.modules):
+                    if module_name == package_name \
+                            or module_name.startswith(package_name + '.'):
+                        sys.modules.pop(module_name, None)
 
 
 @skipUnless(
@@ -390,6 +480,45 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                 connection.commit()
             finally:
                 connection.close()
+            with self.assertRaisesMessage(
+                    CommandError, 'split identity is invalid'):
+                call_command('verify_atomicdb_database')
+
+    def test_lineage_binding_rejects_weakened_table_ddl(self):
+        self._split()
+        with self._active_split():
+            connection = sqlite3.connect(self.destination)
+            try:
+                row = connection.execute(
+                    'SELECT * FROM "{}"'.format(LINEAGE_TABLE)
+                ).fetchone()
+                connection.execute(
+                    'ALTER TABLE "{}" RENAME TO lineage_original'.format(
+                        LINEAGE_TABLE))
+                connection.execute(
+                    """
+                    CREATE TABLE "{}" (
+                        singleton INTEGER PRIMARY KEY,
+                        schema TEXT,
+                        line_id TEXT,
+                        receipt_sha256 TEXT,
+                        origin_snapshot_sha256 TEXT,
+                        destination TEXT,
+                        migration_baseline TEXT,
+                        sealed_at TEXT
+                    )
+                    """.format(LINEAGE_TABLE)
+                )
+                connection.execute(
+                    'INSERT INTO "{}" VALUES (?, ?, ?, ?, ?, ?, ?, ?)'.format(
+                        LINEAGE_TABLE),
+                    row,
+                )
+                connection.execute('DROP TABLE lineage_original')
+                connection.commit()
+            finally:
+                connection.close()
+
             with self.assertRaisesMessage(
                     CommandError, 'split identity is invalid'):
                 call_command('verify_atomicdb_database')

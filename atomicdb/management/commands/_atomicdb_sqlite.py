@@ -21,6 +21,7 @@ from typing import Iterable, Mapping, Sequence
 from django.apps import apps
 from django.conf import settings
 from django.core.management.base import CommandError
+from django.db.migrations.loader import MigrationLoader
 
 from OpenSite.atomicdb_identity import (
     MIGRATION_BASELINE,
@@ -244,10 +245,47 @@ def _is_sha256(value) -> bool:
     return is_sha256(value)
 
 
+def _managed_atomicdb_models(app_registry):
+    return tuple(
+        model
+        for model in app_registry.get_app_config('atomicdb').get_models(
+            include_auto_created=True)
+        if model._meta.managed and not model._meta.proxy
+    )
+
+
 def current_atomicdb_tables() -> tuple[str, ...]:
     return tuple(sorted(
         model._meta.db_table
-        for model in apps.get_app_config('atomicdb').get_models()
+        for model in _managed_atomicdb_models(apps)
+    ))
+
+
+def atomicdb_tables_for_migrations(
+        migration_names: Sequence[str],
+) -> tuple[str, ...]:
+    """Return the exact AtomicDB table set at an applied migration prefix.
+
+    Deploy preflight can legitimately inspect a database whose schema trails
+    the current models.  Requiring either the original split tables or the
+    current tables is insufficient once a prior migration has added, removed,
+    or renamed a model.  Django's historical project state is the canonical
+    source for the table set represented by that exact migration prefix.
+    """
+    migration_names = tuple(migration_names)
+    if not migration_names:
+        raise CommandError('AtomicDB migration prefix must not be empty')
+
+    loader = MigrationLoader(None, ignore_no_migrations=True)
+    target = ('atomicdb', migration_names[-1])
+    if target not in loader.disk_migrations:
+        raise CommandError(
+            'AtomicDB applied migration is not present on disk: {}'.format(
+                migration_names[-1]))
+    state = loader.project_state([target])
+    return tuple(sorted(
+        model._meta.db_table
+        for model in _managed_atomicdb_models(state.apps)
     ))
 
 
@@ -321,7 +359,7 @@ def schema_digest(snapshot: Mapping) -> str:
 def validate_model_columns(connection: sqlite3.Connection) -> None:
     """Require the live schema to match every current AtomicDB model column."""
     expected_tables = {}
-    for model in apps.get_app_config('atomicdb').get_models():
+    for model in _managed_atomicdb_models(apps):
         expected_tables[model._meta.db_table] = {
             field.column: bool(field.primary_key)
             for field in model._meta.local_fields
@@ -338,7 +376,7 @@ def validate_model_columns(connection: sqlite3.Connection) -> None:
 def validate_model_indexes_and_foreign_keys(
         connection: sqlite3.Connection) -> None:
     """Check index and FK shapes implied by current model metadata."""
-    for model in apps.get_app_config('atomicdb').get_models():
+    for model in _managed_atomicdb_models(apps):
         table = model._meta.db_table
         index_rows = connection.execute(
             'PRAGMA index_list({})'.format(quote_identifier(table))).fetchall()

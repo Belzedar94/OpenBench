@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 
 
@@ -265,14 +266,44 @@ def validate_database_lineage(
     if len(table_rows) != 1 or not table_rows[0][1]:
         raise AtomicDBIdentityError(
             'AtomicDB lineage table is missing or ambiguous')
+    normalize_sql = lambda value: re.sub(r'\s+', ' ', value.strip())
+    if normalize_sql(table_rows[0][1]) != \
+            normalize_sql(lineage_table_sql()):
+        raise AtomicDBIdentityError(
+            'AtomicDB lineage table DDL is invalid')
 
     columns = connection.execute(
         'PRAGMA table_info("{}")'.format(LINEAGE_TABLE)).fetchall()
-    actual_columns = tuple(row[1] for row in columns)
-    primary_keys = tuple(row[1] for row in columns if row[5])
-    if actual_columns != LINEAGE_COLUMNS or primary_keys != ('singleton',):
+    actual_columns = tuple(
+        (row[1], str(row[2]).upper(), bool(row[3]), bool(row[5]))
+        for row in columns
+    )
+    expected_columns = (
+        ('singleton', 'INTEGER', True, True),
+        ('schema', 'TEXT', True, False),
+        ('line_id', 'TEXT', True, False),
+        ('receipt_sha256', 'TEXT', True, False),
+        ('origin_snapshot_sha256', 'TEXT', True, False),
+        ('destination', 'TEXT', True, False),
+        ('migration_baseline', 'TEXT', True, False),
+        ('sealed_at', 'TEXT', True, False),
+    )
+    if actual_columns != expected_columns:
         raise AtomicDBIdentityError(
             'AtomicDB lineage table schema is invalid')
+    auxiliary_schema = connection.execute(
+        """
+        SELECT type, name
+          FROM sqlite_master
+         WHERE tbl_name = ?
+           AND type IN ('index', 'trigger')
+           AND sql IS NOT NULL
+        """,
+        (LINEAGE_TABLE,),
+    ).fetchall()
+    if auxiliary_schema:
+        raise AtomicDBIdentityError(
+            'AtomicDB lineage table has unsupported schema objects')
 
     rows = connection.execute(
         'SELECT {} FROM "{}" ORDER BY "singleton"'.format(
@@ -305,6 +336,10 @@ def validate_database_lineage_path(
         connection = sqlite3.connect(
             uri, uri=True, timeout=30.0, isolation_level=None)
         connection.execute('PRAGMA query_only=ON')
+        journal_row = connection.execute('PRAGMA journal_mode').fetchone()
+        if not journal_row or str(journal_row[0]).lower() != 'wal':
+            raise AtomicDBIdentityError(
+                'AtomicDB split database must persist WAL mode')
         lineage = validate_database_lineage(
             connection, receipt, receipt_bytes)
     except sqlite3.Error as error:

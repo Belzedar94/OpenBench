@@ -10,7 +10,8 @@ from OpenSite.atomicdb_identity import (
 )
 
 from ._atomicdb_sqlite import (
-    ATOMICDB_TABLES,
+    atomicdb_migration_names,
+    atomicdb_tables_for_migrations,
     configured_atomicdb_path,
     current_atomicdb_tables,
     database_summaries,
@@ -84,20 +85,22 @@ class Command(BaseCommand):
                 ) from error
             migrations = validate_migrations(
                 connection, allow_pending=allow_pending)
+            current_migrations = atomicdb_migration_names()
+            is_current = (
+                tuple(migrations['names']) == current_migrations)
             expected_tables = (
-                ATOMICDB_TABLES
-                if allow_pending
-                else current_atomicdb_tables()
+                current_atomicdb_tables()
+                if is_current
+                else atomicdb_tables_for_migrations(migrations['names'])
             )
             snapshot = schema_snapshot(
                 connection, expected_tables=expected_tables)
 
             # Before a deploy applies new migrations, the on-disk schema can
-            # legitimately lag the code's model metadata. The immutable v1
-            # split tables, receipt, health, WAL and migration-prefix checks
-            # are still required. Strict post-migrate verification checks the
-            # complete current model contract.
-            if not allow_pending:
+            # legitimately lag the code's model metadata. Validate that exact
+            # historical project state. A current database always receives
+            # the full model/index/FK checks, even in preflight mode.
+            if is_current:
                 validate_model_columns(connection)
                 validate_model_indexes_and_foreign_keys(connection)
 

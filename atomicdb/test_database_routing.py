@@ -223,6 +223,17 @@ class ShadowMigrationParityTests(TransactionTestCase):
 
 class AtomicDatabaseStaticGuards(SimpleTestCase):
 
+    def test_deploy_health_check_fails_on_http_errors(self):
+        deploy = (
+            Path(__file__).resolve().parents[1]
+            / 'Scripts'
+            / 'deploy.sh'
+        ).read_text(encoding='utf-8')
+        self.assertIn(
+            'curl --fail --silent --show-error --output /dev/null',
+            deploy,
+        )
+
     def test_runtime_code_has_no_implicit_default_transaction_or_connection(self):
         root = Path(__file__).resolve().parent
         failures = []

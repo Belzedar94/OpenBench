@@ -58,5 +58,6 @@ fi
 # Restart only after both databases have passed their migration gates.
 systemctl restart openbench
 sleep 2
-curl -s -o /dev/null -w "deploy OK: %{http_code}\n" \
+curl --fail --silent --show-error --output /dev/null \
+    --write-out "deploy OK: %{http_code}\n" \
     http://127.0.0.1:8000/index/

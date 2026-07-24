@@ -4,7 +4,8 @@ import os
 from django.core.management.base import BaseCommand, CommandError
 
 from ._atomicdb_sqlite import (
-    ATOMICDB_TABLES,
+    atomicdb_migration_names,
+    atomicdb_tables_for_migrations,
     configured_atomicdb_path,
     configured_default_path,
     current_atomicdb_tables,
@@ -76,19 +77,22 @@ class Command(BaseCommand):
                 allow_pending
                 or (alias == 'atomicdb' and allow_active_pending)
             )
-            expected_tables = (
-                ATOMICDB_TABLES
-                if alias_allow_pending
-                else current_atomicdb_tables()
-            )
             connection = open_read_only(path)
             try:
                 health = validate_database_health(connection)
                 migrations = validate_migrations(
                     connection, allow_pending=alias_allow_pending)
+                current_migrations = atomicdb_migration_names()
+                is_current = (
+                    tuple(migrations['names']) == current_migrations)
+                expected_tables = (
+                    current_atomicdb_tables()
+                    if is_current
+                    else atomicdb_tables_for_migrations(migrations['names'])
+                )
                 snapshot = schema_snapshot(
                     connection, expected_tables=expected_tables)
-                if not alias_allow_pending:
+                if is_current:
                     validate_model_columns(connection)
                     validate_model_indexes_and_foreign_keys(connection)
             finally:
