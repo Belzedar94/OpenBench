@@ -252,6 +252,18 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
   base.bench`). Si solo cambias dev, el SPRT mide red-vs-red en vez del
   parámetro (mordió el 2026-07-24 en capture-see-120 y spsa3; lo destapó la
   corrección de nombres del propietario).
+- **Ciclo de vida del worker local (3 mordiscos el 2026-07-24)**: (1) el
+  entrypoint es `client.py` — `worker.py` NO tiene `__main__` y sale con
+  exit 0 EN SILENCIO (hasta con --help); (2) necesita PATH con
+  `C:\msys64\mingw64\bin;C:\msys64\usr\bin` (make/g++) y los TBs atomic van
+  con `--atomic-syzygy "<dtz;wdl;345>" --atomic-syzygy-manifest
+  remote-inventory.json` (baseline-artifacts); (3) para PARARLO: crear
+  `openbench.exit` en Client/ y **verificar por PID que el python de
+  client.py murió ANTES de borrar el flag** — `tasklist` trunca los cmdline
+  (un check con grep dio falso "parado", se borró el flag antes de que el
+  worker lo viera y siguió produciendo una hora; lo cazó el propietario en
+  la lista de machines). Verificación buena:
+  `Get-CimInstance Win32_Process | ? { $_.CommandLine -match 'client.py' }`.
 
 ## 7. Estado y pendientes (2026-07-13)
 
