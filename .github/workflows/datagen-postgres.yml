@@ -1,4 +1,4 @@
-name: DATAGEN PostgreSQL races
+name: DATAGEN PostgreSQL + AtomicDB split
 
 on:
   pull_request:
@@ -6,6 +6,8 @@ on:
     branches: [spell-runner]
 
 jobs:
+  # Keep the established PostgreSQL/default-database job as the compatibility
+  # contract.  With no authenticated split receipt, AtomicDB stays on default.
   datagen-postgres:
     runs-on: ubuntu-latest
     services:
@@ -39,6 +41,61 @@ jobs:
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
       - run: python -m unittest UnitTests.test_datagen_worker -v
+      - run: python manage.py test atomicdb --verbosity 2
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py check
+
+  atomicdb-split-sqlite:
+    name: AtomicDB staged SQLite split
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt -r Client/requirements.txt
+      - run: python -c "import cpuinfo, psutil, requests"
+
+      - name: Migrate the compatibility database
+        run: |
+          python manage.py migrate --database default --noinput
+          python manage.py shell -c \
+            "from django.conf import settings; assert settings.ATOMICDB_DATABASE_ALIAS == 'default'"
+
+      - name: Seed minimal legacy AtomicDB state
+        run: |
+          python manage.py shell -c \
+            "from atomicdb import ingest, logic; ingest.get_or_create_position(logic.start_fen())"
+
+      - name: Perform the offline split into the temporary checkout
+        run: |
+          test ! -e "$GITHUB_WORKSPACE/atomicdb.sqlite3"
+          test ! -e "$GITHUB_WORKSPACE/atomicdb.sqlite3.split-receipt.json"
+          python manage.py split_atomicdb_sqlite \
+            --destination "$GITHUB_WORKSPACE/atomicdb.sqlite3"
+
+      - name: Authenticate, migrate, and re-authenticate the split database
+        run: |
+          python manage.py shell -c \
+            "from django.conf import settings; assert settings.ATOMICDB_DATABASE_ALIAS == 'atomicdb'"
+          python manage.py verify_atomicdb_database \
+            --allow-pending-migrations
+          python manage.py migrate atomicdb \
+            --database atomicdb --noinput
+          python manage.py verify_atomicdb_database
+
+      - name: Confirm split placement and retained rollback tables
+        run: |
+          python manage.py shell -c \
+            "from django.db import connections; \
+            d = connections['default'].cursor(); \
+            a = connections['atomicdb'].cursor(); \
+            d.execute('SELECT COUNT(*) FROM atomicdb_position'); \
+            a.execute('SELECT COUNT(*) FROM atomicdb_position'); \
+            assert d.fetchone()[0] == 1; \
+            assert a.fetchone()[0] == 1"
+
       - run: python manage.py test atomicdb --verbosity 2
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py check

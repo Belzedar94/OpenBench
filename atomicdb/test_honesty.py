@@ -1,6 +1,5 @@
-from django.test import TestCase
-
 from . import ingest, logic
+from .testing import TestCase
 
 
 class PublicHonestyTests(TestCase):

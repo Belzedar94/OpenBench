@@ -4,11 +4,11 @@ completitud de movegen, backup determinista bajo replay."""
 from datetime import timedelta
 from unittest import mock
 
-from django.test import TestCase
 from django.utils import timezone
 
 from . import ingest, logic
 from .models import AnalysisTask, Edge, Position
+from .testing import TestCase
 
 
 class LogicTests(TestCase):
@@ -1286,8 +1286,8 @@ class MilestoneLineTests(TestCase):
 
     def test_multiple_labels_batch_parent_queries_by_depth(self):
         import pyffish as pf
-        from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from .database import connection
         from .views import _line_labels_many
         root = ingest.get_or_create_position(logic.start_fen())
         left = self._play(root, 'g1f3')

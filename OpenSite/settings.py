@@ -10,7 +10,10 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
+import json
 import os
+
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -151,6 +154,58 @@ if os.environ.get('OPENBENCH_POSTGRES_DB'):
         'PORT': os.environ.get('OPENBENCH_POSTGRES_PORT', '5432'),
         'CONN_MAX_AGE': 0,
     }
+
+ATOMICDB_DATABASE_ALIAS = 'default'
+_explicit_atomicdb_path = os.environ.get('OPENBENCH_ATOMICDB_PATH', '').strip()
+_durable_atomicdb_path = os.path.join(BASE_DIR, 'atomicdb.sqlite3')
+_atomicdb_path = _explicit_atomicdb_path or _durable_atomicdb_path
+_atomicdb_path = os.path.realpath(os.path.abspath(
+    os.path.expanduser(_atomicdb_path)))
+_atomicdb_receipt_path = _atomicdb_path + '.split-receipt.json'
+_atomicdb_exists = os.path.isfile(_atomicdb_path)
+_atomicdb_receipt_exists = os.path.isfile(_atomicdb_receipt_path)
+_atomicdb_requested = bool(_explicit_atomicdb_path)
+_atomicdb_durable = _atomicdb_exists or _atomicdb_receipt_exists
+
+if _atomicdb_requested or _atomicdb_durable:
+    if not (_atomicdb_exists and _atomicdb_receipt_exists):
+        raise ImproperlyConfigured(
+            'AtomicDB split activation requires both the database and its '
+            'verified split receipt')
+
+    if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
+        _default_sqlite_path = os.path.realpath(os.path.abspath(
+            os.path.expanduser(str(DATABASES['default']['NAME']))))
+        if os.path.normcase(_atomicdb_path) == os.path.normcase(_default_sqlite_path):
+            raise ImproperlyConfigured(
+                'OPENBENCH_ATOMICDB_PATH must differ from the default SQLite database path')
+
+    try:
+        with open(_atomicdb_receipt_path, encoding='utf-8') as receipt_file:
+            _atomicdb_receipt = json.load(receipt_file)
+    except (OSError, TypeError, ValueError) as error:
+        raise ImproperlyConfigured(
+            'AtomicDB split receipt must be valid UTF-8 JSON') from error
+
+    _expected_atomicdb_receipt = {
+        'schema': 'atomicdb.sqlite.split.v1',
+        'status': 'verified',
+        'destination': _atomicdb_path,
+        'migration_sentinel': 'atomicdb.0013_progresssnapshot',
+    }
+    for _field, _expected in _expected_atomicdb_receipt.items():
+        if not isinstance(_atomicdb_receipt, dict) or _atomicdb_receipt.get(_field) != _expected:
+            raise ImproperlyConfigured(
+                'AtomicDB split receipt has an invalid {}'.format(_field))
+
+    DATABASES['atomicdb'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': _atomicdb_path,
+        'OPTIONS': {'timeout': 30},
+    }
+    ATOMICDB_DATABASE_ALIAS = 'atomicdb'
+
+DATABASE_ROUTERS = ['OpenSite.db_routers.AtomicDBRouter']
 
 
 # Password validation

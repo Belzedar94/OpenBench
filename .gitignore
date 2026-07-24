@@ -7,6 +7,14 @@ OpenBench/migrations/__pycache__/
 credentials
 credentials.*
 db.sqlite3
+db.sqlite3-wal
+db.sqlite3-shm
+db.sqlite3-journal
+atomicdb.sqlite3
+atomicdb.sqlite3-wal
+atomicdb.sqlite3-shm
+atomicdb.sqlite3-journal
+*.sqlite3.split-receipt.json
 
 Scripts/Engines/*
 Scripts/Networks/*
