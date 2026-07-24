@@ -6,10 +6,11 @@ import math
 import secrets
 import time
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.contrib.auth import authenticate
 from django.db import OperationalError
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -19,7 +20,7 @@ import re
 from django.db.models import Case, F, IntegerField, Q, Sum, Value, When, Window
 from django.db.models.functions import RowNumber
 
-from . import ingest, logic
+from . import ingest, logic, openings
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
@@ -47,8 +48,23 @@ LINEAGE_SEARCH_MAX_NODES = 1024
 LINEAGE_SEARCH_MAX_FRONTIER = 64
 LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD = 16
 LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
+PLAY_ROUTE_MAX_PLIES = 64
+PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
+PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
 
 logger = logging.getLogger(__name__)
+
+
+class PlayRouteError(ValueError):
+    """An explicit explorer route is malformed or illegal."""
+
+    status_code = 400
+
+
+class PlayRouteConflict(PlayRouteError):
+    """A legal route does not identify the requested AtomicDB position."""
+
+    status_code = 409
 
 
 class _SubmitRejected(Exception):
@@ -554,14 +570,102 @@ def _ctx_board(fen):
     return out
 
 
+def _route_query(ucis):
+    """Canonical query suffix for a route whose tokens are already validated."""
+    if ucis is None or not ucis:
+        return ''
+    return '?play=' + ','.join(ucis)
+
+
+def _explore_url(key, ucis=None):
+    return f'/atomicdb/explore/{key}/' + _route_query(ucis)
+
+
+def _goto_url(key, uci, ucis=None):
+    return f'/atomicdb/goto/{key}/{uci}/' + _route_query(ucis)
+
+
+def _validated_play_route(raw, target_key):
+    """Return a read-only, startpos-rooted route or ``None``.
+
+    ``play`` is deliberately a compact list of UCI tokens rather than trusted
+    lineage.  Every move is replayed with the Atomic rules, the terminal key
+    must be the requested page, and every prefix must already exist in
+    AtomicDB.  This makes a GET incapable of materialising a route merely by
+    naming one.
+    """
+    if raw is None:
+        return None
+    if len(raw) > PLAY_ROUTE_MAX_CHARS:
+        raise PlayRouteError('move path exceeds the supported length')
+    ucis = [] if raw == '' else raw.split(',')
+    if len(ucis) > PLAY_ROUTE_MAX_PLIES or any(
+            not PLAY_UCI_RE.fullmatch(uci) for uci in ucis):
+        raise PlayRouteError('move path contains an invalid UCI token')
+
+    import pyffish as pf
+
+    fen = logic.start_fen()
+    prefix_keys = [logic.key_of(fen)]
+    white = True
+    line = []
+    for uci in ucis:
+        if uci not in logic.legal_moves(fen):
+            raise PlayRouteError('move path contains an illegal Atomic move')
+        try:
+            san = pf.get_san('atomic', fen, uci)
+            fen = logic.apply_move(fen, uci)
+        except Exception as exc:
+            raise PlayRouteError(
+                'move path could not be replayed under Atomic rules') from exc
+        child_key = logic.key_of(fen)
+        prefix_keys.append(child_key)
+        line.append({
+            'uci': uci, 'san': san, 'key': child_key, 'white': white,
+        })
+        white = not white
+
+    if prefix_keys[-1] != target_key:
+        raise PlayRouteConflict(
+            'move path does not reach the requested position')
+    positions = Position.objects.only('key', 'fen').in_bulk(prefix_keys)
+    if any(key not in positions for key in prefix_keys):
+        raise PlayRouteConflict(
+            'move path is not fully materialized in AtomicDB')
+    return positions[prefix_keys[0]], line, ucis
+
+
+def _play_route_error_response(exc):
+    response = HttpResponse(
+        str(exc), status=exc.status_code, content_type='text/plain')
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+def _canonical_route(pos):
+    """Fallback lineage plus a replayable route when startpos was reached."""
+    top, line = _line_to_root(pos)
+    if top.fen != logic.start_fen():
+        return top, line, None
+    return top, line, [step['uci'] for step in line]
+
+
 def goto(request, key, uci):
     """Navegacion jugando: valida la jugada, crea/encuentra el hijo y salta."""
     try:
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return redirect('/atomicdb/')
+    try:
+        route = _validated_play_route(request.GET.get('play'), key)
+    except PlayRouteError as exc:
+        return _play_route_error_response(exc)
+    if route is None:
+        _top, _line, active_ucis = _canonical_route(pos)
+    else:
+        _top, _line, active_ucis = route
     if uci not in logic.legal_moves(pos.fen):
-        return redirect(f'/atomicdb/explore/{key}/')
+        return redirect(_explore_url(key, active_ucis))
     child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
                                           campaign=pos.campaign)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
@@ -569,7 +673,8 @@ def goto(request, key, uci):
     if child.priority <= ingest.DEAD / 2:
         child.priority = 0.0   # ruta nueva: revive de la lapida
         child.save(update_fields=['priority'])
-    return redirect(f'/atomicdb/explore/{child.key}/')
+    child_route = None if active_ucis is None else [*active_ucis, uci]
+    return redirect(_explore_url(child.key, child_route))
 
 
 def _format_san_line(top, line, max_plies=16, keep_head=False):
@@ -759,8 +864,10 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
                 fen = logic.apply_move(fen, uci)
         white = top.fen.split()[1] == 'w'
         line = []
-        for (_uci, child_key), san in zip(ordered, sans):
-            line.append({'san': san, 'key': child_key, 'white': white})
+        for (uci, child_key), san in zip(ordered, sans):
+            line.append({
+                'uci': uci, 'san': san, 'key': child_key, 'white': white,
+            })
             white = not white
         result[key] = (top, line)
     return result
@@ -824,27 +931,6 @@ def _human(n):
     if n >= 1_000_000:
         return f'{n / 1e6:.1f}M'
     return f'{n:,}'
-
-
-def _arrow(uci):
-    """Coordenadas (en % del tablero) de la flecha del mejor movimiento,
-    con la punta retraida para que la cabeza no invada la casilla."""
-    if not uci or len(uci) < 4:
-        return None
-    try:
-        x1 = (ord(uci[0]) - 96 - 0.5) * 12.5
-        y1 = (8 - int(uci[1]) + 0.5) * 12.5
-        x2 = (ord(uci[2]) - 96 - 0.5) * 12.5
-        y2 = (8 - int(uci[3]) + 0.5) * 12.5
-    except ValueError:
-        return None
-    dx, dy = x2 - x1, y2 - y1
-    dist = (dx * dx + dy * dy) ** 0.5
-    if dist > 4:
-        x2 -= dx / dist * 3.2
-        y2 -= dy / dist * 3.2
-    return {'x1': f'{x1:.2f}', 'y1': f'{y1:.2f}',
-            'x2': f'{x2:.2f}', 'y2': f'{y2:.2f}'}
 
 
 def _move_css(status, score, win_status):
@@ -1002,6 +1088,7 @@ def home(request):
     events = _friendly_events(event_rows, labels)
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
+    root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
     return render(request, 'atomicdb/home.html', {
         'analyzing': analyzing, 'upnext': upnext,
@@ -1021,8 +1108,12 @@ def home(request):
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_fen': root.fen,
         'board_turn': 'white' if root.fen.split()[1] == 'w' else 'black',
-        'board_key': root.key, 'arrow': _arrow(root.best_move),
-        'legal_ucis': logic.legal_moves(root.fen)})
+        'board_key': root.key, 'best_move': root.best_move, 'board_play': '',
+        'legal_ucis': root_legal_ucis,
+        'legal_move_links': [
+            {'uci': uci, 'url': _goto_url(root.key, uci, [])}
+            for uci in root_legal_ucis
+        ]})
 
 
 FEN_SHAPE = re.compile(
@@ -1110,7 +1201,7 @@ def _line_to_root(pos, max_plies=64):
     return _lines_to_root([pos.key], max_plies=max_plies)[pos.key]
 
 
-def _numbered_line(top, line):
+def _numbered_line(top, line, route_ucis=None):
     """Explorer breadcrumb tokens, numbered only when move 1 is known."""
     if top.fen != logic.start_fen():
         return [
@@ -1124,10 +1215,84 @@ def _numbered_line(top, line):
         else:
             number = f'{n}...' if i == 0 else ''
             n += 1
-        numbered.append({
+        token = {
             'num': number, 'san': step['san'], 'key': step['key'],
-        })
+        }
+        if route_ucis is not None:
+            token['url'] = _explore_url(step['key'], route_ucis[:i + 1])
+        numbered.append(token)
     return numbered
+
+
+def _opening_for_template(match):
+    """Add presentation-only URL safety without changing catalog records."""
+    if match is None:
+        return None
+    result = dict(match)
+    result['aliases'] = list(match.get('aliases', ()))
+    result['sources'] = []
+    provenance_labels = {
+        'source_line_number': 'Source line',
+        'source_row': 'Source row',
+        'same_atomix_position': 'ATOMIX matches',
+        'same_eao_position': 'EAO match',
+    }
+
+    def provenance_value(value):
+        if isinstance(value, dict):
+            label = value.get('name') or value.get('label') or value.get('id')
+            qualifier = value.get('code') or (
+                value.get('id') if value.get('id') != label else None)
+            if label and qualifier:
+                return f'{label} ({qualifier})'
+            if label:
+                return str(label)
+            return ', '.join(
+                f'{key}: {provenance_value(item)}'
+                for key, item in value.items()
+                if item not in (None, '', [], {})
+            )
+        if isinstance(value, list):
+            return '; '.join(provenance_value(item) for item in value)
+        if isinstance(value, bool):
+            return 'yes' if value else 'no'
+        return str(value)
+
+    for raw_source in match.get('sources', ()):
+        source = dict(raw_source)
+        source['evidence'] = []
+        for raw_evidence in raw_source.get('evidence', ()):
+            evidence = dict(raw_evidence)
+            try:
+                parsed = urlsplit(str(evidence.get('url', '')))
+                evidence['safe_url'] = (
+                    evidence['url']
+                    if parsed.scheme in ('http', 'https') and parsed.netloc
+                    else ''
+                )
+            except (TypeError, ValueError):
+                evidence['safe_url'] = ''
+            source['evidence'].append(evidence)
+        source['provenance_rows'] = []
+        for field, value in raw_source.get('provenance', {}).items():
+            if value is None or value == '' or value == [] or value == {}:
+                continue
+            source['provenance_rows'].append({
+                'label': provenance_labels.get(
+                    field, field.replace('_', ' ').title()),
+                'value': provenance_value(value),
+            })
+        result['sources'].append(source)
+    return result
+
+
+def _exact_child_opening(child_key, current_opening):
+    match = openings.lookup_key(child_key)
+    if match is None:
+        return None
+    if current_opening is not None and match['name'] == current_opening['name']:
+        return None
+    return match['name']
 
 
 def explore(request, key):
@@ -1138,13 +1303,56 @@ def explore(request, key):
     moves = _child_moves(pos)
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
-    top, line = _line_to_root(pos)
+    raw_play = request.GET.get('play')
+    try:
+        explicit_route = _validated_play_route(raw_play, pos.key)
+    except PlayRouteError as exc:
+        return _play_route_error_response(exc)
+    if explicit_route is None:
+        top, line, active_ucis = _canonical_route(pos)
+    else:
+        top, line, active_ucis = explicit_route
     # tambien en posiciones resueltas: se puede explorar la winning line
     legal_ucis = ([] if pos.closure == 'TERMINAL'
                   else logic.legal_moves(pos.fen))
     known = {m['uci'] for m in moves}
-    unexplored = [u for u in legal_ucis if u not in known]
-    numbered = _numbered_line(top, line)
+    if active_ucis is not None:
+        try:
+            current_opening = openings.match_line(active_ucis)
+        except openings.InvalidOpeningLine:
+            current_opening = None
+    else:
+        current_opening = None
+    if current_opening is None:
+        current_opening = openings.lookup_key(pos.key)
+    current_opening = _opening_for_template(current_opening)
+
+    for move in moves:
+        child_route = (
+            None if active_ucis is None
+            else [*active_ucis, move['uci']]
+        )
+        move['url'] = _explore_url(move['key'], child_route)
+        move['enters_opening'] = _exact_child_opening(
+            move['key'], current_opening)
+    unexplored = []
+    for uci in legal_ucis:
+        if uci in known:
+            continue
+        child_fen = logic.apply_move(pos.fen, uci)
+        child_key = logic.key_of(child_fen)
+        unexplored.append({
+            'uci': uci,
+            'url': _goto_url(pos.key, uci, active_ucis),
+            'enters_opening': _exact_child_opening(
+                child_key, current_opening),
+        })
+    numbered = _numbered_line(top, line, active_ucis)
+    board_play = '' if active_ucis is None else ','.join(active_ucis)
+    legal_move_links = [
+        {'uci': uci, 'url': _goto_url(pos.key, uci, active_ucis)}
+        for uci in legal_ucis
+    ]
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     eval_stm = None if pos.eval_cp is None else (
@@ -1152,10 +1360,14 @@ def explore(request, key):
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
+        'active_play': active_ucis, 'board_play': board_play,
+        'opening': current_opening,
         'board_key': pos.key, 'legal_ucis': legal_ucis,
+        'legal_move_links': legal_move_links,
         'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
-        'arrow': None if pos.closure == 'TERMINAL' else _arrow(pos.best_move),
+        'best_move': (None if pos.closure == 'TERMINAL'
+                      else pos.best_move),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),

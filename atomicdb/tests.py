@@ -1470,7 +1470,7 @@ class BoardInteractionTests(TestCase):
             'board_fen': '7k/8/8/8/8/8/8/K7 b - - 0 1',
             'board_turn': 'black',
             'legal_ucis': [],
-            'arrow': None,
+            'best_move': None,
         })
 
         self.assertIn('atomicdb/board.js', html)
@@ -1500,15 +1500,25 @@ class NodesAccountingTests(TestCase):
 class ArrowTests(TestCase):
 
     def test_best_move_arrow_rendered(self):
+        from pathlib import Path
+        from django.conf import settings
         p = ingest.get_or_create_position(logic.start_fen())
         p.best_move = 'g1f3'
         p.save()
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
-        self.assertContains(r, '<svg class="board-arrow"')
+        self.assertContains(r, 'data-best-move="g1f3"')
+        self.assertNotContains(r, '<svg class="board-arrow"')
+        board_js = (
+            Path(settings.BASE_DIR) / 'atomicdb' / 'static' /
+            'atomicdb' / 'board.js'
+        ).read_text(encoding='utf-8')
+        self.assertIn('autoShapes', board_js)
+        self.assertIn("brush: 'green'", board_js)
 
     def test_no_arrow_without_best_move(self):
         p = ingest.get_or_create_position(logic.start_fen())
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
+        self.assertContains(r, 'data-best-move=""')
         self.assertNotContains(r, '<svg class="board-arrow"')
 
 

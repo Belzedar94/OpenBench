@@ -24,6 +24,8 @@ class ConquestMapPageTests(SimpleTestCase):
         self.assertContains(response, '<option value="MATE_PV">Mate PV</option>')
         self.assertContains(response, '<option value="NONE">No closure</option>')
         self.assertContains(response, 'id="map-svg"')
+        self.assertContains(response, 'id="inspector-opening"')
+        self.assertContains(response, 'id="inspector-opening-name"')
         self.assertContains(response, 'role="tree"')
         self.assertContains(response, 'Accessible tree table')
         self.assertContains(response, 'aria-label="Keyboard navigation"')
@@ -72,6 +74,9 @@ class ConquestMapStaticContractTests(SimpleTestCase):
             "'Enter'",
             'line_san',
             'line_uci',
+            'node.opening',
+            'inspectorOpeningName',
+            "searchParams.set('play'",
             'document.hidden',
             'ResizeObserver',
             'history.replaceState',
@@ -117,6 +122,7 @@ class ConquestMapStaticContractTests(SimpleTestCase):
             '.map-key-set',
             'overflow-wrap:anywhere',
             '.opening-line',
+            '.inspector-opening',
             'max-height:5.05rem',
             '.map-fallback table',
             'min-width:43rem',
@@ -135,8 +141,12 @@ class ConquestMapStaticContractTests(SimpleTestCase):
         self.assertTrue(script.is_file())
         self.assertTrue((vendor / 'LICENSE').is_file())
         self.assertTrue((vendor / 'UPSTREAM.md').is_file())
+        # Git's Windows checkout may apply core.autocrlf to the two upstream
+        # newlines.  Pin the vendored content, not the platform checkout
+        # convention; Linux production still receives the exact LF bytes.
+        canonical_bytes = script.read_bytes().replace(b'\r\n', b'\n')
         self.assertEqual(
-            hashlib.sha256(script.read_bytes()).hexdigest(),
+            hashlib.sha256(canonical_bytes).hexdigest(),
             'f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539',
         )
         self.assertIn(

@@ -1,17 +1,9 @@
 {% load static %}
 <div class="boardwrap"><div class="atomic-board cg-wrap brown cburnett" id="board"
   data-key="{{ board_key }}" data-fen="{{ board_fen }}"
-  data-turn="{{ board_turn }}" aria-label="Atomic chess board"></div>
-{% if arrow %}
-<svg class="board-arrow" viewBox="0 0 100 100" preserveAspectRatio="none">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="6.5" refY="5"
-    markerWidth="3" markerHeight="3" orient="auto-start-reverse">
-    <path d="M0,0 L10,5 L0,10 z" fill="var(--won)"/></marker></defs>
-  <line x1="{{ arrow.x1 }}" y1="{{ arrow.y1 }}" x2="{{ arrow.x2 }}" y2="{{ arrow.y2 }}"
-    stroke="var(--won)" stroke-width="2.6" stroke-linecap="round"
-    opacity="0.75" marker-end="url(#ah)"/>
-</svg>
-{% endif %}
+  data-turn="{{ board_turn }}" data-best-move="{{ best_move|default:'' }}"
+  data-play="{{ board_play|default:'' }}"
+  aria-label="Atomic chess board"></div>
 </div>
 {{ legal_ucis|json_script:"atomicdb-legal-moves" }}
 <script type="module" src="{% static 'atomicdb/board.js' %}"></script>
@@ -21,7 +13,11 @@
 <details class="board-legal">
   <summary>Keyboard move list</summary>
   <nav aria-label="Legal moves">
-    {% for uci in legal_ucis %}<a href="/atomicdb/goto/{{ board_key }}/{{ uci }}/">{{ uci }}</a>{% endfor %}
+    {% if legal_move_links %}
+      {% for move in legal_move_links %}<a href="{{ move.url }}">{{ move.uci }}</a>{% endfor %}
+    {% else %}
+      {% for uci in legal_ucis %}<a href="/atomicdb/goto/{{ board_key }}/{{ uci }}/">{{ uci }}</a>{% endfor %}
+    {% endif %}
   </nav>
 </details>
 {% endif %}
