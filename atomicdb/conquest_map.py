@@ -25,7 +25,7 @@ from datetime import datetime, timezone as datetime_timezone
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 
-from . import logic
+from . import logic, openings
 
 
 SNAPSHOT_SCHEMA = 'atomicdb.map.snapshot.v1'
@@ -801,12 +801,26 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
     # bytes/lists that the response contract actually emits.
     root_lineage = _lineage_to_start(nodes, root_key)
     root_line_san, root_line_uci = _materialise_line(nodes, root_lineage)
+    metadata = snapshot['snapshot']
+    start_key = metadata['start_key']
 
-    def compact_summary(key):
+    def compact_opening(exact_match, *, exact=True, matched_ply=None):
+        if exact_match is None:
+            return None
+        return {
+            'name': exact_match['name'],
+            'exact': bool(exact),
+            'matched_ply': (
+                exact_match['matched_ply']
+                if matched_ply is None else matched_ply
+            ),
+        }
+
+    def compact_summary(key, opening=None):
         node = nodes[key]
         active = node['m'][M_ACTIVE]
         queued = node['m'][M_QUEUED]
-        return {
+        summary = {
             'key': key,
             'fen': node['f'],
             'status': node['s'],
@@ -835,11 +849,37 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             'weight': _weight(node, weight),
             'zoomable': bool(node['k']),
         }
+        if opening is not None:
+            summary['opening'] = opening
+        return summary
 
-    def render_node(key, line_san, line_uci):
+    # Opening recognition is position-key based.  Scanning the already-built
+    # lineage backwards finds the last named ancestor in O(depth) without
+    # replaying a potentially very deep line through PyFFish on every request.
+    lineage_keys = [metadata['start_key']] + root_lineage
+    root_opening = None
+    for ply, lineage_key in reversed(list(enumerate(lineage_keys))):
+        match = openings.lookup_key(lineage_key)
+        if match is not None:
+            root_opening = compact_opening(
+                match, exact=lineage_key == root_key, matched_ply=ply)
+            break
+
+    def render_node(key, line_san, line_uci, inherited_opening=None):
         node = nodes[key]
         children = visible_children.get(key, ())
         all_children = node['k']
+        exact_match = openings.lookup_key(key)
+        if exact_match is not None:
+            current_opening = compact_opening(
+                exact_match, exact=True, matched_ply=node['d'])
+        elif inherited_opening is not None:
+            current_opening = {
+                **inherited_opening,
+                'exact': False,
+            }
+        else:
+            current_opening = None
 
         rendered_children = []
         for child_key in children:
@@ -850,8 +890,8 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             )
             child_line_uci = line_uci + [child['u']]
             rendered_children.append(render_node(
-                child_key, child_line_san, child_line_uci))
-        rendered = compact_summary(key)
+                child_key, child_line_san, child_line_uci, current_opening))
+        rendered = compact_summary(key, current_opening)
         rendered.update({
             'best_move': node['b'],
             'depth_invested': node['di'],
@@ -865,9 +905,6 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
         })
         return rendered
 
-    metadata = snapshot['snapshot']
-    start_key = metadata['start_key']
-    lineage_keys = [start_key] + root_lineage
     document = {
         'schema': API_SCHEMA,
         'snapshot': {
@@ -878,6 +915,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             'positions': metadata['positions'],
             'edges': metadata['edges'],
             'max_depth': metadata['max_depth'],
+            'opening_catalog_sha256': openings.catalog_sha256(),
         },
         'semantics': {
             'tier': 'practical-tier-1',
@@ -895,6 +933,10 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             'eval': 'heuristic White-POV centipawns; never proof-closing',
             'transpositions': (
                 'alternate reachable incoming edges not used as display parent'
+            ),
+            'opening': (
+                'position-key exact match; otherwise the last named position '
+                'on the stable display lineage'
             ),
         },
         'request': {
@@ -925,10 +967,18 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             ],
         },
         'first_moves': [
-            compact_summary(key)
+            compact_summary(
+                key,
+                compact_opening(
+                    openings.lookup_key(key),
+                    exact=True,
+                    matched_ply=nodes[key]['d'],
+                ),
+            )
             for key in nodes[start_key]['k']
         ],
-        'root': render_node(root_key, root_line_san, root_line_uci),
+        'root': render_node(
+            root_key, root_line_san, root_line_uci, root_opening),
     }
     return document
 

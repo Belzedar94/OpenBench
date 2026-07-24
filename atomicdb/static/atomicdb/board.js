@@ -28,6 +28,14 @@ if (board && movesNode) {
 
   let navigating = false;
   let ground;
+  const bestMove = board.dataset.bestMove || '';
+  const play = board.dataset.play || '';
+  const playQuery = play ? `?play=${encodeURIComponent(play)}` : '';
+  const autoShapes = bestMove.length >= 4 ? [{
+    orig: bestMove.slice(0, 2),
+    dest: bestMove.slice(2, 4),
+    brush: 'green',
+  }] : [];
   ground = Chessground(board, {
     fen: board.dataset.fen,
     orientation: 'white',
@@ -42,7 +50,13 @@ if (board && movesNode) {
       deleteOnDropOff: false,
     },
     premovable: { enabled: false },
-    drawable: { enabled: false, visible: false },
+    // Use Chessground's own bounds for the engine arrow. A separate SVG
+    // overlay drifts when Chessground rounds its board to a multiple of eight.
+    drawable: {
+      enabled: false,
+      visible: true,
+      autoShapes,
+    },
     movable: {
       free: false,
       color: board.dataset.turn,
@@ -58,7 +72,7 @@ if (board && movesNode) {
           // as a transient orthodox capture.
           ground.set({ fen: board.dataset.fen });
           window.location.assign(
-            `/atomicdb/goto/${board.dataset.key}/${uci}/`,
+            `/atomicdb/goto/${board.dataset.key}/${uci}/${playQuery}`,
           );
         },
       },

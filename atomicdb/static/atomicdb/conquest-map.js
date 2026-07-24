@@ -308,6 +308,9 @@
     inspectorTitle: document.getElementById('inspector-title'),
     inspectorKicker: document.getElementById('inspector-kicker'),
     inspectorLine: document.getElementById('inspector-line'),
+    inspectorOpening: document.getElementById('inspector-opening'),
+    inspectorOpeningName: document.getElementById('inspector-opening-name'),
+    inspectorOpeningState: document.getElementById('inspector-opening-state'),
     inspectorStatus: document.getElementById('inspector-status'),
     inspectorTrust: document.getElementById('inspector-trust'),
     inspectorEval: document.getElementById('inspector-eval'),
@@ -697,6 +700,17 @@
     elements.inspectorTitle.textContent = moveLabel(node);
     elements.inspectorTitle.title = line;
     elements.inspectorLine.textContent = line;
+    if (node.opening && node.opening.name) {
+      elements.inspectorOpening.hidden = false;
+      elements.inspectorOpeningName.textContent = node.opening.name;
+      elements.inspectorOpeningState.textContent = node.opening.exact
+        ? 'exact position'
+        : `theory reached at ply ${safeNumber(node.opening.matched_ply)}`;
+    } else {
+      elements.inspectorOpening.hidden = true;
+      elements.inspectorOpeningName.textContent = '';
+      elements.inspectorOpeningState.textContent = '';
+    }
     elements.inspectorStatus.className = `verdict-pill ${
       statusClasses[status]
     }`;
@@ -724,9 +738,14 @@
     } else {
       elements.inspectorWork.textContent = 'No active work';
     }
-    elements.explorer.href = `/atomicdb/explore/${
-      encodeURIComponent(node.key)
-    }/`;
+    const explorerUrl = new URL(
+      `/atomicdb/explore/${encodeURIComponent(node.key)}/`,
+      window.location.origin,
+    );
+    if (Array.isArray(node.line_uci) && node.line_uci.length) {
+      explorerUrl.searchParams.set('play', node.line_uci.join(','));
+    }
+    elements.explorer.href = `${explorerUrl.pathname}${explorerUrl.search}`;
     elements.zoomSelected.disabled = !(
       hierarchyNode.children
       || node.zoomable
@@ -1323,9 +1342,18 @@
       link.href = `/atomicdb/explore/${
         encodeURIComponent(target.data.key)
       }/`;
+      if (Array.isArray(target.data.line_uci)
+          && target.data.line_uci.length) {
+        link.href += `?play=${encodeURIComponent(
+          target.data.line_uci.join(','),
+        )}`;
+      }
       link.textContent = node.residual
         ? `${lineFor(target)} — ${moveLabel(node)}`
         : lineFor(entry);
+      if (!node.residual && node.opening && node.opening.name) {
+        link.textContent += ` · ${node.opening.name}`;
+      }
       lineCell.appendChild(link);
       const statusCell = document.createElement('td');
       statusCell.className = 'table-state';

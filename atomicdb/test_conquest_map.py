@@ -15,7 +15,7 @@ from django.test import (
 )
 from django.test.utils import CaptureQueriesContext
 
-from . import conquest_map, ingest, logic
+from . import conquest_map, ingest, logic, openings
 from .database import connection
 from .models import AnalysisTask, Edge, Position
 from .testing import TestCase
@@ -180,6 +180,39 @@ class DisplayTreeProjectionTests(SimpleTestCase):
             if child['zoomable']:
                 self.assertTrue(child['truncated'])
                 self.assertGreater(child['hidden_children'], 0)
+
+    def test_render_annotates_exact_and_inherited_atomic_openings(self):
+        moves = ['g1f3', 'f7f6', 'b1c3', 'a7a6']
+        fens = [logic.start_fen()]
+        for move in moves:
+            fens.append(logic.apply_move(fens[-1], move))
+        keys = [logic.key_of(fen) for fen in fens]
+        snapshot = conquest_map.build_snapshot_data(
+            [_row(key, fen=fen) for key, fen in zip(keys, fens)],
+            [
+                (keys[index], keys[index + 1], move)
+                for index, move in enumerate(moves)
+            ],
+            root_key=keys[0],
+        )
+
+        document = conquest_map.render_map(
+            snapshot, keys[0], limit=10, relative_depth=8)
+        self.assertEqual(
+            document['snapshot']['opening_catalog_sha256'],
+            openings.catalog_sha256(),
+        )
+        node = document['root']
+        for _move in moves[:3]:
+            node = node['children'][0]
+        self.assertEqual(node['opening']['name'], 'Two Knights Opening')
+        self.assertTrue(node['opening']['exact'])
+        self.assertEqual(node['opening']['matched_ply'], 3)
+
+        node = node['children'][0]
+        self.assertEqual(node['opening']['name'], 'Two Knights Opening')
+        self.assertFalse(node['opening']['exact'])
+        self.assertEqual(node['opening']['matched_ply'], 3)
 
     def test_direct_10k_deep_root_materialises_line_once(self):
         count = 10_000
