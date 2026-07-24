@@ -470,6 +470,68 @@ class RequestTests(TestCase):
         r = self.client.post(f'/atomicdb/request/{p.key}/')
         self.assertEqual(r.json()['status'], 'already-requested')
 
+    def test_sufficient_auto_lease_is_promoted_and_deduplicated(self):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, generation=0, budget_nodes=128_000_000,
+            state=AnalysisTask.TState.LEASED,
+            source=AnalysisTask.Source.AUTO,
+            machine='m1', leased_at=timezone.now(),
+        )
+
+        first = self.client.post(f'/atomicdb/request/{p.key}/')
+        second = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(first.json()['status'], 'already-queued')
+        self.assertEqual(second.json()['status'], 'already-requested')
+        task.refresh_from_db()
+        self.assertEqual(task.source, AnalysisTask.Source.USER)
+        self.assertEqual(RequestLog.objects.filter(position=p).count(), 1)
+
+    def test_completed_recent_request_can_queue_next_rung(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        first = self.client.post(f'/atomicdb/request/{p.key}/')
+        self.assertEqual(first.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=p, generation=0)
+        self.assertEqual(task.budget_nodes, 128_000_000)
+        task.state = AnalysisTask.TState.COMPLETED
+        task.nodes_searched = 128_000_000
+        task.save(update_fields=['state', 'nodes_searched'])
+        Position.objects.filter(pk=p.pk).update(
+            visits=1, nodes_invested=128_000_000)
+
+        second = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(second.json()['status'], 'queued')
+        follow_up = AnalysisTask.objects.get(position=p, generation=1)
+        self.assertEqual(
+            (follow_up.state, follow_up.source, follow_up.budget_nodes),
+            (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
+             512_000_000),
+        )
+
+    def test_fen_creation_log_does_not_block_first_analysis_request(self):
+        from .models import RequestLog
+
+        fen = logic.apply_move(logic.start_fen(), 'g1f3')
+        created = self.client.post('/atomicdb/fen/', {'fen': fen})
+        self.assertEqual(created.status_code, 302)
+        p = Position.objects.get(key=logic.key_of(logic.canonical_fen(fen)))
+        self.assertTrue(RequestLog.objects.filter(position=p).exists())
+        self.assertFalse(AnalysisTask.objects.filter(position=p).exists())
+
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=p)
+        self.assertEqual(
+            (task.state, task.source, task.budget_nodes),
+            (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
+             128_000_000),
+        )
+
 
 class MachineVisibilityTests(TestCase):
 
