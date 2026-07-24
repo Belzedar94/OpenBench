@@ -92,10 +92,40 @@ class AtomicOpeningCatalogTests(SimpleTestCase):
         )
         self.assertEqual(transposed['name'], 'Two Knights Opening')
 
-    def test_unnamed_continuation_does_not_inherit_ancestor_name(self):
+    def test_unnamed_continuation_retains_last_exact_opening(self):
         match = openings.match_line(
             ['g1f3', 'f7f6', 'b1c3', 'a7a6'])
-        self.assertIsNone(match)
+        self.assertEqual(match['name'], 'Two Knights Opening')
+        self.assertEqual(match['matched_ply'], 3)
+        self.assertFalse(match['exact'])
+        self.assertNotEqual(match['position_key'], match['current_key'])
+
+    def test_villager_defense_survives_unnamed_ng5_continuation(self):
+        match = openings.match_line(['g1f3', 'd7d6', 'f3g5'])
+
+        self.assertEqual(match['name'], 'Villager Defense')
+        self.assertEqual(match['matched_ply'], 2)
+        self.assertFalse(match['exact'])
+        self.assertNotEqual(match['position_key'], match['current_key'])
+
+    def test_later_exact_opening_replaces_inherited_name(self):
+        prefix = [
+            'g1f3', 'f7f6', 'c2c3', 'e7e6',
+            'd2d4', 'd7d5', 'e2e3',
+        ]
+        inherited = openings.match_line(prefix)
+        replaced = openings.match_line([*prefix, 'c7c6'])
+
+        self.assertEqual(
+            inherited['name'], 'Tomato Attack Nightrider Variation')
+        self.assertEqual(inherited['matched_ply'], 4)
+        self.assertFalse(inherited['exact'])
+        self.assertEqual(
+            replaced['name'],
+            'Tomato Attack Nightrider Variation Mainline',
+        )
+        self.assertEqual(replaced['matched_ply'], 8)
+        self.assertTrue(replaced['exact'])
 
     def test_current_community_names_match_only_the_confirmed_positions(self):
         cases = [

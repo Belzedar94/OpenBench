@@ -1,9 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 from io import StringIO
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import tracemalloc
 from unittest import mock, skipUnless
@@ -181,36 +183,194 @@ class DisplayTreeProjectionTests(SimpleTestCase):
                 self.assertTrue(child['truncated'])
                 self.assertGreater(child['hidden_children'], 0)
 
-    def test_render_annotates_only_exact_atomic_openings(self):
-        moves = ['g1f3', 'f7f6', 'b1c3', 'a7a6']
-        fens = [logic.start_fen()]
-        for move in moves:
-            fens.append(logic.apply_move(fens[-1], move))
-        keys = [logic.key_of(fen) for fen in fens]
-        snapshot = conquest_map.build_snapshot_data(
-            [_row(key, fen=fen) for key, fen in zip(keys, fens)],
-            [
-                (keys[index], keys[index + 1], move)
-                for index, move in enumerate(moves)
-            ],
-            root_key=keys[0],
-        )
+    def test_render_inherits_last_exact_opening_until_replaced(self):
+        keys = [_key(index) for index in range(20, 24)]
+        edges = [
+            (keys[0], keys[1], 'a1a2'),
+            (keys[1], keys[2], 'a2a3'),
+            (keys[2], keys[3], 'a3a4'),
+        ]
+        with mock.patch(
+                'atomicdb.conquest_map._san_for_edge',
+                side_effect=lambda _fen, uci: f'SAN-{uci}'):
+            snapshot = conquest_map.build_snapshot_data(
+                [_row(key) for key in keys],
+                edges,
+                root_key=keys[0],
+            )
+        exact = {
+            keys[1]: {'name': 'First Opening', 'matched_ply': 1},
+            keys[3]: {'name': 'Replacement Opening', 'matched_ply': 3},
+        }
 
-        document = conquest_map.render_map(
-            snapshot, keys[0], limit=10, relative_depth=8)
+        with mock.patch(
+                'atomicdb.conquest_map.openings.lookup_key',
+                side_effect=exact.get):
+            document = conquest_map.render_map(
+                snapshot, keys[0], limit=10, relative_depth=8)
+
         self.assertEqual(
             document['snapshot']['opening_catalog_sha256'],
             openings.catalog_sha256(),
         )
-        node = document['root']
-        for _move in moves[:3]:
-            node = node['children'][0]
-        self.assertEqual(node['opening']['name'], 'Two Knights Opening')
-        self.assertTrue(node['opening']['exact'])
-        self.assertEqual(node['opening']['matched_ply'], 3)
+        first_move = document['first_moves'][0]
+        self.assertEqual(first_move['opening'], {
+            'name': 'First Opening',
+            'exact': True,
+            'matched_ply': 1,
+        })
+        first = document['root']['children'][0]
+        self.assertEqual(first['opening'], first_move['opening'])
+        continuation = first['children'][0]
+        self.assertEqual(continuation['opening'], {
+            'name': 'First Opening',
+            'exact': False,
+            'matched_ply': 1,
+        })
+        replacement = continuation['children'][0]
+        self.assertEqual(replacement['opening'], {
+            'name': 'Replacement Opening',
+            'exact': True,
+            'matched_ply': 3,
+        })
 
-        node = node['children'][0]
-        self.assertNotIn('opening', node)
+    def test_global_work_items_include_exact_tasks_outside_visible_marks(self):
+        root, queued, intermediate, active = (
+            _key(index) for index in range(30, 34)
+        )
+        rows = [_row(key) for key in (root, queued, intermediate, active)]
+        edges = [
+            (root, queued, 'a1a2'),
+            (root, intermediate, 'b1b2'),
+            (intermediate, active, 'b2b3'),
+        ]
+        tasks = [
+            (queued, 'PENDING'),
+            (active, 'LEASED'),
+        ]
+        with mock.patch(
+                'atomicdb.conquest_map._san_for_edge',
+                side_effect=lambda _fen, uci: f'SAN-{uci}'):
+            snapshot = conquest_map.build_snapshot_data(
+                rows, edges, tasks, root_key=root)
+
+        self.assertEqual(
+            set(snapshot['snapshot']['work_keys']), {queued, active})
+        document = conquest_map.render_map(
+            snapshot, root, limit=1, relative_depth=1)
+
+        self.assertEqual(document['marks'], 1)
+        self.assertEqual(document['root']['children'], [])
+        self.assertEqual(document['work_items_total'], 2)
+        self.assertFalse(document['work_items_truncated'])
+        self.assertEqual(
+            [item['key'] for item in document['work_items']],
+            [active, queued],
+        )
+        active_item = document['work_items'][0]
+        self.assertEqual(
+            active_item['line_san'], '1. SAN-b1b2 SAN-b2b3')
+        self.assertEqual(
+            active_item['line_uci'], ['b1b2', 'b2b3'])
+        self.assertEqual(active_item['work']['exact_state'], 'active')
+        self.assertEqual(active_item['work']['own_active'], 1)
+        self.assertEqual(active_item['work']['descendant_active'], 0)
+        self.assertEqual(document['root']['work']['exact_state'], 'idle')
+        self.assertEqual(document['root']['work']['subtree_active'], 1)
+        self.assertEqual(document['root']['work']['subtree_queued'], 1)
+        self.assertEqual(document['root']['work']['descendant_active'], 1)
+        self.assertEqual(document['root']['work']['descendant_queued'], 1)
+
+        legacy = conquest_map._unsealed_copy(snapshot)
+        legacy['snapshot'].pop('work_keys')
+        legacy = conquest_map.seal_snapshot(legacy)
+        conquest_map.validate_snapshot(legacy)
+        legacy_document = conquest_map.render_map(
+            legacy, root, limit=1, relative_depth=1)
+        self.assertEqual(
+            [item['key'] for item in legacy_document['work_items']],
+            [active, queued],
+        )
+
+    def test_legacy_work_index_is_derived_once_for_concurrent_requests(self):
+        root, active = _key(34), _key(35)
+        with mock.patch(
+                'atomicdb.conquest_map._san_for_edge',
+                return_value='SAN-a1a2'):
+            snapshot = conquest_map.build_snapshot_data(
+                [_row(root), _row(active)],
+                [(root, active, 'a1a2')],
+                [(active, 'LEASED')],
+                root_key=root,
+            )
+        legacy = conquest_map._unsealed_copy(snapshot)
+        legacy['snapshot'].pop('work_keys')
+        legacy = conquest_map.seal_snapshot(legacy)
+        conquest_map.reset_snapshot_cache()
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingNodes(dict):
+            item_scans = 0
+
+            def items(self):
+                type(self).item_scans += 1
+                entered.set()
+                release.wait(timeout=2)
+                return super().items()
+
+        legacy['nodes'] = BlockingNodes(legacy['nodes'])
+        barrier = threading.Barrier(3)
+
+        def work_keys():
+            barrier.wait()
+            return conquest_map._snapshot_work_keys(legacy)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(work_keys)
+            second = executor.submit(work_keys)
+            barrier.wait()
+            self.assertTrue(entered.wait(timeout=2))
+            release.set()
+            self.assertEqual(first.result(timeout=2), [active])
+            self.assertEqual(second.result(timeout=2), [active])
+
+        self.assertEqual(BlockingNodes.item_scans, 1)
+
+    def test_work_index_is_validated_and_work_items_are_bounded(self):
+        root = _key(40)
+        children = [
+            _key(index)
+            for index in range(41, 41 + conquest_map.MAX_WORK_ITEMS + 2)
+        ]
+        rows = [_row(root)] + [_row(key) for key in children]
+        edges = [
+            (root, key, f'a1{index % 8 + 1}')
+            for index, key in enumerate(children)
+        ]
+        tasks = [
+            (key, 'LEASED' if index % 2 == 0 else 'PENDING')
+            for index, key in enumerate(children)
+        ]
+        with mock.patch(
+                'atomicdb.conquest_map._san_for_edge',
+                side_effect=lambda _fen, uci: f'SAN-{uci}'):
+            snapshot = conquest_map.build_snapshot_data(
+                rows, edges, tasks, root_key=root)
+
+        document = conquest_map.render_map(snapshot, root, limit=1)
+        self.assertEqual(
+            len(document['work_items']), conquest_map.MAX_WORK_ITEMS)
+        self.assertEqual(document['work_items_total'], len(children))
+        self.assertTrue(document['work_items_truncated'])
+
+        mismatched = conquest_map._unsealed_copy(snapshot)
+        mismatched['snapshot']['work_keys'] = children[:-1]
+        mismatched = conquest_map.seal_snapshot(mismatched)
+        with self.assertRaisesRegex(
+                conquest_map.SnapshotError, 'exact work index mismatch'):
+            conquest_map.validate_snapshot(mismatched)
 
     def test_direct_10k_deep_root_materialises_line_once(self):
         count = 10_000
@@ -345,6 +505,24 @@ class SnapshotArtifactTests(SimpleTestCase):
         with self.assertRaises(conquest_map.SnapshotError):
             conquest_map.validate_snapshot(tampered)
 
+    def test_rehashed_non_additive_work_aggregates_fail_closed(self):
+        root = self.snapshot['snapshot']['root_key']
+        cases = (
+            (conquest_map.M_ACTIVE, 'active'),
+            (conquest_map.M_QUEUED, 'queued'),
+        )
+        for metric_index, label in cases:
+            with self.subTest(label=label):
+                tampered = json.loads(json.dumps(self.snapshot))
+                tampered['nodes'][root]['m'][metric_index] += 1
+                tampered = conquest_map.seal_snapshot(
+                    conquest_map._unsealed_copy(tampered))
+
+                with self.assertRaisesRegex(
+                        conquest_map.SnapshotError,
+                        f'{label} work aggregate is not additive'):
+                    conquest_map.validate_snapshot(tampered)
+
     def test_rehashed_orphan_node_still_fails_closed(self):
         root, child = _key(30), _key(31)
         with mock.patch('atomicdb.conquest_map._san_for_edge',
@@ -388,6 +566,41 @@ class SnapshotArtifactTests(SimpleTestCase):
 
         self.assertEqual(reader.call_count, 2)
         self.assertEqual(loaded, self.snapshot)
+
+    def test_cache_identity_changes_with_inode_at_same_mtime_and_size(self):
+        changed = json.loads(json.dumps(self.snapshot))
+        changed['snapshot']['generated_at'] = '2099-01-01T00:00:00Z'
+        changed = conquest_map.seal_snapshot(
+            conquest_map._unsealed_copy(changed))
+        common = {
+            'st_dev': 7,
+            'st_ctime_ns': 10,
+            'st_mtime_ns': 20,
+            'st_size': 30,
+        }
+        first_stat = mock.Mock(st_ino=11, **common)
+        second_stat = mock.Mock(st_ino=12, **common)
+
+        with (
+            mock.patch(
+                'atomicdb.conquest_map.Path.stat',
+                side_effect=(first_stat, second_stat)
+            ),
+            mock.patch(
+                'atomicdb.conquest_map.Path.resolve',
+                return_value=self.path,
+            ),
+            mock.patch(
+                'atomicdb.conquest_map.read_snapshot',
+                side_effect=(self.snapshot, changed),
+            ) as reader,
+        ):
+            first = conquest_map.published_snapshot(self.path)
+            second = conquest_map.published_snapshot(self.path)
+
+        self.assertEqual(first, self.snapshot)
+        self.assertEqual(second, changed)
+        self.assertEqual(reader.call_count, 2)
 
 
 class ConquestMapCommandAndApiTests(TestCase):
@@ -489,6 +702,16 @@ class ConquestMapCommandAndApiTests(TestCase):
         self.assertEqual(second.content, b'')
         self.assertEqual(second['ETag'], etag)
         self.assertIn('Accept-Encoding', second['Vary'])
+
+        for method in ('get', 'head'):
+            with self.subTest(method=method):
+                strong_equivalent = getattr(self.client, method)(
+                    '/atomicdb/api/map/v1',
+                    HTTP_IF_NONE_MATCH=etag.removeprefix('W/'),
+                )
+                self.assertEqual(strong_equivalent.status_code, 304)
+                self.assertEqual(strong_equivalent.content, b'')
+                self.assertEqual(strong_equivalent['ETag'], etag)
 
     def test_head_matches_get_representation_headers_without_a_body(self):
         self._build()

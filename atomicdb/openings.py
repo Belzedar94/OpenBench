@@ -3,10 +3,10 @@
 The source material is compiled into ``data/atomic_openings_v1.json``.  Runtime
 lookups never depend on SAN spelling or a move-prefix: an opening is keyed by
 AtomicDB's canonical position identity.  Consequently transpositions work
-without special cases.  :func:`match_line` validates the complete route but
-returns a name only when the current Atomic position is explicitly catalogued;
-an earlier, merely ancestral opening name is never carried into an unnamed
-continuation.
+without special cases.  :func:`match_line` validates the complete route and
+keeps the last explicitly catalogued name while the played line continues
+through unnamed positions, matching the opening-name behaviour visitors expect
+from chess explorers.
 
 The compiler intentionally discards source commentary.  It keeps only factual
 name/line associations and their minimal provenance (labels, URLs and hashes).
@@ -263,7 +263,7 @@ class Opening:
 
 @dataclass(frozen=True)
 class OpeningLineMatch:
-    """The exact named Atomic position reached by replaying a legal line."""
+    """The last named Atomic position reached while replaying a legal line."""
 
     opening: Opening
     matched_ply: int
@@ -979,16 +979,18 @@ def match_fen(fen: str) -> Opening | None:
 
 
 def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
-    """Return the exact named position reached by a legal UCI line.
+    """Return the last named position reached by a legal UCI line.
 
     The match is position-based.  A transposed route therefore recognizes the
-    same opening.  An unnamed continuation returns ``None`` rather than
-    inheriting a generic ancestor label.  Illegal moves raise
+    same opening.  An unnamed continuation retains the closest named ancestor,
+    and a later exact match replaces it.  Illegal moves raise
     :class:`InvalidOpeningLine` rather than producing a misleading partial
     result.
     """
     fen = logic.start_fen()
-    ply = 0
+    current_key = logic.key_of(fen)
+    opening = match_key(current_key)
+    matched_ply = 0
     for ply, move in enumerate(ucis, start=1):
         if not isinstance(move, str) or not move:
             raise InvalidOpeningLine(f'invalid UCI token at ply {ply}: {move!r}')
@@ -997,18 +999,21 @@ def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
             raise InvalidOpeningLine(
                 f'illegal Atomic move at ply {ply}: {move} in {fen}')
         fen = logic.apply_move(fen, move)
-    current_key = logic.key_of(fen)
-    exact = match_key(current_key)
-    if exact is None:
+        current_key = logic.key_of(fen)
+        exact = match_key(current_key)
+        if exact is not None:
+            opening = exact
+            matched_ply = ply
+    if opening is None:
         return None
     return OpeningLineMatch(
-        opening=exact,
-        matched_ply=ply,
+        opening=opening,
+        matched_ply=matched_ply,
         current_key=current_key,
     )
 
 
 def match_line(ucis: Iterable[str]) -> dict[str, object] | None:
-    """Serializable exact-current-position lookup for a legal played line."""
+    """Serializable last-known-opening lookup for a legal played line."""
     match = match_line_object(ucis)
     return match.as_dict() if match is not None else None

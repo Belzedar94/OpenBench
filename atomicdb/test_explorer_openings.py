@@ -1,8 +1,11 @@
 """Explorer route and opening-name integration tests."""
 
+from urllib.parse import parse_qs, urlsplit
 from unittest import mock
 
-from . import ingest, logic
+from django.core import signing
+
+from . import ingest, logic, views
 from .models import Edge
 from .testing import TestCase
 
@@ -25,6 +28,14 @@ class ExplorerOpeningRouteTests(TestCase):
             current = child
             positions.append(current)
         return positions
+
+    @staticmethod
+    def _long_villager_route(plies):
+        moves = ['g1f3', 'd7d6']
+        cycle = ['f3g1', 'b8c6', 'g1f3', 'c6b8']
+        while len(moves) < plies:
+            moves.extend(cycle)
+        return moves[:plies]
 
     def test_valid_play_route_is_replayed_and_propagated(self):
         ucis = ['g1f3', 'f7f6', 'b1c3']
@@ -93,8 +104,32 @@ class ExplorerOpeningRouteTests(TestCase):
             response.context['opening']['name'], 'Two Knights Opening')
         self.assertTrue(response.context['opening']['exact'])
 
-    def test_unnamed_continuation_has_no_inherited_opening(self):
-        ucis = ['g1f3', 'f7f6', 'b1c3', 'a7a6']
+    def test_explicit_play_route_wins_over_valid_opening_anchor(self):
+        ucis = ['g1f3', 'f7f6', 'b1c3']
+        target = self._materialize(ucis)[-1]
+        villager = views.openings.match_line(['g1f3', 'd7d6'])
+        anchor = views._signed_opening_anchor(
+            target.key, villager, len(ucis))
+
+        response = self.client.get(
+            f'/atomicdb/explore/{target.key}/',
+            {
+                'play': ','.join(ucis),
+                views.OPENING_ANCHOR_PARAM: anchor,
+            },
+        )
+
+        self.assertEqual(response.context['active_play'], ucis)
+        self.assertEqual(
+            response.context['opening']['name'], 'Two Knights Opening')
+        self.assertTrue(response.context['opening']['exact'])
+        self.assertTrue(all(
+            'play=' in link['url']
+            for link in response.context['legal_move_links']
+        ))
+
+    def test_unnamed_continuation_keeps_villager_defense(self):
+        ucis = ['g1f3', 'd7d6', 'f3g5']
         target = self._materialize(ucis)[-1]
 
         response = self.client.get(
@@ -102,8 +137,13 @@ class ExplorerOpeningRouteTests(TestCase):
             {'play': ','.join(ucis)},
         )
 
-        self.assertIsNone(response.context['opening'])
-        self.assertNotContains(response, 'continued from ply 3')
+        self.assertEqual(
+            response.context['opening']['name'], 'Villager Defense')
+        self.assertFalse(response.context['opening']['exact'])
+        self.assertEqual(response.context['opening']['matched_ply'], 2)
+        self.assertContains(response, 'Villager Defense')
+        self.assertNotContains(response, 'exact position')
+        self.assertNotContains(response, 'Aliases and provenance')
 
     def test_goto_preserves_and_extends_validated_route(self):
         ucis = ['g1f3', 'f7f6']
@@ -116,6 +156,152 @@ class ExplorerOpeningRouteTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertIn('?play=g1f3,f7f6,b1c3', response['Location'])
+
+    def test_signed_anchor_keeps_opening_beyond_public_replay_limit(self):
+        route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 2)
+        current = self._materialize(
+            route[:views.PLAY_ROUTE_MAX_PLIES])[-1]
+
+        overflow = self.client.get(
+            f'/atomicdb/goto/{current.key}/{route[64]}/',
+            {'play': ','.join(route[:64])},
+        )
+
+        self.assertEqual(overflow.status_code, 302)
+        self.assertNotIn('play=', overflow['Location'])
+        query = parse_qs(urlsplit(overflow['Location']).query)
+        self.assertEqual(set(query), {views.OPENING_ANCHOR_PARAM})
+        anchor = query[views.OPENING_ANCHOR_PARAM][0]
+
+        inherited = self.client.get(overflow['Location'])
+        self.assertEqual(inherited.status_code, 200)
+        self.assertIsNone(inherited.context['active_play'])
+        self.assertEqual(
+            inherited.context['opening']['name'], 'Villager Defense')
+        self.assertEqual(inherited.context['opening']['matched_ply'], 62)
+        self.assertFalse(inherited.context['opening']['exact'])
+        board_play = inherited.context['board_play']
+        self.assertTrue(
+            board_play.startswith(views.OPENING_ANCHOR_PLAY_PREFIX))
+
+        child = inherited.context['pos']
+        replacement = self.client.get(
+            f'/atomicdb/goto/{child.key}/{route[65]}/',
+            {'play': board_play},
+        )
+        exact = self.client.get(replacement['Location'])
+
+        self.assertEqual(exact.status_code, 200)
+        self.assertEqual(exact.context['opening']['name'], 'Villager Defense')
+        self.assertEqual(exact.context['opening']['matched_ply'], 66)
+        self.assertTrue(exact.context['opening']['exact'])
+
+    def test_signed_anchor_beats_short_transposed_canonical_route(self):
+        route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 2)
+        current = self._materialize(
+            route[:views.PLAY_ROUTE_MAX_PLIES], connect=True)[-1]
+
+        overflow = self.client.get(
+            f'/atomicdb/goto/{current.key}/{route[64]}/',
+            {'play': ','.join(route[:64])},
+        )
+        inherited = self.client.get(overflow['Location'])
+
+        self.assertEqual(inherited.status_code, 200)
+        self.assertIsNone(inherited.context['active_play'])
+        self.assertEqual(
+            inherited.context['opening']['name'], 'Villager Defense')
+        self.assertEqual(inherited.context['opening']['matched_ply'], 62)
+        self.assertFalse(inherited.context['opening']['exact'])
+        self.assertTrue(inherited.context['moves'])
+        for move in inherited.context['moves']:
+            query = parse_qs(urlsplit(move['url']).query)
+            self.assertNotIn('play', query)
+            self.assertIn(views.OPENING_ANCHOR_PARAM, query)
+        for link in inherited.context['legal_move_links']:
+            query = parse_qs(urlsplit(link['url']).query)
+            self.assertNotIn('play', query)
+            self.assertIn(views.OPENING_ANCHOR_PARAM, query)
+
+        anchored_breadcrumbs = [
+            step for step in inherited.context['line'] if step.get('url')
+        ]
+        self.assertGreaterEqual(len(anchored_breadcrumbs), 2)
+        for step in anchored_breadcrumbs:
+            query = parse_qs(urlsplit(step['url']).query)
+            self.assertNotIn('play', query)
+            token = query[views.OPENING_ANCHOR_PARAM][0]
+            payload = signing.loads(
+                token, salt=views.OPENING_ANCHOR_SALT)
+            self.assertEqual(payload['target'], step['key'])
+            self.assertGreaterEqual(
+                payload['route_ply'], payload['matched_ply'])
+        previous = anchored_breadcrumbs[-2]
+        backed_up = self.client.get(previous['url'])
+        self.assertIsNone(backed_up.context['active_play'])
+        self.assertEqual(
+            backed_up.context['opening']['name'], 'Villager Defense')
+        self.assertFalse(backed_up.context['opening']['exact'])
+
+        continued = next(
+            move for move in inherited.context['moves']
+            if move['uci'] == route[65]
+        )
+        child = self.client.get(continued['url'])
+        self.assertIsNone(child.context['active_play'])
+        self.assertEqual(
+            child.context['opening']['name'], 'Villager Defense')
+        self.assertEqual(child.context['opening']['matched_ply'], 66)
+
+    def test_opening_anchor_tampering_and_target_reuse_fail_closed(self):
+        route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 1)
+        current = self._materialize(route[:64])[-1]
+        overflow = self.client.get(
+            f'/atomicdb/goto/{current.key}/{route[64]}/',
+            {'play': ','.join(route[:64])},
+        )
+        query = parse_qs(urlsplit(overflow['Location']).query)
+        anchor = query[views.OPENING_ANCHOR_PARAM][0]
+        child = self.client.get(overflow['Location']).context['pos']
+        tampered = anchor[:-1] + ('A' if anchor[-1] != 'A' else 'B')
+
+        bad_signature = self.client.get(
+            f'/atomicdb/explore/{child.key}/',
+            {views.OPENING_ANCHOR_PARAM: tampered},
+        )
+        wrong_target = self.client.get(
+            f'/atomicdb/explore/{current.key}/',
+            {views.OPENING_ANCHOR_PARAM: anchor},
+        )
+
+        self.assertIsNone(bad_signature.context['opening'])
+        self.assertIsNone(wrong_target.context['opening'])
+        self.assertTrue(all(
+            tampered not in link['url']
+            for link in bad_signature.context['legal_move_links']
+        ))
+
+    def test_even_validly_signed_anchor_requires_catalogued_opening(self):
+        route = self._long_villager_route(65)
+        child = self._materialize(route)[-1]
+        forged = signing.dumps(
+            {
+                'v': 1,
+                'target': child.key,
+                'opening': '0' * 64,
+                'matched_ply': 2,
+                'route_ply': 65,
+            },
+            salt=views.OPENING_ANCHOR_SALT,
+            compress=True,
+        )
+
+        response = self.client.get(
+            f'/atomicdb/explore/{child.key}/',
+            {views.OPENING_ANCHOR_PARAM: forged},
+        )
+
+        self.assertIsNone(response.context['opening'])
 
     def test_goto_rejects_bad_explicit_route_before_writing(self):
         current = self._materialize(['g1f3'], connect=True)[-1]
@@ -206,7 +392,7 @@ class ExplorerOpeningRouteTests(TestCase):
             html,
         )
 
-    def test_nested_provenance_is_human_readable(self):
+    def test_aliases_and_provenance_are_not_rendered(self):
         ucis = ['g1f3', 'f7f6', 'b1c3']
         target = self._materialize(ucis)[-1]
 
@@ -215,6 +401,7 @@ class ExplorerOpeningRouteTests(TestCase):
             {'play': ','.join(ucis)},
         )
 
-        self.assertContains(
-            response, 'Two Knights Attack (atomix-0096)')
-        self.assertNotContains(response, 'labels_differ')
+        self.assertContains(response, 'Two Knights Opening')
+        self.assertNotContains(response, 'Aliases and provenance')
+        self.assertNotContains(response, 'Two Knights Attack (atomix-0096)')
+        self.assertNotContains(response, 'exact position')

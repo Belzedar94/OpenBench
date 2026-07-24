@@ -19,55 +19,11 @@
 
 {% if opening %}
 <section class="opening-card" aria-labelledby="opening-name">
-  <div class="opening-card-head">
-    <div>
-      <span class="opening-kicker">Atomic opening</span>
-      <h2 id="opening-name">{{ opening.name }}</h2>
-    </div>
-    <span class="opening-state exact">exact position</span>
-  </div>
+  <span class="opening-kicker">Atomic opening</span>
+  <h2 id="opening-name">{{ opening.name }}</h2>
   {% if opening.reference_line_san %}
   <p class="opening-reference"><span class="dim">Reference:</span>
     {{ opening.reference_line_san }}</p>
-  {% endif %}
-  {% if opening.aliases or opening.sources %}
-  <details class="opening-details">
-    <summary>Aliases and provenance</summary>
-    {% if opening.aliases %}
-    <div class="opening-aliases">
-      <span class="dim">Also known as</span>
-      {% for alias in opening.aliases %}<span class="opening-alias">{{ alias }}</span>{% endfor %}
-    </div>
-    {% endif %}
-    {% if opening.sources %}
-    <ul class="opening-sources">
-      {% for source in opening.sources %}
-      <li>
-        <strong>{{ source.name }}</strong>
-        <span class="dim">{{ source.source_kind }} · {{ source.status }}
-          · {{ source.confidence }}</span>
-        {% if source.line_san %}<div class="opening-source-line">{{ source.line_san }}</div>{% endif %}
-        {% if source.evidence %}
-        <div class="opening-evidence">
-          {% for evidence in source.evidence %}
-            {% if evidence.safe_url %}<a href="{{ evidence.safe_url }}"
-              rel="noopener noreferrer" target="_blank">{{ evidence.label }}</a>
-            {% else %}<span>{{ evidence.label }}</span>{% endif %}
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if source.provenance_rows %}
-        <div class="opening-provenance">
-          {% for row in source.provenance_rows %}
-            <span><strong>{{ row.label }}:</strong> {{ row.value }}</span>
-          {% endfor %}
-        </div>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-    {% endif %}
-  </details>
   {% endif %}
 </section>
 {% endif %}
