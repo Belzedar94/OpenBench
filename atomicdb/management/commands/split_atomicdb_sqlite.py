@@ -1,9 +1,17 @@
 import json
 import os
+import secrets
 import sqlite3
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+
+from OpenSite.atomicdb_identity import (
+    canonical_json_bytes,
+    derive_line_id,
+    origin_snapshot_sha256,
+    validate_database_lineage,
+)
 
 from ._atomicdb_sqlite import (
     ATOMICDB_TABLES,
@@ -45,7 +53,21 @@ class Command(BaseCommand):
             default=os.path.join(settings.BASE_DIR, 'atomicdb.sqlite3'),
             help='New AtomicDB SQLite path (must not exist)',
         )
+        parser.add_argument(
+            '--offline-confirmed',
+            action='store_true',
+            help=(
+                'Required operator attestation that every web/worker writer '
+                'will remain stopped from before this snapshot until the '
+                'verified split process is restarted'),
+        )
+
     def handle(self, *args, **options):
+        if not options['offline_confirmed']:
+            raise CommandError(
+                'Refusing AtomicDB split without --offline-confirmed; all '
+                'legacy web and worker writers must remain stopped through '
+                'cutover')
         source_path = configured_default_path()
         destination_path = canonical_path(options['destination'])
         receipt_path = split_receipt_path(destination_path)
@@ -72,6 +94,7 @@ class Command(BaseCommand):
         source = None
         destination = None
         destination_reserved = False
+        receipt_published = False
         try:
             source = open_existing_read_write(source_path)
             # A read transaction would provide a consistent snapshot but still
@@ -88,6 +111,33 @@ class Command(BaseCommand):
             source_migrations = validate_migrations(
                 source, allow_pending=False)
             source_summaries = database_summaries(source)
+            receipt = {
+                'schema': SPLIT_RECEIPT_SCHEMA,
+                'status': 'verified',
+                'created_at': utc_now(),
+                'source': source_path,
+                'destination': destination_path,
+                'migration_sentinel': MIGRATION_SENTINEL,
+                'tables': source_summaries,
+                'migrations': source_migrations,
+                'schema_sha256': schema_digest(source_snapshot),
+                'journal_mode': 'wal',
+                'source_health': source_health,
+                'destination_health': {
+                    'integrity_check': 'ok',
+                    'foreign_key_violations': 0,
+                },
+                'line_nonce': secrets.token_hex(32),
+            }
+            receipt['origin_snapshot_sha256'] = \
+                origin_snapshot_sha256(receipt)
+            receipt['line_id'] = derive_line_id(
+                receipt['line_nonce'],
+                receipt['origin_snapshot_sha256'],
+                destination_path,
+                MIGRATION_SENTINEL,
+            )
+            receipt_bytes = canonical_json_bytes(receipt)
 
             # Re-check immediately before the O_EXCL reservation.  O_EXCL is
             # the authoritative race-safe test; this preflight only gives a
@@ -99,7 +149,13 @@ class Command(BaseCommand):
             destination = sqlite3.connect(
                 destination_path, timeout=30.0, isolation_level=None)
             destination.execute('PRAGMA busy_timeout=30000')
-            create_split_target(source, destination, source_snapshot)
+            create_split_target(
+                source,
+                destination,
+                source_snapshot,
+                receipt=receipt,
+                receipt_bytes=receipt_bytes,
+            )
 
             target_snapshot = schema_snapshot(destination)
             if target_snapshot != source_snapshot:
@@ -117,6 +173,8 @@ class Command(BaseCommand):
             if target_migrations != source_migrations:
                 raise CommandError(
                     'AtomicDB destination migration digest differs')
+            validate_database_lineage(
+                destination, receipt, receipt_bytes)
 
             set_and_persist_wal(destination)
             target_health = validate_database_health(destination)
@@ -131,29 +189,35 @@ class Command(BaseCommand):
                 raise CommandError(
                     'AtomicDB WAL mode did not persist after reconnect')
             validate_database_health(destination)
+            validate_database_lineage(
+                destination, receipt, receipt_bytes)
             destination.close()
             destination = None
 
-            receipt = {
-                'schema': SPLIT_RECEIPT_SCHEMA,
-                'status': 'verified',
-                'created_at': utc_now(),
-                'source': source_path,
-                'destination': destination_path,
-                'migration_sentinel': MIGRATION_SENTINEL,
-                'tables': target_summaries,
-                'migrations': target_migrations,
-                'schema_sha256': schema_digest(target_snapshot),
-                'journal_mode': target_journal_mode,
-                'source_health': source_health,
-                'destination_health': target_health,
-            }
+            if receipt['tables'] != target_summaries \
+                    or receipt['migrations'] != target_migrations \
+                    or receipt['schema_sha256'] != schema_digest(target_snapshot) \
+                    or receipt['journal_mode'] != target_journal_mode \
+                    or receipt['destination_health'] != target_health:
+                raise CommandError(
+                    'AtomicDB final destination no longer matches its origin '
+                    'snapshot receipt')
             atomic_write_json_exclusive(receipt_path, receipt)
+            receipt_published = True
+            with open(receipt_path, 'rb') as receipt_stream:
+                if receipt_stream.read() != receipt_bytes:
+                    raise CommandError(
+                        'AtomicDB published receipt bytes are not canonical')
 
         except CommandError:
             if destination is not None:
                 destination.close()
                 destination = None
+            if receipt_published:
+                try:
+                    os.unlink(receipt_path)
+                except FileNotFoundError:
+                    pass
             if destination_reserved:
                 cleanup_created_database(destination_path)
             raise
@@ -161,6 +225,11 @@ class Command(BaseCommand):
             if destination is not None:
                 destination.close()
                 destination = None
+            if receipt_published:
+                try:
+                    os.unlink(receipt_path)
+                except FileNotFoundError:
+                    pass
             if destination_reserved:
                 cleanup_created_database(destination_path)
             raise CommandError(
@@ -169,6 +238,11 @@ class Command(BaseCommand):
             if destination is not None:
                 destination.close()
                 destination = None
+            if receipt_published:
+                try:
+                    os.unlink(receipt_path)
+                except FileNotFoundError:
+                    pass
             if destination_reserved:
                 cleanup_created_database(destination_path)
             raise CommandError(

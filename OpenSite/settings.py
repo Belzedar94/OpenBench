@@ -10,11 +10,15 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
-import json
 import os
 
 from django.core.exceptions import ImproperlyConfigured
 
+from .atomicdb_identity import (
+    AtomicDBIdentityError,
+    split_activation_required,
+    validate_database_lineage_path,
+)
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -165,14 +169,17 @@ _atomicdb_receipt_path = _atomicdb_path + '.split-receipt.json'
 _atomicdb_exists = os.path.isfile(_atomicdb_path)
 _atomicdb_receipt_exists = os.path.isfile(_atomicdb_receipt_path)
 _atomicdb_requested = bool(_explicit_atomicdb_path)
-_atomicdb_durable = _atomicdb_exists or _atomicdb_receipt_exists
 
-if _atomicdb_requested or _atomicdb_durable:
-    if not (_atomicdb_exists and _atomicdb_receipt_exists):
-        raise ImproperlyConfigured(
-            'AtomicDB split activation requires both the database and its '
-            'verified split receipt')
+try:
+    _activate_atomicdb_split = split_activation_required(
+        explicit_requested=_atomicdb_requested,
+        database_exists=_atomicdb_exists,
+        receipt_exists=_atomicdb_receipt_exists,
+    )
+except AtomicDBIdentityError as error:
+    raise ImproperlyConfigured(str(error)) from error
 
+if _activate_atomicdb_split:
     if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
         _default_sqlite_path = os.path.realpath(os.path.abspath(
             os.path.expanduser(str(DATABASES['default']['NAME']))))
@@ -181,22 +188,15 @@ if _atomicdb_requested or _atomicdb_durable:
                 'OPENBENCH_ATOMICDB_PATH must differ from the default SQLite database path')
 
     try:
-        with open(_atomicdb_receipt_path, encoding='utf-8') as receipt_file:
-            _atomicdb_receipt = json.load(receipt_file)
-    except (OSError, TypeError, ValueError) as error:
+        with open(_atomicdb_receipt_path, 'rb') as receipt_file:
+            _atomicdb_receipt_bytes = receipt_file.read()
+        _atomicdb_receipt, _atomicdb_lineage = \
+            validate_database_lineage_path(
+                _atomicdb_path, _atomicdb_receipt_bytes)
+    except (OSError, AtomicDBIdentityError) as error:
         raise ImproperlyConfigured(
-            'AtomicDB split receipt must be valid UTF-8 JSON') from error
-
-    _expected_atomicdb_receipt = {
-        'schema': 'atomicdb.sqlite.split.v1',
-        'status': 'verified',
-        'destination': _atomicdb_path,
-        'migration_sentinel': 'atomicdb.0013_progresssnapshot',
-    }
-    for _field, _expected in _expected_atomicdb_receipt.items():
-        if not isinstance(_atomicdb_receipt, dict) or _atomicdb_receipt.get(_field) != _expected:
-            raise ImproperlyConfigured(
-                'AtomicDB split receipt has an invalid {}'.format(_field))
+            'AtomicDB split identity validation failed: {}'.format(
+                error)) from error
 
     DATABASES['atomicdb'] = {
         'ENGINE': 'django.db.backends.sqlite3',

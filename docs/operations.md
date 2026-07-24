@@ -63,16 +63,23 @@ existen la base y el sidecar
 exactamente:
 
 ```text
-schema=atomicdb.sqlite.split.v1
+schema=atomicdb.sqlite.split.v2
 status=verified
 destination=<realpath absoluto de atomicdb.sqlite3>
 migration_sentinel=atomicdb.0013_progresssnapshot
+line_id=<sha256 derivado del nonce y snapshot de origen>
+origin_snapshot_sha256=<sha256 del estado exacto copiado>
 ```
 
-El sidecar verificado es la configuración durable del split. Un fichero vacío,
-un JSON truncado, una ruta diferente, un sentinel distinto o una sola de las
-dos piezas hace que el proceso falle cerrado o permanezca en compatibilidad;
-nunca debe abrir ni crear una SQLite para decidir el alias.
+La SQLite contiene además exactamente una fila inmutable en
+`openbench_atomicdb_split_identity`. El SHA de los bytes exactos del receipt,
+el `line_id`, el snapshot de origen, ruta y baseline deben coincidir en ambas
+piezas. Esto detecta una DB antigua, un receipt cambiado o el cruce de dos
+parejas sin comparar en cada arranque las tablas de datos, que cambian
+legítimamente tras el cutover. Un fichero vacío, JSON truncado, ruta/baseline
+distintos, lineage ausente o una sola pieza hacen que el proceso falle cerrado.
+Sólo la ausencia simultánea de DB y receipt conserva el modo legacy `default`;
+la validación nunca crea una SQLite perdida.
 
 `OPENBENCH_ATOMICDB_PATH` queda reservado para un destino custom avanzado. Solo
 puede configurarse **después** de que ya existan una DB y receipt válidos para
@@ -89,8 +96,12 @@ debe apuntar la variable a una ruta vacía para “inicializarla”.
 2. Reservar ventana offline y obtener autorización explícita antes de tocar el
    worker AtomicDB T24. Registrar su comando, PID y estado de conexión. No
    detener workers, DATAGEN ni procesos ajenos.
-3. Detener las escrituras web de AtomicDB y, solo si fue autorizado, pausar el
-   T24. Verificar que no quedan leases/submits en tránsito.
+3. Con autorización vigente, detener completamente `openbench` y pausar el T24
+   con su comando/PID registrados. Verificar que no queda ningún proceso web,
+   lease, submit ni writer con la SQLite abierta. **Todo** debe permanecer
+   offline desde antes del snapshot hasta el restart final; `BEGIN IMMEDIATE`
+   bloquea durante la copia, pero no impide que un proceso legacy escriba en
+   `default` después de liberar el lock.
 4. Crear fuera del checkout un backup consistente de la SQLite `default`,
    registrar tamaño y SHA-256, y conservar también commit/configuración. No
    seguir si el backup o `PRAGMA integrity_check` falla.
@@ -100,41 +111,51 @@ debe apuntar la variable a una ruta vacía para “inicializarla”.
 
    ```bash
    ./.venv/bin/python manage.py split_atomicdb_sqlite \
-     --destination /opt/openbench/atomicdb.sqlite3
+     --destination /opt/openbench/atomicdb.sqlite3 \
+     --offline-confirmed
    ```
 
    El comando debe abortar si cualquiera de las dos rutas ya existe. Publica el
-   receipt verificado al final; un fallo previo no se convierte en activación.
-6. En un proceso nuevo, autenticar el destino permitiendo únicamente
-   migraciones de código aún pendientes, migrar explícitamente el app en su
-   alias y repetir la verificación estricta:
+   receipt v2 al final, después de copiar y sellar la fila de linaje; un fallo
+   previo no se convierte en activación.
+6. En un proceso nuevo, antes de la primera escritura, autenticar una sola vez
+   que tablas, migraciones y esquema siguen siendo exactamente el snapshot de
+   origen. Comprobar también que el shadow legacy y el destino tienen el mismo
+   esquema/historial:
 
    ```bash
    ./.venv/bin/python manage.py verify_atomicdb_database \
-     --allow-pending-migrations
-   ./.venv/bin/python manage.py migrate atomicdb \
-     --database atomicdb --no-input
-   ./.venv/bin/python manage.py verify_atomicdb_database
+     --require-origin-snapshot
+   ./.venv/bin/python manage.py verify_atomicdb_shadow \
+     --compare-active-schema
    ```
 
 7. Ejecutar `/opt/openbench/deploy.sh`. Si detecta el alias `atomicdb`, el
-   script autentica primero el destino sin escribir; sólo después migra
-   `default`, migra `atomicdb` y repite la verificación estricta antes de
-   `collectstatic` y del restart. Ningún fallo debe reiniciar el servicio.
+   script autentica primero destino y shadow sin escribir; después migra
+   `default` (incluido el schema shadow AtomicDB), verifica, migra `atomicdb` y
+   exige historia/esquema idénticos antes de `collectstatic` y del restart.
+   El flujo es reanudable si el shadow queda temporalmente por delante. Ningún
+   fallo debe reiniciar el servicio.
 8. Verificar health-check, alias, conteos de filas representativos, integridad,
    foreign keys y una operación de lectura. Si se pausó el worker, relanzarlo
    inmediatamente con su comando exacto en T24 y confirmar que reconecta.
 
 No borrar las tablas AtomicDB legacy de `default` durante el cutover ni durante
-el periodo de observación. Son una red de rollback, no evidencia de que el
-router siga escribiendo allí.
+el periodo de observación. Cada deploy mantiene **schema e historial** al día
+en ambos aliases, pero las filas del shadow quedan deliberadamente obsoletas
+desde la primera escritura en la DB separada. Toda migración `RunPython` futura
+debe usar explícitamente `schema_editor.connection.alias`; nunca el manager
+implícito, para transformar una vez cada DB y no dos veces el alias activo.
 
 ### Rollback
 
-- Antes de aceptar nuevas escrituras en la DB separada, el rollback consiste en
-  mantener todo offline, retirar el sidecar de la ruta de activación
-  (conservarlo junto a la DB, no destruirlo), iniciar un proceso nuevo en
-  `default` y verificarlo antes de reabrir tráfico.
+- Antes de aceptar nuevas escrituras en la DB separada, mantener web y T24
+  completamente offline, ejecutar `PRAGMA wal_checkpoint(TRUNCATE)` y mover,
+  sin borrar, **la DB, el receipt y cualquier `-wal`/`-shm`/`-journal`** a un
+  directorio de rollback nuevo, fechado y fuera de las rutas de activación.
+  Comprobar que DB y receipt están ambos ausentes; una sola pieza hace fallar
+  el arranque. Iniciar entonces un proceso nuevo, confirmar alias `default`,
+  ejecutar checks/lectura y sólo después reabrir tráfico.
 - Después de cualquier escritura post-cutover, **no** basta con retirar el
   sidecar: las tablas legacy ya están atrasadas. Detener escrituras, respaldar
   ambas bases y usar un procedimiento revisado de reconciliación inversa o

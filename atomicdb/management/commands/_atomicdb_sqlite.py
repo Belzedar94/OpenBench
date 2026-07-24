@@ -22,28 +22,25 @@ from django.apps import apps
 from django.conf import settings
 from django.core.management.base import CommandError
 
-
-ATOMICDB_TABLES = (
-    'atomicdb_analysistask',
-    'atomicdb_campaign',
-    'atomicdb_dbevent',
-    'atomicdb_edge',
-    'atomicdb_position',
-    'atomicdb_progresssnapshot',
-    'atomicdb_requestlog',
-    'atomicdb_workerping',
+from OpenSite.atomicdb_identity import (
+    MIGRATION_BASELINE,
+    ORIGIN_ATOMICDB_TABLES,
+    SPLIT_RECEIPT_SCHEMA,
+    canonical_json_bytes,
+    canonical_path,
+    create_lineage_table,
+    is_sha256,
 )
-MIGRATION_SENTINEL = 'atomicdb.0013_progresssnapshot'
-SPLIT_RECEIPT_SCHEMA = 'atomicdb.sqlite.split.v1'
+
+
+ATOMICDB_TABLES = ORIGIN_ATOMICDB_TABLES
+# Receipt field name retained for compatibility.  This is an immutable
+# cutover baseline, not an assertion that 0013 must remain the newest file.
+MIGRATION_SENTINEL = MIGRATION_BASELINE
 RESTORE_RECEIPT_SCHEMA = 'atomicdb.sqlite.restore.v1'
 
 _SAFE_IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _MIGRATION_FILE = re.compile(r'^(\d{4}_[A-Za-z0-9_]+)\.py$')
-
-
-def canonical_path(value) -> str:
-    """Return the exact absolute path used in durable receipts."""
-    return os.path.realpath(os.path.abspath(os.path.expanduser(str(value))))
 
 
 def sqlite_path_from_config(config: Mapping, label: str) -> str:
@@ -55,18 +52,23 @@ def sqlite_path_from_config(config: Mapping, label: str) -> str:
     return canonical_path(name)
 
 
-def atomicdb_migration_names() -> tuple[str, ...]:
-    migration_dir = Path(__file__).resolve().parents[2] / 'migrations'
+def atomicdb_migration_names(migration_dir=None) -> tuple[str, ...]:
+    migration_dir = (
+        Path(migration_dir)
+        if migration_dir is not None
+        else Path(__file__).resolve().parents[2] / 'migrations'
+    )
     names = []
     for path in migration_dir.iterdir():
         match = _MIGRATION_FILE.match(path.name)
         if match:
             names.append(match.group(1))
     names.sort()
-    if not names or '{}.{}'.format('atomicdb', names[-1]) != MIGRATION_SENTINEL:
+    baseline_name = MIGRATION_BASELINE.split('.', 1)[1]
+    if baseline_name not in names:
         raise CommandError(
-            'AtomicDB migration files do not end at {}'.format(
-                MIGRATION_SENTINEL))
+            'AtomicDB migration files do not contain required split baseline '
+            '{}'.format(MIGRATION_BASELINE))
     return tuple(names)
 
 
@@ -155,10 +157,7 @@ def atomic_write_json_exclusive(path: str, payload: Mapping) -> None:
     The receipt is intentionally created last.  A database without its receipt
     remains inactive under the settings-side activation protocol.
     """
-    encoded = (
-        json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True)
-        + '\n'
-    ).encode('utf-8')
+    encoded = canonical_json_bytes(payload)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, 'O_BINARY'):
         flags |= os.O_BINARY
@@ -242,11 +241,7 @@ def validate_split_receipt(receipt: Mapping, destination: str) -> None:
 
 
 def _is_sha256(value) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in '0123456789abcdef' for character in value)
-    )
+    return is_sha256(value)
 
 
 def current_atomicdb_tables() -> tuple[str, ...]:
@@ -461,10 +456,10 @@ def validate_migrations(
     applied = tuple(row[2] for row in rows)
     if len(set(applied)) != len(applied):
         raise CommandError('AtomicDB contains duplicate migration rows')
-    if MIGRATION_SENTINEL.split('.', 1)[1] not in applied:
+    if MIGRATION_BASELINE.split('.', 1)[1] not in applied:
         raise CommandError(
-            'AtomicDB migration sentinel is not applied: {}'.format(
-                MIGRATION_SENTINEL))
+            'AtomicDB migration baseline is not applied: {}'.format(
+                MIGRATION_BASELINE))
     if allow_pending:
         if applied != expected[:len(applied)]:
             raise CommandError(
@@ -592,6 +587,9 @@ def create_split_target(
         source: sqlite3.Connection,
         destination: sqlite3.Connection,
         snapshot: Mapping,
+        *,
+        receipt: Mapping,
+        receipt_bytes: bytes,
 ) -> None:
     destination.execute('PRAGMA foreign_keys=OFF')
     destination.execute('BEGIN IMMEDIATE')
@@ -610,6 +608,7 @@ def create_split_target(
         )
         for name in sorted(snapshot['indexes']):
             destination.execute(snapshot['indexes'][name]['sql'])
+        create_lineage_table(destination, receipt, receipt_bytes)
         validate_database_health(destination)
         destination.execute('COMMIT')
     except Exception:

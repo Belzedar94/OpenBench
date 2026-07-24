@@ -11,9 +11,114 @@ from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connections
+from django.test import SimpleTestCase
 
+from OpenSite.atomicdb_identity import (
+    LINEAGE_TABLE,
+    split_activation_required,
+)
+
+from .management.commands._atomicdb_sqlite import (
+    atomicdb_migration_names,
+    validate_migrations,
+)
 from .models import Position
 from .testing import TransactionTestCase
+
+
+class SQLiteSplitContractTests(SimpleTestCase):
+
+    def test_activation_falls_back_only_when_both_artifacts_are_absent(self):
+        self.assertFalse(split_activation_required(
+            explicit_requested=False,
+            database_exists=False,
+            receipt_exists=False,
+        ))
+        for database_exists, receipt_exists in ((True, False), (False, True)):
+            with self.assertRaisesRegex(
+                    ValueError, 'requires both the database'):
+                split_activation_required(
+                    explicit_requested=False,
+                    database_exists=database_exists,
+                    receipt_exists=receipt_exists,
+                )
+
+    def test_migration_baseline_can_have_known_future_successors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            migration_dir = Path(temporary)
+            for name in (
+                    '0012_analysistask_lease_session.py',
+                    '0013_progresssnapshot.py',
+                    '0014_future_probe.py'):
+                (migration_dir / name).touch()
+            self.assertEqual(
+                atomicdb_migration_names(migration_dir),
+                (
+                    '0012_analysistask_lease_session',
+                    '0013_progresssnapshot',
+                    '0014_future_probe',
+                ),
+            )
+
+            (migration_dir / '0013_progresssnapshot.py').unlink()
+            with self.assertRaisesMessage(
+                    CommandError, 'required split baseline'):
+                atomicdb_migration_names(migration_dir)
+
+    def test_pending_migration_contract_accepts_exact_prefix_after_baseline(self):
+        connection = sqlite3.connect(':memory:')
+        self.addCleanup(connection.close)
+        connection.execute(
+            """
+            CREATE TABLE django_migrations (
+                id INTEGER PRIMARY KEY,
+                app TEXT NOT NULL,
+                name TEXT NOT NULL,
+                applied TEXT NOT NULL
+            )
+            """
+        )
+        names = (
+            '0012_analysistask_lease_session',
+            '0013_progresssnapshot',
+            '0014_future_probe',
+        )
+        for row_id, name in enumerate(names[:2], start=1):
+            connection.execute(
+                """
+                INSERT INTO django_migrations (id, app, name, applied)
+                VALUES (?, 'atomicdb', ?, '2026-07-24T00:00:00Z')
+                """,
+                (row_id, name),
+            )
+        with mock.patch(
+                'atomicdb.management.commands._atomicdb_sqlite.'
+                'atomicdb_migration_names',
+                return_value=names):
+            validate_migrations(connection, allow_pending=True)
+            with self.assertRaisesMessage(
+                    CommandError, 'migrations are not current'):
+                validate_migrations(connection, allow_pending=False)
+
+            connection.execute(
+                """
+                INSERT INTO django_migrations (id, app, name, applied)
+                VALUES (3, 'atomicdb', '0014_future_probe',
+                        '2026-07-24T00:00:01Z')
+                """
+            )
+            validate_migrations(connection, allow_pending=False)
+
+            connection.execute(
+                """
+                UPDATE django_migrations
+                   SET name = '0014_unknown'
+                 WHERE id = 3
+                """
+            )
+            with self.assertRaisesMessage(
+                    CommandError, 'not an exact known prefix'):
+                validate_migrations(connection, allow_pending=True)
 
 
 @skipUnless(
@@ -57,6 +162,7 @@ class SQLiteSplitCommandTests(TransactionTestCase):
             call_command(
                 'split_atomicdb_sqlite',
                 destination=str(self.destination),
+                offline_confirmed=True,
                 stdout=output,
             )
         return json.loads(output.getvalue())
@@ -82,13 +188,15 @@ class SQLiteSplitCommandTests(TransactionTestCase):
         self.assertTrue(self.receipt.is_file())
 
         payload = json.loads(self.receipt.read_text(encoding='utf-8'))
-        self.assertEqual(payload['schema'], 'atomicdb.sqlite.split.v1')
+        self.assertEqual(payload['schema'], 'atomicdb.sqlite.split.v2')
         self.assertEqual(payload['status'], 'verified')
         self.assertEqual(
             payload['migration_sentinel'],
             'atomicdb.0013_progresssnapshot',
         )
         self.assertEqual(payload['tables']['atomicdb_position']['rows'], 1)
+        self.assertEqual(len(payload['line_id']), 64)
+        self.assertEqual(len(payload['origin_snapshot_sha256']), 64)
 
         source = sqlite3.connect(self.source)
         destination = sqlite3.connect(self.destination)
@@ -115,6 +223,12 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                 destination.execute('PRAGMA foreign_key_check').fetchall(),
                 [],
             )
+            self.assertEqual(
+                destination.execute(
+                    'SELECT COUNT(*) FROM "{}"'.format(
+                        LINEAGE_TABLE)).fetchone()[0],
+                1,
+            )
         finally:
             source.close()
             destination.close()
@@ -137,6 +251,7 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                 call_command(
                     'split_atomicdb_sqlite',
                     destination=str(self.destination),
+                    offline_confirmed=True,
                 )
 
         self.assertFalse(self.destination.exists())
@@ -167,6 +282,7 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                     call_command(
                         'split_atomicdb_sqlite',
                         destination=str(self.destination),
+                        offline_confirmed=True,
                     )
         finally:
             blocker.rollback()
@@ -195,3 +311,130 @@ class SQLiteSplitCommandTests(TransactionTestCase):
             with self.assertRaisesMessage(
                     CommandError, 'must persist WAL'):
                 call_command('verify_atomicdb_database')
+
+    def test_split_requires_explicit_offline_attestation(self):
+        with self._default_source(), self.assertRaisesMessage(
+                CommandError, '--offline-confirmed'):
+            call_command(
+                'split_atomicdb_sqlite',
+                destination=str(self.destination),
+            )
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_lineage_binding_rejects_receipt_tamper_but_allows_data_growth(self):
+        self._split()
+        with self._active_split():
+            call_command(
+                'verify_atomicdb_database',
+                require_origin_snapshot=True,
+            )
+
+            connection = sqlite3.connect(self.destination)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO atomicdb_position
+                        (key, fen, status, expanded, depth_invested,
+                         nodes_invested, time_invested, visits, priority,
+                         updated)
+                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0.0, 0, 0.0, ?)
+                    """,
+                    (
+                        '2' * 64,
+                        '8/8/8/8/8/8/8/K6k b - - 0 1',
+                        '2026-07-24 00:00:00',
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            # Ordinary verification authenticates lineage and current schema
+            # without comparing mutable rows to their origin digests.
+            call_command('verify_atomicdb_database')
+            with self.assertRaisesMessage(
+                    CommandError, 'sealed origin snapshot'):
+                call_command(
+                    'verify_atomicdb_database',
+                    require_origin_snapshot=True,
+                )
+
+            payload = json.loads(self.receipt.read_text(encoding='utf-8'))
+            payload['line_id'] = '0' * 64
+            self.receipt.write_text(
+                json.dumps(payload, sort_keys=True, indent=2) + '\n',
+                encoding='utf-8',
+            )
+            with self.assertRaisesMessage(
+                    CommandError, 'split identity is invalid'):
+                call_command('verify_atomicdb_database')
+
+    def test_lineage_binding_rejects_byte_change_and_database_tamper(self):
+        self._split()
+        original_receipt = self.receipt.read_bytes()
+        with self._active_split():
+            self.receipt.write_bytes(original_receipt + b'\n')
+            with self.assertRaisesMessage(
+                    CommandError, 'split identity is invalid'):
+                call_command('verify_atomicdb_database')
+            self.receipt.write_bytes(original_receipt)
+
+            connection = sqlite3.connect(self.destination)
+            try:
+                connection.execute(
+                    'UPDATE "{}" SET receipt_sha256 = ?'.format(
+                        LINEAGE_TABLE),
+                    ('0' * 64,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesMessage(
+                    CommandError, 'split identity is invalid'):
+                call_command('verify_atomicdb_database')
+
+    def test_shadow_verifier_compares_schema_not_stale_rows(self):
+        self._split()
+        with self._default_source(), self._active_split():
+            output = StringIO()
+            call_command(
+                'verify_atomicdb_shadow',
+                compare_active_schema=True,
+                stdout=output,
+            )
+            result = json.loads(output.getvalue())
+            self.assertEqual(result['status'], 'verified')
+
+            # Runtime data intentionally diverges after cutover and must not
+            # invalidate a schema/history rollback shadow.
+            connection = sqlite3.connect(self.destination)
+            try:
+                connection.execute(
+                    'UPDATE atomicdb_position SET visits = visits + 1')
+                connection.commit()
+            finally:
+                connection.close()
+            call_command(
+                'verify_atomicdb_shadow',
+                compare_active_schema=True,
+                stdout=StringIO(),
+            )
+
+            connection = sqlite3.connect(self.destination)
+            try:
+                connection.execute(
+                    """
+                    CREATE INDEX atomicdb_test_schema_drift
+                    ON atomicdb_position(eval_cp)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesMessage(
+                    CommandError, 'shadow and active schemas differ'):
+                call_command(
+                    'verify_atomicdb_shadow',
+                    compare_active_schema=True,
+                )

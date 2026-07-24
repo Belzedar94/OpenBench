@@ -9,6 +9,20 @@ def _selected_alias():
     return getattr(settings, 'ATOMICDB_DATABASE_ALIAS', 'default')
 
 
+def _atomicdb_migration_aliases():
+    """Keep the legacy default schema current as a rollback shadow.
+
+    Runtime reads and writes still use only ``_selected_alias()``.  Once the
+    split is active, migrations must run on both SQLite files so Django never
+    records an AtomicDB migration as applied on ``default`` while silently
+    skipping its schema operations.
+    """
+    selected = _selected_alias()
+    if selected == 'default':
+        return {'default'}
+    return {'default', selected}
+
+
 class AtomicDBRouter:
 
     def db_for_read(self, model, **hints):
@@ -36,7 +50,7 @@ class AtomicDBRouter:
 
     def allow_migrate(self, db, app_label, model_name=None, **hints):
         if app_label == ATOMICDB_APP_LABEL:
-            return db == _selected_alias()
+            return db in _atomicdb_migration_aliases()
         if db == ATOMICDB_DATABASE_ALIAS:
             return False
         return None

@@ -3,13 +3,18 @@ import os
 
 from django.core.management.base import BaseCommand, CommandError
 
+from OpenSite.atomicdb_identity import (
+    AtomicDBIdentityError,
+    parse_and_validate_receipt,
+    validate_database_lineage,
+)
+
 from ._atomicdb_sqlite import (
     ATOMICDB_TABLES,
     configured_atomicdb_path,
     current_atomicdb_tables,
     database_summaries,
     open_read_only,
-    read_receipt,
     require_wal,
     schema_digest,
     schema_snapshot,
@@ -38,22 +43,45 @@ class Command(BaseCommand):
                 'could depend on those pending migrations are deferred.'
             ),
         )
+        parser.add_argument(
+            '--require-origin-snapshot',
+            action='store_true',
+            help=(
+                'Require exact origin table, migration and schema digests. '
+                'Use only during offline cutover before the first write.'),
+        )
 
     def handle(self, *args, **options):
         allow_pending = bool(options['allow_pending_migrations'])
+        require_origin = bool(options['require_origin_snapshot'])
         destination = configured_atomicdb_path()
         receipt_path = split_receipt_path(destination)
 
         if not os.path.isfile(receipt_path):
             raise CommandError(
                 'AtomicDB split receipt is missing: {}'.format(receipt_path))
-        receipt = read_receipt(receipt_path)
-        validate_split_receipt(receipt, destination)
+        try:
+            with open(receipt_path, 'rb') as receipt_stream:
+                receipt_bytes = receipt_stream.read()
+            receipt = parse_and_validate_receipt(
+                receipt_bytes, destination)
+            validate_split_receipt(receipt, destination)
+        except (OSError, AtomicDBIdentityError) as error:
+            raise CommandError(
+                'AtomicDB split identity is invalid: {}'.format(error)
+            ) from error
 
         connection = open_read_only(destination)
         try:
             health = validate_database_health(connection)
             require_wal(connection)
+            try:
+                lineage = validate_database_lineage(
+                    connection, receipt, receipt_bytes)
+            except AtomicDBIdentityError as error:
+                raise CommandError(
+                    'AtomicDB split identity is invalid: {}'.format(error)
+                ) from error
             migrations = validate_migrations(
                 connection, allow_pending=allow_pending)
             expected_tables = (
@@ -75,6 +103,19 @@ class Command(BaseCommand):
 
             summaries = database_summaries(
                 connection, tables=expected_tables)
+            if require_origin:
+                if allow_pending:
+                    raise CommandError(
+                        '--require-origin-snapshot cannot be combined with '
+                        '--allow-pending-migrations')
+                if (
+                        summaries != receipt['tables']
+                        or migrations != receipt['migrations']
+                        or schema_digest(snapshot)
+                        != receipt['schema_sha256']):
+                    raise CommandError(
+                        'AtomicDB current state does not exactly match the '
+                        'sealed origin snapshot')
         finally:
             connection.close()
 
@@ -83,6 +124,7 @@ class Command(BaseCommand):
             'destination': destination,
             'receipt': receipt_path,
             'allow_pending_migrations': allow_pending,
+            'require_origin_snapshot': require_origin,
             'migration_rows': migrations['rows'],
             'migration_sentinel': receipt['migration_sentinel'],
             'tables': {
@@ -92,5 +134,9 @@ class Command(BaseCommand):
             'schema_sha256': schema_digest(snapshot),
             'journal_mode': 'wal',
             'health': health,
+            'line_id': lineage['line_id'],
+            'receipt_sha256': lineage['receipt_sha256'],
+            'origin_snapshot_sha256': lineage[
+                'origin_snapshot_sha256'],
         }
         self.stdout.write(json.dumps(result, sort_keys=True))
