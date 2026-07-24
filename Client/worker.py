@@ -77,7 +77,10 @@ from genfens import create_genfens_opening_book
 ## Basic configuration of the Client. These timeouts can be changed at will
 
 CLIENT_VERSION   = 41 # Client version to send to the Server
-TIMEOUT_HTTP     = 30 # Timeout in seconds for HTTP requests
+# 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
+# jobs hold multi-second transactions; heartbeats were dying at 30s while the
+# server would have answered shortly after).
+TIMEOUT_HTTP     = 90 # Timeout in seconds for HTTP requests
 TIMEOUT_ERROR    = 10 # Timeout in seconds when any errors are thrown
 TIMEOUT_WORKLOAD = 30 # Timeout in seconds between workload requests
 REPORT_INTERVAL  = 30 # Seconds between reports to the Server
