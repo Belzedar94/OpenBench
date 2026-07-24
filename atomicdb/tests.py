@@ -4,6 +4,7 @@ completitud de movegen, backup determinista bajo replay."""
 from datetime import timedelta
 from unittest import mock
 
+from django.db import OperationalError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -463,6 +464,16 @@ class RequestTests(TestCase):
             RequestLog.objects.create(ip='127.0.0.1', position=a)
         r = self.client.post(f'/atomicdb/request/{b.key}/')
         self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.json(), {'status': 'rate-limited'})
+
+    @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
+    def test_request_queue_full_keeps_structured_status(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'queue-full'})
 
     def test_request_dedup_same_ip_position(self):
         p = ingest.get_or_create_position(logic.start_fen())
@@ -531,6 +542,65 @@ class RequestTests(TestCase):
             (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
              128_000_000),
         )
+
+    @mock.patch(
+        'atomicdb.views.ingest.request_analysis',
+        side_effect=OperationalError('database is locked'),
+    )
+    def test_request_lock_is_reported_as_retryable_busy(self, request_analysis):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'busy'})
+        self.assertEqual(response['Retry-After'], '2')
+        self.assertFalse(RequestLog.objects.filter(position=p).exists())
+        request_analysis.assert_called_once()
+
+    @mock.patch(
+        'atomicdb.views.RequestLog.objects.create',
+        side_effect=OperationalError('database is locked'),
+    )
+    def test_request_log_lock_rolls_back_new_task(self, create_log):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'busy'})
+        self.assertFalse(AnalysisTask.objects.filter(position=p).exists())
+        self.assertFalse(RequestLog.objects.filter(position=p).exists())
+        create_log.assert_called_once()
+
+    @mock.patch(
+        'atomicdb.views.ingest.request_analysis',
+        side_effect=OperationalError('disk I/O error'),
+    )
+    def test_non_lock_database_error_is_not_hidden_or_retried(
+            self, request_analysis):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        with self.assertRaisesMessage(OperationalError, 'disk I/O error'):
+            self.client.post(f'/atomicdb/request/{p.key}/')
+
+        request_analysis.assert_called_once()
+
+    def test_explorer_retries_transient_request_contention(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        response = self.client.get(f'/atomicdb/explore/{p.key}/')
+
+        self.assertContains(response, "r.status === 503")
+        self.assertContains(response, "'busy'")
+        self.assertContains(response, 'Server busy, retrying...')
+        self.assertContains(response, 'error.retryable === true')
+        self.assertContains(response, "'rate-limited'")
+        self.assertContains(response, "'queue-full'")
+        self.assertContains(response, 'if (!data)')
+        self.assertNotContains(response, '!r.ok || !data')
 
 
 class MachineVisibilityTests(TestCase):
