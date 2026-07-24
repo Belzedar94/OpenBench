@@ -55,10 +55,27 @@
           })
           .catch(() => setTimeout(() => poll(tries - 1), 10000));
       }
-      btn.addEventListener('click', function () {
-        btn.disabled = true;
+      function requestAnalysis(attempt) {
         fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
-          .then(r => r.json())
+          .then(async r => {
+            const data = await r.json().catch(() => null);
+            if (r.status === 503 && data && data.status === 'busy') {
+              const error = new Error('server busy');
+              error.retryable = true;
+              error.retryAfter = Number(r.headers.get('Retry-After')) || 2;
+              throw error;
+            }
+            // Structured application statuses (including 429 rate-limited
+            // and 503 queue-full) still use their existing user-facing text.
+            // Only an unparseable server response is an opaque server error.
+            if (!data) {
+              const error = new Error('server error');
+              error.retryable = false;
+              error.server = true;
+              throw error;
+            }
+            return data;
+          })
           .then(d => {
             btn.textContent = {
               'queued': 'Queued, waiting for a worker...',
@@ -71,9 +88,28 @@
             if (['queued', 'already-queued',
                  'already-requested'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
+            } else {
+              btn.disabled = false;
             }
           })
-          .catch(() => { btn.textContent = 'Network error'; btn.disabled = false; });
+          .catch(error => {
+            if (attempt < 9 && error.retryable === true) {
+              const delay = Math.max(
+                error.retryAfter * 1000,
+                Math.min(1000 + attempt * 1000, 5000));
+              btn.textContent = 'Server busy, retrying...';
+              setTimeout(() => requestAnalysis(attempt + 1), delay);
+            } else {
+              btn.textContent = error.server
+                ? 'Server error, try again'
+                : 'Network error, try again';
+              btn.disabled = false;
+            }
+          });
+      }
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        requestAnalysis(0);
       });
     })();
     </script>
