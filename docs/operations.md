@@ -147,6 +147,24 @@ desde la primera escritura en la DB separada. Toda migración `RunPython` futura
 debe usar explícitamente `schema_editor.connection.alias`; nunca el manager
 implícito, para transformar una vez cada DB y no dos veces el alias activo.
 
+### Backup diario tras el split
+
+El cron de producción debe respaldar las dos SQLite como snapshots online
+independientes y conservar el receipt inmutable junto a la copia AtomicDB. El
+script versionado se instala y se prueba así:
+
+```bash
+install -o root -g root -m 0755 \
+  Scripts/openbench-db-backup /etc/cron.daily/openbench-db-backup
+/etc/cron.daily/openbench-db-backup
+```
+
+La ejecución usa un lock no bloqueante, verifica `integrity_check`, foreign
+keys, el lineage/receipt y SHA-256 antes de publicar cada cohorte diaria bajo
+`/var/backups/openbench/`. Retiene catorce cohortes completas. Si sólo existe
+una de las dos piezas de activación (`atomicdb.sqlite3` o su receipt), aborta
+sin publicar ni purgar backups.
+
 ### Rollback
 
 - Antes de aceptar nuevas escrituras en la DB separada, mantener web y T24
