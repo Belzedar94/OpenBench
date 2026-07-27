@@ -1,5 +1,7 @@
 from unittest import mock
 
+from django.test import override_settings
+
 from . import ingest, logic
 from .models import DBEvent, Edge
 from .testing import TestCase
@@ -13,7 +15,18 @@ class PriorityRefreshCacheTests(TestCase):
     def tearDown(self):
         ingest._priority_refresh_cache.update({'at': 0.0})
 
-    def test_two_consecutive_task_requests_refresh_once(self):
+    def test_task_requests_no_longer_refresh_at_all(self):
+        """P0d: the global pass moved to ``refresh_selector``."""
+        ingest.get_or_create_position(logic.start_fen())
+        original = ingest._regret_from_root
+        with mock.patch('atomicdb.ingest._regret_from_root',
+                        wraps=original) as refresh:
+            ingest.next_tasks(1)
+            ingest.next_tasks(1)
+        self.assertEqual(refresh.call_count, 0)
+
+    @override_settings(ATOMICDB_INLINE_SELECTOR=True)
+    def test_inline_fallback_still_refreshes_only_once(self):
         ingest.get_or_create_position(logic.start_fen())
         original = ingest._regret_from_root
         with mock.patch('atomicdb.ingest._regret_from_root',

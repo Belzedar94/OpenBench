@@ -1,0 +1,64 @@
+# AtomicDB selector refresher — example systemd unit.
+#
+# Copy to /etc/systemd/system/atomicdb-selector.service, adjust User, paths and
+# the environment block, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-selector
+#     journalctl -u atomicdb-selector -f
+#
+# What it does: recomputes the ``priority`` column that orders the AtomicDB
+# work queue.  That computation is a Dijkstra over the entire DAG plus two
+# in-memory dictionaries of every position and edge; it used to run inside
+# /atomicdb/api/lease, which meant every worker poll could pay for it, in each
+# of the five gunicorn processes independently.
+#
+# If it is stopped, NOTHING breaks: the queue keeps being served in the order
+# the last refresh left, tasks keep being leased and submitted, and priorities
+# simply go stale.  Stale priorities cost relevance, not correctness.
+#
+# Start order: after `manage.py migrate`.  Independent of the web service and
+# of atomicdb-ingest.
+#
+# ONE process, deliberately.  Two would compute the same global pass twice and
+# fight for the SQLite write lock.
+#
+# Emergency fallback: set ATOMICDB_INLINE_SELECTOR=True in the WEB process's
+# environment and restart it.  The lease path then refreshes priorities inline
+# again, through this same code, and this service can stay stopped.
+
+[Unit]
+Description=AtomicDB selector priority refresher
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openbench
+Group=openbench
+WorkingDirectory=/home/openbench/OpenBench
+
+# Same environment the web process uses. The secret key is only needed
+# because settings import it; the refresher serves no HTTP.
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+# EnvironmentFile=/etc/openbench/openbench.env
+
+ExecStart=/home/openbench/OpenBench/.venv/bin/python manage.py \
+    refresh_selector --loop --interval 60
+
+# A refresh interrupted mid-pass leaves the priorities it had already written;
+# they are a heuristic ordering, so a partial pass is harmless.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

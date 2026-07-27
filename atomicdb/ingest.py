@@ -833,13 +833,25 @@ def _regret_from_root():
     return regret
 
 
-def refresh_priorities():
+def refresh_priorities(force=False):
     """§4.1 — recalculo global (llamado por el selector). Prioridad =
     cercania al cierre local - regret acumulado desde la raiz - visitas.
-    Respeta las lapidas (las ramas muertas no resucitan)."""
+    Respeta las lapidas (las ramas muertas no resucitan).
+
+    Es O(grafo entero) — Dijkstra sobre todos los nodos y aristas, mas dos
+    diccionarios con la base cargada en RAM.  A 450k posiciones son segundos
+    de CPU; a 4,5M son decenas de segundos y gigabytes, multiplicados por cada
+    proceso de gunicorn que lo dispare.  Por eso ya NO corre dentro de la
+    request del worker (ver ``next_tasks``): lo llama el servicio
+    ``refresh_selector``, un solo proceso, fuera del camino HTTP.
+
+    ``force`` salta la cache de PRIORITY_REFRESH_SECONDS; el servicio la usa
+    para que su propio intervalo sea el unico reloj que manda.
+    """
     now = time.monotonic()
     cached = _priority_refresh_cache
-    if cached['at'] and now - cached['at'] < PRIORITY_REFRESH_SECONDS:
+    if (not force and cached['at']
+            and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
         return False
 
     regret = _regret_from_root()
@@ -881,9 +893,30 @@ def budget_for(pos):
     return budget
 
 
+def inline_selector_enabled():
+    """Interruptor de emergencia: el Dijkstra global, dentro de la request.
+
+    Con ``ATOMICDB_INLINE_SELECTOR = True`` vuelve el comportamiento anterior
+    a P0d — ``next_tasks`` refresca prioridades el mismo, por el MISMO codigo.
+    Es la salida de emergencia si el servicio ``refresh_selector`` se cae y no
+    hay nadie para levantarlo: una linea de settings y un reinicio del web,
+    sin desplegar otro camino de codigo.
+    """
+    return bool(getattr(settings, 'ATOMICDB_INLINE_SELECTOR', False))
+
+
 def next_tasks(n):
-    """Selector global best-first sobre todo el arbol (sin campanas)."""
-    refresh_priorities()
+    """Selector global best-first sobre todo el arbol (sin campanas).
+
+    Consume ``priority`` TAL Y COMO ESTE.  Quien la mantiene es el servicio
+    ``refresh_selector``; aqui no se recalcula nada porque este codigo corre
+    dentro de ``/atomicdb/api/lease``, y un Dijkstra sobre el grafo entero no
+    tiene sitio en una request HTTP.  Una prioridad de hace un minuto ordena
+    la cola igual de bien: el selector es una heuristica de PARA DONDE MIRAR,
+    no una fuente de verdad.
+    """
+    if inline_selector_enabled():
+        refresh_priorities()
     tasks = []
     for pos in Position.objects.filter(status='UNKNOWN') \
                                .order_by('-priority')[:4 * n]:

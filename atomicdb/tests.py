@@ -248,6 +248,9 @@ class SelectorTests(TestCase):
         b = Edge.objects.get(parent=a, move_uci='e2e4').child
         b.eval_cp, b.expanded = 800, True
         b.save()
+        # The global pass is the selector SERVICE's job now, not the lease
+        # path's; the ordering it produces is what this test is about.
+        ingest.refresh_priorities()
         tasks = ingest.next_tasks(1)
         self.assertEqual(tasks[0].position_id, b.key)
 
@@ -274,6 +277,7 @@ class SelectorTests(TestCase):
         p = ingest.get_or_create_position(logic.start_fen())
         p.eval_cp = 9_997   # mate visto por el motor, aun sin cerrar
         p.save()
+        ingest.refresh_priorities()
         tasks = ingest.next_tasks(1)
         self.assertEqual(tasks[0].position_id, p.key)
         self.assertGreaterEqual(tasks[0].budget_nodes,
@@ -305,8 +309,11 @@ class SelectorTests(TestCase):
             '4k3/8/8/8/8/8/4P3/4K3 w - - 0 1')
         live.eval_cp = 50   # viva pero modesta
         live.save()
+        ingest.refresh_priorities()
         ingest.next_tasks(3)              # entierra a los 20 zombis
-        tasks = ingest.next_tasks(3)      # el refresh NO debe resucitarlos
+        ingest._priority_refresh_cache['at'] = 0.0
+        ingest.refresh_priorities()       # el refresh NO debe resucitarlos
+        tasks = ingest.next_tasks(3)
         self.assertIn(live.key, [t.position_id for t in tasks])
 
     def test_new_edge_revives_tombstoned_position(self):
