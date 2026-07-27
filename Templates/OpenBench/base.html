@@ -8,7 +8,8 @@
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="dark light">
-        <meta name="theme-color" id="atomicdb-theme-color" content="#161512">
+        <meta name="theme-color" id="atomicdb-theme-color" content="#222222"
+              data-theme-dark="#222222" data-theme-light="#ffffff">
 
         <script>
             (function () {
@@ -31,8 +32,10 @@
                 }
                 root.dataset.theme = theme;
                 root.style.colorScheme = theme;
-                document.getElementById("atomicdb-theme-color").content =
-                    theme === "light" ? "#f5f2ea" : "#161512";
+                var meta = document.getElementById("atomicdb-theme-color");
+                meta.content = theme === "light"
+                    ? meta.dataset.themeLight
+                    : meta.dataset.themeDark;
             }());
         </script>
 
