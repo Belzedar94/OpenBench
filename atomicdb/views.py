@@ -1517,26 +1517,59 @@ def home(request):
         ]})
 
 
+# Cuatro, cinco o seis campos.  Un FEN pegado de un GUI o de un chat llega a
+# menudo con el contador de 50 y sin el numero de jugada, y rechazarlo por eso
+# es rechazar al usuario por un detalle que ademas da igual: la identidad
+# canonica pone los dos contadores a cero de todas formas.
 FEN_SHAPE = re.compile(
     r'^[pnbrqkPNBRQK1-8]+(/[pnbrqkPNBRQK1-8]+){7} [wb]'
-    r' (-|[KQkqA-Ha-h]+) (-|[a-h][36])( \d+ \d+)?$')
+    r' (-|[KQkqA-Ha-h]+) (-|[a-h][36])( \d+)?( \d+)?$')
+
+
+class PublicFenError(ValueError):
+    """A public FEN that cannot be turned into a position, and why.
+
+    The reason matters: "this is not a legal atomic position" and "we do not
+    have this position yet" are different answers, and answering the first
+    with the second is how a visitor concludes the site is broken.
+    """
+
+    def __init__(self, reason, detail=''):
+        super().__init__(detail or reason)
+        self.reason = reason
 
 
 def _parse_public_fen(raw):
     """Validacion estricta de FEN publica ANTES de pasarla a pyffish."""
     raw = ' '.join(raw.replace('_', ' ').split())
-    if len(raw) > 100 or not FEN_SHAPE.match(raw):
-        raise ValueError('malformed fen')
+    if not raw:
+        raise PublicFenError('empty', 'no FEN given')
+    if len(raw) > 100:
+        raise PublicFenError('malformed', 'FEN is too long')
+    if not FEN_SHAPE.match(raw):
+        raise PublicFenError(
+            'malformed',
+            'expected "board side castling en-passant [halfmove] [fullmove]"')
     board = raw.split()[0]
     if board.count('K') != 1 or board.count('k') != 1:
-        raise ValueError('need both kings')
+        raise PublicFenError('kings', 'an atomic position needs exactly one '
+                                      'king per side')
     for rank in board.split('/'):
         if sum(int(c) if c.isdigit() else 1 for c in rank) != 8:
-            raise ValueError('bad rank')
-    if len(raw.split()) == 4:
-        raw += ' 0 1'
-    fen = logic.canonical_fen(raw)
-    logic.legal_moves(fen)   # pyffish la acepta
+            raise PublicFenError('ranks', 'every rank must describe 8 squares')
+    fields = raw.split()
+    # The canonical identity zeroes both counters anyway, so a missing one is
+    # not information we lose: it is information that never mattered.
+    while len(fields) < 6:
+        fields.append('0' if len(fields) == 4 else '1')
+    try:
+        fen = logic.canonical_fen(' '.join(fields))
+        logic.legal_moves(fen)   # pyffish la acepta
+    except PublicFenError:
+        raise
+    except Exception as error:
+        raise PublicFenError('illegal',
+                             'the atomic rules reject this position')             from error
     return fen
 
 
@@ -1554,7 +1587,7 @@ def api_query(request):
     stm_white = pos.fen.split()[1] == 'w'
     # ``score`` es el mejor conocimiento actual (respaldado por el subarbol);
     # ``point`` conserva la eval puntual cruda de esta misma posicion.
-    known = ingest.best_known_eval(pos) if pos.status == 'UNKNOWN' \
+    known = ingest.displayed_eval(pos) if pos.status == 'UNKNOWN' \
         else pos.eval_cp
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
@@ -1626,8 +1659,15 @@ def fen_jump(request):
         return redirect('/atomicdb/')
     try:
         fen = _parse_public_fen(request.POST.get('fen', ''))
+    except PublicFenError as error:
+        # "Not a legal atomic position" is not the same answer as "we do not
+        # have this position yet", and saying the second when the first is
+        # true is how a visitor concludes the explorer is broken.
+        return render(request, 'atomicdb/missing.html',
+                      {'fen_error': str(error)}, status=400)
     except Exception:
-        return render(request, 'atomicdb/missing.html', status=400)
+        return render(request, 'atomicdb/missing.html',
+                      {'fen_error': 'that FEN could not be read'}, status=400)
     key = logic.key_of(fen)
     if not Position.objects.filter(key=key).exists():
         ip = _client_ip(request)
@@ -1985,13 +2025,14 @@ def explore(request, key):
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     # Cabecera: el valor RESPALDADO (lo que el subarbol ya sabe) con caida
     # limpia a la eval puntual. Un solo flip a la perspectiva del que mueve.
-    known = None if pos.status != 'UNKNOWN' else (
-        pos.backed_eval if pos.backed_eval is not None else pos.eval_cp)
+    # Derivado de los hijos que esta misma pagina esta pintando: la columna
+    # almacenada puede ir por detras por el corte de coste del ascenso, y la
+    # cabecera no debe contradecir a su propia tabla.
+    known = None if pos.status != 'UNKNOWN' else ingest.displayed_eval(pos)
     eval_stm = None if known is None else (known if stm_white else -known)
     point_stm = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
-    eval_backed = (pos.backed_eval is not None
-                   and pos.backed_eval != pos.eval_cp
+    eval_backed = (known is not None and known != pos.eval_cp
                    and pos.status == 'UNKNOWN')
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
