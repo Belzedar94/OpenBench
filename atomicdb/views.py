@@ -1607,7 +1607,10 @@ def api_frontier(request, key):
 
 
 def _trust_for(pos):
-    if pos.closure in ('TERMINAL', 'TB'):
+    # SOLVE joins TERMINAL and TB: a certificate that the server replayed in
+    # full, with its own move generator, is verified evidence in the same
+    # sense they are — not a witness someone else vouched for.
+    if pos.closure in ('TERMINAL', 'TB', 'SOLVE'):
         return 'VERIFIED'
     if pos.proof:
         return pos.proof
