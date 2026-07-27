@@ -12,7 +12,11 @@ class AtomicMoveTreePageTests(SimpleTestCase):
 
     def test_named_page_route_renders_without_reading_solver_database(self):
         self.assertEqual(reverse('atomicdb-map'), '/atomicdb/map/')
-        self.assertIs(resolve('/atomicdb/map/').func, views.conquest_map)
+        # La ruta va envuelta en una cache corta de lectura; lo que importa es
+        # que por debajo siga estando exactamente esta vista.
+        routed = resolve('/atomicdb/map/').func
+        self.assertIs(getattr(routed, '__wrapped__', routed),
+                      views.conquest_map)
 
         response = self.client.get('/atomicdb/map/')
 
