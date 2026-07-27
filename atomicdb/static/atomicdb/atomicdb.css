@@ -168,6 +168,14 @@ textarea {
   border: 0 !important;
 }
 
+:root {
+  /* The bar: the .9rem padding either side of a 2.75rem row, plus the border.
+     Only used to centre the switch against it -- the height itself comes from
+     the row, below. */
+  --header-row: 2.75rem;
+  --header-height: calc(var(--header-row) + 1.8rem + 1px);
+}
+
 header {
   display: flex;
   align-items: center;
@@ -181,6 +189,20 @@ header h1 {
   flex: 0 0 auto;
   font-size: 1.25rem;
   letter-spacing: .5px;
+}
+
+/* The old 2.75rem switch stood in the top bar and set its height. The new one
+   is out of flow, so the brand holds the row open instead. Holding it from an
+   item rather than as a min-height on the bar keeps the browser's own padding
+   rounding, and with it the exact height the bar had before.
+
+   Scoped to the page bar on purpose: the plain `header h1` above also reaches
+   the map page's <header class="tree-hero">, and a min-height there would push
+   the whole move tree down. */
+body > header > h1 {
+  display: flex;
+  align-items: center;
+  min-height: var(--header-row);
 }
 
 .atomicdb-brand {
@@ -214,124 +236,65 @@ header nav a:hover {
   color: var(--ink);
 }
 
+/* Light / dark switch.
+
+   The same control OpenBench uses: a bare sun/moon icon pinned to the
+   top-right corner of the viewport, showing the theme a click would switch
+   *to*, and hidden until the bootstrap script marks the document as
+   script-capable. Only the button is shared -- it is painted from this
+   app's own palette, not OpenBench's.
+
+   Taking it out of flow is what puts it in the corner rather than at the end
+   of the nav. The header reserves its height below, so the bar is unchanged. */
+
 .theme-toggle {
-  position: relative;
   display: none;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 3.25rem;
-  min-width: 3.25rem;
-  height: 2.75rem;
+  position: fixed;
+  /* Same corner as OpenBench. OpenBench has no header bar, so it sits 10px
+     down; here it lines up with the brand and the nav instead. */
+  top: calc((var(--header-height) - 2rem) / 2);
+  right: 16px;
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
   padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
+  border: none;
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--ink-muted);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: color 180ms ease;
 }
 
 html.theme-js .theme-toggle {
-  display: inline-grid;
+  display: inline-flex;
 }
 
-.theme-toggle-track {
-  position: relative;
+.theme-toggle svg {
   display: block;
-  width: 3.1rem;
-  height: 1.65rem;
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background:
-    linear-gradient(115deg, rgba(242, 190, 91, .26), transparent 46%),
-    #313d55;
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .3);
-  transition:
-    background-color 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
-}
-
-.theme-toggle-thumb {
-  position: absolute;
-  z-index: 2;
-  top: .15rem;
-  left: .15rem;
-  width: 1.23rem;
-  height: 1.23rem;
-  border-radius: 50%;
-  background: #f5f1e8;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, .38);
-  transform: translateX(1.42rem);
-  transition:
-    transform 240ms cubic-bezier(.2, .78, .25, 1),
-    background-color 180ms ease,
-    box-shadow 180ms ease;
-}
-
-.theme-toggle-icon {
-  position: absolute;
-  z-index: 1;
-  top: 50%;
-  width: .8rem;
-  height: .8rem;
-  color: #f2d07a;
-  transform: translateY(-50%);
-  transition:
-    opacity 180ms ease,
-    transform 240ms cubic-bezier(.2, .78, .25, 1);
-}
-
-.theme-toggle-icon svg {
-  display: block;
-  width: 100%;
-  height: 100%;
+  width: 1.15rem;
+  height: 1.15rem;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.8;
+  stroke-width: 1.9;
 }
 
-.theme-toggle-sun {
-  left: .35rem;
-  opacity: .62;
-  transform: translateY(-50%) rotate(-26deg) scale(.86);
+.theme-toggle .theme-toggle-moon,
+html[data-theme="light"] .theme-toggle .theme-toggle-sun {
+  display: none;
 }
 
-.theme-toggle-moon {
-  right: .34rem;
-  color: #dbe8ff;
-  opacity: 1;
-  transform: translateY(-50%) rotate(0) scale(1);
+html[data-theme="light"] .theme-toggle .theme-toggle-moon {
+  display: block;
 }
 
-html[data-theme="light"] .theme-toggle-track {
-  background:
-    linear-gradient(115deg, rgba(255, 255, 255, .48), transparent 52%),
-    #efb94e;
-  box-shadow: inset 0 1px 3px rgba(104, 71, 16, .22);
-}
-
-html[data-theme="light"] .theme-toggle-thumb {
-  background: #fffdf8;
-  box-shadow: 0 2px 5px rgba(91, 63, 18, .28);
-  transform: translateX(0);
-}
-
-html[data-theme="light"] .theme-toggle-sun {
-  color: #774604;
-  opacity: 1;
-  transform: translateY(-50%) rotate(0) scale(1);
-}
-
-html[data-theme="light"] .theme-toggle-moon {
-  opacity: .52;
-  transform: translateY(-50%) rotate(24deg) scale(.84);
-}
-
-.theme-toggle:hover .theme-toggle-track {
-  border-color: var(--accent);
+.theme-toggle:hover {
+  color: var(--accent);
 }
 
 .theme-toggle:focus-visible {
@@ -918,7 +881,12 @@ html.theme-ready .tile {
     font-size: .86rem;
   }
 
-  .theme-toggle {
+  /* In the header row, against the same edge. Fixed positioning is dropped
+     on a phone: the bar already reaches the corner, and an icon floating
+     there would sit on the scrolling nav. */
+  header .theme-toggle {
+    position: static;
+    flex: 0 0 auto;
     margin-left: auto;
   }
 
@@ -944,21 +912,8 @@ html.theme-ready .tile {
 @media (forced-colors: active) {
   .theme-toggle {
     forced-color-adjust: auto;
-  }
-
-  .theme-toggle-track {
     border: 1px solid ButtonText;
-    background: Canvas;
-    box-shadow: none;
-  }
-
-  .theme-toggle-thumb {
-    border: 1px solid Canvas;
-    background: ButtonText;
-    box-shadow: none;
-  }
-
-  .theme-toggle-icon {
+    background: ButtonFace;
     color: ButtonText;
   }
 }
