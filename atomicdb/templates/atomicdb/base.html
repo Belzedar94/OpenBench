@@ -4,156 +4,69 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" id="atomicdb-theme-color" content="#161512">
 <title>{% block title %}AtomicDB{% endblock %}</title>
+<script>
+(function () {
+  var root = document.documentElement;
+  var theme = "dark";
+  root.classList.add("theme-js");
+  try {
+    var stored = window.localStorage.getItem("atomicdb-theme");
+    if (stored === "light" || stored === "dark") {
+      theme = stored;
+    } else if (window.matchMedia &&
+               window.matchMedia("(prefers-color-scheme: light)").matches) {
+      theme = "light";
+    }
+  } catch (_error) {
+    if (window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: light)").matches) {
+      theme = "light";
+    }
+  }
+  root.dataset.theme = theme;
+  root.style.colorScheme = theme;
+  document.getElementById("atomicdb-theme-color").content =
+    theme === "light" ? "#f5f2ea" : "#161512";
+}());
+</script>
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.base.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.brown.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.cburnett.css' %}">
-<style>
-:root{
-  --bg:#161512;--panel:#211f1c;--panel2:#2a2723;--text:#d8d4cf;--dim:#8f8a83;
-  --won:#629924;--lost:#cc3333;--draw:#4a90d9;--hot:#e8a33d;--warm:#b8862f;--cold:#565049;
-  --sq-l:#f0d9b5;--sq-d:#b58863;--accent:#7fa650;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:16px/1.5 'Segoe UI',system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-a{color:var(--accent);text-decoration:none}
-a:hover{text-decoration:underline}
-header{display:flex;align-items:center;gap:1.35rem;padding:.9rem 1.4rem;
-  background:var(--panel);border-bottom:1px solid #3a362f}
-header h1{flex:0 0 auto;font-size:1.25rem;letter-spacing:.5px}
-header h1 span{color:var(--hot)}
-header nav{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem 1rem;min-width:0}
-header nav a{color:var(--dim);white-space:nowrap}
-header nav a:hover{color:var(--text)}
-main{max-width:1100px;margin:1.4rem auto;padding:0 1.2rem}
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
-  gap:.8rem;margin:1rem 0 1.6rem}
-.metric{background:var(--panel);border:1px solid #3a362f;border-radius:8px;
-  padding:.7rem 1rem;text-align:center}
-.metric .v{font-size:1.7rem;font-weight:600}
-.metric .l{color:var(--dim);font-size:.8rem;text-transform:uppercase;letter-spacing:1px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:.6rem}
-.tile{border-radius:8px;padding:.55rem .6rem;border:1px solid #3a362f;
-  background:var(--panel2);transition:transform .08s}
-.tile:hover{transform:translateY(-2px);text-decoration:none}
-.tile .mv{font-weight:700;font-size:1.05rem;color:var(--text)}
-.tile .ev{font-size:.85rem;color:var(--dim)}
-.tile.won{background:linear-gradient(160deg,#2c4d12,#1d3309);border-color:var(--won)}
-.tile.lost{background:linear-gradient(160deg,#5a1717,#3b0e0e);border-color:var(--lost)}
-.tile.draw{border-color:var(--draw)}
-.tile.hot{border-color:var(--hot);background:linear-gradient(160deg,#4a3413,#2e2009)}
-.tile.warm{border-color:var(--warm)}
-.chip{display:inline-block;min-width:12px;height:12px;border-radius:50%;margin-right:.45rem}
-.chip.won{background:var(--won)}.chip.lost{background:var(--lost)}
-.chip.draw{background:var(--draw)}.chip.hot{background:var(--hot)}
-.chip.warm{background:var(--warm)}.chip.cold{background:var(--cold)}
-table{width:100%;border-collapse:collapse}
-th{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:1px;
-  text-align:left;padding:.45rem .6rem;border-bottom:1px solid #3a362f}
-td{padding:.5rem .6rem;border-bottom:1px solid #2c2925}
-tr:hover td{background:var(--panel2)}
-.boardwrap{position:relative;width:min(440px,100%)}
-.atomic-board.cg-wrap{width:100%;aspect-ratio:1;overflow:visible;
-  box-shadow:0 4px 18px rgba(0,0,0,.5)}
-.atomic-board cg-board{border-radius:6px;overflow:hidden}
-.board-arrow{position:absolute;inset:0;width:100%;height:100%;
-  pointer-events:none;z-index:10}
-.board{display:grid;grid-template-columns:repeat(8,1fr);
-  grid-template-rows:repeat(8,1fr);width:100%;
-  aspect-ratio:1;border-radius:6px;overflow:hidden;
-  box-shadow:0 4px 18px rgba(0,0,0,.5)}
-.sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.sq.sel{outline:3px solid var(--hot);outline-offset:-3px;z-index:1}
-.sq.dest::before{content:'';position:absolute;width:26%;height:26%;
-  border-radius:50%;background:rgba(30,90,30,.55);z-index:2}
-.sq.dest:has(img)::before{width:92%;height:92%;background:none;
-  border:4px solid rgba(30,90,30,.55)}
-.raw{font:11px/1.5 ui-monospace,Consolas,monospace;color:var(--dim);
-  background:var(--panel);border:1px solid #3a362f;border-radius:6px;
-  padding:.5rem .7rem;white-space:pre-wrap;word-break:break-all;
-  width:0;min-width:100%;box-sizing:border-box;
-  max-height:16rem;overflow-y:auto}
-details summary{cursor:pointer;color:var(--dim);font-size:.85rem;margin:.6rem 0 .3rem}
-.sq.l{background:var(--sq-l)}.sq.d{background:var(--sq-d)}
-.sq img{width:88%;height:88%;display:block}
-.board-legal{width:min(440px,100%);margin-top:.55rem}
-.board-legal summary{margin:0}
-.board-legal nav{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.45rem}
-.board-legal a{padding:.18rem .4rem;border:1px solid #4a463f;border-radius:4px;
-  font:12px/1.4 ui-monospace,Consolas,monospace}
-.coord{position:absolute;font-size:.62rem;font-weight:700;opacity:.75;
-  pointer-events:none}
-.coord.file{right:3px;bottom:1px}
-.coord.rank{left:3px;top:1px}
-.sq.l .coord{color:var(--sq-d)}.sq.d .coord{color:var(--sq-l)}
-.cols{display:grid;grid-template-columns:auto 1fr;gap:1.6rem;align-items:start}
-@media(max-width:820px){.cols{grid-template-columns:1fr}}
-.verdict{padding:.5rem .9rem;border-radius:8px;background:var(--panel);
-  border:1px solid #3a362f;margin:.8rem 0;font-weight:600}
-.verdict.won{border-color:var(--won)}.verdict.lost{border-color:var(--lost)}
-.reqbtn{display:inline-block;padding:.4rem .9rem;border-radius:8px;
-  background:var(--panel);border:1px solid #4a463f;color:var(--fg);
-  font:inherit;font-size:.85rem;cursor:pointer}
-.reqbtn:hover:not(:disabled){border-color:var(--won)}
-.reqbtn:disabled{color:var(--dim);cursor:default}
-.reqrow{display:flex;align-items:center;gap:.8rem;margin:.7rem 0}
-.progress{margin:.9rem 0 1.1rem}
-.pkpis{font-size:.85rem}
-.queue{display:grid;grid-template-columns:1fr 1fr;gap:1.6rem;margin-bottom:.4rem}
-@media(max-width:820px){.queue{grid-template-columns:1fr}}
-.qline{display:inline-block;max-width:26rem;white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
-.milestone-line{display:inline-block;vertical-align:bottom;max-width:100%}
-.milestone-line summary{display:inline-block;margin:0;list-style:none;cursor:pointer;
-  border-radius:3px}
-.milestone-line summary::-webkit-details-marker{display:none}
-.milestone-line summary::after{content:"";display:inline-block;margin-left:.38rem;
-  border-style:solid;border-width:.28rem 0 .28rem .4rem;
-  border-color:transparent transparent transparent currentColor;
-  transform-origin:40% 50%;transition:transform .12s ease}
-.milestone-line[open] summary::after{transform:rotate(90deg)}
-.milestone-line summary:focus-visible{outline:2px solid var(--won);outline-offset:3px}
-.milestone-line[open]{display:block;margin:.3rem 0 0 6.6rem}
-.milestone-full{display:block;white-space:normal;font-size:.82rem}
-@media(max-width:480px){.milestone-line[open]{margin:.3rem 0 0}}
-.fenbox{display:flex;gap:.6rem;margin:0 0 1.2rem}
-.fenbox input{flex:1;max-width:560px;padding:.45rem .7rem;border-radius:8px;
-  background:var(--panel);border:1px solid #4a463f;color:var(--fg);
-  font:12px/1.4 ui-monospace,Consolas,monospace}
-.fenbox input:focus{outline:none;border-color:var(--won)}
-.feed{list-style:none}
-.feed li{padding:.45rem .2rem;border-bottom:1px solid #2c2925;font-size:.92rem}
-.feed .t{color:var(--dim);font-size:.8rem;margin-right:.6rem}
-h2{margin:1.6rem 0 .7rem;font-size:1.1rem}
-.dim{color:var(--dim)}
-.crumb{font-size:.9rem;color:var(--dim);margin-bottom:.6rem}
-.linebox{background:var(--panel);border:1px solid #3a362f;border-radius:8px;
-  padding:.55rem .8rem;margin-bottom:.9rem;line-height:1.9}
-.linebox a{color:var(--text);padding:.1rem .3rem;border-radius:4px;margin-right:.1rem}
-.linebox a:hover{background:var(--panel2);text-decoration:none}
-.linebox a.cur{background:var(--accent);color:#141310;font-weight:700}
-footer{margin:3rem 0 1rem;text-align:center;color:var(--dim);font-size:.8rem}
-@media(max-width:560px){
-  header{display:flex;align-items:center;gap:.8rem;padding:.58rem .75rem}
-  header h1{margin:0}
-  header h1 a{display:inline-flex;align-items:center;min-height:2.75rem}
-  header nav{flex:1 1 auto;flex-wrap:nowrap;gap:.85rem;overflow-x:auto;padding-bottom:.08rem;
-    scrollbar-color:#4b463f transparent;scrollbar-width:thin}
-  header nav a{display:inline-flex;align-items:center;min-height:2.75rem;font-size:.86rem}
-}
-</style>
+<link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}">
+<script src="{% static 'atomicdb/theme.js' %}" defer></script>
 {% block extra_head %}{% endblock %}
 </head>
 <body>
 <header>
-  <h1><a href="/atomicdb/" style="color:inherit">Atomic<span>DB</span></a></h1>
+  <h1><a class="atomicdb-brand" href="/atomicdb/">Atomic<span>DB</span></a></h1>
   <nav>
     <a href="/atomicdb/">Overview</a>
-    <a href="/atomicdb/map/">Conquest Map</a>
+    <a href="/atomicdb/map/">Move tree</a>
     <a href="/atomicdb/method/">Method</a>
     <a href="/index/">OpenBench</a>
   </nav>
+  <button type="button" class="theme-toggle" id="theme-toggle"
+    role="switch" aria-checked="true" aria-labelledby="theme-toggle-label"
+    title="Switch to light mode">
+    <span class="theme-toggle-track" aria-hidden="true">
+      <span class="theme-toggle-icon theme-toggle-sun">
+        <svg viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3.5"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path>
+        </svg>
+      </span>
+      <span class="theme-toggle-icon theme-toggle-moon">
+        <svg viewBox="0 0 24 24">
+          <path d="M20 15.2A8 8 0 0 1 8.8 4 8.35 8.35 0 1 0 20 15.2z"></path>
+        </svg>
+      </span>
+      <span class="theme-toggle-thumb"></span>
+    </span>
+    <span class="visually-hidden" id="theme-toggle-label">Dark mode</span>
+  </button>
 </header>
 <main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
 <footer>AtomicDB, a practical solving effort for Atomic Chess. Results are

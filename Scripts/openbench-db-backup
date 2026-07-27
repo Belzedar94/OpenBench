@@ -1,0 +1,124 @@
+#!/bin/sh
+# Consistent daily backup of OpenBench and, when active, AtomicDB SQLite.
+set -eu
+umask 077
+
+APP=/opt/openbench
+BACKUPS=/var/backups/openbench
+COHORTS="$BACKUPS/daily-cohorts"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+FINAL="$COHORTS/$STAMP"
+LOCK=/run/lock/openbench-db-backup.lock
+TMP=
+
+cleanup() {
+    [ -z "$TMP" ] || rm -rf -- "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+mkdir -p "$COHORTS"
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+[ -f "$APP/db.sqlite3" ] && [ -s "$APP/db.sqlite3" ]
+atomic_db="$APP/atomicdb.sqlite3"
+atomic_receipt="$atomic_db.split-receipt.json"
+if [ -e "$atomic_db" ] || [ -e "$atomic_receipt" ]; then
+    [ -f "$atomic_db" ] && [ -s "$atomic_db" ]
+    [ -f "$atomic_receipt" ] && [ -s "$atomic_receipt" ]
+    split_active=1
+else
+    split_active=0
+fi
+
+[ ! -e "$FINAL" ]
+TMP=$(mktemp -d "$COHORTS/.pending-$STAMP.XXXXXX")
+
+backup_sqlite() {
+    source=$1
+    destination=$2
+    [ -f "$source" ] && [ -s "$source" ]
+    sqlite3 -readonly "$source" \
+        ".timeout 30000" \
+        ".backup '$destination'"
+    [ -f "$destination" ] && [ -s "$destination" ]
+    [ "$(sqlite3 "$destination" 'PRAGMA integrity_check;')" = ok ]
+    [ -z "$(sqlite3 "$destination" 'PRAGMA foreign_key_check;')" ]
+}
+
+backup_sqlite "$APP/db.sqlite3" "$TMP/openbench.sqlite3"
+artifacts='openbench.sqlite3.gz'
+
+if [ "$split_active" -eq 1 ]; then
+    backup_sqlite "$atomic_db" "$TMP/atomicdb.sqlite3"
+    cp -a "$atomic_receipt" \
+        "$TMP/atomicdb.sqlite3.split-receipt.json"
+
+    (
+        cd "$APP"
+        ./.venv/bin/python - \
+            "$TMP/atomicdb.sqlite3" \
+            "$TMP/atomicdb.sqlite3.split-receipt.json" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+
+from OpenSite.atomicdb_identity import (
+    parse_and_validate_receipt,
+    validate_database_lineage,
+)
+
+database_path, receipt_path = sys.argv[1:]
+receipt_bytes = Path(receipt_path).read_bytes()
+receipt = parse_and_validate_receipt(
+    receipt_bytes, '/opt/openbench/atomicdb.sqlite3')
+connection = sqlite3.connect(
+    Path(database_path).resolve().as_uri() + '?mode=ro', uri=True)
+try:
+    if connection.execute('PRAGMA journal_mode').fetchone() != ('wal',):
+        raise SystemExit('AtomicDB backup is not in WAL mode')
+    validate_database_lineage(connection, receipt, receipt_bytes)
+finally:
+    connection.close()
+PY
+    )
+    artifacts="$artifacts atomicdb.sqlite3.gz"
+    artifacts="$artifacts atomicdb.sqlite3.split-receipt.json"
+fi
+
+gzip "$TMP"/*.sqlite3
+gzip -t "$TMP"/*.sqlite3.gz
+
+(
+    cd "$TMP"
+    # The names are fixed above and contain no whitespace or glob input.
+    sha256sum -- $artifacts > SHA256SUMS
+    sha256sum -c SHA256SUMS >/dev/null
+)
+
+# Publishing the entire directory is the single atomic commit.
+mv -- "$TMP" "$FINAL"
+TMP=
+(
+    cd "$FINAL"
+    sha256sum -c SHA256SUMS >/dev/null
+)
+
+# Retain fourteen already-published cohorts. Pending directories are excluded.
+find "$COHORTS" -mindepth 1 -maxdepth 1 -type d \
+    -name '????????T??????Z' -printf '%T@ %p\n' |
+    sort -nr |
+    sed -n '15,$p' |
+    cut -d' ' -f2- |
+    while IFS= read -r old; do
+        case "$old" in
+            "$COHORTS"/????????T??????Z)
+                find "$old" -mindepth 1 -maxdepth 1 -type f -delete
+                rmdir -- "$old"
+                ;;
+            *)
+                exit 1
+                ;;
+        esac
+    done

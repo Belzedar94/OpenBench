@@ -6,10 +6,12 @@ import math
 import secrets
 import time
 from datetime import timedelta
+from urllib.parse import quote, urlsplit
 
 from django.contrib.auth import authenticate
-from django.db import transaction
-from django.http import JsonResponse
+from django.core import signing
+from django.db import OperationalError
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -19,7 +21,8 @@ import re
 from django.db.models import Case, F, IntegerField, Q, Sum, Value, When, Window
 from django.db.models.functions import RowNumber
 
-from . import ingest, logic
+from . import ingest, logic, openings
+from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      RequestLog, WorkerPing)
@@ -46,8 +49,30 @@ LINEAGE_SEARCH_MAX_NODES = 1024
 LINEAGE_SEARCH_MAX_FRONTIER = 64
 LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD = 16
 LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
+PLAY_ROUTE_MAX_PLIES = 64
+PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
+PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
+OPENING_ANCHOR_PARAM = 'opening'
+OPENING_ANCHOR_SALT = 'atomicdb.explorer.opening-anchor.v1'
+OPENING_ANCHOR_MAX_CHARS = 1024
+# board.js predates opening anchors and carries only one ``play`` value.
+# A distinct, signed sentinel keeps drag/drop navigation working after the
+# bounded replay route rolls over, without accepting any extra replay tokens.
+OPENING_ANCHOR_PLAY_PREFIX = 'signed-opening.'
 
 logger = logging.getLogger(__name__)
+
+
+class PlayRouteError(ValueError):
+    """An explicit explorer route is malformed or illegal."""
+
+    status_code = 400
+
+
+class PlayRouteConflict(PlayRouteError):
+    """A legal route does not identify the requested AtomicDB position."""
+
+    status_code = 409
 
 
 class _SubmitRejected(Exception):
@@ -116,7 +141,7 @@ def api_lease(request):
     lease_session = request.POST.get('lease_session', '')[:64]
     active_task_id = None
 
-    with transaction.atomic():
+    with atomic():
         # recuperar leases caducados
         now = timezone.now()
         stale = now - timedelta(minutes=LEASE_MINUTES)
@@ -381,7 +406,7 @@ def api_submit(request):
 
     transaction_started = time.monotonic()
     try:
-        with transaction.atomic():
+        with atomic():
             claimed = AnalysisTask.objects.filter(
                 id=task_id, state='LEASED', machine=machine,
                 attempts=snapshot.attempts, leased_at=snapshot.leased_at,
@@ -454,8 +479,7 @@ def api_submit(request):
     return JsonResponse({'ok': True, 'summary': summary})
 
 
-@csrf_exempt
-def api_request(request, key):
+def _api_request_once(request, key):
     """Peticion publica de analisis (estilo chessdb.cn), sin cuenta.
     Protecciones: rate-limit por IP, dedup ip+posicion, tope global de cola."""
     if request.method != 'POST':
@@ -468,8 +492,20 @@ def api_request(request, key):
     except Position.DoesNotExist:
         return JsonResponse({'status': 'unknown-position'}, status=404)
     hour_ago = timezone.now() - timedelta(hours=1)
-    if RequestLog.objects.filter(ip=ip, created__gte=hour_ago,
-                                 position=pos).exists():
+    # A recent click is only a duplicate while the request it represented is
+    # still queued or running.  Once that task has completed, the same visitor
+    # must be able to request the next 128M -> 512M -> 2B -> 10B rung.  A
+    # RequestLog may also have been created merely by adding a new FEN, without
+    # ever creating an AnalysisTask, so the log alone is not evidence of work.
+    recent_same_position = RequestLog.objects.filter(
+        ip=ip, created__gte=hour_ago, position=pos,
+    ).exists()
+    active_user_request = AnalysisTask.objects.filter(
+        position=pos,
+        source=AnalysisTask.Source.USER,
+        state__in=(AnalysisTask.TState.PENDING, AnalysisTask.TState.LEASED),
+    ).exists()
+    if recent_same_position and active_user_request:
         return JsonResponse({'status': 'already-requested'})
     if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
                          .count() >= REQUESTS_PER_IP_HOUR:
@@ -478,10 +514,33 @@ def api_request(request, key):
                                    position__status='UNKNOWN') \
                            .count() >= REQUEST_QUEUE_MAX:
         return JsonResponse({'status': 'queue-full'}, status=503)
-    outcome = ingest.request_analysis(pos)
-    if outcome in ('queued', 'already-queued'):
-        RequestLog.objects.create(ip=ip, position=pos)
+    # Task creation/promotion and its rate-limit receipt are one commit.  A
+    # lock while writing RequestLog must roll the task mutation back as well;
+    # otherwise a browser retry could accidentally request the next rung.
+    with atomic():
+        outcome = ingest.request_analysis(pos)
+        if outcome in ('queued', 'already-queued'):
+            RequestLog.objects.create(ip=ip, position=pos)
     return JsonResponse({'status': outcome})
+
+
+@csrf_exempt
+def api_request(request, key):
+    try:
+        return _api_request_once(request, key)
+    except OperationalError as error:
+        # SQLite can reject a read->write transaction upgrade immediately
+        # while the worker is committing a large analysis, even with a long
+        # busy_timeout.  The atomic task+receipt block above guarantees that a
+        # structured busy response has no committed side effect and is safe
+        # for the browser to retry.
+        message = str(error).lower()
+        if 'database is locked' not in message \
+                and 'database table is locked' not in message:
+            raise
+        response = JsonResponse({'status': 'busy'}, status=503)
+        response['Retry-After'] = '2'
+        return response
 
 
 # ---------------- paginas publicas ----------------
@@ -519,14 +578,279 @@ def _ctx_board(fen):
     return out
 
 
+def _route_query(ucis, opening_anchor=None):
+    """Canonical query suffix for validated route or signed opening state."""
+    parts = []
+    if ucis:
+        parts.append('play=' + ','.join(ucis))
+    if opening_anchor:
+        parts.append(
+            f'{OPENING_ANCHOR_PARAM}='
+            + quote(opening_anchor, safe=''),
+        )
+    return '' if not parts else '?' + '&'.join(parts)
+
+
+def _explore_url(key, ucis=None, opening_anchor=None):
+    return (
+        f'/atomicdb/explore/{key}/'
+        + _route_query(ucis, opening_anchor)
+    )
+
+
+def _goto_url(key, uci, ucis=None, opening_anchor=None):
+    return (
+        f'/atomicdb/goto/{key}/{uci}/'
+        + _route_query(ucis, opening_anchor)
+    )
+
+
+def _signed_opening_anchor(target_key, match, route_ply):
+    """Bind the last catalogued opening to one exact explorer target.
+
+    The token is only an overflow continuation for a route that was already
+    replayed and validated.  Names never come from the token: consumers load
+    the signed opening key from the immutable catalogue again.
+    """
+    if match is None:
+        return None
+    opening_key = match.get('position_key')
+    matched_ply = match.get('matched_ply')
+    if (
+        not isinstance(opening_key, str)
+        or isinstance(matched_ply, bool)
+        or not isinstance(matched_ply, int)
+        or matched_ply < 0
+        or isinstance(route_ply, bool)
+        or not isinstance(route_ply, int)
+        or route_ply < matched_ply
+    ):
+        return None
+    exact = openings.lookup_key(opening_key)
+    if exact is None or exact.get('position_key') != opening_key:
+        return None
+    return signing.dumps(
+        {
+            'v': 1,
+            'target': target_key,
+            'opening': opening_key,
+            'matched_ply': matched_ply,
+            'route_ply': route_ply,
+        },
+        salt=OPENING_ANCHOR_SALT,
+        compress=True,
+    )
+
+
+def _validated_opening_anchor(raw, target_key):
+    """Return a catalog-backed opening match and route ply, or fail closed."""
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or len(raw) > OPENING_ANCHOR_MAX_CHARS
+    ):
+        return None, None
+    try:
+        payload = signing.loads(raw, salt=OPENING_ANCHOR_SALT)
+    except (signing.BadSignature, TypeError, ValueError):
+        return None, None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {
+            'v', 'target', 'opening', 'matched_ply', 'route_ply',
+        }
+        or payload.get('v') != 1
+        or payload.get('target') != target_key
+    ):
+        return None, None
+    opening_key = payload.get('opening')
+    matched_ply = payload.get('matched_ply')
+    route_ply = payload.get('route_ply')
+    if (
+        not isinstance(opening_key, str)
+        or isinstance(matched_ply, bool)
+        or not isinstance(matched_ply, int)
+        or matched_ply < 0
+        or isinstance(route_ply, bool)
+        or not isinstance(route_ply, int)
+        or route_ply < matched_ply
+    ):
+        return None, None
+    exact = openings.lookup_key(opening_key)
+    if exact is None or exact.get('position_key') != opening_key:
+        return None, None
+    match = dict(exact)
+    match.update({
+        'matched_ply': matched_ply,
+        'current_key': target_key,
+        'exact': opening_key == target_key,
+    })
+    return match, route_ply
+
+
+def _navigation_opening(active_ucis, raw_anchor, target_key, *,
+                        explicit_play=False):
+    """Resolve opening state and the route that navigation should propagate.
+
+    An explicitly supplied and validated ``play`` route wins.  Otherwise a
+    valid target-bound opening anchor wins over reconstructed lineage: the
+    latter may be a shorter transposition and must not erase overflow state.
+    """
+    if explicit_play and active_ucis is not None:
+        try:
+            match = openings.match_line(active_ucis)
+        except openings.InvalidOpeningLine:
+            match = None
+        return match, len(active_ucis), active_ucis
+    anchored, route_ply = _validated_opening_anchor(raw_anchor, target_key)
+    if anchored is not None:
+        return anchored, route_ply, None
+    if active_ucis is not None:
+        try:
+            match = openings.match_line(active_ucis)
+        except openings.InvalidOpeningLine:
+            match = None
+        return match, len(active_ucis), active_ucis
+    exact = openings.lookup_key(target_key)
+    if exact is None:
+        return None, None, None
+    return exact, exact['matched_ply'], None
+
+
+def _opening_after_move(current, child_key, child_ply):
+    """Advance a trusted opening anchor by one already-validated legal move."""
+    exact = openings.lookup_key(child_key)
+    if exact is not None:
+        result = dict(exact)
+        if child_ply is not None:
+            result['matched_ply'] = child_ply
+        result.update({'current_key': child_key, 'exact': True})
+        return result
+    if current is None:
+        return None
+    result = dict(current)
+    result.update({'current_key': child_key, 'exact': False})
+    return result
+
+
+def _child_navigation_state(active_ucis, current_opening, route_ply,
+                            child_key, move_uci):
+    """Choose a bounded replay route or a signed overflow anchor for a child."""
+    child_ply = None if route_ply is None else route_ply + 1
+    child_opening = _opening_after_move(
+        current_opening, child_key, child_ply)
+    child_route = (
+        None if active_ucis is None else [*active_ucis, move_uci]
+    )
+    if child_route is not None and len(child_route) <= PLAY_ROUTE_MAX_PLIES:
+        return child_route, None
+    anchor_ply = child_ply
+    if anchor_ply is None and child_opening is not None:
+        anchor_ply = child_opening.get('matched_ply')
+    child_anchor = _signed_opening_anchor(
+        child_key, child_opening, anchor_ply)
+    return None, child_anchor
+
+
+def _validated_play_route(raw, target_key):
+    """Return a read-only, startpos-rooted route or ``None``.
+
+    ``play`` is deliberately a compact list of UCI tokens rather than trusted
+    lineage.  Every move is replayed with the Atomic rules, the terminal key
+    must be the requested page, and every prefix must already exist in
+    AtomicDB.  This makes a GET incapable of materialising a route merely by
+    naming one.
+    """
+    if raw is None:
+        return None
+    if len(raw) > PLAY_ROUTE_MAX_CHARS:
+        raise PlayRouteError('move path exceeds the supported length')
+    ucis = [] if raw == '' else raw.split(',')
+    if len(ucis) > PLAY_ROUTE_MAX_PLIES or any(
+            not PLAY_UCI_RE.fullmatch(uci) for uci in ucis):
+        raise PlayRouteError('move path contains an invalid UCI token')
+
+    import pyffish as pf
+
+    fen = logic.start_fen()
+    prefix_keys = [logic.key_of(fen)]
+    white = True
+    line = []
+    for uci in ucis:
+        if uci not in logic.legal_moves(fen):
+            raise PlayRouteError('move path contains an illegal Atomic move')
+        try:
+            san = pf.get_san('atomic', fen, uci)
+            fen = logic.apply_move(fen, uci)
+        except Exception as exc:
+            raise PlayRouteError(
+                'move path could not be replayed under Atomic rules') from exc
+        child_key = logic.key_of(fen)
+        prefix_keys.append(child_key)
+        line.append({
+            'uci': uci, 'san': san, 'key': child_key, 'white': white,
+        })
+        white = not white
+
+    if prefix_keys[-1] != target_key:
+        raise PlayRouteConflict(
+            'move path does not reach the requested position')
+    positions = Position.objects.only('key', 'fen').in_bulk(prefix_keys)
+    if any(key not in positions for key in prefix_keys):
+        raise PlayRouteConflict(
+            'move path is not fully materialized in AtomicDB')
+    return positions[prefix_keys[0]], line, ucis
+
+
+def _play_route_error_response(exc):
+    response = HttpResponse(
+        str(exc), status=exc.status_code, content_type='text/plain')
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+def _canonical_route(pos):
+    """Fallback lineage plus a replayable route when startpos was reached."""
+    top, line = _line_to_root(pos)
+    if top.fen != logic.start_fen():
+        return top, line, None
+    return top, line, [step['uci'] for step in line]
+
+
 def goto(request, key, uci):
     """Navegacion jugando: valida la jugada, crea/encuentra el hijo y salta."""
     try:
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return redirect('/atomicdb/')
+    raw_play = request.GET.get('play')
+    board_anchor = None
+    if (
+        isinstance(raw_play, str)
+        and raw_play.startswith(OPENING_ANCHOR_PLAY_PREFIX)
+    ):
+        board_anchor = raw_play[len(OPENING_ANCHOR_PLAY_PREFIX):]
+        raw_play = None
+    try:
+        route = _validated_play_route(raw_play, key)
+    except PlayRouteError as exc:
+        return _play_route_error_response(exc)
+    if route is None:
+        _top, _line, active_ucis = _canonical_route(pos)
+    else:
+        _top, _line, active_ucis = route
+    current_opening, route_ply, active_ucis = _navigation_opening(
+        active_ucis,
+        request.GET.get(OPENING_ANCHOR_PARAM) or board_anchor,
+        pos.key,
+        explicit_play=route is not None,
+    )
+    current_anchor = (
+        None if active_ucis is not None
+        else _signed_opening_anchor(pos.key, current_opening, route_ply)
+    )
     if uci not in logic.legal_moves(pos.fen):
-        return redirect(f'/atomicdb/explore/{key}/')
+        return redirect(_explore_url(key, active_ucis, current_anchor))
     child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
                                           campaign=pos.campaign)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
@@ -534,7 +858,9 @@ def goto(request, key, uci):
     if child.priority <= ingest.DEAD / 2:
         child.priority = 0.0   # ruta nueva: revive de la lapida
         child.save(update_fields=['priority'])
-    return redirect(f'/atomicdb/explore/{child.key}/')
+    child_route, child_anchor = _child_navigation_state(
+        active_ucis, current_opening, route_ply, child.key, uci)
+    return redirect(_explore_url(child.key, child_route, child_anchor))
 
 
 def _format_san_line(top, line, max_plies=16, keep_head=False):
@@ -724,8 +1050,10 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
                 fen = logic.apply_move(fen, uci)
         white = top.fen.split()[1] == 'w'
         line = []
-        for (_uci, child_key), san in zip(ordered, sans):
-            line.append({'san': san, 'key': child_key, 'white': white})
+        for (uci, child_key), san in zip(ordered, sans):
+            line.append({
+                'uci': uci, 'san': san, 'key': child_key, 'white': white,
+            })
             white = not white
         result[key] = (top, line)
     return result
@@ -789,27 +1117,6 @@ def _human(n):
     if n >= 1_000_000:
         return f'{n / 1e6:.1f}M'
     return f'{n:,}'
-
-
-def _arrow(uci):
-    """Coordenadas (en % del tablero) de la flecha del mejor movimiento,
-    con la punta retraida para que la cabeza no invada la casilla."""
-    if not uci or len(uci) < 4:
-        return None
-    try:
-        x1 = (ord(uci[0]) - 96 - 0.5) * 12.5
-        y1 = (8 - int(uci[1]) + 0.5) * 12.5
-        x2 = (ord(uci[2]) - 96 - 0.5) * 12.5
-        y2 = (8 - int(uci[3]) + 0.5) * 12.5
-    except ValueError:
-        return None
-    dx, dy = x2 - x1, y2 - y1
-    dist = (dx * dx + dy * dy) ** 0.5
-    if dist > 4:
-        x2 -= dx / dist * 3.2
-        y2 -= dy / dist * 3.2
-    return {'x1': f'{x1:.2f}', 'y1': f'{y1:.2f}',
-            'x2': f'{x2:.2f}', 'y2': f'{y2:.2f}'}
 
 
 def _move_css(status, score, win_status):
@@ -967,6 +1274,7 @@ def home(request):
     events = _friendly_events(event_rows, labels)
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
+    root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
     return render(request, 'atomicdb/home.html', {
         'analyzing': analyzing, 'upnext': upnext,
@@ -986,8 +1294,12 @@ def home(request):
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_fen': root.fen,
         'board_turn': 'white' if root.fen.split()[1] == 'w' else 'black',
-        'board_key': root.key, 'arrow': _arrow(root.best_move),
-        'legal_ucis': logic.legal_moves(root.fen)})
+        'board_key': root.key, 'best_move': root.best_move, 'board_play': '',
+        'legal_ucis': root_legal_ucis,
+        'legal_move_links': [
+            {'uci': uci, 'url': _goto_url(root.key, uci, [])}
+            for uci in root_legal_ucis
+        ]})
 
 
 FEN_SHAPE = re.compile(
@@ -1075,24 +1387,104 @@ def _line_to_root(pos, max_plies=64):
     return _lines_to_root([pos.key], max_plies=max_plies)[pos.key]
 
 
-def _numbered_line(top, line):
-    """Explorer breadcrumb tokens, numbered only when move 1 is known."""
-    if top.fen != logic.start_fen():
-        return [
-            {'num': '', 'san': step['san'], 'key': step['key']}
-            for step in line
-        ]
+def _numbered_line(top, line, route_ucis=None, opening_match=None,
+                   route_ply=None):
+    """Explorer breadcrumbs with route- or anchor-preserving destinations."""
+    from_start = top.fen == logic.start_fen()
     numbered, n = [], 1
     for i, step in enumerate(line):
-        if step['white']:
+        if not from_start:
+            number = ''
+        elif step['white']:
             number = f'{n}.'
         else:
             number = f'{n}...' if i == 0 else ''
             n += 1
-        numbered.append({
+        token = {
             'num': number, 'san': step['san'], 'key': step['key'],
-        })
+        }
+        if route_ucis is not None:
+            token['url'] = _explore_url(step['key'], route_ucis[:i + 1])
+        elif opening_match is not None and route_ply is not None:
+            breadcrumb_ply = route_ply - (len(line) - i - 1)
+            anchor = _signed_opening_anchor(
+                step['key'], opening_match, breadcrumb_ply)
+            if anchor is not None:
+                token['url'] = _explore_url(
+                    step['key'], opening_anchor=anchor)
+        numbered.append(token)
     return numbered
+
+
+def _opening_for_template(match):
+    """Add presentation-only URL safety without changing catalog records."""
+    if match is None:
+        return None
+    result = dict(match)
+    result['aliases'] = list(match.get('aliases', ()))
+    result['sources'] = []
+    provenance_labels = {
+        'source_line_number': 'Source line',
+        'source_row': 'Source row',
+        'same_atomix_position': 'ATOMIX matches',
+        'same_eao_position': 'EAO match',
+    }
+
+    def provenance_value(value):
+        if isinstance(value, dict):
+            label = value.get('name') or value.get('label') or value.get('id')
+            qualifier = value.get('code') or (
+                value.get('id') if value.get('id') != label else None)
+            if label and qualifier:
+                return f'{label} ({qualifier})'
+            if label:
+                return str(label)
+            return ', '.join(
+                f'{key}: {provenance_value(item)}'
+                for key, item in value.items()
+                if item not in (None, '', [], {})
+            )
+        if isinstance(value, list):
+            return '; '.join(provenance_value(item) for item in value)
+        if isinstance(value, bool):
+            return 'yes' if value else 'no'
+        return str(value)
+
+    for raw_source in match.get('sources', ()):
+        source = dict(raw_source)
+        source['evidence'] = []
+        for raw_evidence in raw_source.get('evidence', ()):
+            evidence = dict(raw_evidence)
+            try:
+                parsed = urlsplit(str(evidence.get('url', '')))
+                evidence['safe_url'] = (
+                    evidence['url']
+                    if parsed.scheme in ('http', 'https') and parsed.netloc
+                    else ''
+                )
+            except (TypeError, ValueError):
+                evidence['safe_url'] = ''
+            source['evidence'].append(evidence)
+        source['provenance_rows'] = []
+        for field, value in raw_source.get('provenance', {}).items():
+            if value is None or value == '' or value == [] or value == {}:
+                continue
+            source['provenance_rows'].append({
+                'label': provenance_labels.get(
+                    field, field.replace('_', ' ').title()),
+                'value': provenance_value(value),
+            })
+        result['sources'].append(source)
+    return result
+
+
+def _exact_child_opening(child_key, current_opening):
+    match = openings.lookup_key(child_key)
+    if match is None:
+        return None
+    if current_opening is not None and match['name'] == current_opening['name']:
+        return None
+    return match['name']
 
 
 def explore(request, key):
@@ -1103,13 +1495,77 @@ def explore(request, key):
     moves = _child_moves(pos)
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
-    top, line = _line_to_root(pos)
+    raw_play = request.GET.get('play')
+    try:
+        explicit_route = _validated_play_route(raw_play, pos.key)
+    except PlayRouteError as exc:
+        return _play_route_error_response(exc)
+    if explicit_route is None:
+        top, line, active_ucis = _canonical_route(pos)
+    else:
+        top, line, active_ucis = explicit_route
     # tambien en posiciones resueltas: se puede explorar la winning line
     legal_ucis = ([] if pos.closure == 'TERMINAL'
                   else logic.legal_moves(pos.fen))
     known = {m['uci'] for m in moves}
-    unexplored = [u for u in legal_ucis if u not in known]
-    numbered = _numbered_line(top, line)
+    current_opening_match, route_ply, active_ucis = _navigation_opening(
+        active_ucis,
+        request.GET.get(OPENING_ANCHOR_PARAM),
+        pos.key,
+        explicit_play=explicit_route is not None,
+    )
+    current_anchor = (
+        None if active_ucis is not None
+        else _signed_opening_anchor(
+            pos.key, current_opening_match, route_ply)
+    )
+    current_opening = _opening_for_template(current_opening_match)
+
+    for move in moves:
+        child_route, child_anchor = _child_navigation_state(
+            active_ucis, current_opening_match, route_ply,
+            move['key'], move['uci'],
+        )
+        move['url'] = _explore_url(
+            move['key'], child_route, child_anchor)
+        move['enters_opening'] = _exact_child_opening(
+            move['key'], current_opening)
+    unexplored = []
+    for uci in legal_ucis:
+        if uci in known:
+            continue
+        child_fen = logic.apply_move(pos.fen, uci)
+        child_key = logic.key_of(child_fen)
+        unexplored.append({
+            'uci': uci,
+            'url': _goto_url(
+                pos.key, uci, active_ucis, current_anchor),
+            'enters_opening': _exact_child_opening(
+                child_key, current_opening),
+        })
+    numbered = _numbered_line(
+        top,
+        line,
+        active_ucis,
+        current_opening_match if current_anchor else None,
+        route_ply,
+    )
+    board_play = (
+        ','.join(active_ucis)
+        if active_ucis is not None
+        else (
+            OPENING_ANCHOR_PLAY_PREFIX + current_anchor
+            if current_anchor else ''
+        )
+    )
+    legal_move_links = [
+        {
+            'uci': uci,
+            'url': _goto_url(
+                pos.key, uci, active_ucis, current_anchor),
+        }
+        for uci in legal_ucis
+    ]
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     eval_stm = None if pos.eval_cp is None else (
@@ -1117,10 +1573,14 @@ def explore(request, key):
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
+        'active_play': active_ucis, 'board_play': board_play,
+        'opening': current_opening,
         'board_key': pos.key, 'legal_ucis': legal_ucis,
+        'legal_move_links': legal_move_links,
         'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
-        'arrow': None if pos.closure == 'TERMINAL' else _arrow(pos.best_move),
+        'best_move': (None if pos.closure == 'TERMINAL'
+                      else pos.best_move),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),
@@ -1137,7 +1597,7 @@ def method(request):
 
 
 def conquest_map(request):
-    """Public shell for the snapshot-backed Conquest Map.
+    """Public shell for the snapshot-backed Atomic move tree.
 
     Rendering this page never walks or mutates the solver graph.  The
     versioned map endpoint supplies the bounded display-tree projection.

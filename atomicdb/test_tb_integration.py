@@ -1,10 +1,11 @@
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import TestCase, override_settings
+from django.test import override_settings
 
 from . import ingest
 from .models import DBEvent
+from .testing import TestCase
 
 
 FIVE_MEN = '4k3/8/8/8/8/8/8/QK6 w - - 0 1'

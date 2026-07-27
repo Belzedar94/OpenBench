@@ -1,9 +1,8 @@
 from unittest import mock
 
-from django.test import TestCase
-
 from . import ingest, logic
 from .models import DBEvent, Edge
+from .testing import TestCase
 
 
 class PriorityRefreshCacheTests(TestCase):

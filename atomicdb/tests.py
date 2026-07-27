@@ -4,11 +4,12 @@ completitud de movegen, backup determinista bajo replay."""
 from datetime import timedelta
 from unittest import mock
 
-from django.test import TestCase
+from django.db import OperationalError
 from django.utils import timezone
 
 from . import ingest, logic
 from .models import AnalysisTask, Edge, Position
+from .testing import TestCase
 
 
 class LogicTests(TestCase):
@@ -463,12 +464,143 @@ class RequestTests(TestCase):
             RequestLog.objects.create(ip='127.0.0.1', position=a)
         r = self.client.post(f'/atomicdb/request/{b.key}/')
         self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.json(), {'status': 'rate-limited'})
+
+    @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
+    def test_request_queue_full_keeps_structured_status(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'queue-full'})
 
     def test_request_dedup_same_ip_position(self):
         p = ingest.get_or_create_position(logic.start_fen())
         self.client.post(f'/atomicdb/request/{p.key}/')
         r = self.client.post(f'/atomicdb/request/{p.key}/')
         self.assertEqual(r.json()['status'], 'already-requested')
+
+    def test_sufficient_auto_lease_is_promoted_and_deduplicated(self):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        task = AnalysisTask.objects.create(
+            position=p, generation=0, budget_nodes=128_000_000,
+            state=AnalysisTask.TState.LEASED,
+            source=AnalysisTask.Source.AUTO,
+            machine='m1', leased_at=timezone.now(),
+        )
+
+        first = self.client.post(f'/atomicdb/request/{p.key}/')
+        second = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(first.json()['status'], 'already-queued')
+        self.assertEqual(second.json()['status'], 'already-requested')
+        task.refresh_from_db()
+        self.assertEqual(task.source, AnalysisTask.Source.USER)
+        self.assertEqual(RequestLog.objects.filter(position=p).count(), 1)
+
+    def test_completed_recent_request_can_queue_next_rung(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+        first = self.client.post(f'/atomicdb/request/{p.key}/')
+        self.assertEqual(first.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=p, generation=0)
+        self.assertEqual(task.budget_nodes, 128_000_000)
+        task.state = AnalysisTask.TState.COMPLETED
+        task.nodes_searched = 128_000_000
+        task.save(update_fields=['state', 'nodes_searched'])
+        Position.objects.filter(pk=p.pk).update(
+            visits=1, nodes_invested=128_000_000)
+
+        second = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(second.json()['status'], 'queued')
+        follow_up = AnalysisTask.objects.get(position=p, generation=1)
+        self.assertEqual(
+            (follow_up.state, follow_up.source, follow_up.budget_nodes),
+            (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
+             512_000_000),
+        )
+
+    def test_fen_creation_log_does_not_block_first_analysis_request(self):
+        from .models import RequestLog
+
+        fen = logic.apply_move(logic.start_fen(), 'g1f3')
+        created = self.client.post('/atomicdb/fen/', {'fen': fen})
+        self.assertEqual(created.status_code, 302)
+        p = Position.objects.get(key=logic.key_of(logic.canonical_fen(fen)))
+        self.assertTrue(RequestLog.objects.filter(position=p).exists())
+        self.assertFalse(AnalysisTask.objects.filter(position=p).exists())
+
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=p)
+        self.assertEqual(
+            (task.state, task.source, task.budget_nodes),
+            (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
+             128_000_000),
+        )
+
+    @mock.patch(
+        'atomicdb.views.ingest.request_analysis',
+        side_effect=OperationalError('database is locked'),
+    )
+    def test_request_lock_is_reported_as_retryable_busy(self, request_analysis):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'busy'})
+        self.assertEqual(response['Retry-After'], '2')
+        self.assertFalse(RequestLog.objects.filter(position=p).exists())
+        request_analysis.assert_called_once()
+
+    @mock.patch(
+        'atomicdb.views.RequestLog.objects.create',
+        side_effect=OperationalError('database is locked'),
+    )
+    def test_request_log_lock_rolls_back_new_task(self, create_log):
+        from .models import RequestLog
+
+        p = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.post(f'/atomicdb/request/{p.key}/')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'status': 'busy'})
+        self.assertFalse(AnalysisTask.objects.filter(position=p).exists())
+        self.assertFalse(RequestLog.objects.filter(position=p).exists())
+        create_log.assert_called_once()
+
+    @mock.patch(
+        'atomicdb.views.ingest.request_analysis',
+        side_effect=OperationalError('disk I/O error'),
+    )
+    def test_non_lock_database_error_is_not_hidden_or_retried(
+            self, request_analysis):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        with self.assertRaisesMessage(OperationalError, 'disk I/O error'):
+            self.client.post(f'/atomicdb/request/{p.key}/')
+
+        request_analysis.assert_called_once()
+
+    def test_explorer_retries_transient_request_contention(self):
+        p = ingest.get_or_create_position(logic.start_fen())
+
+        response = self.client.get(f'/atomicdb/explore/{p.key}/')
+
+        self.assertContains(response, "r.status === 503")
+        self.assertContains(response, "'busy'")
+        self.assertContains(response, 'Server busy, retrying...')
+        self.assertContains(response, 'error.retryable === true')
+        self.assertContains(response, "'rate-limited'")
+        self.assertContains(response, "'queue-full'")
+        self.assertContains(response, 'if (!data)')
+        self.assertNotContains(response, '!r.ok || !data')
 
 
 class MachineVisibilityTests(TestCase):
@@ -1286,8 +1418,8 @@ class MilestoneLineTests(TestCase):
 
     def test_multiple_labels_batch_parent_queries_by_depth(self):
         import pyffish as pf
-        from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from .database import connection
         from .views import _line_labels_many
         root = ingest.get_or_create_position(logic.start_fen())
         left = self._play(root, 'g1f3')
@@ -1338,7 +1470,7 @@ class BoardInteractionTests(TestCase):
             'board_fen': '7k/8/8/8/8/8/8/K7 b - - 0 1',
             'board_turn': 'black',
             'legal_ucis': [],
-            'arrow': None,
+            'best_move': None,
         })
 
         self.assertIn('atomicdb/board.js', html)
@@ -1368,15 +1500,25 @@ class NodesAccountingTests(TestCase):
 class ArrowTests(TestCase):
 
     def test_best_move_arrow_rendered(self):
+        from pathlib import Path
+        from django.conf import settings
         p = ingest.get_or_create_position(logic.start_fen())
         p.best_move = 'g1f3'
         p.save()
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
-        self.assertContains(r, '<svg class="board-arrow"')
+        self.assertContains(r, 'data-best-move="g1f3"')
+        self.assertNotContains(r, '<svg class="board-arrow"')
+        board_js = (
+            Path(settings.BASE_DIR) / 'atomicdb' / 'static' /
+            'atomicdb' / 'board.js'
+        ).read_text(encoding='utf-8')
+        self.assertIn('autoShapes', board_js)
+        self.assertIn("brush: 'green'", board_js)
 
     def test_no_arrow_without_best_move(self):
         p = ingest.get_or_create_position(logic.start_fen())
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
+        self.assertContains(r, 'data-best-move=""')
         self.assertNotContains(r, '<svg class="board-arrow"')
 
 

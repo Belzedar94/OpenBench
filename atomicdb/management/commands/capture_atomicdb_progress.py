@@ -4,10 +4,10 @@ import json
 from datetime import timezone as datetime_timezone
 
 from django.core.management.base import BaseCommand
-from django.db import transaction
 from django.db.models import BigIntegerField, Case, Count, F, Q, Sum, Value, When
 from django.utils import timezone
 
+from atomicdb.database import atomic
 from atomicdb.metrics import worker_metrics
 from atomicdb.models import AnalysisTask, DBEvent, Position, ProgressSnapshot
 
@@ -104,7 +104,7 @@ def _snapshot_values(observed_at):
     }
 
 
-@transaction.atomic
+@atomic()
 def capture_progress(*, now=None):
     """Capture the current hour once; return ``(snapshot, created)``.
 

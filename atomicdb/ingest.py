@@ -8,10 +8,10 @@ Flujo por resultado de analisis (§2):
 import time
 
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
 from . import logic, tb
+from .database import atomic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
@@ -127,7 +127,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             return {'skipped': 'already-closed'}
         mate_proofs = prepare_mate_proofs(snapshot.fen, lines)
 
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if pos.status != 'UNKNOWN':
             return {'skipped': 'already-closed'}
@@ -485,7 +485,7 @@ def request_analysis(pos):
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(pk=pos.pk)
         if pos.status != 'UNKNOWN':
             return 'already-solved'
@@ -514,28 +514,35 @@ def request_analysis(pos):
             task.save(update_fields=['source', 'budget_nodes'])
             if promoted:
                 return 'queued'
-        elif task.state == 'LEASED' and task.budget_nodes < floor:
-            # The running engine cannot change its ``go nodes`` command. Keep
-            # the user's deeper request as the next generation instead of
-            # logging it as satisfied and silently losing it for an hour.
-            follow_up = (AnalysisTask.objects.filter(
-                position=pos, state=AnalysisTask.TState.PENDING,
-                generation__gt=task.generation)
-                .order_by('generation').first())
-            if follow_up is None:
-                generation = max(pos.visits + 1, task.generation + 1)
-                while AnalysisTask.objects.filter(
-                        position=pos, generation=generation).exists():
-                    generation += 1
-                AnalysisTask.objects.create(
-                    position=pos, generation=generation,
-                    budget_nodes=floor, source='USER',
-                    multipv=multipv_for(generation))
-            else:
-                follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
-                follow_up.source = 'USER'
-                follow_up.save(update_fields=['budget_nodes', 'source'])
-            return 'queued'
+        elif task.state == 'LEASED':
+            if task.budget_nodes < floor:
+                # The running engine cannot change its ``go nodes`` command.
+                # Keep the user's deeper request as the next generation
+                # instead of logging it as satisfied and silently losing it.
+                follow_up = (AnalysisTask.objects.filter(
+                    position=pos, state=AnalysisTask.TState.PENDING,
+                    generation__gt=task.generation)
+                    .order_by('generation').first())
+                if follow_up is None:
+                    generation = max(pos.visits + 1, task.generation + 1)
+                    while AnalysisTask.objects.filter(
+                            position=pos, generation=generation).exists():
+                        generation += 1
+                    AnalysisTask.objects.create(
+                        position=pos, generation=generation,
+                        budget_nodes=floor, source='USER',
+                        multipv=multipv_for(generation))
+                else:
+                    follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
+                    follow_up.source = 'USER'
+                    follow_up.save(update_fields=['budget_nodes', 'source'])
+                return 'queued'
+            # The existing lease already satisfies the requested rung. Mark it
+            # as visitor-requested so subsequent clicks can be deduplicated
+            # without consuming the hourly allowance repeatedly.
+            if task.source != 'USER':
+                task.source = 'USER'
+                task.save(update_fields=['source'])
         return 'already-queued'
 
 
@@ -606,7 +613,7 @@ def _apply_prepared_tb(position_key, prepared):
     """Apply a server-validated TB result inside the caller's transaction."""
     if prepared is None or prepared.get('key') != position_key:
         return False
-    with transaction.atomic():
+    with atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if (pos.status != 'UNKNOWN' or pos.fen != prepared.get('fen')
                 or not logic.tb_applicable(pos.fen)):

@@ -1,11 +1,11 @@
 from datetime import timedelta
 
-from django.test import TestCase
 from django.utils import timezone
 
 from . import ingest, logic
 from .metrics import reset_metrics_cache, worker_metrics
 from .models import AnalysisTask, WorkerPing
+from .testing import TestCase
 
 
 class WorkerMetricTests(TestCase):

@@ -5,13 +5,13 @@ from unittest import mock
 
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.test import TestCase
 
 from .management.commands.capture_atomicdb_progress import (
     capture_progress,
     utc_hour,
 )
 from .models import AnalysisTask, DBEvent, Position, ProgressSnapshot, WorkerPing
+from .testing import TestCase
 
 
 UTC = datetime_timezone.utc

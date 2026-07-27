@@ -5,7 +5,7 @@
 {% if line %}
 <div class="linebox">
   {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
-  {% for st in line %}<a href="/atomicdb/explore/{{ st.key }}/"
+  {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
     {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% endfor %}
 </div>
 {% else %}
@@ -15,6 +15,17 @@
 <div class="crumb">transpositions from:
   {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
 </div>
+{% endif %}
+
+{% if opening %}
+<section class="opening-card" aria-labelledby="opening-name">
+  <span class="opening-kicker">Atomic opening</span>
+  <h2 id="opening-name">{{ opening.name }}</h2>
+  {% if opening.reference_line_san %}
+  <p class="opening-reference"><span class="dim">Reference:</span>
+    {{ opening.reference_line_san }}</p>
+  {% endif %}
+</section>
 {% endif %}
 
 <div class="cols">
@@ -55,10 +66,27 @@
           })
           .catch(() => setTimeout(() => poll(tries - 1), 10000));
       }
-      btn.addEventListener('click', function () {
-        btn.disabled = true;
+      function requestAnalysis(attempt) {
         fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
-          .then(r => r.json())
+          .then(async r => {
+            const data = await r.json().catch(() => null);
+            if (r.status === 503 && data && data.status === 'busy') {
+              const error = new Error('server busy');
+              error.retryable = true;
+              error.retryAfter = Number(r.headers.get('Retry-After')) || 2;
+              throw error;
+            }
+            // Structured application statuses (including 429 rate-limited
+            // and 503 queue-full) still use their existing user-facing text.
+            // Only an unparseable server response is an opaque server error.
+            if (!data) {
+              const error = new Error('server error');
+              error.retryable = false;
+              error.server = true;
+              throw error;
+            }
+            return data;
+          })
           .then(d => {
             btn.textContent = {
               'queued': 'Queued, waiting for a worker...',
@@ -71,9 +99,28 @@
             if (['queued', 'already-queued',
                  'already-requested'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
+            } else {
+              btn.disabled = false;
             }
           })
-          .catch(() => { btn.textContent = 'Network error'; btn.disabled = false; });
+          .catch(error => {
+            if (attempt < 9 && error.retryable === true) {
+              const delay = Math.max(
+                error.retryAfter * 1000,
+                Math.min(1000 + attempt * 1000, 5000));
+              btn.textContent = 'Server busy, retrying...';
+              setTimeout(() => requestAnalysis(attempt + 1), delay);
+            } else {
+              btn.textContent = error.server
+                ? 'Server error, try again'
+                : 'Network error, try again';
+              btn.disabled = false;
+            }
+          });
+      }
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        requestAnalysis(0);
       });
     })();
     </script>
@@ -106,7 +153,9 @@
       {% for m in moves %}
       <tr>
         <td><span class="chip {{ m.css }}"></span></td>
-        <td><a href="/atomicdb/explore/{{ m.key }}/"><strong>{{ m.uci }}</strong></a></td>
+        <td><a href="{{ m.url }}"{% if m.enters_opening %}
+          title="Enters {{ m.enters_opening }}"{% endif %}><strong>{{ m.uci }}</strong></a>
+          {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}</td>
         <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
@@ -116,7 +165,9 @@
       {% for u in unexplored %}
       <tr>
         <td><span class="chip cold"></span></td>
-        <td><a href="/atomicdb/goto/{{ pos.key }}/{{ u }}/"><strong>{{ u }}</strong></a></td>
+        <td><a href="{{ u.url }}"{% if u.enters_opening %}
+          title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
+          {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}</td>
         <td><span class="dim">unexplored</span></td>
         <td><span class="dim">-</span></td>
         <td class="dim">-</td>

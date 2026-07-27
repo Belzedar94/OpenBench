@@ -2,10 +2,11 @@ from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase
 
 from . import ingest, logic
 from .models import AnalysisTask, DBEvent, Edge, Position
+from .testing import TestCase
 
 
 # A genuine atomic mate in two (three plies).  White has exactly the forcing
