@@ -168,10 +168,10 @@ class OpenBenchThemeStaticContractTests(SimpleTestCase):
         'sidebar-hover': '#f8f9fa',     # .links-link:hover / --bs-light
         'td-border': '#dee2e6',         # --bs-border-color
         'statblock-bg': '#f5f5f5',      # .elo-results
-        'statblock-green': '#d1e7dd',   # --bs-success-bg-subtle
-        'statblock-blue': '#cff4fc',    # --bs-info-bg-subtle
-        'statblock-yellow': '#fff3cd',  # --bs-warning-bg-subtle
-        'statblock-red': '#f8d7da',     # --bs-danger-bg-subtle
+        'statblock-green': '#44EB44',   # fishtest .results-pre passed (measured live)
+        'statblock-blue': '#66CCFF',    # fishtest special blue (measured live)
+        'statblock-yellow': '#FFFF00',  # fishtest yellow (measured live)
+        'statblock-red': '#FF6A6A',     # fishtest .results-pre failed (measured live)
         'card-bg': '#ffffff',
         'card-border': '#dee2e6',
     }
