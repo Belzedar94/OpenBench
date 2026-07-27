@@ -22,7 +22,8 @@ from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
                               When, Window)
 from django.db.models.functions import RowNumber
 
-from . import community_names, ingest, ingest_queue, logic, openings, solve
+from . import (community_names, ingest, ingest_queue, logic, openings, proof,
+               solve)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge,
@@ -1493,8 +1494,12 @@ def home(request):
     root = ingest.get_or_create_position(logic.start_fen())
     root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
+    root_pn, root_dn = proof.headline_numbers()
     return render(request, 'atomicdb/home.html', {
         **_suggestions_badge(request),
+        'root_pn_h': proof.format_number(root_pn),
+        'root_dn_h': proof.format_number(root_dn),
+        'has_proof_numbers': root_pn is not None,
         'analyzing': analyzing, 'upnext': upnext,
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),

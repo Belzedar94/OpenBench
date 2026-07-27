@@ -382,6 +382,33 @@ def _refresh_campaign(campaign, seeds, max_plies):
     return written
 
 
+def format_number(value):
+    """pn/dn para consumo humano: saturado es infinito, no 4.6e18.
+
+    Vive aqui y no en una plantilla porque lo usan la home, ``proof_status`` y
+    el snapshot, y tres formateos distintos del mismo numero es como se
+    empieza a desconfiar de un panel.
+    """
+    if value is None:
+        return '-'
+    if value >= PROOF_INFINITY:
+        return '\u221e'
+    return f'{value:,}'
+
+
+def headline_numbers():
+    """(pn, dn) de la campana por defecto, o ``(None, None)`` si no hay.
+
+    Deliberadamente SIN porcentaje: el denominador de "% resuelto" crece cada
+    vez que se descubre una obligacion nueva, asi que una barra de progreso
+    aqui seria una mentira que ademas retrocede.
+    """
+    campaign = ProofCampaign.objects.filter(active=True).order_by('id').first()
+    if campaign is None:
+        return None, None
+    return root_numbers(campaign)
+
+
 def root_numbers(campaign):
     node = ProofNode.objects.filter(
         campaign=campaign, position_id=campaign.root_id).first()

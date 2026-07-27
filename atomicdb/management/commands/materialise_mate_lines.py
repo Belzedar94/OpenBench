@@ -12,30 +12,51 @@ the same proof grade.  Nothing is invented — the witness was re-verified move
 by move when it closed, and this re-verifies it again by default before
 touching anything, because a historical row may predate a movegen fix.
 
-SAFE WHILE THE TREE IS LIVE.  It only creates positions and edges and only
+RUNNABLE WITH THE TREE LIVE.  It only creates positions and edges and only
 closes nodes that are still UNKNOWN; it never overwrites an existing closure,
-never expands anything, and works one witness per transaction.  A worker
-submitting at the same time competes for the SQLite write lock and nothing
-else.  Resumable by key cursor, and idempotent: a chain already materialised
-re-walks to the same rows and writes nothing.
+never expands anything, and works one witness per transaction.
+
+That was not enough on its own.  The first production run needed a full
+quiesce because SQLite answered "database is locked" as soon as the ingest
+processor wanted the writer.  So each witness now waits its turn
+(``busy_timeout``) and, if it still loses the race, retries with backoff
+instead of aborting the pass; ``--batch-size`` and ``--sleep`` slice the work
+thin enough to live alongside a few hundred cores of workers.  It takes
+longer, and nobody has to stop.
+
+Resumable by key cursor, and idempotent: a chain already materialised re-walks
+to the same rows and writes nothing.
 """
 
 import json
+import time
 
 from django.core.management.base import BaseCommand
-from django.db.models import Q
+from django.db import OperationalError
 
-from atomicdb import ingest, logic
+from atomicdb import ingest
 from atomicdb.database import atomic, connection
 from atomicdb.models import DBEvent, Position
+
+# Waiting for a busy writer is normal, not an error: the same allowance
+# ``verify_mates`` gives itself.
+BUSY_TIMEOUT_MS = 30_000
+# Per-witness retries for when the timeout itself is exhausted.
+RETRY_BACKOFF_SECONDS = (1, 3, 10, 30)
 
 
 class Command(BaseCommand):
     help = 'Materialise the won_line chain of existing MATE_PV closures.'
 
     def add_arguments(self, parser):
-        parser.add_argument('--batch-size', type=int, default=200,
-                            help='Witnesses read per resumable checkpoint.')
+        parser.add_argument('--batch-size', type=int, default=50,
+                            help='Witnesses per resumable checkpoint; smaller '
+                                 'batches are friendlier to a live tree.')
+        parser.add_argument('--sleep', type=float, default=0.0,
+                            help='Seconds to pause between batches, leaving '
+                                 'the write lock to the workers.')
+        parser.add_argument('--busy-timeout', type=int, default=BUSY_TIMEOUT_MS,
+                            help='Milliseconds to wait for the write lock.')
         parser.add_argument('--limit', type=int, default=None,
                             help='Stop after this many witnesses.')
         parser.add_argument('--proof', default=None,
@@ -51,10 +72,13 @@ class Command(BaseCommand):
         connection.ensure_connection()
         if connection.vendor == 'sqlite':
             with connection.cursor() as cursor:
-                cursor.execute('PRAGMA busy_timeout = 30000')
+                cursor.execute(
+                    'PRAGMA busy_timeout = {}'.format(
+                        int(options['busy_timeout'])))
 
         counts = {'witnesses': 0, 'edges_created': 0, 'nodes_closed': 0,
-                  'plies_walked': 0, 'rejected': 0, 'skipped': 0}
+                  'plies_walked': 0, 'rejected': 0, 'skipped': 0,
+                  'retried': 0, 'locked_out': 0}
         after_key, processed = '', 0
         seeds = []
 
@@ -75,9 +99,14 @@ class Command(BaseCommand):
                     counts['plies_walked'] += len(
                         (row.won_line or '').split())
                     continue
-                with atomic():
-                    result = ingest.materialise_won_line(
-                        row, verify=not options['no_verify'])
+                result = self._materialise(row, options, counts)
+                if result is None:
+                    counts['locked_out'] += 1
+                    self.stderr.write(
+                        'LOCKED {}: still busy after {} retries; rerun '
+                        'later'.format(row.key[:16],
+                                       len(RETRY_BACKOFF_SECONDS)))
+                    continue
                 if result.get('rejected'):
                     counts['rejected'] += 1
                     self.stderr.write(
@@ -90,11 +119,17 @@ class Command(BaseCommand):
                     seeds.append(row.key)
                 else:
                     counts['skipped'] += 1
+            if options['sleep'] > 0:
+                time.sleep(options['sleep'])
 
         if seeds and not options['dry_run']:
             # New exact children mean the ancestors may now back up further.
-            for start in range(0, len(seeds), 200):
-                ingest.backup_cascade(seeds[start:start + 200])
+            # Sliced as thin as the main pass, for the same reason.
+            step = max(1, options['batch_size'])
+            for start in range(0, len(seeds), step):
+                self._cascade(seeds[start:start + step], counts)
+                if options['sleep'] > 0:
+                    time.sleep(options['sleep'])
             DBEvent.objects.create(kind='WON_LINES_MATERIALISED',
                                    payload=dict(counts))
 
@@ -105,6 +140,45 @@ class Command(BaseCommand):
             'materialise_mate_lines: '
             + ' '.join(f'{name}={value}' for name, value in counts.items())
             + f' cursor={after_key[:16] or "-"}')
+
+    def _materialise(self, row, options, counts):
+        """One witness, retried while SQLite says the tree is busy.
+
+        A lock is a queue, not a failure: the ingest processor holding the
+        writer for a moment is exactly what is supposed to happen on a live
+        tree.  Anything that is NOT a lock is re-raised — a real error must
+        never be retried into silence.
+        """
+        for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
+            try:
+                with atomic():
+                    return ingest.materialise_won_line(
+                        row, verify=not options['no_verify'])
+            except OperationalError as error:
+                message = str(error).lower()
+                if 'locked' not in message and 'busy' not in message:
+                    raise
+                if attempt >= len(RETRY_BACKOFF_SECONDS):
+                    return None
+                counts['retried'] += 1
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+        return None
+
+    def _cascade(self, seeds, counts):
+        """The ancestor backup, under the same patience as the witnesses."""
+        for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
+            try:
+                ingest.backup_cascade(seeds)
+                return
+            except OperationalError as error:
+                message = str(error).lower()
+                if 'locked' not in message and 'busy' not in message:
+                    raise
+                if attempt >= len(RETRY_BACKOFF_SECONDS):
+                    counts['locked_out'] += 1
+                    return
+                counts['retried'] += 1
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
 
     def _batch(self, after_key, take, proof):
         rows = Position.objects.filter(

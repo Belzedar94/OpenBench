@@ -1038,6 +1038,7 @@ def _regret_from_root():
     # el Dijkstra toma el MINIMO sobre caminos, un subarbol ya refutado
     # entra por la puerta de atras.  Eso tuvo al selector ocho horas
     # taladrando posiciones bajo una jugada que pierde en dos.
+    settled = set()
     for key, fen, eval_cp, backed_eval, status in \
             Position.objects.values_list(
                 'key', 'fen', 'eval_cp', 'backed_eval', 'status'):
@@ -1045,6 +1046,8 @@ def _regret_from_root():
         val[key] = {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000,
                     'DRAW': 0}.get(status, known)
         white_stm[key] = fen.split()[1] == 'w'
+        if status != 'UNKNOWN':
+            settled.add(key)
     children = {}
     for pid, cid in Edge.objects.values_list('parent_id', 'child_id'):
         children.setdefault(pid, []).append(cid)
@@ -1058,6 +1061,27 @@ def _regret_from_root():
     while heap:
         r, k = heapq.heappop(heap)
         if r > regret.get(k, INF):
+            continue
+        if k in settled:
+            # UN NODO CERRADO NO RELAJA HACIA ABAJO (fuga #2, 28-jul).
+            #
+            # Un cierre conserva su valor de verdad, asi que en la raiz un
+            # WHITE_WIN ES el mejor hijo: su propio gap es cero, y con la
+            # relajacion normal ese cero lo heredaban todos sus descendientes.
+            # El resultado era una autopista de regret cero hacia el interior
+            # de un subarbol ya resuelto — y desde la materializacion de las
+            # ``won_line`` hay CADENAS enteras de nodos cerrados, asi que la
+            # autopista pasaba a ser sistematica en vez de anecdotica.
+            #
+            # Un nodo cerrado no necesita mas trabajo debajo: lo que haya bajo
+            # el solo merece atencion si algun camino ABIERTO llega tambien
+            # (una transposicion), y ese camino se relaja por su cuenta.  Si
+            # no lo hay, el nodo es inalcanzable de forma util y
+            # ``_still_reachable`` ya lo entierra.
+            #
+            # Ojo a lo que NO cambia: el cerrado sigue contando como HIJO al
+            # calcular el gap de sus hermanos, que es justo lo que hace que
+            # una alternativa perdedora cargue con su distancia al mate.
             continue
         kids = children.get(k, ())
         if not kids:

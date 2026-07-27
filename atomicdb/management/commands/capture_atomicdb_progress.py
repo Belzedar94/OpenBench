@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from django.db.models import BigIntegerField, Case, Count, F, Q, Sum, Value, When
 from django.utils import timezone
 
+from atomicdb import proof
 from atomicdb.database import atomic
 from atomicdb.metrics import worker_metrics
 from atomicdb.models import AnalysisTask, DBEvent, Position, ProgressSnapshot
@@ -93,6 +94,10 @@ def _snapshot_values(observed_at):
         tasks[field] = tasks[field] or 0
 
     live = worker_metrics(now=observed_at)
+    # Observed, like everything else here: the numbers as they stand at
+    # capture time, never reconstructed.  A tree with no campaign records
+    # zeroes rather than skipping the bucket.
+    root_pn, root_dn = proof.headline_numbers()
     return {
         **positions,
         **tasks,
@@ -101,6 +106,8 @@ def _snapshot_values(observed_at):
         'active_workers': live['workers'],
         'active_threads': live['cores'],
         'active_nps': live['nps'],
+        'root_pn': 0 if root_pn is None else int(root_pn),
+        'root_dn': 0 if root_dn is None else int(root_dn),
     }
 
 

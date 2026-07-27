@@ -479,6 +479,15 @@ class ProgressSnapshot(models.Model):
     closure_minimax = models.BigIntegerField(default=0)
     closure_unclassified = models.BigIntegerField(default=0)
 
+    # pn/dn de la raiz de la campana por defecto, en el instante de la
+    # captura.  Son el indicador de progreso REAL del proyecto — cuanto
+    # esfuerzo queda para probar la conjetura y cuanto para refutarla — y a la
+    # vez el detector de que la conjetura podria ser falsa: dn estancado con
+    # pn creciendo.  Se guardan saturados en ``proof.PROOF_INFINITY``, que la
+    # vista pinta como infinito; cero es un valor legitimo (probado).
+    root_pn = models.BigIntegerField(default=0)
+    root_dn = models.BigIntegerField(default=0)
+
     trust_verified = models.BigIntegerField(default=0)
     trust_andor = models.BigIntegerField(default=0)
     trust_engine = models.BigIntegerField(default=0)

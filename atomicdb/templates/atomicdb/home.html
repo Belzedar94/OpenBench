@@ -12,7 +12,9 @@
   <div class="metric" title="Threads reported by active AtomicDB workers"><div class="v">{{ cores_h }}</div><div class="l">active cores</div></div>
   <div class="metric" title="Sum of each active worker's latest reported engine speed"><div class="v">{{ compute_nps_h }}</div><div class="l">nodes / sec</div></div>
   <div class="metric" title="Completed AtomicDB analyses per minute, averaged over 10 minutes"><div class="v">{{ positions_pm_h }}</div><div class="l">positions / min</div></div>
-</div>
+{% if has_proof_numbers %}  <div class="metric" title="Proof number of the campaign root: the estimated remaining effort to PROVE the conjecture. Not a probability, and not a percentage."><div class="v">{{ root_pn_h }}</div><div class="l">proof number</div></div>
+  <div class="metric" title="Disproof number of the campaign root: the estimated effort to REFUTE it. A pn that climbs while this one stalls is the earliest honest sign the conjecture may be false."><div class="v">{{ root_dn_h }}</div><div class="l">disproof number</div></div>
+{% endif %}</div>
 
 {% if first_moves %}
 <div class="progress">

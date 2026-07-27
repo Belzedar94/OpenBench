@@ -92,18 +92,71 @@ class RegretUsesBestKnownEvalTests(TestCase):
 
         self.assertLess(informed_priority, target.priority)
 
-    def test_a_closed_parent_still_hands_out_a_zero_gap_path(self):
-        """RESIDUAL, found while pinning the above and NOT fixed here.
+    def test_a_closed_parent_no_longer_hands_out_a_zero_gap_path(self):
+        """Leak #2, now fixed: a settled node does not relax downwards.
 
-        A closed node keeps its truth value (10000 for a white win), so at the
-        root it IS the best child and its own gap is zero — and its children
-        inherit that zero.  Analysing below a settled node buys nothing, so
-        the regret walk should not descend through one at all.  Reported
-        rather than patched: it is a change to how the Dijkstra treats closed
-        nodes, and that deserves its own round.
+        A closure keeps its truth value, so at the root a WHITE_WIN child IS
+        the best child and its own gap is zero.  With ordinary relaxation
+        every descendant inherited that zero — a free motorway into a subtree
+        that is already resolved.
         """
-        target, mainline = self._leak(blind_parent_backed=1_439)
-        self.assertGreater(target.priority, mainline.priority)
+        self._leak(blind_parent_backed=1_439)
+        target = Position.objects.get(
+            key=Edge.objects.get(move_uci='h4h5').child_id)
+        refuted = Edge.objects.get(move_uci='h4h5').parent_id
+
+        regret = ingest._regret_from_root()
+
+        # The closed node itself is still the best child at the root, so its
+        # OWN regret is zero.  What must not happen is that zero flowing on.
+        self.assertEqual(regret[refuted], 0.0)
+        self.assertGreater(regret[target.key], 1_000)
+
+    def test_a_closed_sibling_still_creates_the_gap_it_should(self):
+        """What must NOT change: a losing alternative still carries the
+        distance to the win beside it."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        winning = Edge.objects.get(parent=root, move_uci='h2h4').child
+        winning.status = 'WHITE_WIN'
+        winning.closure = 'MINIMAX'
+        winning.save()
+        loser = Edge.objects.get(parent=root, move_uci='e2e4').child
+        loser.eval_cp = -300
+        loser.save()
+
+        regret = ingest._regret_from_root()
+
+        self.assertEqual(regret[root.key], 0.0)
+        self.assertGreater(regret[loser.key], 1_000)
+
+    def test_a_materialised_won_line_is_not_a_motorway(self):
+        """Closures now come in CHAINS, so this had to stop being anecdotal.
+
+        Every node of a materialised witness is closed, so the walk must not
+        run down one handing out zero regret at each link.
+        """
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        head = Edge.objects.get(parent=root, move_uci='h2h4').child
+        chain = [head]
+        squares = ('1k6', '2k5', '3k4')
+        for index, rank in enumerate(squares):
+            link = ingest.get_or_create_position(
+                f'8/8/8/8/8/{rank}/8/K6Q w - - 0 1')
+            Edge.objects.create(parent=chain[-1],
+                                move_uci=f'h1h{index + 2}', child=link)
+            chain.append(link)
+        Position.objects.filter(key__in=[node.key for node in chain]).update(
+            status='WHITE_WIN', closure='MATE_PV')
+
+        regret = ingest._regret_from_root()
+
+        # The head is a child of the root, so it has a regret; everything
+        # behind it is only reachable THROUGH closures and is never relaxed.
+        self.assertEqual(regret[head.key], 0.0)
+        for link in chain[1:]:
+            self.assertEqual(regret[link.key], float('inf'))
 
     def test_the_value_map_prefers_status_then_backed_then_eval(self):
         pos = ingest.get_or_create_position(logic.start_fen())
