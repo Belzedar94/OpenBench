@@ -12,6 +12,14 @@
     : null;
   const themeColour = document.getElementById('atomicdb-theme-color');
 
+  // The browser-chrome colour follows whichever palette the page ships. The
+  // AtomicDB pages state nothing and keep their own canvas colours; OpenBench
+  // declares its two on the meta tag.
+  const chrome = {
+    light: (themeColour && themeColour.dataset.themeLight) || '#f5f2ea',
+    dark: (themeColour && themeColour.dataset.themeDark) || '#161512',
+  };
+
   function readStoredTheme() {
     try {
       const value = window.localStorage.getItem(storageKey);
@@ -35,7 +43,7 @@
       ? 'Switch to light mode'
       : 'Switch to dark mode';
     if (themeColour) {
-      themeColour.content = theme === 'light' ? '#f5f2ea' : '#161512';
+      themeColour.content = theme === 'light' ? chrome.light : chrome.dark;
     }
   }
 
