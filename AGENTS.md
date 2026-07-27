@@ -344,3 +344,13 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 - En este host compartido, limitar builds con `OPENBENCH_BUILD_JOBS=8` y usar
   clientes dev pequeños; nunca mezclar la DB/Media/clientes de `:8000` con los
   ensayos de `:8001`.
+
+## Deploy del server (runbook, 27-jul)
+
+En el VPS (/opt/openbench):
+```
+git pull --ff-only
+.venv/bin/python manage.py collectstatic --noinput   # nginx sirve /static/ desde staticfiles/ — SIN esto, CSS/JS viejos
+systemctl restart openbench                          # el token de cache se calcula al arrancar
+```
+Si hubo ventana con estaticos viejos servidos bajo token nuevo: `touch` de los fuentes en OpenBench/static/ + collectstatic + restart (nuevo token, invalida caches envenenadas).
