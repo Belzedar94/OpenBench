@@ -140,6 +140,42 @@ class RequestLog(models.Model):
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
+class OpeningNameSuggestion(models.Model):
+    """Nombre de apertura propuesto por la comunidad, sin cuenta.
+
+    El catalogo auditado (``data/atomic_openings_v1.json``) es inmutable y su
+    identidad esta fijada por digest: nada en tiempo de ejecucion lo reescribe.
+    Un nombre aprobado aqui se APLICA por encima de el, sobre posiciones que el
+    catalogo no nombra (§ community_names), y queda marcado como comunitario.
+
+    ``resolved_by`` guarda el nombre de usuario, no una FK: el router de bases
+    prohibe relaciones entre la base de AtomicDB y la de OpenBench.
+    """
+
+    class SState(models.TextChoices):
+        PENDING  = 'PENDING'
+        APPROVED = 'APPROVED'
+        REJECTED = 'REJECTED'
+
+    position      = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                      related_name='name_suggestions')
+    proposed_name = models.CharField(max_length=60)
+    comment       = models.CharField(max_length=280, blank=True, default='')
+    ip            = models.GenericIPAddressField(db_index=True)
+    created       = models.DateTimeField(auto_now_add=True, db_index=True)
+    status        = models.CharField(max_length=8, choices=SState.choices,
+                                     default=SState.PENDING, db_index=True)
+    resolved_by   = models.CharField(max_length=64, blank=True, default='')
+    resolved_at   = models.DateTimeField(null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['status', 'created'],
+                                name='atomic_suggestion_state')]
+
+    def __str__(self):
+        return f'{self.proposed_name} ({self.status})'
+
+
 class WorkerPing(models.Model):
     """Presencia de workers de AtomicDB, para la pagina /machines/."""
     machine    = models.CharField(max_length=64)

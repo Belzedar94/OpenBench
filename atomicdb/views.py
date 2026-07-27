@@ -22,11 +22,11 @@ from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
                               When, Window)
 from django.db.models.functions import RowNumber
 
-from . import ingest, logic, openings
+from . import community_names, ingest, logic, openings
 from .database import atomic
 from .metrics import worker_metrics
-from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
-                     RequestLog, WorkerPing)
+from .models import (AnalysisTask, Campaign, DBEvent, Edge,
+                     OpeningNameSuggestion, Position, RequestLog, WorkerPing)
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -60,6 +60,17 @@ OPENING_ANCHOR_MAX_CHARS = 1024
 # A distinct, signed sentinel keeps drag/drop navigation working after the
 # bounded replay route rolls over, without accepting any extra replay tokens.
 OPENING_ANCHOR_PLAY_PREFIX = 'signed-opening.'
+# Propuestas publicas de nombre de apertura (§ community_names). Mismo patron
+# de rate-limit que RequestLog: contar filas propias por IP en una ventana.
+SUGGESTION_NAME_MAX_CHARS = 60
+SUGGESTION_NAME_MIN_CHARS = 2
+SUGGESTION_COMMENT_MAX_CHARS = 280
+SUGGESTIONS_PER_IP_DAY = 10
+SUGGESTION_MODERATION_PAGE = 100
+# Letras (con acentos), cifras y la puntuacion que un nombre de apertura de
+# verdad necesita. Nada de <>&"' ni control chars: el escapado de plantilla ya
+# protege, pero un nombre no tiene por que contener markup para empezar.
+SUGGESTION_NAME_RE = re.compile(r"^[0-9A-Za-zÀ-ÿ][0-9A-Za-zÀ-ÿ .,:'’\-()/]*$")
 
 logger = logging.getLogger(__name__)
 
@@ -480,14 +491,18 @@ def api_submit(request):
     return JsonResponse({'ok': True, 'summary': summary})
 
 
+def _client_ip(request):
+    """Ultima entrada de XFF: la puso nuestro nginx, el cliente no la falsea."""
+    return (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
+            or request.META.get('REMOTE_ADDR', '0.0.0.0'))
+
+
 def _api_request_once(request, key):
     """Peticion publica de analisis (estilo chessdb.cn), sin cuenta.
     Protecciones: rate-limit por IP, dedup ip+posicion, tope global de cola."""
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
-    # ultima entrada de XFF: la puso nuestro nginx, el cliente no puede falsearla
-    ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
-          or request.META.get('REMOTE_ADDR', '0.0.0.0'))
+    ip = _client_ip(request)
     try:
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
@@ -1443,8 +1458,7 @@ def fen_jump(request):
         return render(request, 'atomicdb/missing.html', status=400)
     key = logic.key_of(fen)
     if not Position.objects.filter(key=key).exists():
-        ip = (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
-              or request.META.get('REMOTE_ADDR', '0.0.0.0'))
+        ip = _client_ip(request)
         hour_ago = timezone.now() - timedelta(hours=1)
         if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
                              .count() >= REQUESTS_PER_IP_HOUR:
@@ -1552,11 +1566,162 @@ def _opening_for_template(match):
 
 def _exact_child_opening(child_key, current_opening):
     match = openings.lookup_key(child_key)
-    if match is None:
+    # El catalogo auditado manda; donde calla, puede hablar un nombre
+    # comunitario ya moderado.
+    name = match['name'] if match is not None \
+        else community_names.name_for(child_key)
+    if name is None:
         return None
-    if current_opening is not None and match['name'] == current_opening['name']:
+    if current_opening is not None and name == current_opening['name']:
         return None
-    return match['name']
+    return name
+
+
+# ---------------- nombres de apertura de la comunidad ----------------
+
+SUGGESTION_MESSAGES = {
+    'ok': 'Thanks: your name is queued for review.',
+    'duplicate': 'You already have a pending suggestion for this position.',
+    'rate-limited': 'Daily suggestion limit reached, try again tomorrow.',
+    'invalid': 'A name is 2 to 60 characters of ordinary text.',
+    'already-named': 'This position already has a catalogued opening name.',
+}
+
+
+def _suggestion_return_url(request, pos, outcome):
+    """Vuelve a la MISMA pagina de exploracion, ruta incluida.
+
+    La ruta se revalida entera (no se confia en lo que venga en el POST), asi
+    que esto no puede convertirse en un redirect abierto ni materializar una
+    linea nombrandola.
+    """
+    ucis, anchor = None, None
+    try:
+        route = _validated_play_route(request.POST.get('play') or None,
+                                      pos.key)
+    except PlayRouteError:
+        route = None
+    if route is not None:
+        ucis = route[2]
+    else:
+        candidate = request.POST.get('opening') or ''
+        match, _ply = _validated_opening_anchor(candidate, pos.key)
+        if match is not None:
+            anchor = candidate
+    url = _explore_url(pos.key, ucis, anchor)
+    return f"{url}{'&' if '?' in url else '?'}suggested={outcome}"
+
+
+def suggest_opening_name(request, key):
+    """Propuesta publica de nombre, sin cuenta.
+
+    Anti-spam: una sola propuesta pendiente por IP y posicion, tope diario por
+    IP, longitud y alfabeto validados, y nada de nombres para posiciones que
+    el catalogo auditado ya nombra.
+    """
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return render(request, 'atomicdb/missing.html', status=404)
+    if request.method != 'POST':
+        return redirect(_explore_url(pos.key))
+
+    def back(outcome):
+        return redirect(_suggestion_return_url(request, pos, outcome))
+
+    if openings.lookup_key(pos.key) is not None:
+        return back('already-named')
+    name = ' '.join((request.POST.get('name') or '').split())
+    comment = ' '.join((request.POST.get('comment') or '').split())
+    if (len(name) < SUGGESTION_NAME_MIN_CHARS
+            or len(name) > SUGGESTION_NAME_MAX_CHARS
+            or not SUGGESTION_NAME_RE.fullmatch(name)
+            or len(comment) > SUGGESTION_COMMENT_MAX_CHARS):
+        return back('invalid')
+
+    ip = _client_ip(request)
+    if OpeningNameSuggestion.objects.filter(
+            ip=ip, position=pos,
+            status=OpeningNameSuggestion.SState.PENDING).exists():
+        return back('duplicate')
+    day_ago = timezone.now() - timedelta(days=1)
+    if OpeningNameSuggestion.objects.filter(
+            ip=ip, created__gte=day_ago).count() >= SUGGESTIONS_PER_IP_DAY:
+        return back('rate-limited')
+    OpeningNameSuggestion.objects.create(
+        position=pos, proposed_name=name, comment=comment, ip=ip)
+    return back('ok')
+
+
+def _approver_gate(request):
+    """Mismo criterio que /networks/: login, y Profile.approver."""
+    # Import local: mantiene a AtomicDB importable sin arrastrar OpenBench.
+    from OpenBench.models import Profile
+    if not request.user.is_authenticated:
+        return redirect('/login/')
+    if not Profile.objects.filter(user=request.user, approver=True).exists():
+        return redirect('/index/')
+    return None
+
+
+def suggestions(request):
+    """Moderacion de nombres propuestos. Solo para approvers."""
+    denied = _approver_gate(request)
+    if denied is not None:
+        return denied
+
+    if request.method == 'POST':
+        decisions = {'approve': OpeningNameSuggestion.SState.APPROVED,
+                     'reject': OpeningNameSuggestion.SState.REJECTED}
+        decision = decisions.get(request.POST.get('action', ''))
+        try:
+            suggestion_id = int(request.POST.get('suggestion', ''))
+        except (TypeError, ValueError):
+            suggestion_id = None
+        if decision is not None and suggestion_id is not None:
+            with atomic():
+                row = (OpeningNameSuggestion.objects.select_for_update()
+                       .filter(id=suggestion_id,
+                               status=OpeningNameSuggestion.SState.PENDING)
+                       .first())
+                if row is not None:
+                    # El catalogo auditado pudo nombrarla mientras esperaba.
+                    if (decision == OpeningNameSuggestion.SState.APPROVED
+                            and openings.lookup_key(row.position_id)
+                            is not None):
+                        decision = OpeningNameSuggestion.SState.REJECTED
+                    row.status = decision
+                    row.resolved_by = request.user.username[:64]
+                    row.resolved_at = timezone.now()
+                    row.save(update_fields=['status', 'resolved_by',
+                                            'resolved_at'])
+        community_names.invalidate()
+        return redirect('/atomicdb/suggestions/')
+
+    pending = list(OpeningNameSuggestion.objects
+                   .filter(status=OpeningNameSuggestion.SState.PENDING)
+                   .select_related('position')
+                   .order_by('created')[:SUGGESTION_MODERATION_PAGE])
+    resolved = list(OpeningNameSuggestion.objects
+                    .exclude(status=OpeningNameSuggestion.SState.PENDING)
+                    .select_related('position')
+                    .order_by('-resolved_at')[:20])
+    labels = _line_labels_many([row.position_id for row in pending + resolved])
+    rows = []
+    for row in pending:
+        preview, full = labels.get(row.position_id, ('', ''))
+        rows.append({'row': row, 'san': preview or 'start position',
+                     'full': full or 'start position'})
+    history = []
+    for row in resolved:
+        preview, full = labels.get(row.position_id, ('', ''))
+        history.append({'row': row, 'san': preview or 'start position',
+                        'full': full or 'start position'})
+    return render(request, 'atomicdb/suggestions.html', {
+        'pending': rows, 'history': history,
+        'pending_total': OpeningNameSuggestion.objects.filter(
+            status=OpeningNameSuggestion.SState.PENDING).count(),
+    })
 
 
 def explore(request, key):
@@ -1592,6 +1757,12 @@ def explore(request, key):
             pos.key, current_opening_match, route_ply)
     )
     current_opening = _opening_for_template(current_opening_match)
+    # Un nombre comunitario aprobado solo puede aparecer donde el catalogo
+    # auditado calla sobre ESTA posicion, y gana a un nombre heredado de un
+    # ancestro. La navegacion (anclas firmadas) sigue anclada al catalogo.
+    community = community_names.opening_for(pos.key, pos.fen)
+    if community is not None:
+        current_opening = _opening_for_template(community)
 
     for move in moves:
         child_route, child_anchor = _child_navigation_state(
@@ -1666,6 +1837,15 @@ def explore(request, key):
         'eval_backed': eval_backed,
         'eval_backed_plies': pos.backed_plies,
         'eval_point_str': None if point_stm is None else f'{point_stm:+d}cp',
+        # Propuesta de nombre: solo donde el catalogo auditado no dice nada.
+        'may_suggest_name': openings.lookup_key(pos.key) is None,
+        'suggest_play': '' if active_ucis is None else ','.join(active_ucis),
+        'suggest_anchor': current_anchor or '',
+        'suggest_name_max': SUGGESTION_NAME_MAX_CHARS,
+        'suggest_comment_max': SUGGESTION_COMMENT_MAX_CHARS,
+        'suggest_message': SUGGESTION_MESSAGES.get(
+            request.GET.get('suggested', '')),
+        'suggest_ok': request.GET.get('suggested') == 'ok',
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,

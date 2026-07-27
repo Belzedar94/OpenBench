@@ -1,0 +1,54 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB opening name suggestions{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Opening name suggestions</h2>
+<p class="dim">Visitors propose names for positions the audited catalogue does
+  not name. Approving one publishes it on that position, marked as a community
+  name; the static catalogue is never rewritten.</p>
+
+<h2>Pending <span class="dim">({{ pending_total }})</span></h2>
+{% if pending %}
+<table>
+  <tr><th>Proposed name</th><th>Position</th><th>Comment</th>
+    <th>From</th><th></th></tr>
+  {% for item in pending %}
+  <tr>
+    <td><strong>{{ item.row.proposed_name }}</strong></td>
+    <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
+        title="{{ item.full }}">{{ item.san }}</a></td>
+    <td class="dim">{{ item.row.comment }}</td>
+    <td class="dim">{{ item.row.created|date:"M d H:i" }} ·
+      {{ item.row.ip }}</td>
+    <td>
+      <form method="post" action="/atomicdb/suggestions/"
+        class="suggest-actions">{% csrf_token %}
+        <input type="hidden" name="suggestion" value="{{ item.row.id }}">
+        <button class="reqbtn" name="action" value="approve">Approve</button>
+        <button class="reqbtn ghost" name="action" value="reject">Reject</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="dim">Nothing waiting for review.</p>{% endif %}
+
+<h2>Recently resolved</h2>
+{% if history %}
+<table>
+  <tr><th>Name</th><th>Position</th><th>State</th><th>By</th></tr>
+  {% for item in history %}
+  <tr>
+    <td>{{ item.row.proposed_name }}</td>
+    <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
+        title="{{ item.full }}">{{ item.san }}</a></td>
+    <td>{% if item.row.status == 'APPROVED' %}<span class="chip won"></span>approved
+        {% else %}<span class="chip lost"></span>rejected{% endif %}</td>
+    <td class="dim">{{ item.row.resolved_by }} ·
+      {{ item.row.resolved_at|date:"M d H:i" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="dim">Nothing resolved yet.</p>{% endif %}
+
+{% endblock %}

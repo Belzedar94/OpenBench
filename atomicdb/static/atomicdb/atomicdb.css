@@ -808,6 +808,91 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+/* Propuesta publica de nombre de apertura y su moderacion */
+.suggest-name {
+  margin: 0 0 1.2rem;
+  padding: .55rem .85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  font-size: .88rem;
+}
+
+.suggest-name > summary {
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.suggest-name > summary:hover {
+  color: var(--ink);
+}
+
+.suggest-name form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: .7rem;
+  margin-top: .8rem;
+}
+
+.suggest-name label {
+  display: flex;
+  flex: 1 1 15rem;
+  flex-direction: column;
+  gap: .25rem;
+  color: var(--ink-muted);
+  font-size: .78rem;
+}
+
+.suggest-name input {
+  padding: .4rem .6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+  font-size: .85rem;
+}
+
+.suggest-name input:focus {
+  border-color: var(--won);
+  outline: none;
+}
+
+.suggest-name input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.suggest-name .dim {
+  flex: 1 1 100%;
+  font-size: .75rem;
+}
+
+.suggest-status {
+  margin: .5rem 0 0;
+  color: var(--hot);
+  font-size: .82rem;
+}
+
+.suggest-status.ok {
+  color: var(--won);
+}
+
+.suggest-actions {
+  display: flex;
+  gap: .4rem;
+}
+
+.reqbtn.ghost {
+  color: var(--ink-muted);
+}
+
+.reqbtn.ghost:hover:not(:disabled) {
+  border-color: var(--lost);
+  color: var(--ink);
+}
+
 /* Marca sobria de "este numero lo respalda el subarbol, no la eval puntual" */
 .backed-mark {
   margin-left: .35rem;

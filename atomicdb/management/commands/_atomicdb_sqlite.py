@@ -24,6 +24,7 @@ from django.core.management.base import CommandError
 from django.db.migrations.loader import MigrationLoader
 
 from OpenSite.atomicdb_identity import (
+    CURRENT_ATOMICDB_TABLES,
     MIGRATION_BASELINE,
     ORIGIN_ATOMICDB_TABLES,
     SPLIT_RECEIPT_SCHEMA,
@@ -31,10 +32,15 @@ from OpenSite.atomicdb_identity import (
     canonical_path,
     create_lineage_table,
     is_sha256,
+    valid_receipt_table_set,
 )
 
 
-ATOMICDB_TABLES = ORIGIN_ATOMICDB_TABLES
+# El conjunto que una cutover COPIA es el esquema sellado de hoy: el origen
+# congelado mas lo que migraciones posteriores anadieron y alguien reviso
+# explicitamente en atomicdb_identity.  El recibo sigue exigiendo el origen
+# entero, asi que los recibos ya emitidos siguen validando.
+ATOMICDB_TABLES = CURRENT_ATOMICDB_TABLES
 # Receipt field name retained for compatibility.  This is an immutable
 # cutover baseline, not an assertion that 0013 must remain the newest file.
 MIGRATION_SENTINEL = MIGRATION_BASELINE
@@ -229,7 +235,7 @@ def validate_split_receipt(receipt: Mapping, destination: str) -> None:
             raise CommandError(
                 'AtomicDB split receipt has invalid {!r}'.format(field))
     tables = receipt.get('tables')
-    if not isinstance(tables, dict) or set(tables) != set(ATOMICDB_TABLES):
+    if not valid_receipt_table_set(tables):
         raise CommandError('AtomicDB split receipt has an invalid table set')
     for table, summary in tables.items():
         if (

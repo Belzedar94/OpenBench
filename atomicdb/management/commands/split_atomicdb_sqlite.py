@@ -87,10 +87,11 @@ class Command(BaseCommand):
                     os.path.dirname(receipt_path)))
 
         ensure_cutover_paths_absent(destination_path, receipt_path)
-        if current_atomicdb_tables() != ATOMICDB_TABLES:
+        if set(current_atomicdb_tables()) != set(ATOMICDB_TABLES):
             raise CommandError(
-                'The v1 split protocol only supports the sealed eight-table '
-                'AtomicDB schema; update the cutover protocol first')
+                'The v1 split protocol only supports the sealed AtomicDB '
+                'table set declared in OpenSite.atomicdb_identity; update the '
+                'cutover protocol first')
         source = None
         destination = None
         destination_reserved = False

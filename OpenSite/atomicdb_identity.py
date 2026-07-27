@@ -39,6 +39,33 @@ ORIGIN_ATOMICDB_TABLES = (
     'atomicdb_requestlog',
     'atomicdb_workerping',
 )
+# Tablas anadidas DESPUES de la linea base de cutover.  ORIGIN_ATOMICDB_TABLES
+# es historia congelada: cada recibo ya emitido enumera exactamente ese
+# conjunto, y tocarlo invalidaria recibos vivos (y con ellos el arranque del
+# sitio).  Una tabla nueva se declara aqui, a mano y a proposito: este modulo
+# corre antes de que exista el registro de aplicaciones de Django, y el guard
+# del comando de split existe justamente para obligar a esta revision.
+POST_BASELINE_ATOMICDB_TABLES = (
+    'atomicdb_openingnamesuggestion',   # 0015_opening_name_suggestion
+)
+# Ordenado: el verificador compara esta tupla contra lo que encuentra en el
+# fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
+CURRENT_ATOMICDB_TABLES = tuple(sorted(
+    ORIGIN_ATOMICDB_TABLES + POST_BASELINE_ATOMICDB_TABLES))
+
+
+def valid_receipt_table_set(tables) -> bool:
+    """Un recibo debe cubrir el origen entero y nada ajeno al esquema actual.
+
+    Un recibo antiguo (solo las ocho de origen) sigue siendo valido; uno nuevo
+    puede ademas traer las posteriores.  La union con el digest exterior sigue
+    atando el conjunto exacto que se sello.
+    """
+    if not isinstance(tables, dict):
+        return False
+    keys = set(tables)
+    return (keys >= set(ORIGIN_ATOMICDB_TABLES)
+            and keys <= set(CURRENT_ATOMICDB_TABLES))
 
 
 class AtomicDBIdentityError(ValueError):
@@ -155,8 +182,7 @@ def parse_and_validate_receipt(receipt_bytes: bytes, destination: str) -> dict:
             'AtomicDB split receipt has invalid source')
 
     tables = receipt.get('tables')
-    if not isinstance(tables, dict) \
-            or set(tables) != set(ORIGIN_ATOMICDB_TABLES):
+    if not valid_receipt_table_set(tables):
         raise AtomicDBIdentityError(
             'AtomicDB split receipt has invalid origin table set')
     for table, summary in tables.items():

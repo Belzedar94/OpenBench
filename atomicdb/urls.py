@@ -42,6 +42,8 @@ urlpatterns = [
     path('explore/<str:key>/', views.explore),
     path('goto/<str:key>/<str:uci>/', views.goto),
     path('method/', _method_cached),
+    path('suggest/<str:key>/', views.suggest_opening_name),
+    path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
     path('request/<str:key>/', views.api_request),
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),

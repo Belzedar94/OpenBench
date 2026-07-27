@@ -19,13 +19,40 @@
 
 {% if opening %}
 <section class="opening-card" aria-labelledby="opening-name">
-  <span class="opening-kicker">Atomic opening</span>
+  <span class="opening-kicker">{% if opening.community %}Community name{% else %}Atomic opening{% endif %}</span>
   <h2 id="opening-name">{{ opening.name }}</h2>
   {% if opening.reference_line_san %}
   <p class="opening-reference"><span class="dim">Reference:</span>
     {{ opening.reference_line_san }}</p>
   {% endif %}
+  {% if opening.community %}
+  <p class="opening-reference dim">Suggested by a visitor, approved by
+    {{ opening.approved_by }}. Not part of the audited catalogue.</p>
+  {% endif %}
 </section>
+{% endif %}
+
+{% if may_suggest_name %}
+<details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
+  <summary>Suggest a name for this position</summary>
+  {% if suggest_message %}
+  <p class="suggest-status{% if suggest_ok %} ok{% endif %}">{{ suggest_message }}</p>
+  {% endif %}
+  <form method="post" action="/atomicdb/suggest/{{ pos.key }}/">{% csrf_token %}
+    <input type="hidden" name="play" value="{{ suggest_play }}">
+    <input type="hidden" name="opening" value="{{ suggest_anchor }}">
+    <label>Name
+      <input name="name" maxlength="{{ suggest_name_max }}" required
+        placeholder="e.g. Belfast Gambit" spellcheck="false"
+        autocomplete="off"></label>
+    <label>Reference or comment <span class="dim">(optional)</span>
+      <input name="comment" maxlength="{{ suggest_comment_max }}"
+        placeholder="where the name comes from" autocomplete="off"></label>
+    <button class="reqbtn">Send for review</button>
+    <span class="dim">Public, no account. An approver reviews it before it
+      shows up.</span>
+  </form>
+</details>
 {% endif %}
 
 <div class="cols">
