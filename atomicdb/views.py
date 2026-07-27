@@ -38,7 +38,7 @@ LEASE_TOKEN_BUILD = 2026072203
 LEGACY_MAX_BUDGET = 128_000_000
 MAX_REPORTED_NPS = 1_000_000_000_000
 REQUESTS_PER_IP_HOUR = 30
-REQUEST_QUEUE_MAX = 200
+REQUEST_QUEUE_MAX = 1000000  # efectivamente sin tope (orden 27-jul; el propietario lo monitoriza)
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
 # Breadcrumb reconstruction is public-request work. Keep the cycle-safe
