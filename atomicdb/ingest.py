@@ -155,6 +155,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # evals de hijos reportados por el motor
         best_eval, best_move = None, None
         closed_here = 0
+        revoked_here = []
         for index, ln in enumerate(lines):
             uci = ln['move']
             try:
@@ -172,6 +173,17 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                 child.save(update_fields=['eval_cp', 'updated'])
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)
+            if (child.status != 'UNKNOWN' and prepared_proof is not None
+                    and prepared_proof[2] == 'NO_MATE'):
+                # El hijo YA estaba cerrado por un testigo sin certificar y
+                # esta busqueda exhaustiva acaba de refutar ese mismo testigo.
+                # Antes esto se caia por el suelo (el bucle solo miraba hijos
+                # UNKNOWN) y el cierre falso se quedaba vivo para siempre.
+                revoked_keys = _revoke_contradicted_mate(
+                    child, pos, prepared_proof)
+                if revoked_keys:
+                    revoked_here.extend(revoked_keys)
+                    child.refresh_from_db()
             if child.status == 'UNKNOWN' and prepared_proof is not None:
                 winner_white, pv_rest, proof_result = prepared_proof
                 if proof_result == 'NO_MATE':
@@ -210,12 +222,45 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             pos.best_move = best_move
         if best_eval is not None:
             pos.eval_cp = best_eval
-        pos.save()
+        # Campos EXPLICITOS: una revocacion disparada mas arriba en este mismo
+        # bucle pudo recalcular status/closure/priority de esta misma fila, y
+        # un save() completo los pisaria con el snapshot que cargamos antes.
+        pos.save(update_fields=['visits', 'nodes_invested', 'last_analysis',
+                                'best_move', 'eval_cp', 'updated'])
 
     changed = backup_cascade([pos.key])
     backed = backup_backed_evals([pos.key])
-    return {'closed_children': closed_here, 'backed_up': changed,
-            'backed_evals': backed}
+    summary = {'closed_children': closed_here, 'backed_up': changed,
+               'backed_evals': backed}
+    if revoked_here:
+        summary['revoked'] = len(revoked_here)
+    return summary
+
+
+def _revoke_contradicted_mate(child, parent, prepared_proof):
+    """Retira un cierre de mate que esta busqueda exhaustiva acaba de refutar.
+
+    Solo actua sobre lo que la refutacion realmente cubre: un cierre de mate
+    SIN certificar (``MATE_PV`` con ``proof`` distinto de ``ANDOR``) cuya
+    distancia declarada cabe dentro de los plies que la busqueda agoto.  Una
+    busqueda que no encuentra mate en N plies no dice nada sobre un mate en
+    N+5, asi que un ``mate_in`` mayor (o desconocido) NO se toca.
+    """
+    winner_white, pv_rest, _ = prepared_proof
+    want = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
+    searched_plies = len(pv_rest) + 2
+    if (child.status != want or child.closure != 'MATE_PV'
+            or child.proof == 'ANDOR' or child.mate_in is None
+            or child.mate_in > searched_plies):
+        return []
+    DBEvent.objects.create(kind='MATE_PROOF_DISPUTED', payload={
+        'key': child.key, 'parent': parent.key,
+        'winner': 'WHITE' if winner_white else 'BLACK',
+        'max_plies': searched_plies, 'was_closed': True,
+        'claimed_mate_in': child.mate_in})
+    outcome = revoke_closure(child.key, reason='mate-witness-refuted',
+                             mark_disputed=True)
+    return outcome['revoked']
 
 
 def backup_cascade(seed_keys):
@@ -246,11 +291,18 @@ def backup_cascade(seed_keys):
             if new_status != pos.status and pos.status == 'UNKNOWN':
                 pos.status, pos.closure = new_status, 'MINIMAX'
                 pos.proof = _minimax_proof(pos, edges, new_status)
-                # testigo del minimax: la arista hacia el mejor hijo exacto
+                # Testigo del minimax: la arista hacia el mejor hijo exacto.
+                # Entre varios hijos ganadores manda el VERIFICADO: la
+                # estrategia que este arbol exporta no debe apoyarse en un
+                # testigo ENGINE existiendo uno ANDOR/TERMINAL/TB al lado.
                 want = new_status
-                witness = next((e for e in edges if e.child.status == want),
-                               None) or next(
-                    (e for e in edges if e.child.status != 'UNKNOWN'), None)
+                winning = [e for e in edges if e.child.status == want]
+                witness = (
+                    next((e for e in winning
+                          if _child_is_verified(e.child)), None)
+                    or next(iter(winning), None)
+                    or next((e for e in edges
+                             if e.child.status != 'UNKNOWN'), None))
                 if witness:
                     pos.best_move = witness.move_uci
                 # DTM practico: min para el ganador, max para el perdedor;
@@ -261,7 +313,7 @@ def backup_cascade(seed_keys):
                     winners = [e for e in edges if e.child.status == new_status
                                and e.child.mate_in is not None]
                     if winners:
-                        best = min(winners, key=lambda e: e.child.mate_in)
+                        best = min(winners, key=_witness_rank)
                         pos.mate_in = 1 + best.child.mate_in
                         pos.best_move = best.move_uci  # el mate probado mas corto
                 elif new_status != 'DRAW':
@@ -286,9 +338,12 @@ def backup_cascade(seed_keys):
                                if e.child.status == pos.status
                                and e.child.mate_in is not None]
                     if winners:
-                        best = min(winners, key=lambda e: e.child.mate_in)
+                        best = min(winners, key=_witness_rank)
                         if (pos.mate_in is None
-                                or 1 + best.child.mate_in < pos.mate_in):
+                                or 1 + best.child.mate_in < pos.mate_in
+                                or (1 + best.child.mate_in == pos.mate_in
+                                    and pos.best_move != best.move_uci
+                                    and _child_is_verified(best.child))):
                             pos.mate_in = 1 + best.child.mate_in
                             pos.best_move = best.move_uci
                             dirty = True
@@ -318,6 +373,17 @@ def backup_cascade(seed_keys):
 
 def _status_eval(status):
     return {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000, 'DRAW': 0}.get(status)
+
+
+def _witness_rank(edge):
+    """Orden del testigo exportable: mate mas corto, y a igualdad, VERIFICADO.
+
+    La distancia manda porque es la unica parte que un usuario puede
+    comprobar jugando; el desempate por certificacion es el arreglo de F4b:
+    con dos mates de la misma longitud, exportar el que tiene prueba
+    exhaustiva en vez del primero que devolvio el movegen.
+    """
+    return (edge.child.mate_in, 0 if _child_is_verified(edge.child) else 1)
 
 
 # ---------------- valor RESPALDADO (backed eval) ----------------
@@ -539,6 +605,156 @@ def best_known_eval(pos):
 def _child_is_verified(child):
     return (child.closure in ('TERMINAL', 'TB')
             or child.proof == 'ANDOR')
+
+
+# ---------------- revocacion de cierres ----------------
+#
+# POR QUE EXISTE.  Hasta aqui un cierre era para siempre: `verify_mates` podia
+# marcar `proof='DISPUTED'` sobre un MATE_PV y el nodo seguia con su
+# `status=WHITE_WIN` intacto, envenenando por MINIMAX a todos sus ancestros.
+# El unico camino que reabria algo era el DISPUTED del ingest online, y solo
+# porque alli el hijo todavia estaba UNKNOWN.  Esta es la pieza que faltaba:
+# retirar un hecho exacto que perdio su evidencia Y deshacer, hasta punto
+# fijo, exactamente lo que se sostenia sobre el.
+#
+# QUE SE REVOCA Y QUE NO.  Solo se revoca lo DERIVADO.  Un cierre TERMINAL
+# (la propia posicion es terminal), un cierre TB (probe re-verificado en el
+# servidor) y un MATE_PV con `proof='ANDOR'` (mate forzado demostrado
+# exhaustivamente) son hechos INDEPENDIENTES de sus hijos: no los toca esta
+# via, y ademas CORTAN la cascada, porque su status no cambia y por tanto el
+# backup de sus padres tampoco.  Lo unico que depende de los hijos es el
+# cierre MINIMAX, asi que la cascada hacia arriba es exactamente "recorrer
+# ancestros MINIMAX y re-derivar su backup".
+#
+# NO ES MONOTONO AL REVES.  Un ancestro puede sobrevivir a la revocacion de un
+# hijo (le queda otra arista ganadora) y caer despues, cuando se revoca un
+# segundo hijo.  Por eso la cascada no lleva un `seen` que bloquee revisitas:
+# lleva un contador de guarda y se apoya en que revocar es monotono (un nodo
+# pasa de cerrado a UNKNOWN como mucho una vez).
+REVOKE_GUARD_LIMIT = 100_000
+_REVOKED_FIELDS = ['status', 'closure', 'proof', 'won_line', 'mate_in']
+
+
+def _closure_is_independent(pos):
+    """True si el cierre no se apoya en los hijos (y corta la cascada)."""
+    return (pos.closure in ('TERMINAL', 'TB')
+            or (pos.closure != 'MINIMAX' and pos.proof == 'ANDOR'))
+
+
+def _clear_closure(pos, mark_disputed=False):
+    """Devuelve el nodo a UNKNOWN sin tocar nada heuristico.
+
+    ``eval_cp``/``backed_eval``/``visits`` son conocimiento heuristico y
+    sobreviven: lo que se retira es la PRETENSION de exactitud.
+
+    ``mark_disputed`` conserva el rastro de la refutacion exactamente como ya
+    hacia el camino DISPUTED del ingest online: el nodo vuelve a UNKNOWN pero
+    guarda ``proof='DISPUTED'`` y el testigo refutado en ``won_line``, para que
+    la deuda quede visible en vez de evaporarse.  Los ancestros que caen por
+    cascada NO se marcan: su evidencia no fue refutada, simplemente desaparecio.
+    """
+    pos.status = 'UNKNOWN'
+    pos.closure = None
+    pos.mate_in = None
+    if mark_disputed:
+        pos.proof = 'DISPUTED'
+    else:
+        pos.proof = None
+        pos.won_line = None
+    # Las lapidas las levanta ``_revive_tombstones`` en un solo UPDATE por
+    # nivel, para que el contador que devuelve la revocacion sea el numero real
+    # de resurrecciones y no se pise con este save.
+    pos.save(update_fields=_REVOKED_FIELDS + ['updated'])
+
+
+def _revive_tombstones(keys):
+    """Levanta las lapidas de los nodos reabiertos y de sus hijos directos.
+
+    Un nodo se marca DEAD cuando TODOS sus padres estan cerrados
+    (``_still_reachable``).  Reabrir un ancestro vuelve a hacer relevante ese
+    subarbol, asi que la lapida deja de ser cierta.  Se levanta un solo nivel:
+    los nietos vuelven solos en cuanto el selector visite a sus padres, y una
+    resurreccion recursiva del cono entero seria un UPDATE sin cota.
+    """
+    if not keys:
+        return 0
+    revived = Position.objects.filter(
+        key__in=list(keys), priority__lte=DEAD / 2).update(priority=0.0)
+    child_keys = list(Edge.objects.filter(parent_id__in=list(keys))
+                      .values_list('child_id', flat=True))
+    if child_keys:
+        revived += Position.objects.filter(
+            key__in=child_keys, priority__lte=DEAD / 2).update(priority=0.0)
+    return revived
+
+
+def revoke_closure(position_key, reason='', requeue=True, mark_disputed=False):
+    """Retira un cierre y todo lo que se apoyaba en el. Punto fijo hacia arriba.
+
+    Devuelve ``{'revoked': [keys...], 'requeued': task_id|None,
+    'revived': int}``.  ``revoked`` sale en el orden en que la cascada los fue
+    abriendo: el nodo semilla primero, luego sus ancestros MINIMAX.
+
+    El reanalisis a presupuesto maximo se encola SOLO para la semilla: es la
+    unica que perdio su evidencia propia.  Los ancestros revocados vuelven al
+    selector normal y se re-cerraran solos en cuanto la semilla se cierre otra
+    vez; encolar 2B para cada uno quemaria el presupuesto del proyecto en
+    trabajo que la cascada hara gratis.
+    """
+    revoked, guard = [], 0
+    pending = [position_key]
+    while pending and guard < REVOKE_GUARD_LIMIT:
+        guard += 1
+        key = pending.pop(0)
+        try:
+            pos = Position.objects.select_for_update().get(key=key)
+        except Position.DoesNotExist:
+            continue
+        if pos.status == 'UNKNOWN':
+            continue                      # ya abierto: nada que retirar
+        if key != position_key:
+            if pos.closure != 'MINIMAX':
+                continue                  # hecho independiente: corta aqui
+            edges = list(Edge.objects.filter(parent=pos)
+                         .select_related('child'))
+            derived = logic.backup_status(
+                pos.fen, pos.expanded, [e.child.status for e in edges])
+            if derived == pos.status:
+                continue                  # el backup se sostiene sin el hijo
+        elif _closure_is_independent(pos):
+            # La semilla se revoca a peticion expresa del llamante (es su
+            # evidencia la que fallo), pero un TERMINAL jamas: la posicion es
+            # terminal por movegen, no por creencia.
+            if pos.closure == 'TERMINAL':
+                return {'revoked': [], 'requeued': None, 'revived': 0}
+        _clear_closure(pos, mark_disputed=mark_disputed and key == position_key)
+        revoked.append(key)
+        pending.extend(Edge.objects.filter(child=pos)
+                       .values_list('parent_id', flat=True))
+
+    if not revoked:
+        return {'revoked': [], 'requeued': None, 'revived': 0}
+
+    revived = _revive_tombstones(revoked)
+    # Punto fijo desde abajo otra vez: lo que TODAVIA se sostiene con la
+    # evidencia superviviente vuelve a cerrarse, y los DTM/testigos de los
+    # ancestros que sobrevivieron se recalculan sin el hijo retirado.
+    backup_cascade(revoked)
+    requeued = None
+    if requeue:
+        seed = Position.objects.get(key=position_key)
+        if seed.status == 'UNKNOWN':
+            requeued = _queue_disputed_reanalysis(seed).id
+    DBEvent.objects.create(kind='CLOSURE_REVOKED', payload={
+        'key': position_key, 'reason': reason or 'evidence-withdrawn',
+        'chain': revoked[:64], 'revoked': len(revoked),
+        'revived': revived, 'requeued': requeued,
+        'truncated': len(revoked) > 64})
+    if guard >= REVOKE_GUARD_LIMIT:
+        DBEvent.objects.create(kind='REVOKE_GUARD', payload={
+            'key': position_key, 'iterations': guard,
+            'remaining': len(pending)})
+    return {'revoked': revoked, 'requeued': requeued, 'revived': revived}
 
 
 def _minimax_proof(pos, edges, status):

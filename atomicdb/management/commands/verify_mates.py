@@ -43,6 +43,7 @@ class Command(BaseCommand):
 
         counts = {'ANDOR': 0, 'ENGINE': 0, 'DISPUTED': 0,
                   'MISSING': 0, 'SKIPPED': 0, 'ERROR': 0}
+        revoked_nodes = 0
         processed = 0
         after_witness_len = None
         after_key = ''
@@ -148,6 +149,15 @@ class Command(BaseCommand):
                                 'max_plies': len(hint) + 2,
                             },
                         )
+                        # An exhaustive search refuted this witness.  Leaving
+                        # the WIN in place would keep poisoning every ancestor
+                        # that inherited it through MINIMAX: withdraw the fact
+                        # and everything that stood on it.
+                        outcome = ingest.revoke_closure(
+                            snapshot['key'],
+                            reason='mate-witness-refuted',
+                            mark_disputed=True)
+                        revoked_nodes += len(outcome['revoked'])
 
                 counts[proof] += 1
                 processed += 1
@@ -163,7 +173,8 @@ class Command(BaseCommand):
 
         self.stdout.write(
             'verify_mates run: '
-            + ' '.join(f'{name}={value}' for name, value in counts.items()))
+            + ' '.join(f'{name}={value}' for name, value in counts.items())
+            + f' revoked_nodes={revoked_nodes}')
 
         mate_positions = Position.objects.filter(closure='MATE_PV')
         totals = {
@@ -175,9 +186,12 @@ class Command(BaseCommand):
             'verify_mates totals: '
             + ' '.join(f'{name}={value}' for name, value in totals.items()))
 
-        disputed = mate_positions.filter(proof='DISPUTED').order_by('key') \
-            .values_list('key', 'fen')
+        # A refuted witness no longer keeps its WIN: the row that is still
+        # tagged DISPUTED here is the reopened position, listed so the operator
+        # can see exactly which lines went back to UNKNOWN.
+        disputed = Position.objects.filter(proof='DISPUTED').order_by('key') \
+            .values_list('key', 'fen', 'status')
         if disputed.exists():
-            self.stdout.write('DISPUTED positions (not reverted):')
-            for key, fen in disputed:
-                self.stdout.write(f'  {key} {fen}')
+            self.stdout.write('DISPUTED positions (closure revoked):')
+            for key, fen, status in disputed:
+                self.stdout.write(f'  {key} [{status}] {fen}')

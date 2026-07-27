@@ -172,20 +172,28 @@ class VerifyMatesCommandTests(TestCase):
 
     @patch('atomicdb.management.commands.verify_mates.logic.prove_forced_mate',
            return_value='NO_MATE')
-    def test_disputed_is_reported_but_existing_closure_is_not_reverted(
-            self, prove):
+    def test_disputed_reopens_the_position_and_keeps_its_witness(self, prove):
+        """P0c: a refuted witness no longer keeps its WIN.
+
+        The historic behaviour was to record the dispute and leave the closure
+        standing, which is exactly what let 637 uncertified mates poison their
+        ancestors through MINIMAX.  ``atomicdb/test_revocation.py`` owns the
+        cascade; this pins the command's own contract.
+        """
         pos = self._mate_position(COOPERATIVE_FEN, COOPERATIVE_PV)
         out = StringIO()
         call_command('verify_mates', stdout=out)
         pos.refresh_from_db()
 
         self.assertEqual(pos.proof, 'DISPUTED')
-        self.assertEqual(pos.status, 'WHITE_WIN')
-        self.assertEqual(pos.closure, 'MATE_PV')
+        self.assertEqual(pos.status, 'UNKNOWN')
+        self.assertIsNone(pos.closure)
         self.assertEqual(pos.won_line, ' '.join(COOPERATIVE_PV))
         self.assertIn(pos.key, out.getvalue())
         self.assertTrue(DBEvent.objects.filter(
             kind='MATE_PROOF_DISPUTED', payload__key=pos.key).exists())
+        self.assertTrue(DBEvent.objects.filter(
+            kind='CLOSURE_REVOKED', payload__key=pos.key).exists())
         prove.assert_called_once()
 
 
