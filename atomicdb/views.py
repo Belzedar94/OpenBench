@@ -1590,7 +1590,7 @@ def api_query(request):
     stm_white = pos.fen.split()[1] == 'w'
     # ``score`` es el mejor conocimiento actual (respaldado por el subarbol);
     # ``point`` conserva la eval puntual cruda de esta misma posicion.
-    known = ingest.displayed_eval(pos) if pos.status == 'UNKNOWN' \
+    known = ingest.best_known_eval(pos) if pos.status == 'UNKNOWN' \
         else pos.eval_cp
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
@@ -2054,10 +2054,11 @@ def explore(request, key):
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     # Cabecera: el valor RESPALDADO (lo que el subarbol ya sabe) con caida
     # limpia a la eval puntual. Un solo flip a la perspectiva del que mueve.
-    # Derivado de los hijos que esta misma pagina esta pintando: la columna
-    # almacenada puede ir por detras por el corte de coste del ascenso, y la
-    # cabecera no debe contradecir a su propia tabla.
-    known = None if pos.status != 'UNKNOWN' else ingest.displayed_eval(pos)
+    # UNA sola fuente en todo el render: exactamente la misma llamada que usa
+    # la fila de este nodo en la pagina de su padre.  Dos aggregaciones — una
+    # almacenada y otra recalculada al pintar — es como la cabecera de una
+    # pagina acaba discrepando de la fila que la enlaza.
+    known = None if pos.status != 'UNKNOWN' else ingest.best_known_eval(pos)
     eval_stm = None if known is None else (known if stm_white else -known)
     point_stm = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)

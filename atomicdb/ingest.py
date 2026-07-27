@@ -78,9 +78,29 @@ def capped_analysis(lines, max_plies=STORED_PV_MAX_PLIES):
     return stored
 
 
-def multipv_for(visits):
-    """Anchura al sembrar (primeras visitas), profundidad en los peldanos
-    altos: MultiPV 3 alli gana ~1-2 plies."""
+# A partir de este presupuesto, los nodos se gastan en PROFUNDIDAD.
+DEPTH_BUDGET_THRESHOLD = 512_000_000
+DEPTH_MULTIPV = 2
+
+
+def multipv_for(visits, budget_nodes=None, seeding=False):
+    """Cuantas variantes pedirle al motor, segun para que es este analisis.
+
+    Medido (caso de la comunidad, 28-jul): con el MISMO presupuesto de nodos,
+    MultiPV 5 llego a profundidad 18 y dijo "negras aguantan" (-89); MultiPV 1
+    llego a 23 y dijo "negras perdidas" (-901).  A partir de cierto peldano la
+    anchura no compra ordenacion, compra ruido caro.
+
+    * SEMBRANDO (``bootstrap_root``): 5.  Ahi la anchura ES el producto — se
+      esta ordenando un nivel entero por primera vez.
+    * PRESUPUESTO ALTO: 2.  Dos, no una, para conservar una segunda opinion de
+      ordenacion; una sola linea deja al arbol sin nada con que comparar.
+    * El resto: la politica por visitas de siempre, 5 al sembrar y 3 despues.
+    """
+    if seeding:
+        return 5
+    if budget_nodes is not None and budget_nodes >= DEPTH_BUDGET_THRESHOLD:
+        return DEPTH_MULTIPV
     return 5 if visits < 3 else 3
 
 
@@ -699,45 +719,6 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     return changed_total
 
 
-def displayed_eval(pos, edges=None):
-    """Lo que una pagina debe PINTAR para ``pos``, recalculado aqui mismo.
-
-    POR QUE NO SE LEE LA COLUMNA.  ``backed_eval`` se mantiene con un corte de
-    coste: si el valor de un nodo se mueve menos de ``BACKED_EPSILON_CP`` y lo
-    sigue respaldando la misma arista, el ascenso PARA ahi.  Ese corte es
-    correcto — subir el DAG entero por tres centipeones no compra nada — pero
-    deja al padre con una columna que puede ir por detras de sus propios hijos.
-    Y el padre PINTA esa columna en su cabecera mientras pinta a los hijos con
-    su valor fresco, asi que la pagina se contradice a si misma por hasta
-    nueve centipeones, y peor si el hijo no tiene respaldo propio y lo que
-    cambio fue su eval puntual.
-
-    El epsilon gatea el COSTE DE SUBIR; no debe gatear la verdad que se
-    enseña.  Asi que el display recalcula, desde los mismos hijos que la
-    pagina esta mostrando y con las MISMAS guardas de cobertura y calidad que
-    usa el respaldo almacenado — no es una segunda opinion, es la misma
-    cuenta hecha en el momento de mirar.
-    """
-    exact = _status_eval(pos.status)
-    if exact is not None:
-        return exact
-    if edges is None:
-        edges = list(Edge.objects.filter(parent=pos).select_related('child'))
-    if not edges:
-        # Nothing to derive from: the stored column is all the knowledge
-        # there is, and it is still knowledge.
-        return best_known_eval(pos)
-    children = [
-        _child_contribution(edge.move_uci, edge.child.status,
-                            edge.child.eval_cp, edge.child.backed_eval,
-                            edge.child.backed_nodes,
-                            edge.child.nodes_invested,
-                            edge.child.backed_plies)
-        for edge in edges]
-    value, _move, _plies, _quality = _backed_for(pos, children)
-    return value if value is not None else best_known_eval(pos)
-
-
 def best_known_eval(pos):
     """Mejor conocimiento actual del nodo, en perspectiva blanca.
 
@@ -1045,10 +1026,24 @@ def _regret_from_root():
     import heapq
 
     val, white_stm = {}, {}
-    for key, fen, eval_cp, status in Position.objects.values_list(
-            'key', 'fen', 'eval_cp', 'status'):
+    # El mapa de valores usa el MEJOR CONOCIMIENTO, no la eval cruda:
+    # status probado > respaldado > eval propia, igual que
+    # ``best_known_eval``.
+    #
+    # POR QUE IMPORTA (fuga del 28-jul).  Un nodo con dos padres se
+    # alcanza por el camino MENOS informado: si uno de esos padres nunca
+    # se analizo directamente tiene ``eval_cp`` None aunque la cascada ya
+    # le haya subido un ``backed_eval`` decidido.  Con la eval cruda ese
+    # padre no aporta gap ninguno, sus hijos heredan regret bajo, y como
+    # el Dijkstra toma el MINIMO sobre caminos, un subarbol ya refutado
+    # entra por la puerta de atras.  Eso tuvo al selector ocho horas
+    # taladrando posiciones bajo una jugada que pierde en dos.
+    for key, fen, eval_cp, backed_eval, status in \
+            Position.objects.values_list(
+                'key', 'fen', 'eval_cp', 'backed_eval', 'status'):
+        known = backed_eval if backed_eval is not None else eval_cp
         val[key] = {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000,
-                    'DRAW': 0}.get(status, eval_cp)
+                    'DRAW': 0}.get(status, known)
         white_stm[key] = fen.split()[1] == 'w'
     children = {}
     for pid, cid in Edge.objects.values_list('parent_id', 'child_id'):
@@ -1107,7 +1102,11 @@ def refresh_priorities(force=False):
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
                                .iterator(chunk_size=2000):
-        e = abs(pos.eval_cp) if pos.eval_cp is not None else 0
+        # Mismo criterio que el mapa del Dijkstra: un nodo sin eval
+        # propia pero con respaldo decidido no es un nodo sin
+        # informacion, ni en un sentido ni en el otro.
+        known = best_known_eval(pos)
+        e = abs(known) if known is not None else 0
         r = regret.get(pos.key, float('inf'))
         runits = DISCONNECTED_REGRET if r == float('inf') \
             else min(r, 3000) / 100.0
@@ -1176,10 +1175,11 @@ def next_tasks(n):
             pos.priority = DEAD   # lapida (refresh_priorities la respeta)
             pos.save(update_fields=['priority'])
             continue
+        budget = budget_for(pos)
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
-            defaults={'budget_nodes': budget_for(pos),
-                      'multipv': multipv_for(pos.visits)})
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(pos.visits, budget)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -1222,10 +1222,11 @@ def _next_tasks_by_proof(n):
             pos.priority = DEAD
             pos.save(update_fields=['priority'])
             continue
+        budget = budget_for(pos)
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
-            defaults={'budget_nodes': budget_for(pos),
-                      'multipv': multipv_for(pos.visits)})
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(pos.visits, budget)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -1252,8 +1253,10 @@ def bootstrap_root(budget=None):
             while AnalysisTask.objects.filter(position=c,
                                               generation=gen).exists():
                 gen += 1
+            # Sembrando la raiz: la anchura ES el producto aqui.
             AnalysisTask.objects.create(position=c, generation=gen,
-                                        budget_nodes=budget, source='USER')
+                                        budget_nodes=budget, source='USER',
+                                        multipv=multipv_for(0, seeding=True))
         made += 1
     return made
 
@@ -1323,7 +1326,7 @@ def _request_rung(pos):
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
-                  'multipv': multipv_for(pos.visits)})
+                  'multipv': multipv_for(pos.visits, floor)})
     if created:
         return 'queued'
     if task.state == 'PENDING':
@@ -1350,7 +1353,7 @@ def _request_rung(pos):
                 AnalysisTask.objects.create(
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
-                    multipv=multipv_for(generation))
+                    multipv=multipv_for(generation, floor))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
                 follow_up.source = 'USER'
@@ -1366,10 +1369,16 @@ def _request_rung(pos):
 
 
 def _frontier_rank(child, stm_white):
-    """Explorer convention: an unanalysed child outranks a known bad one."""
-    if child.eval_cp is None:
+    """Explorer convention: an unanalysed child outranks a known bad one.
+
+    "Unanalysed" has to mean no knowledge at all, not merely no eval of its
+    own: a child whose subtree already backed a value IS informed, and ranking
+    it as a blank sends visitor clicks at lines the tree has already judged.
+    """
+    known = best_known_eval(child)
+    if known is None:
         return -9_999.5
-    return child.eval_cp if stm_white else -child.eval_cp
+    return known if stm_white else -known
 
 
 def _frontier_children(parent, limit=None):
@@ -1567,8 +1576,11 @@ def _queue_disputed_reanalysis(pos):
     pending = (AnalysisTask.objects.filter(position=pos, state='PENDING')
                .order_by('-generation').first())
     if pending is not None:
+        # Un reanalisis por testigo refutado va a presupuesto maximo, asi
+        # que quiere PROFUNDIDAD: es exactamente el caso en el que la anchura
+        # ya demostro no estar viendo el fondo.
         pending.budget_nodes = max(pending.budget_nodes, BUDGET_LADDER[-1])
-        pending.multipv = max(pending.multipv, multipv_for(pos.visits))
+        pending.multipv = multipv_for(pos.visits, pending.budget_nodes)
         pending.save(update_fields=['budget_nodes', 'multipv'])
         return pending
 
@@ -1580,7 +1592,7 @@ def _queue_disputed_reanalysis(pos):
     return AnalysisTask.objects.create(
         position=pos, generation=generation,
         budget_nodes=BUDGET_LADDER[-1],
-        multipv=multipv_for(pos.visits), source='AUTO')
+        multipv=multipv_for(pos.visits, BUDGET_LADDER[-1]), source='AUTO')
 
 
 # ---------------- cierre por certificado SOLVE ----------------
