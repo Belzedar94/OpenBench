@@ -51,6 +51,17 @@ VARIANT = 'atomic'
 # teorema, no un detalle de implementacion: todo cierre decisivo que exista
 # quedaria referido a otro conjunto de reglas.
 RULESET_ID = 'atomic-fide-claim-v1'
+# Version del CANONICALIZADOR: como se convierte una posicion en una clave.
+# Es independiente del ruleset (las reglas del juego no cambian) pero mueve
+# claves, asi que toda migracion de re-clavado se referencia contra ella.
+#
+#   v1  piezas + turno + enroques + campo e.p. TAL CUAL lo emite el movegen.
+#   v2  piezas + turno + enroques + campo e.p. SOLO SI la captura al paso es
+#       realmente ejecutable.  El movegen atomic emite la casilla tambien
+#       cuando la captura es pseudo-legal pero ilegal — porque explotaria al
+#       propio rey, o porque el peon capturador esta clavado — y esas dos
+#       posiciones son la MISMA a efectos de juego.  Ver ``canonical_fen``.
+CANONICAL_VERSION = 2
 # Plies del contador de 50 tras los cuales el defensor puede reclamar tablas.
 FIFTY_MOVE_PLIES = 100
 CLOCK_SLACK_MAX = 100
@@ -58,9 +69,57 @@ CLOCK_SLACK_MAX = 100
 
 # ---------- identidad (§3.5) ----------
 
+def en_passant_changes_the_game(parts):
+    """True si el derecho al paso declarado altera realmente las jugadas.
+
+    La pregunta se le hace al movegen fijado, no a una reimplementacion de la
+    regla: se generan las jugadas legales con el campo e.p. y sin el, y si el
+    conjunto es IDENTICO el derecho no existe.  Quitar un derecho solo puede
+    quitar jugadas, asi que la comparacion es exactamente "aporta la captura
+    al paso o no".
+
+    En atomic hay dos formas de que el campo mienta y las dos estan
+    verificadas contra el movegen: la captura al paso explotaria al propio rey
+    (la explosion cubre el 3x3 alrededor de la casilla de destino), y el peon
+    capturador esta clavado.  Cuando no hay ningun peon enemigo al lado, el
+    movegen ya elimina el campo por su cuenta.
+
+    Casos degenerados, medidos contra el movegen real y no supuestos: si la
+    posicion no tiene NINGUNA jugada legal (mate, ahogado, rey explotado) los
+    dos conjuntos salen vacios y el derecho se elimina — correcto, porque un
+    derecho que no se puede ejercer no distingue nada, y ``pf.get_fen`` ya lo
+    elimina por su cuenta en esas posiciones.  Una FEN que el movegen no sabe
+    leer la reinterpreta en vez de rechazarla, asi que tampoco hay nada que
+    conservar; ninguna de las dos cosas llega a la base, donde todas las FEN
+    salen del propio movegen.
+    """
+    with_right = ' '.join(parts[:4] + ['0', '1'])
+    without_right = ' '.join(parts[:3] + ['-', '0', '1'])
+    try:
+        return (set(pf.legal_moves(VARIANT, with_right, []))
+                != set(pf.legal_moves(VARIANT, without_right, [])))
+    except Exception:
+        return True
+
+
 def canonical_fen(fen):
-    """Piezas+turno+enroques+ep, contadores a 0 1."""
+    """Piezas+turno+enroques+ep EJECUTABLE, contadores a 0 1.
+
+    El campo e.p. entra en la clave, asi que un derecho FANTASMA — declarado
+    pero inejecutable — parte en dos la identidad de una posicion.  El coste
+    tiene dos tamanos muy distintos: se pierden transposiciones (molesto), y
+    el guard anti-repeticion de ``prove_forced_mate`` compara claves de rama,
+    de modo que una repeticion REAL puede pasar desapercibida y una linea que
+    en realidad son tablas certificarse como ganada (fallo de solidez).
+
+    Por eso v2 del canonicalizador conserva la casilla solo cuando ejecutarla
+    es legal.  La comprobacion cuesta dos generaciones de movimientos y solo
+    corre en posiciones que declaran e.p. — el 0,8% del arbol.
+    """
     parts = fen.split()
+    if (len(parts) >= 4 and parts[3] != '-'
+            and not en_passant_changes_the_game(parts)):
+        parts = list(parts[:3]) + ['-']
     return ' '.join(parts[:4] + ['0', '1'])
 
 

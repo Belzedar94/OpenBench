@@ -9,9 +9,11 @@ child may carry a closure upward, and the audit that measures how much of the
 identity is not what it claims to be.
 """
 
+import hashlib
 from io import StringIO
 from unittest.mock import patch
 
+import pyffish as pf
 from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
 
@@ -343,37 +345,44 @@ class BackfillCommandTests(TestCase):
 
 
 class EnPassantAuditTests(TestCase):
-    """The identity audit. It reports; it must never re-key anything."""
+    """The MOVE GENERATOR behaviour, which is what the audit measures.
+
+    The finding these pin has not changed: the generator emits an en-passant
+    square for a capture that is pseudo-legal but illegal.  What changed after
+    the audit is what AtomicDB does with it — the canonicalizer no longer puts
+    an unusable right in the key.  That contract lives in
+    ``atomicdb/test_en_passant_identity.py``; here we keep the raw generator
+    behaviour honest, because the audit reads raw stored FENs.
+    """
+
+    def _raw(self, before, move='e2e4'):
+        return pf.get_fen(logic.VARIANT, before, [move])
 
     def test_a_legal_capture_is_not_a_phantom(self):
-        after = logic.apply_move(EP_ORDINARY, 'e2e4')
-        verdict = logic.audit_en_passant(after)
+        verdict = logic.audit_en_passant(self._raw(EP_ORDINARY))
         self.assertEqual(verdict['square'], 'e3')
         self.assertEqual(verdict['legal_moves'], ['d4e3'])
         self.assertFalse(verdict['phantom'])
 
-    def test_an_atomic_self_explosion_leaves_a_phantom_square(self):
-        """CONFIRMED against the pinned move generator, not hypothetical."""
-        after = logic.apply_move(EP_OWN_KING, 'e2e4')
-        verdict = logic.audit_en_passant(after)
+    def test_an_atomic_self_explosion_still_makes_it_emit_one(self):
+        verdict = logic.audit_en_passant(self._raw(EP_OWN_KING))
         self.assertEqual(verdict['square'], 'e3')
         self.assertEqual(verdict['legal_moves'], [])
         self.assertTrue(verdict['phantom'])
 
-    def test_a_pinned_capturing_pawn_leaves_a_phantom_square(self):
-        after = logic.apply_move(EP_PINNED, 'e2e4')
-        self.assertTrue(logic.audit_en_passant(after)['phantom'])
+    def test_a_pinned_capturing_pawn_still_makes_it_emit_one(self):
+        self.assertTrue(
+            logic.audit_en_passant(self._raw(EP_PINNED))['phantom'])
 
     def test_no_adjacent_enemy_pawn_drops_the_square_correctly(self):
         after = logic.apply_move(logic.start_fen(), 'e2e4')
         self.assertIsNone(logic.audit_en_passant(after))
 
-    def test_two_identical_positions_get_two_keys(self):
-        """The concrete cost: one board, two rows, and a repetition guard
-        that compares those keys."""
-        phantom = logic.apply_move(EP_OWN_KING, 'e2e4')
+    def test_the_canonicalizer_now_folds_the_two_keys_into_one(self):
+        """The cost this audit was measuring, now paid off."""
+        phantom = self._raw(EP_OWN_KING)
         without = ' '.join(phantom.split()[:3] + ['-', '0', '1'])
-        self.assertNotEqual(logic.key_of(phantom), logic.key_of(without))
+        self.assertEqual(logic.key_of(phantom), logic.key_of(without))
         self.assertEqual(phantom.split()[0], without.split()[0])
 
     def test_self_test_reports_the_known_shapes(self):
@@ -384,10 +393,13 @@ class EnPassantAuditTests(TestCase):
         self.assertIn('PHANTOM pinned-capturing-pawn', text)
         self.assertIn('ok      ordinary-legal-capture', text)
 
-    def test_scan_counts_stored_positions_without_touching_them(self):
-        phantom = logic.apply_move(EP_OWN_KING, 'e2e4')
-        stored = Position.objects.create(key=logic.key_of(phantom),
-                                         fen=phantom)
+    def test_scan_counts_legacy_rows_without_touching_them(self):
+        """A row written before canonicalizer v2 still carries the phantom."""
+        phantom = self._raw(EP_OWN_KING)
+        legacy_fen = ' '.join(phantom.split()[:4] + ['0', '1'])
+        stored = Position.objects.create(
+            key=hashlib.sha256(legacy_fen.encode()).hexdigest(),
+            fen=legacy_fen)
         out = StringIO()
 
         call_command('audit_en_passant', json=True, stdout=out)
@@ -397,4 +409,4 @@ class EnPassantAuditTests(TestCase):
         self.assertEqual(report['phantom'], 1)
         self.assertEqual(report['with_ep'], 1)
         stored.refresh_from_db()
-        self.assertEqual(stored.fen, phantom)
+        self.assertEqual(stored.fen, legacy_fen)

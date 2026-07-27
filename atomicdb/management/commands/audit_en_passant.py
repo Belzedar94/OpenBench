@@ -17,14 +17,17 @@ and the capturing pawn is pinned.  When no enemy pawn sits beside the pushed
 pawn at all, the square is correctly dropped, so the exposure is exactly the
 "pseudo-legal but illegal" band.
 
-This command changes NOTHING.  Re-keying the tree is a major migration — every
-key in the database moves, and every receipt with it — and belongs to the
-owner with this report in hand.
+The canonicalizer now drops those squares (``logic.CANONICAL_VERSION`` 2), so
+this command has two jobs.  Before the re-keying pass it MEASURES the exposure
+on the stored rows; after it, ``--verify`` is the check that the pass finished
+its work, and it fails loudly if any stored key still carries a right that
+cannot be executed.  It still writes nothing itself.
 """
 
 import json
 
-from django.core.management.base import BaseCommand
+import pyffish as pf
+from django.core.management.base import BaseCommand, CommandError
 
 from atomicdb import logic
 from atomicdb.database import connection
@@ -54,6 +57,10 @@ class Command(BaseCommand):
         parser.add_argument(
             '--self-test', action='store_true',
             help='Only run the synthetic adversarial cases and exit.')
+        parser.add_argument(
+            '--verify', action='store_true',
+            help='Fail unless every stored key is free of phantom rights. '
+                 'This is the post-rekey check.')
         parser.add_argument(
             '--json', action='store_true',
             help='Emit one JSON object instead of the readable report.')
@@ -107,27 +114,38 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"  {offender['key'][:16]} ep={offender['square']} "
                 f"{offender['fen']}")
-        self.stdout.write(
-            'NOTHING WAS CHANGED. Re-keying the tree is a major migration; '
-            'this command only measures the exposure.')
+        self.stdout.write('NOTHING WAS CHANGED; this command only measures.')
+        if options['verify'] and counts['phantom']:
+            raise CommandError(
+                f"{counts['phantom']} stored position(s) still carry a "
+                'phantom en-passant right: run rekey_en_passant')
 
     def _self_test(self, as_json):
         results = []
         for name, before, move in ADVERSARIAL:
-            after = logic.apply_move(before, move)
-            verdict = logic.audit_en_passant(after)
+            # RAW movegen output on purpose: `logic.apply_move` canonicalises,
+            # and the canonicalizer is exactly what these cases exist to test.
+            raw = pf.get_fen(logic.VARIANT, before, [move])
+            verdict = logic.audit_en_passant(raw)
             results.append({
-                'case': name, 'fen': after,
+                'case': name, 'fen': raw,
                 'square': None if verdict is None else verdict['square'],
                 'legal_ep_moves': [] if verdict is None
                 else verdict['legal_moves'],
                 'phantom': bool(verdict and verdict['phantom']),
+                'canonical': logic.canonical_fen(raw),
+                'canonical_keeps_ep':
+                    logic.canonical_fen(raw).split()[3] != '-',
             })
         if as_json:
             self.stdout.write(json.dumps(results, sort_keys=True))
             return
         for row in results:
             marker = 'PHANTOM' if row['phantom'] else 'ok     '
+            kept = 'kept' if row['canonical_keeps_ep'] else 'dropped'
             self.stdout.write(
                 f"  {marker} {row['case']:<24} ep={row['square']} "
-                f"legal={row['legal_ep_moves']}")
+                f"legal={row['legal_ep_moves']} canonical={kept}")
+        self.stdout.write(
+            f'canonicalizer v{logic.CANONICAL_VERSION}: a PHANTOM case must '
+            'read "dropped" and a real one "kept".')
