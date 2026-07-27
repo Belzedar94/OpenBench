@@ -40,6 +40,16 @@ FRONTIER_CLICK_CAP = 64    # hard ceiling of tasks queued by a single click
 # set and this hard ply guard-rail.
 FRONTIER_DESCENT_MAX_PLIES = 32
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
+# Tope de la PV que se guarda por linea.  ``last_analysis`` es un JSON por
+# POSICION, asi que su tamano medio se multiplica por el numero de posiciones:
+# a 1 KB por fila son 45 GB a 45M posiciones, mas que la tabla de posiciones
+# entera.  Los plies 25 en adelante de una PV no-mate no deciden nada — ni
+# ordenan la frontera ni sostienen un cierre — asi que se tiran.
+#
+# Las lineas de MATE se guardan ENTERAS y a proposito: son evidencia.  El
+# testigo de un cierre MATE_PV se re-verifica jugada a jugada, y una PV de
+# mate truncada dejaria de serlo.
+STORED_PV_MAX_PLIES = 24
 CASCADE_GUARD_LIMIT = 100_000
 PRIORITY_REFRESH_SECONDS = 30.0
 # A legal terminal mate PV remains useful ENGINE evidence when the stronger
@@ -47,6 +57,25 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # shared wall-clock allowance for the complete online submission.
 ONLINE_MATE_PROOF_SECONDS = 20.0
 _priority_refresh_cache = {'at': 0.0}
+
+
+def capped_analysis(lines, max_plies=STORED_PV_MAX_PLIES):
+    """Lo que se GUARDA de un analisis: PVs no-mate recortadas.
+
+    No toca las lineas que el ingest ya uso para decidir nada — el recorte
+    ocurre al persistir, no al razonar — y deja intactas las PVs con score de
+    mate, que son evidencia y se re-verifican entera.
+    """
+    stored = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        pv = line.get('pv')
+        if (line.get('mate') is None and isinstance(pv, list)
+                and len(pv) > max_plies):
+            line = dict(line, pv=pv[:max_plies], pv_truncated=True)
+        stored.append(line)
+    return stored
 
 
 def multipv_for(visits):
@@ -230,7 +259,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
-        pos.last_analysis = lines[:8]
+        pos.last_analysis = capped_analysis(lines[:8])
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:

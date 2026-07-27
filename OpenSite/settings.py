@@ -178,6 +178,16 @@ if os.environ.get('OPENBENCH_POSTGRES_DB'):
     }
 
 ATOMICDB_DATABASE_ALIAS = 'default'
+# AtomicDB on Postgres.  Inert without OPENBENCH_ATOMICDB_POSTGRES_DB: with the
+# variable unset, everything below behaves exactly as it did on SQLite, so
+# deploying this code changes nothing until the migration window arrives.
+#
+# When it IS set, the SQLite split identity does not apply — a receipt is a
+# statement about a SQLite file — so the whole activation block is skipped and
+# the alias points at Postgres instead.  See Documentation/postgres-migration.md
+# for the runbook, including why the two databases move separately.
+_atomicdb_postgres_db = os.environ.get('OPENBENCH_ATOMICDB_POSTGRES_DB',
+                                       '').strip()
 _explicit_atomicdb_path = os.environ.get('OPENBENCH_ATOMICDB_PATH', '').strip()
 _durable_atomicdb_path = os.path.join(BASE_DIR, 'atomicdb.sqlite3')
 _atomicdb_path = _explicit_atomicdb_path or _durable_atomicdb_path
@@ -188,16 +198,42 @@ _atomicdb_exists = os.path.isfile(_atomicdb_path)
 _atomicdb_receipt_exists = os.path.isfile(_atomicdb_receipt_path)
 _atomicdb_requested = bool(_explicit_atomicdb_path)
 
-try:
-    _activate_atomicdb_split = split_activation_required(
-        explicit_requested=_atomicdb_requested,
-        database_exists=_atomicdb_exists,
-        receipt_exists=_atomicdb_receipt_exists,
-    )
-except AtomicDBIdentityError as error:
-    raise ImproperlyConfigured(str(error)) from error
+if _atomicdb_postgres_db:
+    _activate_atomicdb_split = False
+else:
+    try:
+        _activate_atomicdb_split = split_activation_required(
+            explicit_requested=_atomicdb_requested,
+            database_exists=_atomicdb_exists,
+            receipt_exists=_atomicdb_receipt_exists,
+        )
+    except AtomicDBIdentityError as error:
+        raise ImproperlyConfigured(str(error)) from error
 
-if _activate_atomicdb_split:
+if _atomicdb_postgres_db:
+    DATABASES['atomicdb'] = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': _atomicdb_postgres_db,
+        'USER': os.environ.get('OPENBENCH_ATOMICDB_POSTGRES_USER',
+                               os.environ.get('OPENBENCH_POSTGRES_USER',
+                                              'postgres')),
+        'PASSWORD': os.environ.get('OPENBENCH_ATOMICDB_POSTGRES_PASSWORD',
+                                   os.environ.get(
+                                       'OPENBENCH_POSTGRES_PASSWORD', '')),
+        'HOST': os.environ.get('OPENBENCH_ATOMICDB_POSTGRES_HOST',
+                               os.environ.get('OPENBENCH_POSTGRES_HOST',
+                                              '127.0.0.1')),
+        'PORT': os.environ.get('OPENBENCH_ATOMICDB_POSTGRES_PORT',
+                               os.environ.get('OPENBENCH_POSTGRES_PORT',
+                                              '5432')),
+        # Persistent connections matter more here than for the web database:
+        # the ingest processor and the selector service open one connection
+        # each and hold it for their whole lifetime.
+        'CONN_MAX_AGE': int(os.environ.get(
+            'OPENBENCH_ATOMICDB_POSTGRES_CONN_MAX_AGE', '60')),
+    }
+    ATOMICDB_DATABASE_ALIAS = 'atomicdb'
+elif _activate_atomicdb_split:
     if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3':
         _default_sqlite_path = os.path.realpath(os.path.abspath(
             os.path.expanduser(str(DATABASES['default']['NAME']))))

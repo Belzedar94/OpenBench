@@ -332,6 +332,50 @@ class SolveTask(models.Model):
         return f'solve {self.pk} {self.position_id[:12]} {self.state}'
 
 
+# ---------------------------------------------------------------------------
+# DISENO PENDIENTE: legal_move_inventory  (P2, sin migracion todavia)
+# ---------------------------------------------------------------------------
+#
+# EL PROBLEMA.  Un nodo expandido materializa una fila de ``Edge`` mas una de
+# ``Position`` por cada jugada legal: ~70 filas por expansion en la apertura
+# atomica.  A escala eso es la mayor parte del almacenamiento, y la mayoria de
+# esas filas no se visitan jamas — un nodo tipico solo necesita los tres a
+# cinco hijos del MultiPV.
+#
+# POR QUE NO BASTA "expandir en perezoso".  El cierre AND exige saber que se
+# han cubierto TODAS las respuestas legales.  Hoy ``expanded`` significa "las
+# filas que hay son todas las que hay", que es una afirmacion sobre el estado
+# de la tabla, no sobre las reglas.  Si las aristas se materializan a demanda,
+# esa afirmacion deja de tener sentido y ``backup_status`` se queda sin su
+# guarda — el agujero clasico de "cerre con movegen parcial".
+#
+# LA FORMA CORRECTA.  Separar COBERTURA de MATERIALIZACION:
+#
+#     class LegalMoveInventory(models.Model):
+#         position       = models.OneToOneField(Position, ...)
+#         movegen_version = models.CharField(max_length=32)   # pyffish build
+#         move_count     = models.SmallIntegerField()
+#         packed_moves   = models.BinaryField()   # 2 bytes/jugada, ordenadas
+#         move_set_sha256 = models.CharField(max_length=64)
+#         created        = models.DateTimeField(auto_now_add=True)
+#
+# Con ~70 jugadas y 16 bits por jugada son ~140 bytes, frente a las ~70 filas
+# de posicion mas ~70 de arista que hoy cuesta lo mismo.  Y entonces:
+#
+#   * "expandido" pasa a significar "la cobertura materializada IGUALA un
+#     conjunto legal AUTENTICADO", no "las filas que hay parecen todas";
+#   * un nodo AND solo cierra si sus hijos cubren ``move_set_sha256``;
+#   * un certificado SOLVE puede comparar su nodo AND contra el inventario en
+#     vez de regenerar el movegen, y el verificador sigue regenerandolo de
+#     todos modos como red;
+#   * un cambio de movegen invalida inventarios por ``movegen_version`` en vez
+#     de invalidar el arbol entero a ciegas.
+#
+# NO se implementa aqui: cambiar el significado de ``expanded`` toca el punto
+# fijo exacto, y eso se hace con el gestor de prueba ya asentado y con la
+# migracion a Postgres hecha, no en la misma semana que ambos.
+
+
 class DBEvent(models.Model):
     ts      = models.DateTimeField(auto_now_add=True, db_index=True)
     kind    = models.CharField(max_length=32)     # SUBTREE_CLOSED, WALL, CAMPAIGN...
