@@ -64,7 +64,12 @@ def get_or_create_position(fen, campaign=None):
         t = logic.terminal_status(fen)
         if t:
             pos.status, pos.closure, pos.mate_in = t[0], 'TERMINAL', 0
-            pos.save(update_fields=['status', 'closure', 'mate_in'])
+            # Una posicion terminal lo es con el contador que sea: mate y
+            # explosion tienen precedencia sobre la adjudicacion por reloj.
+            if t[0] != 'DRAW':
+                pos.clock_slack = logic.CLOCK_SLACK_MAX
+            pos.save(update_fields=['status', 'closure', 'mate_in',
+                                    'clock_slack'])
     return pos
 
 
@@ -122,14 +127,15 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
     # Certify shortest witnesses first while preserving original MultiPV
     # indexes for the ingestion map.
     for _, index, child_fen, winner_white, pv_rest in sorted(candidates):
+        worst_run = None
         if deadline is not None and time.monotonic() >= deadline:
             proof_result = 'INCONCLUSIVE'
         else:
-            proof_result = logic.prove_forced_mate(
+            proof_result, worst_run = logic.prove_forced_mate(
                 child_fen, winner_white, max_plies=len(pv_rest) + 2,
                 budget_positions=budget_positions, hint_pv=pv_rest,
-                deadline=deadline)
-        prepared[index] = (winner_white, pv_rest, proof_result)
+                deadline=deadline, return_run=True)
+        prepared[index] = (winner_white, pv_rest, proof_result, worst_run)
     return prepared
 
 
@@ -185,7 +191,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     revoked_here.extend(revoked_keys)
                     child.refresh_from_db()
             if child.status == 'UNKNOWN' and prepared_proof is not None:
-                winner_white, pv_rest, proof_result = prepared_proof
+                winner_white, pv_rest, proof_result, worst_run = prepared_proof
                 if proof_result == 'NO_MATE':
                     child.proof = 'DISPUTED'
                     child.won_line = ' '.join(pv_rest)
@@ -203,10 +209,17 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                                else 'ENGINE')
                 child.won_line = ' '.join(pv_rest)
                 child.mate_in = len(pv_rest)   # linea probada (cota superior)
+                # Prueba exhaustiva: la racha reversible REAL del arbol
+                # probado.  Testigo sin certificar: la cota burda por
+                # longitud, que se recalcula al certificar.
+                child.clock_slack = (
+                    logic.slack_from_run(worst_run)
+                    if proof_result == 'PROVEN' and worst_run is not None
+                    else logic.slack_from_witness_length(len(pv_rest)))
                 if pv_rest:
                     child.best_move = pv_rest[0]
                 child.save(update_fields=['status', 'closure', 'proof',
-                                          'won_line', 'mate_in',
+                                          'won_line', 'mate_in', 'clock_slack',
                                           'best_move', 'updated'])
                 _emit_closure_events(child)   # tambien cuenta y sale en feed
                 closed_here += 1
@@ -246,7 +259,7 @@ def _revoke_contradicted_mate(child, parent, prepared_proof):
     busqueda que no encuentra mate en N plies no dice nada sobre un mate en
     N+5, asi que un ``mate_in`` mayor (o desconocido) NO se toca.
     """
-    winner_white, pv_rest, _ = prepared_proof
+    winner_white, pv_rest = prepared_proof[0], prepared_proof[1]
     want = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
     searched_plies = len(pv_rest) + 2
     if (child.status != want or child.closure != 'MATE_PV'
@@ -278,7 +291,7 @@ def backup_cascade(seed_keys):
         pos = Position.objects.get(key=key)
         edges = list(Edge.objects.filter(parent=pos).select_related('child'))
         if edges:
-            statuses = [e.child.status for e in edges]
+            statuses = [_supporting_status(pos, e) for e in edges]
             evals = [e.child.eval_cp if e.child.status == 'UNKNOWN' else
                      _status_eval(e.child.status) for e in edges]
             new_status = (pos.status if pos.status != 'UNKNOWN' else
@@ -327,6 +340,10 @@ def backup_cascade(seed_keys):
                 inherited = _minimax_proof(pos, edges, pos.status)
                 if inherited != pos.proof:
                     pos.proof = inherited
+                    dirty = True
+                slack = _minimax_slack(pos, edges)
+                if slack != pos.clock_slack:
+                    pos.clock_slack = slack
                     dirty = True
             if pos.status in ('WHITE_WIN', 'BLACK_WIN'):
                 # refinamiento retroactivo del DTM: si aparece (o se acorta)
@@ -380,6 +397,55 @@ def backup_cascade(seed_keys):
 
 def _status_eval(status):
     return {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000, 'DRAW': 0}.get(status)
+
+
+def fresh_context_enabled():
+    """Interruptor de la regla fresh-context (encendida por defecto).
+
+    Existe para la ventana de despliegue: hasta que ``backfill_clock_slack``
+    pase, la base viva tiene ``clock_slack`` NULL en todas partes y la regla
+    bloquea cierres nuevos a traves de aristas tranquilas.  Bloquear cierres
+    es CONSERVADOR (no cierra de menos por error, cierra de menos por
+    prudencia), pero el propietario puede querer decidir cuando pagar ese
+    precio.
+    """
+    return bool(getattr(settings, 'ATOMICDB_FRESH_CONTEXT', True))
+
+
+def _supporting_status(pos, edge):
+    """Status del hijo TAL COMO puede sostener el cierre de ``pos``.
+
+    Un hijo decisivo alcanzado por arista tranquila sin margen de reloj no
+    sostiene nada: para el padre cuenta como UNKNOWN, que es exactamente
+    "todavia no lo sabemos", no "es tablas".  Las tablas y los UNKNOWN pasan
+    tal cual: las tablas son inmunes al reloj (subirlo solo degrada victorias)
+    y un UNKNOWN ya no sostiene nada.
+
+    IMPORTANTE: esto endurece los cierres NUEVOS.  Los ya existentes no se
+    re-derivan con esta regla — ver ``revoke_closure``, que sigue usando el
+    backup liso — porque hacerlo antes del backfill desharia el arbol entero
+    por un NULL, no por una refutacion.
+    """
+    child = edge.child
+    if child.status in ('UNKNOWN', 'DRAW') or not fresh_context_enabled():
+        return child.status
+    if logic.edge_supports(pos.fen, edge.move_uci, child.clock_slack):
+        return child.status
+    return 'UNKNOWN'
+
+
+def _minimax_slack(pos, edges):
+    """``clock_slack`` de un cierre MINIMAX desde el de sus hijos."""
+    if pos.status not in ('WHITE_WIN', 'BLACK_WIN'):
+        return None            # las tablas no llevan slack
+    mover_win = ('WHITE_WIN' if pos.fen.split()[1] == 'w' else 'BLACK_WIN')
+    if pos.status == mover_win:
+        winning = [(e.move_uci, e.child.clock_slack) for e in edges
+                   if e.child.status == pos.status]
+        return logic.minimax_slack(pos.fen, winning, [], mover_wins=True)
+    return logic.minimax_slack(
+        pos.fen, [], [(e.move_uci, e.child.clock_slack) for e in edges],
+        mover_wins=False)
 
 
 def _witness_rank(edge):
@@ -639,7 +705,8 @@ def _child_is_verified(child):
 # lleva un contador de guarda y se apoya en que revocar es monotono (un nodo
 # pasa de cerrado a UNKNOWN como mucho una vez).
 REVOKE_GUARD_LIMIT = 100_000
-_REVOKED_FIELDS = ['status', 'closure', 'proof', 'won_line', 'mate_in']
+_REVOKED_FIELDS = ['status', 'closure', 'proof', 'won_line', 'mate_in',
+                   'clock_slack']
 
 
 def _closure_is_independent(pos):
@@ -663,6 +730,7 @@ def _clear_closure(pos, mark_disputed=False):
     pos.status = 'UNKNOWN'
     pos.closure = None
     pos.mate_in = None
+    pos.clock_slack = None      # el slack pertenecia al cierre retirado
     if mark_disputed:
         pos.proof = 'DISPUTED'
     else:
@@ -1347,8 +1415,17 @@ def _tb_rejected(position_key, reason, **payload):
         'key': position_key, 'reason': reason, **payload})
 
 
-def prepare_tb_closure(position_key, wdl, user=None):
-    """Validate and, for <=5 men, probe TB before any encompassing write tx."""
+def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
+    """Validate and, for <=5 men, probe TB before any encompassing write tx.
+
+    ``dtz`` es ADITIVO y opcional: un worker anterior a este protocolo no
+    lo manda y el cierre sigue exactamente igual, con ``clock_slack`` 0 —
+    que es lo unico honesto, porque un WDL a secas asume haberse
+    alcanzado justo tras un reset.  El WDL se sigue re-verificando en el
+    servidor hasta cinco piezas; el DTZ se ACEPTA SIN VERIFICAR y queda
+    marcado como tal en el evento.  La verificacion dura del DTZ llega
+    con los certificados de P1c.
+    """
     try:
         pos = Position.objects.only('key', 'fen', 'status').get(
             key=position_key)
@@ -1381,7 +1458,11 @@ def prepare_tb_closure(position_key, wdl, user=None):
             _tb_rejected(pos.key, 'untrusted-six-piece', worker_wdl=wdl,
                          username=username)
             return None
-    return {'key': pos.key, 'fen': pos.fen, 'wdl': wdl}
+    try:
+        dtz = None if dtz is None else int(dtz)
+    except (TypeError, ValueError):
+        dtz = None
+    return {'key': pos.key, 'fen': pos.fen, 'wdl': wdl, 'dtz': dtz}
 
 
 def _apply_prepared_tb(position_key, prepared):
@@ -1394,18 +1475,24 @@ def _apply_prepared_tb(position_key, prepared):
                 or not logic.tb_applicable(pos.fen)):
             return False
         wdl = prepared['wdl']
+        dtz = prepared.get('dtz')
         stm_white = pos.fen.split()[1] == 'w'
         pos.status = logic.wdl_to_status(wdl, stm_white)
         pos.closure = 'TB'
-        pos.save(update_fields=['status', 'closure', 'updated'])
+        pos.clock_slack = (None if pos.status == 'DRAW'
+                           else logic.slack_from_dtz(dtz))
+        pos.save(update_fields=['status', 'closure', 'clock_slack',
+                                'updated'])
         DBEvent.objects.create(kind='NODE_CLOSED', payload={
-            'key': pos.key, 'status': pos.status, 'closure': 'TB'})
+            'key': pos.key, 'status': pos.status, 'closure': 'TB',
+            'dtz': dtz, 'dtz_verified': False,
+            'clock_slack': pos.clock_slack})
     backup_cascade([position_key])
     backup_backed_evals([position_key])
     return True
 
 
-def close_by_tb(position_key, wdl, user=None):
+def close_by_tb(position_key, wdl, user=None, dtz=None):
     """Cierra con WDL del lado al turno, dentro de una frontera verificable.
 
     Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
@@ -1413,5 +1500,5 @@ def close_by_tb(position_key, wdl, user=None):
     explicitamente confiables porque el set completo no reside en el VPS.
     Todo rechazo queda registrado y nunca muta el arbol.
     """
-    prepared = prepare_tb_closure(position_key, wdl, user=user)
+    prepared = prepare_tb_closure(position_key, wdl, user=user, dtz=dtz)
     return _apply_prepared_tb(position_key, prepared)

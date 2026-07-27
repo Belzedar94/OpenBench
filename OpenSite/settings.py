@@ -83,6 +83,24 @@ ATOMICDB_TB_TRUSTED = [
     ).split(',') if username.strip()
 ]
 
+# Identidad CONGELADA del enunciado que AtomicDB prueba.  No es una opcion de
+# despliegue: cambiarla cambia el teorema, y todo cierre decisivo existente
+# quedaria referido a otras reglas.  La semantica completa esta en el
+# docstring de atomicdb/logic.py.
+ATOMICDB_RULESET_ID = 'atomic-fide-claim-v1'
+# Regla fresh-context: un hijo decisivo solo sostiene el cierre de su padre a
+# traves de una arista tranquila si le queda margen de reloj.  Endurece los
+# cierres NUEVOS; apagarla es volver al comportamiento anterior a P1b.
+ATOMICDB_FRESH_CONTEXT = os.environ.get(
+    'ATOMICDB_FRESH_CONTEXT', 'True').lower() not in ('0', 'false', 'no')
+# Selector de trabajo: 'regret' (Dijkstra de interes, por defecto) o 'pn'
+# (descenso df-pn del gestor de prueba).
+ATOMICDB_SELECTOR = os.environ.get('ATOMICDB_SELECTOR', 'regret')
+# Salida de emergencia: recalcular prioridades dentro de la request del worker
+# si el servicio refresh_selector no esta corriendo.
+ATOMICDB_INLINE_SELECTOR = os.environ.get(
+    'ATOMICDB_INLINE_SELECTOR', '').lower() in ('1', 'true', 'yes')
+
 INSTALLED_APPS = [
     'atomicdb',
     'OpenBench',

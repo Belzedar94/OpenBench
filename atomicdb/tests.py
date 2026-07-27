@@ -819,6 +819,11 @@ class DtmTests(TestCase):
             c = e.child
             c.status, c.closure = 'WHITE_WIN', 'MATE_PV'
             c.mate_in = dists(i)
+            # Fresh-context rule (P1b): a decisive child only carries its
+            # closure up a QUIET edge while it still has clock margin.  This
+            # test is about DTM, so give every child room and let the DTM
+            # arithmetic be the only thing under test.
+            c.clock_slack = 50
             c.save()
         ingest.backup_cascade([edges[0].child.key])
         p.refresh_from_db()

@@ -382,6 +382,17 @@ def api_submit(request):
         parsed_wdl = None if tb_wdl in (None, '') else int(tb_wdl)
     except ValueError:
         return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
+    # DTZ opcional y ADITIVO: sin el, el cierre TB vale solo con el reloj a
+    # cero (clock_slack 0), que es lo que ya ocurria.  Un valor ilegible se
+    # ignora en vez de rechazar el submit entero: es contexto de reloj, no el
+    # hecho exacto, y el hecho exacto ya viene verificado aparte.
+    tb_dtz = request.POST.get('tb_dtz')
+    try:
+        parsed_dtz = None if tb_dtz in (None, '') else int(tb_dtz)
+    except (TypeError, ValueError):
+        parsed_dtz = None
+    if parsed_dtz is not None and abs(parsed_dtz) > 1024:
+        parsed_dtz = None
 
     machine = request.POST.get('machine', '')
     engine_sha = _sha_field(request.POST.get('engine_sha', ''))
@@ -436,6 +447,7 @@ def api_submit(request):
             'machine': machine,
             'username': user.username,
             'tb_wdl': parsed_wdl,
+            'tb_dtz': parsed_dtz,
         })
         task.state, task.machine = 'COMPLETED', machine
         task.completed = timezone.now()

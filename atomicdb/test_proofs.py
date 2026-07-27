@@ -222,7 +222,8 @@ class MinimaxProofInheritanceTests(TestCase):
 
 class NewDisputedMateTests(TestCase):
 
-    @patch('atomicdb.ingest.logic.prove_forced_mate', return_value='NO_MATE')
+    @patch('atomicdb.ingest.logic.prove_forced_mate',
+           return_value=('NO_MATE', None))
     @patch('atomicdb.ingest.logic.verify_mate_pv', return_value=True)
     def test_new_dispute_does_not_close_and_queues_max_budget(self,
                                                               verify, prove):

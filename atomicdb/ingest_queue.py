@@ -141,11 +141,12 @@ def apply_job(job):
     elapsed = float(payload.get('elapsed') or 0.0)
     machine = payload.get('machine') or ''
     tb_wdl = payload.get('tb_wdl')
+    tb_dtz = payload.get('tb_dtz')
 
     tb_prepared, mate_proofs, rejected = None, None, False
     if tb_wdl is not None:
         tb_prepared = ingest.prepare_tb_closure(
-            job.position_id, tb_wdl,
+            job.position_id, tb_wdl, dtz=tb_dtz,
             user=_submitting_user(payload.get('username') or ''))
         # Un WDL que el servidor no confirma nunca muta el arbol, y
         # reintentarlo daria exactamente el mismo rechazo: el trabajo se cierra

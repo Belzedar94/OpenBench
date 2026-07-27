@@ -357,7 +357,7 @@ class OnlineDisputeRevokesTests(TestCase):
 
         with patch('atomicdb.ingest.logic.verify_mate_pv', return_value=True), \
                 patch('atomicdb.ingest.logic.prove_forced_mate',
-                      return_value='NO_MATE'):
+                      return_value=('NO_MATE', None)):
             summary = ingest.ingest_analysis(parent.key, [{
                 'move': 'e2e4', 'eval_cp': 9999, 'mate': 1,
                 'pv': ['e2e4', 'a1a2'],
@@ -383,7 +383,7 @@ class OnlineDisputeRevokesTests(TestCase):
 
         with patch('atomicdb.ingest.logic.verify_mate_pv', return_value=True), \
                 patch('atomicdb.ingest.logic.prove_forced_mate',
-                      return_value='NO_MATE'):
+                      return_value=('NO_MATE', None)):
             ingest.ingest_analysis(parent.key, [{
                 'move': 'e2e4', 'eval_cp': 9999, 'mate': 1,
                 'pv': ['e2e4', 'a1a2'],

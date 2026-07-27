@@ -632,19 +632,32 @@ def _net_sha256(engine_path):
 
 
 def probe_tb(tb, fen):
+    """Return ``(wdl, dtz)``; ``dtz`` is None when the tables cannot give it.
+
+    DTZ is what turns a tablebase win into a statement about the fifty-move
+    counter, so the server can record for which entry clocks the closure
+    holds.  It is strictly additive: a server that does not know the field
+    ignores it, and a probe that cannot produce it still reports its WDL.
+    """
     if tb is None:
-        return None
+        return None, None
     parts = fen.split()
     if parts[2] != '-' or parts[3] != '-':
-        return None
+        return None, None
     if sum(ch.isalpha() for ch in parts[0]) > 6:
-        return None
+        return None, None
     try:
         import chess.variant
         board = chess.variant.AtomicBoard(fen)
-        return tb.probe_wdl(board)
+        wdl = tb.probe_wdl(board)
     except Exception:
-        return None
+        return None, None
+    dtz = None
+    try:
+        dtz = tb.probe_dtz(board)
+    except Exception:
+        dtz = None
+    return wdl, dtz
 
 
 def main():
@@ -730,16 +743,19 @@ def main():
         for t in tasks:
             current_task.start(t['id'], t.get('lease_token', ''))
             t0 = time.time()
-            wdl = probe_tb(tb, t['fen'])
+            wdl, dtz = probe_tb(tb, t['fen'])
             if wdl is not None:
+                payload = {
+                    **auth, **provenance,
+                    'task_id': t['id'], 'lines': '[]',
+                    'elapsed': f'{time.time() - t0:.2f}',
+                    'tb_wdl': wdl,
+                    'lease_token': t.get('lease_token', '')}
+                if dtz is not None:
+                    payload['tb_dtz'] = dtz
                 try:
-                    rr = _submit_until_definitive(a.S, {
-                        **auth, **provenance,
-                        'task_id': t['id'], 'lines': '[]',
-                        'elapsed': f'{time.time() - t0:.2f}',
-                        'tb_wdl': wdl,
-                        'lease_token': t.get('lease_token', '')}, t['id'])
-                    print(f"task {t['id']} TB wdl={wdl} -> "
+                    rr = _submit_until_definitive(a.S, payload, t['id'])
+                    print(f"task {t['id']} TB wdl={wdl} dtz={dtz} -> "
                           f"{rr.json().get('summary')}", flush=True)
                 except Exception as e:
                     print(f'tb submit error: {e}', flush=True)

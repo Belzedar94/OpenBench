@@ -51,6 +51,14 @@ class Position(models.Model):
     backed_nodes = models.BigIntegerField(default=0)   # calidad (nodos) del respaldo
     won_line  = models.TextField(null=True)   # PV verificada del cierre (testigo)
     mate_in   = models.IntegerField(null=True)  # plies hasta mate, linea probada mas corta
+    # Reloj de entrada MAXIMO para el que este cierre decisivo sigue valiendo,
+    # en plies del contador de 50 (0..100).  ``canonical_fen`` pone los
+    # contadores a cero, asi que un cierre probado aqui lo esta "desde reloj
+    # cero"; llegar a la misma posicion con reloj c solo es seguro si
+    # c <= clock_slack.  Solo se rellena en cierres DECISIVOS: las tablas son
+    # monotonas en el reloj (subirlo solo degrada victorias hacia tablas) y no
+    # necesitan slack.  NULL = no medido, que se trata como cero.
+    clock_slack = models.SmallIntegerField(null=True)
     last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
     depth_invested = models.IntegerField(default=0)
