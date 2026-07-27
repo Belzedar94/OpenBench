@@ -353,9 +353,11 @@ class RequestTests(TestCase):
             p.visits = generation + 1
             p.save(update_fields=['visits'])
 
-        self.assertEqual(ingest.request_analysis(p), 'queued')
-        self.assertEqual(AnalysisTask.objects.get(
-            position=p, generation=len(expected)).budget_nodes, expected[-1])
+        # Past the top rung the request stops buying the same 10B search
+        # again and becomes a frontier expansion instead (test_frontier.py).
+        self.assertEqual(ingest.request_analysis(p), 'expanded')
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=p, generation=len(expected)).exists())
 
     def test_reanalysis_refreshes_stale_position_before_selecting_rung(self):
         p = ingest.get_or_create_position(logic.start_fen())

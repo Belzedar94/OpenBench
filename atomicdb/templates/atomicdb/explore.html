@@ -95,9 +95,12 @@
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',
               'already-solved': 'Already solved',
+              // depth ladder spent here: the request goes one ply deeper
+              'expanded': 'Expanding beneath this position: '
+                          + (d.children_queued || 0) + ' children queued',
             }[d.status] || 'Something went wrong';
-            if (['queued', 'already-queued',
-                 'already-requested'].includes(d.status)) {
+            if (['queued', 'already-queued', 'already-requested',
+                 'expanded'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
             } else {
               btn.disabled = false;

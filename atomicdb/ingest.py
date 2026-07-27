@@ -19,9 +19,18 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
 # Visitor-requested reanalysis is deliberately steeper than autonomous tree
-# exploration: 128M -> 512M -> 2B -> 10B, then stays at 10B.
+# exploration: 128M -> 512M -> 2B -> 10B.
 REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
                          10_000_000_000]
+# Once the last rung is spent, buying it again would only repeat a search we
+# already have.  The request then becomes a proof-number style expansion of
+# the frontier one ply below: an OR node (the attacker of the conjecture,
+# White, to move) only needs ONE good try, so a narrow top-k is enough; an
+# AND node (Black to move) has to answer EVERY reply, so it takes them all.
+FRONTIER_OR_WIDTH = 3
+FRONTIER_AND_CAP = 64
+FRONTIER_BLIND_WIDTH = 8   # no ordering information at all: widen a little
+FRONTIER_CLICK_CAP = 64    # hard ceiling of tasks queued by a single click
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 CASCADE_GUARD_LIMIT = 100_000
 PRIORITY_REFRESH_SECONDS = 30.0
@@ -478,72 +487,200 @@ def bootstrap_root(budget=None):
     return made
 
 
-def request_analysis(pos):
-    """Peticion publica: encola (o promociona) la tarea de esta posicion.
-    Suelo de 128M: quien pide analisis merece profundidad de verdad.
-    Devuelve 'queued' | 'already-queued' | 'already-solved'."""
+_LADDER_EXHAUSTED = 'ladder-exhausted'   # interno: nunca sale del modulo
+
+
+class RequestOutcome(str):
+    """Request status that can carry frontier-expansion counters.
+
+    It stays a plain ``str`` on purpose: the view still drops it straight
+    into ``{'status': ...}``, explore.html still switches on it and the M1
+    tests still compare it against a literal.  Only the frontier path
+    attaches a ``detail`` mapping, which the view merges into its payload.
+    """
+
+    def __new__(cls, value, **detail):
+        outcome = super().__new__(cls, value)
+        outcome.detail = detail
+        return outcome
+
+
+def _completed_max_budget(pos):
+    return (AnalysisTask.objects.filter(
+        position=pos, state=AnalysisTask.TState.COMPLETED)
+        .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
+        .first())
+
+
+def ladder_exhausted(pos):
+    """True when the visitor ladder has nothing left to buy on ``pos`` itself.
+
+    Read-only.  The view needs it to keep click deduplication anchored on
+    the parent even though an expansion places its tasks on the children.
+    """
+    if pos.status != 'UNKNOWN':
+        return False
+    completed_max = _completed_max_budget(pos)
+    return (completed_max is not None
+            and completed_max >= REQUEST_BUDGET_LADDER[-1])
+
+
+def _request_rung(pos):
+    """Buy the next ladder rung for ONE position. The caller owns the tx.
+
+    Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
+    interno _LADDER_EXHAUSTED cuando el ultimo peldano ya esta COMPLETED:
+    repetirlo seria gastar 10B en una busqueda que ya tenemos."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
-    with atomic():
-        pos = Position.objects.select_for_update().get(pk=pos.pk)
-        if pos.status != 'UNKNOWN':
-            return 'already-solved'
-        completed_max = (AnalysisTask.objects.filter(
-            position=pos, state=AnalysisTask.TState.COMPLETED)
-            .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
-            .first())
-        floor = REQUEST_BUDGET_LADDER[0]
-        if completed_max is not None:
-            floor = REQUEST_BUDGET_LADDER[-1]
-            for candidate in REQUEST_BUDGET_LADDER:
-                if candidate > completed_max:
-                    floor = candidate
-                    break
-        floor = max(floor, budget_for(pos))
-        task, created = AnalysisTask.objects.get_or_create(
-            position=pos, generation=pos.visits,
-            defaults={'budget_nodes': floor, 'source': 'USER',
-                      'multipv': multipv_for(pos.visits)})
-        if created:
+    pos = Position.objects.select_for_update().get(pk=pos.pk)
+    if pos.status != 'UNKNOWN':
+        return 'already-solved'
+    completed_max = _completed_max_budget(pos)
+    if (completed_max is not None
+            and completed_max >= REQUEST_BUDGET_LADDER[-1]):
+        return _LADDER_EXHAUSTED
+    floor = REQUEST_BUDGET_LADDER[0]
+    if completed_max is not None:
+        floor = REQUEST_BUDGET_LADDER[-1]
+        for candidate in REQUEST_BUDGET_LADDER:
+            if candidate > completed_max:
+                floor = candidate
+                break
+    floor = max(floor, budget_for(pos))
+    task, created = AnalysisTask.objects.get_or_create(
+        position=pos, generation=pos.visits,
+        defaults={'budget_nodes': floor, 'source': 'USER',
+                  'multipv': multipv_for(pos.visits)})
+    if created:
+        return 'queued'
+    if task.state == 'PENDING':
+        task.budget_nodes = max(task.budget_nodes, floor)
+        promoted = task.source != 'USER'
+        task.source = 'USER'   # promocion: al frente de la cola
+        task.save(update_fields=['source', 'budget_nodes'])
+        if promoted:
             return 'queued'
-        if task.state == 'PENDING':
-            task.budget_nodes = max(task.budget_nodes, floor)
-            promoted = task.source != 'USER'
-            task.source = 'USER'   # promocion: al frente de la cola
-            task.save(update_fields=['source', 'budget_nodes'])
-            if promoted:
-                return 'queued'
-        elif task.state == 'LEASED':
-            if task.budget_nodes < floor:
-                # The running engine cannot change its ``go nodes`` command.
-                # Keep the user's deeper request as the next generation
-                # instead of logging it as satisfied and silently losing it.
-                follow_up = (AnalysisTask.objects.filter(
-                    position=pos, state=AnalysisTask.TState.PENDING,
-                    generation__gt=task.generation)
-                    .order_by('generation').first())
-                if follow_up is None:
-                    generation = max(pos.visits + 1, task.generation + 1)
-                    while AnalysisTask.objects.filter(
-                            position=pos, generation=generation).exists():
-                        generation += 1
-                    AnalysisTask.objects.create(
-                        position=pos, generation=generation,
-                        budget_nodes=floor, source='USER',
-                        multipv=multipv_for(generation))
-                else:
-                    follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
-                    follow_up.source = 'USER'
-                    follow_up.save(update_fields=['budget_nodes', 'source'])
-                return 'queued'
-            # The existing lease already satisfies the requested rung. Mark it
-            # as visitor-requested so subsequent clicks can be deduplicated
-            # without consuming the hourly allowance repeatedly.
-            if task.source != 'USER':
-                task.source = 'USER'
-                task.save(update_fields=['source'])
-        return 'already-queued'
+    elif task.state == 'LEASED':
+        if task.budget_nodes < floor:
+            # The running engine cannot change its ``go nodes`` command.
+            # Keep the user's deeper request as the next generation
+            # instead of logging it as satisfied and silently losing it.
+            follow_up = (AnalysisTask.objects.filter(
+                position=pos, state=AnalysisTask.TState.PENDING,
+                generation__gt=task.generation)
+                .order_by('generation').first())
+            if follow_up is None:
+                generation = max(pos.visits + 1, task.generation + 1)
+                while AnalysisTask.objects.filter(
+                        position=pos, generation=generation).exists():
+                    generation += 1
+                AnalysisTask.objects.create(
+                    position=pos, generation=generation,
+                    budget_nodes=floor, source='USER',
+                    multipv=multipv_for(generation))
+            else:
+                follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
+                follow_up.source = 'USER'
+                follow_up.save(update_fields=['budget_nodes', 'source'])
+            return 'queued'
+        # The existing lease already satisfies the requested rung. Mark it
+        # as visitor-requested so subsequent clicks can be deduplicated
+        # without consuming the hourly allowance repeatedly.
+        if task.source != 'USER':
+            task.source = 'USER'
+            task.save(update_fields=['source'])
+    return 'already-queued'
+
+
+def _frontier_rank(child, stm_white):
+    """Explorer convention: an unanalysed child outranks a known bad one."""
+    if child.eval_cp is None:
+        return -9_999.5
+    return child.eval_cp if stm_white else -child.eval_cp
+
+
+def _frontier_children(parent):
+    """Unsolved children worth buying next, best first and already sliced.
+
+    Ordering, by decreasing trust:
+
+    1. the parent's stored MultiPV (``last_analysis``) — the engine's own
+       ranking of the moves it just searched, emitted best first;
+    2. what the tree already knows about each child (eval from the mover's
+       point of view, the same convention the explorer's move table uses);
+    3. nothing at all, in which case the first FRONTIER_BLIND_WIDTH legal
+       moves stand in for the ordering we do not have.
+
+    Solved children never take a slot: an OR node cannot be proven through
+    them and an AND node has nothing left to ask of them.
+    """
+    stm_white = parent.fen.split()[1] == 'w'
+    # order_by('id') keeps the movegen order expand() wrote the edges in.
+    edges = [e for e in Edge.objects.filter(parent=parent)
+             .select_related('child').order_by('id')
+             if e.child.status == 'UNKNOWN']
+    live = [e.child for e in edges]
+    by_move = {e.move_uci: e.child for e in edges}
+
+    ranked, seen = [], set()
+    for line in (parent.last_analysis or []):
+        move = line.get('move') if isinstance(line, dict) else None
+        child = by_move.get(move)
+        if child is not None and child.key not in seen:
+            seen.add(child.key)
+            ranked.append(child)
+    rest = [c for c in live if c.key not in seen]
+    informed = bool(ranked) or any(c.eval_cp is not None for c in rest)
+    # Stable sort over legal-move order: with no eval at all the fallback is
+    # literally "the first N legal moves".
+    rest.sort(key=lambda c: -_frontier_rank(c, stm_white))
+    ranked.extend(rest)
+
+    if stm_white:     # OR node: one good try is enough to prove the branch
+        width = FRONTIER_OR_WIDTH if informed else FRONTIER_BLIND_WIDTH
+    else:             # AND node: every reply has to be answered
+        width = FRONTIER_AND_CAP
+    return ranked[:min(width, FRONTIER_CLICK_CAP)]
+
+
+def _expand_frontier(parent):
+    """Spend an exhausted request one ply deeper, proof-number style.
+
+    Every selected child re-enters the ordinary ladder at its own natural
+    floor (typically 128M).  A child whose own ladder is already spent is
+    counted and left alone: v1 deliberately does not recurse to grandchildren.
+    """
+    parent = Position.objects.select_for_update().get(pk=parent.pk)
+    expand(parent)   # no-op once the legal edges already exist
+    counts = {'children_considered': 0, 'children_queued': 0,
+              'children_solved': 0, 'children_exhausted': 0}
+    for child in _frontier_children(parent):
+        counts['children_considered'] += 1
+        outcome = _request_rung(child)
+        if outcome == _LADDER_EXHAUSTED:
+            counts['children_exhausted'] += 1
+        elif outcome == 'already-solved':
+            counts['children_solved'] += 1
+        else:
+            counts['children_queued'] += 1
+    return RequestOutcome('expanded', **counts)
+
+
+def request_analysis(pos):
+    """Peticion publica: encola (o promociona) la tarea de esta posicion.
+    Suelo de 128M: quien pide analisis merece profundidad de verdad.
+
+    Agotada la escalera (10B ya COMPLETED), repetir el peldano no compra
+    informacion nueva: la peticion se convierte en expansion de frontera un
+    ply mas abajo (estilo proof-number search).
+    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'."""
+    with atomic():
+        outcome = _request_rung(pos)
+        if outcome != _LADDER_EXHAUSTED:
+            return RequestOutcome(outcome)
+        return _expand_frontier(pos)
 
 
 def _queue_disputed_reanalysis(pos):

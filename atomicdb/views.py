@@ -505,6 +505,17 @@ def _api_request_once(request, key):
         source=AnalysisTask.Source.USER,
         state__in=(AnalysisTask.TState.PENDING, AnalysisTask.TState.LEASED),
     ).exists()
+    if recent_same_position and not active_user_request \
+            and ingest.ladder_exhausted(pos):
+        # A frontier expansion puts its tasks on the CHILDREN, so the parent
+        # row alone can no longer prove that the previous click is still
+        # being served.  One click stays one expansion event.
+        active_user_request = AnalysisTask.objects.filter(
+            position__edges_in__parent=pos,
+            source=AnalysisTask.Source.USER,
+            state__in=(AnalysisTask.TState.PENDING,
+                       AnalysisTask.TState.LEASED),
+        ).exists()
     if recent_same_position and active_user_request:
         return JsonResponse({'status': 'already-requested'})
     if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
@@ -519,9 +530,13 @@ def _api_request_once(request, key):
     # otherwise a browser retry could accidentally request the next rung.
     with atomic():
         outcome = ingest.request_analysis(pos)
-        if outcome in ('queued', 'already-queued'):
+        if outcome in ('queued', 'already-queued', 'expanded'):
             RequestLog.objects.create(ip=ip, position=pos)
-    return JsonResponse({'status': outcome})
+    payload = {'status': str(outcome)}
+    # Only a frontier expansion carries counters; every other status keeps
+    # the exact single-key body explore.html has always parsed.
+    payload.update(getattr(outcome, 'detail', None) or {})
+    return JsonResponse(payload)
 
 
 @csrf_exempt
