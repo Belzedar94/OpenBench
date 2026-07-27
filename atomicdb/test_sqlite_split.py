@@ -427,8 +427,8 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                     INSERT INTO atomicdb_position
                         (key, fen, status, expanded, depth_invested,
                          nodes_invested, time_invested, visits, priority,
-                         updated)
-                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0.0, 0, 0.0, ?)
+                         backed_plies, backed_nodes, updated)
+                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0.0, 0, 0.0, 0, 0, ?)
                     """,
                     (
                         '2' * 64,

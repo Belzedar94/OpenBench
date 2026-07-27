@@ -33,7 +33,8 @@
     {% include "atomicdb/_board.html" %}
     <div class="verdict {{ verdict_css }}">
       {% if pos.status == 'UNKNOWN' %}
-        UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% endif %}
+        UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% if eval_backed %}<span
+          class="backed-mark" title="negamax of what the subtree already knows, {{ eval_backed_plies }} ply(s) below · eval stored on this position {{ eval_point_str }}">backed</span>{% endif %}{% endif %}
       {% else %}
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}
       {% endif %}
@@ -192,7 +193,8 @@
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}</td>
         <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-        <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+        <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<span
+            class="backed-mark" title="negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below · eval stored on that position {{ m.point }}">backed</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% endfor %}

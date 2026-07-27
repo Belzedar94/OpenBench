@@ -38,6 +38,17 @@ class Position(models.Model):
     closure   = models.CharField(max_length=8, choices=Closure.choices, null=True)
     proof     = models.CharField(max_length=8, choices=Proof.choices, null=True)
     best_move = models.CharField(max_length=8, null=True)          # uci, heuristica
+    # --- valor RESPALDADO (negamax de lo que el subarbol ya sabe) ---
+    # eval_cp es la eval ALMACENADA de esta posicion: la que dejo su ultimo
+    # analisis, refinada en el sitio por la cascada heredada cuando el nodo
+    # esta completamente expandido.  backed_eval es un valor DERIVADO de los
+    # hijos (§ ingest.backup_backed_evals), con guardas de cobertura y de
+    # calidad, y vive aparte para no pisar nada.  Perspectiva BLANCA, igual
+    # que eval_cp; el unico flip a la del que mueve ocurre al pintar.
+    backed_eval  = models.IntegerField(null=True)      # negamax de los hijos
+    backed_move  = models.CharField(max_length=8, null=True)  # arista que lo respalda
+    backed_plies = models.IntegerField(default=0)      # plies por debajo del origen
+    backed_nodes = models.BigIntegerField(default=0)   # calidad (nodos) del respaldo
     won_line  = models.TextField(null=True)   # PV verificada del cierre (testigo)
     mate_in   = models.IntegerField(null=True)  # plies hasta mate, linea probada mas corta
     last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis

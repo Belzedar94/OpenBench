@@ -808,6 +808,20 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+/* Marca sobria de "este numero lo respalda el subarbol, no la eval puntual" */
+.backed-mark {
+  margin-left: .35rem;
+  padding: 0 .28rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--ink-muted);
+  font-size: .62rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  vertical-align: .08em;
+  cursor: help;
+}
+
 footer {
   margin: 3rem 0 1rem;
   color: var(--ink-muted);

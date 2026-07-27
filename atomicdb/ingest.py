@@ -213,7 +213,9 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         pos.save()
 
     changed = backup_cascade([pos.key])
-    return {'closed_children': closed_here, 'backed_up': changed}
+    backed = backup_backed_evals([pos.key])
+    return {'closed_children': closed_here, 'backed_up': changed,
+            'backed_evals': backed}
 
 
 def backup_cascade(seed_keys):
@@ -316,6 +318,222 @@ def backup_cascade(seed_keys):
 
 def _status_eval(status):
     return {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000, 'DRAW': 0}.get(status)
+
+
+# ---------------- valor RESPALDADO (backed eval) ----------------
+#
+# CONVENCION DE SIGNO.  Todo lo que hay aqui vive en perspectiva BLANCA,
+# exactamente como ``eval_cp``.  Un negamax en perspectiva blanca es un
+# minimax liso: max en un nodo con blancas al turno, min con negras.  Dentro
+# de este modulo NO hay ni un solo cambio de signo; el unico flip a la
+# perspectiva del que mueve ocurre una vez por ply, al pintar, en views.py.
+#
+# QUE ES.  ``eval_cp`` es la eval ALMACENADA del nodo: la que dejo su ultimo
+# analisis.  ``backup_cascade`` la refina en el sitio, pero SOLO en nodos
+# completamente expandidos y sin guardas de cobertura, y cada analisis nuevo
+# la vuelve a pisar con la lectura puntual del motor.  ``backed_eval`` es un
+# valor aparte y explicito: el negamax sobre los hijos con informacion,
+# usando el backed del hijo si existe y su eval almacenada si no.  Ninguna
+# pisa a la otra, y el respaldo atraviesa tambien lo que la cascada se niega
+# a tocar (expansiones parciales de /goto/).
+#
+# GUARDAS (§ refinamiento de fase A).  Sobre una lista de jugadas COMPLETA
+# (``expanded`` y todos los hijos informados) el negamax es el minimax de
+# verdad y sustituye a la eval propia en cualquier direccion.  Sobre
+# cobertura PARCIAL solo vale como "valor que el que mueve puede alcanzar":
+# un hijo analizado demuestra que ese valor esta disponible, pero los hijos
+# sin mirar pueden esconder algo mejor.  Por eso, con cobertura parcial, el
+# valor solo se mueve en la direccion que FAVORECE al que mueve (max en un
+# nodo OR, min en uno AND) y nunca en la contraria.  Asi el nodo OR (el
+# atacante de la conjetura) jamas baja sin cobertura completa, y el nodo AND
+# (el defensor) jamas sube: el min parcial es sistematicamente optimista para
+# el atacante y queda vetado.
+#
+# CALIDAD.  Un valor respaldado arrastra el presupuesto de busqueda que lo
+# sostiene.  Con cobertura parcial, un hijo solo puede desplazar la eval
+# propia si su respaldo pesa al menos tanto como la busqueda que produjo esa
+# eval propia: asi un analisis de 128M no pisa lo que respaldo uno de 10B.
+# Un hijo con status PROBADO pesa mas que cualquier busqueda.
+BACKED_MAX_PLIES = 64        # tope de profundidad del ascenso (generoso)
+BACKED_MAX_REVISITS = 2      # el DAG puede volver a un nodo por otro hijo
+BACKED_MAX_NODES = 50_000    # tope duro de recomputos por llamada
+BACKED_EPSILON_CP = 10       # ruido que no merece seguir subiendo
+PROVEN_QUALITY = 1 << 60     # calidad de un valor exacto (gana a toda busqueda)
+
+_BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
+
+
+class _ChildValue:
+    """Lo que un hijo aporta al negamax del padre."""
+
+    __slots__ = ('move', 'value', 'quality', 'plies')
+
+    def __init__(self, move, value, quality, plies):
+        self.move, self.value = move, value
+        self.quality, self.plies = quality, plies
+
+
+def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
+                        nodes_invested, backed_plies):
+    """Valor y calidad de un hijo, en perspectiva blanca.
+
+    Un status resuelto entra con su valor de VERDAD (mate/tablas) y calidad
+    de prueba; nunca con una eval. Si no, manda el backed del hijo, y solo en
+    su ausencia su eval puntual.
+    """
+    exact = _status_eval(status)
+    if exact is not None:
+        return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0)
+    if backed_eval is not None:
+        return _ChildValue(move_uci, backed_eval, backed_nodes or 0,
+                           backed_plies or 0)
+    if eval_cp is not None:
+        return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0)
+    return _ChildValue(move_uci, None, 0, 0)
+
+
+def _better_for_mover(value, reference, stm_white):
+    return value > reference if stm_white else value < reference
+
+
+def _backed_for(row, children):
+    """(valor, arista, plies, calidad) respaldados para ``row``.
+
+    ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
+    no aportan nada llevan ``value=None``).
+    """
+    exact = _status_eval(row.status)
+    if exact is not None:
+        # Un backed jamas puede contradecir el status probado del propio nodo.
+        return exact, row.best_move, 0, PROVEN_QUALITY
+    informed = [c for c in children if c.value is not None]
+    if not informed:
+        return None, None, 0, 0
+    stm_white = row.fen.split()[1] == 'w'
+    # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
+    # (menos plies), luego el orden de movegen, para que el resultado sea
+    # determinista bajo replay.
+    best = (max if stm_white else min)(
+        informed,
+        key=lambda c: (c.value, c.quality, -c.plies) if stm_white
+        else (c.value, -c.quality, c.plies))
+    complete = bool(row.expanded) and len(informed) == len(children)
+    if not complete:
+        own = row.eval_cp
+        own_quality = row.nodes_invested or 0
+        if own is not None and (
+                not _better_for_mover(best.value, own, stm_white)
+                or best.quality < own_quality):
+            return own, None, 0, own_quality
+    return best.value, best.move, 1 + best.plies, best.quality
+
+
+def _backed_stored(row, value, move, plies, quality):
+    return (row.backed_eval == value and row.backed_move == move
+            and row.backed_plies == plies and row.backed_nodes == quality)
+
+
+def _backed_worth_propagating(row, value, move):
+    """Corte efectivo: sube solo si cambia la DECISION o el valor de verdad.
+
+    Cerca de las hojas el "no cambio nada" casi nunca dispara (las evals
+    difieren siempre en algun cp), asi que el corte util es este: la arista
+    que respalda el valor sigue siendo la misma y el valor se movio menos de
+    BACKED_EPSILON_CP.
+    """
+    if (row.backed_eval is None) != (value is None):
+        return True
+    if value is None:
+        return False
+    if row.backed_move != move:
+        return True
+    return abs(value - row.backed_eval) >= BACKED_EPSILON_CP
+
+
+def _backed_children_by_parent(parent_keys):
+    rows = Edge.objects.filter(parent_id__in=parent_keys).values_list(
+        'parent_id', 'move_uci', 'child__status', 'child__eval_cp',
+        'child__backed_eval', 'child__backed_nodes', 'child__nodes_invested',
+        'child__backed_plies')
+    by_parent = {}
+    for (parent_id, move_uci, status, eval_cp, backed_eval, backed_nodes,
+         nodes_invested, backed_plies) in rows:
+        by_parent.setdefault(parent_id, []).append(_child_contribution(
+            move_uci, status, eval_cp, backed_eval, backed_nodes,
+            nodes_invested, backed_plies))
+    return by_parent
+
+
+def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
+    """Recalcula el valor respaldado y lo sube por el DAG hasta que deje de
+    importar.
+
+    El ascenso es por NIVELES para que el coste en consultas no crezca con la
+    anchura del arbol: un nivel entero cuesta cuatro sentencias (posiciones,
+    aristas+hijos, bulk_update, padres) tenga tres hijos o sesenta.  Un DAG
+    tiene varios padres por nodo y puede cerrar ciclos por transposicion, asi
+    que el ascenso lleva contador de visitas por nodo, tope de plies y tope
+    global de recomputos.
+    """
+    frontier = [key for key in dict.fromkeys(seed_keys) if key]
+    visits, changed_total, processed, plies = {}, 0, 0, 0
+    while frontier and plies < max_plies:
+        plies += 1
+        rows = list(Position.objects.filter(key__in=frontier).only(
+            'key', 'fen', 'status', 'expanded', 'eval_cp', 'nodes_invested',
+            'best_move', *_BACKED_FIELDS))
+        if not rows:
+            break
+        children = _backed_children_by_parent([row.key for row in rows])
+        dirty, propagate = [], []
+        for row in rows:
+            processed += 1
+            value, move, below, quality = _backed_for(
+                row, children.get(row.key, ()))
+            if _backed_stored(row, value, move, below, quality):
+                continue
+            if _backed_worth_propagating(row, value, move):
+                propagate.append(row.key)
+            row.backed_eval, row.backed_move = value, move
+            row.backed_plies, row.backed_nodes = below, quality
+            dirty.append(row)
+        if dirty:
+            Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)
+            changed_total += len(dirty)
+        if not propagate:
+            break
+        if processed >= BACKED_MAX_NODES:
+            DBEvent.objects.create(kind='BACKED_GUARD', payload={
+                'reason': 'node-budget', 'processed': processed,
+                'plies': plies, 'seed_count': len(seed_keys)})
+            break
+        frontier = []
+        for key in set(Edge.objects.filter(child_id__in=propagate)
+                       .values_list('parent_id', flat=True)):
+            seen = visits.get(key, 0)
+            if seen < BACKED_MAX_REVISITS:
+                visits[key] = seen + 1
+                frontier.append(key)
+    else:
+        if frontier:
+            DBEvent.objects.create(kind='BACKED_GUARD', payload={
+                'reason': 'ply-guard', 'processed': processed,
+                'plies': plies, 'seed_count': len(seed_keys)})
+    return changed_total
+
+
+def best_known_eval(pos):
+    """Mejor conocimiento actual del nodo, en perspectiva blanca.
+
+    Es lo que deben pintar tanto la cabecera de la posicion como la fila de
+    la arista que apunta a ella: status probado > backed > eval puntual.
+    """
+    exact = _status_eval(pos.status)
+    if exact is not None:
+        return exact
+    if pos.backed_eval is not None:
+        return pos.backed_eval
+    return pos.eval_cp
 
 
 def _child_is_verified(child):
@@ -879,6 +1097,7 @@ def _apply_prepared_tb(position_key, prepared):
         DBEvent.objects.create(kind='NODE_CLOSED', payload={
             'key': pos.key, 'status': pos.status, 'closure': 'TB'})
     backup_cascade([position_key])
+    backup_backed_evals([position_key])
     return True
 
 

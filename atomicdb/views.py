@@ -1150,7 +1150,11 @@ def _move_css(status, score, win_status):
 
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
-    El almacenamiento interno sigue siendo White-POV; solo la vista voltea.
+    El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
+    exactamente UN cambio de signo por ply mostrado.
+    Cada fila muestra el MEJOR CONOCIMIENTO ACTUAL del hijo (status probado >
+    backed > eval puntual); ``point`` conserva la eval puntual cruda para que
+    el respaldo nunca borre lo que el motor dijo de verdad.
     Orden: victorias del que mueve, luego por score, derrotas al final."""
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
@@ -1159,15 +1163,21 @@ def _child_moves(pos):
     for e in Edge.objects.filter(parent=pos).select_related('child'):
         c = e.child
         mate = None
+        point = None if c.eval_cp is None else (
+            c.eval_cp if stm_white else -c.eval_cp)
+        backed_plies = 0
         if c.status == win:
             score, rank = 10_000, 10_001
         elif c.status == loss:
             score, rank = -10_000, -10_001
         elif c.status == 'DRAW':
             score, rank = 0, 0
-        elif c.eval_cp is not None:
-            score = c.eval_cp if stm_white else -c.eval_cp
+        elif c.backed_eval is not None or c.eval_cp is not None:
+            known = ingest.best_known_eval(c)
+            score = known if stm_white else -known
             rank = score
+            if c.backed_eval is not None and c.backed_eval != c.eval_cp:
+                backed_plies = c.backed_plies
         else:
             score, rank = None, -9_999.5   # sin analizar: encima de perder
         if c.status in (win, loss):
@@ -1188,7 +1198,9 @@ def _child_moves(pos):
                          else min(n, 999)) * 1e-3
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
                       'closure': c.closure, 'score': score, 'rank': rank,
-                      'mate': mate,
+                      'mate': mate, 'point': point,
+                      'backed_plies': backed_plies,
+                      'backed': bool(backed_plies),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
@@ -1356,14 +1368,21 @@ def api_query(request):
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
     stm_white = pos.fen.split()[1] == 'w'
-    score = None if pos.eval_cp is None else (
+    # ``score`` es el mejor conocimiento actual (respaldado por el subarbol);
+    # ``point`` conserva la eval puntual cruda de esta misma posicion.
+    known = ingest.best_known_eval(pos) if pos.status == 'UNKNOWN' \
+        else pos.eval_cp
+    score = None if known is None else (known if stm_white else -known)
+    point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
-              'score': m['score'], 'mate': m['mate'], 'visits': m['visits']}
+              'score': m['score'], 'point': m['point'], 'mate': m['mate'],
+              'backed_plies': m['backed_plies'], 'visits': m['visits']}
              for m in _child_moves(pos)]
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
-        'closure': pos.closure, 'score': score, 'best_move': pos.best_move,
+        'closure': pos.closure, 'score': score, 'point': point,
+        'backed_plies': pos.backed_plies, 'best_move': pos.best_move,
         'tier': 'PRACTICAL', 'trust': _trust_for(pos),
         'history_scope': 'COUNTERS_AND_REPETITION_IGNORED',
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
@@ -1621,8 +1640,16 @@ def explore(request, key):
     ]
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
-    eval_stm = None if pos.eval_cp is None else (
+    # Cabecera: el valor RESPALDADO (lo que el subarbol ya sabe) con caida
+    # limpia a la eval puntual. Un solo flip a la perspectiva del que mueve.
+    known = None if pos.status != 'UNKNOWN' else (
+        pos.backed_eval if pos.backed_eval is not None else pos.eval_cp)
+    eval_stm = None if known is None else (known if stm_white else -known)
+    point_stm = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
+    eval_backed = (pos.backed_eval is not None
+                   and pos.backed_eval != pos.eval_cp
+                   and pos.status == 'UNKNOWN')
     return render(request, 'atomicdb/explore.html', {
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
@@ -1636,6 +1663,9 @@ def explore(request, key):
                       else pos.best_move),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
+        'eval_backed': eval_backed,
+        'eval_backed_plies': pos.backed_plies,
+        'eval_point_str': None if point_stm is None else f'{point_stm:+d}cp',
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,
