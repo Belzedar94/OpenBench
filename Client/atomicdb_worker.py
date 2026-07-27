@@ -31,7 +31,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072803
+ATOMICDB_WORKER_BUILD = 2026072804
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -817,7 +817,15 @@ def main():
     # Additive provenance: an older server simply ignores these POST fields.
     provenance = {'engine_sha': _file_sha256(a.engine),
                   'net_sha': _net_sha256(a.engine)}
-    eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
+    # -T is the contributor's TOTAL thread budget.  With --solve the solver
+    # thread takes one core, so the analysis engine gets T-1: the machine
+    # never uses more than what the flag promised.
+    engine_threads = max(1, a.T - 1) if a.solve else a.T
+    if a.solve and a.T < 2:
+        print('aviso: --solve con -T 1 comparte el unico hilo entre '
+              'analisis y pruebas', flush=True)
+    eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
+                 syzygy=a.syzygy)
     solver = Solver(a.engine, hash_mb=a.hash) if a.solve else None
     heartbeat_stop = threading.Event()
     current_task = CurrentTaskState()
@@ -845,8 +853,8 @@ def main():
             if _install_worker_update(a.S):
                 eng.close()
                 if not _restart_updated_worker():
-                    eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
-                                 syzygy=a.syzygy)
+                    eng = Engine(a.engine, threads=engine_threads,
+                                 hash_mb=a.hash, syzygy=a.syzygy)
         # In normal runs the solver lives in its own thread (started above)
         # and this loop is analysis-only: "proof first" starved the analysis
         # queue for the whole length of a fortress attempt.  --once keeps the
@@ -902,7 +910,7 @@ def main():
                     eng.close()
                 except Exception:
                     pass
-                eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
+                eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
                              syzygy=a.syzygy)
                 current_task.clear()
                 continue   # la tarea vuelve sola al caducar su lease
