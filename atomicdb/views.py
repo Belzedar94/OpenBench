@@ -22,11 +22,12 @@ from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
                               When, Window)
 from django.db.models.functions import RowNumber
 
-from . import community_names, ingest, ingest_queue, logic, openings
+from . import community_names, ingest, ingest_queue, logic, openings, solve
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge,
-                     OpeningNameSuggestion, Position, RequestLog, WorkerPing)
+                     OpeningNameSuggestion, Position, RequestLog, SolveTask,
+                     WorkerPing)
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -510,6 +511,153 @@ def _sha_field(raw):
     if len(raw) != 64 or any(ch not in '0123456789abcdef' for ch in raw):
         return ''
     return raw
+
+
+# ---------------- API SOLVE (aditiva) ----------------
+#
+# Un worker anterior a este protocolo no llama a ninguno de estos endpoints y
+# no cambia nada para el.  El patron de arriendo es EL MISMO que el de
+# AnalysisTask — token de fencing por asignacion, heartbeat separado, sesion
+# replayable — porque ya esta probado contra los modos de fallo reales
+# (respuesta perdida tras el commit, proceso zombi con la misma identidad de
+# maquina) y dos patrones distintos serian dos superficies de fallo.
+
+SOLVE_LEASE_MINUTES = 20
+MAX_SOLVE_CERTIFICATE_BYTES = solve.MAX_COMPRESSED_BYTES
+
+
+@csrf_exempt
+def api_solve_acquire(request):
+    """Arrienda UNA tarea de prueba. Sin tareas, responde con la lista vacia."""
+    user = _auth(request)
+    if user is None:
+        return JsonResponse({'error': 'bad credentials'}, status=403)
+    ping = _touch_worker(request, user)
+    machine = ping.machine
+    lease_session = request.POST.get('lease_session', '')[:64]
+
+    with atomic():
+        now = timezone.now()
+        stale = now - timedelta(minutes=SOLVE_LEASE_MINUTES)
+        SolveTask.objects.filter(
+            state='LEASED', leased_at__lt=stale,
+        ).filter(Q(lease_heartbeat_at__isnull=True)
+                 | Q(lease_heartbeat_at__lt=stale)).update(
+            state='PENDING', machine='', lease_heartbeat_at=None,
+            lease_token='', lease_session='')
+
+        active = (SolveTask.objects.select_for_update()
+                  .select_related('position')
+                  .filter(state='LEASED', machine=machine,
+                          lease_heartbeat_at__gte=stale)
+                  .order_by('leased_at', 'id').first())
+        if active is not None:
+            if lease_session and secrets.compare_digest(
+                    active.lease_session, lease_session):
+                # The first response may have been lost after the commit.
+                # Replay the same assignment without burning an attempt.
+                return JsonResponse({'tasks': [_solve_payload(active)]})
+            return JsonResponse({'tasks': []})
+
+        task = (SolveTask.objects.select_for_update(skip_locked=True)
+                .select_related('position').filter(state='PENDING')
+                .order_by('-budget_nodes', 'id').first())
+        if task is None:
+            return JsonResponse({'tasks': []})
+        assigned_at = timezone.now()
+        task.state, task.machine, task.leased_at = 'LEASED', machine, assigned_at
+        task.lease_heartbeat_at = assigned_at
+        task.lease_token = secrets.token_urlsafe(32)
+        task.lease_session = lease_session
+        task.attempts += 1
+        task.save(update_fields=['state', 'machine', 'leased_at',
+                                 'lease_heartbeat_at', 'lease_token',
+                                 'lease_session', 'attempts'])
+    return JsonResponse({'tasks': [_solve_payload(task)]})
+
+
+def _solve_payload(task):
+    return {
+        'id': task.id,
+        'fen': task.position.fen,
+        'goal': task.goal,
+        'budget_nodes': task.budget_nodes,
+        'ruleset': logic.RULESET_ID,
+        'lease_token': task.lease_token,
+    }
+
+
+@csrf_exempt
+def api_solve_heartbeat(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    user = _auth(request)
+    if user is None:
+        return JsonResponse({'error': 'bad credentials'}, status=403)
+    ping = _touch_worker(request, user)
+    try:
+        task_id = int(request.POST.get('task_id', ''))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'invalid task_id'}, status=400)
+    renewed = (SolveTask.objects
+               .filter(id=task_id, state='LEASED', machine=ping.machine,
+                       lease_token=request.POST.get('lease_token', ''))
+               .update(lease_heartbeat_at=timezone.now()))
+    if renewed != 1:
+        return JsonResponse({'error': 'stale-lease'}, status=409)
+    return JsonResponse({'ok': True, 'current_task_id': task_id})
+
+
+@csrf_exempt
+def api_solve_submit(request):
+    """Recibe un resultado SOLVE. El certificado se VERIFICA aqui, entero."""
+    user = _auth(request)
+    if user is None:
+        return JsonResponse({'error': 'bad credentials'}, status=403)
+    try:
+        task_id = int(request.POST['task_id'])
+    except (KeyError, TypeError, ValueError):
+        return JsonResponse({'error': 'malformed: task_id'}, status=400)
+    outcome = request.POST.get('outcome', '')
+    if outcome not in ('PROVED', 'DISPROVED', 'UNKNOWN'):
+        return JsonResponse({'error': 'malformed: outcome'}, status=400)
+    machine = request.POST.get('machine', '')
+    provided_token = request.POST.get('lease_token', '')
+
+    try:
+        task = SolveTask.objects.select_related('position').get(id=task_id)
+    except SolveTask.DoesNotExist:
+        return JsonResponse({'error': 'malformed: unknown task'}, status=400)
+    if task.state == 'COMPLETED':
+        return JsonResponse({'ok': True, 'dup': True})
+    if task.state != 'LEASED':
+        return JsonResponse({'error': 'not-leased'}, status=400)
+    if not machine or machine != task.machine:
+        return JsonResponse({'error': 'not-your-lease'}, status=409)
+    if task.lease_token and not secrets.compare_digest(task.lease_token,
+                                                       provided_token):
+        return JsonResponse({'error': 'stale-lease'}, status=409)
+
+    certificate = request.FILES.get('certificate')
+    blob = certificate.read(MAX_SOLVE_CERTIFICATE_BYTES + 1) \
+        if certificate is not None else b''
+    if len(blob) > MAX_SOLVE_CERTIFICATE_BYTES:
+        return JsonResponse({'error': 'certificate too large'}, status=413)
+
+    def as_int(name):
+        try:
+            return int(request.POST.get(name, ''))
+        except (TypeError, ValueError):
+            return None
+
+    summary = ingest.apply_solve_result(
+        task, outcome=outcome, certificate_blob=blob or None,
+        advisory_pn=as_int('pn'), advisory_dn=as_int('dn'),
+        searched_nodes=as_int('nodes') or 0,
+        elapsed_seconds=request.POST.get('elapsed', ''),
+        solver_build=_sha_field(request.POST.get('solver_build', ''))
+        or request.POST.get('solver_build', '')[:64])
+    return JsonResponse({'ok': True, 'summary': summary})
 
 
 def _client_ip(request):

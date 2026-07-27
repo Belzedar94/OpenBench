@@ -1410,6 +1410,112 @@ def _queue_disputed_reanalysis(pos):
         multipv=multipv_for(pos.visits), source='AUTO')
 
 
+# ---------------- cierre por certificado SOLVE ----------------
+#
+# Un ``PROVED`` de un voluntario no es una prueba.  Lo que hace solido un
+# solver distribuido es que el hecho exacto entra SOLO despues de que el
+# servidor haya reproducido la estrategia entera, con OTRA implementacion de
+# las reglas (pyffish aqui, el movegen del motor alli).  Un certificado
+# rechazado no muta el arbol: deja evento y la tarea en FAILED.
+
+def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
+                       advisory_dn=None, searched_nodes=0, elapsed_seconds=0,
+                       solver_build=''):
+    """Aplica un resultado SOLVE. Devuelve el resumen que ve el worker."""
+    from . import solve
+    from .models import SolveTask
+
+    try:
+        elapsed = max(0.0, min(float(elapsed_seconds or 0), 86_400.0))
+    except (TypeError, ValueError):
+        elapsed = 0.0
+
+    verified, report, reason = False, None, ''
+    verify_seconds = 0.0
+    if outcome == 'PROVED':
+        if not certificate_blob:
+            reason = 'PROVED without a certificate'
+        else:
+            started = time.monotonic()
+            try:
+                text = solve.decompress(certificate_blob)
+                report = solve.verify_certificate(
+                    text, root_fen=task.position.fen, goal=task.goal)
+                verified = True
+            except solve.CertificateError as error:
+                reason = str(error)
+            except Exception as error:          # movegen/parse surprises
+                reason = f'{type(error).__name__}: {error}'
+            verify_seconds = time.monotonic() - started
+
+    with atomic():
+        current = SolveTask.objects.select_for_update().get(pk=task.pk)
+        if current.state == 'COMPLETED':
+            return {'dup': True}
+        current.outcome = outcome
+        current.advisory_pn = advisory_pn
+        current.advisory_dn = advisory_dn
+        current.searched_nodes = max(0, int(searched_nodes or 0))
+        current.elapsed_seconds = elapsed
+        current.solver_build = (solver_build or '')[:64]
+        current.completed = timezone.now()
+        if outcome == 'PROVED' and not verified:
+            current.state = 'FAILED'
+            current.verified = False
+            current.reject_reason = reason[:2000]
+            current.save()
+            DBEvent.objects.create(kind='SOLVE_REJECTED', payload={
+                'task': current.pk, 'key': current.position_id,
+                'reason': reason[:500], 'machine': current.machine})
+            return {'rejected': True, 'reason': reason[:200]}
+
+        current.state = 'COMPLETED'
+        current.verified = verified
+        current.reject_reason = ''
+        if verified:
+            current.certificate = certificate_blob
+            current.certificate_bytes = len(certificate_blob)
+            current.certificate_nodes = report['nodes']
+        current.save()
+
+        closed = False
+        if verified:
+            # The verifier's own cost is a pilot gate, so it is measured
+            # rather than assumed: a proof-carrying design is only worth it
+            # while checking stays much cheaper than searching.
+            DBEvent.objects.create(kind='SOLVE_VERIFIED', payload={
+                'task': current.pk, 'key': current.position_id,
+                'seconds': round(verify_seconds, 4),
+                'nodes': report['nodes'], 'depth': report['depth'],
+                'bytes': current.certificate_bytes,
+                'solver_seconds': elapsed})
+            closed = _close_by_certificate(current, report)
+    if verified:
+        backup_cascade([task.position_id])
+        backup_backed_evals([task.position_id])
+    return {'verified': verified, 'closed': closed,
+            'certificate_nodes': (report or {}).get('nodes', 0)}
+
+
+def _close_by_certificate(task, report):
+    """Cierra la posicion con ``closure='SOLVE'`` y el slack del certificado."""
+    pos = Position.objects.select_for_update().get(key=task.position_id)
+    if pos.status != 'UNKNOWN':
+        return False
+    pos.status = task.goal
+    pos.closure = 'SOLVE'
+    pos.proof = 'ANDOR'          # reproducido entero, no un testigo
+    pos.clock_slack = report.get('clock_slack')
+    pos.save(update_fields=['status', 'closure', 'proof', 'clock_slack',
+                            'updated'])
+    DBEvent.objects.create(kind='NODE_CLOSED', payload={
+        'key': pos.key, 'status': pos.status, 'closure': 'SOLVE',
+        'certificate_nodes': report['nodes'], 'depth': report['depth'],
+        'clock_slack': report.get('clock_slack'), 'task': task.pk})
+    _emit_closure_events(pos)
+    return True
+
+
 def _tb_rejected(position_key, reason, **payload):
     DBEvent.objects.create(kind='TB_REJECTED', payload={
         'key': position_key, 'reason': reason, **payload})

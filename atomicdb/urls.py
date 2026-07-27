@@ -52,4 +52,8 @@ urlpatterns = [
     path('api/lease', views.api_lease),
     path('api/heartbeat', views.api_heartbeat),
     path('api/submit', views.api_submit),
+    # Protocolo SOLVE: aditivo. Un worker anterior no conoce estas rutas.
+    path('api/solve/acquire', views.api_solve_acquire),
+    path('api/solve/heartbeat', views.api_solve_heartbeat),
+    path('api/solve/submit', views.api_solve_submit),
 ]

@@ -10,6 +10,7 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
 import argparse
 import ast
+import gzip
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072801
+ATOMICDB_WORKER_BUILD = 2026072802
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -631,6 +632,101 @@ def _net_sha256(engine_path):
     return ''
 
 
+class Solver:
+    """Drives the engine's `solve` command over a fresh process each time.
+
+    A solve job is minutes long and allocates its own proof table, so it does
+    NOT share the analysis engine's process: a solver that runs out of memory
+    or wedges must not take the analysis worker down with it.
+    """
+
+    def __init__(self, path, hash_mb=256):
+        self.path = path
+        self.hash_mb = hash_mb
+
+    def solve(self, fen, goal, budget_nodes, movetime_ms=0):
+        """Return (outcome, pn, dn, nodes, elapsed, certificate_text)."""
+        command = (f'solve {fen} goal {goal} nodes {int(budget_nodes)} '
+                   f'hash {int(self.hash_mb)}')
+        if movetime_ms:
+            command += f' movetime {int(movetime_ms)}'
+        started = time.time()
+        process = subprocess.run(
+            [self.path], input=command + '\nquit\n', text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        elapsed = time.time() - started
+
+        outcome, pn, dn, nodes = 'UNKNOWN', None, None, 0
+        certificate = []
+        in_certificate = False
+        for line in process.stdout.splitlines():
+            if in_certificate:
+                certificate.append(line)
+                continue
+            if line.startswith('# atomicdb-proof/'):
+                in_certificate = True
+                certificate.append(line)
+                continue
+            if not line.startswith('solve '):
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            name, value = parts[1], parts[2]
+            if name == 'outcome':
+                outcome = value
+            elif name == 'pn':
+                pn = None if value == 'INF' else int(value)
+            elif name == 'dn':
+                dn = None if value == 'INF' else int(value)
+            elif name == 'nodes':
+                nodes = int(value)
+        text = '\n'.join(certificate) + '\n' if certificate else ''
+        return outcome, pn, dn, nodes, elapsed, text
+
+
+def _solve_once(server, auth, solver, lease_session):
+    """Acquire, solve and submit ONE proof task. Returns True if it did work."""
+    try:
+        response = requests.post(
+            server + '/atomicdb/api/solve/acquire',
+            data=dict(auth, lease_session=lease_session), timeout=60)
+        response.raise_for_status()
+        tasks = response.json().get('tasks') or []
+    except (requests.RequestException, ValueError) as exc:
+        print(f'solve lease error: {exc}', flush=True)
+        return False
+    if not tasks:
+        return False
+
+    task = tasks[0]
+    outcome, pn, dn, nodes, elapsed, certificate = solver.solve(
+        task['fen'], task.get('goal', 'WHITE_WIN'), task['budget_nodes'])
+    payload = {**auth, 'task_id': task['id'], 'outcome': outcome,
+               'nodes': nodes, 'elapsed': f'{elapsed:.2f}',
+               'lease_token': task.get('lease_token', '')}
+    if pn is not None:
+        payload['pn'] = pn
+    if dn is not None:
+        payload['dn'] = dn
+    files = None
+    if certificate:
+        files = {'certificate': ('certificate.gz',
+                                 gzip.compress(certificate.encode('utf-8')),
+                                 'application/gzip')}
+    try:
+        submitted = requests.post(server + '/atomicdb/api/solve/submit',
+                                  data=payload, files=files,
+                                  timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
+                                           SUBMIT_READ_TIMEOUT_SECONDS))
+        summary = submitted.json().get('summary', submitted.text[:200])
+    except (requests.RequestException, ValueError) as exc:
+        summary = f'submit error: {exc}'
+    print(f"solve task {task['id']} {outcome} ({nodes}n, {elapsed:.1f}s) "
+          f'-> {summary}', flush=True)
+    return True
+
+
 def probe_tb(tb, fen):
     """Return ``(wdl, dtz)``; ``dtz`` is None when the tables cannot give it.
 
@@ -673,6 +769,10 @@ def main():
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='no actualizar este archivo desde el servidor oficial')
+    ap.add_argument('--solve', action='store_true',
+                    help='servir tambien tareas SOLVE (pruebas exhaustivas) '
+                         'ademas de analisis; sin este flag el worker se '
+                         'comporta exactamente igual que antes')
     a = ap.parse_args()
 
     if not a.no_auto_update and _install_worker_update(a.S):
@@ -701,6 +801,7 @@ def main():
     provenance = {'engine_sha': _file_sha256(a.engine),
                   'net_sha': _net_sha256(a.engine)}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
+    solver = Solver(a.engine, hash_mb=a.hash) if a.solve else None
     heartbeat_stop = threading.Event()
     current_task = CurrentTaskState()
     heartbeat_thread = threading.Thread(
@@ -725,6 +826,12 @@ def main():
                 if not _restart_updated_worker():
                     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
                                  syzygy=a.syzygy)
+        # Proof work first when asked for it: a SOLVE task is what actually
+        # closes a position, and the analysis queue is never empty.
+        if a.solve and _solve_once(a.S, auth, solver, secrets.token_urlsafe(24)):
+            if a.once:
+                break
+            continue
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
         except LeaseRequestError as e:

@@ -21,6 +21,7 @@ class Closure(models.TextChoices):
     MATE_PV = 'MATE_PV'   # PV de mate re-verificada jugada a jugada
     MINIMAX = 'MINIMAX'   # retropropagado desde hijos exactos
     TERMINAL= 'TERMINAL'  # la propia posicion es terminal (mate/ahogado/explosion)
+    SOLVE   = 'SOLVE'     # certificado df-pn reproducido ENTERO en el servidor
 
 
 class Proof(models.TextChoices):
@@ -252,6 +253,83 @@ class IngestJob(models.Model):
 
     def __str__(self):
         return f'ingest job {self.pk} for task {self.task_id} ({self.state})'
+
+
+class SolveTask(models.Model):
+    """Una peticion de PRUEBA exhaustiva. Tabla aparte de ``AnalysisTask``.
+
+    Deliberadamente separada: un worker antiguo pide analisis por
+    ``/api/lease`` y nunca ve estas filas, asi que el protocolo nuevo es
+    puramente aditivo.  El patron de arriendo (lease, heartbeat, token de
+    fencing, sesion replayable) es el MISMO, porque ya esta probado en
+    produccion y dos patrones distintos serian dos superficies de fallo.
+
+    ``certificate`` va como blob comprimido EN LA FILA, no como fichero en
+    MEDIA.  Razones, en orden: (1) el cierre exacto y su evidencia entran en
+    la misma transaccion, asi que no puede existir un certificado huerfano ni
+    una fila sin certificado; (2) la copia de seguridad y el recibo de
+    identidad del split cubren TABLAS, no el sistema de ficheros — un
+    certificado en disco quedaria fuera de las dos; (3) los topes duros
+    (``solve.MAX_COMPRESSED_BYTES``) acotan la fila por construccion.  El
+    precio es que un certificado enorme se rechaza en vez de guardarse; eso es
+    exactamente lo que queremos de un limite anti-bomba.
+    """
+
+    class TState(models.TextChoices):
+        PENDING   = 'PENDING'
+        LEASED    = 'LEASED'
+        COMPLETED = 'COMPLETED'
+        FAILED    = 'FAILED'
+
+    class Outcome(models.TextChoices):
+        PROVED    = 'PROVED'
+        DISPROVED = 'DISPROVED'
+        UNKNOWN   = 'UNKNOWN'
+
+    position     = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                     related_name='solve_tasks')
+    campaign     = models.ForeignKey(ProofCampaign, null=True, blank=True,
+                                     on_delete=models.SET_NULL,
+                                     related_name='solve_tasks')
+    goal         = models.CharField(max_length=10,
+                                    choices=ProofCampaign.Goal.choices,
+                                    default=ProofCampaign.Goal.WHITE_WIN)
+    budget_nodes = models.BigIntegerField(default=10_000_000)
+    state        = models.CharField(max_length=10, choices=TState.choices,
+                                    default=TState.PENDING, db_index=True)
+    machine      = models.CharField(max_length=64, default='')
+    leased_at    = models.DateTimeField(null=True)
+    lease_heartbeat_at = models.DateTimeField(null=True)
+    lease_token  = models.CharField(max_length=64, default='')
+    lease_session = models.CharField(max_length=64, default='')
+    attempts     = models.IntegerField(default=0)
+    # Resultado
+    outcome      = models.CharField(max_length=10, choices=Outcome.choices,
+                                    blank=True, default='')
+    certificate  = models.BinaryField(null=True, blank=True)
+    certificate_bytes = models.IntegerField(default=0)
+    certificate_nodes = models.IntegerField(default=0)
+    verified     = models.BooleanField(default=False)
+    reject_reason = models.TextField(blank=True, default='')
+    # Pistas de planificacion, NUNCA hechos: dependen del build, de la TT y
+    # del presupuesto del worker que las produjo.
+    advisory_pn  = models.BigIntegerField(null=True)
+    advisory_dn  = models.BigIntegerField(null=True)
+    searched_nodes = models.BigIntegerField(default=0)
+    elapsed_seconds = models.FloatField(default=0.0)
+    solver_build = models.CharField(max_length=64, blank=True, default='')
+    # Etiqueta libre del arnes del piloto ('' fuera de el).
+    arm          = models.CharField(max_length=32, blank=True, default='',
+                                    db_index=True)
+    created      = models.DateTimeField(auto_now_add=True, db_index=True)
+    completed    = models.DateTimeField(null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['state', 'created'],
+                                name='atomic_solve_state')]
+
+    def __str__(self):
+        return f'solve {self.pk} {self.position_id[:12]} {self.state}'
 
 
 class DBEvent(models.Model):
