@@ -627,6 +627,9 @@ class MachineVisibilityTests(TestCase):
         submit = dict(payload, task_id=tasks[0]['id'], lines='[]',
                       elapsed='2.5', nodes='1000')
         self.client.post('/atomicdb/api/submit', submit)
+        # La telemetria del worker es sincrona; el arbol lo aplica la cola.
+        from . import ingest_queue
+        ingest_queue.drain()
         ping.refresh_from_db()
         self.assertEqual(ping.tasks_done, 1)
         self.assertIsNone(ping.current_task_id)
@@ -1493,6 +1496,8 @@ class NodesAccountingTests(TestCase):
         self.client.post('/atomicdb/api/submit',
                          dict(payload, task_id=t['id'], lines='[]',
                               nodes='12345'))
+        from . import ingest_queue
+        ingest_queue.drain()
         task = AnalysisTask.objects.get(id=t['id'])
         self.assertEqual(task.nodes_searched, 12345)
         pos = Position.objects.get(fen=t['fen'])

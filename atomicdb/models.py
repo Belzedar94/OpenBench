@@ -127,6 +127,48 @@ class AnalysisTask(models.Model):
                                 name='atomic_task_state_done')]
 
 
+class IngestJob(models.Model):
+    """Cola durable de resultados de worker pendientes de aplicar al arbol.
+
+    Un submit valida lo barato (identidad, lease, formato), RECLAMA la tarea y
+    deja aqui el payload crudo, todo en el mismo commit.  El trabajo caro
+    (pruebas de mate, expansion, aristas, cascadas) lo hace despues
+    ``process_ingest_queue``, fuera de la request.
+
+    Idempotencia: una tarea tiene como mucho un trabajo (OneToOne), y el
+    procesador marca DONE dentro de la MISMA transaccion que aplica el
+    resultado, asi que aplicarlo dos veces es imposible.
+    """
+
+    class JState(models.TextChoices):
+        PENDING    = 'PENDING'
+        PROCESSING = 'PROCESSING'
+        DONE       = 'DONE'
+        FAILED     = 'FAILED'
+
+    task     = models.OneToOneField(AnalysisTask, on_delete=models.CASCADE,
+                                    related_name='ingest_job')
+    position = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                 related_name='ingest_jobs')
+    payload  = models.JSONField()          # crudo, tal y como llego
+    state    = models.CharField(max_length=10, choices=JState.choices,
+                                default=JState.PENDING, db_index=True)
+    attempts = models.IntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, db_index=True)
+    claimed_at = models.DateTimeField(null=True)
+    last_error = models.TextField(blank=True, default='')
+    summary  = models.JSONField(null=True)
+    created  = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['state', 'next_attempt_at', 'id'],
+                                name='atomic_ingest_ready')]
+
+    def __str__(self):
+        return f'ingest job {self.pk} for task {self.task_id} ({self.state})'
+
+
 class DBEvent(models.Model):
     ts      = models.DateTimeField(auto_now_add=True, db_index=True)
     kind    = models.CharField(max_length=32)     # SUBTREE_CLOSED, WALL, CAMPAIGN...

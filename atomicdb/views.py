@@ -22,7 +22,7 @@ from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
                               When, Window)
 from django.db.models.functions import RowNumber
 
-from . import community_names, ingest, logic, openings
+from . import community_names, ingest, ingest_queue, logic, openings
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge,
@@ -85,10 +85,6 @@ class PlayRouteConflict(PlayRouteError):
     """A legal route does not identify the requested AtomicDB position."""
 
     status_code = 409
-
-
-class _SubmitRejected(Exception):
-    pass
 
 
 def _auth(request):
@@ -404,88 +400,82 @@ def api_submit(request):
     if snapshot.state == 'COMPLETED':
         return JsonResponse({'ok': True, 'dup': True})
 
-    prepare_started = time.monotonic()
-    tb_prepared = None
-    mate_proofs = None
-    if parsed_wdl is not None:
-        tb_prepared = ingest.prepare_tb_closure(
-            snapshot.position_id, parsed_wdl, user=user)
-        if tb_prepared is None:
-            return JsonResponse({'error': 'tb-rejected'}, status=409)
-    else:
-        mate_proofs = ingest.prepare_mate_proofs(snapshot.position.fen, lines)
-    prepare_seconds = time.monotonic() - prepare_started
-
+    # A partir de aqui el submit solo RECLAMA y ENCOLA: la parte cara (probar
+    # mates, expandir, aristas, cascadas, retropropagacion) la hace despues
+    # process_ingest_queue.  Reclamacion y encolado son un unico commit, asi
+    # que un lease no puede caducar con el payload esperando en la cola.
     transaction_started = time.monotonic()
-    try:
-        with atomic():
-            claimed = AnalysisTask.objects.filter(
-                id=task_id, state='LEASED', machine=machine,
-                attempts=snapshot.attempts, leased_at=snapshot.leased_at,
-                lease_token=snapshot.lease_token,
-            ).update(state='COMPLETED')
-            if claimed != 1:
-                current = AnalysisTask.objects.get(id=task_id)
-                if current.state == 'COMPLETED':
-                    return JsonResponse({'ok': True, 'dup': True})
-                if current.state != 'LEASED':
-                    return JsonResponse({'error': 'not-leased'}, status=400)
-                if (current.machine == machine
-                        and (current.attempts != snapshot.attempts
-                             or current.leased_at != snapshot.leased_at
-                             or current.lease_token != snapshot.lease_token)):
-                    return JsonResponse({'error': 'stale-lease'}, status=409)
-                return JsonResponse({'error': 'not-your-lease'}, status=409)
+    with atomic():
+        claimed = AnalysisTask.objects.filter(
+            id=task_id, state='LEASED', machine=machine,
+            attempts=snapshot.attempts, leased_at=snapshot.leased_at,
+            lease_token=snapshot.lease_token,
+        ).update(state='COMPLETED')
+        if claimed != 1:
+            current = AnalysisTask.objects.get(id=task_id)
+            if current.state == 'COMPLETED':
+                return JsonResponse({'ok': True, 'dup': True})
+            if current.state != 'LEASED':
+                return JsonResponse({'error': 'not-leased'}, status=400)
+            if (current.machine == machine
+                    and (current.attempts != snapshot.attempts
+                         or current.leased_at != snapshot.leased_at
+                         or current.lease_token != snapshot.lease_token)):
+                return JsonResponse({'error': 'stale-lease'}, status=409)
+            return JsonResponse({'error': 'not-your-lease'}, status=409)
 
-            task = (AnalysisTask.objects.select_for_update()
-                    .select_related('position').get(id=task_id))
-            searched = min(searched, 2 * task.budget_nodes)
-            if parsed_wdl is not None:
-                closed = ingest._apply_prepared_tb(
-                    task.position_id, tb_prepared)
-                if not closed:
-                    raise _SubmitRejected
-                summary = {'tb_closed': True}
-            else:
-                summary = ingest.ingest_analysis(
-                    task.position_id, lines, searched, machine=machine,
-                    mate_proofs=mate_proofs)
-
-            if elapsed:
-                Position.objects.filter(key=task.position_id).update(
-                    time_invested=F('time_invested') + elapsed)
-            task.state, task.machine = 'COMPLETED', machine
-            task.completed = timezone.now()
-            task.nodes_searched = searched
-            task.elapsed_seconds = elapsed
-            task.save(update_fields=[
-                'state', 'machine', 'completed', 'nodes_searched',
-                'elapsed_seconds'])
-            ping_updates = {
-                'tasks_done': F('tasks_done') + 1,
-                'last_seen': timezone.now(),
-            }
-            if searched > 0 and elapsed > 0:
-                ping_updates.update({
-                    'last_nps': min(round(searched / elapsed),
-                                    MAX_REPORTED_NPS),
-                    'nps_updated': timezone.now(),
-                })
-            ping_updates['current_task_id'] = None
-            WorkerPing.objects.filter(machine=machine, user=user.username).update(
-                **ping_updates)
-    except _SubmitRejected:
-        return JsonResponse({'error': 'tb-rejected'}, status=409)
+        task = (AnalysisTask.objects.select_for_update()
+                .select_related('position').get(id=task_id))
+        searched = min(searched, 2 * task.budget_nodes)
+        job, _created = ingest_queue.enqueue(task, {
+            'lines': lines,
+            'nodes': searched,
+            'elapsed': elapsed,
+            'machine': machine,
+            'username': user.username,
+            'tb_wdl': parsed_wdl,
+        })
+        task.state, task.machine = 'COMPLETED', machine
+        task.completed = timezone.now()
+        task.nodes_searched = searched
+        task.elapsed_seconds = elapsed
+        task.save(update_fields=[
+            'state', 'machine', 'completed', 'nodes_searched',
+            'elapsed_seconds'])
+        ping_updates = {
+            'tasks_done': F('tasks_done') + 1,
+            'last_seen': timezone.now(),
+        }
+        if searched > 0 and elapsed > 0:
+            ping_updates.update({
+                'last_nps': min(round(searched / elapsed),
+                                MAX_REPORTED_NPS),
+                'nps_updated': timezone.now(),
+            })
+        ping_updates['current_task_id'] = None
+        WorkerPing.objects.filter(machine=machine, user=user.username).update(
+            **ping_updates)
     transaction_seconds = time.monotonic() - transaction_started
+
+    summary = {'queued': True, 'ingest_job': job.pk}
+    apply_seconds = 0.0
+    if ingest_queue.synchronous_ingest_enabled():
+        # Interruptor de despliegue: mismo codigo de aplicacion, aqui mismo.
+        apply_started = time.monotonic()
+        applied, error = ingest_queue.process_job(job)
+        apply_seconds = time.monotonic() - apply_started
+        summary = applied if error is None else {'ingest_job': job.pk,
+                                                 'ingest_error': error}
     total_seconds = time.monotonic() - submit_started
     logger.info(
-        'AtomicDB submit task=%s machine=%s kind=%s lines=%s '
-        'prepare_seconds=%.3f transaction_seconds=%.3f total_seconds=%.3f',
+        'AtomicDB submit task=%s machine=%s kind=%s lines=%s job=%s '
+        'transaction_seconds=%.3f apply_seconds=%.3f total_seconds=%.3f',
         task_id, machine, 'tb' if parsed_wdl is not None else 'engine',
-        len(lines), prepare_seconds, transaction_seconds, total_seconds)
+        len(lines), job.pk, transaction_seconds, apply_seconds, total_seconds)
+    summary = dict(summary or {})
     summary['submit_timing_seconds'] = {
-        'prepare': round(prepare_seconds, 3),
         'transaction': round(transaction_seconds, 3),
+        'apply': round(apply_seconds, 3),
         'total': round(total_seconds, 3),
     }
     return JsonResponse({'ok': True, 'summary': summary})

@@ -439,10 +439,14 @@ def validate_model_indexes_and_foreign_keys(
         expected_foreign_keys = set()
         for field in model._meta.local_fields:
             remote = getattr(field, 'remote_field', None)
+            # Un OneToOneField es una clave foranea con indice unico: SQLite
+            # la lista igual en foreign_key_list, asi que tiene que entrar en
+            # lo esperado o la validacion se cae sobre su propio esquema.
             if (
                     remote is None
                     or not getattr(field, 'db_constraint', True)
-                    or not getattr(field, 'many_to_one', False)):
+                    or not (getattr(field, 'many_to_one', False)
+                            or getattr(field, 'one_to_one', False))):
                 continue
             expected_foreign_keys.add((
                 remote.model._meta.db_table,

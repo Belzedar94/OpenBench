@@ -1,0 +1,59 @@
+# AtomicDB ingest queue processor — example systemd unit.
+#
+# Copy to /etc/systemd/system/atomicdb-ingest.service, adjust User, paths and
+# the environment block, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-ingest
+#     journalctl -u atomicdb-ingest -f
+#
+# What it does: applies to the tree the worker submissions that
+# /atomicdb/api/submit left in the durable queue.  The web process only
+# validates and enqueues, so THIS service is what makes results visible.  If
+# it is stopped, submits keep being accepted and nothing is lost — the queue
+# simply grows, and everything lands when it starts again.
+#
+# Start order: after the web service, and after `manage.py migrate`.  Nothing
+# breaks if it starts first; the queue is just empty.
+#
+# Emergency fallback: set ATOMICDB_SYNCHRONOUS_INGEST=True in the WEB
+# process's environment and restart it.  Submits then apply inline, through
+# this same code, and this service becomes a no-op that can stay stopped.
+
+[Unit]
+Description=AtomicDB ingest queue processor
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openbench
+Group=openbench
+WorkingDirectory=/home/openbench/OpenBench
+
+# Same environment the web process uses. The secret key is only needed
+# because settings import it; the processor serves no HTTP.
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+# EnvironmentFile=/etc/openbench/openbench.env
+
+ExecStart=/home/openbench/OpenBench/.venv/bin/python manage.py \
+    process_ingest_queue --idle-seconds 2
+
+# The processor finishes the job it is applying and exits on SIGTERM; a job
+# interrupted before its commit rolls back whole and is retried.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=5
+
+# One consumer is the intended shape: SQLite serialises writes anyway and a
+# single consumer preserves arrival order.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

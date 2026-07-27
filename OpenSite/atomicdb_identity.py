@@ -47,6 +47,7 @@ ORIGIN_ATOMICDB_TABLES = (
 # del comando de split existe justamente para obligar a esta revision.
 POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_openingnamesuggestion',   # 0015_opening_name_suggestion
+    'atomicdb_ingestjob',               # 0016_ingest_queue
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.

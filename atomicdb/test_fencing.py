@@ -4,9 +4,9 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.utils import timezone
 
-from . import ingest, logic
+from . import ingest, ingest_queue, logic
 from .database import connection
-from .models import AnalysisTask, Position
+from .models import AnalysisTask, DBEvent, IngestJob, Position
 from .testing import TestCase, TransactionTestCase
 
 
@@ -76,10 +76,27 @@ class SubmitFencingTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.state, 'LEASED')
 
+    def _mutate_between_read_and_claim(self, mutation):
+        """Seam para la carrera que el compare-and-swap del submit defiende.
+
+        El submit lee la tarea, la comprueba y despues la RECLAMA dentro de
+        una transaccion.  Desde que la ingesta es asincrona no queda trabajo
+        caro en medio, asi que la ventana solo se puede provocar aqui: envolver
+        la apertura de la transaccion y mover la tarea justo antes del CAS.
+        """
+        original = ingest_queue.atomic
+
+        def wrapped():
+            mutation()
+            return original()
+
+        return mock.patch('atomicdb.views.atomic', side_effect=wrapped)
+
     def test_reported_nodes_are_clamped_to_twice_budget(self):
         task = self._task('LEASED', 'machine-a')
         response = self._submit(task, nodes='999999')
         self.assertEqual(response.status_code, 200)
+        ingest_queue.drain()
         task.refresh_from_db()
         self.assertEqual(task.nodes_searched, 2_000)
         position = Position.objects.get(key=self.position.key)
@@ -89,21 +106,20 @@ class SubmitFencingTests(TestCase):
         task = self._task('LEASED', 'machine-a')
         response = self._submit(task, nodes='0')
         self.assertEqual(response.status_code, 200)
+        ingest_queue.drain()
         task.refresh_from_db()
         self.position.refresh_from_db()
         self.assertEqual(task.nodes_searched, 0)
         self.assertEqual(self.position.nodes_invested, 0)
 
-    def test_same_machine_release_during_proof_is_stale(self):
+    def test_same_machine_release_during_the_claim_is_stale(self):
         task = self._task('LEASED', 'machine-a')
 
-        def re_lease(fen, lines):
+        def re_lease():
             AnalysisTask.objects.filter(id=task.id).update(
                 attempts=task.attempts + 1, leased_at=timezone.now())
-            return {}
 
-        with mock.patch('atomicdb.ingest.prepare_mate_proofs',
-                        side_effect=re_lease):
+        with self._mutate_between_read_and_claim(re_lease):
             response = self._submit(task, nodes='123')
 
         self.assertEqual(response.status_code, 409)
@@ -114,19 +130,19 @@ class SubmitFencingTests(TestCase):
         self.assertEqual(task.attempts, 1)
         self.assertEqual(self.position.visits, 0)
         self.assertEqual(self.position.nodes_invested, 0)
+        self.assertFalse(IngestJob.objects.exists())   # nada encolado
 
     def test_nodes_use_authoritative_budget_after_claim(self):
         task = self._task('LEASED', 'machine-a')
 
-        def resize_budget(fen, lines):
+        def resize_budget():
             AnalysisTask.objects.filter(id=task.id).update(budget_nodes=100)
-            return {}
 
-        with mock.patch('atomicdb.ingest.prepare_mate_proofs',
-                        side_effect=resize_budget):
+        with self._mutate_between_read_and_claim(resize_budget):
             response = self._submit(task, nodes='999')
 
         self.assertEqual(response.status_code, 200)
+        ingest_queue.drain()
         task.refresh_from_db()
         self.position.refresh_from_db()
         self.assertEqual(task.nodes_searched, 200)
@@ -140,26 +156,41 @@ class SubmitFencingTests(TestCase):
 
     @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=-2)
     def test_rejected_tb_does_not_account_elapsed_time(self, probe):
+        """El WDL sin confirmar sigue sin tocar el arbol ni el reloj.
+
+        Lo que cambia con la ingesta asincrona: el rechazo ya no puede viajar
+        en la respuesta del submit (el servidor aun no ha sondeado nada cuando
+        contesta), asi que el worker recibe su 2xx de siempre y el rechazo
+        queda en el trabajo y en el feed de eventos.  El worker se comporta
+        igual: trataba el 409 como definitivo y no reintentaba.
+        """
         tb_position = ingest.get_or_create_position(
             '7k/8/8/8/8/8/8/K6R w - - 0 1')
         task = self._task('LEASED', 'machine-a', position=tb_position)
 
         response = self._submit(
             task, tb_wdl='2', elapsed='86400', nodes='1000')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['ok'])
+        ingest_queue.drain()
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()['error'], 'tb-rejected')
-        task.refresh_from_db()
         tb_position.refresh_from_db()
-        self.assertEqual(task.state, 'LEASED')
-        self.assertEqual(task.machine, 'machine-a')
-        self.assertEqual(task.nodes_searched, 0)
+        self.assertEqual(tb_position.status, 'UNKNOWN')
         self.assertEqual(tb_position.time_invested, 0)
+        job = IngestJob.objects.get()
+        self.assertEqual(job.state, 'DONE')
+        self.assertEqual(job.summary, {'tb_rejected': True})
+        self.assertTrue(DBEvent.objects.filter(kind='TB_REJECTED').exists())
         probe.assert_called_once()
 
 
 class SubmitPreparationBoundaryTests(TransactionTestCase):
-    """Expensive proof and TB I/O must finish before the write transaction."""
+    """Expensive proof and TB I/O must finish before the write transaction.
+
+    Since the ingest moved to the durable queue this invariant lives in the
+    PROCESSOR, which is where that work now runs; the submit itself no longer
+    does any of it.  Both facts are asserted below.
+    """
 
     reset_sequences = True
 
@@ -192,8 +223,10 @@ class SubmitPreparationBoundaryTests(TransactionTestCase):
         with mock.patch('atomicdb.ingest.prepare_mate_proofs',
                         side_effect=prepare) as proof:
             response = self._submit(task)
+            self.assertEqual(response.status_code, 200)
+            proof.assert_not_called()      # el submit ya no prueba mates
+            ingest_queue.drain()
 
-        self.assertEqual(response.status_code, 200)
         proof.assert_called_once()
 
     def test_tb_probe_runs_outside_atomic_block(self):
@@ -207,6 +240,8 @@ class SubmitPreparationBoundaryTests(TransactionTestCase):
         with mock.patch('atomicdb.ingest.tb.probe_wdl',
                         side_effect=probe) as tb_probe:
             response = self._submit(task, tb_wdl='0')
+            self.assertEqual(response.status_code, 200)
+            tb_probe.assert_not_called()   # ni sondea tablebases
+            ingest_queue.drain()
 
-        self.assertEqual(response.status_code, 200)
         tb_probe.assert_called_once()
