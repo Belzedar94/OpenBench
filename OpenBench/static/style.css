@@ -245,133 +245,78 @@ body, html, main{
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    justify-content: space-between;
     min-width: 0;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
 }
 
+/* Shrink-to-fit so the switch trails the title instead of being pinned to the
+   far edge of the content column, where wide tables can scroll it off-screen
+   and where it would otherwise sit on top of the index capacity cards. */
 #content-header h2 {
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
+    margin: 0.9rem 0;
 }
+
+/* Light / dark switch. A plain icon button in the page's own button idiom:
+   1px border, 4px radius, surface fill. It shows the theme a click would
+   switch *to*, and stays hidden until the bootstrap script marks the document
+   as script-capable, so a JS-less client never sees a dead control. */
 
 .theme-toggle {
-    position: relative;
     display: none;
     flex: 0 0 auto;
-    place-items: center;
-    width: 3.25rem;
-    min-width: 3.25rem;
-    height: 2.75rem;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
     padding: 0;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background-color: var(--surface-1);
+    color: var(--ink-muted);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-}
-
-html.theme-js .theme-toggle {
-    display: inline-grid;
-}
-
-.theme-toggle-track {
-    position: relative;
-    display: block;
-    width: 3.1rem;
-    height: 1.65rem;
-    overflow: hidden;
-    border: 1px solid var(--border-strong);
-    border-radius: 999px;
-    background:
-        linear-gradient(115deg, rgba(242, 190, 91, .26), transparent 46%),
-        #313d55;
-    box-shadow: inset 0 1px 3px rgba(0, 0, 0, .3);
     transition:
         background-color 180ms ease,
         border-color 180ms ease,
-        box-shadow 180ms ease;
+        color 180ms ease;
 }
 
-.theme-toggle-thumb {
-    position: absolute;
-    z-index: 2;
-    top: .15rem;
-    left: .15rem;
-    width: 1.23rem;
-    height: 1.23rem;
-    border-radius: 50%;
-    background: #f5f1e8;
-    box-shadow: 0 2px 5px rgba(0, 0, 0, .38);
-    transform: translateX(1.42rem);
-    transition:
-        transform 240ms cubic-bezier(.2, .78, .25, 1),
-        background-color 180ms ease,
-        box-shadow 180ms ease;
+html.theme-js .theme-toggle {
+    display: inline-flex;
 }
 
-.theme-toggle-icon {
-    position: absolute;
-    z-index: 1;
-    top: 50%;
-    width: .8rem;
-    height: .8rem;
-    color: #f2d07a;
-    transform: translateY(-50%);
-    transition:
-        opacity 180ms ease,
-        transform 240ms cubic-bezier(.2, .78, .25, 1);
-}
-
-.theme-toggle-icon svg {
+.theme-toggle svg {
     display: block;
-    width: 100%;
-    height: 100%;
+    width: 1.05rem;
+    height: 1.05rem;
     fill: none;
     stroke: currentColor;
     stroke-linecap: round;
     stroke-linejoin: round;
-    stroke-width: 1.8;
+    stroke-width: 1.9;
 }
 
-.theme-toggle-sun {
-    left: .35rem;
-    opacity: .62;
-    transform: translateY(-50%) rotate(-26deg) scale(.86);
+.theme-toggle .theme-toggle-moon,
+html[data-theme="light"] .theme-toggle .theme-toggle-sun {
+    display: none;
 }
 
-.theme-toggle-moon {
-    right: .34rem;
-    color: #dbe8ff;
-    opacity: 1;
-    transform: translateY(-50%) rotate(0) scale(1);
+html[data-theme="light"] .theme-toggle .theme-toggle-moon {
+    display: block;
 }
 
-html[data-theme="light"] .theme-toggle-track {
-    background:
-        linear-gradient(115deg, rgba(255, 255, 255, .48), transparent 52%),
-        #efb94e;
-    box-shadow: inset 0 1px 3px rgba(104, 71, 16, .22);
-}
-
-html[data-theme="light"] .theme-toggle-thumb {
-    background: #fffdf8;
-    box-shadow: 0 2px 5px rgba(91, 63, 18, .28);
-    transform: translateX(0);
-}
-
-html[data-theme="light"] .theme-toggle-sun {
-    color: #774604;
-    opacity: 1;
-    transform: translateY(-50%) rotate(0) scale(1);
-}
-
-html[data-theme="light"] .theme-toggle-moon {
-    opacity: .52;
-    transform: translateY(-50%) rotate(24deg) scale(.84);
-}
-
-.theme-toggle:hover .theme-toggle-track {
+.theme-toggle:hover {
     border-color: var(--accent);
+    background-color: var(--surface-hover);
+    color: var(--accent);
+}
+
+.theme-toggle:active {
+    background-color: var(--surface-2);
 }
 
 .theme-toggle:focus-visible {
@@ -883,10 +828,13 @@ html.theme-ready pre {
     #content-header {
         display: flex;
         align-items: center;
+        gap: 0.4rem;
         background-color: var(--color1);
         box-sizing: border-box;
         width: 100%;
         padding-right: 8px;
+        padding-bottom: 0;
+        margin-bottom: 0;
         border-bottom: 1px solid var(--border);
         position: absolute;
         top: 0;
@@ -900,11 +848,17 @@ html.theme-ready pre {
         margin: 8px 0;
     }
 
+    /* The title must be allowed to wrap here, otherwise it runs underneath
+       the theme switch on narrow phones. */
+    #content-header h2,
     #content-header .site-title {
-        white-space: break-spaces;
+        white-space: normal;
     }
 
+    /* The hamburger and the title already own the left of the mobile bar, so
+       the switch goes to the opposite edge rather than trailing the title. */
     #content-header .theme-toggle {
+        flex: 0 0 auto;
         margin-left: auto;
     }
 
@@ -969,21 +923,8 @@ html.theme-ready pre {
 @media (forced-colors: active) {
     .theme-toggle {
         forced-color-adjust: auto;
-    }
-
-    .theme-toggle-track {
         border: 1px solid ButtonText;
-        background: Canvas;
-        box-shadow: none;
-    }
-
-    .theme-toggle-thumb {
-        border: 1px solid Canvas;
-        background: ButtonText;
-        box-shadow: none;
-    }
-
-    .theme-toggle-icon {
+        background: ButtonFace;
         color: ButtonText;
     }
 }
