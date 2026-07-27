@@ -39,7 +39,6 @@ TASK_REFILL_COUNT = 4
 LEASE_TOKEN_BUILD = 2026072203
 LEGACY_MAX_BUDGET = 128_000_000
 MAX_REPORTED_NPS = 1_000_000_000_000
-REQUESTS_PER_IP_HOUR = 30
 REQUEST_QUEUE_MAX = 1000000  # efectivamente sin tope (orden 27-jul; el propietario lo monitoriza)
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
@@ -668,7 +667,13 @@ def _client_ip(request):
 
 def _api_request_once(request, key):
     """Peticion publica de analisis (estilo chessdb.cn), sin cuenta.
-    Protecciones: rate-limit por IP, dedup ip+posicion, tope global de cola."""
+
+    Protecciones: dedup ip+posicion y tope global de cola.  SIN limite
+    horario: el propietario lo retiro (28-jul) porque estaba frenando a la
+    gente que de verdad usa el explorador mientras no frenaba a nadie mas —
+    lo que acota el gasto real es el dedup (un click por posicion mientras su
+    trabajo sigue vivo) y el techo de la cola, no un contador por IP.
+    """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
     ip = _client_ip(request)
@@ -703,9 +708,6 @@ def _api_request_once(request, key):
         ).exists()
     if recent_same_position and active_user_request:
         return JsonResponse({'status': 'already-requested'})
-    if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
-                         .count() >= REQUESTS_PER_IP_HOUR:
-        return JsonResponse({'status': 'rate-limited'}, status=429)
     if AnalysisTask.objects.filter(state='PENDING', source='USER',
                                    position__status='UNKNOWN') \
                            .count() >= REQUEST_QUEUE_MAX:
@@ -717,7 +719,7 @@ def _api_request_once(request, key):
         outcome = ingest.request_analysis(pos)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
-        # so the hourly allowance keeps bounding what a descent costs us.
+        # so the per-position dedup keeps bounding what a descent costs us.
         if outcome in ('queued', 'already-queued', 'expanded', 'saturated'):
             RequestLog.objects.create(ip=ip, position=pos)
     payload = {'status': str(outcome)}
@@ -1492,6 +1494,7 @@ def home(request):
     root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
     return render(request, 'atomicdb/home.html', {
+        **_suggestions_badge(request),
         'analyzing': analyzing, 'upnext': upnext,
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),
@@ -1670,13 +1673,17 @@ def fen_jump(request):
                       {'fen_error': 'that FEN could not be read'}, status=400)
     key = logic.key_of(fen)
     if not Position.objects.filter(key=key).exists():
+        # Seeding a position the tree does not have yet.  It is a
+        # counter-zero instance like every other node and it starts with NO
+        # path to the root, so `refresh_priorities` gives it
+        # DISCONNECTED_REGRET and the pn descent never reaches it from a
+        # campaign root: only the visitor ladder works it, until something
+        # expands a parent that reaches it and the ordinary edges connect it.
         ip = _client_ip(request)
-        hour_ago = timezone.now() - timedelta(hours=1)
-        if RequestLog.objects.filter(ip=ip, created__gte=hour_ago) \
-                             .count() >= REQUESTS_PER_IP_HOUR:
-            return render(request, 'atomicdb/missing.html', status=429)
         pos = ingest.get_or_create_position(fen)
         RequestLog.objects.create(ip=ip, position=pos)
+        DBEvent.objects.create(kind='SEEDED', payload={
+            'key': pos.key, 'fen': pos.fen, 'ip': ip})
     return redirect(f'/atomicdb/explore/{key}/')
 
 
@@ -1865,6 +1872,28 @@ def suggest_opening_name(request, key):
     return back('ok')
 
 
+def _suggestions_badge(request):
+    """Contexto del enlace de moderacion, SOLO para approvers.
+
+    Se devuelve como diccionario para fusionar en el contexto de una vista
+    concreta, no como context processor global, y la razon es la cache: el
+    header vive en ``base.html``, que tambien pintan ``map`` y ``method``, y
+    esas dos llevan ``cache_page`` PLANO — sin variar por cookie.  Un render
+    de approver ahi quedaria cacheado y se le serviria a todo el mundo, que es
+    justo la fuga que no queremos.  Asi que el enlace solo aparece donde la
+    vista lo pasa a proposito: ``home`` (que si varia por cookie) y
+    ``explore`` (sin cache).  Donde no se pasa, la plantilla no lo pinta.
+    """
+    user = getattr(request, 'user', None)
+    if user is None or not user.is_authenticated:
+        return {}
+    from OpenBench.models import Profile
+    if not Profile.objects.filter(user=user, approver=True).exists():
+        return {}
+    return {'suggestions_pending': OpeningNameSuggestion.objects.filter(
+        status=OpeningNameSuggestion.SState.PENDING).count()}
+
+
 def _approver_gate(request):
     """Mismo criterio que /networks/: login, y Profile.approver."""
     # Import local: mantiene a AtomicDB importable sin arrastrar OpenBench.
@@ -2035,6 +2064,7 @@ def explore(request, key):
     eval_backed = (known is not None and known != pos.eval_cp
                    and pos.status == 'UNKNOWN')
     return render(request, 'atomicdb/explore.html', {
+        **_suggestions_badge(request),
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,

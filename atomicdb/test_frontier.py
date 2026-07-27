@@ -567,9 +567,10 @@ class ExpansionRequestApiTests(TestCase):
 
         response = self.client.post(f'/atomicdb/request/{pos.key}/')
 
-        self.assertEqual(response.status_code, 429)
-        self.assertEqual(response.json(), {'status': 'rate-limited'})
-        self.assertFalse(Edge.objects.filter(parent=pos).exists())
+        # No hourly allowance any more: receipts for OTHER positions do not
+        # stand between a visitor and this one.
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()['status'], 'rate-limited')
 
     def test_a_different_visitor_is_not_deduplicated(self):
         pos = self._exhausted_root()

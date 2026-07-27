@@ -251,6 +251,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                                           'won_line', 'mate_in', 'clock_slack',
                                           'best_move', 'updated'])
                 _emit_closure_events(child)   # tambien cuenta y sale en feed
+                # La linea ganadora deja de ser una cadena de texto y pasa a
+                # ser arbol navegable: sin esto el explorador enseña el cierre
+                # en la cabecera y "unexplored" en todas las filas.
+                materialise_won_line(child)
                 closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
@@ -306,7 +310,22 @@ def _revoke_contradicted_mate(child, parent, prepared_proof):
 
 
 def backup_cascade(seed_keys):
-    """Recalcula status/eval hacia arriba hasta punto fijo (§3.3)."""
+    """Recalcula el STATUS hacia arriba hasta punto fijo (§3.3).
+
+    Ya NO toca ``eval_cp``.  Durante un tiempo hubo aqui un minimax de evals
+    "en el sitio" que pisaba la columna con el min/max sobre los hijos, y eso
+    resultó ser el bug que la comunidad reportó como "la propagacion recursiva
+    sigue rota": la eval respaldada tiene su propia columna, ``backed_eval``,
+    con guardas de cobertura y de calidad, y este minimax no tenia ninguna de
+    las dos.  Con los dos escribiendo el mismo campo ganaba el ultimo, asi que
+    un nodo cuya busqueda propia de 512M decia 413 se publicaba como 506 — el
+    min sobre tres hermanos con evals sembradas por una busqueda mas somera,
+    mientras otras veintidos respuestas no tenian numero ninguno.
+
+    Ahora cada columna significa una sola cosa: ``eval_cp`` es lo que dijo el
+    ultimo analisis DE ESTA posicion, ``backed_eval`` es lo que su subarbol
+    sabe, y ``best_known_eval`` elige entre ambas en un solo sitio.
+    """
     frontier = set(seed_keys)
     for pid in Edge.objects.filter(child_id__in=list(seed_keys)).values_list(
             'parent_id', flat=True):
@@ -321,15 +340,8 @@ def backup_cascade(seed_keys):
         edges = list(Edge.objects.filter(parent=pos).select_related('child'))
         if edges:
             statuses = [_supporting_status(pos, e) for e in edges]
-            evals = [e.child.eval_cp if e.child.status == 'UNKNOWN' else
-                     _status_eval(e.child.status) for e in edges]
             new_status = (pos.status if pos.status != 'UNKNOWN' else
                           logic.backup_status(pos.fen, pos.expanded, statuses))
-            # minimax de evals SOLO con lista de movimientos completa: sobre
-            # una expansion parcial (aristas de /goto/) el min/max es basura
-            # optimista (p.ej. un unico hijo perdido pondria 10000)
-            new_eval = (logic.backup_eval(pos.fen, evals)
-                        if pos.expanded else None)
             dirty = False
             if new_status != pos.status and pos.status == 'UNKNOWN':
                 pos.status, pos.closure = new_status, 'MINIMAX'
@@ -401,9 +413,6 @@ def backup_cascade(seed_keys):
                         if new_mate != pos.mate_in:
                             pos.mate_in = new_mate
                             dirty = True
-            if new_eval is not None and new_eval != pos.eval_cp:
-                pos.eval_cp = new_eval
-                dirty = True
             if dirty:
                 pos.save()
                 changed_total += 1
@@ -690,6 +699,45 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     return changed_total
 
 
+def displayed_eval(pos, edges=None):
+    """Lo que una pagina debe PINTAR para ``pos``, recalculado aqui mismo.
+
+    POR QUE NO SE LEE LA COLUMNA.  ``backed_eval`` se mantiene con un corte de
+    coste: si el valor de un nodo se mueve menos de ``BACKED_EPSILON_CP`` y lo
+    sigue respaldando la misma arista, el ascenso PARA ahi.  Ese corte es
+    correcto — subir el DAG entero por tres centipeones no compra nada — pero
+    deja al padre con una columna que puede ir por detras de sus propios hijos.
+    Y el padre PINTA esa columna en su cabecera mientras pinta a los hijos con
+    su valor fresco, asi que la pagina se contradice a si misma por hasta
+    nueve centipeones, y peor si el hijo no tiene respaldo propio y lo que
+    cambio fue su eval puntual.
+
+    El epsilon gatea el COSTE DE SUBIR; no debe gatear la verdad que se
+    enseña.  Asi que el display recalcula, desde los mismos hijos que la
+    pagina esta mostrando y con las MISMAS guardas de cobertura y calidad que
+    usa el respaldo almacenado — no es una segunda opinion, es la misma
+    cuenta hecha en el momento de mirar.
+    """
+    exact = _status_eval(pos.status)
+    if exact is not None:
+        return exact
+    if edges is None:
+        edges = list(Edge.objects.filter(parent=pos).select_related('child'))
+    if not edges:
+        # Nothing to derive from: the stored column is all the knowledge
+        # there is, and it is still knowledge.
+        return best_known_eval(pos)
+    children = [
+        _child_contribution(edge.move_uci, edge.child.status,
+                            edge.child.eval_cp, edge.child.backed_eval,
+                            edge.child.backed_nodes,
+                            edge.child.nodes_invested,
+                            edge.child.backed_plies)
+        for edge in edges]
+    value, _move, _plies, _quality = _backed_for(pos, children)
+    return value if value is not None else best_known_eval(pos)
+
+
 def best_known_eval(pos):
     """Mejor conocimiento actual del nodo, en perspectiva blanca.
 
@@ -702,6 +750,79 @@ def best_known_eval(pos):
     if pos.backed_eval is not None:
         return pos.backed_eval
     return pos.eval_cp
+
+
+# ---------------- materializacion de la linea ganadora ----------------
+#
+# Un cierre MATE_PV vive SOLO en el nodo: ``expand`` se salta todo lo que no
+# esta UNKNOWN, asi que la cadena del testigo no se materializa nunca y la
+# linea ganadora es una cadena de texto, no arbol.  El explorador lo enseña
+# tal cual: la cabecera dice "WHITE_WIN via MATE_PV, ≤M6" y la tabla de
+# jugadas dice "unexplored" en las 30 filas, la ganadora incluida, porque el
+# nodo no tiene ni una arista.  Navegar la jugada ganadora aterriza en una
+# posicion que la base ni conoce.
+#
+# Materializar la cadena arregla eso sin inventar nada: cada posicion del
+# camino existe ya como hecho (el testigo fue re-verificado jugada a jugada al
+# cerrar), y cada sufijo es un mate igual de probado que el original, un ply
+# mas corto.  Se materializa SOLO la arista de la linea — nada de expandir —
+# asi que el selector sigue ignorando estos nodos exactamente como hasta ahora.
+
+WON_LINE_MAX_PLIES = 64
+
+
+def materialise_won_line(pos, verify=False):
+    """Crea la cadena de la ``won_line`` como arbol de verdad.
+
+    Cada nodo del camino queda cerrado con el mismo status y la misma CLASE DE
+    PRUEBA que el original: un ANDOR probo exhaustivamente ese subarbol, asi
+    que sus sufijos son ANDOR; un ENGINE es un testigo legal sin certificar y
+    sus sufijos heredan esa misma honestidad.  Un DISPUTED no materializa nada.
+
+    ``clock_slack`` se hereda del nodo original.  Es CONSERVADOR por
+    construccion: la racha reversible que le queda a un sufijo no puede ser
+    mayor que la del arbol entero, asi que el slack real del sufijo es al
+    menos este.  Prefiero subestimar el margen a inventarlo.
+    """
+    line = (pos.won_line or '').split()
+    if (pos.closure != 'MATE_PV' or pos.status not in ('WHITE_WIN', 'BLACK_WIN')
+            or pos.proof == 'DISPUTED' or not line):
+        return {'created_edges': 0, 'closed': 0, 'plies': 0}
+    if verify and not logic.verify_mate_pv(
+            pos.fen, line, pos.status == 'WHITE_WIN'):
+        return {'created_edges': 0, 'closed': 0, 'plies': 0,
+                'rejected': 'witness-does-not-verify'}
+
+    grade = pos.proof if pos.proof in ('ANDOR', 'ENGINE') else None
+    slack = pos.clock_slack
+    created_edges = closed = 0
+    node, walked = pos, 0
+    for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
+        if uci not in logic.legal_moves(node.fen):
+            break                       # testigo historico ya no legal
+        child = get_or_create_position(logic.apply_move(node.fen, uci),
+                                       campaign=node.campaign)
+        _edge, made = Edge.objects.get_or_create(
+            parent=node, move_uci=uci, defaults={'child': child})
+        if made:
+            created_edges += 1
+        walked += 1
+        suffix = line[index + 1:]
+        if suffix and child.status == 'UNKNOWN':
+            child.status = pos.status
+            child.closure = 'MATE_PV'
+            child.proof = grade
+            child.won_line = ' '.join(suffix)
+            child.mate_in = len(suffix)
+            child.best_move = suffix[0]
+            child.clock_slack = slack
+            child.save(update_fields=['status', 'closure', 'proof',
+                                      'won_line', 'mate_in', 'best_move',
+                                      'clock_slack', 'updated'])
+            _emit_closure_events(child)
+            closed += 1
+        node = child
+    return {'created_edges': created_edges, 'closed': closed, 'plies': walked}
 
 
 def _child_is_verified(child):
@@ -742,6 +863,27 @@ def _closure_is_independent(pos):
     """True si el cierre no se apoya en los hijos (y corta la cascada)."""
     return (pos.closure in ('TERMINAL', 'TB')
             or (pos.closure != 'MINIMAX' and pos.proof == 'ANDOR'))
+
+
+def _witness_runs_through(pos, child_key):
+    """True si el testigo de ``pos`` pasa por ese hijo exacto.
+
+    Un nodo de una cadena materializada cierra por su propio sufijo, no por un
+    backup, asi que la regla "solo se revocan los MINIMAX" lo dejaria en pie
+    con su testigo ya refutado.  Si la PRIMERA jugada de su ``won_line`` lleva
+    al nodo que se acaba de revocar, su linea entera esta refutada tambien y
+    tiene que caer con el.
+    """
+    line = (pos.won_line or '').split()
+    if pos.closure != 'MATE_PV' or not line or not child_key:
+        return False
+    if pos.proof == 'ANDOR':
+        # An exhaustive AND/OR search proved THIS node on its own; it does not
+        # rest on the child's uncertified witness even though its line runs
+        # through it.  ANDOR keeps cutting the cascade, as it always did.
+        return False
+    return Edge.objects.filter(parent=pos, move_uci=line[0],
+                               child_id=child_key).exists()
 
 
 def _clear_closure(pos, mark_disputed=False):
@@ -806,10 +948,10 @@ def revoke_closure(position_key, reason='', requeue=True, mark_disputed=False):
     trabajo que la cascada hara gratis.
     """
     revoked, guard = [], 0
-    pending = [position_key]
+    pending = [(position_key, None)]
     while pending and guard < REVOKE_GUARD_LIMIT:
         guard += 1
-        key = pending.pop(0)
+        key, via_child = pending.pop(0)
         try:
             pos = Position.objects.select_for_update().get(key=key)
         except Position.DoesNotExist:
@@ -817,14 +959,15 @@ def revoke_closure(position_key, reason='', requeue=True, mark_disputed=False):
         if pos.status == 'UNKNOWN':
             continue                      # ya abierto: nada que retirar
         if key != position_key:
-            if pos.closure != 'MINIMAX':
+            if pos.closure == 'MINIMAX':
+                edges = list(Edge.objects.filter(parent=pos)
+                             .select_related('child'))
+                derived = logic.backup_status(
+                    pos.fen, pos.expanded, [e.child.status for e in edges])
+                if derived == pos.status:
+                    continue              # el backup se sostiene sin el hijo
+            elif not _witness_runs_through(pos, via_child):
                 continue                  # hecho independiente: corta aqui
-            edges = list(Edge.objects.filter(parent=pos)
-                         .select_related('child'))
-            derived = logic.backup_status(
-                pos.fen, pos.expanded, [e.child.status for e in edges])
-            if derived == pos.status:
-                continue                  # el backup se sostiene sin el hijo
         elif _closure_is_independent(pos):
             # La semilla se revoca a peticion expresa del llamante (es su
             # evidencia la que fallo), pero un TERMINAL jamas: la posicion es
@@ -833,7 +976,8 @@ def revoke_closure(position_key, reason='', requeue=True, mark_disputed=False):
                 return {'revoked': [], 'requeued': None, 'revived': 0}
         _clear_closure(pos, mark_disputed=mark_disputed and key == position_key)
         revoked.append(key)
-        pending.extend(Edge.objects.filter(child=pos)
+        pending.extend((parent_id, key) for parent_id in
+                       Edge.objects.filter(child=pos)
                        .values_list('parent_id', flat=True))
 
     if not revoked:

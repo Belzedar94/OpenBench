@@ -464,7 +464,8 @@ class RequestTests(TestCase):
         tasks = json.loads(lease.content)['tasks']
         self.assertEqual(tasks[0]['fen'], b.fen)  # USER antes que mejor prio
 
-    def test_request_rate_limited(self):
+    def test_receipts_no_longer_rate_limit_an_ip(self):
+        """The hourly allowance was removed (owner, 28-jul)."""
         from .models import RequestLog
         a = ingest.get_or_create_position(logic.start_fen())
         b = ingest.get_or_create_position(
@@ -472,8 +473,8 @@ class RequestTests(TestCase):
         for _ in range(30):
             RequestLog.objects.create(ip='127.0.0.1', position=a)
         r = self.client.post(f'/atomicdb/request/{b.key}/')
-        self.assertEqual(r.status_code, 429)
-        self.assertEqual(r.json(), {'status': 'rate-limited'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['status'], 'queued')
 
     @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
     def test_request_queue_full_keeps_structured_status(self):

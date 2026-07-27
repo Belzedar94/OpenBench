@@ -1,3 +1,4 @@
 {% extends "atomicdb/base.html" %}
-{% block content %}<p class="dim">Position not in the tree (yet).
+{% block content %}<p class="dim">{% if fen_error %}That FEN was not accepted:
+<strong>{{ fen_error }}</strong>{% else %}Position not in the tree (yet).{% endif %}
 <a href="/atomicdb/">Back to the map</a></p>{% endblock %}

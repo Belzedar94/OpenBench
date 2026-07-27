@@ -46,6 +46,8 @@
     <a href="/atomicdb/">Overview</a>
     <a href="/atomicdb/map/">Move tree</a>
     <a href="/atomicdb/method/">Method</a>
+    {% if suggestions_pending is not None %}<a href="/atomicdb/suggestions/"
+      >Suggestions{% if suggestions_pending %} ({{ suggestions_pending }}){% endif %}</a>{% endif %}
     <a href="/index/">OpenBench</a>
   </nav>
   <button type="button" class="theme-toggle" id="theme-toggle"
