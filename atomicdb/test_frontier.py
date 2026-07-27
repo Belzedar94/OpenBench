@@ -43,6 +43,28 @@ def _multipv(*moves):
             for i, uci in enumerate(moves)]
 
 
+def _spent_line(*moves):
+    """A line whose nodes are all spent and each name their one heir.
+
+    Used with the frontier widths pinned to one: ``_frontier_children`` then
+    returns exactly the named move at every step, so a descent has a single
+    legal path and a test can assert where it came out.  The last element is
+    the tail the line leads to, which is deliberately NOT spent.
+    """
+    fen = logic.start_fen()
+    nodes = []
+    for uci in moves:
+        pos = ingest.get_or_create_position(fen)
+        ingest.expand(pos)
+        pos.last_analysis = _multipv(uci)
+        pos.save(update_fields=['last_analysis'])
+        _exhaust_ladder(pos)
+        nodes.append(pos)
+        fen = logic.apply_move(fen, uci)
+    nodes.append(ingest.get_or_create_position(fen))
+    return nodes
+
+
 class LadderExhaustionTests(TestCase):
 
     def test_exhausted_ladder_no_longer_requeues_the_parent(self):
@@ -242,7 +264,8 @@ class AndNodeExpansionTests(TestCase):
         self.assertEqual(ingest.FRONTIER_CLICK_CAP, 64)
 
 
-class SingleLevelRecursionTests(TestCase):
+class PartialExhaustionTests(TestCase):
+    """One buyable sibling is enough: the click stays at this level."""
 
     def test_child_with_a_spent_ladder_is_counted_not_recursed(self):
         pos = ingest.get_or_create_position(logic.start_fen())
@@ -258,7 +281,9 @@ class SingleLevelRecursionTests(TestCase):
         self.assertEqual(outcome.detail['children_exhausted'], 1)
         self.assertEqual(outcome.detail['children_queued'], 2)
         self.assertEqual(_queued_moves(pos), ['d2d4', 'g1f3'])
-        # v1 stops one ply down: no grandchildren, no task on the spent child.
+        # The descent only starts when EVERY candidate is spent, so the one
+        # spent child stays untouched: no grandchildren, no extra task.
+        self.assertEqual(outcome.detail['descent_plies'], 0)
         self.assertFalse(Edge.objects.filter(parent=deep_child).exists())
         self.assertEqual(
             list(AnalysisTask.objects.filter(position=deep_child)
@@ -281,6 +306,222 @@ class SingleLevelRecursionTests(TestCase):
         self.assertEqual(outcome.detail['children_queued'], 3)
         self.assertEqual(AnalysisTask.objects.get(position=child).source,
                          AnalysisTask.Source.USER)
+
+
+class DescentTests(TestCase):
+    """A spent frontier is not a dead end: follow the most promising line.
+
+    Proof-number search walks to the most-proving node instead of giving up,
+    and that is the whole idea here.  While every candidate at a level has a
+    spent ladder there is nothing to buy, so the click steps down through the
+    best one — best eval at an OR node, and at an AND node the unsolved reply
+    that is best for the DEFENDER, the one hardest to refute — and asks the
+    same question one ply lower.
+    """
+
+    def _eval_children(self, pos, evals):
+        """Give named children an eval and spend their ladders."""
+        children = {}
+        ingest.expand(pos)
+        for uci, eval_cp in evals.items():
+            child = Edge.objects.get(parent=pos, move_uci=uci).child
+            Position.objects.filter(pk=child.pk).update(eval_cp=eval_cp)
+            _exhaust_ladder(child)
+            children[uci] = child
+        return children
+
+    def test_or_node_follows_the_best_eval(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        children = self._eval_children(
+            pos, {'e2e4': 50, 'd2d4': 30, 'g1f3': 10})
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome, 'expanded')
+        self.assertEqual(outcome.detail['descent_plies'], 1)
+        self.assertEqual(outcome.detail['descent_key'], children['e2e4'].key)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position__edges_in__parent=children['e2e4'],
+            state=AnalysisTask.TState.PENDING).exists())
+
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 3)
+    def test_and_node_follows_the_defender_s_hardest_reply(self):
+        pos = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        self.assertEqual(pos.fen.split()[1], 'b')
+        # White-POV evals: the lower the number the better for the defender.
+        children = self._eval_children(
+            pos, {'c7c5': -30, 'g8f6': 10, 'e7e5': 50})
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome.detail['descent_key'], children['c7c5'].key)
+
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 3)
+    def test_a_solved_reply_is_never_followed_however_good(self):
+        pos = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        children = self._eval_children(
+            pos, {'b8c6': -900, 'c7c5': -30, 'g8f6': 10, 'e7e5': 50})
+        # The defender's dream reply is already refuted: nothing left to ask.
+        Position.objects.filter(pk=children['b8c6'].pk).update(
+            status='WHITE_WIN', closure='MATE_PV')
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome.detail['descent_key'], children['c7c5'].key)
+        self.assertFalse(Edge.objects.filter(parent=children['b8c6']).exists())
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    def test_the_descent_keeps_going_while_the_line_is_spent(self):
+        nodes = _spent_line('e2e4', 'e7e5', 'g1f3')
+
+        outcome = ingest.request_analysis(nodes[0])
+
+        # It stops at the last node that still has something to buy, and the
+        # tasks land one ply below THAT, exactly as a click there would.
+        self.assertEqual(outcome, 'expanded')
+        self.assertEqual(outcome.detail['descent_plies'], 2)
+        self.assertEqual(outcome.detail['descent_key'], nodes[-2].key)
+        self.assertEqual(outcome.detail['children_exhausted'], 2)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=nodes[-1],
+            state=AnalysisTask.TState.PENDING).exists())
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    def test_a_transposition_cycle_cannot_loop_forever(self):
+        # Stripped of the counters, 1.Nf3 Nf6 2.Ng1 Ng8 IS the start position,
+        # so this line is a genuine cycle in the DAG rather than a contrived
+        # one: without the visited set the descent would never terminate.
+        nodes = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
+        self.assertEqual(nodes[-1].key, nodes[0].key)
+
+        outcome = ingest.request_analysis(nodes[0])
+
+        self.assertEqual(outcome, 'saturated')
+        self.assertEqual(outcome.detail['descent_stop'], 'no-candidate')
+        self.assertEqual(outcome.detail['descent_plies'], 3)
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_DESCENT_MAX_PLIES', 2)
+    def test_the_ply_guard_stops_a_long_spent_line(self):
+        nodes = _spent_line('e2e4', 'e7e5', 'g1f3', 'b8c6')
+
+        outcome = ingest.request_analysis(nodes[0])
+
+        self.assertEqual(outcome, 'saturated')
+        self.assertEqual(outcome.detail['descent_stop'], 'depth-guard')
+        self.assertEqual(outcome.detail['descent_plies'], 2)
+        self.assertFalse(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).exists())
+
+    def test_a_fully_solved_level_saturates_without_descending(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        Position.objects.filter(
+            pk__in=Edge.objects.filter(parent=pos).values('child_id')).update(
+                status='DRAW', closure='TERMINAL')
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome, 'saturated')
+        self.assertEqual(outcome.detail['descent_plies'], 0)
+        self.assertEqual(outcome.detail['children_considered'], 0)
+        self.assertFalse(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).exists())
+
+    @mock.patch('atomicdb.ingest.FRONTIER_CLICK_CAP', 5)
+    def test_one_descending_click_still_respects_the_task_budget(self):
+        # The level it lands on is a wide AND node: without the per-click
+        # ceiling a single click would buy every legal reply down there.
+        pos = ingest.get_or_create_position(logic.start_fen())
+        children = self._eval_children(
+            pos, {'e2e4': 50, 'd2d4': 30, 'g1f3': 10})
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome.detail['descent_plies'], 1)
+        self.assertEqual(outcome.detail['descent_key'], children['e2e4'].key)
+        self.assertGreater(
+            len(logic.legal_moves(children['e2e4'].fen)), 5)
+        self.assertEqual(outcome.detail['children_queued'], 5)
+        self.assertEqual(
+            AnalysisTask.objects.filter(
+                state=AnalysisTask.TState.PENDING).count(), 5)
+
+    @mock.patch('atomicdb.ingest.FRONTIER_CLICK_CAP', 0)
+    def test_a_spent_budget_saturates_before_touching_anything(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos)
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome, 'saturated')
+        self.assertEqual(outcome.detail['descent_stop'], 'budget-spent')
+        self.assertFalse(Edge.objects.filter(parent=pos).exists())
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    def test_the_way_down_queues_nothing_above_where_it_stops(self):
+        nodes = _spent_line('e2e4', 'e7e5', 'g1f3')
+
+        ingest.request_analysis(nodes[0])
+
+        for node in nodes[:-1]:
+            self.assertFalse(
+                AnalysisTask.objects.filter(
+                    position=node,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED)).exists())
+
+    def test_declared_descent_guard_matches_the_approved_design(self):
+        self.assertEqual(ingest.FRONTIER_DESCENT_MAX_PLIES, 32)
+
+
+class DescentRequestApiTests(TestCase):
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    def test_saturated_is_reported_with_its_counters(self):
+        line = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
+
+        body = self.client.post(f'/atomicdb/request/{line[0].key}/').json()
+
+        self.assertEqual(body['status'], 'saturated')
+        self.assertEqual(body['descent_stop'], 'no-candidate')
+        self.assertEqual(body['descent_plies'], 3)
+        self.assertEqual(body['children_exhausted'], 4)
+
+    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
+    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
+    def test_a_saturated_click_still_leaves_one_receipt(self):
+        line = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
+        before = AnalysisTask.objects.count()
+
+        self.client.post(f'/atomicdb/request/{line[0].key}/')
+
+        # It bought nothing, but it did the walking: the hourly allowance is
+        # what bounds how often a visitor can pay for that walk.
+        self.assertEqual(
+            RequestLog.objects.filter(position=line[0]).count(), 1)
+        self.assertEqual(AnalysisTask.objects.count(), before)
+
+    def test_explorer_renders_the_saturated_status(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos)
+
+        response = self.client.get(f'/atomicdb/explore/{pos.key}/')
+
+        self.assertContains(response, 'saturated')
+        self.assertContains(response, 'descent_plies')
 
 
 class ExpansionRequestApiTests(TestCase):

@@ -43,17 +43,39 @@
       <button class="reqbtn" id="reqbtn">Request analysis</button>
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
     </p>
+    <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
+       hidden></p>
     <script>
     (function () {
       const btn = document.getElementById('reqbtn');
+      const cascade = document.getElementById('cascade');
       const fen = '{{ pos.fen|escapejs }}';
+      const key = '{{ pos.key|escapejs }}';
       const visits0 = {{ pos.visits }};
       const status0 = '{{ pos.status }}';
+      // Once the ladder here is spent the work lands BELOW this position, so
+      // watching this row alone would say nothing for six minutes.  Follow
+      // whatever level the request actually reached instead.
+      let below = {% if frontier_exhausted %}key{% else %}null{% endif %};
+      function showCascade() {
+        if (!below) { return; }
+        fetch('/atomicdb/api/frontier/' + below + '/')
+          .then(r => r.json())
+          .then(d => {
+            if (!d || d.error) { return; }
+            cascade.textContent = 'Analyzing beneath this position: '
+              + d.running + ' running, ' + d.queued + ' queued, '
+              + d.done + ' done (' + d.children_solved + ' children solved)';
+            cascade.hidden = false;   // no empty gap on an ordinary position
+          })
+          .catch(() => {});
+      }
       function poll(tries) {
         if (tries <= 0) {
           btn.textContent = 'Still queued, check back in a while';
           return;
         }
+        showCascade();
         fetch('/atomicdb/api/query?fen=' + encodeURIComponent(fen))
           .then(r => r.json())
           .then(d => {
@@ -95,10 +117,18 @@
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',
               'already-solved': 'Already solved',
-              // depth ladder spent here: the request goes one ply deeper
+              // depth ladder spent here: the request goes one ply deeper,
+              // and deeper still while every candidate it meets is spent
               'expanded': 'Expanding beneath this position: '
-                          + (d.children_queued || 0) + ' children queued',
+                          + (d.children_queued || 0) + ' children queued'
+                          + (d.descent_plies
+                             ? ' (' + d.descent_plies + (d.descent_plies === 1
+                                ? ' ply' : ' plies') + ' down)' : ''),
+              // nothing reachable from here had anything left to buy
+              'saturated': 'Already at full depth below this position',
             }[d.status] || 'Something went wrong';
+            if (d.descent_key) { below = d.descent_key; }
+            if (d.status === 'saturated') { showCascade(); }
             if (['queued', 'already-queued', 'already-requested',
                  'expanded'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
@@ -125,6 +155,7 @@
         btn.disabled = true;
         requestAnalysis(0);
       });
+      showCascade();   // an already-spent ladder shows its cascade on load
     })();
     </script>
     {% endif %}
