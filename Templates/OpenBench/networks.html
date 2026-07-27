@@ -36,6 +36,12 @@
             <tr>
                 {% if network.default %}
                     <td><i class="fas fa-star default-network" aria-hidden="true"></i></td>
+                {% elif not is_approver %}
+                    {% if network.was_default %}
+                        <td><i class="fas fa-star was-default-network" aria-hidden="true"></i></td>
+                    {% else %}
+                        <td><i class="far fa-star non-default-network" aria-hidden="true"></i></td>
+                    {% endif %}
                 {% elif network.was_default %}
                     <td><a href="/networks/{{network.engine}}/DEFAULT/{{network.sha256}}">
                     <i class="fas fa-star was-default-network" aria-hidden="true"></i></a></td>
@@ -49,6 +55,7 @@
                 <td><a href="/networks/{{network.engine}}/DOWNLOAD/{{network.sha256}}">{{network.name}}</a></td>
                 <td>{{network.sha256}}</td>
 
+                {% if is_approver %}
                 <td>
                     <a href="/networks/{{network.engine}}/EDIT/{{network.sha256}}">
                             <i class="fa-solid fa-pen-to-square icon-muted"></i>
@@ -66,6 +73,10 @@
                                 <i class="fa-solid fa-trash-can icon-muted"></i></a>
                     {% endif %}
                 </td>
+                {% else %}
+                <td></td>
+                <td></td>
+                {% endif %}
             </tr>
         {% endfor %}
 

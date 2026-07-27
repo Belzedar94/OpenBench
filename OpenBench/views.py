@@ -604,7 +604,11 @@ def networks(request, engine=None, action=None, name=None, client=False):
         networks = Network.objects.all()
         if engine and engine in OPENBENCH_CONFIG['engines'].keys():
             networks = networks.filter(engine=engine)
-        return render(request, 'networks.html', { 'networks' : list(networks.order_by('-id').values()) })
+        is_approver = request.user.is_authenticated \
+            and Profile.objects.filter(user=request.user, approver=True).exists()
+        return render(request, 'networks.html', {
+            'networks' : list(networks.order_by('-id').values()),
+            'is_approver' : is_approver })
 
     # Require logins. Clients will be artifically logged in
     if not request.user.is_authenticated:
