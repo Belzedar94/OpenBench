@@ -36,6 +36,14 @@ urlpatterns = [
     django.urls.path(r'user/<str:username>/<int:page>/', OpenBench.views.user),
     django.urls.path(r'greens/', OpenBench.views.greens),
     django.urls.path(r'greens/<int:page>/', OpenBench.views.greens),
+    django.urls.path(
+        r'regression/', OpenBench.views.regression_index,
+        name='regression_index',
+    ),
+    django.urls.path(
+        r'regression/<str:engine>/', OpenBench.views.regression_engine,
+        name='regression_engine',
+    ),
     django.urls.path(r'search/', OpenBench.views.search),
 
     # Links for viewing general information tables

@@ -28,6 +28,7 @@ import OpenBench.config
 import OpenBench.datagen
 import OpenBench.datagen_publication
 import OpenBench.index_metrics
+import OpenBench.stats
 import OpenBench.utils
 
 from OpenBench.workloads.create_workload import create_workload
@@ -44,7 +45,7 @@ from django.contrib.auth.models import User
 from OpenSite.settings import MEDIA_ROOT
 
 from django.db import OperationalError, transaction
-from django.db.models import F, Q
+from django.db.models import Count, F, Q
 from django.http import HttpResponse, JsonResponse, FileResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.core.files.storage import FileSystemStorage
@@ -312,6 +313,46 @@ def greens(request, page=1):
 
     data = { 'completed' : completed[start:end], 'paging' : paging }
     return render(request, 'index.html', data)
+
+def _regression_tests():
+    return Test.objects.filter(
+        finished=True,
+        deleted=False,
+        test_mode='GAMES',
+        dev__name__startswith='regression-',
+    )
+
+def regression_index(request):
+
+    engines = _regression_tests().values('dev_engine').annotate(
+        test_count=Count('id'),
+    ).order_by('dev_engine')
+
+    return render(request, 'regression_index.html', { 'engines' : engines })
+
+def regression_engine(request, engine):
+
+    tests = list(
+        _regression_tests()
+        .filter(dev_engine=engine)
+        .select_related('dev', 'base')
+        .order_by('-creation', '-id')
+    )
+
+    if not tests:
+        raise django.http.Http404('No regression measurements for this engine')
+
+    for test in tests:
+        results = test.results()
+        lower, elo, upper = OpenBench.stats.Elo(results)
+        test.regression_elo = elo
+        test.regression_error = max(upper - elo, elo - lower)
+        test.regression_los = 100.0 * OpenBench.stats.LOS(results)
+
+    return render(request, 'regression_engine.html', {
+        'engine' : engine,
+        'tests'  : tests,
+    })
 
 def search(request):
 

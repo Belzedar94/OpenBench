@@ -1,0 +1,50 @@
+{% extends "OpenBench/base.html" %}
+
+{% load mytags %}
+
+{% block content %}
+
+    <h2>{{engine}} Regression Tests</h2>
+
+    <p>
+        <a href="{% url 'regression_index' %}">&larr; All engines</a>
+    </p>
+
+    <table class="stripes hoverable">
+        <tr class="table-header">
+            <th>Date</th>
+            <th>Development</th>
+            <th>Release anchor</th>
+            <th>TC</th>
+            <th>Book</th>
+            <th>Games</th>
+            <th>W / L / D</th>
+            <th>Elo (95%)</th>
+            <th>LOS</th>
+            <th>Test</th>
+        </tr>
+
+        {% for test in tests %}
+            <tr>
+                <td>{{test.creation|date:"Y-m-d"}}</td>
+                <td>{{test.dev.name}} <code>{{test.dev.sha|slice:":8"}}</code></td>
+                <td>{{test.base.name}} <code>{{test.base.sha|slice:":8"}}</code></td>
+                <td>{{test.dev_time_control}}</td>
+                <td>{{test.book_name}}</td>
+                <td style="text-align: right">{{test.games|insertCommas}}</td>
+                <td style="text-align: right">
+                    {{test.wins|insertCommas}} /
+                    {{test.losses|insertCommas}} /
+                    {{test.draws|insertCommas}}
+                </td>
+                <td style="text-align: right">
+                    {{test.regression_elo|floatformat:2}} &plusmn;
+                    {{test.regression_error|floatformat:2}}
+                </td>
+                <td style="text-align: right">{{test.regression_los|floatformat:1}}%</td>
+                <td><a href="/test/{{test.id}}/">#{{test.id}}</a></td>
+            </tr>
+        {% endfor %}
+    </table>
+
+{% endblock %}

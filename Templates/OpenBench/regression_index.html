@@ -1,0 +1,31 @@
+{% extends "OpenBench/base.html" %}
+
+{% block content %}
+
+    <h2>Regression Tests</h2>
+
+    <p>Periodic development-versus-release progress measurements.</p>
+
+    <table class="stripes hoverable">
+        <tr class="table-header">
+            <th>Engine</th>
+            <th>Measurements</th>
+        </tr>
+
+        {% for engine in engines %}
+            <tr>
+                <td>
+                    <a href="{% url 'regression_engine' engine=engine.dev_engine %}">
+                        {{engine.dev_engine}}
+                    </a>
+                </td>
+                <td style="text-align: right">{{engine.test_count}}</td>
+            </tr>
+        {% empty %}
+            <tr>
+                <td colspan="2">No regression measurements are available yet.</td>
+            </tr>
+        {% endfor %}
+    </table>
+
+{% endblock %}
