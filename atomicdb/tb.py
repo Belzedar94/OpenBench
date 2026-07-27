@@ -92,9 +92,13 @@ def _get_tablebase():
 def probe_wdl(fen, max_pieces=6):
     """Probe Atomic WDL from the side-to-move perspective, or return ``None``.
 
-    This intentionally matches ``Client.atomicdb_worker.probe_tb``: WDL is the
-    raw value returned by python-chess (normally -2..2), and all unsupported or
-    failed probes are represented by ``None``.
+    This intentionally matches the WDL half of
+    ``Client.atomicdb_worker.probe_tb``: WDL is the raw value returned by
+    python-chess (normally -2..2), and all unsupported or failed probes are
+    represented by ``None``.  The worker additionally reports DTZ when its
+    tables can give it, which is what lets a TB closure say for which entry
+    clocks it holds; the server does not re-derive DTZ here, so a closure
+    without one keeps ``clock_slack`` at zero.
     """
     if not is_applicable(fen, max_pieces=max_pieces):
         return None
