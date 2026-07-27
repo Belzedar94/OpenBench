@@ -21,10 +21,11 @@
 # The implementation for PentanomialSPRT is taken directly from Fishtest.
 # The implementation for TrinomialSPRT was derived directory from Fishtest.
 #
-# Only three functions should be used externally from this Module.
+# Only four functions should be used externally from this Module.
 # 1. llr = TrinomialSPRT([losses, draws, wins], elo0, elo1)
 # 2. llr = PentanomialSPRT([ll, ld, dd, dw, ww], elo0, elo1)
 # 3. lower, elo, upper = Elo((L, D, W) or (LL, LD, DD/WL, DW, WW))
+# 4. los = LOS((L, D, W) or (LL, LD, DD/WL, DW, WW))
 
 import math
 import scipy
@@ -84,6 +85,25 @@ def Elo(results):
     mu_max = mu + scipy.stats.norm.ppf(0.975) * math.sqrt(var) / math.sqrt(N)
 
     return logistic_elo(mu_min), logistic_elo(mu), logistic_elo(mu_max)
+
+
+def LOS(results):
+
+    # Probability that the observed score is greater than an even score.
+    # This is the same normal approximation used by Fishtest's get_elo().
+    if not (N := sum(results)):
+        return 0.50
+
+    div = len(results) - 1
+    mu  = sum((f / div) * results[f] for f in range(len(results))) / N
+    var = sum(((f / div) - mu)**2 * results[f] for f in range(len(results))) / N
+
+    # Degenerate samples have no uncertainty. Keep the neutral all-draws
+    # result at 50%, while unanimous decisive samples are certain.
+    if not var:
+        return 0.50 if mu == 0.50 else float(mu > 0.50)
+
+    return scipy.stats.norm.cdf((mu - 0.50) / (math.sqrt(var) / math.sqrt(N)))
 
 
 def bayeselo_to_proba(elo, draw_elo):
