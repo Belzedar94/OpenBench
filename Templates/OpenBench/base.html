@@ -5,7 +5,36 @@
     {% load static %}
 
     <head>
+        <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark light">
+        <meta name="theme-color" id="atomicdb-theme-color" content="#161512">
+
+        <script>
+            (function () {
+                var root = document.documentElement;
+                var theme = "dark";
+                root.classList.add("theme-js");
+                try {
+                    var stored = window.localStorage.getItem("atomicdb-theme");
+                    if (stored === "light" || stored === "dark") {
+                        theme = stored;
+                    } else if (window.matchMedia &&
+                               window.matchMedia("(prefers-color-scheme: light)").matches) {
+                        theme = "light";
+                    }
+                } catch (_error) {
+                    if (window.matchMedia &&
+                        window.matchMedia("(prefers-color-scheme: light)").matches) {
+                        theme = "light";
+                    }
+                }
+                root.dataset.theme = theme;
+                root.style.colorScheme = theme;
+                document.getElementById("atomicdb-theme-color").content =
+                    theme === "light" ? "#f5f2ea" : "#161512";
+            }());
+        </script>
 
         <link rel="icon" type="image/svg+xml" href="{% static 'logo.svg' %}?{{ static_version }}">
         <link rel="stylesheet" href="{% static 'style.css' %}?{{ static_version }}">
@@ -17,6 +46,7 @@
 
         <link rel="preconnect" href="https://fonts.gstatic.com">
         <link href="https://fonts.googleapis.com/css2?family=Courier+Prime&display=swap" rel="stylesheet">
+        <script src="{% static 'atomicdb/theme.js' %}" defer></script>
 
         <title>OpenBench</title>
 
@@ -86,7 +116,7 @@
                 <li><a href="/index"><i class="fa-solid fa-house fa-fw"></i> Index</a></li>
                 <li><a href="/greens"><i class="fa-solid fa-heart fa-fw"></i> Greens</a></li>
                 <li><a href="/regression"><i class="fa-solid fa-chart-line fa-fw"></i> Regression Tests</a></li>
-                <li><a href="/atomicdb/" style="color:#e8a33d;font-weight:600"><i class="fa-solid fa-atom fa-fw"></i> AtomicDB</a></li>
+                <li><a class="atomicdb-link" href="/atomicdb/"><i class="fa-solid fa-atom fa-fw"></i> AtomicDB</a></li>
                 <li><a href="/search"><i class="fa-solid fa-magnifying-glass fa-fw"></i> Search</a></li>
             </ul>
 
@@ -141,6 +171,25 @@
                     <h2>
                         <a class="site-title" href="/">OpenBench&nbsp;Testing&nbsp;Framework</a>
                     </h2>
+                    <button type="button" class="theme-toggle" id="theme-toggle"
+                        role="switch" aria-checked="true" aria-labelledby="theme-toggle-label"
+                        title="Switch to light mode">
+                        <span class="theme-toggle-track" aria-hidden="true">
+                            <span class="theme-toggle-icon theme-toggle-sun">
+                                <svg viewBox="0 0 24 24">
+                                    <circle cx="12" cy="12" r="3.5"></circle>
+                                    <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path>
+                                </svg>
+                            </span>
+                            <span class="theme-toggle-icon theme-toggle-moon">
+                                <svg viewBox="0 0 24 24">
+                                    <path d="M20 15.2A8 8 0 0 1 8.8 4 8.35 8.35 0 1 0 20 15.2z"></path>
+                                </svg>
+                            </span>
+                            <span class="theme-toggle-thumb"></span>
+                        </span>
+                        <span class="visually-hidden" id="theme-toggle-label">Dark mode</span>
+                    </button>
                 </div>
 
                 {% if request.session.error_message %}
