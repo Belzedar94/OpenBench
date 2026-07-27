@@ -8,6 +8,7 @@ Flujo por resultado de analisis (§2):
 import time
 
 from django.conf import settings
+from django.db.models import Max
 from django.utils import timezone
 
 from . import logic, tb
@@ -31,6 +32,13 @@ FRONTIER_OR_WIDTH = 3
 FRONTIER_AND_CAP = 64
 FRONTIER_BLIND_WIDTH = 8   # no ordering information at all: widen a little
 FRONTIER_CLICK_CAP = 64    # hard ceiling of tasks queued by a single click
+# When that frontier is itself spent, the click descends instead of giving
+# up: proof-number search never abandons a node whose children are all
+# searched, it walks to the most-proving one and grows the tree there.  The
+# DAG transposes and can even close a cycle (1.Nf3 Nf6 2.Ng1 Ng8 IS the start
+# position once the counters are stripped), so the descent carries a visited
+# set and this hard ply guard-rail.
+FRONTIER_DESCENT_MAX_PLIES = 32
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 CASCADE_GUARD_LIMIT = 100_000
 PRIORITY_REFRESH_SECONDS = 30.0
@@ -601,7 +609,7 @@ def _frontier_rank(child, stm_white):
     return child.eval_cp if stm_white else -child.eval_cp
 
 
-def _frontier_children(parent):
+def _frontier_children(parent, limit=None):
     """Unsolved children worth buying next, best first and already sliced.
 
     Ordering, by decreasing trust:
@@ -614,7 +622,9 @@ def _frontier_children(parent):
        moves stand in for the ordering we do not have.
 
     Solved children never take a slot: an OR node cannot be proven through
-    them and an AND node has nothing left to ask of them.
+    them and an AND node has nothing left to ask of them.  ``limit`` is what
+    a descending click has left of its budget, so an entire descent still
+    fits inside one FRONTIER_CLICK_CAP allowance.
     """
     stm_white = parent.fen.split()[1] == 'w'
     # order_by('id') keeps the movegen order expand() wrote the edges in.
@@ -642,21 +652,61 @@ def _frontier_children(parent):
         width = FRONTIER_OR_WIDTH if informed else FRONTIER_BLIND_WIDTH
     else:             # AND node: every reply has to be answered
         width = FRONTIER_AND_CAP
-    return ranked[:min(width, FRONTIER_CLICK_CAP)]
+    width = min(width, FRONTIER_CLICK_CAP)
+    if limit is not None:
+        width = min(width, max(0, limit))
+    return ranked[:width]
 
 
-def _expand_frontier(parent):
+def _ladder_spent_keys(children):
+    """Which of these children have nothing left to buy, in one aggregate.
+
+    The descent probes a whole level at a time and only buys at the level
+    where it stops, so calling ``_request_rung`` child by child on the way
+    down would put thousands of statements inside a single click's write
+    transaction to learn what one grouped query already says.
+    """
+    keys = [child.key for child in children]
+    if not keys:
+        return set()
+    top_rung = REQUEST_BUDGET_LADDER[-1]
+    rows = (AnalysisTask.objects
+            .filter(position_id__in=keys,
+                    state=AnalysisTask.TState.COMPLETED)
+            .values('position_id')
+            .annotate(top=Max('budget_nodes')))
+    return {row['position_id'] for row in rows
+            if row['top'] is not None and row['top'] >= top_rung}
+
+
+def _ensure_expanded(pos):
+    """Materialise the legal edges of a level before anyone reads it.
+
+    A ladder can be spent on a position whose edges were never written (a
+    task completed without its analysis ever being ingested), and both the
+    descent probe and the frontier selection read edges before deciding
+    anything, so the level has to exist first.  Returns the locked row.
+    """
+    if pos.expanded or pos.status != 'UNKNOWN':
+        return pos
+    pos = Position.objects.select_for_update().get(pk=pos.pk)
+    expand(pos)
+    return pos
+
+
+def _expand_frontier(parent, limit=None):
     """Spend an exhausted request one ply deeper, proof-number style.
 
     Every selected child re-enters the ordinary ladder at its own natural
     floor (typically 128M).  A child whose own ladder is already spent is
-    counted and left alone: v1 deliberately does not recurse to grandchildren.
+    counted and left alone here; following it is the descent's job, and only
+    when EVERY candidate at this level is spent.
     """
     parent = Position.objects.select_for_update().get(pk=parent.pk)
     expand(parent)   # no-op once the legal edges already exist
     counts = {'children_considered': 0, 'children_queued': 0,
               'children_solved': 0, 'children_exhausted': 0}
-    for child in _frontier_children(parent):
+    for child in _frontier_children(parent, limit=limit):
         counts['children_considered'] += 1
         outcome = _request_rung(child)
         if outcome == _LADDER_EXHAUSTED:
@@ -665,7 +715,70 @@ def _expand_frontier(parent):
             counts['children_solved'] += 1
         else:
             counts['children_queued'] += 1
-    return RequestOutcome('expanded', **counts)
+    return counts
+
+
+def _descent_outcome(status, stop, node, plies, totals):
+    """One payload shape for both endings, so the UI never branches on keys."""
+    return RequestOutcome(status, descent_plies=plies, descent_key=node.key,
+                          descent_stop=stop, **totals)
+
+
+def _descend_frontier(pos):
+    """Follow the spent line down until the click finds something to buy.
+
+    Proof-number search does not give up on a node whose whole frontier is
+    already searched: it walks to the most-proving node and grows the tree
+    there.  This is the same move.  While every candidate at the current
+    level has a spent ladder there is nothing left to buy here, so the
+    request follows the single most promising one and asks the same question
+    one ply lower:
+
+      * an OR node (the attacker to move) only needs one good try, so the
+        best eval leads;
+      * an AND node (the defender to move) must survive every reply, so the
+        unsolved child that is best FOR THE DEFENDER leads — the answer that
+        is hardest to refute.
+
+    Both are the same sentence in ``_frontier_children`` order, which ranks
+    by the mover's own point of view.  Solved nodes are never followed: there
+    is no question left to ask of them.  The visited set keeps a
+    transposition cycle from looping (1.Nf3 Nf6 2.Ng1 Ng8 IS the start
+    position once the counters are stripped) and the whole descent shares one
+    FRONTIER_CLICK_CAP budget plus one hard ply guard.
+
+    The way down writes nothing but the edges a level needs to be readable at
+    all: a descent that finds everything reachable spent or solved answers
+    'saturated' and has bought nothing.
+    """
+    totals = {'children_considered': 0, 'children_queued': 0,
+              'children_solved': 0, 'children_exhausted': 0}
+    visited = {pos.key}
+    node, plies = pos, 0
+    while True:
+        remaining = FRONTIER_CLICK_CAP - totals['children_queued']
+        if remaining <= 0:
+            return _descent_outcome('saturated', 'budget-spent', node,
+                                    plies, totals)
+        node = _ensure_expanded(node)
+        children = _frontier_children(node, limit=remaining)
+        spent = _ladder_spent_keys(children)
+        if len(spent) < len(children):
+            for name, value in _expand_frontier(node, limit=remaining).items():
+                totals[name] += value
+            return _descent_outcome('expanded', 'queued', node, plies, totals)
+        # Every candidate here is spent: charge the level and step down.
+        totals['children_considered'] += len(children)
+        totals['children_exhausted'] += len(children)
+        following = next((c for c in children if c.key not in visited), None)
+        if following is None:
+            return _descent_outcome('saturated', 'no-candidate', node,
+                                    plies, totals)
+        if plies >= FRONTIER_DESCENT_MAX_PLIES:
+            return _descent_outcome('saturated', 'depth-guard', node,
+                                    plies, totals)
+        visited.add(following.key)
+        node, plies = following, plies + 1
 
 
 def request_analysis(pos):
@@ -674,13 +787,16 @@ def request_analysis(pos):
 
     Agotada la escalera (10B ya COMPLETED), repetir el peldano no compra
     informacion nueva: la peticion se convierte en expansion de frontera un
-    ply mas abajo (estilo proof-number search).
-    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'."""
+    ply mas abajo (estilo proof-number search), y si esa frontera tambien
+    esta agotada el click DESCIENDE por el hijo mas prometedor hasta
+    encontrar trabajo o declararse 'saturated'.
+    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
+    | 'saturated'."""
     with atomic():
         outcome = _request_rung(pos)
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
-        return _expand_frontier(pos)
+        return _descend_frontier(pos)
 
 
 def _queue_disputed_reanalysis(pos):

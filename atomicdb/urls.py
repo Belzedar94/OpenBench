@@ -12,6 +12,7 @@ urlpatterns = [
     path('request/<str:key>/', views.api_request),
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),
+    path('api/frontier/<str:key>/', views.api_frontier),
     path('api/map/v1', map_api),
     path('api/lease', views.api_lease),
     path('api/heartbeat', views.api_heartbeat),

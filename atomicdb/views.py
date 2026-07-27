@@ -18,7 +18,8 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import Case, F, IntegerField, Q, Sum, Value, When, Window
+from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
+                              When, Window)
 from django.db.models.functions import RowNumber
 
 from . import ingest, logic, openings
@@ -530,7 +531,10 @@ def _api_request_once(request, key):
     # otherwise a browser retry could accidentally request the next rung.
     with atomic():
         outcome = ingest.request_analysis(pos)
-        if outcome in ('queued', 'already-queued', 'expanded'):
+        # 'saturated' bought nothing, but it walked the tree to find that out
+        # and the honest answer is still an answer: one click, one receipt,
+        # so the hourly allowance keeps bounding what a descent costs us.
+        if outcome in ('queued', 'already-queued', 'expanded', 'saturated'):
             RequestLog.objects.create(ip=ip, position=pos)
     payload = {'status': str(outcome)}
     # Only a frontier expansion carries counters; every other status keeps
@@ -1365,6 +1369,40 @@ def api_query(request):
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
 
 
+def api_frontier(request, key):
+    """What a click bought BELOW this position, for the explorer's poller.
+
+    Once the ladder is spent the work no longer lands on the position the
+    visitor clicked, so watching that row alone says nothing for six minutes.
+    This reports the level underneath instead: visitor tasks running, waiting
+    and finished on the direct children, plus how many of those children the
+    tree has already closed.
+
+    Deliberately two statements and no more.  The level is folded into ONE
+    aggregate because a position can have sixty children and this is polled
+    every ten seconds; a query per child would make the page cost grow with
+    the width of the tree.
+    """
+    status = (Position.objects.filter(key=key)
+              .values_list('status', flat=True).first())
+    if status is None:
+        return JsonResponse({'error': 'unknown position'}, status=404)
+    requested = Q(child__analysistask__source=AnalysisTask.Source.USER)
+
+    def tasks_in(state):
+        return Count('child__analysistask',
+                     filter=requested & Q(child__analysistask__state=state))
+
+    level = Edge.objects.filter(parent_id=key).aggregate(
+        children_total=Count('child', distinct=True),
+        children_solved=Count('child', distinct=True,
+                              filter=~Q(child__status='UNKNOWN')),
+        running=tasks_in(AnalysisTask.TState.LEASED),
+        queued=tasks_in(AnalysisTask.TState.PENDING),
+        done=tasks_in(AnalysisTask.TState.COMPLETED))
+    return JsonResponse({'key': key, 'status': status, **level})
+
+
 def _trust_for(pos):
     if pos.closure in ('TERMINAL', 'TB'):
         return 'VERIFIED'
@@ -1601,6 +1639,9 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,
+        # Spent ladder: a click here lands below, so the page shows the
+        # cascade underneath from the first render, before any click.
+        'frontier_exhausted': ingest.ladder_exhausted(pos),
         'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
                          else None),
