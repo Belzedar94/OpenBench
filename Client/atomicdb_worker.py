@@ -31,7 +31,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072802
+ATOMICDB_WORKER_BUILD = 2026072803
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -727,6 +727,23 @@ def _solve_once(server, auth, solver, lease_session):
     return True
 
 
+def _solve_loop(server, auth, solver, stop_event):
+    """Proof thread. The solver is single-threaded, so it runs BESIDE the
+    analysis engine instead of in front of it: one core proves while the
+    engine's threads keep the analysis queue (and visitor requests) moving.
+    A fortress-stratum attempt can hold this thread for many minutes; that
+    must never freeze the analysis loop again."""
+    while not stop_event.is_set():
+        did = False
+        try:
+            did = _solve_once(server, auth, solver,
+                              secrets.token_urlsafe(24))
+        except Exception as exc:  # the thread must survive anything
+            print(f'solve loop error: {exc}', flush=True)
+        if not did:
+            stop_event.wait(60)
+
+
 def probe_tb(tb, fen):
     """Return ``(wdl, dtz)``; ``dtz`` is None when the tables cannot give it.
 
@@ -808,6 +825,10 @@ def main():
         target=_heartbeat_loop, args=(a.S, auth, current_task, heartbeat_stop),
         name='atomicdb-heartbeat', daemon=True)
     heartbeat_thread.start()
+    if solver is not None and not a.once:
+        threading.Thread(
+            target=_solve_loop, args=(a.S, auth, solver, heartbeat_stop),
+            name='atomicdb-solver', daemon=True).start()
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)
     next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
     # Idempotency nonce for one logical lease request. Preserve it only across
@@ -826,12 +847,13 @@ def main():
                 if not _restart_updated_worker():
                     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash,
                                  syzygy=a.syzygy)
-        # Proof work first when asked for it: a SOLVE task is what actually
-        # closes a position, and the analysis queue is never empty.
-        if a.solve and _solve_once(a.S, auth, solver, secrets.token_urlsafe(24)):
-            if a.once:
-                break
-            continue
+        # In normal runs the solver lives in its own thread (started above)
+        # and this loop is analysis-only: "proof first" starved the analysis
+        # queue for the whole length of a fortress attempt.  --once keeps the
+        # historical smoke semantics: one unit of proof work is the work.
+        if a.solve and a.once and _solve_once(
+                a.S, auth, solver, secrets.token_urlsafe(24)):
+            break
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
         except LeaseRequestError as e:
