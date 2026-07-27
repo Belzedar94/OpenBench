@@ -1,6 +1,7 @@
 *.pyc
 .venv/
 .venv-codex/
+.venv-qa/
 .scratch/
 Client/*
 OpenBench/migrations/__pycache__/

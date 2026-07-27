@@ -18,6 +18,7 @@
 #                                                                             #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+import hashlib
 import json
 import os
 import re
@@ -26,7 +27,45 @@ import traceback
 
 from OpenSite.settings import PROJECT_PATH
 
-OPENBENCH_STATIC_VERSION = 'v6'
+# Assets that base.html links with the cache-busting token below.
+OPENBENCH_STATIC_ASSETS = [
+    os.path.join(PROJECT_PATH, 'OpenBench', 'static'),
+    os.path.join(PROJECT_PATH, 'atomicdb', 'static', 'atomicdb', 'theme.js'),
+]
+
+def compute_static_version(base='v7'):
+
+    # base.html appends this token to every stylesheet and script URL. While it
+    # was a hand-maintained constant, any edit to style.css that forgot to bump
+    # it kept the URL identical, so browsers and proxies happily served the
+    # previous file from cache -- which is exactly how the theme switch first
+    # shipped with new markup and old CSS. Folding a digest of the assets into
+    # the token makes the URL move whenever the assets do. Size and mtime are
+    # enough (and cheap); the token only has to change, not be reproducible.
+
+    digest = hashlib.sha256()
+
+    try:
+        for asset in OPENBENCH_STATIC_ASSETS:
+            paths = [asset]
+            if os.path.isdir(asset):
+                paths = sorted(
+                    os.path.join(root, name)
+                    for root, dirs, names in os.walk(asset)
+                    for name in names)
+
+            for path in paths:
+                stats = os.stat(path)
+                digest.update(os.path.basename(path).encode('utf-8'))
+                digest.update(str(stats.st_size).encode('utf-8'))
+                digest.update(str(int(stats.st_mtime)).encode('utf-8'))
+
+    except OSError:
+        return base # Unreadable assets: fall back to the manual token
+
+    return '%s-%s' % (base, digest.hexdigest()[:10])
+
+OPENBENCH_STATIC_VERSION = compute_static_version()
 
 OPENBENCH_CONFIG = None # Initialized by OpenBench/apps.py
 

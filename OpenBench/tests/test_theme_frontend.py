@@ -1,9 +1,14 @@
+import os
 import re
+import tempfile
+import time
 from pathlib import Path
 
 from django.conf import settings
 from django.template import loader
 from django.test import SimpleTestCase
+
+from OpenBench import config as openbench_config
 
 
 class OpenBenchThemeTemplateTests(SimpleTestCase):
@@ -183,6 +188,20 @@ class OpenBenchThemeStaticContractTests(SimpleTestCase):
             self.assertIn(marker, summary)
         self.assertNotIn('style="color:', summary)
 
+    def test_every_linked_asset_carries_the_cache_busting_token(self):
+        source = (
+            Path(settings.BASE_DIR) / 'Templates' / 'OpenBench' / 'base.html'
+        ).read_text(encoding='utf-8')
+
+        # A stylesheet or script linked without the token keeps its URL across
+        # deploys, so browsers and proxies go on serving the cached copy. That
+        # is how the theme switch first shipped with new markup and old CSS.
+        for asset in ['style.css', 'base.css', 'form.css', 'paging.css',
+                      'atomicdb/theme.js']:
+            with self.subTest(asset=asset):
+                self.assertIn(
+                    "{%% static '%s' %%}?{{ static_version }}" % asset, source)
+
     def test_shared_controller_persists_and_follows_system(self):
         source = (self.atomicdb_static / 'theme.js').read_text(
             encoding='utf-8',
@@ -197,3 +216,48 @@ class OpenBenchThemeStaticContractTests(SimpleTestCase):
             "toggle.setAttribute('aria-checked'",
         ]:
             self.assertIn(token, source)
+
+
+class OpenBenchStaticVersionTests(SimpleTestCase):
+
+    def test_token_tracks_the_assets_instead_of_a_manual_constant(self):
+
+        with tempfile.TemporaryDirectory() as folder:
+            asset = os.path.join(folder, 'style.css')
+
+            with open(asset, 'w', encoding='utf-8') as handle:
+                handle.write('body { color: red; }')
+
+            original = openbench_config.OPENBENCH_STATIC_ASSETS
+            openbench_config.OPENBENCH_STATIC_ASSETS = [folder]
+
+            try:
+                before = openbench_config.compute_static_version()
+                self.assertEqual(
+                    before, openbench_config.compute_static_version())
+
+                # mtime has one-second resolution in the digest
+                time.sleep(1.05)
+                with open(asset, 'w', encoding='utf-8') as handle:
+                    handle.write('body { color: blue; }\n/* longer now */')
+
+                after = openbench_config.compute_static_version()
+
+            finally:
+                openbench_config.OPENBENCH_STATIC_ASSETS = original
+
+        self.assertNotEqual(before, after)
+        self.assertTrue(before.startswith('v'))
+        self.assertTrue(after.startswith('v'))
+
+    def test_token_falls_back_when_assets_are_unreadable(self):
+
+        original = openbench_config.OPENBENCH_STATIC_ASSETS
+        openbench_config.OPENBENCH_STATIC_ASSETS = [
+            os.path.join('there', 'is', 'no', 'such', 'asset.css')]
+
+        try:
+            self.assertEqual(
+                openbench_config.compute_static_version(base='v9'), 'v9')
+        finally:
+            openbench_config.OPENBENCH_STATIC_ASSETS = original
