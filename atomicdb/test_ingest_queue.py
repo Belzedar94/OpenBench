@@ -19,7 +19,7 @@ from django.test import Client, override_settings
 from django.utils import timezone
 
 from . import ingest, ingest_queue, logic
-from .models import AnalysisTask, Edge, IngestJob, Position
+from .models import AnalysisTask, Edge, IngestJob, Position, ProofCampaign
 from .testing import TestCase
 
 
@@ -344,6 +344,7 @@ class SynchronousVsQueuedTests(TestCase):
         IngestJob.objects.all().delete()
         AnalysisTask.objects.all().delete()
         Edge.objects.all().delete()          # PROTECT sobre Edge.child
+        ProofCampaign.objects.all().delete()  # PROTECT sobre Campaign.root
         Position.objects.all().delete()
 
         self._fixture('async')

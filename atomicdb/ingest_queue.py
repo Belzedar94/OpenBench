@@ -182,6 +182,11 @@ def apply_job(job):
         current.save(update_fields=['state', 'summary', 'claimed_at',
                                     'next_attempt_at', 'last_error',
                                     'updated'])
+    # Hook del gestor de prueba.  ``backup_cascade`` ya refresca el cono que
+    # cambio, pero un trabajo puede no cascadear nada (WDL rechazado, posicion
+    # ya cerrada) y aun asi haber movido la eval que inicializa la hoja.  Esto
+    # es lo que garantiza que TODO submit toca los pn/dn de su posicion.
+    ingest.proof.refresh_proof_numbers([job.position_id])
     return summary
 
 

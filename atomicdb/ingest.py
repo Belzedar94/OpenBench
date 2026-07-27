@@ -11,7 +11,7 @@ from django.conf import settings
 from django.db.models import Max
 from django.utils import timezone
 
-from . import logic, tb
+from . import logic, proof, tb
 from .database import atomic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
@@ -270,6 +270,7 @@ def backup_cascade(seed_keys):
             'parent_id', flat=True):
         frontier.add(pid)
     changed_total = 0
+    changed_keys = []
     guard = 0
     while frontier and guard < CASCADE_GUARD_LIMIT:
         guard += 1
@@ -360,6 +361,7 @@ def backup_cascade(seed_keys):
             if dirty:
                 pos.save()
                 changed_total += 1
+                changed_keys.append(pos.key)
                 for e in Edge.objects.filter(child=pos).values_list(
                         'parent_id', flat=True):
                     frontier.add(e)
@@ -368,6 +370,11 @@ def backup_cascade(seed_keys):
             'iterations': guard, 'remaining': len(frontier),
             'seed_count': len(seed_keys),
         })
+    # Hook del gestor de prueba: los pn/dn del cono que acaba de moverse.
+    # Va DESPUES del punto fijo exacto a proposito — la prueba se apoya en el
+    # status, no al reves — y nunca puede tumbar una ingesta: unos numeros de
+    # prueba viejos ordenan peor, no mienten.
+    proof.refresh_proof_numbers(list(seed_keys) + changed_keys)
     return changed_total
 
 
@@ -915,6 +922,8 @@ def next_tasks(n):
     la cola igual de bien: el selector es una heuristica de PARA DONDE MIRAR,
     no una fuente de verdad.
     """
+    if proof.selector_mode() == 'pn':
+        return _next_tasks_by_proof(n)
     if inline_selector_enabled():
         refresh_priorities()
     tasks = []
@@ -927,6 +936,52 @@ def next_tasks(n):
             pos.save(update_fields=['priority'])
             continue
         task, _ = AnalysisTask.objects.get_or_create(
+            position=pos, generation=pos.visits,
+            defaults={'budget_nodes': budget_for(pos),
+                      'multipv': multipv_for(pos.visits)})
+        if task.state == 'PENDING':
+            tasks.append(task)
+    return tasks
+
+
+def _task_counter():
+    """Contador monotono y barato para el reparto blando del repertorio.
+
+    El id mas alto de la tabla de tareas ya es monotono y esta indexado, asi
+    que no hace falta ni una columna nueva ni un COUNT sobre millones de
+    filas.  Lo unico que se le pide es que avance.
+    """
+    return AnalysisTask.objects.order_by('-id').values_list(
+        'id', flat=True).first() or 0
+
+
+def _next_tasks_by_proof(n):
+    """Selector df-pn: baja desde la raiz de cada campana activa.
+
+    Coste O(profundidad x branching) de LECTURAS por tarea, sin una sola
+    pasada global.  La asignacion blanda del repertorio (80/15/5 por defecto)
+    se resuelve con un contador determinista: el mismo estado produce la misma
+    cola, y un replay es reproducible.
+    """
+    campaigns = proof.active_campaigns()
+    if not campaigns:
+        return []
+    base = _task_counter()
+    tasks, seen, attempts = [], set(), 0
+    budget = 4 * max(1, n)
+    while len(tasks) < n and attempts < budget:
+        campaign = campaigns[attempts % len(campaigns)]
+        pos, _plies = proof.descend(campaign, counter=base + attempts,
+                                    avoid=seen)
+        attempts += 1
+        if pos is None or pos.key in seen:
+            continue
+        seen.add(pos.key)
+        if not _still_reachable(pos):
+            pos.priority = DEAD
+            pos.save(update_fields=['priority'])
+            continue
+        task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget_for(pos),
                       'multipv': multipv_for(pos.visits)})

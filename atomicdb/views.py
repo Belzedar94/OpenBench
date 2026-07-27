@@ -384,6 +384,8 @@ def api_submit(request):
         return JsonResponse({'error': 'malformed: invalid tb_wdl'}, status=400)
 
     machine = request.POST.get('machine', '')
+    engine_sha = _sha_field(request.POST.get('engine_sha', ''))
+    net_sha = _sha_field(request.POST.get('net_sha', ''))
     provided_lease_token = request.POST.get('lease_token', '')
     try:
         snapshot = AnalysisTask.objects.select_related('position').get(id=task_id)
@@ -439,9 +441,13 @@ def api_submit(request):
         task.completed = timezone.now()
         task.nodes_searched = searched
         task.elapsed_seconds = elapsed
+        # Procedencia opcional: un worker anterior a este build no la manda y
+        # las columnas se quedan vacias, que es exactamente lo que ya pasaba.
+        task.engine_sha = engine_sha
+        task.net_sha = net_sha
         task.save(update_fields=[
             'state', 'machine', 'completed', 'nodes_searched',
-            'elapsed_seconds'])
+            'elapsed_seconds', 'engine_sha', 'net_sha'])
         ping_updates = {
             'tasks_done': F('tasks_done') + 1,
             'last_seen': timezone.now(),
@@ -479,6 +485,19 @@ def api_submit(request):
         'total': round(total_seconds, 3),
     }
     return JsonResponse({'ok': True, 'summary': summary})
+
+
+def _sha_field(raw):
+    """Un sha256 hex en minusculas, o cadena vacia. Nunca levanta.
+
+    Es telemetria opcional que llega de un cliente no confiable: se sanea a
+    lo que la columna admite y punto.  No cierra nada, no autoriza nada; solo
+    hace ATRIBUIBLE un sesgo de evals a un binario concreto.
+    """
+    raw = str(raw or '').strip().lower()
+    if len(raw) != 64 or any(ch not in '0123456789abcdef' for ch in raw):
+        return ''
+    return raw
 
 
 def _client_ip(request):

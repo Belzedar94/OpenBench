@@ -78,10 +78,13 @@ class ProgressCaptureTests(TestCase):
         self.assertTrue(created)
         self.assertEqual(snapshot.bucket_start,
                          datetime(2026, 7, 23, 10, 0, tzinfo=UTC))
+        # Nine, not eight: migration 0018 seeds the root proof campaign, and
+        # a campaign needs its root position to exist.  That row is UNKNOWN
+        # and unexpanded, so it lands in total and unknown only.
         self.assertEqual(
             (snapshot.positions_total, snapshot.positions_unknown,
              snapshot.positions_closed, snapshot.positions_expanded),
-            (8, 2, 6, 2))
+            (9, 3, 6, 2))
         self.assertEqual(
             (snapshot.engine_nodes_total, snapshot.engine_seconds_total,
              snapshot.analyses_completed),
@@ -116,7 +119,7 @@ class ProgressCaptureTests(TestCase):
 
         self.assertFalse(created)
         self.assertEqual(second.pk, first.pk)
-        self.assertEqual(second.positions_total, 8)
+        self.assertEqual(second.positions_total, 9)
         self.assertEqual(ProgressSnapshot.objects.count(), 1)
 
     def test_snapshot_instance_cannot_be_updated_or_deleted(self):
@@ -136,7 +139,7 @@ class ProgressCaptureTests(TestCase):
 
         self.assertTrue(created)
         self.assertNotEqual(second.pk, first.pk)
-        self.assertEqual(second.positions_total, 9)
+        self.assertEqual(second.positions_total, 10)
         self.assertEqual(ProgressSnapshot.objects.count(), 2)
 
     def test_naive_capture_time_is_rejected(self):

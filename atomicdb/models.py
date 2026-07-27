@@ -117,6 +117,13 @@ class AnalysisTask(models.Model):
     # replayable without letting a different same-machine process steal it.
     lease_session = models.CharField(max_length=64, default='')
     attempts     = models.IntegerField(default=0)
+    # Procedencia del analisis, opcional y ADITIVA: un worker antiguo no la
+    # manda y no pasa nada.  Una eval no puede envenenar la VERDAD (solo los
+    # cierres exactos lo hacen), pero si puede envenenar la LIVENESS: un build
+    # roto que devuelve +3000 legales redirige el selector durante meses.  Con
+    # el sha del binario y el de la red, ese sesgo es atribuible.
+    engine_sha   = models.CharField(max_length=64, blank=True, default='')
+    net_sha      = models.CharField(max_length=64, blank=True, default='')
     created      = models.DateTimeField(auto_now_add=True)
     completed    = models.DateTimeField(null=True)
 
@@ -125,6 +132,76 @@ class AnalysisTask(models.Model):
             fields=['position', 'generation'], name='uniq_task_per_generation')]
         indexes = [models.Index(fields=['state', 'completed'],
                                 name='atomic_task_state_done')]
+
+
+class ProofCampaign(models.Model):
+    """Una PRUEBA en curso: raiz, objetivo y politica. No es el DAG.
+
+    El DAG universal (``Position``/``Edge``) es una cache de posiciones: evals
+    compartidas por transposicion y hechos exactos reutilizables.  Los numeros
+    de prueba NO son propiedad de una posicion — dependen de que se intenta
+    demostrar, desde que raiz y bajo que politica de repertorio — asi que viven
+    aqui y en ``ProofNode``, en tablas propias, y el DAG se queda como lo que
+    es.  Dos campanas pueden mirar la misma posicion con pn/dn distintos sin
+    contradecirse.
+    """
+
+    class Goal(models.TextChoices):
+        WHITE_WIN = 'WHITE_WIN'
+        BLACK_WIN = 'BLACK_WIN'
+
+    name = models.CharField(max_length=64, unique=True)
+    root = models.ForeignKey(Position, on_delete=models.PROTECT,
+                             related_name='proof_campaigns')
+    goal = models.CharField(max_length=10, choices=Goal.choices,
+                            default=Goal.WHITE_WIN)
+    active = models.BooleanField(default=True, db_index=True)
+    # Sube cuando cambian las recurrencias o la inicializacion de hojas: los
+    # pn/dn calculados con otra version no son comparables con estos.
+    algorithm_version = models.IntegerField(default=1)
+    # Repertorio BLANDO (no una restriccion de la prueba): que fraccion de las
+    # bajadas sigue la eleccion primaria, cual la de respaldo y cual explora.
+    # Una eleccion fija que resulte ser una trampa de fortaleza solo demuestra
+    # "esta estrategia fallo", nunca "el atacante no gana".
+    repertoire_policy = models.JSONField(default=dict, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.name} ({self.goal})'
+
+
+class ProofNode(models.Model):
+    """pn/dn de UNA posicion dentro de UNA campana.
+
+    ``pn`` = esfuerzo estimado para PROBAR el objetivo desde aqui, ``dn`` para
+    REFUTARLO.  Ambos saturan en ``proof.PROOF_INFINITY`` (2^62), que es el
+    infinito de la aritmetica: cabe holgadamente en un BigInteger y sumar dos
+    infinitos sigue sin desbordar en Python antes del clamp.
+    """
+
+    campaign = models.ForeignKey(ProofCampaign, on_delete=models.CASCADE,
+                                 related_name='nodes')
+    position = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                 related_name='proof_nodes')
+    pn = models.BigIntegerField(default=1)
+    dn = models.BigIntegerField(default=1)
+    # El nodo tiene hijos MATERIALIZADOS que la prueba ya considera; distinto
+    # de ``Position.expanded``, que habla del DAG universal.
+    expanded_in_proof = models.BooleanField(default=False)
+    selected_child = models.CharField(max_length=8, null=True, blank=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['campaign', 'position'], name='uniq_proof_node')]
+        indexes = [
+            models.Index(fields=['campaign', 'pn'], name='atomic_proof_pn'),
+            models.Index(fields=['campaign', 'dn'], name='atomic_proof_dn'),
+        ]
+
+    def __str__(self):
+        return f'{self.position_id[:12]} pn={self.pn} dn={self.dn}'
 
 
 class IngestJob(models.Model):

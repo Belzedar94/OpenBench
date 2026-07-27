@@ -30,7 +30,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072203
+ATOMICDB_WORKER_BUILD = 2026072801
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -594,6 +594,43 @@ def provision_engine(server):
     return dest
 
 
+def _file_sha256(path):
+    """sha256 de un fichero, o '' si no se puede leer.
+
+    Telemetria de PROCEDENCIA, opcional por diseno: el servidor la acepta si
+    llega y no la echa de menos si no.  Una eval no puede envenenar la verdad
+    del arbol (solo los cierres exactos lo hacen), pero un build roto puede
+    redirigir el selector durante meses; con el sha del binario y el de la red
+    ese sesgo es atribuible a algo concreto.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ''
+
+
+def _net_sha256(engine_path):
+    """sha256 de la red NNUE que el motor va a cargar, si es un fichero suelto.
+
+    Se busca en el cwd del worker (que es donde ``provision_engine`` la deja)
+    y junto al binario.  Una red embebida en el binario ya queda cubierta por
+    el sha del propio ejecutable.
+    """
+    import glob
+    candidates = sorted(glob.glob('*.nnue'))
+    directory = os.path.dirname(os.path.abspath(engine_path))
+    candidates += sorted(glob.glob(os.path.join(directory, '*.nnue')))
+    for candidate in candidates:
+        digest = _file_sha256(candidate)
+        if digest:
+            return digest
+    return ''
+
+
 def probe_tb(tb, fen):
     if tb is None:
         return None
@@ -647,6 +684,9 @@ def main():
             'threads': a.T, 'hash': a.hash, 'tb': '1' if tb else '0',
             'os': f'{platform.system()} {platform.release()}',
             'worker_build': ATOMICDB_WORKER_BUILD}
+    # Additive provenance: an older server simply ignores these POST fields.
+    provenance = {'engine_sha': _file_sha256(a.engine),
+                  'net_sha': _net_sha256(a.engine)}
     eng = Engine(a.engine, threads=a.T, hash_mb=a.hash, syzygy=a.syzygy)
     heartbeat_stop = threading.Event()
     current_task = CurrentTaskState()
@@ -694,7 +734,8 @@ def main():
             if wdl is not None:
                 try:
                     rr = _submit_until_definitive(a.S, {
-                        **auth, 'task_id': t['id'], 'lines': '[]',
+                        **auth, **provenance,
+                        'task_id': t['id'], 'lines': '[]',
                         'elapsed': f'{time.time() - t0:.2f}',
                         'tb_wdl': wdl,
                         'lease_token': t.get('lease_token', '')}, t['id'])
@@ -727,7 +768,8 @@ def main():
                     searched = max(searched, int(m.group(1)))
             try:
                 rr = _submit_until_definitive(a.S, {
-                    **auth, 'task_id': t['id'], 'lines': json.dumps(lines),
+                    **auth, **provenance,
+                    'task_id': t['id'], 'lines': json.dumps(lines),
                     'elapsed': f'{time.time() - t0:.2f}',
                     'nodes': searched,
                     'lease_token': t.get('lease_token', ''),

@@ -48,6 +48,8 @@ ORIGIN_ATOMICDB_TABLES = (
 POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_openingnamesuggestion',   # 0015_opening_name_suggestion
     'atomicdb_ingestjob',               # 0016_ingest_queue
+    'atomicdb_proofcampaign',           # 0017_proof_manager
+    'atomicdb_proofnode',               # 0017_proof_manager
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
