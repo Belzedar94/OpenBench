@@ -19,6 +19,11 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 import django.urls, OpenBench.views
+from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_cookie
+
+# 15s anonymous-friendly cache for the hottest read view (refresh storms)
+_index_cached = cache_page(15)(vary_on_cookie(OpenBench.views.index))
 
 urlpatterns = [
 
@@ -30,8 +35,8 @@ urlpatterns = [
     django.urls.path(r'profileConfig/', OpenBench.views.profile_config),
 
     # Links for viewing test tables
-    django.urls.path(r'index/', OpenBench.views.index),
-    django.urls.path(r'index/<int:page>/', OpenBench.views.index),
+    django.urls.path(r'index/', _index_cached),
+    django.urls.path(r'index/<int:page>/', _index_cached),
     django.urls.path(r'user/<str:username>/', OpenBench.views.user),
     django.urls.path(r'user/<str:username>/<int:page>/', OpenBench.views.user),
     django.urls.path(r'greens/', OpenBench.views.greens),
@@ -108,7 +113,7 @@ urlpatterns = [
     django.urls.path(r'api/datagen-producer/<str:sha256>/', OpenBench.views.api_datagen_producer),
 
     # Redirect anything else to the Index
-    django.urls.path(r'', OpenBench.views.index),
+    django.urls.path(r'', _index_cached),
 
     # Link for Ethereal Sales
     django.urls.path(r'Ethereal/', OpenBench.views.buyEthereal),
