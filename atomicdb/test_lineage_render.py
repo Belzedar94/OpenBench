@@ -71,6 +71,35 @@ class FormatSanLineTests(TestCase):
         self.assertGreaterEqual(views.LINEAGE_SEARCH_MAX_PLIES, 96)
 
 
+class LineboxCopyTests(TestCase):
+    """What a copy carries is the text nodes, never the CSS.
+
+    Wolfram selected a line in the explorer, pasted it, and got
+    "1. Nf3f62. e4d53. Nc3Bg4" — the plies were separated by margins,
+    which the clipboard does not see.  The separator must be a real
+    space in the markup.
+    """
+
+    def test_a_copied_line_has_spaces_between_plies(self):
+        from django.utils.html import strip_tags
+
+        from . import ingest
+        from .models import Edge
+
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        nf3 = Edge.objects.get(parent=root, move_uci='g1f3').child
+        ingest.expand(nf3)
+        nf6 = Edge.objects.get(parent=nf3, move_uci='g8f6').child
+
+        body = self.client.get(
+            f'/atomicdb/explore/{nf6.key}/').content.decode()
+        linebox = body.split('class="linebox"', 1)[1].split('</div>', 1)[0]
+        text = strip_tags(linebox)
+
+        self.assertIn('1. Nf3 Nf6', ' '.join(text.split()))
+
+
 class LineboxCssTests(TestCase):
 
     def test_the_move_list_wraps_or_scrolls_inside_its_own_box(self):

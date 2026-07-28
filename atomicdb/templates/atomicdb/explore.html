@@ -6,7 +6,7 @@
 <div class="linebox">
   {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
   {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
-    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% endfor %}
+    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
 {% else %}
 <div class="crumb">{% if line_from_root %}root position{% else %}&hellip; lineage unavailable{% endif %}</div>

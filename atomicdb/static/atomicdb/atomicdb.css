@@ -776,7 +776,9 @@ h2 {
 }
 
 .linebox a {
-  margin-right: .1rem;
+  /* Plies are separated by a REAL space in the markup, not by a margin: the
+     clipboard carries text nodes only, and a margin-separated line pastes
+     as "1. Nf3f62. e4d5".  Keep it that way. */
   padding: .1rem .3rem;
   border-radius: 4px;
   color: var(--ink);
