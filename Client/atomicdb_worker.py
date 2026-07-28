@@ -33,7 +33,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072806
+ATOMICDB_WORKER_BUILD = 2026072807
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -546,6 +546,259 @@ class Engine:
             self.p.kill()
 
 
+# ---------------------------------------------------------------------------
+# Tablebases for every worker, not just the closures
+# ---------------------------------------------------------------------------
+#
+# Analysis that cannot see a tablebase re-searches endgames that were solved
+# decades ago, and it does it on every visit.  The 3-4-5 atomic set is 1.3 GB,
+# which is worth asking a contributor to store once and never worth asking
+# them to fetch by hand -- so the worker fetches it itself, verifies it, and
+# gets out of the way if the mirror is down.
+#
+# Three rules shape everything below:
+#
+#   * an explicit --syzygy is never touched.  Our own T2 box points at a full
+#     six-man set; auto-fetching over that would be a downgrade.
+#   * the fetch is idempotent and resumable, because it runs on EVERY start,
+#     including the restart after a self-update.  A worker that re-downloads
+#     1.3 GB whenever it updates is a worker nobody keeps running.
+#   * a dead mirror never stops the fleet.  Failure means starting without
+#     tablebases and saying so, not exiting.
+SYZYGY_SET = 'atomic-syzygy-345'
+SYZYGY_BASE_PATH = '/atomicdb/engines/syzygy-345/'
+SYZYGY_DIR_NAME = 'syzygy-345'
+SYZYGY_FETCH_ATTEMPTS = 3
+SYZYGY_MANIFEST_TIMEOUT_SECONDS = 60
+SYZYGY_FILE_CONNECT_TIMEOUT_SECONDS = 15
+SYZYGY_FILE_READ_TIMEOUT_SECONDS = 600
+# Anti-bomb ceilings on a remote description of what to write to disk.
+SYZYGY_MAX_FILES = 4096
+SYZYGY_MAX_FILE_BYTES = 512 * 1024 * 1024
+_SYZYGY_HASH_CHUNK = 1 << 20
+
+
+class SyzygyManifestError(Exception):
+    """A manifest that is malformed, oversized, or not the set we asked for."""
+
+
+def parse_syzygy_manifest(payload):
+    """Validate the published vocabulary and return the file list.
+
+    The format is fixed by the distribution point:
+
+        {"set": "atomic-syzygy-345",
+         "files": [{"name": ..., "bytes": ..., "sha256": ...}, ...]}
+
+    Everything here is a remote instruction to write files on a contributor's
+    disk, so it is checked rather than trusted -- most of all ``name``, which
+    becomes a path.  A manifest that says ``../../.ssh/authorized_keys`` is
+    the reason this function exists.
+    """
+    if not isinstance(payload, dict):
+        raise SyzygyManifestError('manifest is not an object')
+    if payload.get('set') != SYZYGY_SET:
+        raise SyzygyManifestError(
+            f'manifest declares set {payload.get("set")!r}, not {SYZYGY_SET!r}')
+    files = payload.get('files')
+    if not isinstance(files, list) or not files:
+        raise SyzygyManifestError('manifest has no files')
+    if len(files) > SYZYGY_MAX_FILES:
+        raise SyzygyManifestError('manifest exceeds the file-count limit')
+
+    seen = set()
+    entries = []
+    for index, raw in enumerate(files):
+        if not isinstance(raw, dict):
+            raise SyzygyManifestError(f'file {index} is not an object')
+        name = raw.get('name')
+        if not isinstance(name, str) or not name:
+            raise SyzygyManifestError(f'file {index} has no name')
+        # A name is a leaf, always. No directories, no traversal, no drives.
+        if (name in ('.', '..') or '/' in name or '\\' in name
+                or name.startswith('.') or ':' in name
+                or os.path.basename(name) != name):
+            raise SyzygyManifestError(f'unsafe file name {name!r}')
+        if name in seen:
+            raise SyzygyManifestError(f'duplicate file name {name!r}')
+        seen.add(name)
+        size = raw.get('bytes')
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise SyzygyManifestError(f'{name}: bad byte count')
+        if size > SYZYGY_MAX_FILE_BYTES:
+            raise SyzygyManifestError(f'{name}: exceeds the per-file limit')
+        digest = raw.get('sha256')
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(c not in '0123456789abcdefABCDEF' for c in digest)):
+            raise SyzygyManifestError(f'{name}: bad sha256')
+        entries.append({'name': name, 'bytes': size,
+                        'sha256': digest.lower()})
+    return entries
+
+
+def _sha256_of_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(_SYZYGY_HASH_CHUNK), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def syzygy_file_state(directory, entry):
+    """``ok`` / ``missing`` / ``wrong-size`` / ``wrong-hash``.
+
+    Size is checked before the hash on purpose: it is a stat instead of a read,
+    and it catches the overwhelmingly common failure (a truncated download)
+    without paying to hash a gigabyte to find out.
+    """
+    path = Path(directory) / entry['name']
+    try:
+        actual = path.stat().st_size
+    except OSError:
+        return 'missing'
+    if actual != entry['bytes']:
+        return 'wrong-size'
+    if _sha256_of_file(path) != entry['sha256']:
+        return 'wrong-hash'
+    return 'ok'
+
+
+def syzygy_dir(script_path=None):
+    """Beside the SCRIPT, never the working directory.
+
+    A worker is started from wherever the contributor happens to be, and a
+    1.3 GB set that lands in a different place each time is a set downloaded
+    many times.
+    """
+    base = Path(script_path or __file__).resolve().parent
+    return base / SYZYGY_DIR_NAME
+
+
+def _download_syzygy_file(server, entry, directory, get):
+    """One file, staged and verified before it is allowed to exist."""
+    url = server.rstrip('/') + SYZYGY_BASE_PATH + entry['name']
+    response = get(url, stream=True,
+                   timeout=(SYZYGY_FILE_CONNECT_TIMEOUT_SECONDS,
+                            SYZYGY_FILE_READ_TIMEOUT_SECONDS))
+    close = getattr(response, 'close', None)
+    try:
+        response.raise_for_status()
+        _stream_syzygy_file(response, entry, directory)
+    finally:
+        # 292 files is 292 held connections if this is forgotten.
+        if close is not None:
+            close()
+
+
+def _stream_syzygy_file(response, entry, directory):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=entry['name'] + '.', suffix='.part',
+                                     dir=str(directory))
+    temp = Path(temp_name)
+    try:
+        digest = hashlib.sha256()
+        written = 0
+        with os.fdopen(fd, 'wb') as stream:
+            for block in response.iter_content(chunk_size=_SYZYGY_HASH_CHUNK):
+                if not block:
+                    continue
+                written += len(block)
+                if written > entry['bytes']:
+                    raise SyzygyManifestError(
+                        f"{entry['name']}: server sent more than the manifest "
+                        'declared')
+                digest.update(block)
+                stream.write(block)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if written != entry['bytes']:
+            raise SyzygyManifestError(
+                f"{entry['name']}: got {written} bytes, expected "
+                f"{entry['bytes']}")
+        if digest.hexdigest() != entry['sha256']:
+            raise SyzygyManifestError(f"{entry['name']}: sha256 mismatch")
+        # Only now does it get its real name: a half-written tablebase must
+        # never be mistaken for a good one by the next start.
+        os.replace(temp, directory / entry['name'])
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
+                     log=print, get=None):
+    """Bring the set on disk up to the manifest. Returns the dir, or None.
+
+    Idempotent and resumable: every pass re-checks what is on disk and fetches
+    only what is missing or wrong, so a cold start, a restart after a
+    self-update, and a resumed half-download all take the same path. Never
+    raises -- a mirror having a bad day is not a reason to stop analysing.
+    """
+    get = get or requests.get
+    directory = Path(directory) if directory is not None else syzygy_dir()
+
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            response = get(server.rstrip('/') + SYZYGY_BASE_PATH
+                           + 'manifest.json',
+                           timeout=SYZYGY_MANIFEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            entries = parse_syzygy_manifest(response.json())
+        except Exception as error:
+            log(f'syzygy: manifest unavailable ({error}); intento '
+                f'{attempt}/{attempts}', flush=True)
+            continue
+
+        pending = [e for e in entries
+                   if syzygy_file_state(directory, e) != 'ok']
+        if not pending:
+            log(f'syzygy: {len(entries)} ficheros verificados en {directory}',
+                flush=True)
+            return directory
+
+        missing_bytes = sum(e['bytes'] for e in pending)
+        log(f'syzygy: faltan {len(pending)}/{len(entries)} ficheros '
+            f'({missing_bytes / (1 << 20):.0f} MB); descargando a {directory}',
+            flush=True)
+        failed = 0
+        for entry in pending:
+            try:
+                _download_syzygy_file(server, entry, directory, get)
+            except Exception as error:
+                failed += 1
+                log(f"syzygy: {entry['name']} fallo ({error})", flush=True)
+        if not failed:
+            log(f'syzygy: set completo en {directory}', flush=True)
+            return directory
+        log(f'syzygy: {failed} ficheros pendientes tras el intento '
+            f'{attempt}/{attempts}', flush=True)
+
+    log('syzygy: no se pudo completar el set; el worker arranca SIN '
+        'tablebases (el analisis sigue siendo correcto, solo mas lento en '
+        'finales)', flush=True)
+    return None
+
+
+def resolve_syzygy(args, server, log=print, script_path=None, get=None):
+    """The SyzygyPath the engines should use, or '' for none.
+
+    An explicit --syzygy wins outright and is returned untouched, including
+    its multi-directory ';' form -- the contributor who typed it knows more
+    about their disk than this function does.
+    """
+    if args.syzygy:
+        return args.syzygy
+    if getattr(args, 'no_fetch_syzygy', False):
+        log('syzygy: descarga desactivada (--no-fetch-syzygy)', flush=True)
+        return ''
+    fetched = fetch_syzygy_set(server, syzygy_dir(script_path), log=log,
+                               get=get)
+    return str(fetched) if fetched else ''
+
+
 def _fetch_verified(server, entry, dest):
     """Descarga un archivo del manifest con sha256 verificado; reutiliza la
     copia local si ya coincide."""
@@ -945,7 +1198,12 @@ def main():
                          'Una posicion sola escala mal con muchos hilos, asi '
                          'que K analisis de T/K hilos rinden mas que uno de T')
     ap.add_argument('--hash', type=int, default=512)
-    ap.add_argument('--syzygy', default='', help='dirs de TB atomicas separados por ;')
+    ap.add_argument('--syzygy', default='',
+                    help='dirs de TB atomicas separados por ; (si se pasa, '
+                         'manda tal cual y no se descarga nada)')
+    ap.add_argument('--no-fetch-syzygy', action='store_true',
+                    help=f'no descargar el set {SYZYGY_SET} (1,3 GB) cuando '
+                         'no se ha pasado --syzygy')
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='no actualizar este archivo desde el servidor oficial')
@@ -958,16 +1216,32 @@ def main():
     if not a.no_auto_update and _install_worker_update(a.S):
         _restart_updated_worker()
 
+    # Deliberately AFTER the self-update: a restarted worker re-enters main()
+    # from the top, so the set is re-verified on every start rather than only
+    # on cold ones.  Verification of an intact set is a stat and a hash, so
+    # this costs seconds and downloads nothing.
+    a.syzygy = resolve_syzygy(a, a.S)
+
+    # The probing tablebase and the ADVERTISED capability are two different
+    # things.  python-chess gives the worker a fast pre-probe that skips the
+    # engine entirely; the engine gets SyzygyPath either way and resolves
+    # endgames itself.  So a missing python-chess must degrade the pre-probe,
+    # not the capability -- reporting tb=0 there would send every tablebase
+    # position to some other worker for no reason.
     tb = None
     if a.syzygy:
-        import chess.syzygy
-        import chess.variant
         dirs = [d for d in a.syzygy.split(';') if d]
-        tb = chess.syzygy.open_tablebase(dirs[0],
-                                         VariantBoard=chess.variant.AtomicBoard)
-        for d in dirs[1:]:
-            tb.add_directory(d)
-        print(f'syzygy: {len(dirs)} dirs', flush=True)
+        try:
+            import chess.syzygy
+            import chess.variant
+            tb = chess.syzygy.open_tablebase(
+                dirs[0], VariantBoard=chess.variant.AtomicBoard)
+            for d in dirs[1:]:
+                tb.add_directory(d)
+            print(f'syzygy: {len(dirs)} dirs, pre-probe activo', flush=True)
+        except Exception as error:
+            print(f'syzygy: {len(dirs)} dirs para el motor; sin pre-probe '
+                  f'({error})', flush=True)
 
     import platform
     if not a.engine:
@@ -997,7 +1271,7 @@ def main():
     # actually run and the capacity view should not have to guess.
     auth_base = {'username': a.U, 'password': a.P,
                  'threads': slot_threads[0], 'hash': a.hash,
-                 'tb': '1' if tb else '0',
+                 'tb': '1' if a.syzygy else '0',
                  'os': f'{platform.system()} {platform.release()}',
                  'worker_build': ATOMICDB_WORKER_BUILD}
     # Additive provenance: an older server simply ignores these POST fields.
