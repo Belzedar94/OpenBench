@@ -291,6 +291,19 @@ class SolveTask(models.Model):
         PROVED    = 'PROVED'
         DISPROVED = 'DISPROVED'
         UNKNOWN   = 'UNKNOWN'
+        # SURVIVE50 (doc 18 §6.1).  El PRIMER disproof que llega con
+        # certificado reproducible: los ``DISPROVED`` de arriba son
+        # afirmaciones sin reproducir, porque el solver df-pn solo emite
+        # certificado cuando PRUEBA.  Este trae una estrategia de
+        # supervivencia entera y se replica jugada a jugada.
+        #
+        # NO es ``BLACK_WIN`` y jamas debe convertirse en uno.  Refuta el
+        # objetivo booleano WHITE_WIN y no dice nada del objetivo
+        # independiente: Black sobrevive, que es compatible con tablas y con
+        # victoria negra, y distinguirlas necesita otra prueba.  Por eso este
+        # resultado NO cierra ninguna ``Position`` — alimenta al orquestador,
+        # que elimina el candidato blanco, y nada mas.
+        DISPROVED_WHITE_WIN = 'DISPROVED_WHITE_WIN'
 
     class Stage(models.TextChoices):
         """Peldano de la escalera F del doc 18 (§5).
@@ -329,11 +342,21 @@ class SolveTask(models.Model):
     lease_session = models.CharField(max_length=64, default='')
     attempts     = models.IntegerField(default=0)
     # Resultado
-    outcome      = models.CharField(max_length=10, choices=Outcome.choices,
+    outcome      = models.CharField(max_length=24, choices=Outcome.choices,
                                     blank=True, default='')
     certificate  = models.BinaryField(null=True, blank=True)
     certificate_bytes = models.IntegerField(default=0)
     certificate_nodes = models.IntegerField(default=0)
+    # Que verificador replica este certificado.  Hay dos formatos y dos
+    # verificadores independientes, y una fila que no dice cual es suyo es una
+    # fila que no se puede re-verificar sin adivinar.
+    certificate_format = models.CharField(max_length=48, blank=True,
+                                          default='')
+    # SURVIVE50: el reloj MINIMO desde el que la estrategia aguanta, en plies
+    # del contador de 50.  Es el valor central del certificado, no telemetria:
+    # ``tau <= reloj de entrada`` es exactamente lo que se ha probado.
+    survival_tau    = models.SmallIntegerField(null=True, blank=True)
+    survival_states = models.IntegerField(default=0)
     verified     = models.BooleanField(default=False)
     reject_reason = models.TextField(blank=True, default='')
     # Pistas de planificacion, NUNCA hechos: dependen del build, de la TT y

@@ -103,21 +103,28 @@ applying eight moves costs the same as applying one.  The floor for this
 verifier is therefore one ``get_fen`` per edge plus a handful per state, and no
 amount of care in this file moves it.
 
-That is worth stating plainly, because doc 18 §3 budgets verification at
-"40 states / ~500 universal edges in under 100 ms" and "10k states in
-seconds", and neither is reachable here.  Measured on the reference box:
+Which put this module two to three orders of magnitude outside the budget doc
+18 §3 assumes, and for a while that looked like a flaw in the doc.  It was
+not.  Writing the same algorithm in C++ against the same tree reproduced the
+cost almost exactly, which located it: pyffish calls ``UCI::init_variant`` on
+every position it constructs, and that rebuilds the whole piece attack table.
+It has to — the variant is an argument of every pyffish call.
 
-  * 500 edges  ->  about 8 seconds, not 100 ms;
-  * the full bare-kings closure, 8,064 states and 52,080 edges, took 1,190
-    seconds just to ENUMERATE, and verifying it costs the same again.
+So the reference is slow for a reason that has nothing to do with the checks
+it performs, and ``tools/survive50-verify`` binds the variant once and does
+the same work at ~90,000 positions/s.  ``verify_certificate_auto`` routes to
+it above ``NATIVE_VERIFIER_STATE_THRESHOLD``; this module remains the
+reference, which is a job about correctness and not about speed.
 
-So the practical ceiling is thousands of edges per minute, not hundreds of
-thousands per second, and the chunking-by-certified-SCC that the oracle
-reserved for certificates above a million edges belongs two or three orders of
-magnitude lower.  ``MAX_POSITIONS`` is set from the measurement rather than
-from the doc, and ``positions`` is reported on every run so the fleet budgets
-in the currency that actually costs something.
+``MAX_POSITIONS`` and the reported ``positions`` count stay, because the
+fleet should budget in the currency that actually costs something whichever
+verifier ran.
 """
+
+import json
+import pathlib
+import subprocess
+import tempfile
 
 import pyffish as pf
 
@@ -191,6 +198,102 @@ def _fail(code, message):
 
 class SurvivalReport(dict):
     """The verification report.  A dict, so it serialises without ceremony."""
+
+
+# ---------------------------------------------------------------------------
+# The F ladder (doc 18 §5), re-costed on measurement
+# ---------------------------------------------------------------------------
+#
+# The node budgets are the WORKER's, and they did not move: they come from the
+# observed 10^8 df-pn nodes in about twelve minutes.  What moved is the other
+# column, and it is the one that decides whether proof-carrying work pays.
+#
+#   stage  worker budget   certificate it can emit   verify (pyffish)  (native)
+#     F0      2M,  ~14 s   telemetry only                     --          --
+#     F1      5M,  ~36 s   ~1k states / 20k edges          ~6 min      0.2 s
+#     F2     20M, ~2.4 min ~10k states / 150k edges       ~47 min      1.9 s
+#     F3     50M,  ~6 min  ~50k states                     ~4 h        ~10 s
+#     F4    100M, ~12 min  ~100k states / 2M edges        ~10 h        ~24 s
+#
+# With the reference alone the server was the bottleneck by more than an order
+# of magnitude at every stage above F1 -- 2.4 minutes of searching bought 47
+# minutes of checking, which is not a proof-carrying design, it is a queue.
+# With the native verifier the ratio is ~70:1 the other way and the ladder
+# behaves the way doc 18 assumed it would.
+STAGE_BUDGETS = {
+    'F0': 2_000_000,
+    'F1': 5_000_000,
+    'F2': 20_000_000,
+    'F3': 50_000_000,
+    'F4': 100_000_000,
+}
+
+
+# ---------------------------------------------------------------------------
+# The F0 fortress classifier (doc 18 §5)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the four thresholds the engine computes in dfpn.h.  They live in two
+# places because the engine measures them and the server schedules on them;
+# if they ever disagree the engine is right, since it is the one that counted.
+FORTRESS_TT_HIT = 0.65
+FORTRESS_QUIET_SCC = 0.50
+FORTRESS_RESET_MAX = 0.05
+FORTRESS_STAGNATION_MAX = 2.0
+FORTRESS_INDICATORS_REQUIRED = 3
+
+
+# The keys as STORED, which are not the keys as sent.  The engine prints
+# ``solve fortress_tt_hit ...``, the worker posts ``fortress_tt_hit``, and
+# ``views._solve_submit`` strips the prefix before saving.  Reading the wire
+# names here would produce a classifier that never fires on real telemetry and
+# passes every test written against its own invention, so the vocabulary is
+# named once and pinned by a test against the view that fills it.
+TELEMETRY_KEYS = ('tt_hit', 'quiet_scc', 'reset_rate', 'stagnation')
+
+
+def fortress_indicators(telemetry):
+    """Which of the four fired.  ``telemetry`` is the worker's stored F0 report."""
+    if not isinstance(telemetry, dict):
+        return {}
+
+    def number(name):
+        try:
+            return float(telemetry.get(name))
+        except (TypeError, ValueError):
+            return None
+
+    tt = number('tt_hit')
+    scc = number('quiet_scc')
+    reset = number('reset_rate')
+    stagnation = number('stagnation')
+    return {
+        'tt_hit': tt is not None and tt >= FORTRESS_TT_HIT,
+        'quiet_scc': scc is not None and scc >= FORTRESS_QUIET_SCC,
+        # A reset rate of zero with no moves seen is not "few resets", it is
+        # no data; the view drops absent fields rather than storing a zero, so
+        # absence reads as None and only a real measurement counts.
+        'few_resets': reset is not None and reset <= FORTRESS_RESET_MAX,
+        # The engine emits 0.0 when it had no baseline to compare against, and
+        # the view clamps negatives to zero, so zero means "no reading".
+        'stagnant': (stagnation is not None
+                     and 0 < stagnation < FORTRESS_STAGNATION_MAX),
+    }
+
+
+def fortress_suspected(telemetry):
+    """Three of four.  SCHEDULING ONLY.
+
+    This never authorises a result and cannot be used to conclude anything
+    about a position.  It decides whether a candidate is worth an F1 survival
+    attempt instead of more df-pn, and that is the whole of its remit -- doc
+    18 §5 is explicit that the classifier affects scheduling and nothing else,
+    and Guid-Bratko is cited there as a detector precisely because a fortress
+    heuristic is not a fortress proof.
+    """
+    fired = fortress_indicators(telemetry)
+    return sum(1 for value in fired.values() if value) \
+        >= FORTRESS_INDICATORS_REQUIRED
 
 
 def _fifty_move_counter(fen):
@@ -566,8 +669,105 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
     })
 
 
+# ---------------------------------------------------------------------------
+# Routing: which verifier replays this one
+# ---------------------------------------------------------------------------
+
+NATIVE_BINARY = (pathlib.Path(__file__).resolve().parent.parent / 'tools'
+                 / 'survive50-verify' / 'survive50-verify.exe')
+if not NATIVE_BINARY.exists():
+    NATIVE_BINARY = NATIVE_BINARY.with_suffix('')
+
+# A native run that has not answered in this long is not going to.  The whole
+# point of the tool is that a 10k-state certificate is seconds, so a minute is
+# already four orders of magnitude of headroom.
+NATIVE_TIMEOUT_SECONDS = 120
+
+
+def declared_states(text):
+    """The state count from the header, for routing.  Cheap and untrusted.
+
+    Untrusted is the operative word: it decides which verifier runs, and both
+    verifiers then check the declaration against the body themselves.  A liar
+    can pick the slow path and nothing else.
+    """
+    try:
+        header, _ = parse_header(text)
+        return int(header.get('states', 0))
+    except (CertificateError, TypeError, ValueError):
+        return 0
+
+
+def native_available():
+    return NATIVE_BINARY.exists()
+
+
+def verify_certificate_native(text, root_fen=None, max_positions=MAX_POSITIONS,
+                              timeout=NATIVE_TIMEOUT_SECONDS):
+    """Replay through the pinned upstream Fairy-Stockfish binary.
+
+    Same checks, same rejection codes, ~1,400x the throughput.  The subprocess
+    is bounded on every axis that can run away: a positions budget, a wall
+    clock, and a certificate that was already size-checked before we got here.
+    """
+    if not NATIVE_BINARY.exists():
+        raise CertificateError('the native verifier is not built')
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / 'certificate.txt'
+        path.write_text(text, encoding='utf-8')
+        command = [str(NATIVE_BINARY), str(path), '--budget',
+                   str(int(max_positions))]
+        if root_fen:
+            command += ['--root', root_fen]
+        try:
+            finished = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise CertificateError(
+                f'the native verifier did not answer within {timeout}s')
+    line = (finished.stdout or '').strip().splitlines()
+    if not line:
+        raise CertificateError(
+            f'the native verifier said nothing (exit {finished.returncode})')
+    try:
+        payload = json.loads(line[-1])
+    except ValueError:
+        raise CertificateError('the native verifier produced unreadable output')
+    if not payload.get('ok'):
+        error = CertificateError(payload.get('message', 'rejected'))
+        error.code = payload.get('code', 'uncoded')
+        raise error
+    payload.pop('ok', None)
+    return SurvivalReport(payload)
+
+
+def verify_certificate_auto(text, root_fen=None, **kwargs):
+    """Route by size, fall back to the reference when the tool is missing.
+
+    Above the threshold the reference is not a slower option, it is an
+    unaffordable one, so the fallback is announced in the report rather than
+    silently taken: a caller with a deadline needs to know it just got the
+    thing that takes minutes.
+    """
+    native = (native_available()
+              and declared_states(text) >= NATIVE_VERIFIER_STATE_THRESHOLD)
+    if native:
+        report = verify_certificate_native(text, root_fen=root_fen,
+                                           **{k: v for k, v in kwargs.items()
+                                              if k == 'max_positions'})
+        report['verifier'] = 'native'
+        return report
+    report = verify_certificate(text, root_fen=root_fen, **kwargs)
+    report['verifier'] = 'reference'
+    report['native_unavailable'] = not native_available()
+    return report
+
+
 __all__ = [
     'CERTIFICATE_FORMAT', 'REPETITION_MODE', 'TERMINAL_PRECEDENCE_ID',
-    'CertificateError', 'MAX_POSITIONS', 'SurvivalReport',
-    'compress', 'decompress', 'parse_header', 'verify_certificate',
+    'CertificateError', 'MAX_POSITIONS', 'SurvivalReport', 'STAGE_BUDGETS',
+    'NATIVE_VERIFIER_STATE_THRESHOLD', 'compress', 'decompress',
+    'declared_states', 'fortress_indicators', 'fortress_suspected',
+    'native_available', 'parse_header', 'verify_certificate',
+    'verify_certificate_auto', 'verify_certificate_native',
 ]
