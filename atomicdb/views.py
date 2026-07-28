@@ -693,11 +693,10 @@ def api_solve_submit(request):
     return JsonResponse({'ok': True, 'summary': summary})
 
 
-# Un boton de expansion masiva es una decision humana, asi que se cuenta como
-# tal por IP.  El dedup por posicion no sirve aqui — cada click es sobre un
-# padre distinto — asi que la cuenta va sobre el evento propio.  Ampliado
-# x100 (orden 28-jul); los approvers logueados no tienen limite.
-BULK_REQUESTS_PER_IP_DAY = 1000
+# Sin limite de peticiones masivas (orden 28-jul: "lo volveremos a poner si
+# se complica; ahora la queue va muy rapida").  El evento BULK_REQUEST se
+# sigue registrando por IP: es la auditoria que permitiria reintroducir un
+# limite informado el dia que haga falta.
 
 
 @csrf_exempt
@@ -718,14 +717,6 @@ def api_request_unexplored(request, key):
         return JsonResponse({'status': 'already-solved'})
 
     ip = _client_ip(request)
-    is_approver = (request.user.is_authenticated and Profile.objects.filter(
-        user=request.user, approver=True).exists())
-    if not is_approver:
-        day_ago = timezone.now() - timedelta(days=1)
-        spent = DBEvent.objects.filter(
-            kind='BULK_REQUEST', ts__gte=day_ago, payload__ip=ip).count()
-        if spent >= BULK_REQUESTS_PER_IP_DAY:
-            return JsonResponse({'status': 'rate-limited'}, status=429)
 
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)

@@ -1,8 +1,7 @@
 """pn/dn beside every reply, and one click for the replies nobody looked at."""
 
-from unittest.mock import patch
 
-from . import ingest, logic, proof, views
+from . import ingest, logic, proof
 from .models import (AnalysisTask, DBEvent, Edge, Position, ProofCampaign,
                      ProofNode, RequestLog)
 from .testing import TestCase
@@ -128,26 +127,24 @@ class UnexploredButtonTests(TestCase):
         self.assertEqual(second['queued'], 0)
         self.assertEqual(AnalysisTask.objects.count(), first['queued'])
 
-    def test_the_daily_allowance_is_per_ip_and_per_button(self):
-        """The MECHANISM, not the number.
-
-        The allowance is policy and it moves — it was widened x100 on 28-jul —
-        so a test that spends exactly ten clicks stops testing anything the
-        moment the policy changes, and then fails for a reason that has
-        nothing to do with what it was written to protect.  Patch the limit,
-        spend it, and assert the cap fires.
+    def test_there_is_no_daily_allowance(self):
+        """The limit was removed outright (owner's order, 28-jul): the queue
+        drains fast enough that throttling humans costs more than it saves.
+        Pin the removal — a pile of prior BULK_REQUEST events from the same
+        IP must not produce a 429.  The events themselves are still written
+        (see the receipt test below); they are the audit trail that would
+        let an informed limit come back if it is ever needed.
         """
-        with patch.object(views, 'BULK_REQUESTS_PER_IP_DAY', 3):
-            for index in range(3):
-                DBEvent.objects.create(kind='BULK_REQUEST',
-                                       payload={'ip': '127.0.0.1',
-                                                'key': f'k{index}'})
+        for index in range(50):
+            DBEvent.objects.create(kind='BULK_REQUEST',
+                                   payload={'ip': '127.0.0.1',
+                                            'key': f'k{index}'})
 
-            response = self.client.post(
-                f'/atomicdb/request-unexplored/{self.root.key}/')
+        response = self.client.post(
+            f'/atomicdb/request-unexplored/{self.root.key}/')
 
-        self.assertEqual(response.status_code, 429)
-        self.assertEqual(response.json()['status'], 'rate-limited')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()['status'], 'rate-limited')
 
     def test_a_receipt_and_an_event_are_recorded(self):
         self.client.post(f'/atomicdb/request-unexplored/{self.root.key}/')
