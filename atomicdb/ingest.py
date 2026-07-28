@@ -55,7 +55,12 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # A legal terminal mate PV remains useful ENGINE evidence when the stronger
 # exhaustive AND/OR certificate cannot be produced promptly.  This is one
 # shared wall-clock allowance for the complete online submission.
-ONLINE_MATE_PROOF_SECONDS = 20.0
+#
+# 5s, no 20 (28-jul): con el backlog post-Postgres los applies eran CPU-bound
+# en estas pruebas online y la cola se comia la latencia; la flota F0
+# re-certifica en diferido todo lo que aqui se degrade a ENGINE, asi que el
+# tiempo online solo compra lo barato.
+ONLINE_MATE_PROOF_SECONDS = 5.0
 _priority_refresh_cache = {'at': 0.0}
 
 
