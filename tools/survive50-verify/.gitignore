@@ -1,0 +1,6 @@
+# Build products. The binary is built from the pinned upstream tree, so it is
+# reproducible and has no business in the repository.
+survive50-verify
+survive50-verify.exe
+*.o
+*.cert

@@ -142,11 +142,48 @@ MAX_STATES = 20_000
 MAX_EDGES = 200_000
 MAX_FANOUT = 256
 
+# WHICH VERIFIER THE SERVER REACHES FOR.
+#
+# Below this many states the reference in this module is used; above it, the
+# native tool in ``tools/survive50-verify``, invoked as a subprocess with the
+# same budget.  The wiring is phase 5; the number lives here so that both
+# sides agree on one constant rather than two opinions.
+#
+# The measured cost of the reference, so the number can be moved with data
+# rather than by feel.  It builds roughly ``4 x states + 2 x edges`` positions
+# and manages about 66 a second:
+#
+#     14 states,     19 edges  ->     75 positions  ->    ~1 s
+#    500 states, ~10k edges    ->   ~22k positions  ->    ~5 min
+#     10k states, ~150k edges  ->  ~340k positions  ->   ~85 min
+#
+# The native tool does the same work at ~90k positions/s, so the last row is
+# seconds rather than an afternoon.  A threshold of 500 therefore does NOT
+# mean "the reference is quick up to here" -- it means the reference is still
+# CORRECT up to here and the deployment is simpler.  Anything with a deadline
+# attached wants the native tool far below 500.
+NATIVE_VERIFIER_STATE_THRESHOLD = 500
+
 # The one that costs wall clock.  A "position" is one pyffish position
 # construction, measured at ~15 ms on the reference box, so 200k of them is
 # roughly fifty minutes: a worker task, never an online request.  Callers with
 # a deadline pass their own budget and get told what they spent.
 MAX_POSITIONS = 200_000
+
+
+
+def _fail(code, message):
+    """Raise a rejection carrying a STABLE machine-readable code.
+
+    The prose is for a human reading a log; the code is the contract. The
+    native verifier reproduces this vocabulary exactly, and the differential
+    test asserts that both implementations reject for the same reason and not
+    merely that both said no -- two verifiers rejecting the same certificate
+    on different grounds is a disagreement wearing a matching hat.
+    """
+    error = CertificateError(message)
+    error.code = code
+    raise error
 
 
 class SurvivalReport(dict):
@@ -178,7 +215,7 @@ class _Movegen:
     def _charge(self, count=1):
         self.spent += count
         if self.spent > self.budget:
-            raise CertificateError(
+            _fail('budget-exceeded', 
                 f'certificate exceeds the move generator budget '
                 f'({self.budget} positions)')
 
@@ -207,7 +244,7 @@ def parse_header(text):
     """Header fields and the index at which the record stream starts."""
     lines = text.split('\n')
     if not lines or lines[0].strip() != '# ' + CERTIFICATE_FORMAT:
-        raise CertificateError('unknown certificate format')
+        _fail('format-unknown', 'unknown certificate format')
     header = {}
     for index in range(1, min(len(lines), MAX_HEADER_LINES)):
         line = lines[index].strip()
@@ -217,22 +254,22 @@ def parse_header(text):
             continue
         name, _, value = line.partition(' ')
         if not name or not value:
-            raise CertificateError(f'malformed header line: {line!r}')
+            _fail('header-line-malformed', f'malformed header line: {line!r}')
         header[name] = value.strip()
-    raise CertificateError('certificate header is not terminated')
+    _fail('header-unterminated', 'certificate header is not terminated')
 
 
 def _check_header(header, root_fen):
     if header.get('ruleset') != logic.RULESET_ID:
-        raise CertificateError(
+        _fail('ruleset-mismatch', 
             f'certificate ruleset {header.get("ruleset")!r} is not '
             f'{logic.RULESET_ID!r}')
     if header.get('repetition') != REPETITION_MODE:
-        raise CertificateError(
+        _fail('repetition-mismatch', 
             f'certificate repetition mode {header.get("repetition")!r} is not '
             f'{REPETITION_MODE!r}')
     if header.get('terminal_precedence') != TERMINAL_PRECEDENCE_ID:
-        raise CertificateError(
+        _fail('precedence-mismatch', 
             f'certificate terminal precedence '
             f'{header.get("terminal_precedence")!r} is not '
             f'{TERMINAL_PRECEDENCE_ID!r}')
@@ -240,30 +277,30 @@ def _check_header(header, root_fen):
     # the SAME position, and a certificate keyed by a different identity would
     # pass every local check while describing an incoherent strategy.
     if header.get('canonical') != str(logic.CANONICAL_VERSION):
-        raise CertificateError(
+        _fail('canonical-version-mismatch', 
             f'certificate canonical version {header.get("canonical")!r} is not '
             f'{logic.CANONICAL_VERSION}')
 
     cert_root = header.get('root')
     if not cert_root:
-        raise CertificateError('certificate has no root position')
+        _fail('root-missing', 'certificate has no root position')
     if root_fen is not None and \
             logic.canonical_fen(cert_root) != logic.canonical_fen(root_fen):
-        raise CertificateError('certificate refutes a different position')
+        _fail('root-mismatch', 'certificate refutes a different position')
 
     declared = header.get('entry_clock')
     if declared is None:
-        raise CertificateError('certificate has no entry clock')
+        _fail('entry-clock-missing', 'certificate has no entry clock')
     try:
         entry_clock = int(declared)
     except ValueError:
-        raise CertificateError('certificate entry clock is malformed')
+        _fail('entry-clock-malformed', 'certificate entry clock is malformed')
     if not 0 <= entry_clock <= TAU_MAX:
-        raise CertificateError('certificate entry clock is out of range')
+        _fail('entry-clock-range', 'certificate entry clock is out of range')
     # The clock is a property of the position, not of the prover's opinion.
     actual = _fifty_move_counter(root_fen if root_fen is not None else cert_root)
     if entry_clock != min(actual, TAU_MAX):
-        raise CertificateError(
+        _fail('entry-clock-mismatch', 
             f'certificate entry clock {entry_clock} does not match the '
             f"root position's halfmove counter {actual}")
     return cert_root, entry_clock
@@ -286,26 +323,26 @@ def _parse_body(lines, start, max_states, max_edges, max_fanout):
 
         if kind == 'S':
             if seen_edge:
-                raise CertificateError('a state is declared after an edge')
+                _fail('state-after-edge', 'a state is declared after an edge')
             parts = rest.split(' ', 2)
             if len(parts) != 3:
-                raise CertificateError(f'malformed state record: {line!r}')
+                _fail('state-record-malformed', f'malformed state record: {line!r}')
             try:
                 state_id = int(parts[0])
                 tau = int(parts[1])
             except ValueError:
-                raise CertificateError(f'malformed state record: {line!r}')
+                _fail('state-record-malformed', f'malformed state record: {line!r}')
             if state_id != len(states):
-                raise CertificateError(
+                _fail('state-id-gap', 
                     'state identifiers must run from 0 without gaps')
             if len(states) >= max_states:
-                raise CertificateError('certificate exceeds the state limit')
+                _fail('state-limit', 'certificate exceeds the state limit')
             if not TAU_MIN <= tau <= TAU_MAX:
-                raise CertificateError(
+                _fail('tau-range', 
                     f'state {state_id} has tau {tau} outside [0, {TAU_MAX}]')
             fen = parts[2].strip()
             if fen in by_fen:
-                raise CertificateError(
+                _fail('state-duplicate', 
                     f'state {state_id} repeats the position of state '
                     f'{by_fen[fen]}')
             by_fen[fen] = state_id
@@ -316,32 +353,32 @@ def _parse_body(lines, start, max_states, max_edges, max_fanout):
             seen_edge = True
             parts = rest.split()
             if len(parts) != 3:
-                raise CertificateError(f'malformed edge record: {line!r}')
+                _fail('edge-record-malformed', f'malformed edge record: {line!r}')
             try:
                 state_id = int(parts[0])
             except ValueError:
-                raise CertificateError(f'malformed edge record: {line!r}')
+                _fail('edge-record-malformed', f'malformed edge record: {line!r}')
             if not 0 <= state_id < len(states):
-                raise CertificateError(
+                _fail('edge-unknown-state', 
                     f'edge cites unknown state {state_id}')
             edges += 1
             if edges > max_edges:
-                raise CertificateError('certificate exceeds the edge limit')
+                _fail('edge-limit', 'certificate exceeds the edge limit')
             entry = (parts[1], parts[2])
             if kind == 'W':
                 bucket = white.setdefault(state_id, [])
                 if len(bucket) >= max_fanout:
-                    raise CertificateError(
+                    _fail('fanout-limit', 
                         'a White state exceeds the fan-out limit')
                 bucket.append(entry)
             else:
                 if state_id in black:
-                    raise CertificateError(
+                    _fail('black-reply-duplicate', 
                         f'state {state_id} has more than one Black reply')
                 black[state_id] = entry
             continue
 
-        raise CertificateError(f'unknown record kind {kind!r}')
+        _fail('record-kind-unknown', f'unknown record kind {kind!r}')
 
     return states, by_fen, white, black, edges
 
@@ -351,13 +388,13 @@ def _resolve(target, states):
     if target == 'T':
         return None
     if not target.startswith('#'):
-        raise CertificateError(f'malformed edge target {target!r}')
+        _fail('edge-target-malformed', f'malformed edge target {target!r}')
     try:
         index = int(target[1:])
     except ValueError:
-        raise CertificateError(f'malformed edge target {target!r}')
+        _fail('edge-target-malformed', f'malformed edge target {target!r}')
     if not 0 <= index < len(states):
-        raise CertificateError(f'edge target #{index} is not a state')
+        _fail('edge-target-unknown', f'edge target #{index} is not a state')
     return index
 
 
@@ -375,7 +412,7 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         text.split('\n'), start, max_states, max_edges, max_fanout)
 
     if not states:
-        raise CertificateError('certificate has no states')
+        _fail('states-empty', 'certificate has no states')
     for name, value in (('states', len(states)), ('edges', edges)):
         declared = header.get(name)
         if declared is None:
@@ -383,9 +420,9 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         try:
             expected = int(declared)
         except ValueError:
-            raise CertificateError(f'certificate {name} count is malformed')
+            _fail('count-malformed', f'certificate {name} count is malformed')
         if expected != value:
-            raise CertificateError(
+            _fail('count-mismatch', 
                 f'certificate declares {expected} {name} but carries {value}')
 
     movegen = _Movegen(max_positions)
@@ -402,11 +439,11 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         # A state whose FEN is not in AtomicDB's canonical form is a state
         # whose identity is somebody else's.
         if movegen.canonical(fen) != fen:
-            raise CertificateError(
+            _fail('state-not-canonical', 
                 f'state {state_id} is not in canonical form: {fen}')
         status = movegen.terminal_status(fen)
         if status is not None:
-            raise CertificateError(
+            _fail('state-terminal', 
                 f'state {state_id} is already terminal ({status[0]}): {fen}')
 
         white_to_move = fen.split()[1] == 'w'
@@ -414,29 +451,29 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
 
         if white_to_move:
             if state_id in black:
-                raise CertificateError(
+                _fail('white-state-has-black-reply', 
                     f'state {state_id} has a Black reply but White is to move')
             listed = white.get(state_id, [])
             moves = [move for move, _ in listed]
             if len(set(moves)) != len(moves):
-                raise CertificateError(f'state {state_id} repeats a White move')
+                _fail('white-move-duplicate', f'state {state_id} repeats a White move')
             if set(moves) != set(legal):
                 missing = sorted(set(legal) - set(moves))
                 extra = sorted(set(moves) - set(legal))
-                raise CertificateError(
+                _fail('white-coverage-mismatch', 
                     f'state {state_id} does not cover exactly the legal White '
                     f'moves (missing={missing}, extra={extra})')
             plan.append(listed)
         else:
             if state_id in white:
-                raise CertificateError(
+                _fail('black-state-has-white-moves', 
                     f'state {state_id} has White moves but Black is to move')
             if state_id not in black:
-                raise CertificateError(
+                _fail('black-reply-missing', 
                     f'state {state_id} has no Black reply')
             move, target = black[state_id]
             if move not in legal:
-                raise CertificateError(
+                _fail('black-reply-illegal', 
                     f'state {state_id} selects illegal reply {move!r}')
             plan.append([(move, target)])
 
@@ -456,11 +493,11 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
             if index is None:
                 status = movegen.terminal_status(child)
                 if status is None:
-                    raise CertificateError(
+                    _fail('terminal-claim-but-game-continues', 
                         f'state {state_id}: move {move} is declared terminal '
                         f'but the game continues')
                 if status[0] == 'WHITE_WIN':
-                    raise CertificateError(
+                    _fail('terminal-reaches-white-win', 
                         f'state {state_id}: move {move} reaches a White win')
                 terminal_exits += 1
                 zeroing_edges += zeroing
@@ -468,7 +505,7 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
 
             child_canonical = movegen.canonical(child)
             if states[index][1] != child_canonical:
-                raise CertificateError(
+                _fail('edge-lands-elsewhere', 
                     f'state {state_id}: move {move} lands on '
                     f'{child_canonical} but claims state {index}')
             child_tau = states[index][0]
@@ -478,22 +515,22 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
                 # the exact point at which the "it is self-destructive anyway"
                 # shortcut becomes unsound.
                 if child_tau != 0:
-                    raise CertificateError(
+                    _fail('reset-into-nonzero-tau', 
                         f'state {state_id}: zeroing move {move} enters state '
                         f'{index} with tau {child_tau}, not 0')
                 zeroing_edges += 1
             elif child_tau > tau + 1:
-                raise CertificateError(
+                _fail('quiet-tau-inequality', 
                     f'state {state_id} (tau {tau}): quiet move {move} enters '
                     f'state {index} with tau {child_tau} > {tau + 1}')
 
     root_canonical = logic.canonical_fen(cert_root)
     root_id = by_fen.get(root_canonical)
     if root_id is None:
-        raise CertificateError('the root position is not among the states')
+        _fail('root-not-a-state', 'the root position is not among the states')
     root_tau = states[root_id][0]
     if root_tau > entry_clock:
-        raise CertificateError(
+        _fail('root-tau-above-clock', 
             f'certificate proves survival only from clock {root_tau}, but the '
             f'root enters at {entry_clock}')
 
