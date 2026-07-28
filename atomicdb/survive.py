@@ -149,20 +149,23 @@ MAX_FANOUT = 256
 # same budget.  The wiring is phase 5; the number lives here so that both
 # sides agree on one constant rather than two opinions.
 #
-# The measured cost of the reference, so the number can be moved with data
-# rather than by feel.  It builds roughly ``4 x states + 2 x edges`` positions
-# and manages about 66 a second:
+# The measured cost of the reference, so the number was moved with data rather
+# than by feel.  It builds roughly ``4 x states + edges`` positions and manages
+# about 66 a second, against ~90,000 for the native tool:
 #
-#     14 states,     19 edges  ->     75 positions  ->    ~1 s
-#    500 states, ~10k edges    ->   ~22k positions  ->    ~5 min
-#     10k states, ~150k edges  ->  ~340k positions  ->   ~85 min
+#      states / edges        reference      native
+#         14 /     19            ~1 s        6 ms
+#        100 /  ~2000           ~36 s       25 ms
+#        500 / ~10000            ~6 min      0.2 s
+#        10k / ~150k            ~47 min      1.9 s
 #
-# The native tool does the same work at ~90k positions/s, so the last row is
-# seconds rather than an afternoon.  A threshold of 500 therefore does NOT
-# mean "the reference is quick up to here" -- it means the reference is still
-# CORRECT up to here and the deployment is simpler.  Anything with a deadline
-# attached wants the native tool far below 500.
-NATIVE_VERIFIER_STATE_THRESHOLD = 500
+# So the threshold is 100, not 500.  The reference is not the fast path at any
+# size and was never going to be; what it is, is the INDEPENDENT one, and that
+# is worth keeping for two jobs only -- certificates small enough that a
+# subprocess is not worth the ceremony, and the differential in
+# test_survive_native, where being slow is irrelevant because being a second
+# opinion is the entire point.  Anything carrying a deadline goes native.
+NATIVE_VERIFIER_STATE_THRESHOLD = 100
 
 # The one that costs wall clock.  A "position" is one pyffish position
 # construction, measured at ~15 ms on the reference box, so 200k of them is
