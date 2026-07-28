@@ -20,9 +20,12 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
 # Visitor-requested reanalysis is deliberately steeper than autonomous tree
-# exploration: 128M -> 512M -> 2B -> 10B.
-REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
-                         10_000_000_000]
+# exploration: 512M -> 2B -> 10B.  The 128M first rung died on 28-jul by
+# owner's order: with a 288-core contributor chewing probes in seconds, a
+# first look that shallow wasted the click AND the box.  Legacy note: builds
+# older than LEASE_TOKEN_BUILD cannot take >128M tasks, so every first-visit
+# USER probe now needs a token-capable worker — the whole fleet already is.
+REQUEST_BUDGET_LADDER = [512_000_000, 2_000_000_000, 10_000_000_000]
 # Once the last rung is spent, buying it again would only repeat a search we
 # already have.  The request then becomes a proof-number style expansion of
 # the frontier one ply below: an OR node (the attacker of the conjecture,
@@ -98,13 +101,19 @@ def multipv_for(visits, budget_nodes=None, seeding=False):
 
     * SEMBRANDO (``bootstrap_root``): 5.  Ahi la anchura ES el producto — se
       esta ordenando un nivel entero por primera vez.
-    * PRESUPUESTO ALTO: 2.  Dos, no una, para conservar una segunda opinion de
-      ordenacion; una sola linea deja al arbol sin nada con que comparar.
-    * El resto: la politica por visitas de siempre, 5 al sembrar y 3 despues.
+    * PRIMERA VISITA: 5, a cualquier presupuesto.  Desde que el primer
+      peldano de peticion es 512M (28-jul), la regla de presupuesto pisaba a
+      la de primera mirada — y una primera mirada existe para lo mismo que la
+      siembra: informar un nivel entero de hijos.  Profundidad sin anchura en
+      un nodo virgen deja al arbol dos hijos informados y nada que comparar.
+    * REVISITA CON PRESUPUESTO ALTO: 2.  Dos, no una, para conservar una
+      segunda opinion de ordenacion.
+    * El resto: la politica por visitas de siempre, 5 al empezar y 3 despues.
     """
     if seeding:
         return 5
-    if budget_nodes is not None and budget_nodes >= DEPTH_BUDGET_THRESHOLD:
+    if (budget_nodes is not None and visits >= 1
+            and budget_nodes >= DEPTH_BUDGET_THRESHOLD):
         return DEPTH_MULTIPV
     return 5 if visits < 3 else 3
 
@@ -1710,11 +1719,12 @@ def _queue_disputed_reanalysis(pos):
     pending = (AnalysisTask.objects.filter(position=pos, state='PENDING')
                .order_by('-generation').first())
     if pending is not None:
-        # Un reanalisis por testigo refutado va a presupuesto maximo, asi
-        # que quiere PROFUNDIDAD: es exactamente el caso en el que la anchura
-        # ya demostro no estar viendo el fondo.
+        # Un reanalisis por testigo refutado quiere PROFUNDIDAD por
+        # definicion, tenga las visitas que tenga: es exactamente el caso en
+        # el que la anchura ya demostro no estar viendo el fondo.  Intencion
+        # explicita, no derivada de la politica por visitas.
         pending.budget_nodes = max(pending.budget_nodes, BUDGET_LADDER[-1])
-        pending.multipv = multipv_for(pos.visits, pending.budget_nodes)
+        pending.multipv = DEPTH_MULTIPV
         pending.save(update_fields=['budget_nodes', 'multipv'])
         return pending
 
@@ -1726,7 +1736,7 @@ def _queue_disputed_reanalysis(pos):
     return AnalysisTask.objects.create(
         position=pos, generation=generation,
         budget_nodes=BUDGET_LADDER[-1],
-        multipv=multipv_for(pos.visits, BUDGET_LADDER[-1]), source='AUTO')
+        multipv=DEPTH_MULTIPV, source='AUTO')
 
 
 # ---------------- cierre por certificado SOLVE ----------------
@@ -2097,11 +2107,14 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
     for child in unexplored_children(pos):
         if queued >= cap:
             break
+        # Un click humano compra sondas de grado peticion, no semillas de
+        # cobertura: el primer analisis de cada respuesta entra por el primer
+        # peldano de la escalera de peticiones (orden 28-jul, 512M).
+        budget = max(REQUEST_BUDGET_LADDER[0], budget_for(child))
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
-            defaults={'budget_nodes': max(COVERAGE_SEED_NODES,
-                                          budget_for(child)),
-                      'multipv': multipv_for(child.visits),
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(child.visits, budget),
                       'source': source})
         if created:
             queued += 1

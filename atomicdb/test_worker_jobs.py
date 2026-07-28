@@ -41,6 +41,34 @@ worker = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(worker)
 
 
+class LeaseCsrfTests(TestCase):
+    """The worker has no CSRF token and never will.
+
+    The first cut of the --jobs patch inserted two helpers between
+    ``@csrf_exempt`` and ``api_lease``, silently moving the decorator onto a
+    helper and leaving the view protected.  Every test stayed green — the
+    Django test client does not enforce CSRF — while production would have
+    403'd the entire fleet on deploy.  This client enforces it.
+    """
+
+    def test_a_tokenless_worker_post_can_lease(self):
+        from django.test import Client
+
+        User.objects.create_user(username='w', password='p')
+        pos = ingest.get_or_create_position(logic.start_fen())
+        AnalysisTask.objects.create(position=pos, generation=0,
+                                    budget_nodes=8_000_000,
+                                    source=AnalysisTask.Source.USER)
+
+        response = Client(enforce_csrf_checks=True).post(
+            '/atomicdb/api/lease', {
+                'username': 'w', 'password': 'p', 'machine': 'm-csrf',
+                'worker_build': '2026072203', 'lease_session': 'm-csrf'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()['tasks']), 1)
+
+
 class ThreadBudgetTests(TestCase):
     """-T is a promise about the whole machine, not a per-engine setting."""
 

@@ -394,7 +394,8 @@ class RequestTests(TestCase):
         follow_up = AnalysisTask.objects.get(position=p, generation=1)
         self.assertEqual((follow_up.state, follow_up.source,
                           follow_up.budget_nodes),
-                         ('PENDING', 'USER', 128_000_000))
+                         ('PENDING', 'USER',
+                          ingest.REQUEST_BUDGET_LADDER[0]))
         running.refresh_from_db()
         self.assertEqual(running.budget_nodes, 8_000_000)
         self.assertTrue(RequestLog.objects.filter(position=p).exists())
@@ -459,8 +460,13 @@ class RequestTests(TestCase):
         ingest.next_tasks(2)                # tareas AUTO para ambas
         r = self.client.post(f'/atomicdb/request/{b.key}/')
         self.assertEqual(r.json()['status'], 'queued')
+        # Un worker moderno (con token): desde el suelo de 512M (28-jul) una
+        # tarea USER de primera visita ya no es tomable por un build legacy,
+        # y este test es sobre el ORDEN, no sobre la compatibilidad legacy.
         lease = self.client.post('/atomicdb/api/lease',
-                                 {'username': 'u', 'password': 'p'})
+                                 {'username': 'u', 'password': 'p',
+                                  'worker_build': '2026072203',
+                                  'lease_session': 'orden-test'})
         tasks = json.loads(lease.content)['tasks']
         self.assertEqual(tasks[0]['fen'], b.fen)  # USER antes que mejor prio
 
@@ -496,7 +502,8 @@ class RequestTests(TestCase):
 
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
-            position=p, generation=0, budget_nodes=128_000_000,
+            position=p, generation=0,
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[0],
             state=AnalysisTask.TState.LEASED,
             source=AnalysisTask.Source.AUTO,
             machine='m1', leased_at=timezone.now(),
@@ -516,12 +523,12 @@ class RequestTests(TestCase):
         first = self.client.post(f'/atomicdb/request/{p.key}/')
         self.assertEqual(first.json()['status'], 'queued')
         task = AnalysisTask.objects.get(position=p, generation=0)
-        self.assertEqual(task.budget_nodes, 128_000_000)
+        self.assertEqual(task.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
         task.state = AnalysisTask.TState.COMPLETED
-        task.nodes_searched = 128_000_000
+        task.nodes_searched = ingest.REQUEST_BUDGET_LADDER[0]
         task.save(update_fields=['state', 'nodes_searched'])
         Position.objects.filter(pk=p.pk).update(
-            visits=1, nodes_invested=128_000_000)
+            visits=1, nodes_invested=ingest.REQUEST_BUDGET_LADDER[0])
 
         second = self.client.post(f'/atomicdb/request/{p.key}/')
 
@@ -530,7 +537,7 @@ class RequestTests(TestCase):
         self.assertEqual(
             (follow_up.state, follow_up.source, follow_up.budget_nodes),
             (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
-             512_000_000),
+             ingest.REQUEST_BUDGET_LADDER[1]),
         )
 
     def test_fen_creation_log_does_not_block_first_analysis_request(self):
@@ -550,7 +557,7 @@ class RequestTests(TestCase):
         self.assertEqual(
             (task.state, task.source, task.budget_nodes),
             (AnalysisTask.TState.PENDING, AnalysisTask.Source.USER,
-             128_000_000),
+             ingest.REQUEST_BUDGET_LADDER[0]),
         )
 
     @mock.patch(

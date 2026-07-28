@@ -152,7 +152,6 @@ def _live_moves(task):
     return []
 
 
-@csrf_exempt
 def machine_base(machine):
     """La maquina fisica detras de un slot: ``base#3`` -> ``base``.
 
@@ -180,6 +179,7 @@ def _machine_at_lease_cap(machine):
     return held >= LEASES_PER_MACHINE
 
 
+@csrf_exempt
 def api_lease(request):
     user = _auth(request)
     if user is None:
