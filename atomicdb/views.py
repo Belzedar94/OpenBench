@@ -1182,9 +1182,12 @@ def _format_san_line(top, line, max_plies=16, keep_head=False):
         # Two different reasons the walk did not reach the root, and only one
         # of them is the reported bug.
         #
-        # It ran out of BUDGET: the line really is deeper than the ceiling, and
-        # a bare tail reads as broken.  Say how deep it is.
-        if len(line) >= LINEAGE_SEARCH_MAX_PLIES:
+        # It ran out of BUDGET — plies, or the node ceiling inside a
+        # transposition-heavy component (the walk marks that itself): the
+        # line really is deeper than what the walk could cross, and a bare
+        # tail reads as broken.  Say how deep it is.
+        if (len(line) >= LINEAGE_SEARCH_MAX_PLIES
+                or getattr(top, 'lineage_capped', False)):
             tail = ' '.join(st['san'] for st in line[-4:])
             return f'deep line, ply ≥{len(line)} · … {tail}'
         # Or it ran out of ANCESTORS: a short fragment whose link to the root
@@ -1327,12 +1330,15 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
                 key=lambda source: (-source[0], source[1]),
             )
         else:
-            # A closed cyclic component or the max-depth boundary: retain the
-            # longest acyclic context found, but do not pretend it is move 1.
+            # A closed cyclic component or a walk ceiling (depth, or the
+            # node budget that a transposition-heavy shuffle component
+            # exhausts long before reaching startpos): retain the longest
+            # acyclic context found, but do not pretend it is move 1.
             top_key = min(
                 state['seen'],
                 key=lambda node_key: (-state['distance'][node_key], node_key),
             )
+            state['capped'] = True
 
         ordered = []
         cursor = top_key
@@ -1347,6 +1353,13 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             cursor = child_key
 
         top = state['nodes'][top_key]
+        if state.get('capped'):
+            # The walk hit its OWN ceilings without finding a real boundary.
+            # The renderer must read this as "deep", never as "unrooted":
+            # an endgame shuffle sits in a transposition component that the
+            # bounded reverse BFS cannot cross, and painting it as an orphan
+            # fragment is exactly the reported head-drop bug again.
+            top.lineage_capped = True
         ucis = [uci for uci, _child_key in ordered]
         try:
             # One C++ call parses and advances the full line. Calling

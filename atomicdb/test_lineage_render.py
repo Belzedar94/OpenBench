@@ -71,6 +71,39 @@ class FormatSanLineTests(TestCase):
         self.assertGreaterEqual(views.LINEAGE_SEARCH_MAX_PLIES, 96)
 
 
+class CappedWalkLabelTests(TestCase):
+    """A walk that hits its own ceilings must read as DEEP, not as unrooted.
+
+    The endgame shuffle lines on the home page ("… Bb5 Kg2 Bc4 Bd7 …") live
+    in transposition components that exhaust the reverse BFS node budget
+    long before it reaches startpos.  The walk ended with no real boundary,
+    the fragment fell into the orphan branch, and the head-drop bug was
+    reported a second time.  The walk knows why it stopped; the label must
+    say it.
+    """
+
+    def test_a_node_capped_walk_labels_as_deep_not_orphan(self):
+        from unittest.mock import patch
+
+        from . import ingest, views
+        from .models import Edge
+
+        pos = ingest.get_or_create_position(logic.start_fen())
+        for uci in ('a2a3', 'a7a6', 'b2b3', 'b7b6'):
+            child = ingest.get_or_create_position(
+                logic.apply_move(pos.fen, uci))
+            Edge.objects.get_or_create(parent=pos, move_uci=uci,
+                                       defaults={'child': child})
+            pos = child
+
+        with patch.object(views, 'LINEAGE_SEARCH_MAX_NODES', 2):
+            top, line = views._line_to_root(pos)
+            text = views._format_san_line(top, line)
+
+        self.assertTrue(text.startswith('deep line'), text)
+        self.assertFalse(text.startswith('…'), text)
+
+
 class LineboxCopyTests(TestCase):
     """What a copy carries is the text nodes, never the CSS.
 
