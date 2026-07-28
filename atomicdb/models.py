@@ -446,8 +446,23 @@ class OpeningNameSuggestion(models.Model):
 
     El catalogo auditado (``data/atomic_openings_v1.json``) es inmutable y su
     identidad esta fijada por digest: nada en tiempo de ejecucion lo reescribe.
-    Un nombre aprobado aqui se APLICA por encima de el, sobre posiciones que el
-    catalogo no nombra (§ community_names), y queda marcado como comunitario.
+    Un nombre aprobado aqui se APLICA por encima de el (§ community_names) y
+    queda marcado como comunitario.
+
+    Dos formas, y la diferencia importa (28-jul, peticion del propietario:
+    "que la gente no solo pueda proponer nuevos nombres sino editar existentes
+    tambien, con la misma aprobacion que ahora"):
+
+    * ``NEW`` — la posicion no tenia nombre.  Sigue sin poder pisar al catalogo
+      auditado: si alguien lo nombra mientras la propuesta espera, la
+      aprobacion se convierte en rechazo, igual que antes.
+    * ``EDIT`` — la posicion YA tenia nombre y esto es una correccion de ese
+      nombre.  ``previous_name`` congela el nombre que se mostraba EN EL
+      MOMENTO DE PROPONER, no en el de aprobar: es lo que el proponente estaba
+      mirando, y es lo unico que hace legible un "actual -> propuesto" en la
+      cola aunque el nombre cambie entre medias.  Una edicion aprobada SI
+      desplaza al catalogo auditado en pantalla — ver community_names, donde
+      esta escrito por que eso no rompe la propiedad que el catalogo protege.
 
     ``resolved_by`` guarda el nombre de usuario, no una FK: el router de bases
     prohibe relaciones entre la base de AtomicDB y la de OpenBench.
@@ -458,9 +473,19 @@ class OpeningNameSuggestion(models.Model):
         APPROVED = 'APPROVED'
         REJECTED = 'REJECTED'
 
+    class SKind(models.TextChoices):
+        NEW  = 'NEW'
+        EDIT = 'EDIT'
+
     position      = models.ForeignKey(Position, on_delete=models.CASCADE,
                                       related_name='name_suggestions')
     proposed_name = models.CharField(max_length=60)
+    # Un flag explicito y no "previous_name != ''": lo que decide si algo
+    # puede desplazar al catalogo auditado tiene que decir lo que ES, no
+    # deducirse de que una cadena venga vacia.
+    kind          = models.CharField(max_length=4, choices=SKind.choices,
+                                     default=SKind.NEW)
+    previous_name = models.CharField(max_length=60, blank=True, default='')
     comment       = models.CharField(max_length=280, blank=True, default='')
     ip            = models.GenericIPAddressField(db_index=True)
     created       = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -474,6 +499,9 @@ class OpeningNameSuggestion(models.Model):
                                 name='atomic_suggestion_state')]
 
     def __str__(self):
+        if self.kind == self.SKind.EDIT:
+            return (f'{self.previous_name} -> {self.proposed_name} '
+                    f'({self.status})')
         return f'{self.proposed_name} ({self.status})'
 
 

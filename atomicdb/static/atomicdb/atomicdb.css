@@ -852,6 +852,13 @@ h2 {
   color: var(--ink);
 }
 
+/* El nombre que se esta corrigiendo: fuera del form, que es flex y lo
+   pondria en la misma fila que los campos. */
+.suggest-current {
+  margin: .6rem 0 0;
+  font-size: .78rem;
+}
+
 .suggest-name form {
   display: flex;
   flex-wrap: wrap;

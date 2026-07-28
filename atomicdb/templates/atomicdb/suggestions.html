@@ -3,9 +3,11 @@
 {% block content %}
 
 <h2 style="margin-top:0">Opening name suggestions</h2>
-<p class="dim">Visitors propose names for positions the audited catalogue does
-  not name. Approving one publishes it on that position, marked as a community
-  name; the static catalogue is never rewritten.</p>
+<p class="dim">Visitors propose a name where a position has none
+  (<strong>NEW</strong>), or a correction to the name a position already shows
+  (<strong>EDIT</strong>, written as <em>current &rarr; proposed</em>).
+  Approving one publishes it on that position, marked as a community name; the
+  static catalogue is never rewritten.</p>
 
 <h2>Pending <span class="dim">({{ pending_total }})</span></h2>
 {% if pending %}
@@ -14,7 +16,7 @@
     <th>From</th><th></th></tr>
   {% for item in pending %}
   <tr>
-    <td><strong>{{ item.row.proposed_name }}</strong></td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; <strong>'{{ item.row.proposed_name }}'</strong>{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% else %}<span class="dim">NEW:</span> <strong>{{ item.row.proposed_name }}</strong>{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td class="dim">{{ item.row.comment }}</td>
@@ -39,7 +41,7 @@
   <tr><th>Name</th><th>Position</th><th>State</th><th>By</th></tr>
   {% for item in history %}
   <tr>
-    <td>{{ item.row.proposed_name }}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; '{{ item.row.proposed_name }}'{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td>{% if item.row.status == 'APPROVED' %}<span class="chip won"></span>approved

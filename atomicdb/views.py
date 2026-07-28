@@ -2220,12 +2220,27 @@ def _opening_for_template(match):
     return result
 
 
+def _named_right_here(position_key):
+    """El nombre que lleva EXACTAMENTE esta posicion, o ``None``.
+
+    Una sola fuente para las tres preguntas que se hacen lo mismo: que pinta
+    la ficha, que etiqueta la jugada del padre, y contra que nombre se propone
+    una correccion.  El orden es el de ``community_names``: la capa comunitaria
+    solo devuelve algo cuando de verdad manda (una correccion aprobada), asi
+    que preguntarle primero no le da precedencia que no tenga.
+
+    Un nombre HEREDADO de un ancestro no cuenta: aqui se responde por esta
+    posicion exacta, igual que hacia el catalogo.
+    """
+    name = community_names.name_for(position_key)
+    if name is not None:
+        return name
+    match = openings.lookup_key(position_key)
+    return None if match is None else match['name']
+
+
 def _exact_child_opening(child_key, current_opening):
-    match = openings.lookup_key(child_key)
-    # El catalogo auditado manda; donde calla, puede hablar un nombre
-    # comunitario ya moderado.
-    name = match['name'] if match is not None \
-        else community_names.name_for(child_key)
+    name = _named_right_here(child_key)
     if name is None:
         return None
     if current_opening is not None and name == current_opening['name']:
@@ -2240,7 +2255,7 @@ SUGGESTION_MESSAGES = {
     'duplicate': 'You already have a pending suggestion for this position.',
     'rate-limited': 'Daily suggestion limit reached, try again tomorrow.',
     'invalid': 'A name is 2 to 60 characters of ordinary text.',
-    'already-named': 'This position already has a catalogued opening name.',
+    'unchanged': 'That is already the name this position shows.',
 }
 
 
@@ -2271,9 +2286,17 @@ def _suggestion_return_url(request, pos, outcome):
 def suggest_opening_name(request, key):
     """Propuesta publica de nombre, sin cuenta.
 
-    Anti-spam: una sola propuesta pendiente por IP y posicion, tope diario por
-    IP, longitud y alfabeto validados, y nada de nombres para posiciones que
-    el catalogo auditado ya nombra.
+    Dos formas por el MISMO formulario y el mismo endpoint: si la posicion no
+    tiene nombre se propone uno nuevo; si lo tiene, esto es una correccion de
+    ese nombre y la fila lo dice (``kind=EDIT``) y congela cual era
+    (``previous_name``).  Ese nombre se lee AQUI, no se acepta del POST: si
+    viniera del cliente, la cola de moderacion pintaria un "actual" que
+    cualquiera podria escribir.
+
+    Anti-spam: exactamente el mismo, y por eso vale para las dos formas — una
+    sola propuesta pendiente por IP y posicion, tope diario por IP, longitud y
+    alfabeto validados.  Lo unico que se anade es que una "correccion" que no
+    corrige nada no llega a la cola.
     """
     try:
         pos = Position.objects.get(key=key)
@@ -2285,8 +2308,6 @@ def suggest_opening_name(request, key):
     def back(outcome):
         return redirect(_suggestion_return_url(request, pos, outcome))
 
-    if openings.lookup_key(pos.key) is not None:
-        return back('already-named')
     name = ' '.join((request.POST.get('name') or '').split())
     comment = ' '.join((request.POST.get('comment') or '').split())
     if (len(name) < SUGGESTION_NAME_MIN_CHARS
@@ -2294,6 +2315,12 @@ def suggest_opening_name(request, key):
             or not SUGGESTION_NAME_RE.fullmatch(name)
             or len(comment) > SUGGESTION_COMMENT_MAX_CHARS):
         return back('invalid')
+
+    current = _named_right_here(pos.key)
+    if current == name:
+        return back('unchanged')
+    kind = (OpeningNameSuggestion.SKind.NEW if current is None
+            else OpeningNameSuggestion.SKind.EDIT)
 
     ip = _client_ip(request)
     if OpeningNameSuggestion.objects.filter(
@@ -2305,7 +2332,8 @@ def suggest_opening_name(request, key):
             ip=ip, created__gte=day_ago).count() >= SUGGESTIONS_PER_IP_DAY:
         return back('rate-limited')
     OpeningNameSuggestion.objects.create(
-        position=pos, proposed_name=name, comment=comment, ip=ip)
+        position=pos, proposed_name=name, comment=comment, ip=ip,
+        kind=kind, previous_name=current or '')
     return back('ok')
 
 
@@ -2363,8 +2391,13 @@ def suggestions(request):
                                status=OpeningNameSuggestion.SState.PENDING)
                        .first())
                 if row is not None:
-                    # El catalogo auditado pudo nombrarla mientras esperaba.
+                    # El catalogo auditado pudo nombrarla mientras esperaba, y
+                    # un nombre NUEVO no lo pisa: la aprobacion se convierte en
+                    # rechazo, igual que siempre.  Una CORRECCION no cae aqui —
+                    # nacio contra un nombre existente y el moderador acaba de
+                    # leer cual y cual lo sustituye.
                     if (decision == OpeningNameSuggestion.SState.APPROVED
+                            and row.kind != OpeningNameSuggestion.SKind.EDIT
                             and openings.lookup_key(row.position_id)
                             is not None):
                         decision = OpeningNameSuggestion.SState.REJECTED
@@ -2385,16 +2418,22 @@ def suggestions(request):
                     .select_related('position')
                     .order_by('-resolved_at')[:20])
     labels = _line_labels_many([row.position_id for row in pending + resolved])
-    rows = []
-    for row in pending:
+
+    def presented(row, live=False):
         preview, full = labels.get(row.position_id, ('', ''))
-        rows.append({'row': row, 'san': preview or 'start position',
-                     'full': full or 'start position'})
-    history = []
-    for row in resolved:
-        preview, full = labels.get(row.position_id, ('', ''))
-        history.append({'row': row, 'san': preview or 'start position',
-                        'full': full or 'start position'})
+        item = {'row': row, 'san': preview or 'start position',
+                'full': full or 'start position', 'drifted': ''}
+        # El "actual" de la fila es el de CUANDO se propuso.  Si el nombre se
+        # movio mientras esperaba, el moderador tiene que verlo: aprobar esto
+        # sustituye lo que hay HOY, no lo que habia entonces.
+        if live and row.kind == OpeningNameSuggestion.SKind.EDIT:
+            current = _named_right_here(row.position_id)
+            if (current or '') != row.previous_name:
+                item['drifted'] = current or '(no name)'
+        return item
+
+    rows = [presented(row, live=True) for row in pending]
+    history = [presented(row) for row in resolved]
     return render(request, 'atomicdb/suggestions.html', {
         'pending': rows, 'history': history,
         'pending_total': OpeningNameSuggestion.objects.filter(
@@ -2520,8 +2559,10 @@ def explore(request, key):
         'eval_backed': eval_backed,
         'eval_backed_plies': pos.backed_plies,
         'eval_point_str': None if point_stm is None else f'{point_stm:+d}cp',
-        # Propuesta de nombre: solo donde el catalogo auditado no dice nada.
-        'may_suggest_name': openings.lookup_key(pos.key) is None,
+        # Propuesta de nombre: en TODAS las posiciones desde el 28-jul.  Donde
+        # no hay nombre se propone uno; donde lo hay, la misma caja propone una
+        # correccion de ese nombre, que es lo que aqui se pasa a la plantilla.
+        'suggest_current_name': _named_right_here(pos.key) or '',
         'suggest_play': '' if active_ucis is None else ','.join(active_ucis),
         'suggest_anchor': current_anchor or '',
         'suggest_name_max': SUGGESTION_NAME_MAX_CHARS,
