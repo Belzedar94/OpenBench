@@ -133,6 +133,20 @@
           })
           .catch(() => {});
       }
+      // Digest de los HIJOS: el request normal toca visits/status del propio
+      // nodo, pero el boton masivo analiza a los hijos y este nodo no cambia
+      // ni un campo — el poller tiene que mirar tambien la tabla de Moves.
+      function kidsum(d) {
+        return (d.moves || []).reduce(function (a, m) {
+          return a + (m.visits || 0)
+                   + (m.score !== null && m.score !== undefined ? 1 : 0)
+                   + (m.status !== 'UNKNOWN' ? 1 : 0);
+        }, 0);
+      }
+      let kids0 = null;
+      fetch('/atomicdb/api/query?fen=' + encodeURIComponent(fen))
+        .then(r => r.json()).then(d => { kids0 = kidsum(d); })
+        .catch(() => {});
       function poll(tries) {
         if (tries <= 0) {
           btn.textContent = 'Still queued, check back in a while';
@@ -142,7 +156,8 @@
         fetch('/atomicdb/api/query?fen=' + encodeURIComponent(fen))
           .then(r => r.json())
           .then(d => {
-            if (d.visits > visits0 || d.status !== status0) {
+            const kidsChanged = kids0 !== null && kidsum(d) !== kids0;
+            if (d.visits > visits0 || d.status !== status0 || kidsChanged) {
               btn.textContent = 'Analysis arrived, reloading...';
               location.reload();
             } else {
