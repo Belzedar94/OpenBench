@@ -77,6 +77,24 @@ ALGORITHM_VERSION = 1
 DEFAULT_CAMPAIGN_NAME = 'root-white-win'
 DEFAULT_REPERTOIRE_POLICY = {'primary': 0.8, 'backup': 0.15, 'explore': 0.05}
 
+# Histeresis del hijo primario de un nodo OR (anti-baile).
+#
+# ``pn`` es una ESTIMACION de coste, no una medida: dos jugadas del atacante
+# igual de prometedoras se adelantan la una a la otra cada vez que llega un
+# analisis, y el descenso, que sigue al minimo, se iba con la que acabara de
+# parpadear.  El resultado es que ninguna de las dos acumula la profundidad
+# que la cerraria — el "baile" que reporto la comunidad.  Aqui el retador
+# tiene que ser K VECES mas barato de probar para destronar a la primaria:
+# no es una preferencia estetica, es la diferencia entre "mejor dentro del
+# ruido" y "mejor de verdad".
+#
+# Solo afecta a QUIEN es la primaria.  El reparto de visitas sigue siendo la
+# asignacion blanda 80/15/5 de siempre: la histeresis elige a quien va el 80%,
+# no cuanto es.  Un hijo ya PROBADO (pn = 0) no lo destrona nadie: ningun pn
+# puede ser menor que cero, asi que la condicion es imposible por
+# construccion, no por un caso especial.
+SELECTED_CHILD_HYSTERESIS = 3
+
 # Mantenimiento incremental (mismos topes de forma que el respaldo de evals).
 PROOF_MAX_PLIES = 64
 PROOF_MAX_REVISITS = 2
@@ -258,13 +276,34 @@ def _children_by_parent(parent_keys):
     return by_parent
 
 
-def compute_numbers(campaign, position, children, child_nodes):
+def sticky_index(best, held, numbers):
+    """Indice del primario respetando la histeresis, en aritmetica entera.
+
+    ``best`` es el mejor por pn de esta pasada y ``held`` el que ya era
+    primario (o ``None`` si no habia).  El retador destrona solo si
+    ``pn_retador < pn_actual / K``, escrito como producto para no perder el
+    caso ``pn_actual == 0`` por division entera.
+    """
+    if held is None or held == best:
+        return best
+    if numbers[best][0] * SELECTED_CHILD_HYSTERESIS < numbers[held][0]:
+        return best
+    return held
+
+
+def compute_numbers(campaign, position, children, child_nodes, previous=None):
     """(pn, dn, expanded_in_proof, selected_child) de un nodo.
 
     ``children`` es la lista de aristas materializadas; ``child_nodes`` el
     mapa de ``ProofNode`` de los hijos que ya existen.  Un hijo sin nodo de
     prueba aporta su inicializacion de hoja al vuelo, para que un cono a medio
     materializar no invente numeros optimistas.
+
+    ``previous`` es el ``selected_child`` que este nodo ya tenia: en un nodo
+    OR el primario es PEGAJOSO (ver ``SELECTED_CHILD_HYSTERESIS``).  Un nodo
+    AND no lo es: ahi el primario es la defensa mas dura de refutar, y
+    sostenerla contra evidencia nueva retrasaria justo la refutacion que la
+    prueba necesita.
     """
     goal = campaign.goal
     exact = terminal_numbers(position.status, goal)
@@ -288,6 +327,8 @@ def compute_numbers(campaign, position, children, child_nodes):
     pn, dn = internal_numbers(position.fen, goal, numbers)
     if is_or_node(position.fen, goal):
         index = min(range(len(numbers)), key=lambda i: (numbers[i][0], i))
+        held = moves.index(previous) if previous in moves else None
+        index = sticky_index(index, held, numbers)
     else:
         index = min(range(len(numbers)), key=lambda i: (numbers[i][1], i))
     return pn, dn, True, moves[index]
@@ -333,9 +374,13 @@ def _refresh_campaign(campaign, seeds, max_plies):
         create, update, propagate = [], [], []
         for row in positions:
             processed += 1
-            pn, dn, expanded, selected = compute_numbers(
-                campaign, row, children.get(row.key, ()), existing)
+            # La fila de prueba de este mismo nodo ya viene en ``existing``
+            # (se lee junto a la de sus hijos), asi que el primario anterior
+            # no cuesta ni una sentencia extra.
             node = existing.get(row.key)
+            pn, dn, expanded, selected = compute_numbers(
+                campaign, row, children.get(row.key, ()), existing,
+                previous=None if node is None else node.selected_child)
             if node is None:
                 create.append(ProofNode(
                     campaign=campaign, position_id=row.key, pn=pn, dn=dn,
@@ -424,6 +469,12 @@ def root_numbers(campaign):
 # del grafo: nada de pasadas globales.  La asignacion blanda del repertorio se
 # resuelve con un contador determinista, no con ``random``: dos servidores con
 # el mismo estado eligen lo mismo, y un replay de la cola es reproducible.
+#
+# Dos decisiones distintas, deliberadamente separadas: QUIEN es la primaria de
+# un nodo lo fija ``selected_child`` con histeresis (``compute_numbers``), y
+# CUANTO le toca lo reparte ``_bucket`` 80/15/5.  Mezclarlas es como se acaba
+# teniendo un descenso que baila entre dos jugadas o un repertorio que gasta
+# el 95% en una sola.
 
 DESCENT_MAX_PLIES = 96
 
@@ -461,6 +512,22 @@ def _ranked_children(campaign, position, children, child_nodes):
     return ranked
 
 
+def _primary_index(ranked, node):
+    """Cual de los candidatos VIVOS es la primaria de este nodo.
+
+    Quien es primaria ya lo decidio la histeresis y vive en
+    ``selected_child``; aqui solo se respeta mientras siga siendo un candidato
+    de este descenso.  Si la primaria esta resuelta, ya visitada o reservada
+    por el mismo lote, no queda pregunta que hacerle y manda el orden pn — que
+    es exactamente lo que hacia esta funcion antes de existir.
+    """
+    if node is not None and node.selected_child:
+        for index, item in enumerate(ranked):
+            if item[1] == node.selected_child:
+                return index
+    return 0
+
+
 def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=()):
     """Baja desde la raiz hasta la posicion mas demostradora sin resolver.
 
@@ -485,18 +552,27 @@ def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=()):
         if not children:
             # Frontera: aqui es donde se compra, salvo que ya este reservada.
             return (None if node.key in reserved else node), plies
-        child_nodes = _node_rows(
-            campaign, [child_id for _, child_id, _, _, _ in children])
-        ranked = _ranked_children(campaign, node, children, child_nodes)
+        # La fila del propio nodo viaja con las de sus hijos: el primario
+        # pegajoso se lee en la MISMA sentencia que ya se pagaba.
+        rows = _node_rows(campaign, [node.key] + [
+            child_id for _, child_id, _, _, _ in children])
+        ranked = _ranked_children(campaign, node, children, rows)
         ranked = [item for item in ranked
                   if item[2] not in visited and item[2] not in reserved]
         if not ranked:
             return (None if node.key in reserved else node), plies
         bucket = _bucket(counter + plies, policy)
+        primary = _primary_index(ranked, rows.get(node.key))
         if bucket == 'primary':
-            chosen = ranked[0]
+            chosen = ranked[primary]
         elif bucket == 'backup':
-            chosen = ranked[1] if len(ranked) > 1 else ranked[0]
+            # El backup es la mejor ALTERNATIVA a la primaria, no "el segundo
+            # por pn": con una primaria pegajosa que no encabeza el orden,
+            # ranked[1] podria ser la primaria otra vez y el 15% se gastaria
+            # en la misma jugada que el 80%.
+            alternatives = [item for index, item in enumerate(ranked)
+                            if index != primary]
+            chosen = alternatives[0] if alternatives else ranked[primary]
         else:
             chosen = ranked[-1]
         visited.add(chosen[2])

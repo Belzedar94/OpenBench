@@ -237,6 +237,175 @@ class IncrementalMaintenanceTests(TestCase):
             campaign=self.campaign, position=self.root).pn, 0)
 
 
+class SelectedChildHysteresisTests(TestCase):
+    """El primario de un nodo OR no cambia por un parpadeo de pn.
+
+    Peticion de la comunidad: el descenso alternaba entre dos jugadas blancas
+    igual de prometedoras y ninguna acumulaba la profundidad que la cerraria.
+    ``pn`` es una estimacion de coste, asi que "algo mejor" esta dentro del
+    ruido; solo ``K`` veces mejor es informacion.
+    """
+
+    def setUp(self):
+        self.campaign = ProofCampaign.objects.get(
+            name=proof.DEFAULT_CAMPAIGN_NAME)
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.moves = [edge.move_uci for edge in
+                      Edge.objects.filter(parent=self.root).order_by('id')]
+
+    def _selected(self, numbers, previous):
+        """selected_child de la raiz con esos pn/dn por hijo."""
+        children = [(move, f'child-{move}', 'UNKNOWN', None, BLACK_TO_MOVE)
+                    for move in self.moves[:len(numbers)]]
+        nodes = {f'child-{move}': ProofNode(
+            campaign=self.campaign, position_id=f'child-{move}',
+            pn=pn, dn=dn)
+            for move, (pn, dn) in zip(self.moves, numbers)}
+        _pn, _dn, _expanded, selected = proof.compute_numbers(
+            self.campaign, self.root, children, nodes, previous=previous)
+        return selected
+
+    def test_the_declared_constant_is_the_approved_one(self):
+        self.assertEqual(proof.SELECTED_CHILD_HYSTERESIS, 3)
+
+    def test_a_flicker_does_not_move_the_primary(self):
+        # 30 es mejor que 60, pero no TRES VECES mejor: eso es ruido.
+        self.assertEqual(
+            self._selected([(60, 5), (30, 5)], previous=self.moves[0]),
+            self.moves[0])
+
+    def test_crossing_the_threshold_does_move_it(self):
+        # 19 * 3 < 60: el retador ya no esta discutiendo dentro del ruido.
+        self.assertEqual(
+            self._selected([(60, 5), (19, 5)], previous=self.moves[0]),
+            self.moves[1])
+
+    def test_the_boundary_itself_is_not_a_change(self):
+        """Exactamente K veces mejor no basta: el umbral es estricto."""
+        self.assertEqual(
+            self._selected([(60, 5), (20, 5)], previous=self.moves[0]),
+            self.moves[0])
+
+    def test_a_proved_primary_is_never_dethroned(self):
+        """pn = 0 esta probado: nada puede ser menor que cero.
+
+        El caso que muerde no es un retador mejor (imposible), es un EMPATE:
+        una hermana que tambien cierra y que el desempate por indice habria
+        puesto delante.
+        """
+        self.assertEqual(
+            self._selected([(0, INF), (0, INF)], previous=self.moves[1]),
+            self.moves[1])
+        self.assertEqual(
+            self._selected([(0, INF), (1, 5)], previous=self.moves[0]),
+            self.moves[0])
+
+    def test_a_refuted_primary_hands_the_seat_over(self):
+        """Pegajoso no es inamovible: un pn infinito lo pierde igual."""
+        self.assertEqual(
+            self._selected([(INF, 0), (7, 5)], previous=self.moves[0]),
+            self.moves[1])
+
+    def test_with_no_primary_yet_the_best_pn_takes_it(self):
+        self.assertEqual(
+            self._selected([(60, 5), (30, 5)], previous=None),
+            self.moves[1])
+
+    def test_a_primary_that_is_no_longer_a_child_is_not_honoured(self):
+        self.assertEqual(
+            self._selected([(60, 5), (30, 5)], previous='z9z9'),
+            self.moves[1])
+
+    def test_an_and_node_is_not_sticky(self):
+        """El primario AND es la defensa mas dura; sostenerla contra
+        evidencia nueva retrasaria la refutacion que la prueba necesita."""
+        black = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        ingest.expand(black)
+        replies = [edge.move_uci for edge in
+                   Edge.objects.filter(parent=black).order_by('id')]
+        children = [(move, f'r-{move}', 'UNKNOWN', None, WHITE_TO_MOVE)
+                    for move in replies[:2]]
+        nodes = {f'r-{replies[0]}': ProofNode(campaign=self.campaign,
+                                              position_id='a', pn=5, dn=60),
+                 f'r-{replies[1]}': ProofNode(campaign=self.campaign,
+                                              position_id='b', pn=5, dn=30)}
+
+        _pn, _dn, _expanded, selected = proof.compute_numbers(
+            self.campaign, black, children, nodes, previous=replies[0])
+
+        self.assertEqual(selected, replies[1])
+
+    def test_the_stored_primary_survives_a_refresh(self):
+        """Sobre el arbol real y por el camino de siempre, no en laboratorio.
+
+        La primaria se gana en un indice ALTO a proposito: asi el empate que
+        viene despues la habria destronado por puro orden de arista, que es
+        justo el baile del que se quejo la comunidad.
+        """
+        edges = list(Edge.objects.filter(parent=self.root).order_by('id'))
+        for edge in edges:
+            Position.objects.filter(key=edge.child_id).update(eval_cp=-400)
+        Position.objects.filter(key=edges[9].child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edge.child_id for edge in edges])
+        node = ProofNode.objects.get(campaign=self.campaign,
+                                     position=self.root)
+        self.assertEqual(node.selected_child, edges[9].move_uci)
+
+        # Una hermana alcanza la MISMA banda de eval: empata en pn, y un
+        # empate se rompe por indice, no por informacion.
+        Position.objects.filter(key=edges[2].child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edges[2].child_id])
+
+        node.refresh_from_db()
+        self.assertEqual(node.selected_child, edges[9].move_uci)
+
+    def test_the_descent_follows_the_sticky_primary(self):
+        """La histeresis solo sirve si el descenso la respeta."""
+        self.campaign.repertoire_policy = {'primary': 1.0, 'backup': 0.0,
+                                           'explore': 0.0}
+        self.campaign.save(update_fields=['repertoire_policy'])
+        edges = list(Edge.objects.filter(parent=self.root).order_by('id'))
+        for edge in edges:
+            Position.objects.filter(key=edge.child_id).update(eval_cp=-400)
+        held = edges[9]
+        Position.objects.filter(key=held.child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edge.child_id for edge in edges])
+        # Una hermana empata en banda: por puro orden pn el descenso se iria
+        # con la de indice menor.
+        Position.objects.filter(key=edges[2].child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edges[2].child_id])
+
+        found, _plies = proof.descend(self.campaign, counter=0)
+
+        self.assertEqual(found.key, held.child_id)
+
+    def test_the_backup_bucket_still_gets_an_alternative(self):
+        """La histeresis elige QUIEN es primaria; el 80/15/5 sigue repartiendo.
+
+        Con la primaria fuera del primer puesto, un ``ranked[1]`` a secas
+        podria ser la primaria otra vez y el 15% se gastaria en la misma
+        jugada que el 80%.
+        """
+        self.campaign.repertoire_policy = {'primary': 0.0, 'backup': 1.0,
+                                           'explore': 0.0}
+        self.campaign.save(update_fields=['repertoire_policy'])
+        edges = list(Edge.objects.filter(parent=self.root).order_by('id'))
+        for edge in edges:
+            Position.objects.filter(key=edge.child_id).update(eval_cp=-400)
+        held = edges[9]
+        Position.objects.filter(key=held.child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edge.child_id for edge in edges])
+        Position.objects.filter(key=edges[2].child_id).update(eval_cp=3_000)
+        proof.refresh_proof_numbers([edges[2].child_id])
+
+        found, _plies = proof.descend(self.campaign, counter=0)
+
+        self.assertIsNotNone(found)
+        self.assertNotEqual(found.key, held.child_id)
+
+
 class DescentTests(TestCase):
 
     def setUp(self):
