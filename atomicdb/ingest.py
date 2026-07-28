@@ -1742,7 +1742,7 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
                        solver_build='', telemetry=None,
                        trusted_submitter=False):
     """Aplica un resultado SOLVE. Devuelve el resumen que ve el worker."""
-    from . import solve
+    from . import solve, survive
     from .models import SolveTask
 
     disputed = False
@@ -1754,15 +1754,24 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
 
     verified, report, reason = False, None, ''
     verify_seconds = 0.0
-    if outcome == 'PROVED':
+    survival = outcome == 'DISPROVED_WHITE_WIN'
+    if outcome == 'PROVED' or survival:
         if not certificate_blob:
-            reason = 'PROVED without a certificate'
+            reason = f'{outcome} without a certificate'
         else:
             started = time.monotonic()
             try:
-                text = solve.decompress(certificate_blob)
-                report = solve.verify_certificate(
-                    text, root_fen=task.position.fen, goal=task.goal)
+                if survival:
+                    # SURVIVE50.  A different proof object, a different
+                    # verifier, and the routing picks the native one above the
+                    # size where the reference stops being affordable.
+                    text = survive.decompress(certificate_blob)
+                    report = survive.verify_certificate_auto(
+                        text, root_fen=task.position.fen)
+                else:
+                    text = solve.decompress(certificate_blob)
+                    report = solve.verify_certificate(
+                        text, root_fen=task.position.fen, goal=task.goal)
                 verified = True
             except solve.CertificateError as error:
                 reason = str(error)
@@ -1783,7 +1792,7 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
         if telemetry:
             current.telemetry = telemetry
         current.completed = timezone.now()
-        if outcome == 'PROVED' and not verified:
+        if (outcome == 'PROVED' or survival) and not verified:
             current.state = 'FAILED'
             current.verified = False
             current.reject_reason = reason[:2000]
@@ -1799,11 +1808,38 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
         if verified:
             current.certificate = certificate_blob
             current.certificate_bytes = len(certificate_blob)
-            current.certificate_nodes = report['nodes']
+            current.certificate_nodes = (report['states'] if survival
+                                         else report['nodes'])
+            current.certificate_format = (survive.CERTIFICATE_FORMAT if survival
+                                          else solve.CERTIFICATE_FORMAT)
+            if survival:
+                current.survival_tau = report['root_tau']
+                current.survival_states = report['states']
         current.save()
 
         closed = upgraded = False
-        if verified:
+        if survival and verified:
+            # DELIBERATELY NOT A CLOSURE.  This refutes the boolean objective
+            # WHITE_WIN and says nothing about BLACK_WIN: Black survives, which
+            # is compatible with a draw AND with a Black win, and telling those
+            # apart needs a different proof.  ``Position.status`` has no
+            # NOT_WHITE_WIN, and inventing one out of this certificate is
+            # exactly the conflation doc 18 §6.1 forbids.  So the fact lands on
+            # the task and in the event log, the orchestrator drops the White
+            # candidate, and the position stays as open as it was.
+            DBEvent.objects.create(kind='SURVIVE_VERIFIED', payload={
+                'task': current.pk, 'key': current.position_id,
+                'seconds': round(verify_seconds, 4),
+                'verifier': report.get('verifier', 'reference'),
+                'tau': report['root_tau'],
+                'entry_clock': report['entry_clock'],
+                'states': report['states'], 'edges': report['edges'],
+                'reachable': report['reachable'],
+                'positions': report.get('positions', 0),
+                'bytes': current.certificate_bytes,
+                'stage': current.budget_stage,
+                'solver_seconds': elapsed})
+        elif verified:
             # The verifier's own cost is a pilot gate, so it is measured
             # rather than assumed: a proof-carrying design is only worth it
             # while checking stays much cheaper than searching.

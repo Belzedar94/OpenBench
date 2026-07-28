@@ -180,6 +180,188 @@ def _append(text, line):
     return _renumber(text + line + '\n')
 
 
+def corruption_corpus():
+    """Every way a certificate can lie, as DATA rather than as test methods.
+
+    The methods below read as a specification and assert on prose, which is
+    what you want when the question is "what does this verifier promise".  The
+    native differential needs the same ground as a list it can iterate and
+    compare code-for-code, because two verifiers that both say no for
+    different reasons have not agreed about anything.
+
+    Returns dicts of {name, text, root, code}, where ``code`` is None for the
+    cases that must be ACCEPTED -- a differential that only exercised
+    rejections would miss the failure mode that matters most.
+    """
+    walk_fens, walk_white, walk_black = _expand(KING_WALK_ROOT, _shuffle_policy)
+    walk_tau = _thresholds(walk_fens, walk_white, walk_black)
+    walk = _emit(KING_WALK_ROOT, 0, walk_fens, walk_white, walk_black, walk_tau)
+
+    reset_fens, reset_white, reset_black = _expand(PAWN_RESET_ROOT,
+                                                   _shuffle_policy)
+    reset_tau = _thresholds(reset_fens, reset_white, reset_black)
+    reset = _emit(PAWN_RESET_ROOT, 0, reset_fens, reset_white, reset_black,
+                  reset_tau)
+
+    cases = []
+
+    def add(name, text, code, root=None):
+        cases.append({'name': name, 'text': text, 'code': code, 'root': root})
+
+    first_white = min(walk_white)
+    first_move, first_target, _ = walk_white[first_white][0]
+    black_state, (black_move, black_target, _) = next(
+        iter(sorted(walk_black.items())))
+    raised = [50] * len(walk_fens)
+    climbing = list(raised)
+    climbing[1] = 51
+    push_state, push_move, push_target = next(
+        (state, move, target)
+        for state, edges in reset_white.items()
+        for move, target, zeroing in edges if zeroing)
+    mate_fen = logic.canonical_fen(MATE_IN_ONE)
+    mate_moves = list(logic.legal_moves(mate_fen))
+    mate_header = ['# ' + survive.CERTIFICATE_FORMAT,
+                   'ruleset ' + logic.RULESET_ID,
+                   f'canonical {logic.CANONICAL_VERSION}',
+                   'repetition ' + survive.REPETITION_MODE,
+                   'terminal_precedence ' + survive.TERMINAL_PRECEDENCE_ID,
+                   'root ' + MATE_IN_ONE, 'entry_clock 0', '---',
+                   f'S 0 0 {mate_fen}']
+
+    # --- the ones that must be accepted ---
+    add('accept: the king-walk fortress', walk, None, KING_WALK_ROOT)
+    add('accept: a region whose White moves reset', reset, None,
+        PAWN_RESET_ROOT)
+    add('accept: at the threshold',
+        _emit(_with_clock(KING_WALK_ROOT, 50), 50, walk_fens, walk_white,
+              walk_black, raised), None)
+    add('accept: a quiet edge climbing by exactly one',
+        _emit(_with_clock(KING_WALK_ROOT, 51), 51, walk_fens, walk_white,
+              walk_black, climbing), None)
+
+    # --- the threshold ---
+    add('reject: one ply below the threshold',
+        _emit(_with_clock(KING_WALK_ROOT, 49), 49, walk_fens, walk_white,
+              walk_black, raised), 'root-tau-above-clock')
+    add('reject: entry clock is not the root counter',
+        _rewrite(walk, 'entry_clock 0', 'entry_clock 40'),
+        'entry-clock-mismatch')
+    add('reject: tau out of range', _rewrite(walk, 'S 0 0 ', 'S 0 101 '),
+        'tau-range')
+
+    # --- White coverage ---
+    add('reject: an omitted White move',
+        _drop_line(walk, f'W {first_white} {first_move} {first_target}'),
+        'white-coverage-mismatch')
+    add('reject: an invented White move',
+        _append(walk, f'W {first_white} a1a2 T'), 'white-coverage-mismatch')
+    add('reject: a repeated White move',
+        _append(walk, f'W {first_white} {first_move} {first_target}'),
+        'white-move-duplicate')
+    add('reject: a Black reply at a White state',
+        _append(walk, f'B {first_white} a1a2 T'), 'white-state-has-black-reply')
+
+    # --- Black policy ---
+    add('reject: a missing Black reply',
+        _drop_line(walk, f'B {black_state} {black_move} {black_target}'),
+        'black-reply-missing')
+    add('reject: a doubled Black reply',
+        _append(walk, f'B {black_state} {black_move} {black_target}'),
+        'black-reply-duplicate')
+    add('reject: an illegal Black reply',
+        _rewrite(walk, f'B {black_state} {black_move} {black_target}',
+                 f'B {black_state} h7h6 {black_target}'), 'black-reply-illegal')
+
+    # --- the two local inequalities ---
+    add('reject: a reset into a child that is not certified at tau 0',
+        _rewrite(reset, f'S {int(push_target[1:])} 0 ',
+                 f'S {int(push_target[1:])} 1 '), 'reset-into-nonzero-tau')
+    add('reject: a quiet edge breaking the inequality',
+        _rewrite(walk, 'S 1 0 ', 'S 1 2 '), 'quiet-tau-inequality')
+    add('reject: an edge landing on a different position',
+        _rewrite(walk, f'W {first_white} {first_move} {first_target}',
+                 f'W {first_white} {first_move} '
+                 + ('#2' if first_target != '#2' else '#3')),
+        'edge-lands-elsewhere')
+
+    # --- terminals ---
+    add('reject: a move reaching a White win',
+        '\n'.join(mate_header + ['W 0 a1g7 T']
+                  + [f'W 0 {move} T' for move in mate_moves
+                     if move != 'a1g7']) + '\n',
+        'terminal-reaches-white-win')
+    add('reject: the same lost position with the mate omitted',
+        '\n'.join(mate_header + [f'W 0 {move} T' for move in mate_moves
+                                 if move != 'a1g7']) + '\n',
+        'white-coverage-mismatch')
+    add('reject: a terminal state',
+        '\n'.join(['# ' + survive.CERTIFICATE_FORMAT,
+                   'ruleset ' + logic.RULESET_ID,
+                   f'canonical {logic.CANONICAL_VERSION}',
+                   'repetition ' + survive.REPETITION_MODE,
+                   'terminal_precedence ' + survive.TERMINAL_PRECEDENCE_ID,
+                   'root ' + STALEMATE, 'entry_clock 0', '---',
+                   f'S 0 0 {logic.canonical_fen(STALEMATE)}']) + '\n',
+        'state-terminal')
+    add('reject: a terminal claim where the game continues',
+        _rewrite(walk, f'W {first_white} {first_move} {first_target}',
+                 f'W {first_white} {first_move} T'),
+        'terminal-claim-but-game-continues')
+
+    # --- the frozen statement and identity ---
+    add('reject: a foreign ruleset',
+        _rewrite(walk, 'ruleset ' + logic.RULESET_ID, 'ruleset atomic-other-v1'),
+        'ruleset-mismatch')
+    add('reject: a foreign repetition mode',
+        _rewrite(walk, 'repetition ' + survive.REPETITION_MODE,
+                 'repetition ALLOW_REPETITION'), 'repetition-mismatch')
+    add('reject: a foreign terminal precedence',
+        _rewrite(walk, 'terminal_precedence ' + survive.TERMINAL_PRECEDENCE_ID,
+                 'terminal_precedence clock-before-terminal/1'),
+        'precedence-mismatch')
+    add('reject: a foreign canonical version',
+        _rewrite(walk, f'canonical {logic.CANONICAL_VERSION}', 'canonical 1'),
+        'canonical-version-mismatch')
+    add('reject: an unknown format',
+        _rewrite(walk, '# ' + survive.CERTIFICATE_FORMAT, '# atomicdb-proof/1'),
+        'format-unknown')
+    add('reject: a certificate about another position', walk, 'root-mismatch',
+        PAWN_RESET_ROOT)
+    add('reject: a non-canonical state',
+        _rewrite(walk, f'S 1 0 {walk_fens[1]}',
+                 f'S 1 0 {_with_clock(walk_fens[1], 7)}'), 'state-not-canonical')
+    add('reject: a repeated state',
+        _rewrite(walk, f'S 1 0 {walk_fens[1]}', f'S 1 0 {walk_fens[0]}'),
+        'state-duplicate')
+    add('reject: sparse state identifiers',
+        _rewrite(walk, 'S 1 0 ', 'S 4 0 '), 'state-id-gap')
+    add('reject: a root outside the states',
+        _rewrite(walk, 'root ' + KING_WALK_ROOT, 'root ' + STALEMATE),
+        'root-not-a-state')
+
+    # --- the parser as an adversarial boundary ---
+    add('reject: a declared state count that does not match',
+        _rewrite(walk, 'states 14', 'states 13'), 'count-mismatch')
+    add('reject: a declared edge count that does not match',
+        _rewrite(walk, 'edges 19', 'edges 40'), 'count-mismatch')
+    add('reject: an unknown record kind', _append(walk, 'X 0 nonsense'),
+        'record-kind-unknown')
+    add('reject: a malformed state record', _rewrite(walk, 'S 1 0 ', 'S 1 x '),
+        'state-record-malformed')
+    add('reject: an edge citing an unknown state',
+        _append(walk, 'W 99 a1a2 T'), 'edge-unknown-state')
+    add('reject: an unterminated header', _rewrite(walk, '\n---\n', '\n'),
+        'header-unterminated')
+    add('reject: a malformed edge target',
+        _rewrite(walk, f'W {first_white} {first_move} {first_target}',
+                 f'W {first_white} {first_move} @9'), 'edge-target-malformed')
+    add('reject: a state declared after an edge',
+        _append(walk, f'S 14 0 {STALEMATE}'), 'state-after-edge')
+
+    return cases
+
+
 class SurvivalCertificateTests(SimpleTestCase):
 
     @classmethod

@@ -103,21 +103,28 @@ applying eight moves costs the same as applying one.  The floor for this
 verifier is therefore one ``get_fen`` per edge plus a handful per state, and no
 amount of care in this file moves it.
 
-That is worth stating plainly, because doc 18 §3 budgets verification at
-"40 states / ~500 universal edges in under 100 ms" and "10k states in
-seconds", and neither is reachable here.  Measured on the reference box:
+Which put this module two to three orders of magnitude outside the budget doc
+18 §3 assumes, and for a while that looked like a flaw in the doc.  It was
+not.  Writing the same algorithm in C++ against the same tree reproduced the
+cost almost exactly, which located it: pyffish calls ``UCI::init_variant`` on
+every position it constructs, and that rebuilds the whole piece attack table.
+It has to — the variant is an argument of every pyffish call.
 
-  * 500 edges  ->  about 8 seconds, not 100 ms;
-  * the full bare-kings closure, 8,064 states and 52,080 edges, took 1,190
-    seconds just to ENUMERATE, and verifying it costs the same again.
+So the reference is slow for a reason that has nothing to do with the checks
+it performs, and ``tools/survive50-verify`` binds the variant once and does
+the same work at ~90,000 positions/s.  ``verify_certificate_auto`` routes to
+it above ``NATIVE_VERIFIER_STATE_THRESHOLD``; this module remains the
+reference, which is a job about correctness and not about speed.
 
-So the practical ceiling is thousands of edges per minute, not hundreds of
-thousands per second, and the chunking-by-certified-SCC that the oracle
-reserved for certificates above a million edges belongs two or three orders of
-magnitude lower.  ``MAX_POSITIONS`` is set from the measurement rather than
-from the doc, and ``positions`` is reported on every run so the fleet budgets
-in the currency that actually costs something.
+``MAX_POSITIONS`` and the reported ``positions`` count stay, because the
+fleet should budget in the currency that actually costs something whichever
+verifier ran.
 """
+
+import json
+import pathlib
+import subprocess
+import tempfile
 
 import pyffish as pf
 
@@ -142,6 +149,31 @@ MAX_STATES = 20_000
 MAX_EDGES = 200_000
 MAX_FANOUT = 256
 
+# WHICH VERIFIER THE SERVER REACHES FOR.
+#
+# Below this many states the reference in this module is used; above it, the
+# native tool in ``tools/survive50-verify``, invoked as a subprocess with the
+# same budget.  The wiring is phase 5; the number lives here so that both
+# sides agree on one constant rather than two opinions.
+#
+# The measured cost of the reference, so the number was moved with data rather
+# than by feel.  It builds roughly ``4 x states + edges`` positions and manages
+# about 66 a second, against ~90,000 for the native tool:
+#
+#      states / edges        reference      native
+#         14 /     19            ~1 s        6 ms
+#        100 /  ~2000           ~36 s       25 ms
+#        500 / ~10000            ~6 min      0.2 s
+#        10k / ~150k            ~47 min      1.9 s
+#
+# So the threshold is 100, not 500.  The reference is not the fast path at any
+# size and was never going to be; what it is, is the INDEPENDENT one, and that
+# is worth keeping for two jobs only -- certificates small enough that a
+# subprocess is not worth the ceremony, and the differential in
+# test_survive_native, where being slow is irrelevant because being a second
+# opinion is the entire point.  Anything carrying a deadline goes native.
+NATIVE_VERIFIER_STATE_THRESHOLD = 100
+
 # The one that costs wall clock.  A "position" is one pyffish position
 # construction, measured at ~15 ms on the reference box, so 200k of them is
 # roughly fifty minutes: a worker task, never an online request.  Callers with
@@ -149,8 +181,119 @@ MAX_FANOUT = 256
 MAX_POSITIONS = 200_000
 
 
+
+def _fail(code, message):
+    """Raise a rejection carrying a STABLE machine-readable code.
+
+    The prose is for a human reading a log; the code is the contract. The
+    native verifier reproduces this vocabulary exactly, and the differential
+    test asserts that both implementations reject for the same reason and not
+    merely that both said no -- two verifiers rejecting the same certificate
+    on different grounds is a disagreement wearing a matching hat.
+    """
+    error = CertificateError(message)
+    error.code = code
+    raise error
+
+
 class SurvivalReport(dict):
     """The verification report.  A dict, so it serialises without ceremony."""
+
+
+# ---------------------------------------------------------------------------
+# The F ladder (doc 18 §5), re-costed on measurement
+# ---------------------------------------------------------------------------
+#
+# The node budgets are the WORKER's, and they did not move: they come from the
+# observed 10^8 df-pn nodes in about twelve minutes.  What moved is the other
+# column, and it is the one that decides whether proof-carrying work pays.
+#
+#   stage  worker budget   certificate it can emit   verify (pyffish)  (native)
+#     F0      2M,  ~14 s   telemetry only                     --          --
+#     F1      5M,  ~36 s   ~1k states / 20k edges          ~6 min      0.2 s
+#     F2     20M, ~2.4 min ~10k states / 150k edges       ~47 min      1.9 s
+#     F3     50M,  ~6 min  ~50k states                     ~4 h        ~10 s
+#     F4    100M, ~12 min  ~100k states / 2M edges        ~10 h        ~24 s
+#
+# With the reference alone the server was the bottleneck by more than an order
+# of magnitude at every stage above F1 -- 2.4 minutes of searching bought 47
+# minutes of checking, which is not a proof-carrying design, it is a queue.
+# With the native verifier the ratio is ~70:1 the other way and the ladder
+# behaves the way doc 18 assumed it would.
+STAGE_BUDGETS = {
+    'F0': 2_000_000,
+    'F1': 5_000_000,
+    'F2': 20_000_000,
+    'F3': 50_000_000,
+    'F4': 100_000_000,
+}
+
+
+# ---------------------------------------------------------------------------
+# The F0 fortress classifier (doc 18 §5)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the four thresholds the engine computes in dfpn.h.  They live in two
+# places because the engine measures them and the server schedules on them;
+# if they ever disagree the engine is right, since it is the one that counted.
+FORTRESS_TT_HIT = 0.65
+FORTRESS_QUIET_SCC = 0.50
+FORTRESS_RESET_MAX = 0.05
+FORTRESS_STAGNATION_MAX = 2.0
+FORTRESS_INDICATORS_REQUIRED = 3
+
+
+# The keys as STORED, which are not the keys as sent.  The engine prints
+# ``solve fortress_tt_hit ...``, the worker posts ``fortress_tt_hit``, and
+# ``views._solve_submit`` strips the prefix before saving.  Reading the wire
+# names here would produce a classifier that never fires on real telemetry and
+# passes every test written against its own invention, so the vocabulary is
+# named once and pinned by a test against the view that fills it.
+TELEMETRY_KEYS = ('tt_hit', 'quiet_scc', 'reset_rate', 'stagnation')
+
+
+def fortress_indicators(telemetry):
+    """Which of the four fired.  ``telemetry`` is the worker's stored F0 report."""
+    if not isinstance(telemetry, dict):
+        return {}
+
+    def number(name):
+        try:
+            return float(telemetry.get(name))
+        except (TypeError, ValueError):
+            return None
+
+    tt = number('tt_hit')
+    scc = number('quiet_scc')
+    reset = number('reset_rate')
+    stagnation = number('stagnation')
+    return {
+        'tt_hit': tt is not None and tt >= FORTRESS_TT_HIT,
+        'quiet_scc': scc is not None and scc >= FORTRESS_QUIET_SCC,
+        # A reset rate of zero with no moves seen is not "few resets", it is
+        # no data; the view drops absent fields rather than storing a zero, so
+        # absence reads as None and only a real measurement counts.
+        'few_resets': reset is not None and reset <= FORTRESS_RESET_MAX,
+        # The engine emits 0.0 when it had no baseline to compare against, and
+        # the view clamps negatives to zero, so zero means "no reading".
+        'stagnant': (stagnation is not None
+                     and 0 < stagnation < FORTRESS_STAGNATION_MAX),
+    }
+
+
+def fortress_suspected(telemetry):
+    """Three of four.  SCHEDULING ONLY.
+
+    This never authorises a result and cannot be used to conclude anything
+    about a position.  It decides whether a candidate is worth an F1 survival
+    attempt instead of more df-pn, and that is the whole of its remit -- doc
+    18 §5 is explicit that the classifier affects scheduling and nothing else,
+    and Guid-Bratko is cited there as a detector precisely because a fortress
+    heuristic is not a fortress proof.
+    """
+    fired = fortress_indicators(telemetry)
+    return sum(1 for value in fired.values() if value) \
+        >= FORTRESS_INDICATORS_REQUIRED
 
 
 def _fifty_move_counter(fen):
@@ -178,7 +321,7 @@ class _Movegen:
     def _charge(self, count=1):
         self.spent += count
         if self.spent > self.budget:
-            raise CertificateError(
+            _fail('budget-exceeded', 
                 f'certificate exceeds the move generator budget '
                 f'({self.budget} positions)')
 
@@ -207,7 +350,7 @@ def parse_header(text):
     """Header fields and the index at which the record stream starts."""
     lines = text.split('\n')
     if not lines or lines[0].strip() != '# ' + CERTIFICATE_FORMAT:
-        raise CertificateError('unknown certificate format')
+        _fail('format-unknown', 'unknown certificate format')
     header = {}
     for index in range(1, min(len(lines), MAX_HEADER_LINES)):
         line = lines[index].strip()
@@ -217,22 +360,22 @@ def parse_header(text):
             continue
         name, _, value = line.partition(' ')
         if not name or not value:
-            raise CertificateError(f'malformed header line: {line!r}')
+            _fail('header-line-malformed', f'malformed header line: {line!r}')
         header[name] = value.strip()
-    raise CertificateError('certificate header is not terminated')
+    _fail('header-unterminated', 'certificate header is not terminated')
 
 
 def _check_header(header, root_fen):
     if header.get('ruleset') != logic.RULESET_ID:
-        raise CertificateError(
+        _fail('ruleset-mismatch', 
             f'certificate ruleset {header.get("ruleset")!r} is not '
             f'{logic.RULESET_ID!r}')
     if header.get('repetition') != REPETITION_MODE:
-        raise CertificateError(
+        _fail('repetition-mismatch', 
             f'certificate repetition mode {header.get("repetition")!r} is not '
             f'{REPETITION_MODE!r}')
     if header.get('terminal_precedence') != TERMINAL_PRECEDENCE_ID:
-        raise CertificateError(
+        _fail('precedence-mismatch', 
             f'certificate terminal precedence '
             f'{header.get("terminal_precedence")!r} is not '
             f'{TERMINAL_PRECEDENCE_ID!r}')
@@ -240,30 +383,30 @@ def _check_header(header, root_fen):
     # the SAME position, and a certificate keyed by a different identity would
     # pass every local check while describing an incoherent strategy.
     if header.get('canonical') != str(logic.CANONICAL_VERSION):
-        raise CertificateError(
+        _fail('canonical-version-mismatch', 
             f'certificate canonical version {header.get("canonical")!r} is not '
             f'{logic.CANONICAL_VERSION}')
 
     cert_root = header.get('root')
     if not cert_root:
-        raise CertificateError('certificate has no root position')
+        _fail('root-missing', 'certificate has no root position')
     if root_fen is not None and \
             logic.canonical_fen(cert_root) != logic.canonical_fen(root_fen):
-        raise CertificateError('certificate refutes a different position')
+        _fail('root-mismatch', 'certificate refutes a different position')
 
     declared = header.get('entry_clock')
     if declared is None:
-        raise CertificateError('certificate has no entry clock')
+        _fail('entry-clock-missing', 'certificate has no entry clock')
     try:
         entry_clock = int(declared)
     except ValueError:
-        raise CertificateError('certificate entry clock is malformed')
+        _fail('entry-clock-malformed', 'certificate entry clock is malformed')
     if not 0 <= entry_clock <= TAU_MAX:
-        raise CertificateError('certificate entry clock is out of range')
+        _fail('entry-clock-range', 'certificate entry clock is out of range')
     # The clock is a property of the position, not of the prover's opinion.
     actual = _fifty_move_counter(root_fen if root_fen is not None else cert_root)
     if entry_clock != min(actual, TAU_MAX):
-        raise CertificateError(
+        _fail('entry-clock-mismatch', 
             f'certificate entry clock {entry_clock} does not match the '
             f"root position's halfmove counter {actual}")
     return cert_root, entry_clock
@@ -286,26 +429,26 @@ def _parse_body(lines, start, max_states, max_edges, max_fanout):
 
         if kind == 'S':
             if seen_edge:
-                raise CertificateError('a state is declared after an edge')
+                _fail('state-after-edge', 'a state is declared after an edge')
             parts = rest.split(' ', 2)
             if len(parts) != 3:
-                raise CertificateError(f'malformed state record: {line!r}')
+                _fail('state-record-malformed', f'malformed state record: {line!r}')
             try:
                 state_id = int(parts[0])
                 tau = int(parts[1])
             except ValueError:
-                raise CertificateError(f'malformed state record: {line!r}')
+                _fail('state-record-malformed', f'malformed state record: {line!r}')
             if state_id != len(states):
-                raise CertificateError(
+                _fail('state-id-gap', 
                     'state identifiers must run from 0 without gaps')
             if len(states) >= max_states:
-                raise CertificateError('certificate exceeds the state limit')
+                _fail('state-limit', 'certificate exceeds the state limit')
             if not TAU_MIN <= tau <= TAU_MAX:
-                raise CertificateError(
+                _fail('tau-range', 
                     f'state {state_id} has tau {tau} outside [0, {TAU_MAX}]')
             fen = parts[2].strip()
             if fen in by_fen:
-                raise CertificateError(
+                _fail('state-duplicate', 
                     f'state {state_id} repeats the position of state '
                     f'{by_fen[fen]}')
             by_fen[fen] = state_id
@@ -316,32 +459,32 @@ def _parse_body(lines, start, max_states, max_edges, max_fanout):
             seen_edge = True
             parts = rest.split()
             if len(parts) != 3:
-                raise CertificateError(f'malformed edge record: {line!r}')
+                _fail('edge-record-malformed', f'malformed edge record: {line!r}')
             try:
                 state_id = int(parts[0])
             except ValueError:
-                raise CertificateError(f'malformed edge record: {line!r}')
+                _fail('edge-record-malformed', f'malformed edge record: {line!r}')
             if not 0 <= state_id < len(states):
-                raise CertificateError(
+                _fail('edge-unknown-state', 
                     f'edge cites unknown state {state_id}')
             edges += 1
             if edges > max_edges:
-                raise CertificateError('certificate exceeds the edge limit')
+                _fail('edge-limit', 'certificate exceeds the edge limit')
             entry = (parts[1], parts[2])
             if kind == 'W':
                 bucket = white.setdefault(state_id, [])
                 if len(bucket) >= max_fanout:
-                    raise CertificateError(
+                    _fail('fanout-limit', 
                         'a White state exceeds the fan-out limit')
                 bucket.append(entry)
             else:
                 if state_id in black:
-                    raise CertificateError(
+                    _fail('black-reply-duplicate', 
                         f'state {state_id} has more than one Black reply')
                 black[state_id] = entry
             continue
 
-        raise CertificateError(f'unknown record kind {kind!r}')
+        _fail('record-kind-unknown', f'unknown record kind {kind!r}')
 
     return states, by_fen, white, black, edges
 
@@ -351,13 +494,13 @@ def _resolve(target, states):
     if target == 'T':
         return None
     if not target.startswith('#'):
-        raise CertificateError(f'malformed edge target {target!r}')
+        _fail('edge-target-malformed', f'malformed edge target {target!r}')
     try:
         index = int(target[1:])
     except ValueError:
-        raise CertificateError(f'malformed edge target {target!r}')
+        _fail('edge-target-malformed', f'malformed edge target {target!r}')
     if not 0 <= index < len(states):
-        raise CertificateError(f'edge target #{index} is not a state')
+        _fail('edge-target-unknown', f'edge target #{index} is not a state')
     return index
 
 
@@ -375,7 +518,7 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         text.split('\n'), start, max_states, max_edges, max_fanout)
 
     if not states:
-        raise CertificateError('certificate has no states')
+        _fail('states-empty', 'certificate has no states')
     for name, value in (('states', len(states)), ('edges', edges)):
         declared = header.get(name)
         if declared is None:
@@ -383,9 +526,9 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         try:
             expected = int(declared)
         except ValueError:
-            raise CertificateError(f'certificate {name} count is malformed')
+            _fail('count-malformed', f'certificate {name} count is malformed')
         if expected != value:
-            raise CertificateError(
+            _fail('count-mismatch', 
                 f'certificate declares {expected} {name} but carries {value}')
 
     movegen = _Movegen(max_positions)
@@ -402,11 +545,11 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
         # A state whose FEN is not in AtomicDB's canonical form is a state
         # whose identity is somebody else's.
         if movegen.canonical(fen) != fen:
-            raise CertificateError(
+            _fail('state-not-canonical', 
                 f'state {state_id} is not in canonical form: {fen}')
         status = movegen.terminal_status(fen)
         if status is not None:
-            raise CertificateError(
+            _fail('state-terminal', 
                 f'state {state_id} is already terminal ({status[0]}): {fen}')
 
         white_to_move = fen.split()[1] == 'w'
@@ -414,29 +557,29 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
 
         if white_to_move:
             if state_id in black:
-                raise CertificateError(
+                _fail('white-state-has-black-reply', 
                     f'state {state_id} has a Black reply but White is to move')
             listed = white.get(state_id, [])
             moves = [move for move, _ in listed]
             if len(set(moves)) != len(moves):
-                raise CertificateError(f'state {state_id} repeats a White move')
+                _fail('white-move-duplicate', f'state {state_id} repeats a White move')
             if set(moves) != set(legal):
                 missing = sorted(set(legal) - set(moves))
                 extra = sorted(set(moves) - set(legal))
-                raise CertificateError(
+                _fail('white-coverage-mismatch', 
                     f'state {state_id} does not cover exactly the legal White '
                     f'moves (missing={missing}, extra={extra})')
             plan.append(listed)
         else:
             if state_id in white:
-                raise CertificateError(
+                _fail('black-state-has-white-moves', 
                     f'state {state_id} has White moves but Black is to move')
             if state_id not in black:
-                raise CertificateError(
+                _fail('black-reply-missing', 
                     f'state {state_id} has no Black reply')
             move, target = black[state_id]
             if move not in legal:
-                raise CertificateError(
+                _fail('black-reply-illegal', 
                     f'state {state_id} selects illegal reply {move!r}')
             plan.append([(move, target)])
 
@@ -456,11 +599,11 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
             if index is None:
                 status = movegen.terminal_status(child)
                 if status is None:
-                    raise CertificateError(
+                    _fail('terminal-claim-but-game-continues', 
                         f'state {state_id}: move {move} is declared terminal '
                         f'but the game continues')
                 if status[0] == 'WHITE_WIN':
-                    raise CertificateError(
+                    _fail('terminal-reaches-white-win', 
                         f'state {state_id}: move {move} reaches a White win')
                 terminal_exits += 1
                 zeroing_edges += zeroing
@@ -468,7 +611,7 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
 
             child_canonical = movegen.canonical(child)
             if states[index][1] != child_canonical:
-                raise CertificateError(
+                _fail('edge-lands-elsewhere', 
                     f'state {state_id}: move {move} lands on '
                     f'{child_canonical} but claims state {index}')
             child_tau = states[index][0]
@@ -478,22 +621,22 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
                 # the exact point at which the "it is self-destructive anyway"
                 # shortcut becomes unsound.
                 if child_tau != 0:
-                    raise CertificateError(
+                    _fail('reset-into-nonzero-tau', 
                         f'state {state_id}: zeroing move {move} enters state '
                         f'{index} with tau {child_tau}, not 0')
                 zeroing_edges += 1
             elif child_tau > tau + 1:
-                raise CertificateError(
+                _fail('quiet-tau-inequality', 
                     f'state {state_id} (tau {tau}): quiet move {move} enters '
                     f'state {index} with tau {child_tau} > {tau + 1}')
 
     root_canonical = logic.canonical_fen(cert_root)
     root_id = by_fen.get(root_canonical)
     if root_id is None:
-        raise CertificateError('the root position is not among the states')
+        _fail('root-not-a-state', 'the root position is not among the states')
     root_tau = states[root_id][0]
     if root_tau > entry_clock:
-        raise CertificateError(
+        _fail('root-tau-above-clock', 
             f'certificate proves survival only from clock {root_tau}, but the '
             f'root enters at {entry_clock}')
 
@@ -526,8 +669,105 @@ def verify_certificate(text, root_fen=None, max_states=MAX_STATES,
     })
 
 
+# ---------------------------------------------------------------------------
+# Routing: which verifier replays this one
+# ---------------------------------------------------------------------------
+
+NATIVE_BINARY = (pathlib.Path(__file__).resolve().parent.parent / 'tools'
+                 / 'survive50-verify' / 'survive50-verify.exe')
+if not NATIVE_BINARY.exists():
+    NATIVE_BINARY = NATIVE_BINARY.with_suffix('')
+
+# A native run that has not answered in this long is not going to.  The whole
+# point of the tool is that a 10k-state certificate is seconds, so a minute is
+# already four orders of magnitude of headroom.
+NATIVE_TIMEOUT_SECONDS = 120
+
+
+def declared_states(text):
+    """The state count from the header, for routing.  Cheap and untrusted.
+
+    Untrusted is the operative word: it decides which verifier runs, and both
+    verifiers then check the declaration against the body themselves.  A liar
+    can pick the slow path and nothing else.
+    """
+    try:
+        header, _ = parse_header(text)
+        return int(header.get('states', 0))
+    except (CertificateError, TypeError, ValueError):
+        return 0
+
+
+def native_available():
+    return NATIVE_BINARY.exists()
+
+
+def verify_certificate_native(text, root_fen=None, max_positions=MAX_POSITIONS,
+                              timeout=NATIVE_TIMEOUT_SECONDS):
+    """Replay through the pinned upstream Fairy-Stockfish binary.
+
+    Same checks, same rejection codes, ~1,400x the throughput.  The subprocess
+    is bounded on every axis that can run away: a positions budget, a wall
+    clock, and a certificate that was already size-checked before we got here.
+    """
+    if not NATIVE_BINARY.exists():
+        raise CertificateError('the native verifier is not built')
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / 'certificate.txt'
+        path.write_text(text, encoding='utf-8')
+        command = [str(NATIVE_BINARY), str(path), '--budget',
+                   str(int(max_positions))]
+        if root_fen:
+            command += ['--root', root_fen]
+        try:
+            finished = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise CertificateError(
+                f'the native verifier did not answer within {timeout}s')
+    line = (finished.stdout or '').strip().splitlines()
+    if not line:
+        raise CertificateError(
+            f'the native verifier said nothing (exit {finished.returncode})')
+    try:
+        payload = json.loads(line[-1])
+    except ValueError:
+        raise CertificateError('the native verifier produced unreadable output')
+    if not payload.get('ok'):
+        error = CertificateError(payload.get('message', 'rejected'))
+        error.code = payload.get('code', 'uncoded')
+        raise error
+    payload.pop('ok', None)
+    return SurvivalReport(payload)
+
+
+def verify_certificate_auto(text, root_fen=None, **kwargs):
+    """Route by size, fall back to the reference when the tool is missing.
+
+    Above the threshold the reference is not a slower option, it is an
+    unaffordable one, so the fallback is announced in the report rather than
+    silently taken: a caller with a deadline needs to know it just got the
+    thing that takes minutes.
+    """
+    native = (native_available()
+              and declared_states(text) >= NATIVE_VERIFIER_STATE_THRESHOLD)
+    if native:
+        report = verify_certificate_native(text, root_fen=root_fen,
+                                           **{k: v for k, v in kwargs.items()
+                                              if k == 'max_positions'})
+        report['verifier'] = 'native'
+        return report
+    report = verify_certificate(text, root_fen=root_fen, **kwargs)
+    report['verifier'] = 'reference'
+    report['native_unavailable'] = not native_available()
+    return report
+
+
 __all__ = [
     'CERTIFICATE_FORMAT', 'REPETITION_MODE', 'TERMINAL_PRECEDENCE_ID',
-    'CertificateError', 'MAX_POSITIONS', 'SurvivalReport',
-    'compress', 'decompress', 'parse_header', 'verify_certificate',
+    'CertificateError', 'MAX_POSITIONS', 'SurvivalReport', 'STAGE_BUDGETS',
+    'NATIVE_VERIFIER_STATE_THRESHOLD', 'compress', 'decompress',
+    'declared_states', 'fortress_indicators', 'fortress_suspected',
+    'native_available', 'parse_header', 'verify_certificate',
+    'verify_certificate_auto', 'verify_certificate_native',
 ]
