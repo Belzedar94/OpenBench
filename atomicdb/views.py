@@ -23,13 +23,14 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField, Q,
                               Sum, Value, When, Window)
 from django.db.models.functions import RowNumber
 
-from . import (community_names, ingest, ingest_queue, logic, openings, proof,
-               solve)
+from . import (community_names, ingest, ingest_queue, logic, metrics,
+               openings, proof, solve)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge,
-                     OpeningNameSuggestion, Position, ProofCampaign,
-                     ProofNode, RequestLog, SolveTask, WorkerPing)
+                     OpeningNameSuggestion, Position, ProgressSnapshot,
+                     ProofCampaign, ProofNode, RequestLog, SolveTask,
+                     WorkerPing)
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -1493,6 +1494,83 @@ def _human(n):
     return f'{n:,}'
 
 
+def _human_seconds(value):
+    """4200 -> '1.2h'; 90 -> '1.5m'; 0 -> '0s'. Sin decimales que no informan."""
+    value = max(0, int(value or 0))
+    if value >= 86_400:
+        return f'{value / 86_400:.1f}d'
+    if value >= 3_600:
+        return f'{value / 3_600:.1f}h'
+    if value >= 60:
+        return f'{value / 60:.1f}m'
+    return f'{value}s'
+
+
+def _attribution_rows(window):
+    """Las cinco procedencias de una ventana, ya con su porcentaje.
+
+    El denominador es lo ETIQUETADO, no todos los cierres: un porcentaje sobre
+    un total que incluye eventos anteriores al despliegue de la etiqueta
+    sumaria siempre menos de cien y nadie sabria por que.  Lo que falta se
+    dice aparte, en claro.
+    """
+    stamped = window['stamped']
+    rows = []
+    for name, count in window['sources'].items():
+        rows.append({'source': name, 'count': count,
+                     'pct': (round(100.0 * count / stamped, 1)
+                             if stamped else 0.0)})
+    return rows
+
+
+def _proof_health(now):
+    """Los KPIs del paquete adversarial para la portada.
+
+    Las dos cifras del frente y la latencia humana salen de la ULTIMA captura
+    horaria, no de una consulta en vivo: la mediana de ``dn`` recorre el
+    frente entero y la latencia cruza eventos con peticiones, y ninguna de las
+    dos tiene sitio dentro del render de una portada publica.  Una hora de
+    retraso en un indicador de tendencia no cambia ninguna decision; un
+    segundo extra por visita si.
+
+    Los cierres por procedencia SI van en vivo: son ``COUNT`` sobre un indice
+    de fecha y responden a "que esta haciendo el servidor ahora mismo", que es
+    justo la pregunta que una captura horaria contestaria tarde.
+    """
+    snapshot = ProgressSnapshot.objects.order_by('-bucket_start').first()
+    day = metrics.closure_attribution_window(now=now, hours=24)
+    week = metrics.closure_attribution_window(now=now, hours=24 * 7)
+    health = {
+        'attribution_24h': _attribution_rows(day),
+        'attribution_7d': _attribution_rows(week),
+        'attribution_stamped_24h': day['stamped'],
+        'attribution_total_24h': day['total'],
+        'attribution_stamped_7d': week['stamped'],
+        'attribution_total_7d': week['total'],
+        'has_attribution': bool(week['stamped']),
+        'has_frontier': False,
+    }
+    if snapshot is None:
+        return health
+    health.update({
+        'has_frontier': bool(snapshot.frontier_and_nodes),
+        'frontier_and_nodes_h': _human(snapshot.frontier_and_nodes),
+        'frontier_dn_median_h': proof.format_number(
+            snapshot.frontier_dn_median),
+        'frontier_dn_thin_h': _human(snapshot.frontier_dn_thin),
+        'frontier_dn_thin_pct': (
+            round(100.0 * snapshot.frontier_dn_thin
+                  / snapshot.frontier_and_nodes, 1)
+            if snapshot.frontier_and_nodes else 0.0),
+        'dn_repair_floor': ingest.DN_REPAIR_FLOOR,
+        'human_close_h': _human_seconds(snapshot.human_close_median_seconds),
+        'human_close_samples': snapshot.human_close_samples,
+        'has_human_close': bool(snapshot.human_close_samples),
+        'proof_health_at': snapshot.bucket_start,
+    })
+    return health
+
+
 def _own_search(point, nodes):
     """Que dijo el motor MIRANDO ESA POSICION, para las filas [BACKED].
 
@@ -1706,6 +1784,7 @@ def home(request):
     root_pn, root_dn = proof.headline_numbers()
     return render(request, 'atomicdb/home.html', {
         **_suggestions_badge(request),
+        **_proof_health(now),
         'root_pn_h': proof.format_number(root_pn),
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,

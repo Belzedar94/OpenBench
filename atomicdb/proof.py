@@ -597,6 +597,95 @@ def open_and_obligations(campaign, limit=10):
         .order_by('updated')[:limit])
 
 
+# ---------------- el FRENTE DE PRUEBA ----------------
+#
+# DEFINICION OPERATIVA, y por que esta.  "Frente" no es una metafora: es el
+# conjunto de nodos sobre los que la prueba de esta campana esta trabajando
+# AHORA, y hace falta fijarlo con precision porque de el salen las tres cosas
+# que este paquete mide y repara.  Un nodo pertenece al frente cuando cumple
+# las tres condiciones:
+#
+#   1. tiene fila ``ProofNode`` en la campana — es decir, la prueba ya lo
+#      alcanzo alguna vez.  Un nodo del DAG que ninguna cascada toco no es
+#      frente de nadie: es cache de posiciones;
+#   2. su ``Position.status`` sigue siendo ``UNKNOWN``.  Un nodo cerrado es
+#      una HOJA de la prueba con su valor de verdad, no una pregunta abierta;
+#   3. ``pn`` y ``dn`` son ambos FINITOS.  ``pn`` infinito significa que el
+#      objetivo esta refutado ahi y ese nodo ya no es una obligacion; ``dn``
+#      infinito significa que esta probado.  En los dos casos no queda
+#      esfuerzo que estimar y contarlo solo ensuciaria la mediana.
+#
+# Y esta ACOTADO: los ``limit`` de MENOR pn primero.  Dos razones, ninguna
+# estetica.  La barata: ``(campaign, pn)`` esta indexado, asi que el corte lo
+# hace el indice y no un scan.  La honesta: el frente que importa es a donde
+# va el descenso, y el descenso va al minimo pn.  El sesgo que esto introduce
+# hay que decirlo en voz alta — mirar los mas demostradores primero mide la
+# parte del arbol donde la prueba cree que esta cerca, no el arbol entero — y
+# es exactamente el sesgo que queremos: una espina de dn=1 en un rincon que
+# nadie visita no tumba nada; una en la linea principal si.
+PROOF_FRONTIER_SCAN = 20_000
+
+
+def frontier_rows(campaign, limit=PROOF_FRONTIER_SCAN):
+    """``(position_id, fen, pn, dn)`` del frente de prueba, mas proving first.
+
+    Devuelve tuplas y no modelos a proposito: el frente se recorre entero para
+    medir y para reparar, y traer ``Position`` completas arrastraria el JSON
+    de ``last_analysis`` de cada fila — el mayor campo de la tabla — para leer
+    de el un color al turno.
+    """
+    return list(ProofNode.objects.filter(
+        campaign=campaign, position__status='UNKNOWN',
+        pn__lt=PROOF_INFINITY, dn__lt=PROOF_INFINITY,
+    ).order_by('pn', 'position_id').values_list(
+        'position_id', 'position__fen', 'pn', 'dn')[:limit])
+
+
+def frontier_and_rows(campaign, limit=PROOF_FRONTIER_SCAN):
+    """El frente restringido a nodos AND: mueve el DEFENSOR de la campana.
+
+    Son las OBLIGACIONES — hay que refutar todas las respuestas — y por eso
+    son las unicas donde un ``dn`` bajo es una mala noticia en vez de una
+    buena.  El filtro se hace en Python sobre el FEN que ya viajo con la fila:
+    en SQL seria un ``LIKE`` sobre la columna mas larga de la tabla, que ni
+    usa indice ni cabe en una portada.
+    """
+    return [row for row in frontier_rows(campaign, limit=limit)
+            if not is_or_node(row[1], campaign.goal)]
+
+
+def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
+    """Salud del frente AND: cuantos son, su ``dn`` MEDIANO y cuantos finos.
+
+    ``dn`` mediano sobre el frente AND es la metrica que la comunidad
+    (Wolfram) hizo evidente: una linea humana acumula dn alto porque cada
+    replica del defensor analizada suma una via mas de refutacion que habria
+    que cerrar; una espina que el selector automatico dejo con dn=1 es UNA
+    pregunta sin responder de distancia de caerse.  La mediana, no la media:
+    un punado de nodos saturados no debe poder tapar mil espinas.
+
+    ``floor`` es el suelo de reparacion vigente (``ingest.DN_REPAIR_FLOOR``);
+    se pasa y no se importa para que la constante viva en UN solo sitio, que
+    es donde esta el brazo que la usa.
+    """
+    dns = sorted(row[3] for row in frontier_and_rows(campaign, limit=limit))
+    if not dns:
+        return {'and_nodes': 0, 'dn_median': 0, 'thin': 0}
+    middle = len(dns) // 2
+    median = (dns[middle] if len(dns) % 2
+              else (dns[middle - 1] + dns[middle]) // 2)
+    return {'and_nodes': len(dns), 'dn_median': int(median),
+            'thin': sum(1 for value in dns if value <= floor)}
+
+
+def frontier_dn_headline(floor):
+    """Las mismas cifras para la campana de portada, o ``None`` si no hay."""
+    campaign = ProofCampaign.objects.filter(active=True).order_by('id').first()
+    if campaign is None:
+        return None
+    return frontier_dn_stats(campaign, floor)
+
+
 def most_proving_frontier(campaign, limit=10):
     """Los nodos abiertos con menor pn: donde una prueba rendiria mas."""
     return list(ProofNode.objects.filter(

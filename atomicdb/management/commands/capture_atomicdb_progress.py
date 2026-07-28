@@ -7,9 +7,10 @@ from django.core.management.base import BaseCommand
 from django.db.models import BigIntegerField, Case, Count, F, Q, Sum, Value, When
 from django.utils import timezone
 
-from atomicdb import proof
+from atomicdb import ingest, proof
 from atomicdb.database import atomic
-from atomicdb.metrics import worker_metrics
+from atomicdb.metrics import (closure_attribution_totals,
+                              human_close_latency, worker_metrics)
 from atomicdb.models import AnalysisTask, DBEvent, Position, ProgressSnapshot
 
 
@@ -98,6 +99,12 @@ def _snapshot_values(observed_at):
     # capture time, never reconstructed.  A tree with no campaign records
     # zeroes rather than skipping the bucket.
     root_pn, root_dn = proof.headline_numbers()
+    # The one measurement that cannot wait for a later reader: ProofNode rows
+    # are overwritten in place by every cascade, so this hour's dn
+    # distribution stops existing the moment the hour does.
+    frontier = proof.frontier_dn_headline(ingest.DN_REPAIR_FLOOR) or {}
+    attributed = closure_attribution_totals()
+    latency = human_close_latency(now=observed_at)
     return {
         **positions,
         **tasks,
@@ -108,6 +115,16 @@ def _snapshot_values(observed_at):
         'active_nps': live['nps'],
         'root_pn': 0 if root_pn is None else int(root_pn),
         'root_dn': 0 if root_dn is None else int(root_dn),
+        'frontier_and_nodes': frontier.get('and_nodes', 0),
+        'frontier_dn_median': frontier.get('dn_median', 0),
+        'frontier_dn_thin': frontier.get('thin', 0),
+        'closures_user': attributed['USER'],
+        'closures_fill': attributed['FILL'],
+        'closures_auto': attributed['AUTO'],
+        'closures_solve': attributed['SOLVE'],
+        'closures_none': attributed['NONE'],
+        'human_close_median_seconds': latency['median_seconds'],
+        'human_close_samples': latency['samples'],
     }
 
 
@@ -152,8 +169,24 @@ class Command(BaseCommand):
             '--json', action='store_true',
             help='Emit a stable JSON receipt instead of a one-line summary.',
         )
+        parser.add_argument(
+            '--preview', action='store_true',
+            help='Compute the counters and print them WITHOUT writing a row. '
+                 'For reading the current numbers when this hour is already '
+                 'captured; it is not a backfill and cannot become one.',
+        )
 
     def handle(self, *args, **options):
+        if options['preview']:
+            # Escribe NADA.  Existe porque una hora ya capturada no se
+            # reescribe — es la garantia de la tabla — y justo despues de una
+            # migracion que anade columnas hace falta poder LEER lo que esa
+            # fila no llego a guardar, sin romper esa garantia.
+            self.stdout.write(json.dumps(
+                {'preview': True,
+                 'snapshot': _snapshot_values(timezone.now())},
+                sort_keys=True, separators=(',', ':'), default=str))
+            return
         snapshot, created = capture_progress()
         payload = _payload(snapshot, created)
         if options['json']:

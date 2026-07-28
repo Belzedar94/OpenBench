@@ -38,7 +38,7 @@ from django.utils import timezone
 
 from . import ingest
 from .database import atomic
-from .models import IngestJob, Position
+from .models import AnalysisTask, IngestJob, Position
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,15 @@ def apply_job(job):
         fen = Position.objects.only('fen').get(key=job.position_id).fen
         mate_proofs = ingest.prepare_mate_proofs(fen, lines)
 
-    with atomic():
+    # De QUE cola salio este trabajo.  Es lo unico que sabe la procedencia de
+    # todos los cierres que esta aplicacion vaya a producir — incluidos los
+    # que caigan sobre ancestros lejanos en la cascada — asi que se pone aqui
+    # y el emisor de eventos lo recoge.  Una tarea borrada deja ``NONE``, que
+    # es la verdad: ya no hay a quien apuntarselo.
+    source = AnalysisTask.objects.filter(pk=job.task_id).values_list(
+        'source', flat=True).first()
+
+    with atomic(), ingest.closure_attribution(source):
         current = IngestJob.objects.select_for_update().get(pk=job.pk)
         if current.state == IngestJob.JState.DONE:
             return current.summary or {}

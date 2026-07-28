@@ -5,6 +5,8 @@ Flujo por resultado de analisis (§2):
   (terminal / MATE_PV) -> backup minimax en cascada hacia arriba -> eventos.
 """
 
+import contextlib
+import contextvars
 import time
 
 from django.conf import settings
@@ -639,6 +641,22 @@ def _better_for_mover(value, reference, stm_white):
     return value > reference if stm_white else value < reference
 
 
+def coverage_is_partial(row, children):
+    """Le falta a este nodo alguna respuesta por mirar.
+
+    Es la condicion que degrada el respaldo en ``_backed_for``: mientras la
+    cobertura sea parcial, el valor de los hijos entra con guardas y la
+    autoridad de PRUEBA se corta.  Vive en una funcion con nombre porque
+    ademas de gobernar el respaldo es lo que define una afirmacion FRAGIL
+    (ver ``fragile_mate_claims``), y dos copias de este predicado son dos
+    copias que se separan.
+    """
+    informed = [child for child in children if child.value is not None]
+    if not informed:
+        return True
+    return not (bool(row.expanded) and len(informed) == len(children))
+
+
 def _backed_for(row, children, discrepancies=None):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
@@ -665,7 +683,7 @@ def _backed_for(row, children, discrepancies=None):
         informed,
         key=lambda c: (c.value, c.quality, -c.plies) if stm_white
         else (c.value, -c.quality, c.plies))
-    complete = bool(row.expanded) and len(informed) == len(children)
+    complete = not coverage_is_partial(row, children)
     if not complete:
         own = row.eval_cp
         own_quality = row.nodes_invested or 0
@@ -1135,9 +1153,76 @@ def _minimax_proof(pos, edges, status):
             else 'ENGINE')
 
 
-def _emit_closure_events(pos):
+# ---------------- atribucion de cierres ----------------
+#
+# LA PREGUNTA QUE NO SE PODIA RESPONDER.  "De los cierres de las ultimas 24
+# horas, cuantos los produjo el explorador automatico y cuantos una persona
+# pidiendo una jugada a mano?"  Hasta aqui no habia forma: un ``NODE_CLOSED``
+# guardaba la posicion, el status y la clase de cierre, y nada mas.  La
+# procedencia no es derivable a posteriori — un cierre MINIMAX en la cascada
+# puede venir de una tarea AUTO, de un completado FILL, del click de un
+# visitante o de un certificado SOLVE, y las cuatro escriben exactamente las
+# mismas filas — asi que se REGISTRA en el momento, o se pierde.
+#
+# POR QUE UN CONTEXTVAR Y NO UN PARAMETRO.  El cierre no ocurre donde se sabe
+# la procedencia.  ``apply_job`` conoce el ``source`` de su ``AnalysisTask``;
+# el cierre lo emite ``backup_cascade`` cinco llamadas mas abajo, a veces
+# sobre un ANCESTRO que nada tiene que ver con la posicion analizada, y por un
+# camino (``ingest_analysis`` -> ``materialise_won_line`` -> cascada) que ya
+# tiene tres puntos de emision.  Pasar el dato a mano seria tocar seis firmas
+# y confiar en que ningun sitio nuevo se olvide; un contextvar lo lleva solo,
+# es por hilo (cada worker de gunicorn tiene el suyo) y su valor por defecto
+# es la respuesta honesta cuando nadie lo puso: NONE, "esto no salio de una
+# tarea".
+#
+# LO QUE NO ES.  No es una fuente de verdad ni toca el cierre: es una etiqueta
+# en el evento.  Un cierre mal atribuido sigue siendo un cierre correcto.
+CLOSURE_SOURCE_NONE = 'NONE'
+CLOSURE_SOURCE_SOLVE = 'SOLVE'
+# El orden en el que se pintan y se cuentan: las tres colas de analisis en el
+# mismo orden en que se sirven, luego los certificados, luego lo que no salio
+# de ninguna tarea (comandos de mantenimiento, siembra).
+CLOSURE_SOURCES = ('USER', 'FILL', 'AUTO', CLOSURE_SOURCE_SOLVE,
+                   CLOSURE_SOURCE_NONE)
+
+_closure_source = contextvars.ContextVar('atomicdb_closure_source',
+                                         default=CLOSURE_SOURCE_NONE)
+
+
+@contextlib.contextmanager
+def closure_attribution(source):
+    """Marca a quien se le apuntan los cierres que ocurran aqui dentro.
+
+    Se restaura siempre, incluso si la aplicacion revienta: un token de
+    contextvar no es un global que haya que acordarse de limpiar.
+    """
+    label = str(source or CLOSURE_SOURCE_NONE).upper()
+    if label not in CLOSURE_SOURCES:
+        label = CLOSURE_SOURCE_NONE
+    token = _closure_source.set(label)
+    try:
+        yield label
+    finally:
+        _closure_source.reset(token)
+
+
+def current_closure_source():
+    return _closure_source.get()
+
+
+def _emit_closure_events(pos, **extra):
+    """El UNICO emisor de ``NODE_CLOSED``.
+
+    ``extra`` son los campos que este camino de cierre sabe y los demas no
+    (el DTZ de un TB, los nodos del certificado de un SOLVE).  Antes cada
+    camino especial creaba SU evento y ademas llamaba aqui, asi que un cierre
+    por certificado contaba DOS veces en el "cierres en 24h" de la portada y
+    un cierre TB no cerraba la campana que colgaba de el.  Una sola puerta
+    arregla las dos cosas.
+    """
     DBEvent.objects.create(kind='NODE_CLOSED', payload={
-        'key': pos.key, 'status': pos.status, 'closure': pos.closure})
+        'key': pos.key, 'status': pos.status, 'closure': pos.closure,
+        'source': _closure_source.get(), **extra})
     for camp in Campaign.objects.filter(root=pos, active=True):
         DBEvent.objects.create(kind='CAMPAIGN_CLOSED', payload={
             'campaign': camp.name, 'status': pos.status})
@@ -1804,7 +1889,7 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
                 reason = f'{type(error).__name__}: {error}'
             verify_seconds = time.monotonic() - started
 
-    with atomic():
+    with atomic(), closure_attribution(CLOSURE_SOURCE_SOLVE):
         current = SolveTask.objects.select_for_update().get(pk=task.pk)
         if current.state == 'COMPLETED':
             return {'dup': True}
@@ -1885,8 +1970,12 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
         elif outcome == 'DISPROVED':
             disputed = _dispute_from_solver(current, trusted_submitter)
     if verified or disputed:
-        backup_cascade([task.position_id])
-        backup_backed_evals([task.position_id])
+        # La cascada tambien va bajo la etiqueta: un certificado que cierra su
+        # posicion cierra ademas ancestros por MINIMAX, y esos cierres son
+        # tan del SOLVE como el primero.
+        with closure_attribution(CLOSURE_SOURCE_SOLVE):
+            backup_cascade([task.position_id])
+            backup_backed_evals([task.position_id])
     return {'verified': verified, 'closed': closed, 'upgraded': upgraded,
             'disputed': disputed,
             'certificate_nodes': (report or {}).get('nodes', 0)}
@@ -2087,6 +2176,261 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
     return made
 
 
+# ---------------- reparacion de dn: el brazo adversarial ----------------
+#
+# EL HALLAZGO DE LA COMUNIDAD.  Wolfram comparo sus lineas exploradas a mano
+# con las que dejo el selector automatico y encontro una diferencia que no es
+# de gusto: las humanas acumulan ``dn`` ALTO — cada respuesta del defensor que
+# alguien miro es una via mas de refutacion que habria que cerrar — mientras
+# el selector deja ESPINAS con ``dn`` 1 o 2.  Una espina es una afirmacion a
+# UNA pregunta sin responder de derrumbarse: basta que la unica replica viva
+# resulte buena para que el subarbol entero deje de valer.  El arbol de prueba
+# humano es mas robusto porque el humano se refuta a si mismo.
+#
+# QUE HACE ESTO.  Que el explorador automatico haga eso mismo: cuando un nodo
+# AND del frente esta por debajo del suelo, se le compran las replicas del
+# defensor que nadie ha mirado.  Si aguantan, el nodo sube de dn y la
+# afirmacion queda de verdad sostenida; si una de ellas refuta, mejor
+# enterarse ahora que despues de construir cien plies encima.
+#
+# QUE NO HACE.  No toca ``api_lease``.  Las tareas salen como ``FILL``, que ya
+# existe y ya se sirve DESPUES de ``USER`` por el orden alfabetico descendente
+# de ``-source``; el orden de servicio no se toca porque no hace falta
+# tocarlo.  Y esta acotado dos veces: por el cupo global de ``FILL``
+# (``COVERAGE_QUEUE_CAP``, compartido con el completado de cobertura, que es
+# trabajo de la misma naturaleza) y por un tope propio por ciclo.
+#
+# Suelo 2, no 1.  ``dn`` 1 es la espina pura; ``dn`` 2 es la espina con una
+# sola replica mirada, que sigue siendo una afirmacion que dos preguntas
+# tumban.  Subirlo mas convertiria el brazo en exploracion normal disfrazada.
+DN_REPAIR_FLOOR = 2
+# Cuantas replicas sin mirar se compran por nodo.  Tres, como el completado de
+# cobertura: lo bastante para que el ``dn`` deje de ser trivial, lo bastante
+# poco para que un nodo con setenta respuestas no se coma el ciclo entero.
+DN_REPAIR_REPLIES = 3
+# Tope por pasada del servicio del selector.  El brazo corre en cada ciclo, no
+# una vez: repartirlo en el tiempo es lo que lo mantiene detras de lo urgente.
+DN_REPAIR_MAX_PER_CYCLE = 24
+# Cuantos nodos finos se MIRAN por pasada, se compre algo en ellos o no.  Sin
+# esto el coste de una pasada lo fija el numero de espinas del arbol, no una
+# constante: un frente con miles de nodos finos ya mirados haria dos consultas
+# por cada uno para acabar sin encolar nada.
+#
+# El riesgo de mirar siempre los mismos primeros N esta acotado por como se
+# vacia el conjunto: un nodo fino con replicas sin mirar sube de dn en cuanto
+# se compran, y uno permanentemente fino sin nada que comprar es un nodo cuyo
+# pn ya es infinito — es decir, refutado — y el frente no lo incluye.
+DN_REPAIR_MAX_NODES = 200
+DN_REPAIR_SEED_NODES = COVERAGE_SEED_NODES
+
+
+def _dn_repair_replies(parent, replies):
+    """Las replicas sin mirar de un nodo AND, en el orden que no tenemos.
+
+    ``unexplored_children`` es exactamente el predicado que hace falta — ni
+    status, ni respaldo, ni eval propia — y devuelve en orden de movegen.  No
+    hay nada mejor: una replica que el motor hubiera rankeado en su MultiPV
+    tendria ``eval_cp`` sembrada por ``ingest_analysis`` y por tanto NO estaria
+    en esta lista.  Las que quedan son las que ninguna busqueda menciono, asi
+    que el orden de movegen es honesto (es el mismo argumento que
+    ``FRONTIER_BLIND_WIDTH``) y ademas reproducible bajo replay.
+    """
+    return unexplored_children(parent)[:max(0, int(replies))]
+
+
+def enqueue_dn_repair(cap=COVERAGE_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
+                      replies=DN_REPAIR_REPLIES,
+                      per_cycle=DN_REPAIR_MAX_PER_CYCLE,
+                      max_nodes=DN_REPAIR_MAX_NODES, campaigns=None):
+    """Compra replicas sin mirar en los nodos AND finos del frente de prueba.
+
+    Devuelve cuantas tareas se crearon.  Emite un ``DN_REPAIR`` por tanda con
+    los conteos, que es de donde sale el KPI.
+    """
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', source=AnalysisTask.Source.FILL).count()
+    room = min(max(0, int(cap) - pending), max(0, int(per_cycle)))
+    if room <= 0:
+        return 0
+    if campaigns is None:
+        campaigns = proof.active_campaigns()
+    if not campaigns:
+        return 0
+
+    made, nodes_repaired, scanned = 0, 0, 0
+    for campaign in campaigns:
+        if made >= room or scanned >= max_nodes:
+            break
+        for key, _fen, _pn, dn in proof.frontier_and_rows(campaign):
+            if made >= room or scanned >= max_nodes:
+                break
+            if dn > floor:
+                # El frente viene ordenado por pn, no por dn: aqui no se puede
+                # cortar, hay que seguir mirando.  Y no cuenta como mirado:
+                # descartarlo cuesta una comparacion, no una consulta.
+                continue
+            scanned += 1
+            # ``expanded``, y no "tiene aristas": a un nodo sin expandir no le
+            # faltan REPLICAS que mirar, le falta correr el movegen, y de eso
+            # ya se encarga el analisis normal cuando le toque.  Contar sus
+            # aristas parciales como si fueran la lista legal entera es
+            # exactamente el agujero que la guarda de cobertura tapa.
+            parent = Position.objects.filter(key=key, status='UNKNOWN',
+                                             expanded=True).first()
+            if parent is None:
+                continue
+            queued_here = 0
+            for child in _dn_repair_replies(parent, replies):
+                if made >= room:
+                    break
+                budget = max(DN_REPAIR_SEED_NODES, budget_for(child))
+                task, created = AnalysisTask.objects.get_or_create(
+                    position=child, generation=child.visits,
+                    defaults={'budget_nodes': budget,
+                              # Anchura de PRIMERA MIRADA, no la de cobertura.
+                              # El completado de cobertura pide profundidad
+                              # porque va a cerrar un nodo; esto va a INFORMAR
+                              # una replica virgen, que es para lo que la
+                              # politica de la casa reserva MultiPV 5.
+                              'multipv': multipv_for(child.visits, budget),
+                              'source': AnalysisTask.Source.FILL})
+                if created:
+                    made += 1
+                    queued_here += 1
+                elif (task.state == 'PENDING'
+                      and task.source == AnalysisTask.Source.AUTO):
+                    # Ya estaba en la cola normal: se promociona sin gastar
+                    # cupo, porque la tarea ya existia.
+                    task.source = AnalysisTask.Source.FILL
+                    task.save(update_fields=['source'])
+            if queued_here:
+                nodes_repaired += 1
+    if made:
+        DBEvent.objects.create(kind='DN_REPAIR', payload={
+            'queued': made, 'nodes': nodes_repaired, 'examined': scanned,
+            'floor': int(floor), 'pending_before': pending,
+            'cap': int(cap), 'per_cycle': int(per_cycle)})
+    return made
+
+
+# ---------------- afirmaciones FRAGILES de mate ----------------
+#
+# EL CASO EXACTO (Wolfram, 28-jul).  Un nodo publicaba ``backed_eval`` 9994 —
+# banda de mate — sobre territorio en el que nadie habia corrido un analisis:
+# un visitante habia CAMINADO una linea hasta un mate terminal y el valor
+# subio con peso de prueba por toda la cadena.  El corte de autoridad de
+# ``_backed_for`` ya degrada la CALIDAD de ese valor en cuanto la cobertura es
+# parcial, que es lo correcto y basta para que no envenene decisiones.  Pero
+# deja la pregunta en pie: o ese mate existe, y entonces cerrar el nodo vale
+# muchisimo, o no existe, y entonces la afirmacion es ruido caro.
+#
+# Un F0 de 2M la contesta en segundos.  Es el uso mas barato que tiene el
+# solver y es exactamente el que el piloto no probo.
+#
+# LA LECCION DEL PILOTO, CLAVADA AQUI.  23 de las 36 tareas del piloto fueron
+# DISPROVED instantaneos porque se preguntaba WHITE_WIN sobre posiciones con
+# eval -10000 — es decir, se preguntaba si ganaba el bando que estaba
+# perdiendo.  El objetivo va POR SIGNO del valor respaldado, siempre.
+FRAGILE_ARM = 'fragile'
+# Cupo PROPIO y pequeno.  Separado del de la deuda a proposito: son dos
+# apetitos distintos y compartir cap significaria que una purga de deuda mata
+# este brazo o al reves.  Pequeno porque cada tarea es una pregunta concreta,
+# no una barrida.
+FRAGILE_QUEUE_CAP = 50
+FRAGILE_SCAN_ROWS = 2_000
+# Mismo peldano F0 que la deuda HOY.  Constante propia para que ajustar uno no
+# mueva el otro sin querer: son dos politicas que coinciden en un numero, no
+# un numero compartido.
+FRAGILE_STAGE_NODES = DEBT_STAGE_NODES
+
+
+def fragile_mate_claims(scan=FRAGILE_SCAN_ROWS):
+    """Nodos UNKNOWN que AFIRMAN mate y no lo tienen mirado por todos lados.
+
+    Se escanea por ``updated`` descendente y con tope, igual que el completado
+    de cobertura: una afirmacion fragil aparece justo donde algo acaba de
+    moverse.  Devuelve ``[(Position, goal)]``, con el objetivo ya resuelto POR
+    SIGNO.
+    """
+    rows = list(Position.objects.filter(status='UNKNOWN').filter(
+        Q(backed_eval__gte=MATE_BAND) | Q(backed_eval__lte=-MATE_BAND)
+    ).order_by('-updated')[:scan])
+    if not rows:
+        return []
+    children = _backed_children_by_parent([row.key for row in rows])
+    found = []
+    for row in rows:
+        if not coverage_is_partial(row, children.get(row.key, ())):
+            continue
+        goal = ('WHITE_WIN' if row.backed_eval > 0 else 'BLACK_WIN')
+        found.append((row, goal))
+    return found
+
+
+def enqueue_fragile_mate_solves(cap=FRAGILE_QUEUE_CAP, scan=FRAGILE_SCAN_ROWS):
+    """Pone las afirmaciones fragiles de mate delante del solver, a F0.
+
+    Devuelve cuantas tareas se crearon.  El resultado ``DISPROVED`` que vuelva
+    sigue siendo advisory y no cierra nada: sobre una posicion ``UNKNOWN``,
+    ``_dispute_from_solver`` no tiene status que discutir y se limita a dejar
+    la senal.  Esa semantica es de doc 18 y aqui no se toca.
+    """
+    from .models import SolveTask
+
+    pending = SolveTask.objects.filter(state='PENDING',
+                                       arm=FRAGILE_ARM).count()
+    room = max(0, int(cap) - pending)
+    if room <= 0:
+        return 0
+
+    candidates = fragile_mate_claims(scan=scan)
+    if not candidates:
+        return 0
+    keys = [row.key for row, _goal in candidates]
+    # Dedup en dos direcciones: nada que este brazo ya pregunto (aunque haya
+    # terminado — repetir la misma pregunta al mismo presupuesto da la misma
+    # respuesta) y nada que tenga YA un solve vivo por cualquier otra via.
+    taken = set(SolveTask.objects.filter(
+        position_id__in=keys, arm=FRAGILE_ARM,
+        state__in=('PENDING', 'LEASED', 'COMPLETED'),
+    ).values_list('position_id', flat=True))
+    taken |= set(SolveTask.objects.filter(
+        position_id__in=keys, state__in=('PENDING', 'LEASED'),
+    ).values_list('position_id', flat=True))
+
+    made = []
+    for row, goal in candidates:
+        if len(made) >= room:
+            break
+        if row.key in taken:
+            continue
+        taken.add(row.key)
+        made.append(SolveTask(
+            position=row, goal=goal, budget_stage='F0',
+            budget_nodes=FRAGILE_STAGE_NODES, arm=FRAGILE_ARM))
+    if not made:
+        return 0
+    SolveTask.objects.bulk_create(made, ignore_conflicts=True)
+    DBEvent.objects.create(kind='FRAGILE_ENQUEUED', payload={
+        'created': len(made), 'pending_before': pending, 'cap': int(cap),
+        'candidates': len(candidates),
+        'white': sum(1 for task in made if task.goal == 'WHITE_WIN'),
+        'black': sum(1 for task in made if task.goal == 'BLACK_WIN')})
+    return len(made)
+
+
+def adversarial_arms_enabled():
+    """Interruptor de despliegue de los dos brazos adversariales.
+
+    Apagado por DEFECTO, y no por prudencia generica: el paquete existe para
+    MEDIR si el explorador que se refuta a si mismo cierra mas, y esa medida
+    necesita un "antes" tomado con el codigo ya desplegado y los brazos
+    todavia quietos.  Se enciende con ``ATOMICDB_ADVERSARIAL = True`` cuando
+    el snapshot de referencia esta en la tabla.
+    """
+    return bool(getattr(settings, 'ATOMICDB_ADVERSARIAL', False))
+
+
 # Un click de visitante pide COMO MUCHO esto.  El completado automatico de
 # cobertura se limita a tres jugadas porque busca cerrar un nodo; esto es otra
 # cosa — "mirad todo lo que aqui no se ha mirado" — y sesenta y cuatro es una
@@ -2216,11 +2560,9 @@ def _close_by_certificate(task, report):
     pos.clock_slack = report.get('clock_slack')
     pos.save(update_fields=['status', 'closure', 'proof', 'clock_slack',
                             'updated'])
-    DBEvent.objects.create(kind='NODE_CLOSED', payload={
-        'key': pos.key, 'status': pos.status, 'closure': 'SOLVE',
-        'certificate_nodes': report['nodes'], 'depth': report['depth'],
-        'clock_slack': report.get('clock_slack'), 'task': task.pk})
-    _emit_closure_events(pos)
+    _emit_closure_events(pos, certificate_nodes=report['nodes'],
+                        depth=report['depth'],
+                        clock_slack=report.get('clock_slack'), task=task.pk)
     return True
 
 
@@ -2297,10 +2639,8 @@ def _apply_prepared_tb(position_key, prepared):
                            else logic.slack_from_dtz(dtz))
         pos.save(update_fields=['status', 'closure', 'clock_slack',
                                 'updated'])
-        DBEvent.objects.create(kind='NODE_CLOSED', payload={
-            'key': pos.key, 'status': pos.status, 'closure': 'TB',
-            'dtz': dtz, 'dtz_verified': False,
-            'clock_slack': pos.clock_slack})
+        _emit_closure_events(pos, dtz=dtz, dtz_verified=False,
+                             clock_slack=pos.clock_slack)
     backup_cascade([position_key])
     backup_backed_evals([position_key])
     return True

@@ -24,6 +24,32 @@
 </div>
 {% endif %}
 
+{% if has_frontier or has_attribution %}
+<div class="progress">
+  {% if has_frontier or has_human_close %}
+  <div class="pkpis dim">Proof health
+    {% if has_frontier %}· median disproof number on the AND frontier:
+      <b>{{ frontier_dn_median_h }}</b> over {{ frontier_and_nodes_h }} open
+      obligations, of which {{ frontier_dn_thin_h }} ({{ frontier_dn_thin_pct }}%)
+      sit at or below dn {{ dn_repair_floor }} — one unanswered question from
+      falling over{% endif %}
+    {% if has_human_close %}· positions a visitor asked for close in
+      <b>{{ human_close_h }}</b> (median of {{ human_close_samples }}){% endif %}
+    · measured at {{ proof_health_at|date:"Y-m-d H:i" }} UTC
+  </div>
+  {% endif %}
+  {% if has_attribution %}
+  <div class="pkpis dim">Closures by source, last 24h ({{ attribution_stamped_24h }} of
+    {{ attribution_total_24h }} labelled):
+    {% for row in attribution_24h %}{{ row.source }} {{ row.pct }}% ({{ row.count }}){% if not forloop.last %} · {% endif %}{% endfor %}
+    — last 7d ({{ attribution_stamped_7d }} of {{ attribution_total_7d }}):
+    {% for row in attribution_7d %}{{ row.source }} {{ row.pct }}% ({{ row.count }}){% if not forloop.last %} · {% endif %}{% endfor %}.
+    Labelling started at deploy: closures older than that carry no source and
+    are counted in none of the shares above.</div>
+  {% endif %}
+</div>
+{% endif %}
+
 <form class="fenbox" method="post" action="/atomicdb/fen/">{% csrf_token %}
   <input name="fen" placeholder="Paste a FEN or a PGN to jump to that position" required
     spellcheck="false" autocomplete="off">

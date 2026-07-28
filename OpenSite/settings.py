@@ -100,6 +100,13 @@ ATOMICDB_SELECTOR = os.environ.get('ATOMICDB_SELECTOR', 'regret')
 # si el servicio refresh_selector no esta corriendo.
 ATOMICDB_INLINE_SELECTOR = os.environ.get(
     'ATOMICDB_INLINE_SELECTOR', '').lower() in ('1', 'true', 'yes')
+# Brazos adversariales del explorador (reparacion de dn y solves F0 sobre
+# afirmaciones fragiles de mate).  APAGADOS por defecto a proposito: el
+# paquete existe para medir si mejoran los cierres, y esa medida necesita un
+# snapshot "antes" tomado con el codigo desplegado y los brazos quietos.  Se
+# encienden cuando ese snapshot esta en la tabla.
+ATOMICDB_ADVERSARIAL = os.environ.get(
+    'ATOMICDB_ADVERSARIAL', '').lower() in ('1', 'true', 'yes')
 
 INSTALLED_APPS = [
     'atomicdb',

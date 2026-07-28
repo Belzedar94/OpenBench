@@ -540,6 +540,42 @@ class ProgressSnapshot(models.Model):
     root_pn = models.BigIntegerField(default=0)
     root_dn = models.BigIntegerField(default=0)
 
+    # --- salud del FRENTE DE PRUEBA (definicion en proof.frontier_rows) ---
+    #
+    # Estas tres son las UNICAS de la fila que no se pueden reconstruir mas
+    # tarde.  Los eventos son durables y los ``RequestLog`` tambien, asi que
+    # cualquier conteo sobre ellos se puede recalcular manana; los ``pn``/``dn``
+    # de un ``ProofNode`` se sobrescriben en el sitio en cada cascada, asi que
+    # la distribucion de ``dn`` de esta hora deja de existir en cuanto pasa.
+    # Si no se guarda aqui, no hay "antes" contra el que medir nada.
+    frontier_and_nodes = models.BigIntegerField(default=0)
+    frontier_dn_median = models.BigIntegerField(default=0)
+    frontier_dn_thin = models.BigIntegerField(default=0)
+
+    # --- cierres por PROCEDENCIA, acumulados desde el despliegue ---
+    #
+    # Cuentan eventos ``NODE_CLOSED`` que llevan la etiqueta ``source`` que
+    # ``ingest.closure_attribution`` empezo a poner.  Los cierres anteriores al
+    # despliegue no la llevan y no entran en ninguno de los cinco: eso es
+    # deliberado y es lo que hace que la suma NO cuadre con
+    # ``positions_closed``.  Un contador que mintiera para cuadrar seria peor
+    # que uno que no cubre el pasado.
+    closures_user = models.BigIntegerField(default=0)
+    closures_fill = models.BigIntegerField(default=0)
+    closures_auto = models.BigIntegerField(default=0)
+    closures_solve = models.BigIntegerField(default=0)
+    closures_none = models.BigIntegerField(default=0)
+
+    # --- tiempo hasta el cierre de lo que toco una persona ---
+    #
+    # Mediana de segundos entre la PRIMERA peticion publica sobre una posicion
+    # y su cierre, sobre los cierres de la ventana reciente.  Es una VENTANA,
+    # no un acumulado — como los medidores de workers vivos — y su tamano de
+    # muestra viaja al lado para que una mediana de dos casos no se lea como
+    # una propiedad de la flota.
+    human_close_median_seconds = models.BigIntegerField(default=0)
+    human_close_samples = models.BigIntegerField(default=0)
+
     trust_verified = models.BigIntegerField(default=0)
     trust_andor = models.BigIntegerField(default=0)
     trust_engine = models.BigIntegerField(default=0)

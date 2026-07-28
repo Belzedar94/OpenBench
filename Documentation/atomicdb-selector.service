@@ -26,6 +26,13 @@
 # Emergency fallback: set ATOMICDB_INLINE_SELECTOR=True in the WEB process's
 # environment and restart it.  The lease path then refreshes priorities inline
 # again, through this same code, and this service can stay stopped.
+#
+# Adversarial arms (dn repair + F0 solves on fragile mate claims): OFF unless
+# ATOMICDB_ADVERSARIAL=1 is in THIS process's environment.  Turn them on only
+# after `capture_atomicdb_progress` has written the reference row — the whole
+# package exists to measure the difference, and the "before" has to be taken
+# with the code deployed and the arms quiet.  See
+# docs/atomicdb-progress-instrumentation.md.
 
 [Unit]
 Description=AtomicDB selector priority refresher
@@ -43,6 +50,7 @@ WorkingDirectory=/home/openbench/OpenBench
 # because settings import it; the refresher serves no HTTP.
 Environment=OPENBENCH_DEBUG=False
 Environment=PYTHONUNBUFFERED=1
+# Environment=ATOMICDB_ADVERSARIAL=1
 # EnvironmentFile=/etc/openbench/openbench.env
 
 ExecStart=/home/openbench/OpenBench/.venv/bin/python manage.py \

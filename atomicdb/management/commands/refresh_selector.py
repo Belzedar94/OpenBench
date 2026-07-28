@@ -14,6 +14,15 @@ never a source of truth.
 FALLBACK.  ``ATOMICDB_INLINE_SELECTOR = True`` in the web process restores the
 old inline behaviour through the same code path, so this service can be stopped
 without stopping the project.  See Documentation/atomicdb-selector.service.
+
+WHAT ELSE RIDES THIS TIMER.  Everything that is a bounded scheduling decision
+rather than a request: the ENGINE debt top-up, coverage completion, and — when
+``ATOMICDB_ADVERSARIAL`` is on — the two adversarial arms (dn repair and F0
+solves on fragile mate claims).  They belong here and not in crons of their
+own because they compete for the SAME queue allowances, and a decision about
+how to spend one cap should be taken in one place.  The order inside a pass is
+the priority order: debt, coverage, then the adversarial arms last, so a cap
+that coverage just spent is no longer available to dn repair.
 """
 
 import json
@@ -51,6 +60,23 @@ class Command(BaseCommand):
         parser.add_argument(
             '--no-debt', action='store_true',
             help='Refresh priorities only; do not top up the debt queue.')
+        parser.add_argument(
+            '--adversarial', dest='adversarial', action='store_true',
+            default=None,
+            help='Run the dn-repair and fragile-mate arms this pass, whatever '
+                 'ATOMICDB_ADVERSARIAL says.')
+        parser.add_argument(
+            '--no-adversarial', dest='adversarial', action='store_false',
+            help='Skip both adversarial arms this pass.')
+        parser.add_argument(
+            '--dn-repair-cap', type=int, default=ingest.COVERAGE_QUEUE_CAP,
+            help='Maximum PENDING FILL tasks before dn repair stops adding '
+                 'more; shared with coverage completion (default: '
+                 '%(default)s).')
+        parser.add_argument(
+            '--fragile-cap', type=int, default=ingest.FRAGILE_QUEUE_CAP,
+            help='Maximum PENDING fragile-mate SolveTasks (default: '
+                 '%(default)s).')
         parser.add_argument(
             '--status', action='store_true',
             help='Print how many live positions carry a priority and exit.')
@@ -98,17 +124,32 @@ class Command(BaseCommand):
             # its cap here rather than in a cron of its own.  It is bounded
             # work (one bulk_create of at most `cap - pending` rows) and it
             # belongs with the other scheduling decision, not beside it.
-            enqueued = covered = 0
+            enqueued = covered = repaired = fragile = 0
             if not options['no_debt']:
                 enqueued = ingest.enqueue_engine_debt(cap=options['debt_cap'])
             if not options['no_coverage']:
                 covered = ingest.enqueue_coverage_completion(
                     cap=options['coverage_cap'])
+            # Los brazos adversariales, en el MISMO ciclo y detras de todo lo
+            # demas: el cupo de FILL que la cobertura acabe de gastar ya no
+            # esta disponible para la reparacion de dn, que es el orden de
+            # prioridad correcto (cerrar un nodo vale mas que engordar su dn).
+            adversarial = options['adversarial']
+            if adversarial is None:
+                adversarial = ingest.adversarial_arms_enabled()
+            if adversarial:
+                repaired = ingest.enqueue_dn_repair(
+                    cap=options['dn_repair_cap'])
+                fragile = ingest.enqueue_fragile_mate_solves(
+                    cap=options['fragile_cap'])
             passes += 1
             elapsed = time.monotonic() - started
             self.stdout.write(json.dumps(
                 {'pass': passes, 'seconds': round(elapsed, 3),
-                 'debt_enqueued': enqueued, 'coverage_enqueued': covered},
+                 'debt_enqueued': enqueued, 'coverage_enqueued': covered,
+                 'adversarial': bool(adversarial),
+                 'dn_repair_enqueued': repaired,
+                 'fragile_enqueued': fragile},
                 sort_keys=True))
             if not options['loop']:
                 break
