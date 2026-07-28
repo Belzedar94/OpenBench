@@ -1,6 +1,8 @@
 """pn/dn beside every reply, and one click for the replies nobody looked at."""
 
-from . import ingest, logic, proof
+from unittest.mock import patch
+
+from . import ingest, logic, proof, views
 from .models import (AnalysisTask, DBEvent, Edge, Position, ProofCampaign,
                      ProofNode, RequestLog)
 from .testing import TestCase
@@ -127,18 +129,25 @@ class UnexploredButtonTests(TestCase):
         self.assertEqual(AnalysisTask.objects.count(), first['queued'])
 
     def test_the_daily_allowance_is_per_ip_and_per_button(self):
-        from django.utils import timezone
-        for index in range(10):
-            DBEvent.objects.create(kind='BULK_REQUEST',
-                                   payload={'ip': '127.0.0.1',
-                                            'key': f'k{index}'})
+        """The MECHANISM, not the number.
 
-        response = self.client.post(
-            f'/atomicdb/request-unexplored/{self.root.key}/')
+        The allowance is policy and it moves — it was widened x100 on 28-jul —
+        so a test that spends exactly ten clicks stops testing anything the
+        moment the policy changes, and then fails for a reason that has
+        nothing to do with what it was written to protect.  Patch the limit,
+        spend it, and assert the cap fires.
+        """
+        with patch.object(views, 'BULK_REQUESTS_PER_IP_DAY', 3):
+            for index in range(3):
+                DBEvent.objects.create(kind='BULK_REQUEST',
+                                       payload={'ip': '127.0.0.1',
+                                                'key': f'k{index}'})
+
+            response = self.client.post(
+                f'/atomicdb/request-unexplored/{self.root.key}/')
 
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.json()['status'], 'rate-limited')
-        del timezone
 
     def test_a_receipt_and_an_event_are_recorded(self):
         self.client.post(f'/atomicdb/request-unexplored/{self.root.key}/')
