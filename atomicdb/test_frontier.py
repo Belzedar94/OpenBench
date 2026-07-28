@@ -523,6 +523,32 @@ class DescentRequestApiTests(TestCase):
         self.assertContains(response, 'saturated')
         self.assertContains(response, 'descent_plies')
 
+    def test_a_saturated_click_says_what_it_walked(self):
+        """The complaint this fixes: a spent ladder read as a broken queue.
+
+        The endpoint already answered honestly; the page turned that answer
+        into four words that never mentioned the walk or the counters.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos)
+
+        response = self.client.get(f'/atomicdb/explore/{pos.key}/')
+
+        self.assertContains(response, 'Frontier saturated')
+        self.assertContains(response, 'nothing left to buy')
+        self.assertContains(response, 'children_exhausted')
+
+    def test_the_outcome_has_a_place_to_be_read_beside_the_button(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos)
+
+        response = self.client.get(f'/atomicdb/explore/{pos.key}/')
+
+        # Beside the button, not INSIDE it: the button still has to say what
+        # it is doing while the note says what the click bought.
+        self.assertContains(response, 'id="reqnote"')
+        self.assertContains(response, 'class="reqnote"')
+
 
 class ExpansionRequestApiTests(TestCase):
 
@@ -607,5 +633,16 @@ class ExpansionRequestApiTests(TestCase):
 
         response = self.client.get(f'/atomicdb/explore/{pos.key}/')
 
-        self.assertContains(response, 'Expanding beneath this position')
+        self.assertContains(response, 'Budget exhausted here')
         self.assertContains(response, 'children_queued')
+
+    def test_an_expansion_says_where_the_work_landed(self):
+        pos = self._exhausted_root()
+
+        response = self.client.get(f'/atomicdb/explore/{pos.key}/')
+
+        # "below INSTEAD" is the whole point: the visitor asked for this
+        # position and got work one level down, which is not a failure and is
+        # not what "queued" alone conveys either.
+        self.assertContains(response, 'below instead')
+        self.assertContains(response, 'further down')

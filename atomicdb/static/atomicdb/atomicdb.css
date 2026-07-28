@@ -607,9 +607,24 @@ details summary {
 
 .reqrow {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: .8rem;
   margin: .7rem 0;
+}
+
+/* Veredicto de un click que ya no compraba en ESTA posicion: se lee al lado
+   del boton, no dentro, porque el boton tiene que seguir diciendo lo que
+   hace. Ambos colores estan tomados de la paleta, asi que el par claro/oscuro
+   sale del tema y no de un hex suelto. */
+.reqnote {
+  flex: 0 0 100%;   /* siempre su propia linea: es un veredicto, no un chip */
+  color: var(--ink);
+  font-size: .8rem;
+}
+
+.reqnote.spent {
+  color: var(--hot);
 }
 
 .progress {

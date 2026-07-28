@@ -1428,6 +1428,23 @@ def _human(n):
     return f'{n:,}'
 
 
+def _own_search(point, nodes):
+    """Que dijo el motor MIRANDO ESA POSICION, para las filas [BACKED].
+
+    Una fila respaldada pinta el negamax del subarbol, asi que la eval propia
+    del hijo desaparece de la tabla — y con ella la unica forma que tiene un
+    visitante de ver de donde sale el numero.  ``point`` ya viene en la
+    perspectiva del que mueve, igual que la celda; el soporte es lo que hace
+    honesta la frase, porque "+388" con 2.000 nodos detras y "+388" con 128M
+    no son la misma afirmacion.  Sin eval propia se dice, sin adornos.
+    """
+    if point is None:
+        return 'no direct search yet'
+    if not nodes:
+        return f'own search: {point:+d}'
+    return f'own search: {point:+d} @ {_human(nodes)} nodes'
+
+
 def _move_css(status, score, win_status):
     """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
     if status == 'DRAW':
@@ -1514,6 +1531,7 @@ def _child_moves(pos):
                       'mate': mate, 'point': point,
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
+                      'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})

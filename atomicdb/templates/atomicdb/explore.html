@@ -72,12 +72,14 @@
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
         title="Queue every reply this position has never looked at">Analyse all {{ unexplored_count }} unexplored replies</button>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
+      <span class="reqnote" id="reqnote" hidden></span>
     </p>
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>
     (function () {
       const btn = document.getElementById('reqbtn');
+      const note = document.getElementById('reqnote');
       const cascade = document.getElementById('cascade');
       const fen = '{{ pos.fen|escapejs }}';
       const key = '{{ pos.key|escapejs }}';
@@ -87,6 +89,37 @@
       // watching this row alone would say nothing for six minutes.  Follow
       // whatever level the request actually reached instead.
       let below = {% if frontier_exhausted %}key{% else %}null{% endif %};
+      function plural(n, one, many) {
+        return n + ' ' + (n === 1 ? one : many);
+      }
+      function showNote(text, spent) {
+        note.textContent = text || '';
+        note.classList.toggle('spent', !!spent);
+        note.hidden = !text;
+      }
+      // Past the top rung the click stops buying HERE, and the two endings
+      // look identical from the button: one queued work further down, the
+      // other found the whole reachable frontier already bought.  Reporting
+      // both as "queued" (or as nothing at all) is what made an advanced
+      // visitor read a working queue as a broken one.  The counters the
+      // endpoint already returns are the honest answer, so they get said.
+      function descentNote(d) {
+        const plies = Number(d.descent_plies) || 0;
+        if (d.status === 'expanded') {
+          return 'Budget exhausted here — queued '
+                 + plural(Number(d.children_queued) || 0, 'reply', 'replies')
+                 + ' below instead'
+                 + (plies ? ' (' + plural(plies, 'ply', 'plies')
+                            + ' further down)' : '');
+        }
+        const seen = Number(d.children_exhausted) || 0;
+        if (!plies && !seen) {
+          return 'Frontier saturated — nothing left to buy below this position';
+        }
+        return 'Frontier saturated — walked ' + plural(plies, 'ply', 'plies')
+               + ' past ' + plural(seen, 'reply', 'replies')
+               + ' already at full depth, nothing left to buy';
+      }
       function showCascade() {
         if (!below) { return; }
         fetch('/atomicdb/api/frontier/' + below + '/')
@@ -140,6 +173,7 @@
             return data;
           })
           .then(d => {
+            const descent = d.status === 'expanded' || d.status === 'saturated';
             btn.textContent = {
               'queued': 'Queued, waiting for a worker...',
               'already-queued': 'In the queue, waiting for a worker...',
@@ -148,15 +182,16 @@
               'queue-full': 'Queue is full, try later',
               'already-solved': 'Already solved',
               // depth ladder spent here: the request goes one ply deeper,
-              // and deeper still while every candidate it meets is spent
-              'expanded': 'Expanding beneath this position: '
-                          + (d.children_queued || 0) + ' children queued'
-                          + (d.descent_plies
-                             ? ' (' + d.descent_plies + (d.descent_plies === 1
-                                ? ' ply' : ' plies') + ' down)' : ''),
-              // nothing reachable from here had anything left to buy
-              'saturated': 'Already at full depth below this position',
+              // and deeper still while every candidate it meets is spent.
+              // The counters live in the note beside the button; the button
+              // itself only says what it is doing now.
+              'expanded': 'Queued below, waiting for a worker...',
+              // nothing reachable from here had anything left to buy, so
+              // the button goes back to offering the click it did not spend
+              'saturated': 'Request analysis',
             }[d.status] || 'Something went wrong';
+            showNote(descent ? descentNote(d) : '',
+                     d.status === 'saturated');
             if (d.descent_key) { below = d.descent_key; }
             if (d.status === 'saturated') { showCascade(); }
             if (['queued', 'already-queued', 'already-requested',
@@ -183,6 +218,7 @@
       }
       btn.addEventListener('click', function () {
         btn.disabled = true;
+        showNote('');   // a new click does not inherit the last verdict
         requestAnalysis(0);
       });
       const allbtn = document.getElementById('allbtn');
@@ -252,7 +288,7 @@
         <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<span
-            class="backed-mark" title="negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below · eval stored on that position {{ m.point }}">backed</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            class="backed-mark" title="negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below · {{ m.own_search }}">backed</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>

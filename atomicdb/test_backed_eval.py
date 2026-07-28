@@ -308,6 +308,56 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(rows['h5f7']['score'], 10_000)  # probado manda
         self.assertIsNone(rows['a2a3']['score'])
 
+    def test_a_backed_row_reports_the_raw_search_behind_it(self):
+        """El numero pintado es del subarbol; el tooltip dice de donde sale."""
+        parent = _pos('OWP', 'w', expanded=True)
+        child = _pos('OWC', 'b', eval_cp=388, backed_eval=794,
+                     backed_plies=2, nodes_invested=128_000_000)
+        _edge(parent, child, 'd7d6')
+
+        row = next(m for m in views._child_moves(parent))
+
+        self.assertTrue(row['backed'])
+        self.assertEqual(row['own_search'], 'own search: +388 @ 128.0M nodes')
+
+    def test_the_tooltip_is_in_the_mover_s_perspective_like_the_cell(self):
+        """Un solo flip por ply pintado: la celda y su tooltip, o ninguno."""
+        parent = _pos('OWBP', 'b', expanded=True)
+        child = _pos('OWBC', 'w', eval_cp=-388, backed_eval=-794,
+                     backed_plies=1, nodes_invested=2_400_000_000)
+        _edge(parent, child, 'd7d6')
+
+        row = next(m for m in views._child_moves(parent))
+
+        self.assertEqual(row['score'], 794)
+        self.assertEqual(row['own_search'], 'own search: +388 @ 2.40B nodes')
+
+    def test_a_purely_inherited_row_says_so_instead_of_inventing_a_zero(self):
+        parent = _pos('OWIP', 'w', expanded=True)
+        child = _pos('OWIC', 'b', backed_eval=-500, backed_plies=3)
+        _edge(parent, child, 'd7d6')
+
+        row = next(m for m in views._child_moves(parent))
+
+        self.assertTrue(row['backed'])
+        self.assertEqual(row['own_search'], 'no direct search yet')
+
+    def test_an_eval_with_no_nodes_behind_it_claims_no_support(self):
+        self.assertEqual(views._own_search(388, 0), 'own search: +388')
+
+    def test_the_page_paints_the_tooltip_on_the_badge(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).first().child
+        Position.objects.filter(key=child.key).update(
+            eval_cp=388, backed_eval=794, backed_plies=2,
+            nodes_invested=128_000_000)
+
+        body = Client().get(f'/atomicdb/explore/{root.key}/').content.decode()
+
+        self.assertIn('backed-mark', body)
+        self.assertIn('own search: +388 @ 128.0M nodes', body)
+
     def test_black_to_move_flips_the_sign_exactly_once(self):
         parent = _pos('BM', 'b', expanded=True)
         _edge(parent, _pos('BMK', 'w', eval_cp=-794, backed_eval=-794,
