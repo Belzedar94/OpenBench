@@ -69,6 +69,8 @@
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
+      {% if unexplored_count %}<button class="reqbtn" id="allbtn"
+        title="Queue every reply this position has never looked at">Analyse all {{ unexplored_count }} unexplored replies</button>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
     </p>
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
@@ -183,6 +185,33 @@
         btn.disabled = true;
         requestAnalysis(0);
       });
+      const allbtn = document.getElementById('allbtn');
+      if (allbtn) {
+        allbtn.addEventListener('click', function () {
+          allbtn.disabled = true;
+          allbtn.textContent = 'Queueing...';
+          fetch('/atomicdb/request-unexplored/' + key + '/', {method: 'POST'})
+            .then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+              if (data.status === 'queued') {
+                const n = data.queued;
+                allbtn.textContent = 'Queued ' + n + ' analys'
+                                     + (n === 1 ? 'is' : 'es');
+                poll(36);
+              } else {
+                allbtn.textContent = {
+                  'rate-limited': 'Daily limit reached, try tomorrow',
+                  'nothing-to-do': 'Nothing left unexplored here',
+                  'already-solved': 'Already solved',
+                }[data.status] || 'Something went wrong';
+              }
+            })
+            .catch(() => {
+              allbtn.textContent = 'Network error, try again';
+              allbtn.disabled = false;
+            });
+        });
+      }
       showCascade();   // an already-spent ladder shows its cascade on load
     })();
     </script>
@@ -211,7 +240,9 @@
   <div>
     <h2 style="margin-top:0">Moves</h2>
     <table>
-      <tr><th></th><th>move</th><th>state</th><th>eval</th><th>visits</th></tr>
+      <tr><th></th><th>move</th><th>state</th><th>eval</th>
+        <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
+        <th>visits</th></tr>
       {% for m in moves %}
       <tr>
         <td><span class="chip {{ m.css }}"></span></td>
@@ -222,6 +253,7 @@
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<span
             class="backed-mark" title="negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below · eval stored on that position {{ m.point }}">backed</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+        <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% endfor %}
@@ -233,6 +265,7 @@
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}</td>
         <td><span class="dim">unexplored</span></td>
         <td><span class="dim">-</span></td>
+        <td class="dim proofnums"></td>
         <td class="dim">-</td>
       </tr>
       {% endfor %}

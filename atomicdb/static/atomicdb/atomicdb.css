@@ -1024,3 +1024,11 @@ html.theme-ready .tile {
     color: ButtonText;
   }
 }
+
+/* Proof numbers sit beside the eval, deliberately quiet: they are scheduling
+   information, not a verdict, and they must not out-shout the move state. */
+.proofnums {
+  font-variant-numeric: tabular-nums;
+  font-size: .8rem;
+  white-space: nowrap;
+}

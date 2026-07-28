@@ -555,6 +555,19 @@ BACKED_MAX_PLIES = 64        # tope de profundidad del ascenso (generoso)
 BACKED_MAX_REVISITS = 2      # el DAG puede volver a un nodo por otro hijo
 BACKED_MAX_NODES = 50_000    # tope duro de recomputos por llamada
 BACKED_EPSILON_CP = 10       # ruido que no merece seguir subiendo
+# TOLERANCIA DE LA GUARDA DE CALIDAD.
+#
+# La guarda nacio para que un analisis de 8M no pisara lo que respaldo uno de
+# 10B.  Comparada de forma estricta hacia tambien esto (caso real, 28-jul):
+# un nodo con 128.111.808 nodos propios y un hijo con 128.007.926 de soporte.
+# Una diferencia del 0,08% — la misma busqueda, practicamente — bloqueaba un
+# desplazamiento favorable al que mueve, y la pagina mostraba 416 en la fila
+# del hijo mientras la cabecera del padre seguia diciendo 369.
+#
+# Media orden de magnitud es la linea: separa "la misma busqueda" de "una
+# busqueda seria contra una superficial", que es lo unico que la guarda
+# queria distinguir.
+BACKED_QUALITY_TOLERANCE = 0.5
 PROVEN_QUALITY = 1 << 60     # calidad de un valor exacto (gana a toda busqueda)
 
 _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
@@ -593,11 +606,16 @@ def _better_for_mover(value, reference, stm_white):
     return value > reference if stm_white else value < reference
 
 
-def _backed_for(row, children):
+def _backed_for(row, children, discrepancies=None):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
     no aportan nada llevan ``value=None``).
+
+    ``discrepancies``, si se pasa, recoge los casos en los que un hijo
+    reclamaba un valor MEJOR para el que mueve y la guarda de calidad lo
+    bloqueo de verdad (soporte por debajo de la tolerancia).  El llamante los
+    convierte en trabajo: ver ``_queue_quality_convergence``.
     """
     exact = _status_eval(row.status)
     if exact is not None:
@@ -618,11 +636,78 @@ def _backed_for(row, children):
     if not complete:
         own = row.eval_cp
         own_quality = row.nodes_invested or 0
-        if own is not None and (
-                not _better_for_mover(best.value, own, stm_white)
-                or best.quality < own_quality):
-            return own, None, 0, own_quality
+        if own is not None:
+            # GUARDA DIRECCIONAL (intacta): con cobertura parcial el valor
+            # solo se mueve en la direccion que favorece al que mueve.
+            favourable = _better_for_mover(best.value, own, stm_white)
+            # GUARDA DE CALIDAD, ahora con tolerancia.
+            outweighed = best.quality < own_quality * BACKED_QUALITY_TOLERANCE
+            if not favourable or outweighed:
+                if favourable and outweighed and discrepancies is not None:
+                    # El hijo dice algo mejor y no tiene con que sostenerlo.
+                    # Eso no es ruido que ignorar: es una pregunta abierta, y
+                    # la respuesta se compra.
+                    discrepancies.append((best.move, row.key, own_quality))
+                return own, None, 0, own_quality
     return best.value, best.move, 1 + best.plies, best.quality
+
+
+def _rung_at_least(nodes):
+    """El peldano de la escalera que iguala (o supera) ese soporte."""
+    for rung in BUDGET_LADDER:
+        if rung >= nodes:
+            return rung
+    return BUDGET_LADDER[-1]
+
+
+def _queue_quality_convergence(discrepancies):
+    """Convierte en trabajo los bloqueos LEGITIMOS de la guarda de calidad.
+
+    Un hijo que reclama un valor mejor con 8M de soporte frente a los 10B del
+    padre tiene razon o no la tiene, y hoy no hay forma de saberlo: la guarda
+    se limita a callarlo.  Se le compra al hijo el peldano que iguala el
+    soporte del padre y la siguiente cascada lo resuelve sola.
+
+    Con la tolerancia de arriba, toda discrepancia acaba o DESPLAZANDO (misma
+    busqueda) o CONVERGIENDO (busqueda distinta, se iguala).  Ninguna se queda
+    en silencio, que era la forma de este sintoma.
+    """
+    if not discrepancies:
+        return 0
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', source=AnalysisTask.Source.FILL).count()
+    room = max(0, COVERAGE_QUEUE_CAP - pending)
+    if room <= 0:
+        return 0
+    made = 0
+    for move_uci, parent_key, own_quality in discrepancies:
+        if made >= room:
+            break
+        edge = Edge.objects.filter(parent_id=parent_key,
+                                   move_uci=move_uci).first()
+        if edge is None:
+            continue
+        child = edge.child
+        if child.status != 'UNKNOWN':
+            continue
+        budget = _rung_at_least(own_quality)
+        if (child.nodes_invested or 0) >= budget:
+            continue                  # ya se le compro esa profundidad
+        task, created = AnalysisTask.objects.get_or_create(
+            position=child, generation=child.visits,
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(child.visits, budget),
+                      'source': AnalysisTask.Source.FILL})
+        if created:
+            made += 1
+        elif task.state == 'PENDING' and task.budget_nodes < budget:
+            task.budget_nodes = budget
+            task.source = AnalysisTask.Source.FILL
+            task.save(update_fields=['budget_nodes', 'source'])
+    if made:
+        DBEvent.objects.create(kind='QUALITY_CONVERGENCE', payload={
+            'queued': made, 'discrepancies': len(discrepancies)})
+    return made
 
 
 def _backed_stored(row, value, move, plies, quality):
@@ -682,11 +767,11 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         if not rows:
             break
         children = _backed_children_by_parent([row.key for row in rows])
-        dirty, propagate = [], []
+        dirty, propagate, discrepancies = [], [], []
         for row in rows:
             processed += 1
             value, move, below, quality = _backed_for(
-                row, children.get(row.key, ()))
+                row, children.get(row.key, ()), discrepancies)
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -697,6 +782,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         if dirty:
             Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)
             changed_total += len(dirty)
+        _queue_quality_convergence(discrepancies)
         if not propagate:
             break
         if processed >= BACKED_MAX_NODES:
@@ -1914,6 +2000,56 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
             'created': made, 'pending_before': pending, 'cap': int(cap),
             'scanned': len(candidates)})
     return made
+
+
+# Un click de visitante pide COMO MUCHO esto.  El completado automatico de
+# cobertura se limita a tres jugadas porque busca cerrar un nodo; esto es otra
+# cosa — "mirad todo lo que aqui no se ha mirado" — y sesenta y cuatro es una
+# expansion generosa que sigue siendo una sola decision humana.
+UNEXPLORED_CLICK_CAP = 64
+
+
+def unexplored_children(pos):
+    """Hijos materializados sobre los que el arbol no sabe NADA todavia.
+
+    Ni status, ni respaldo, ni eval propia.  Un hijo con respaldo pero sin
+    eval propia NO cuenta: de ese ya sabemos algo, y este boton existe para
+    los huecos, no para re-pedir lo que ya tiene valor.
+    """
+    return [edge.child for edge in
+            Edge.objects.filter(parent=pos).select_related('child')
+            .order_by('id')
+            if edge.child.status == 'UNKNOWN'
+            and edge.child.eval_cp is None
+            and edge.child.backed_eval is None]
+
+
+def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
+                                source=AnalysisTask.Source.USER):
+    """Encola las jugadas sin mirar de ``pos``. Devuelve cuantas se encolaron.
+
+    Es ``enqueue_coverage_completion`` sin su guarda de unilateralidad: alli
+    el sistema decide que un nodo esta a punto de cerrarse, aqui lo decide una
+    persona que esta mirando la pagina.  Lo que si comparte es el dedup: una
+    jugada que ya tiene tarea viva no gasta cupo ni crea una segunda.
+    """
+    queued = 0
+    for child in unexplored_children(pos):
+        if queued >= cap:
+            break
+        task, created = AnalysisTask.objects.get_or_create(
+            position=child, generation=child.visits,
+            defaults={'budget_nodes': max(COVERAGE_SEED_NODES,
+                                          budget_for(child)),
+                      'multipv': multipv_for(child.visits),
+                      'source': source})
+        if created:
+            queued += 1
+        elif task.state == 'PENDING' and task.source != source:
+            task.source = source
+            task.save(update_fields=['source'])
+            queued += 1
+    return queued
 
 
 def _upgrade_by_certificate(task, report):

@@ -28,8 +28,8 @@ from . import (community_names, ingest, ingest_queue, logic, openings, proof,
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, DBEvent, Edge,
-                     OpeningNameSuggestion, Position, RequestLog, SolveTask,
-                     WorkerPing)
+                     OpeningNameSuggestion, Position, ProofCampaign,
+                     ProofNode, RequestLog, SolveTask, WorkerPing)
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -691,6 +691,49 @@ def api_solve_submit(request):
         solver_build=_sha_field(request.POST.get('solver_build', ''))
         or request.POST.get('solver_build', '')[:64])
     return JsonResponse({'ok': True, 'summary': summary})
+
+
+# Un boton de expansion masiva es una decision humana, asi que se cuenta como
+# tal: diez al dia por IP.  El dedup por posicion no sirve aqui — cada click
+# es sobre un padre distinto — asi que la cuenta va sobre el evento propio.
+BULK_REQUESTS_PER_IP_DAY = 10
+
+
+@csrf_exempt
+def api_request_unexplored(request, key):
+    """Pide TODAS las jugadas sin mirar de una posicion, de una vez.
+
+    El completado automatico de cobertura solo actua cuando el nodo esta a
+    punto de cerrarse.  Esto es la version humana: alguien mira una posicion,
+    ve doce filas que dicen "unexplored" y decide que merecen atencion.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return JsonResponse({'status': 'unknown-position'}, status=404)
+    if pos.status != 'UNKNOWN':
+        return JsonResponse({'status': 'already-solved'})
+
+    ip = _client_ip(request)
+    day_ago = timezone.now() - timedelta(days=1)
+    spent = DBEvent.objects.filter(
+        kind='BULK_REQUEST', ts__gte=day_ago, payload__ip=ip).count()
+    if spent >= BULK_REQUESTS_PER_IP_DAY:
+        return JsonResponse({'status': 'rate-limited'}, status=429)
+
+    with atomic():
+        pos = Position.objects.select_for_update().get(key=key)
+        pending = ingest.unexplored_children(pos)
+        if not pending:
+            return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
+        queued = ingest.enqueue_unexplored_children(pos)
+        RequestLog.objects.create(ip=ip, position=pos)
+        DBEvent.objects.create(kind='BULK_REQUEST', payload={
+            'ip': ip, 'key': pos.key, 'queued': queued,
+            'candidates': len(pending)})
+    return JsonResponse({'status': 'queued', 'queued': queued})
 
 
 def _client_ip(request):
@@ -1395,6 +1438,24 @@ def _move_css(status, score, win_status):
     return 'hot' if e >= 500 else ('warm' if e >= 200 else 'cold')
 
 
+def _proof_numbers_for(keys):
+    """{key: (pn, dn)} de la campana activa, en UNA consulta.
+
+    Una fila sin ``ProofNode`` sale AUSENTE del diccionario, no con (1, 1):
+    ese 1/1 es la inicializacion de PNS para "no se nada", y pintarlo seria
+    afirmar que se midio algo que no se ha medido.
+    """
+    keys = [key for key in keys if key]
+    if not keys:
+        return {}
+    campaign = ProofCampaign.objects.filter(active=True).order_by('id').first()
+    if campaign is None:
+        return {}
+    return {row[0]: (row[1], row[2]) for row in ProofNode.objects.filter(
+        campaign=campaign, position_id__in=keys,
+    ).values_list('position_id', 'pn', 'dn')}
+
+
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
@@ -1407,7 +1468,9 @@ def _child_moves(pos):
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
     moves = []
-    for e in Edge.objects.filter(parent=pos).select_related('child'):
+    edges = list(Edge.objects.filter(parent=pos).select_related('child'))
+    numbers = _proof_numbers_for([edge.child.key for edge in edges])
+    for e in edges:
         c = e.child
         mate = None
         point = None if c.eval_cp is None else (
@@ -1443,7 +1506,10 @@ def _child_moves(pos):
                 # mates cortos primero al ganar; resistencia larga primero al perder
                 rank += ((999 - min(n, 999)) if c.status == win
                          else min(n, 999)) * 1e-3
+        pn, dn = numbers.get(c.key, (None, None))
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
+                      'pn_h': None if pn is None else proof.format_number(pn),
+                      'dn_h': None if dn is None else proof.format_number(dn),
                       'closure': c.closure, 'score': score, 'rank': rank,
                       'mate': mate, 'point': point,
                       'backed_plies': backed_plies,
@@ -2139,6 +2205,8 @@ def explore(request, key):
         'legal_move_links': legal_move_links,
         'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
+        'unexplored_count': (len(ingest.unexplored_children(pos))
+                             if pos.status == 'UNKNOWN' else 0),
         'best_move': (None if pos.closure == 'TERMINAL'
                       else pos.best_move),
         'stm': 'White' if stm_white else 'Black',
