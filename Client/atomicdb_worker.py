@@ -5,6 +5,8 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
   python atomicdb_worker.py -U user -P pass -S https://servidor -T 8
 
+--jobs K corre K analisis a la vez repartiendo -T entre ellos.
+
 --engine ruta/binario permite usar una build propia en su lugar.
 """
 
@@ -31,7 +33,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072804
+ATOMICDB_WORKER_BUILD = 2026072806
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -784,6 +786,152 @@ def probe_tb(tb, fen):
     return wdl, dtz
 
 
+def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
+                   owns_updates):
+    """One independent leaseholder: its own engine, lease and heartbeat.
+
+    A slot is a worker in every sense the server cares about.  It has its own
+    machine identity, so every rule the protocol already enforces per machine
+    -- one live assignment, the fencing token, heartbeat keepalive, replay of a
+    lost response -- applies per slot with nothing added to the protocol and
+    nothing added to the schema.  That is the whole reason the slot lives in
+    the identity rather than in a new column.
+    """
+    eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
+                 syzygy=a.syzygy)
+    current_task = CurrentTaskState()
+    threading.Thread(
+        target=_heartbeat_loop, args=(a.S, auth, current_task, stop),
+        name=f'atomicdb-heartbeat-{slot}', daemon=True).start()
+
+    next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
+    # Idempotency nonce for one logical lease request. Preserve it only across
+    # transport/ambiguous-response failures where the server may have committed;
+    # rotate only after a valid 2xx payload or a definitive 4xx rejection.
+    lease_session = secrets.token_urlsafe(24)
+
+    while not stop.is_set():
+        # Only one slot drives the self-update, and it does so between batches
+        # exactly as before.  A successful update re-execs the process, which
+        # ends every slot at once -- their leases then expire and are recycled,
+        # which is the same thing that happens when a single worker restarts.
+        if (owns_updates and not a.no_auto_update
+                and time.monotonic() >= next_update_check):
+            next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
+            if _install_worker_update(a.S):
+                eng.close()
+                if not _restart_updated_worker():
+                    eng = Engine(a.engine, threads=engine_threads,
+                                 hash_mb=a.hash, syzygy=a.syzygy)
+        try:
+            tasks = _request_tasks(a.S, auth, lease_session)
+        except LeaseRequestError as e:
+            if not e.ambiguous:
+                lease_session = secrets.token_urlsafe(24)
+            print(f'[{slot}] lease response error: {e}; reintento en 30s',
+                  flush=True)
+            if stop.wait(30):
+                break
+            continue
+        lease_session = secrets.token_urlsafe(24)
+        if not tasks:
+            print(f'[{slot}] sin tareas; espero 60s', flush=True)
+            if a.once:
+                break
+            if stop.wait(60):
+                break
+            continue
+        for t in tasks:
+            current_task.start(t['id'], t.get('lease_token', ''))
+            t0 = time.time()
+            wdl, dtz = probe_tb(tb, t['fen'])
+            if wdl is not None:
+                payload = {
+                    **auth, **provenance,
+                    'task_id': t['id'], 'lines': '[]',
+                    'elapsed': f'{time.time() - t0:.2f}',
+                    'tb_wdl': wdl,
+                    'lease_token': t.get('lease_token', '')}
+                if dtz is not None:
+                    payload['tb_dtz'] = dtz
+                try:
+                    rr = _submit_until_definitive(a.S, payload, t['id'])
+                    print(f"[{slot}] task {t['id']} TB wdl={wdl} dtz={dtz} -> "
+                          f"{rr.json().get('summary')}", flush=True)
+                except Exception as e:
+                    print(f'[{slot}] tb submit error: {e}', flush=True)
+                current_task.clear()
+                continue
+            try:
+                lines = eng.analyse(
+                    t['fen'], t['budget_nodes'], t['multipv'],
+                    t.get('searchmoves'),
+                    progress=current_task.progress,
+                )
+            except Exception as e:
+                print(f'[{slot}] engine failure: {e}; reiniciando motor',
+                      flush=True)
+                try:
+                    eng.close()
+                except Exception:
+                    pass
+                eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
+                             syzygy=a.syzygy)
+                current_task.clear()
+                continue   # la tarea vuelve sola al caducar su lease
+            searched = 0
+            for ln in lines:
+                m = re.search(r' nodes (\d+)', ln.get('raw', ''))
+                if m:
+                    searched = max(searched, int(m.group(1)))
+            try:
+                rr = _submit_until_definitive(a.S, {
+                    **auth, **provenance,
+                    'task_id': t['id'], 'lines': json.dumps(lines),
+                    'elapsed': f'{time.time() - t0:.2f}',
+                    'nodes': searched,
+                    'lease_token': t.get('lease_token', ''),
+                }, t['id'])
+                s = rr.json().get('summary', rr.json())
+            except Exception as e:
+                s = f'submit error: {e}'
+            print(f"[{slot}] task {t['id']} ({t['budget_nodes']}n, "
+                  f"{time.time()-t0:.1f}s) -> {s}", flush=True)
+            current_task.clear()
+        if a.once:
+            break
+    eng.close()
+
+
+def plan_threads(total, jobs, solve):
+    """Split the contributor's -T promise honestly, and spend all of it.
+
+    -T is what the machine was promised to use, IN TOTAL, and the split has to
+    respect that rather than multiply it: K engines at T threads each is K*T
+    cores, which is how a worker quietly takes over a box it was lent a corner
+    of.  The solver, when present, takes its core off the top first, exactly as
+    it did before jobs existed.
+
+    The remainder is distributed instead of discarded.  A flat ``available //
+    jobs`` looks tidy and quietly wastes up to jobs-1 cores -- -T 24 --jobs 6
+    --solve would run six engines of three and leave five of the twenty-four
+    idle, which is precisely the thing this flag exists to stop.  So the first
+    slots get one thread more and the sum is exact.
+
+    Returns (jobs, [threads per slot], solver_cores).  Jobs is clamped down
+    when the budget cannot give every slot a whole thread, because a slot with
+    less than one core is not parallelism, it is contention with bookkeeping.
+    """
+    total = max(1, int(total))
+    jobs = max(1, int(jobs))
+    solver_cores = 1 if solve else 0
+    available = max(1, total - solver_cores)
+    jobs = min(jobs, available)
+    base, extra = divmod(available, jobs)
+    return jobs, [base + (1 if slot < extra else 0)
+                  for slot in range(jobs)], solver_cores
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-U', required=True)
@@ -792,6 +940,10 @@ def main():
     ap.add_argument('--engine', default='',
                     help='binario propio (opcional; sin el se descarga el de referencia)')
     ap.add_argument('-T', type=int, default=4)
+    ap.add_argument('--jobs', type=int, default=1,
+                    help='analisis concurrentes; -T se REPARTE entre ellos. '
+                         'Una posicion sola escala mal con muchos hilos, asi '
+                         'que K analisis de T/K hilos rinden mas que uno de T')
     ap.add_argument('--hash', type=int, default=512)
     ap.add_argument('--syzygy', default='', help='dirs de TB atomicas separados por ;')
     ap.add_argument('--once', action='store_true')
@@ -820,135 +972,81 @@ def main():
     import platform
     if not a.engine:
         a.engine = provision_engine(a.S)
-    machine = f'{a.U}-{platform.node() or "worker"}-atomicdb'[:64]
-    auth = {'username': a.U, 'password': a.P, 'machine': machine,
-            'threads': a.T, 'hash': a.hash, 'tb': '1' if tb else '0',
-            'os': f'{platform.system()} {platform.release()}',
-            'worker_build': ATOMICDB_WORKER_BUILD}
-    # Additive provenance: an older server simply ignores these POST fields.
-    provenance = {'engine_sha': _file_sha256(a.engine),
-                  'net_sha': _net_sha256(a.engine)}
-    # -T is the contributor's TOTAL thread budget.  With --solve the solver
-    # thread takes one core, so the analysis engine gets T-1: the machine
-    # never uses more than what the flag promised.
-    engine_threads = max(1, a.T - 1) if a.solve else a.T
+
+    # --once keeps the historical smoke semantics, which are single-slot.
+    if a.once:
+        a.jobs = 1
+    jobs, slot_threads, solver_cores = plan_threads(a.T, a.jobs, a.solve)
+    if jobs < a.jobs:
+        print(f'aviso: --jobs {a.jobs} recortado a {jobs}: -T {a.T} no da '
+              f'un hilo entero por trabajo', flush=True)
     if a.solve and a.T < 2:
         print('aviso: --solve con -T 1 comparte el unico hilo entre '
               'analisis y pruebas', flush=True)
-    eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
-                 syzygy=a.syzygy)
+
+    base = f'{a.U}-{platform.node() or "worker"}-atomicdb'
+    # With a single job the identity is byte-identical to every previous
+    # build, so an existing deployment sees no change at all.  With more, each
+    # slot is its own leaseholder and says so.
+    if jobs == 1:
+        machines = [base[:64]]
+    else:
+        machines = [f'{base[:60]}#{slot}' for slot in range(jobs)]
+
+    # Each slot reports ITS OWN thread count, because that is what it will
+    # actually run and the capacity view should not have to guess.
+    auth_base = {'username': a.U, 'password': a.P,
+                 'threads': slot_threads[0], 'hash': a.hash,
+                 'tb': '1' if tb else '0',
+                 'os': f'{platform.system()} {platform.release()}',
+                 'worker_build': ATOMICDB_WORKER_BUILD}
+    # Additive provenance: an older server simply ignores these POST fields.
+    provenance = {'engine_sha': _file_sha256(a.engine),
+                  'net_sha': _net_sha256(a.engine)}
+
+    stop = threading.Event()
     solver = Solver(a.engine, hash_mb=a.hash) if a.solve else None
-    heartbeat_stop = threading.Event()
-    current_task = CurrentTaskState()
-    heartbeat_thread = threading.Thread(
-        target=_heartbeat_loop, args=(a.S, auth, current_task, heartbeat_stop),
-        name='atomicdb-heartbeat', daemon=True)
-    heartbeat_thread.start()
     if solver is not None and not a.once:
         threading.Thread(
-            target=_solve_loop, args=(a.S, auth, solver, heartbeat_stop),
+            target=_solve_loop,
+            args=(a.S, dict(auth_base, machine=machines[0]), solver, stop),
             name='atomicdb-solver', daemon=True).start()
-    print(f'AtomicDB worker: {a.engine} T={a.T} -> {a.S}', flush=True)
-    next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
-    # Idempotency nonce for one logical lease request. Preserve it only across
-    # transport/ambiguous-response failures where the server may have committed;
-    # rotate only after a valid 2xx payload or a definitive 4xx rejection.
-    lease_session = secrets.token_urlsafe(24)
 
-    while True:
-        # This is deliberately the only periodic update checkpoint: the prior
-        # leased batch has been fully analysed and definitively submitted.
-        if (not a.no_auto_update
-                and time.monotonic() >= next_update_check):
-            next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
-            if _install_worker_update(a.S):
-                eng.close()
-                if not _restart_updated_worker():
-                    eng = Engine(a.engine, threads=engine_threads,
-                                 hash_mb=a.hash, syzygy=a.syzygy)
-        # In normal runs the solver lives in its own thread (started above)
-        # and this loop is analysis-only: "proof first" starved the analysis
-        # queue for the whole length of a fortress attempt.  --once keeps the
-        # historical smoke semantics: one unit of proof work is the work.
-        if a.solve and a.once and _solve_once(
-                a.S, auth, solver, secrets.token_urlsafe(24)):
-            break
-        try:
-            tasks = _request_tasks(a.S, auth, lease_session)
-        except LeaseRequestError as e:
-            if not e.ambiguous:
-                lease_session = secrets.token_urlsafe(24)
-            print(f'lease response error: {e}; reintento en 30s', flush=True)
-            time.sleep(30)
-            continue
-        lease_session = secrets.token_urlsafe(24)
-        if not tasks:
-            print('sin tareas; espero 60s', flush=True)
-            if a.once:
-                break
-            time.sleep(60)
-            continue
-        for t in tasks:
-            current_task.start(t['id'], t.get('lease_token', ''))
-            t0 = time.time()
-            wdl, dtz = probe_tb(tb, t['fen'])
-            if wdl is not None:
-                payload = {
-                    **auth, **provenance,
-                    'task_id': t['id'], 'lines': '[]',
-                    'elapsed': f'{time.time() - t0:.2f}',
-                    'tb_wdl': wdl,
-                    'lease_token': t.get('lease_token', '')}
-                if dtz is not None:
-                    payload['tb_dtz'] = dtz
-                try:
-                    rr = _submit_until_definitive(a.S, payload, t['id'])
-                    print(f"task {t['id']} TB wdl={wdl} dtz={dtz} -> "
-                          f"{rr.json().get('summary')}", flush=True)
-                except Exception as e:
-                    print(f'tb submit error: {e}', flush=True)
-                current_task.clear()
-                continue
-            try:
-                lines = eng.analyse(
-                    t['fen'], t['budget_nodes'], t['multipv'],
-                    t.get('searchmoves'),
-                    progress=current_task.progress,
-                )
-            except Exception as e:
-                print(f'engine failure: {e}; reiniciando motor', flush=True)
-                try:
-                    eng.close()
-                except Exception:
-                    pass
-                eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
-                             syzygy=a.syzygy)
-                current_task.clear()
-                continue   # la tarea vuelve sola al caducar su lease
-            searched = 0
-            for ln in lines:
-                m = re.search(r' nodes (\d+)', ln.get('raw', ''))
-                if m:
-                    searched = max(searched, int(m.group(1)))
-            try:
-                rr = _submit_until_definitive(a.S, {
-                    **auth, **provenance,
-                    'task_id': t['id'], 'lines': json.dumps(lines),
-                    'elapsed': f'{time.time() - t0:.2f}',
-                    'nodes': searched,
-                    'lease_token': t.get('lease_token', ''),
-                }, t['id'])
-                s = rr.json().get('summary', rr.json())
-            except Exception as e:
-                s = f'submit error: {e}'
-            print(f"task {t['id']} ({t['budget_nodes']}n, "
-                  f"{time.time()-t0:.1f}s) -> {s}", flush=True)
-            current_task.clear()
-        if a.once:
-            break
-    heartbeat_stop.set()
-    heartbeat_thread.join(timeout=2)
-    eng.close()
+    spread = ('x'.join(str(n) for n in sorted(set(slot_threads), reverse=True))
+              if len(set(slot_threads)) > 1 else str(slot_threads[0]))
+    print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} trabajos de '
+          f'{spread} hilos (suma {sum(slot_threads) + solver_cores})'
+          + (f' + {solver_cores} solver' if solver_cores else '')
+          + f' -> {a.S}', flush=True)
+
+    if a.once:
+        if a.solve and _solve_once(a.S, dict(auth_base, machine=machines[0]),
+                                   solver, secrets.token_urlsafe(24)):
+            stop.set()
+            return
+        _analysis_slot(0, a, tb, dict(auth_base, machine=machines[0]),
+                       provenance, slot_threads[0], stop, owns_updates=False)
+        stop.set()
+        return
+
+    threads = []
+    for slot in range(jobs):
+        thread = threading.Thread(
+            target=_analysis_slot,
+            args=(slot, a, tb,
+                  dict(auth_base, machine=machines[slot],
+                       threads=slot_threads[slot]),
+                  provenance, slot_threads[slot], stop, slot == 0),
+            name=f'atomicdb-analysis-{slot}')
+        thread.start()
+        threads.append(thread)
+    try:
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=5)
 
 
 if __name__ == '__main__':
