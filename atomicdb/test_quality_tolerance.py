@@ -147,6 +147,35 @@ class QualityConvergenceTests(TestCase):
 
         self.assertFalse(AnalysisTask.objects.filter(position=child).exists())
 
+    def test_bought_depth_closes_the_loop_instead_of_going_silent(self):
+        """The other half of every purchase: it has to WORK.
+
+        The child's contribution used to carry only ``backed_nodes`` — the
+        support of the leaf that backed the value.  A convergence purchase
+        raised the child's ``nodes_invested``, which the contribution never
+        looked at, so the parent stayed outweighed, nothing re-bought the
+        child ("already has the depth"), and the discrepancy went silent
+        forever.  Wolfram's spines, own-searched at 2.6B, blocked every
+        128M-supported chain under them permanently.  The child's best
+        knowledge is sustained by EVERYTHING invested in it.
+        """
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        parent.eval_cp = 369
+        parent.nodes_invested = 2_000_000_000
+        parent.save()
+        child = Edge.objects.get(parent=parent, move_uci='d2d4').child
+        child.backed_eval = 416
+        child.backed_nodes = 8_000_000            # the leaf that backed it
+        child.nodes_invested = 2_000_000_000      # the purchase, landed
+        child.save()
+
+        ingest.backup_backed_evals([parent.key])
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.backed_eval, 416)
+        self.assertEqual(parent.backed_move, 'd2d4')
+
     def test_the_rung_matches_the_support_it_has_to_equal(self):
         self.assertEqual(ingest._rung_at_least(1), ingest.BUDGET_LADDER[0])
         self.assertEqual(ingest._rung_at_least(200_000_000), 512_000_000)

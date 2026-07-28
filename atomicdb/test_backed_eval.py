@@ -435,6 +435,42 @@ class BackedIngestTests(TestCase):
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
 
+    def test_a_new_analysis_of_the_child_retests_the_blocked_parent(self):
+        """The purchase's delivery route, end to end through submit.
+
+        A blocked parent stores a self-echo and the echo never changes, so
+        propagation from below never reached it again: the convergence
+        purchase analysed the child, the child's backed value stayed put
+        (value unchanged, no propagation), and the parent stayed blocked on
+        stale quality forever.  The apply now seeds the analysed position's
+        PARENTS too, because a fresh analysis changes ``nodes_invested``
+        even when it changes nothing else — and that is precisely what the
+        parents' quality guards are waiting on.
+        """
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        Position.objects.filter(key=parent.key).update(
+            eval_cp=369, nodes_invested=2_000_000_000)
+        edge = Edge.objects.filter(parent=parent).order_by('move_uci').first()
+        child = edge.child
+        ingest.expand(child)
+
+        # A shallow pass over the child: informative, mover-favourable at
+        # the parent (416 > 369 for White), but 8M against 2B — blocked.
+        ingest.ingest_analysis(child.key, self._lines(
+            child, [416] * 5), 8_000_000)
+        parent.refresh_from_db()
+        self.assertEqual(parent.backed_eval, 369)   # the self-echo
+        self.assertIsNone(parent.backed_move)
+
+        # The convergence purchase lands: same values, real depth.
+        ingest.ingest_analysis(child.key, self._lines(
+            child, [416] * 5), 2_000_000_000)
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.backed_eval, 416)
+        self.assertEqual(parent.backed_move, edge.move_uci)
+
     def test_partially_expanded_lineage_still_backs_up(self):
         """El hueco real que dejaba la cascada heredada.
 

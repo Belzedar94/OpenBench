@@ -19,8 +19,8 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import (Case, Count, F, IntegerField, Q, Sum, Value,
-                              When, Window)
+from django.db.models import (Case, Count, F, FloatField, IntegerField, Q,
+                              Sum, Value, When, Window)
 from django.db.models.functions import RowNumber
 
 from . import (community_names, ingest, ingest_queue, logic, openings, proof,
@@ -206,10 +206,22 @@ def api_lease(request):
             # TB positions happen to be ahead of the first compatible task.
             first = None
             supports_tb = request.POST.get('tb') == '1'
+            # Dentro de la banda USER el orden es FIFO puro (id de creacion).
+            # Un click es un click: ordenar a los humanos por la prioridad de
+            # la POSICION hacia que una linea profunda y perdedora (prioridad
+            # muy negativa) esperase detras de cada click fresco de cualquier
+            # otro — Wolfram espero una hora mientras la cola volaba.  La
+            # prioridad de posicion sigue mandando en AUTO y FILL, que es
+            # donde significa algo (el selector la calcula para eso).
+            human_rank = Case(
+                When(source=AnalysisTask.Source.USER, then=Value(0.0)),
+                default=F('position__priority'),
+                output_field=FloatField())
             queryset = (AnalysisTask.objects
                 .select_for_update(skip_locked=True)
                 .select_related('position').filter(state='PENDING')
-                .order_by('-source', '-position__priority', 'id'))
+                .annotate(queue_rank=human_rank)
+                .order_by('-source', '-queue_rank', 'id'))
             for candidate in queryset.iterator(chunk_size=64):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
@@ -1721,6 +1733,150 @@ def _parse_public_fen(raw):
     return fen
 
 
+# El cajetin dice FEN, pero el portapapeles del visitante trae lo que trae:
+# la gente pega lineas PGN enteras y "FEN is too long" es responderle al
+# formato en vez de a la persona.  Un PGN se reconoce, se camina desde la
+# posicion inicial y aterriza en la posicion final de la linea.
+PGN_MAX_CHARS = 20_000
+PGN_MAX_PLIES = 300
+_PGN_RESULTS = {'1-0', '0-1', '1/2-1/2', '*'}
+_MOVETEXT_HINT = re.compile(
+    r'^\[|(^|\s)\d+\.|(^|\s)[O0]-[O0]'
+    r'|^[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](=[QRBN])?[+#]?(\s|$)')
+
+
+def _looks_like_movetext(raw):
+    return bool(_MOVETEXT_HINT.search(raw.strip()))
+
+
+def _pgn_tokens(raw):
+    """SAN de la linea principal: fuera cabeceras, comentarios, variantes,
+    NAGs, numeros de jugada y resultado."""
+    text = re.sub(r'\[[^\]]*\]', ' ', raw)
+    text = re.sub(r'\{[^}]*\}', ' ', text)
+    text = re.sub(r'\$\d+', ' ', text)
+    depth, keep = 0, []
+    for ch in text:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            keep.append(ch)
+    tokens = []
+    for item in ''.join(keep).split():
+        if item in _PGN_RESULTS:
+            continue
+        item = re.sub(r'^\d+\.{0,3}', '', item)     # "12.", "12...", "12.Nf3"
+        item = item.rstrip('!?+#')
+        if item:
+            tokens.append(item)
+    return tokens
+
+
+def _uci_for_san(fen, token):
+    """La UCI legal cuyo SAN es ``token``, o None.
+
+    La heuristica propia (tablero parseado del FEN) deja 1-3 candidatas y
+    solo entonces se le pregunta a pyffish, porque ``get_san`` reconstruye la
+    variante en cada llamada y un barrido ciego por ply seria un segundo por
+    jugada en el peor caso.
+    """
+    import pyffish as pf
+
+    legal = logic.legal_moves(fen)
+    board, stm = fen.split()[0], fen.split()[1]
+    piece_at = {}
+    for rank_index, rank in enumerate(board.split('/')):
+        file_index = 0
+        for ch in rank:
+            if ch.isdigit():
+                file_index += int(ch)
+            else:
+                piece_at[chr(ord('a') + file_index) + str(8 - rank_index)] = ch
+                file_index += 1
+
+    bare = token.rstrip('+#')
+    castle = bare.replace('0', 'O')
+    if castle in ('O-O', 'O-O-O'):
+        king = 'K' if stm == 'w' else 'k'
+        wings = ('g', 'h') if castle == 'O-O' else ('c', 'a')
+        # FSF emite el enroque como rey-a-torre o rey-dos-columnas segun la
+        # convencion; se aceptan las dos y decide el SAN generado.
+        candidates = [uci for uci in legal
+                      if piece_at.get(uci[:2]) == king and uci[0] == 'e'
+                      and uci[2] in wings]
+        bare = castle
+    else:
+        match = re.match(
+            r'^([KQRBN]?)([a-h]?)([1-8]?)x?([a-h][1-8])(=?([QRBN]))?$', bare)
+        if match is None:
+            return None
+        piece, from_file, from_rank, target, _raw_promo, promo = match.groups()
+        candidates = []
+        for uci in legal:
+            src, dst = uci[:2], uci[2:4]
+            if dst != target:
+                continue
+            if piece_at.get(src, '?').upper() != (piece or 'P'):
+                continue
+            if from_file and src[0] != from_file:
+                continue
+            if from_rank and src[1] != from_rank:
+                continue
+            if promo:
+                if len(uci) < 5 or uci[4].upper() != promo:
+                    continue
+            elif len(uci) >= 5:
+                continue
+            candidates.append(uci)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def san_matches(uci):
+        try:
+            produced = pf.get_san('atomic', fen, uci).rstrip('+#')
+        except Exception:
+            return False
+        return produced == bare or produced.replace('=', '') == \
+            bare.replace('=', '')
+
+    matches = [uci for uci in (candidates or legal) if san_matches(uci)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _parse_public_pgn(raw):
+    if len(raw) > PGN_MAX_CHARS:
+        raise PublicFenError('malformed', 'PGN is too long')
+    tokens = _pgn_tokens(raw)
+    if not tokens:
+        raise PublicFenError('empty', 'no moves found in the PGN')
+    if len(tokens) > PGN_MAX_PLIES:
+        raise PublicFenError('malformed',
+                             f'PGN longer than {PGN_MAX_PLIES} plies')
+    fen = logic.start_fen()
+    for ply, token in enumerate(tokens):
+        uci = _uci_for_san(fen, token)
+        if uci is None:
+            side = 'White' if ply % 2 == 0 else 'Black'
+            raise PublicFenError(
+                'pgn-move',
+                f'move {ply // 2 + 1} for {side} ("{token}") is not a legal '
+                'atomic move at that point of the line')
+        fen = logic.apply_move(fen, uci)
+    return logic.canonical_fen(fen)
+
+
+def _parse_public_position(raw):
+    """FEN o PGN: lo que el visitante tenga en el portapapeles."""
+    try:
+        return _parse_public_fen(raw)
+    except PublicFenError as fen_error:
+        if not _looks_like_movetext(raw):
+            raise fen_error
+    return _parse_public_pgn(raw)
+
+
 def api_query(request):
     """API publica de consulta por FEN. Scores en perspectiva del que mueve
     (convencion chessdb.cn); el arbol interno almacena White-POV."""
@@ -1801,12 +1957,12 @@ def _trust_for(pos):
 
 
 def fen_jump(request):
-    """Cajetin de FEN: salta a la posicion; si no existe la crea, bajo el
-    mismo rate-limit por IP que las peticiones de analisis."""
+    """Cajetin de posicion: FEN o PGN; salta a la posicion y si no existe la
+    crea como semilla."""
     if request.method != 'POST':
         return redirect('/atomicdb/')
     try:
-        fen = _parse_public_fen(request.POST.get('fen', ''))
+        fen = _parse_public_position(request.POST.get('fen', ''))
     except PublicFenError as error:
         # "Not a legal atomic position" is not the same answer as "we do not
         # have this position yet", and saying the second when the first is

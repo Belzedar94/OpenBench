@@ -295,7 +295,15 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                                 'best_move', 'eval_cp', 'updated'])
 
     changed = backup_cascade([pos.key])
-    backed = backup_backed_evals([pos.key])
+    # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
+    # cambia necesariamente el backed de este nodo (un autoeco bloqueado se
+    # queda igual y no propaga), pero SI cambia ``nodes_invested`` — que es
+    # exactamente lo que las guardas de calidad de los padres esperan.  Sin
+    # esta semilla, la compra de convergencia analizaba al hijo y el padre
+    # bloqueado no se enteraba jamas.
+    parent_keys = list(Edge.objects.filter(child_id=pos.key)
+                       .values_list('parent_id', flat=True))
+    backed = backup_backed_evals([pos.key, *parent_keys])
     summary = {'closed_children': closed_here, 'backed_up': changed,
                'backed_evals': backed}
     if revoked_here:
@@ -595,7 +603,18 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
     if exact is not None:
         return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0)
     if backed_eval is not None:
-        return _ChildValue(move_uci, backed_eval, backed_nodes or 0,
+        # La calidad del mejor conocimiento del hijo es TODO lo invertido en
+        # el, no solo el soporte de la hoja que respaldo el valor.  Con solo
+        # ``backed_nodes`` la cadena quedaba clavada en la hoja mas debil:
+        # cualquier ancestro con busqueda propia honda bloqueaba, la compra
+        # de convergencia le compraba al hijo un analisis profundo que subia
+        # ``nodes_invested``... y esta contribucion no lo miraba, asi que el
+        # bloqueo era permanente y silencioso (caso Wolfram, 28-jul: espinas
+        # de 2.6B bloqueando respaldos con soporte 128M para siempre).  El
+        # propio nodo ya ENSEÑA su backed como mejor conocimiento; su padre
+        # debe verlo con el peso de todo lo que lo corrobora.
+        return _ChildValue(move_uci, backed_eval,
+                           max(backed_nodes or 0, nodes_invested or 0),
                            backed_plies or 0)
     if eval_cp is not None:
         return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0)
