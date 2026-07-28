@@ -8,6 +8,7 @@ import time
 from datetime import timedelta
 from urllib.parse import quote, urlsplit
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
 from django.db import OperationalError
@@ -46,7 +47,13 @@ MAX_SUBMIT_PV_PLIES = 512
 # Breadcrumb reconstruction is public-request work. Keep the cycle-safe
 # reverse search useful for recent rows that are not in a materialized map
 # yet, but put hard ceilings on graph fan-out and memory.
-LINEAGE_SEARCH_MAX_PLIES = 64
+# The tree reached 40-90 plies the day 372 community cores arrived, and a
+# breadcrumb that cannot reach the root is worse than useless — it renders a
+# headless tail.  96 plies is one Edge query per ply for ALL the rows on a
+# page (the walk is batched), so the home costs at most ~96 queries behind a
+# 15s cache.  Beyond this the answer is not a bigger ceiling but a lineage
+# cached on the task at creation time; see the deep-line label below.
+LINEAGE_SEARCH_MAX_PLIES = 96
 LINEAGE_SEARCH_MAX_NODES = 1024
 LINEAGE_SEARCH_MAX_FRONTIER = 64
 LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD = 16
@@ -559,9 +566,16 @@ def api_solve_acquire(request):
                 return JsonResponse({'tasks': [_solve_payload(active)]})
             return JsonResponse({'tasks': []})
 
+        # Orden: primero todo lo que NO es deuda (peticiones, piloto), y
+        # dentro de cada grupo el presupuesto mayor primero.  La deuda de
+        # certificacion es importante pero nunca urgente: si se sirviera por
+        # tamano de presupuesto se colaria delante por ser barata.
         task = (SolveTask.objects.select_for_update(skip_locked=True)
                 .select_related('position').filter(state='PENDING')
-                .order_by('-budget_nodes', 'id').first())
+                .annotate(is_debt=Case(
+                    When(arm=ingest.DEBT_ARM, then=Value(1)),
+                    default=Value(0), output_field=IntegerField()))
+                .order_by('is_debt', '-budget_nodes', 'id').first())
         if task is None:
             return JsonResponse({'tasks': []})
         assigned_at = timezone.now()
@@ -581,6 +595,7 @@ def _solve_payload(task):
         'id': task.id,
         'fen': task.position.fen,
         'goal': task.goal,
+        'stage': task.budget_stage,
         'budget_nodes': task.budget_nodes,
         'ruleset': logic.RULESET_ID,
         'lease_token': task.lease_token,
@@ -650,11 +665,29 @@ def api_solve_submit(request):
         except (TypeError, ValueError):
             return None
 
+    # Telemetria de fortaleza: ADVISORY, saneada, y jamas capaz de cambiar un
+    # veredicto (doc 18 §5: el clasificador solo afecta al scheduling).
+    telemetry = {}
+    for name in ('tt_hit', 'quiet_scc', 'reset_rate', 'stagnation',
+                 'score'):
+        raw = request.POST.get(f'fortress_{name}')
+        if raw in (None, ''):
+            continue
+        try:
+            telemetry[name] = max(0.0, min(1e9, float(raw)))
+        except (TypeError, ValueError):
+            continue
+
+    trusted = set(getattr(settings, 'ATOMICDB_TB_TRUSTED', ()))
+    trusted_submitter = bool(getattr(user, 'is_staff', False)
+                             or user.username in trusted)
+
     summary = ingest.apply_solve_result(
         task, outcome=outcome, certificate_blob=blob or None,
         advisory_pn=as_int('pn'), advisory_dn=as_int('dn'),
         searched_nodes=as_int('nodes') or 0,
         elapsed_seconds=request.POST.get('elapsed', ''),
+        telemetry=telemetry or None, trusted_submitter=trusted_submitter,
         solver_build=_sha_field(request.POST.get('solver_build', ''))
         or request.POST.get('solver_build', '')[:64])
     return JsonResponse({'ok': True, 'summary': summary})
@@ -1069,35 +1102,62 @@ def goto(request, key, uci):
     return redirect(_explore_url(child.key, child_route, child_anchor))
 
 
+# A truncated breadcrumb keeps its HEAD and its TAIL, with the ellipsis in the
+# middle: the head is what identifies the opening ("1. Nf3 f6 2. Nc3") and the
+# tail is what says where you are now.  Dropping the head was the bug — it
+# produced "… d4 Bc4 Bg7 d3" and left the reader with no idea which line that
+# was.
+SAN_HEAD_PLIES = 6
+SAN_TAIL_PLIES = 8
+
+
 def _format_san_line(top, line, max_plies=16, keep_head=False):
-    """Linea SAN numerada hasta la raiz ("1. Nf3 f6 ..."). Al truncar,
-    keep_head conserva el PRINCIPIO (para ver el opening); de lo contrario se
-    conserva el final. Un fragmento que no alcanza startpos queda sin numeros:
-    el FEN canonico no conserva el ply absoluto y no debemos inventar "1..."."""
+    """Numbered SAN breadcrumb from the root ("1. Nf3 f6 …").
+
+    THE LINE ALWAYS STARTS AT THE ROOT when the walk reached it.  When it is
+    too long, the ellipsis goes in the MIDDLE.
+
+    When the reverse walk could NOT reach the root inside its budget, the
+    canonical FEN does not record the absolute ply, so numbering the fragment
+    would be inventing a "1..." that may be false.  It says so instead of
+    printing a mute tail: a labelled fragment is honest, an unlabelled one
+    reads like a bug — and it was reported as one.
+    """
     if not line:
         return '' if top.fen == logic.start_fen() else '…'
     from_start = top.fen == logic.start_fen()
+
+    if not from_start:
+        # Two different reasons the walk did not reach the root, and only one
+        # of them is the reported bug.
+        #
+        # It ran out of BUDGET: the line really is deeper than the ceiling, and
+        # a bare tail reads as broken.  Say how deep it is.
+        if len(line) >= LINEAGE_SEARCH_MAX_PLIES:
+            tail = ' '.join(st['san'] for st in line[-4:])
+            return f'deep line, ply ≥{len(line)} · … {tail}'
+        # Or it ran out of ANCESTORS: a short fragment whose link to the root
+        # is genuinely missing (a FEN someone pasted, an edge never
+        # materialised).  That is not depth and must not claim to be; the page
+        # already says "lineage unavailable" beside it.
+        return '… ' + ' '.join(st['san'] for st in line)
+
     parts = []
-    if from_start:
-        n = 1
-        for i, st in enumerate(line):
-            if st['white']:
-                parts.append(f"{n}. {st['san']}")
-            else:
-                parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
-                n += 1
-    else:
-        parts = [st['san'] for st in line]
-    prefix = '' if from_start else '… '
-    suffix = ''
-    if len(parts) > max_plies:
-        if keep_head:
-            parts = parts[:max_plies]
-            suffix = ' …'
+    n = 1
+    for i, st in enumerate(line):
+        if st['white']:
+            parts.append(f"{n}. {st['san']}")
         else:
-            parts = parts[-max_plies:]
-            prefix = '… '
-    return prefix + ' '.join(parts) + suffix
+            parts.append(f"{n}... {st['san']}" if i == 0 else st['san'])
+            n += 1
+
+    if len(parts) <= max_plies:
+        return ' '.join(parts)
+    if keep_head:
+        return ' '.join(parts[:max_plies]) + ' …'
+    head = max(1, min(SAN_HEAD_PLIES, max_plies - SAN_TAIL_PLIES - 1))
+    tail = max(1, max_plies - head - 1)
+    return ' '.join(parts[:head]) + ' … ' + ' '.join(parts[-tail:])
 
 
 def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):

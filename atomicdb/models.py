@@ -102,7 +102,13 @@ class AnalysisTask(models.Model):
 
     class Source(models.TextChoices):
         AUTO = 'AUTO'   # selector best-first
+        FILL = 'FILL'   # completado de cobertura (ver ingest, politica AND)
         USER = 'USER'   # peticion publica: se sirve primero
+
+    # El orden de servicio es ``-source``, y alfabeticamente descendente eso
+    # da USER > FILL > AUTO: una peticion de visitante sigue yendo primero, el
+    # completado de cobertura va por delante de la exploracion normal — porque
+    # cierra nodos en vez de solo mirarlos — y nunca se disfraza de visitante.
 
     position     = models.ForeignKey(Position, on_delete=models.CASCADE)
     budget_nodes = models.BigIntegerField()
@@ -286,6 +292,23 @@ class SolveTask(models.Model):
         DISPROVED = 'DISPROVED'
         UNKNOWN   = 'UNKNOWN'
 
+    class Stage(models.TextChoices):
+        """Peldano de la escalera F del doc 18 (§5).
+
+        Hoy solo existen los dos extremos: F0, el peldano barato con el que se
+        certifica deuda y se clasifica una fortaleza, y F4, el presupuesto de
+        escalada que ya usaban las peticiones y el piloto.  F1-F3 pertenecen a
+        SURVIVE50 (solver de umbrales tau) y NO estan implementados; la
+        columna existe para que cuando lleguen no haya que re-etiquetar el
+        historico.
+        """
+
+        F0 = 'F0'
+        F1 = 'F1'
+        F2 = 'F2'
+        F3 = 'F3'
+        F4 = 'F4'
+
     position     = models.ForeignKey(Position, on_delete=models.CASCADE,
                                      related_name='solve_tasks')
     campaign     = models.ForeignKey(ProofCampaign, null=True, blank=True,
@@ -294,6 +317,8 @@ class SolveTask(models.Model):
     goal         = models.CharField(max_length=10,
                                     choices=ProofCampaign.Goal.choices,
                                     default=ProofCampaign.Goal.WHITE_WIN)
+    budget_stage = models.CharField(max_length=2, choices=Stage.choices,
+                                    default=Stage.F4, db_index=True)
     budget_nodes = models.BigIntegerField(default=10_000_000)
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
@@ -318,6 +343,10 @@ class SolveTask(models.Model):
     searched_nodes = models.BigIntegerField(default=0)
     elapsed_seconds = models.FloatField(default=0.0)
     solver_build = models.CharField(max_length=64, blank=True, default='')
+    # Telemetria de clasificacion de fortaleza (doc 18 §5).  ADVISORY: son
+    # pistas de scheduling y NO autorizan ningun resultado; un veredicto solo
+    # sale de un certificado reproducido entero.
+    telemetry    = models.JSONField(null=True, blank=True)
     # Etiqueta libre del arnes del piloto ('' fuera de el).
     arm          = models.CharField(max_length=32, blank=True, default='',
                                     db_index=True)

@@ -45,12 +45,41 @@ from atomicdb.models import (AnalysisTask, DBEvent, Position, ProofCampaign,
 
 ANALYZE_BUDGETS = (512_000_000, 2_000_000_000)
 SOLVE_BUDGETS = (10_000_000, 100_000_000)
+# Round 2, after round 1: the fortress arm spent twelve minutes per position
+# to answer UNKNOWN.  Sending it back to 10^8 would buy the same answer at the
+# same price, so that stratum now gets the CLASSIFIER budget instead — one F0
+# pass whose product is the fortress telemetry, not a verdict.  What to do
+# with a candidate the classifier flags belongs to SURVIVE50.
+FORTRESS_BUDGETS = (ingest.DEBT_STAGE_NODES,)
 STRATA = ('mate_band', 'high_eval', 'fortress', 'moderate')
 PILOT_ARMS = ('analyze', 'solve')
 # Gates, written down before the numbers exist.
 GATE_MAX_FALSE_CERTIFICATES = 0
 GATE_MAX_VERIFIER_SHARE = 0.20
 GATE_MIN_CLOSURE_RATIO = 2.0
+
+
+def goal_for(position, campaign=None):
+    """Which side the SOLVE task should try to prove.
+
+    Round 1 asked every arm to prove the CAMPAIGN's goal, which on a position
+    evaluated at -1500 is asking the solver to prove the thing the engine is
+    certain is false.  It burned the budget and answered UNKNOWN, as it
+    should have.  The eval is a terrible oracle and a perfectly good SIGNPOST:
+    decisively negative means point the prover at Black.
+    """
+    known = position.backed_eval if position.backed_eval is not None \
+        else position.eval_cp
+    if known is not None and known <= -GOAL_SIGN_THRESHOLD:
+        return ProofCampaign.Goal.BLACK_WIN
+    if known is not None and known >= GOAL_SIGN_THRESHOLD:
+        return ProofCampaign.Goal.WHITE_WIN
+    return (campaign.goal if campaign is not None
+            else ProofCampaign.Goal.WHITE_WIN)
+
+
+# Past this, in the attacker-agnostic sense, the engine is not hesitating.
+GOAL_SIGN_THRESHOLD = 900
 
 
 def zeroing_density(last_analysis):
@@ -188,11 +217,13 @@ class Command(BaseCommand):
 
     def _queue_solve(self, position, stratum, campaign):
         made = 0
-        goal = (campaign.goal if campaign is not None
-                else ProofCampaign.Goal.WHITE_WIN)
-        for budget in SOLVE_BUDGETS:
+        goal = goal_for(position, campaign)
+        fortress = stratum == 'fortress'
+        budgets = FORTRESS_BUDGETS if fortress else SOLVE_BUDGETS
+        for budget in budgets:
             SolveTask.objects.create(
                 position=position, campaign=campaign, goal=goal,
+                budget_stage='F0' if fortress else 'F4',
                 budget_nodes=budget, arm=stratum)
             made += 1
         DBEvent.objects.create(kind='SOLVE_PILOT_ARM', payload={

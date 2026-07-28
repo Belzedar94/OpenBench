@@ -750,6 +750,14 @@ h2 {
   border-radius: 8px;
   background: var(--surface-1);
   line-height: 1.9;
+  /* A 90-ply line used to push the whole page sideways.  It wraps inside its
+     own box; if a single token ever cannot wrap, the box scrolls rather than
+     the document.  max-width keeps it honest inside a grid column, where
+     min-width:auto would otherwise let the content set the track size. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
 }
 
 .linebox a {

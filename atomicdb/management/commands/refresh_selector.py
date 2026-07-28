@@ -38,6 +38,20 @@ class Command(BaseCommand):
             '--interval', type=float, default=60.0,
             help='Seconds between refreshes when looping (default: 60).')
         parser.add_argument(
+            '--debt-cap', type=int, default=ingest.DEBT_QUEUE_CAP,
+            help='Maximum PENDING SolveTasks before the ENGINE-debt top-up '
+                 'stops adding more (default: %(default)s).')
+        parser.add_argument(
+            '--coverage-cap', type=int, default=ingest.COVERAGE_QUEUE_CAP,
+            help='Maximum PENDING coverage-completion tasks (default: '
+                 '%(default)s).')
+        parser.add_argument(
+            '--no-coverage', action='store_true',
+            help='Do not top up the coverage-completion queue.')
+        parser.add_argument(
+            '--no-debt', action='store_true',
+            help='Refresh priorities only; do not top up the debt queue.')
+        parser.add_argument(
             '--status', action='store_true',
             help='Print how many live positions carry a priority and exit.')
 
@@ -80,10 +94,21 @@ class Command(BaseCommand):
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
             ingest.refresh_priorities(force=True)
+            # Same process, same timer: the ENGINE debt queue is topped up to
+            # its cap here rather than in a cron of its own.  It is bounded
+            # work (one bulk_create of at most `cap - pending` rows) and it
+            # belongs with the other scheduling decision, not beside it.
+            enqueued = covered = 0
+            if not options['no_debt']:
+                enqueued = ingest.enqueue_engine_debt(cap=options['debt_cap'])
+            if not options['no_coverage']:
+                covered = ingest.enqueue_coverage_completion(
+                    cap=options['coverage_cap'])
             passes += 1
             elapsed = time.monotonic() - started
             self.stdout.write(json.dumps(
-                {'pass': passes, 'seconds': round(elapsed, 3)},
+                {'pass': passes, 'seconds': round(elapsed, 3),
+                 'debt_enqueued': enqueued, 'coverage_enqueued': covered},
                 sort_keys=True))
             if not options['loop']:
                 break

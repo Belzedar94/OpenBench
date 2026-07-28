@@ -196,11 +196,28 @@ class Command(BaseCommand):
 
     # ---------------- selection ----------------
 
+    def _fleet_owned(self):
+        """Keys the fleet already has a live SOLVE task for.
+
+        Since the debt goes to the fleet, this command is the SAFETY NET, not
+        the main road: re-proving in Python what a df-pn is already certifying
+        at 2M nodes is a waste of the box AND a source of confusing double
+        events.  What is left for it is exactly what the fleet cannot take —
+        witnesses it has not been given, and the unwitnessed rows.
+        """
+        from atomicdb.models import SolveTask
+        return set(SolveTask.objects.filter(
+            arm=ingest.DEBT_ARM,
+            state__in=('PENDING', 'LEASED'),
+        ).values_list('position_id', flat=True))
+
     def _next_batch(self, after_witness_len, after_key, take):
         pending = Position.objects.filter(
             closure='MATE_PV', proof='ENGINE',
             won_line__isnull=False,
-        ).exclude(won_line='').annotate(witness_len=Length('won_line'))
+        ).exclude(won_line='').exclude(
+            key__in=self._fleet_owned()
+        ).annotate(witness_len=Length('won_line'))
         if after_witness_len is not None:
             pending = pending.filter(
                 Q(witness_len__gt=after_witness_len)

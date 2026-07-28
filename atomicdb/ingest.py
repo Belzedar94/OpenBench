@@ -8,7 +8,7 @@ Flujo por resultado de analisis (§2):
 import time
 
 from django.conf import settings
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from . import logic, proof, tb
@@ -1629,10 +1629,13 @@ def _queue_disputed_reanalysis(pos):
 
 def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
                        advisory_dn=None, searched_nodes=0, elapsed_seconds=0,
-                       solver_build=''):
+                       solver_build='', telemetry=None,
+                       trusted_submitter=False):
     """Aplica un resultado SOLVE. Devuelve el resumen que ve el worker."""
     from . import solve
     from .models import SolveTask
+
+    disputed = False
 
     try:
         elapsed = max(0.0, min(float(elapsed_seconds or 0), 86_400.0))
@@ -1667,6 +1670,8 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
         current.searched_nodes = max(0, int(searched_nodes or 0))
         current.elapsed_seconds = elapsed
         current.solver_build = (solver_build or '')[:64]
+        if telemetry:
+            current.telemetry = telemetry
         current.completed = timezone.now()
         if outcome == 'PROVED' and not verified:
             current.state = 'FAILED'
@@ -1687,7 +1692,7 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
             current.certificate_nodes = report['nodes']
         current.save()
 
-        closed = False
+        closed = upgraded = False
         if verified:
             # The verifier's own cost is a pilot gate, so it is measured
             # rather than assumed: a proof-carrying design is only worth it
@@ -1698,12 +1703,282 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
                 'nodes': report['nodes'], 'depth': report['depth'],
                 'bytes': current.certificate_bytes,
                 'solver_seconds': elapsed})
-            closed = _close_by_certificate(current, report)
-    if verified:
+            # Una posicion ABIERTA se cierra; una ya cerrada (la deuda
+            # ENGINE) solo sube de grado.  Son dos cosas distintas y ninguna
+            # de las dos debe hacer el trabajo de la otra.
+            if Position.objects.filter(key=current.position_id,
+                                       status='UNKNOWN').exists():
+                closed = _close_by_certificate(current, report)
+            else:
+                upgraded = _upgrade_by_certificate(current, report)
+        elif outcome == 'DISPROVED':
+            disputed = _dispute_from_solver(current, trusted_submitter)
+    if verified or disputed:
         backup_cascade([task.position_id])
         backup_backed_evals([task.position_id])
-    return {'verified': verified, 'closed': closed,
+    return {'verified': verified, 'closed': closed, 'upgraded': upgraded,
+            'disputed': disputed,
             'certificate_nodes': (report or {}).get('nodes', 0)}
+
+
+# Presupuesto del peldano F0 del doc 18: df-pn tactico + telemetria de
+# fortaleza.  Certifica un mate tipico en menos de quince segundos, que es lo
+# que hace viable pasarle la deuda entera a la flota.
+DEBT_STAGE_NODES = 2_000_000
+# Tope de cola SOLVE pendiente. Encolar 28.000 tareas de golpe no acelera
+# nada: solo entierra las peticiones y el piloto bajo una montana de deuda.
+DEBT_QUEUE_CAP = 500
+DEBT_ARM = 'debt'
+
+
+def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
+    """Pone la deuda de mates SIN CERTIFICAR en manos de la flota.
+
+    QUE ES LA DEUDA.  Un cierre ``MATE_PV`` con ``proof='ENGINE'`` es un
+    testigo legal cuyo certificado exhaustivo nunca se produjo: la busqueda
+    online se quedo sin presupuesto.  Son verdad "probablemente", viven en la
+    cascada exacta como si fueran verdad "seguro", y con la flota cerrando
+    mates a este ritmo la deuda crece mas rapido de lo que un cron nocturno la
+    absorbe.  Un df-pn a 2M nodos la certifica en segundos.
+
+    BACKPRESSURE.  Solo se rellena hasta ``cap`` tareas SOLVE pendientes en
+    total, contando las de todo el mundo: la deuda es importante pero NUNCA
+    urgente, y una peticion de visitante o un brazo del piloto siempre van
+    delante (ver el orden de ``api_solve_acquire``, que manda ``arm='debt'``
+    al final).
+
+    Devuelve el numero de tareas creadas.
+    """
+    from .models import SolveTask
+
+    pending = SolveTask.objects.filter(state='PENDING').count()
+    room = max(0, int(cap) - pending)
+    if limit is not None:
+        room = min(room, int(limit))
+    if room <= 0:
+        return 0
+
+    # Ya tienen tarea viva o certificado: no se re-encolan.
+    taken = set(SolveTask.objects.filter(
+        arm=DEBT_ARM,
+        state__in=('PENDING', 'LEASED', 'COMPLETED'),
+    ).values_list('position_id', flat=True))
+
+    candidates = Position.objects.filter(
+        closure='MATE_PV', status__in=('WHITE_WIN', 'BLACK_WIN'),
+        won_line__isnull=False,
+    ).exclude(won_line='').filter(
+        Q(proof='ENGINE') | Q(proof__isnull=True)
+    ).exclude(key__in=taken).order_by('key')
+
+    made = []
+    for position in candidates[:room * 2]:
+        if len(made) >= room:
+            break
+        if position.key in taken:
+            continue
+        taken.add(position.key)
+        made.append(SolveTask(
+            position=position, goal=position.status,
+            budget_stage='F0', budget_nodes=DEBT_STAGE_NODES,
+            arm=DEBT_ARM))
+    if not made:
+        return 0
+    SolveTask.objects.bulk_create(made, ignore_conflicts=True)
+    DBEvent.objects.create(kind='DEBT_ENQUEUED', payload={
+        'created': len(made), 'pending_before': pending, 'cap': int(cap)})
+    return len(made)
+
+
+# ---------------- completado de cobertura ----------------
+#
+# EL CASO QUE LO PIDIO (Wolfram, 28-jul).  Un nodo con negras al turno tenia
+# doce respuestas: nueve WHITE_WIN ya probadas (≤M8..M15), dos evaluadas en
+# -1300 para el que mueve... y UNA sin analizar.  La guarda de cobertura hizo
+# lo correcto — con una respuesta sin mirar, el minimax parcial es optimista y
+# no se promueve — asi que el nodo siguio publicando su vieja eval de -150.
+# Cuando un humano pidio a mano esa unica jugada y salio mate, la cobertura se
+# completo y el valor salto a +1261 y subio al padre.
+#
+# El sistema sabia EXACTAMENTE lo que le faltaba y no hizo nada al respecto.
+# Eso es lo que arregla esto: si un nodo esta a K jugadas de tener la verdad
+# entera, se piden esas K jugadas.
+COVERAGE_MISSING_MAX = 3
+COVERAGE_DECISIVE_CP = 800
+COVERAGE_QUEUE_CAP = 200
+COVERAGE_SCAN_ROWS = 2_000
+COVERAGE_SEED_NODES = 8_000_000
+
+
+def _coverage_children(parent_keys):
+    rows = Edge.objects.filter(parent_id__in=list(parent_keys)).values_list(
+        'parent_id', 'move_uci', 'child_id', 'child__status',
+        'child__eval_cp', 'child__backed_eval')
+    by_parent = {}
+    for parent_id, move, child_id, status, eval_cp, backed in rows:
+        known = backed if backed is not None else eval_cp
+        by_parent.setdefault(parent_id, []).append(
+            (move, child_id, status, known))
+    return by_parent
+
+
+def _coverage_gap(fen, children, missing_max):
+    """Las jugadas que faltan para tener la verdad entera, o ``None``.
+
+    El gate es deliberadamente estrecho.  No basta con que falten pocas
+    jugadas: lo YA MIRADO tiene que ser unilateral EN CONTRA del que mueve —
+    todo cerrado a favor del rival o evaluado por debajo de
+    ``-COVERAGE_DECISIVE_CP`` desde su punto de vista.  Solo entonces las
+    jugadas que faltan son la diferencia entre "no sabemos" y un cierre
+    MINIMAX completo, que es lo que hace que valga la pena gastar en ellas.
+
+    Un nodo equilibrado no entra: ahi las jugadas que faltan no deciden nada y
+    pedirlas seria exploracion normal disfrazada de prioridad.
+    """
+    stm_white = fen.split()[1] == 'w'
+    mover_win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    mover_loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    missing, informed = [], 0
+    for move, child_id, status, known in children:
+        if status == mover_win:
+            return None          # ya hay una ganadora: no es este caso
+        if status == mover_loss:
+            informed += 1
+            continue
+        if status == 'DRAW':
+            return None          # unas tablas exactas rompen la unilateralidad
+        if known is None:
+            missing.append((move, child_id))
+            continue
+        mover_value = known if stm_white else -known
+        if mover_value > -COVERAGE_DECISIVE_CP:
+            return None          # algo que no pinta mal: no es unilateral
+        informed += 1
+    if not missing or len(missing) > missing_max or not informed:
+        return None
+    return missing
+
+
+def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
+                                missing_max=COVERAGE_MISSING_MAX,
+                                scan=COVERAGE_SCAN_ROWS):
+    """Pide las pocas jugadas que le faltan a un nodo para cerrarse.
+
+    Se escanea por ``updated`` descendente y con tope: la cobertura nueva
+    aparece justo donde algo acaba de cambiar, asi que mirar lo mas reciente
+    es a la vez lo mas barato y lo mas productivo.  El tope global de la
+    politica se cuenta sobre ``source='FILL'``, que existe para esto.
+    """
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', source=AnalysisTask.Source.FILL).count()
+    room = max(0, int(cap) - pending)
+    if room <= 0:
+        return 0
+
+    candidates = list(Position.objects.filter(
+        status='UNKNOWN', expanded=True,
+    ).order_by('-updated').values_list('key', 'fen')[:scan])
+    if not candidates:
+        return 0
+    children = _coverage_children([key for key, _fen in candidates])
+
+    made = 0
+    for key, fen in candidates:
+        if made >= room:
+            break
+        gap = _coverage_gap(fen, children.get(key, ()), missing_max)
+        if not gap:
+            continue
+        for _move, child_id in gap:
+            if made >= room:
+                break
+            child = Position.objects.filter(key=child_id).first()
+            if child is None or child.status != 'UNKNOWN':
+                continue
+            task, created = AnalysisTask.objects.get_or_create(
+                position_id=child_id, generation=child.visits,
+                defaults={'budget_nodes': max(COVERAGE_SEED_NODES,
+                                              budget_for(child)),
+                          'multipv': DEPTH_MULTIPV,
+                          'source': AnalysisTask.Source.FILL})
+            if created:
+                made += 1
+            elif task.state == 'PENDING' \
+                    and task.source == AnalysisTask.Source.AUTO:
+                # Ya estaba en la cola normal: se promociona sin gastar cupo
+                # nuevo, porque la tarea ya existia.
+                task.source = AnalysisTask.Source.FILL
+                task.save(update_fields=['source'])
+    if made:
+        DBEvent.objects.create(kind='COVERAGE_ENQUEUED', payload={
+            'created': made, 'pending_before': pending, 'cap': int(cap),
+            'scanned': len(candidates)})
+    return made
+
+
+def _upgrade_by_certificate(task, report):
+    """El cierre YA existe: esto sube su GRADO DE PRUEBA, no lo re-cierra.
+
+    Es el camino de la deuda ENGINE.  El status no se toca — ya era ese — y
+    tampoco el ``closure``: un ``MATE_PV`` certificado sigue siendo un
+    MATE_PV, exactamente lo que produce ``verify_mates`` cuando le alcanza el
+    presupuesto.  Lo que cambia es que deja de ser un testigo sin certificar.
+
+    El slack se queda con el MEJOR de los dos: el almacenado venia de la cota
+    burda ``100 - len(testigo)``, y el del certificado esta medido sobre la
+    racha reversible real del arbol probado.
+    """
+    pos = Position.objects.select_for_update().get(key=task.position_id)
+    if pos.status != task.goal or pos.status == 'UNKNOWN':
+        return False
+    if pos.proof == 'ANDOR':
+        return False                       # ya estaba certificado
+    pos.proof = 'ANDOR'
+    certified = report.get('clock_slack')
+    if certified is not None:
+        pos.clock_slack = max(pos.clock_slack or 0, certified)
+    pos.save(update_fields=['proof', 'clock_slack', 'updated'])
+    DBEvent.objects.create(kind='PROOF_UPGRADED', payload={
+        'key': pos.key, 'status': pos.status, 'closure': pos.closure,
+        'certificate_nodes': report['nodes'],
+        'clock_slack': pos.clock_slack, 'task': task.pk})
+    return True
+
+
+def _dispute_from_solver(task, trusted):
+    """Un DISPROVED del solver sobre una posicion cerrada CON ESE MISMO status.
+
+    El solver dice, con busqueda exhaustiva, que el objetivo NO se puede
+    forzar; el arbol dice que si.  Uno de los dos miente y el arbol solo tiene
+    un testigo sin certificar, asi que la sospecha es seria.
+
+    Pero un DISPROVED NO trae certificado — mi solver solo los emite para
+    PROVED — asi que es una afirmacion sin reproducir.  Aceptarla de
+    cualquiera seria darle a un voluntario un boton para borrar cierres.  De
+    modo que:
+
+      * de una identidad de CONFIANZA (la misma puerta que los TB de seis
+        piezas): revoca, porque ahi el operador responde por su maquina;
+      * de cualquier otra: se registra la sospecha y se encola la
+        re-certificacion servidor-side, que SI reproduce la refutacion antes
+        de tocar nada.
+
+    En los dos casos queda evento: la deuda sospechosa se ve.
+    """
+    pos = Position.objects.select_for_update().get(key=task.position_id)
+    if pos.status != task.goal or pos.status == 'UNKNOWN':
+        return False
+    if _closure_is_independent(pos):
+        return False                       # TERMINAL/TB/ANDOR: no se discute
+    DBEvent.objects.create(kind='SOLVE_DISPUTE_SIGNAL', payload={
+        'key': pos.key, 'status': pos.status, 'closure': pos.closure,
+        'proof': pos.proof, 'task': task.pk, 'trusted': bool(trusted),
+        'machine': task.machine})
+    if not trusted:
+        return False
+    revoke_closure(pos.key, reason='solver-disproved-the-goal',
+                   mark_disputed=True)
+    return True
 
 
 def _close_by_certificate(task, report):

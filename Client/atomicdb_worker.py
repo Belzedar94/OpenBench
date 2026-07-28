@@ -645,7 +645,12 @@ class Solver:
         self.hash_mb = hash_mb
 
     def solve(self, fen, goal, budget_nodes, movetime_ms=0):
-        """Return (outcome, pn, dn, nodes, elapsed, certificate_text)."""
+        """Return (outcome, pn, dn, nodes, elapsed, certificate, telemetry).
+
+        ``telemetry`` carries the fortress indicators the solver reports.  It
+        is advisory scheduling information: the server stores it and never
+        lets it near a verdict.
+        """
         command = (f'solve {fen} goal {goal} nodes {int(budget_nodes)} '
                    f'hash {int(self.hash_mb)}')
         if movetime_ms:
@@ -657,6 +662,7 @@ class Solver:
         elapsed = time.time() - started
 
         outcome, pn, dn, nodes = 'UNKNOWN', None, None, 0
+        telemetry = {}
         certificate = []
         in_certificate = False
         for line in process.stdout.splitlines():
@@ -681,8 +687,13 @@ class Solver:
                 dn = None if value == 'INF' else int(value)
             elif name == 'nodes':
                 nodes = int(value)
+            elif name.startswith('fortress_'):
+                try:
+                    telemetry[name] = float(value)
+                except ValueError:
+                    pass
         text = '\n'.join(certificate) + '\n' if certificate else ''
-        return outcome, pn, dn, nodes, elapsed, text
+        return outcome, pn, dn, nodes, elapsed, text, telemetry
 
 
 def _solve_once(server, auth, solver, lease_session):
@@ -700,11 +711,11 @@ def _solve_once(server, auth, solver, lease_session):
         return False
 
     task = tasks[0]
-    outcome, pn, dn, nodes, elapsed, certificate = solver.solve(
+    outcome, pn, dn, nodes, elapsed, certificate, telemetry = solver.solve(
         task['fen'], task.get('goal', 'WHITE_WIN'), task['budget_nodes'])
     payload = {**auth, 'task_id': task['id'], 'outcome': outcome,
                'nodes': nodes, 'elapsed': f'{elapsed:.2f}',
-               'lease_token': task.get('lease_token', '')}
+               'lease_token': task.get('lease_token', ''), **telemetry}
     if pn is not None:
         payload['pn'] = pn
     if dn is not None:
