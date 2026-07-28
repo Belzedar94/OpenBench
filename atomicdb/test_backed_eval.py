@@ -13,7 +13,7 @@ import hashlib
 from django.test import Client
 
 from . import ingest, logic, views
-from .models import DBEvent, Edge, Position
+from .models import AnalysisTask, DBEvent, Edge, Position
 from .testing import TestCase
 
 
@@ -434,6 +434,52 @@ class BackedIngestTests(TestCase):
                          .backed_eval, -900)
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
+
+    def test_a_walked_mate_line_loses_proof_weight_at_partial_nodes(self):
+        """A proof's authority ends where the unproven alternatives begin.
+
+        A visitor WALKED a line to a terminal mate without requesting a
+        single analysis.  The terminal is genuinely proven, but every walked
+        node above it has no eval of its own, so the directional guard had
+        no anchor and the mate-band value climbed the whole chain carrying
+        PROVEN quality — the explorer painted 9994 BACKED over territory no
+        engine ever looked at (Wolfram, 28-jul).  The value may climb (it is
+        the best knowledge), but past a partial-coverage node it carries
+        only that node's own search support: the first evaluated ancestor
+        blocks it, and the convergence purchase sends the ENGINE down the
+        line the human explored.
+        """
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        Position.objects.filter(key=root.key).update(
+            eval_cp=120, nodes_invested=128_000_000)
+        walked = Edge.objects.filter(parent=root).order_by('move_uci') \
+                             .first().child
+        # The walked node: an edge exists, but no eval and no expansion —
+        # exactly what /goto/ navigation leaves behind.
+        deep_fen = logic.apply_move(walked.fen,
+                                    logic.legal_moves(walked.fen)[0])
+        deep = ingest.get_or_create_position(deep_fen)
+        Edge.objects.get_or_create(
+            parent=walked, move_uci=logic.legal_moves(walked.fen)[0],
+            defaults={'child': deep})
+        Position.objects.filter(key=deep.key).update(
+            status='WHITE_WIN', closure='TERMINAL')
+
+        ingest.backup_backed_evals([deep.key, walked.key, root.key])
+
+        walked.refresh_from_db()
+        root.refresh_from_db()
+        # The walked node itself may honestly carry the value...
+        self.assertIsNotNone(walked.backed_eval)
+        # ...but WITHOUT proof weight,
+        self.assertLess(walked.backed_nodes, ingest.PROVEN_QUALITY)
+        # so the evaluated ancestor keeps its own knowledge,
+        self.assertEqual(root.backed_eval, 120)
+        self.assertIsNone(root.backed_move)
+        # and the discrepancy buys the walked line an engine analysis.
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=walked, source=AnalysisTask.Source.FILL).exists())
 
     def test_a_new_analysis_of_the_child_retests_the_blocked_parent(self):
         """The purchase's delivery route, end to end through submit.

@@ -682,7 +682,22 @@ def _backed_for(row, children, discrepancies=None):
                     # la respuesta se compra.
                     discrepancies.append((best.move, row.key, own_quality))
                 return own, None, 0, own_quality
-    return best.value, best.move, 1 + best.plies, best.quality
+    quality = best.quality
+    if not complete and quality >= PROVEN_QUALITY:
+        # La autoridad de una PRUEBA termina en el primer nodo cuyas
+        # alternativas no estan probadas.  Sin este corte, una linea que un
+        # visitante CAMINO hasta un mate terminal (nodos sin eval propia, la
+        # guarda direccional sin ancla) subia el valor de banda de mate con
+        # peso de prueba por toda la cadena, y el explorador pintaba 9994
+        # BACKED sobre territorio sin un solo analisis (caso Wolfram,
+        # 28-jul).  El valor puede subir — es el mejor conocimiento — pero
+        # con el soporte de BUSQUEDA del propio nodo (0 en un nodo caminado):
+        # el primer ancestro con eval real lo bloquea y la convergencia
+        # compra analisis de motor exactamente en la linea que el humano
+        # exploro.  El soporte de busqueda real (no-prueba) sigue
+        # atravesando nodos conectores como siempre.
+        quality = row.nodes_invested or 0
+    return best.value, best.move, 1 + best.plies, quality
 
 
 def _rung_at_least(nodes):
