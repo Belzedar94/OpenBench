@@ -231,8 +231,16 @@
             .then(({status, data}) => {
               if (data.status === 'queued') {
                 const n = data.queued;
-                allbtn.textContent = 'Queued ' + n + ' analys'
-                                     + (n === 1 ? 'is' : 'es');
+                if (n === 0 && data.candidates > 0) {
+                  // Every candidate already has a pending task (an earlier
+                  // click, FILL or the selector got there first): truthful,
+                  // and the results are simply still in flight.
+                  allbtn.textContent = 'All ' + data.candidates
+                                       + ' already queued — results pending';
+                } else {
+                  allbtn.textContent = 'Queued ' + n + ' analys'
+                                       + (n === 1 ? 'is' : 'es');
+                }
                 poll(36);
               } else {
                 allbtn.textContent = {

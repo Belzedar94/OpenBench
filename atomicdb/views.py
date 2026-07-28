@@ -733,7 +733,8 @@ def api_request_unexplored(request, key):
         DBEvent.objects.create(kind='BULK_REQUEST', payload={
             'ip': ip, 'key': pos.key, 'queued': queued,
             'candidates': len(pending)})
-    return JsonResponse({'status': 'queued', 'queued': queued})
+    return JsonResponse({'status': 'queued', 'queued': queued,
+                         'candidates': len(pending)})
 
 
 def _client_ip(request):
