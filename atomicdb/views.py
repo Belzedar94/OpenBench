@@ -40,6 +40,17 @@ LEGACY_DISPLAY_MINUTES = 60
 TASK_REFILL_COUNT = 4
 LEASE_TOKEN_BUILD = 2026072203
 LEGACY_MAX_BUDGET = 128_000_000
+# Un worker con --jobs K se presenta como K leaseholders, "base#0".."base#K-1",
+# porque asi cada trabajo hereda TAL CUAL las reglas que el protocolo ya
+# aplica por maquina: una asignacion viva, token de fencing, heartbeat y
+# replay de una respuesta perdida.  No hace falta nada nuevo en el protocolo
+# ni una columna nueva; el slot vive en la identidad.
+#
+# Este tope es lo unico que hay que anadir, y no es contra el contribuidor
+# honesto: es contra el que se equivoca de cero en --jobs, o el que decide
+# que la cola es suya.  32 deja sitio de sobra a una maquina grande de verdad
+# y sigue impidiendo que una sola vacie la cola.
+LEASES_PER_MACHINE = 32
 MAX_REPORTED_NPS = 1_000_000_000_000
 REQUEST_QUEUE_MAX = 1000000  # efectivamente sin tope (orden 27-jul; el propietario lo monitoriza)
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
@@ -142,6 +153,33 @@ def _live_moves(task):
 
 
 @csrf_exempt
+def machine_base(machine):
+    """La maquina fisica detras de un slot: ``base#3`` -> ``base``.
+
+    Un worker con --jobs se identifica por slot, y el tope de leases es por
+    maquina, no por slot -- si no, --jobs 1000 lo sortearia trivialmente.
+    """
+    return (machine or '').split('#', 1)[0]
+
+
+def _machine_at_lease_cap(machine):
+    """True si la maquina fisica ya tiene todas sus asignaciones vivas.
+
+    El prefijo se compara con el separador incluido: ``bob-pc-atomicdb`` y
+    ``bob-pc-atomicdb2`` son maquinas distintas y un ``startswith`` a secas
+    las mezclaria.  Se cuenta DESPUES de reciclar los leases caducados, en la
+    misma transaccion, asi que un lease muerto no ocupa sitio.
+    """
+    base = machine_base(machine)
+    if not base:
+        return False
+    held = (AnalysisTask.objects
+            .filter(state='LEASED')
+            .filter(Q(machine=base) | Q(machine__startswith=base + '#'))
+            .count())
+    return held >= LEASES_PER_MACHINE
+
+
 def api_lease(request):
     user = _auth(request)
     if user is None:
@@ -258,6 +296,12 @@ def api_lease(request):
                 replayed = True
             else:
                 active_task_id = active_same_machine.id
+        elif _machine_at_lease_cap(machine):
+            # La maquina fisica ya tiene LEASES_PER_MACHINE asignaciones
+            # vivas repartidas entre sus slots.  No es un error del worker
+            # honesto -- con --jobs sensato nunca se llega -- asi que se le
+            # responde como a una cola vacia y reintenta, en vez de fallar.
+            pass
         else:
             chosen = choose_pending()
             if chosen is None:
