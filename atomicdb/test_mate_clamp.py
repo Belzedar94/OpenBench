@@ -100,6 +100,14 @@ class MateDistanceUnitTests(TestCase):
             pos = _position(CLAIM_FEN, eval_cp=value)
             self.assertIsNone(ingest.claimed_mate_plies(pos), value)
 
+    def test_a_proven_win_without_a_stated_distance_is_not_a_claim(self):
+        """+-10_000 es "ganado", el valor con el que la cascada respalda una
+        victoria probada.  No es un mate en cero jugadas."""
+        for value in (10_000, -10_000):
+            pos = _position(CLAIM_FEN, eval_cp=value)
+            self.assertIsNone(ingest.claimed_mate_plies(pos), value)
+            self.assertEqual(ingest.budget_for(pos), ingest.BUDGET_LADDER[2])
+
     def test_the_declared_mate_field_beats_the_decoded_eval(self):
         """La distancia ESCRITA por el motor manda sobre la decodificada."""
         pos = _position(CLAIM_FEN, eval_cp=_mate_eval(2), last_analysis=[

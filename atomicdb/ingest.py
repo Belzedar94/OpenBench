@@ -186,7 +186,11 @@ def claimed_mate_plies(pos):
                                         stm_white)
         break            # la linea vigente no reclama mate: no hay distancia
     eval_cp = pos.eval_cp
-    if eval_cp is not None and abs(eval_cp) > TB_CLAMP_CEILING:
+    # Franja ABIERTA por los dos lados.  Por abajo, el recorte de tablebase.
+    # Por arriba, +-10_000 exacto, que en este arbol significa "ganado" sin
+    # distancia declarada — es el valor con el que la cascada respalda una
+    # victoria probada — y no un mate en cero jugadas.
+    if eval_cp is not None and TB_CLAMP_CEILING < abs(eval_cp) < 10_000:
         return _mate_moves_to_plies(10_000 - abs(eval_cp), eval_cp > 0,
                                     stm_white)
     return None

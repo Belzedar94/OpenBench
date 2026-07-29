@@ -275,7 +275,12 @@ class SelectorTests(TestCase):
 
     def test_mate_band_boost_and_budget_jump(self):
         p = ingest.get_or_create_position(logic.start_fen())
-        p.eval_cp = 9_997   # mate visto por el motor, aun sin cerrar
+        # Mate visto por el motor, aun sin cerrar, y LARGO: el salto de
+        # presupuesto existe para extraer una PV que de verdad hay que
+        # extraer.  Con un mate corto lo que se compra hoy es una
+        # verificacion barata (``ingest._short_mate_clamp``, test_mate_clamp),
+        # asi que la distancia forma parte del fixture, no es un detalle.
+        p.eval_cp = 10_000 - 40   # M40: 79 plies de PV que sacar
         p.save()
         ingest.refresh_priorities()
         tasks = ingest.next_tasks(1)
