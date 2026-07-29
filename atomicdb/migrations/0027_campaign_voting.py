@@ -52,7 +52,7 @@ def active_from_state(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('atomicdb', '0025_opening_name_edits'),
+        ('atomicdb', '0026_analysistask_requested_by'),
     ]
 
     operations = [
