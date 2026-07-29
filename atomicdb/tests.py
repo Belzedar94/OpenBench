@@ -295,6 +295,24 @@ class SelectorTests(TestCase):
         tasks = ingest.next_tasks(50)
         self.assertNotIn(child.key, [t.position_id for t in tasks])
 
+    def test_pool_top_up_keeps_the_queue_fed(self):
+        # El colchon del selector: mintea hasta el objetivo y, ya lleno, no
+        # duplica nada (informe de Lesha: valles con la cola en cero).
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        for edge in Edge.objects.filter(parent=root)[:6]:
+            child = edge.child
+            child.eval_cp, child.expanded = 100, True
+            child.save()
+        ingest.refresh_priorities()
+
+        minted = ingest.top_up_analysis_pool(target=5)
+
+        self.assertEqual(minted, 5)
+        self.assertEqual(AnalysisTask.objects.filter(state='PENDING').count(),
+                         5)
+        self.assertEqual(ingest.top_up_analysis_pool(target=5), 0)
+
     def test_tombstones_survive_refresh_no_starvation(self):
         # zombis con eval de mate NO deben resucitar en cada refresh ni
         # matar de hambre a las posiciones vivas de menor prioridad

@@ -1610,6 +1610,27 @@ def next_tasks(n):
     return tasks
 
 
+# Colchon de tareas PENDING que el servicio selector mantiene lleno.  El
+# lease solo rellena (4) con la cola VACIA: con decenas de slots consumiendo
+# sondas de 128M, eso es operar clavado en cola cero — cada lease vacio paga
+# el minteo inline y dos leases concurrentes mintean los MISMOS top-4 (el
+# dedup de get_or_create hace que la oferta no escale con los que piden).
+# Valles de utilizacion medidos por la flota de Lesha (28-jul).
+ANALYSIS_POOL_TARGET = 64
+
+
+def top_up_analysis_pool(target=None):
+    """Rellena la cola de analisis hasta ``target`` FUERA del camino HTTP.
+
+    Devuelve cuantas tareas se mintearon.  Corre en el ciclo del servicio
+    selector, con las prioridades recien refrescadas."""
+    target = ANALYSIS_POOL_TARGET if target is None else target
+    pending = AnalysisTask.objects.filter(state='PENDING').count()
+    if pending >= target:
+        return 0
+    return len(next_tasks(target - pending))
+
+
 def _task_counter():
     """Contador monotono y barato para el reparto blando del repertorio.
 

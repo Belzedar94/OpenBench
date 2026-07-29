@@ -47,6 +47,11 @@ class Command(BaseCommand):
             '--interval', type=float, default=60.0,
             help='Seconds between refreshes when looping (default: 60).')
         parser.add_argument(
+            '--pool-target', type=int, default=ingest.ANALYSIS_POOL_TARGET,
+            help='Keep this many PENDING analysis tasks minted so the fleet '
+                 'never waits on the lease-path refill (default: '
+                 '%(default)s).')
+        parser.add_argument(
             '--debt-cap', type=int, default=ingest.DEBT_QUEUE_CAP,
             help='Maximum PENDING SolveTasks before the ENGINE-debt top-up '
                  'stops adding more (default: %(default)s).')
@@ -120,6 +125,9 @@ class Command(BaseCommand):
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
             ingest.refresh_priorities(force=True)
+            # Colchon de analisis: la flota nunca debe esperar al minteo
+            # inline del lease (4 con cola vacia = valles de utilizacion).
+            pooled = ingest.top_up_analysis_pool(options['pool_target'])
             # Same process, same timer: the ENGINE debt queue is topped up to
             # its cap here rather than in a cron of its own.  It is bounded
             # work (one bulk_create of at most `cap - pending` rows) and it
@@ -146,6 +154,7 @@ class Command(BaseCommand):
             elapsed = time.monotonic() - started
             self.stdout.write(json.dumps(
                 {'pass': passes, 'seconds': round(elapsed, 3),
+                 'pool_topped_up': pooled,
                  'debt_enqueued': enqueued, 'coverage_enqueued': covered,
                  'adversarial': bool(adversarial),
                  'dn_repair_enqueued': repaired,

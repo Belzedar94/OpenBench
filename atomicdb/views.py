@@ -39,7 +39,9 @@ POST_DEPLOY_LEGACY_LEASE_MINUTES = 60
 LEGACY_DISPLAY_MINUTES = 60
 # One task per lease is intentional. It makes the queue truthful and prevents
 # a later task in a sequential batch expiring before the worker even starts it.
-TASK_REFILL_COUNT = 4
+# Emergencia inline: el colchon lo mantiene el selector
+# (ingest.top_up_analysis_pool); esto solo cubre el hueco entre ciclos.
+TASK_REFILL_COUNT = 8
 LEASE_TOKEN_BUILD = 2026072203
 LEGACY_MAX_BUDGET = 128_000_000
 # Un worker con --jobs K se presenta como K leaseholders, "base#0".."base#K-1",
