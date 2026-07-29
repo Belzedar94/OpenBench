@@ -435,6 +435,28 @@ class BackedIngestTests(TestCase):
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
 
+    def test_the_arrow_follows_the_table_not_the_stale_search(self):
+        """Board arrow and moves table must move TOGETHER.
+
+        The arrow used pos.best_move (the last own search's pick) while the
+        table ranks by best knowledge including backed values.  When a
+        backed child overtook, the table promoted it and the arrow kept
+        pointing at the old move — the board contradicted its own column
+        (reported 29-jul).  One source of truth: the arrow is the table's
+        top row.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        Position.objects.filter(key=pos.key).update(
+            eval_cp=100, expanded=True, best_move='a2a3')
+        edge = Edge.objects.get(parent=pos, move_uci='e2e3')
+        Position.objects.filter(key=edge.child_id).update(
+            backed_eval=425, backed_nodes=1, backed_plies=1)
+
+        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+
+        self.assertIn('data-best-move="e2e3"', body)
+
     def test_a_narrow_shallow_pass_does_not_clobber_the_wide_snapshot(self):
         """The raw-lines showcase never downgrades; knowledge always flows.
 

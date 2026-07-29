@@ -2683,8 +2683,16 @@ def explore(request, key):
         'board': _ctx_board(pos.fen),
         'unexplored_count': (len(ingest.unexplored_children(pos))
                              if pos.status == 'UNKNOWN' else 0),
+        # La flecha apunta al TOP de la misma lista que pinta la tabla (mejor
+        # conocimiento, backed incluido), no al best_move de la ultima
+        # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
+        # moverse JUNTAS o el tablero contradice a su propia columna (bug
+        # reportado 29-jul; misma leccion de la fuente unica de verdad).
         'best_move': (None if pos.closure == 'TERMINAL'
-                      else pos.best_move),
+                      else (moves[0]['uci']
+                            if moves and (moves[0].get('score') is not None
+                                          or moves[0].get('mate') is not None)
+                            else pos.best_move)),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,

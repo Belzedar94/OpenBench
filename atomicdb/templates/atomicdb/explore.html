@@ -299,9 +299,6 @@
     {% if pos.last_analysis %}
     <details>
       <summary>raw engine output (last analysis)</summary>
-      {# Una linea = un bloque: el minificador de HTML se come los \n y con
-         white-space:pre-wrap no quedaba NADA que separara los multipv — la
-         salida entera fluia como un parrafo (Wolfram, 29-jul). #}
       <div class="raw">{% for ln in pos.last_analysis %}<div class="rawline">{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}</div>{% endfor %}</div>
     </details>
     {% endif %}  </div>
