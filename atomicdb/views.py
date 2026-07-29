@@ -11,6 +11,7 @@ from urllib.parse import quote, urlsplit
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
+from django.core.cache import cache
 from django.db import OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -70,6 +71,23 @@ LINEAGE_SEARCH_MAX_NODES = 1024
 LINEAGE_SEARCH_MAX_FRONTIER = 64
 LINEAGE_SEARCH_MAX_PARENTS_PER_CHILD = 16
 LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
+# ...and the walk above is what every explorer click paid, every time.  The
+# night a batch job and a traffic record met on the same box, the VPS went to
+# load 34 and a click on a deep position took ~300ms of window-function
+# queries — recomputing a line to the root that had not changed since the
+# previous click and almost never does.
+#
+# So it is cached, and the TTL is the ONLY invalidation.  That is a choice,
+# not a shortcut: a new edge can only ever make a breadcrumb SHORTER, never
+# wrong, and nobody navigating a 96-ply line needs to see that improvement
+# within the same minute.  Anything stronger (cross-process events, a shared
+# store) is infrastructure this deployment does not have and does not need —
+# five gunicorn workers keep five independent copies, and a restart clears
+# all of them.  Two minutes is also the blast radius if this is ever wrong.
+LINEAGE_CACHE_SECONDS = 120
+# Bump when the cached payload shape changes, so a deploy cannot read an old
+# entry with new code.  ``0`` seconds above disables the cache outright.
+LINEAGE_CACHE_VERSION = 1
 PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
@@ -1259,7 +1277,7 @@ def _format_san_line(top, line, max_plies=16, keep_head=False):
     return ' '.join(parts[:head]) + ' … ' + ' '.join(parts[-tail:])
 
 
-def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
+def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     """Resolve canonical minimum-ply breadcrumbs from startpos in batches.
 
     The home page contains queue rows and milestones with heavily overlapping
@@ -1269,6 +1287,9 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     even though another parent leads to startpos. Reverse BFS explores every
     parent at the current distance, remains cycle-safe, and uses one Edge query
     per ply for all requested positions, up to the public-search ceilings.
+
+    This is the expensive half.  Callers go through ``_lines_to_root``, which
+    only sends it the keys a short-lived cache could not answer.
     """
     import pyffish as pf
 
@@ -1432,6 +1453,107 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             white = not white
         result[key] = (top, line)
     return result
+
+
+class _LineageTop:
+    """The part of a top position a breadcrumb actually reads.
+
+    The walk hands back a live ``Position`` with ``lineage_capped`` glued on
+    as an attribute, and the renderers downstream read two things from it:
+    ``fen`` (is this the root? whose move is it?) and that marker.  ``key``
+    is carried too because it names the node the line starts from.  Nothing
+    else — an ORM row is not a cache payload, it drags a database identity
+    and a row of live state into an entry meant to outlive the request.
+
+    Both the hit and the miss path return one of these, on purpose: if the
+    shape only appeared after the first render, the difference would surface
+    as a bug that needs traffic and a warm cache to reproduce.
+    """
+
+    __slots__ = ('key', 'fen', 'lineage_capped')
+
+    def __init__(self, key, fen, lineage_capped=False):
+        self.key = key
+        self.fen = fen
+        self.lineage_capped = lineage_capped
+
+
+def _lineage_cache_key(key, max_plies):
+    # The ply budget is part of the identity: the explorer walks 64 and the
+    # home page walks 96, and the same position can be rooted under one and
+    # "deep line" under the other.  One shared entry would let whichever
+    # page rendered first decide what the other one says.
+    return f'atomicdb.lineage.v{LINEAGE_CACHE_VERSION}.{max_plies}.{key}'
+
+
+def _lineage_payload(top, line):
+    """Serialisable form of one resolved breadcrumb."""
+    return {
+        'top_key': top.key,
+        'top_fen': top.fen,
+        # This marker is why the payload is explicit rather than a pickled
+        # object: it is the difference between "deep line, ply ≥96" and a
+        # headless "… Bc4 Bd7" fragment, and it travels as an injected
+        # attribute that any serialisation would silently drop.
+        'capped': bool(getattr(top, 'lineage_capped', False)),
+        'line': [
+            {'uci': step['uci'], 'san': step['san'],
+             'key': step['key'], 'white': step['white']}
+            for step in line
+        ],
+    }
+
+
+def _lineage_from_payload(payload):
+    top = _LineageTop(payload['top_key'], payload['top_fen'])
+    if payload['capped']:
+        top.lineage_capped = True
+    return top, [dict(step) for step in payload['line']]
+
+
+def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
+    """Cached front door to the reverse walk.
+
+    Everything the explorer shows about the CURRENT position — evals, move
+    rows, proof numbers — stays uncached and is read fresh on every render.
+    Only the line BACK to the root, which is what actually costs the queries,
+    is served from here.
+    """
+    keys = list(dict.fromkeys(key for key in keys if key))
+    if not keys:
+        return {}
+    budget = min(max_plies, LINEAGE_SEARCH_MAX_PLIES)
+    ttl = LINEAGE_CACHE_SECONDS
+    if ttl <= 0:
+        return _walk_lines_to_root(keys, max_plies=max_plies)
+
+    cache_keys = {key: _lineage_cache_key(key, budget) for key in keys}
+    stored = cache.get_many(list(cache_keys.values()))
+    resolved, misses = {}, []
+    for key in keys:
+        payload = stored.get(cache_keys[key])
+        if payload is None:
+            misses.append(key)
+        else:
+            resolved[key] = _lineage_from_payload(payload)
+
+    if misses:
+        fresh = {}
+        for key, (top, line) in _walk_lines_to_root(
+                misses, max_plies=max_plies).items():
+            payload = _lineage_payload(top, line)
+            fresh[cache_keys[key]] = payload
+            # Round-trip even on the miss, so a hit and a miss are the same
+            # object shape.
+            resolved[key] = _lineage_from_payload(payload)
+        if fresh:
+            # Keys the walk did not return are positions AtomicDB does not
+            # have yet.  Not caching that absence is deliberate: `goto`
+            # materialises positions, and a two-minute "no such node" would
+            # be a broken explorer on the click right after seeding one.
+            cache.set_many(fresh, ttl)
+
+    return {key: resolved[key] for key in keys if key in resolved}
 
 
 def _line_labels_many(keys, preview_plies=10):
