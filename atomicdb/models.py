@@ -159,11 +159,11 @@ class Campaign(models.Model):
 class CampaignVote(models.Model):
     """Un voto por campana y por visitante, sin cuenta.
 
-    La identidad es una cookie opaca, no una IP: una IP compartida (un
-    campus, un movil detras de CGNAT) es una persona sola a efectos de rate
-    limit y son cincuenta a efectos de voto, y elegir la IP habria roto una de
-    las dos.  No pretende ser infalsificable — borrar la cookie da otro voto —
-    sino proporcionado a lo que decide, que es un ORDEN en una lista que el
+    La identidad es una cookie opaca, no una IP.  Detras de una IP compartida
+    — un campus, un movil en CGNAT — hay cincuenta personas, y contarlas como
+    una sola les daria un voto entre todas y un solo cupo de propuestas para
+    todas.  No pretende ser infalsificable (borrar la cookie da otro voto),
+    sino proporcionado a lo que decide: un ORDEN en una lista que el
     propietario mira antes de activar nada.
 
     ``name`` es opcional y decorativo: quien quiere que se sepa que voto lo
