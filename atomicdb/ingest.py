@@ -251,10 +251,19 @@ def _seed_child_eval(child, ev):
 
 
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
-                    mate_proofs=None):
+                    mate_proofs=None, restricted=False):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
-    Devuelve dict con resumen."""
+    Devuelve dict con resumen.
+
+    ``restricted``: el pase se busco con ``searchmoves`` acotado a las jugadas
+    sin resolver (§ views._live_moves), asi que su mejor linea es la mejor
+    ENTRE LO QUE QUEDABA, no la de la posicion.  Con la jugada buena ya cerrada
+    y fuera de la lista, ese numero es peor que la posicion, y ``eval_cp``
+    alimenta budget_for, el breadth-swap, witness-refuted y la incertidumbre.
+    Un pase asi puede MEJORAR ``eval_cp`` para el que mueve — eso lo ha
+    demostrado — pero nunca empeorarlo, que es lo unico que no ha mirado.
+    """
     if mate_proofs is None:
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
         if snapshot.status != 'UNKNOWN':
@@ -399,6 +408,15 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             elif len(snapshot) >= len(current or prior):
                 prior = []
             pos.last_analysis = (snapshot + prior)[:10]
+        # Un pase restringido no puede EMPEORAR la posicion para el que mueve:
+        # no ha mirado las jugadas que le faltan, asi que su peor numero no es
+        # una afirmacion sobre ellas.  Si mejora, si: eso lo ha demostrado con
+        # una linea concreta, y el best_move la acompana.
+        if restricted and best_eval is not None and pos.eval_cp is not None:
+            improves = (best_eval > pos.eval_cp if stm_white
+                        else best_eval < pos.eval_cp)
+            if not improves:
+                best_eval, best_move = None, None
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:

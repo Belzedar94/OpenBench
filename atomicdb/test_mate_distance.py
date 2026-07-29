@@ -24,6 +24,7 @@ direcciones, el AND sigue exactamente como estaba, y un testigo propio
 """
 
 from io import StringIO
+from unittest.mock import patch
 
 from django.core.management import call_command
 
@@ -519,3 +520,65 @@ class CertifiedLineAdoptionTests(TestCase):
         child.refresh_from_db()
         self.assertNotIn('certified', summary)
         self.assertEqual(child.mate_in, 1)
+
+
+class BackfillDoesNotOverwriteLiveWorkTests(TestCase):
+    """El backfill escribe sobre SU foto, o no escribe.
+
+    Sus pasadas son largas — un punto fijo sobre el conjunto cerrado entero —
+    y mientras tanto ``backup_cascade`` esta escribiendo ``mate_in`` y
+    ``best_move`` en vivo sobre esas mismas filas.  Un ``bulk_update`` ciego al
+    final devolvia esas filas al valor derivado de una lectura ya vieja: el
+    trabajo del que llego despues, borrado por el que llego antes.
+    """
+
+    def setUp(self):
+        self.parent = _position(_after('g1f3', 'd7d5'))
+        ingest.expand(self.parent)
+        Position.objects.filter(key=self.parent.key).update(
+            status='WHITE_WIN', closure='MINIMAX', proof='ENGINE',
+            mate_in=3, best_move='f3e5', clock_slack=90)
+        edge = Edge.objects.select_related('child').get(
+            parent=self.parent, move_uci='f3e5')
+        self.child = edge.child
+        Position.objects.filter(key=self.child.key).update(
+            status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
+            won_line='f7f6 e5d7 e7e6 d7f8', mate_in=4, best_move='f7f6',
+            clock_slack=90)
+
+    def _backfill(self, meanwhile=None):
+        from atomicdb.management.commands import backfill_mate_distance
+
+        out = StringIO()
+        original = backfill_mate_distance.Command._write
+
+        def writing(command, pending, origin):
+            if meanwhile is not None:
+                meanwhile()
+            return original(command, pending, origin)
+
+        with patch.object(backfill_mate_distance.Command, '_write', writing):
+            call_command('backfill_mate_distance', stdout=out, stderr=out)
+        return out.getvalue()
+
+    def test_a_cascade_that_lands_first_keeps_its_number(self):
+        def cascade_commits():
+            # Otro proceso escribe la fila con informacion mas fresca justo
+            # antes de que el backfill vaya a persistir su punto fijo.
+            Position.objects.filter(key=self.parent.key).update(
+                mate_in=11, best_move='f3e5')
+
+        report = self._backfill(meanwhile=cascade_commits)
+
+        self.assertEqual(
+            Position.objects.get(key=self.parent.key).mate_in, 11)
+        self.assertIn('written=0', report)
+        self.assertIn('skipped=1', report)
+
+    def test_an_untouched_row_is_still_repaired(self):
+        report = self._backfill()
+
+        self.assertEqual(
+            Position.objects.get(key=self.parent.key).mate_in, 5)
+        self.assertIn('written=1', report)
+        self.assertIn('skipped=0', report)

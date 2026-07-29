@@ -122,6 +122,13 @@
       function plural(n, one, many) {
         return n + ' ' + (n === 1 ? one : many);
       }
+      // Los dos botones de peticion POSTean sin formulario, y sus endpoints
+      // ya no estan exentos de CSRF: el token viaja en la cabecera, leido del
+      // input oculto que los formularios de arriba pintan en toda pagina.
+      function csrf() {
+        const field = document.querySelector('[name=csrfmiddlewaretoken]');
+        return field ? field.value : '';
+      }
       function showNote(text, spent) {
         note.textContent = text || '';
         note.classList.toggle('spent', !!spent);
@@ -200,7 +207,8 @@
         const playRoute = new URLSearchParams(location.search).get('play') || '';
         fetch('/atomicdb/request/{{ pos.key }}/', {
           method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-CSRFToken': csrf()},
           body: new URLSearchParams({route: playRoute}).toString()})
           .then(async r => {
             const data = await r.json().catch(() => null);
@@ -275,7 +283,8 @@
         allbtn.addEventListener('click', function () {
           allbtn.disabled = true;
           allbtn.textContent = 'Queueing...';
-          fetch('/atomicdb/request-unexplored/' + key + '/', {method: 'POST'})
+          fetch('/atomicdb/request-unexplored/' + key + '/',
+                {method: 'POST', headers: {'X-CSRFToken': csrf()}})
             .then(r => r.json().then(d => ({status: r.status, data: d})))
             .then(({status, data}) => {
               if (data.status === 'queued') {

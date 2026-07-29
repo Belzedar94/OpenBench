@@ -1589,3 +1589,54 @@ class WitnessTests(TestCase):
         # el padre cerro por MINIMAX con testigo = la jugada de mate
         self.assertEqual(p.status, 'WHITE_WIN')
         self.assertEqual(p.best_move, mating_move)
+
+
+class ExplorerRequestCsrfTests(TestCase):
+    """M8: los botones de peticion del explorador ya NO estan exentos de CSRF.
+
+    La exencion del protocolo de workers existe porque un worker no tiene
+    navegador ni token; estos dos endpoints los llama el fetch de explore.html,
+    que tiene el token en la pagina.  Mientras estuvieron exentos, cualquier
+    pagina de terceros podia encolar analisis (hasta el tope del boton masivo)
+    a nombre del visitante que la abriera con sesion iniciada.
+    """
+
+    def setUp(self):
+        from django.test import Client
+
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.strict = Client(enforce_csrf_checks=True)
+
+    def _token(self):
+        page = self.strict.get(f'/atomicdb/explore/{self.root.key}/')
+        return page.cookies['csrftoken'].value
+
+    def test_a_foreign_post_without_token_is_rejected(self):
+        for url in (f'/atomicdb/request/{self.root.key}/',
+                    f'/atomicdb/request-unexplored/{self.root.key}/'):
+            with self.subTest(url=url):
+                response = self.strict.post(url)
+                self.assertEqual(response.status_code, 403)
+
+    def test_the_pages_own_fetch_still_goes_through(self):
+        token = self._token()
+        for url in (f'/atomicdb/request/{self.root.key}/',
+                    f'/atomicdb/request-unexplored/{self.root.key}/'):
+            with self.subTest(url=url):
+                response = self.strict.post(url, HTTP_X_CSRFTOKEN=token)
+                self.assertNotEqual(response.status_code, 403)
+
+    def test_the_template_sends_the_header_it_needs(self):
+        body = self.client.get(
+            f'/atomicdb/explore/{self.root.key}/').content.decode()
+        self.assertIn('X-CSRFToken', body)
+
+    def test_the_worker_protocol_stays_exempt(self):
+        # Un worker sin navegador no tiene token que mandar: 403 aqui seria
+        # apagar la flota entera, no proteger a nadie.
+        worker_account('csrf-worker', 'pw')
+        response = self.strict.post('/atomicdb/api/lease', {
+            'username': 'csrf-worker', 'password': 'pw', 'machine': 'm1',
+            'lease_session': 's1', 'threads': 1, 'hash': 64})
+        self.assertEqual(response.status_code, 200)

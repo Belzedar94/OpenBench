@@ -211,7 +211,18 @@ def _touch_worker(request, user):
 def _live_moves(task):
     """Jugadas sin resolver de la posicion: el motor no debe gastar ni un
     nodo re-derivando defensas ya demostradas (go searchmoves). Vacio = sin
-    restriccion (nada resuelto aun, o posicion sin expandir)."""
+    restriccion (nada resuelto aun, o posicion sin expandir).
+
+    QUE SIGNIFICA LO QUE VUELVE DE UN PASE ASI.  Un pase restringido no mide
+    la posicion: mide LO MEJOR ENTRE LO QUE SIGUE SIN RESOLVER.  Si la jugada
+    buena de verdad ya esta cerrada y fuera de la lista, el numero que devuelve
+    el motor es PEOR que la posicion, y ese numero alimenta budget_for, el
+    breadth-swap, witness-refuted y la incertidumbre.  Por eso el worker
+    devuelve la restriccion que le dieron (§ ``ingest.ingest_analysis``,
+    ``restricted``) y un pase restringido nunca puede EMPEORAR ``eval_cp`` para
+    el que mueve: solo puede mejorarlo, que es lo unico que puede afirmar
+    honestamente sobre la posicion entera.
+    """
     pos = task.position
     if not pos.expanded:
         return []
@@ -615,6 +626,12 @@ def api_submit(request):
             'username': user.username,
             'tb_wdl': parsed_wdl,
             'tb_dtz': parsed_dtz,
+            # Estas lineas hablan de la posicion ENTERA o solo de lo que
+            # quedaba sin resolver (§ ``_live_moves``).  El worker devuelve la
+            # restriccion con la que busco; uno anterior a este build no la
+            # manda, y entonces se toma el pase como completo, que es
+            # exactamente lo que se hacia antes.
+            'restricted': bool((request.POST.get('searchmoves') or '').split()),
         })
         task.state, task.machine = 'COMPLETED', machine
         task.completed = timezone.now()
@@ -872,13 +889,18 @@ def api_solve_submit(request):
 # limite informado el dia que haga falta.
 
 
-@csrf_exempt
 def api_request_unexplored(request, key):
     """Pide TODAS las jugadas sin mirar de una posicion, de una vez.
 
     El completado automatico de cobertura solo actua cuando el nodo esta a
     punto de cerrarse.  Esto es la version humana: alguien mira una posicion,
     ve doce filas que dicen "unexplored" y decide que merecen atencion.
+
+    SIN ``csrf_exempt``, a diferencia del protocolo de workers: esto no lo
+    llama un worker sin navegador, lo llama el explorador — que tiene el token
+    en la pagina y lo manda en ``X-CSRFToken``.  Exento, una pagina de terceros
+    podia encolar hasta ``UNEXPLORED_CLICK_CAP`` analisis a nombre de quien la
+    visitara estando logueado, y quedaban a su nombre.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -888,6 +910,13 @@ def api_request_unexplored(request, key):
         return JsonResponse({'status': 'unknown-position'}, status=404)
     if pos.status != 'UNKNOWN':
         return JsonResponse({'status': 'already-solved'})
+    # La misma puerta que el boton de una sola jugada: una expansion masiva no
+    # tiene MENOS motivos para respetar el tope de cola que una peticion
+    # suelta, y era el unico camino que entraba sin mirarlo.
+    if AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                   position__status='UNKNOWN') \
+                           .count() >= REQUEST_QUEUE_MAX:
+        return JsonResponse({'status': 'queue-full'}, status=503)
 
     ip = _client_ip(request)
 
@@ -991,8 +1020,16 @@ def _api_request_once(request, key):
     return JsonResponse(payload)
 
 
-@csrf_exempt
 def api_request(request, key):
+    """Peticion de analisis de UNA posicion, desde el explorador.
+
+    SIN ``csrf_exempt``: la exencion del protocolo de workers existe porque un
+    worker no tiene navegador ni token, y esto es exactamente lo contrario —
+    un fetch de explore.html, que manda el token de la propia pagina en
+    ``X-CSRFToken``.  Mientras estuvo exenta, cualquier pagina de terceros
+    podia gastarle la escalera de peticiones a un visitante logueado, y las
+    peticiones quedaban atribuidas a el.
+    """
     try:
         return _api_request_once(request, key)
     except OperationalError as error:

@@ -171,6 +171,10 @@ def apply_job(job):
     machine = payload.get('machine') or ''
     tb_wdl = payload.get('tb_wdl')
     tb_dtz = payload.get('tb_dtz')
+    # El pase venia acotado a las jugadas sin resolver: sus lineas no hablan de
+    # la posicion entera (§ views._live_moves).  Ausente = pase completo, que
+    # es lo que manda un worker anterior a esa marca.
+    restricted = bool(payload.get('restricted'))
 
     tb_prepared, mate_proofs, rejected = None, None, False
     if tb_wdl is not None:
@@ -209,7 +213,7 @@ def apply_job(job):
         else:
             summary = ingest.ingest_analysis(
                 job.position_id, lines, searched, machine=machine,
-                mate_proofs=mate_proofs)
+                mate_proofs=mate_proofs, restricted=restricted)
         # El tiempo de motor solo se contabiliza cuando el resultado entra:
         # un WDL rechazado no compra nada y no gasta reloj.
         if elapsed and not summary.get('tb_rejected'):

@@ -1227,6 +1227,11 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     'elapsed': f'{time.time() - t0:.2f}',
                     'nodes': searched,
                     'lease_token': t.get('lease_token', ''),
+                    # Aditivo: se devuelve la restriccion CON LA QUE SE BUSCO,
+                    # para que el servidor sepa que estas lineas no hablan de
+                    # la posicion entera sino de lo que quedaba sin resolver.
+                    # Un servidor que no la conozca la ignora.
+                    'searchmoves': ' '.join(t.get('searchmoves') or ()),
                 }, t['id'])
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
