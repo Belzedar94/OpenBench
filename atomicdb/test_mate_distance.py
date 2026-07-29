@@ -177,6 +177,73 @@ class BackfillCycleTests(TestCase):
             self.assertEqual(node.mate_in, 10)     # ni una fila empeorada
 
 
+class DeepChainTests(TestCase):
+    """La correccion sube cadenas mas largas que el tope viejo de 25 pasadas.
+
+    En la base viva las won_line corren a decenas de plies: el frente de una
+    correccion avanza como mucho un nivel por pasada, asi que el punto fijo
+    necesita tantas pasadas como profunda es la cadena.  La frontera las hace
+    baratas y el tope ya no las corta."""
+
+    LENGTH = 31
+
+    def _fen(self, index, stm=None):
+        """Rey e1/e8 y un peon blanco en casilla distinta por eslabon."""
+        file_i, rank_i = index % 8, 2 + index // 8
+        row = (str(file_i) if file_i else '') + 'P' \
+            + (str(7 - file_i) if file_i != 7 else '')
+        rows = ['4k3' if rank == 8 else '4K3' if rank == 1
+                else row if rank == rank_i else '8'
+                for rank in range(8, 0, -1)]
+        stm = stm or ('w' if index % 2 == 0 else 'b')
+        return '/'.join(rows) + f' {stm} - - 0 1'
+
+    def _chain(self):
+        nodes = []
+        for i in range(self.LENGTH):
+            last = i == self.LENGTH - 1
+            fields = dict(status='WHITE_WIN', proof='ENGINE', mate_in=100,
+                          closure='MATE_PV' if last else 'MINIMAX',
+                          clock_slack=90, expanded=True)
+            if last:
+                fields['won_line'] = 'd4d5'
+            nodes.append(_position(self._fen(i), **fields))
+        terminal = _position(self._fen(self.LENGTH, stm='b'),
+                             status='WHITE_WIN', closure='TERMINAL',
+                             mate_in=0, clock_slack=90)
+        for parent, child in zip(nodes, nodes[1:] + [terminal]):
+            Edge.objects.get_or_create(parent=parent, move_uci='a2a3',
+                                       defaults={'child': child})
+        return nodes
+
+    def test_a_correction_climbs_past_the_old_pass_cap(self):
+        nodes = self._chain()
+        out = StringIO()
+
+        call_command('backfill_mate_distance', stdout=out, stderr=out)
+
+        report = out.getvalue()
+        self.assertIn('fixed_point=True', report)
+        self.assertIn(f'written={self.LENGTH}', report)
+        for depth, node in enumerate(nodes):
+            node.refresh_from_db()
+            self.assertEqual(node.mate_in, self.LENGTH - depth)
+
+    def test_max_write_refuses_and_leaves_rows_alone(self):
+        nodes = self._chain()
+        out = StringIO()
+
+        call_command('backfill_mate_distance', max_write=5,
+                     stdout=out, stderr=out)
+
+        report = out.getvalue()
+        self.assertIn('NOTHING written', report)
+        self.assertIn('written=0', report)
+        for node in nodes:
+            node.refresh_from_db()
+            self.assertEqual(node.mate_in, 100)
+
+
 class AndMirrorTests(TestCase):
     """El espejo AND ya era correcto: regresion, para que siga siendolo."""
 

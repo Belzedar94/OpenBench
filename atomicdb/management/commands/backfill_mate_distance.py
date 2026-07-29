@@ -25,8 +25,12 @@ para que las dos converjan al MISMO punto fijo y no a dos parecidos):
 
 CICLOS Y PUNTO FIJO.  El DAG transpone y llega a cerrar ciclos (1.Nf3 Nf6
 2.Ng1 Ng8 ES la posicion inicial una vez quitados los contadores), asi que no
-hay orden topologico que recorrer: se hacen PASADAS completas hasta que una no
-cambia nada, con tope ``--max-passes``.
+hay orden topologico que recorrer: se itera hasta que una pasada no cambia
+nada, con tope ``--max-passes``.  Solo la PRIMERA pasada barre el cierre
+entero; las siguientes releen la FRONTERA (los padres de lo que se acaba de
+mover), porque una fila solo depende de sus hijos.  Una correccion que sube
+una cadena de won_line de 60 plies necesita 60 pasadas — baratas: cada una
+toca cientos de filas, no cientos de miles.
 
 Un ciclo cuyos nodos se sostienen unos a otros SIN suelo (nadie del ciclo tiene
 testigo propio ni hijo terminal) no tiene distancia finita, y la recurrencia lo
@@ -35,9 +39,16 @@ tener uno — el primer cierre de un ciclo tuvo que apoyarse en algo de fuera, y
 revocar ese apoyo reabre el ciclo entero — pero este comando existe justamente
 porque la base NO es consistente.  Contencion: una fila que SUBE en
 ``--max-climbs`` pasadas seguidas se CONGELA en lo que la base tiene hoy y se
-reporta.  No se empeora una fila que no sabemos leer.  Asentarse (subir y
-luego bajar mientras los hermanos convergen) no cuenta: el contador se
-reinicia en cuanto la fila deja de subir.
+reporta.  No se empeora una fila que no sabemos leer.  OJO CON EL LISTON: una
+correccion legitima que sube por una cadena larga tambien sube un ply por
+pasada hasta asentarse (relajacion simultanea: el frente avanza un nivel por
+pasada), asi que el tope debe superar la cadena real mas larga; con un tope
+corto las subidas legitimas se congelan como falsos ciclos.  Asentarse (subir
+y luego bajar mientras los hermanos convergen) no cuenta: el contador se
+reinicia en cuanto la fila deja de subir.  El reinicio deja ciego al contador
+ante una OSCILACION (cambiar sin parar sin subir en monotono): eso lo caza
+``--max-flips``, el total de pasadas en que la fila cambio de valor, por
+encima de ``--max-climbs`` para no pisar a las cadenas.
 
 TODO O NADA.  Las filas nuevas se acumulan en memoria y se escriben en un solo
 UPDATE por lotes AL FINAL, y solo si hubo punto fijo.  Una pasada a medias
@@ -103,16 +114,34 @@ class Command(BaseCommand):
             '--batch-size', type=int, default=2_000,
             help='Closed positions read per query (default: 2000).')
         parser.add_argument(
-            '--max-passes', type=int, default=25,
-            help='Cap on full passes before giving up on the fixed point '
-                 '(default: 25). Nothing is written without one.')
+            '--max-passes', type=int, default=200,
+            help='Cap on passes before giving up on the fixed point '
+                 '(default: 200). Nothing is written without one. Only the '
+                 'first pass scans the whole closed set; the rest walk the '
+                 'frontier (parents of what changed), so a correction that '
+                 'climbs a 60-ply chain costs 60 cheap passes, not 60 scans.')
         parser.add_argument(
-            '--max-climbs', type=int, default=6,
+            '--max-climbs', type=int, default=120,
             help='A row whose distance CLIMBS on this many consecutive '
                  'passes is FROZEN at its stored value and reported '
-                 '(default: 6). See the module docstring: climbing forever is '
-                 'the signature of a cycle with no ground under it, and a row '
-                 'that merely settles a few times does not trip it.')
+                 '(default: 120). Climbing forever is the signature of a '
+                 'cycle with no ground under it — but a correction riding up '
+                 'a long chain ALSO climbs one ply per pass until it '
+                 'settles, so the cap must exceed the longest real chain '
+                 '(won lines run about 100 plies) or legitimate raises get '
+                 'frozen as false cycles.')
+        parser.add_argument(
+            '--max-flips', type=int, default=150,
+            help='A row whose value changes on this many passes in TOTAL is '
+                 'FROZEN and reported (default: 150). Backstop above '
+                 '--max-climbs for oscillations that never climb '
+                 'monotonically; must stay ABOVE it or chain corrections '
+                 'trip this first.')
+        parser.add_argument(
+            '--max-write', type=int, default=0,
+            help='Refuse to write more rows than this and report instead '
+                 '(default: 0 = unlimited). Safety valve for running the '
+                 'real pass straight after a differently-shaped dry run.')
         parser.add_argument(
             '--sample', type=int, default=10,
             help='Rows printed per kind of change (default: 10).')
@@ -124,6 +153,8 @@ class Command(BaseCommand):
         batch_size = options['batch_size']
         max_passes = options['max_passes']
         max_climbs = options['max_climbs']
+        max_flips = options['max_flips']
+        max_write = options['max_write']
         sample = options['sample']
         dry_run = options['dry_run']
         if batch_size <= 0:
@@ -132,6 +163,12 @@ class Command(BaseCommand):
             raise ValueError('--max-passes must be positive')
         if max_climbs <= 0:
             raise ValueError('--max-climbs must be positive')
+        if max_flips <= max_climbs:
+            raise ValueError('--max-flips must exceed --max-climbs: chain '
+                             'corrections climb once per pass and must not '
+                             'trip the oscillation backstop first')
+        if max_write < 0:
+            raise ValueError('--max-write must be non-negative')
         if sample < 0:
             raise ValueError('--sample must be non-negative')
 
@@ -155,14 +192,22 @@ class Command(BaseCommand):
         overlay = {}
         origin = {}         # key -> (mate_in original, etiqueta legible)
         climbs = {}         # key -> pasadas CONSECUTIVAS subiendo
+        flips = {}          # key -> pasadas TOTALES cambiando de valor
         frozen = set()
         passes = 0
         unstable = False
+        # Pasada 1: el conjunto cerrado entero.  Despues, solo la FRONTERA:
+        # una fila depende de sus hijos, asi que solo pueden moverse los
+        # padres de lo que acaba de moverse (o de congelarse: sus padres
+        # derivaban del valor que se retiro del overlay).  Una correccion
+        # que sube una cadena de 60 plies cuesta 60 pasadas baratas en vez
+        # de 60 barridos completos de la tabla.
+        frontier = None
 
         while passes < max_passes:
             passes += 1
             pending, scanned = self._one_pass(
-                batch_size, overlay, frozen, origin)
+                batch_size, overlay, frozen, origin, keys=frontier)
             if passes == 1:
                 counts['scanned'] = scanned
             self.stdout.write(
@@ -179,15 +224,18 @@ class Command(BaseCommand):
                     climbs[key] = climbs.get(key, 0) + 1
                 else:
                     climbs[key] = 0          # se asento: no es un ciclo
-                if climbs[key] >= max_climbs:
-                    # Ciclo sin suelo: el valor sube un ply por pasada y no
-                    # converge nunca.  Se congela en lo que la base tiene hoy
-                    # — no se empeora una fila que no sabemos leer — y se
-                    # reporta para mirarla a mano.
+                flips[key] = flips.get(key, 0) + 1
+                if climbs[key] >= max_climbs or flips[key] >= max_flips:
+                    # Ciclo sin suelo (sube un ply por pasada) u oscilacion
+                    # (cambia sin parar sin subir en monotono, invisible para
+                    # el contador de subidas).  Se congela en lo que la base
+                    # tiene hoy — no se empeora una fila que no sabemos
+                    # leer — y se reporta para mirarla a mano.
                     frozen.add(key)
                     overlay.pop(key, None)
             overlay.update({key: value for key, value in pending.items()
                             if key not in frozen})
+            frontier = self._parents_of(set(pending), batch_size)
         else:
             unstable = True
 
@@ -196,8 +244,9 @@ class Command(BaseCommand):
         counts['rows_changed'] = len(overlay)
         orphans = Position.objects.filter(
             status='UNKNOWN', mate_in__isnull=False).count()
+        overflow = bool(max_write and len(overlay) > max_write)
         written = 0
-        if overlay and not dry_run and not unstable:
+        if overlay and not dry_run and not unstable and not overflow:
             written = self._write(overlay)
 
         for kind in ('raised', 'lowered', 'cleared', 'named'):
@@ -219,6 +268,10 @@ class Command(BaseCommand):
                 f'backfill_mate_distance: no fixed point in {max_passes} '
                 'pass(es); NOTHING written. Raise --max-passes or look at '
                 'the graph.')
+        if overflow:
+            self.stderr.write(
+                f'backfill_mate_distance: {len(overlay)} row(s) exceed '
+                f'--max-write {max_write}; NOTHING written.')
         if written:
             DBEvent.objects.create(kind='MATE_DISTANCE_BACKFILL', payload={
                 key: value for key, value in counts.items()
@@ -228,39 +281,74 @@ class Command(BaseCommand):
 
     # ---------------- una pasada completa ----------------
 
-    def _one_pass(self, batch_size, overlay, frozen, origin):
-        """Devuelve ``({key: (mate_in, best_move)}, filas_leidas)``."""
+    def _one_pass(self, batch_size, overlay, frozen, origin, keys=None):
+        """Devuelve ``({key: (mate_in, best_move)}, filas_leidas)``.
+
+        Con ``keys`` (la frontera) solo se relee ese subconjunto; los filtros
+        de cierre son los mismos que en el barrido completo.  ``live`` es la
+        vista Gauss-Seidel: lo recien calculado se usa YA dentro de la misma
+        pasada (cuando el orden de claves acompaña, una cadena entera colapsa
+        de golpe), mientras que ``overlay`` — la referencia contra la que el
+        llamante cuenta subidas y congela — no se toca desde aqui."""
         pending = {}
         scanned = 0
-        after = ''
-        while True:
-            rows = list(Position.objects.filter(
-                status__in=DECISIVE, key__gt=after,
-            ).exclude(closure='TERMINAL').order_by('key').values(
-                'key', 'fen', 'status', 'closure', 'proof', 'won_line',
-                'mate_in', 'best_move')[:batch_size])
-            if not rows:
-                break
-            after = rows[-1]['key']
-            scanned += len(rows)
-            edges = self._edges_by_parent([row['key'] for row in rows], overlay)
-            for row in rows:
-                out_edges = edges.get(row['key'])
-                if not out_edges or row['key'] in frozen:
-                    continue        # sin hijos no hay nada que derivar
-                current = overlay.get(row['key'],
-                                      (row['mate_in'], row['best_move']))
-                node = _Node(row, current[0], current[1])
-                new_mate, new_move = ingest.mate_distance_refresh(
-                    node, out_edges)
-                if (new_mate, new_move) == current:
-                    continue
-                pending[row['key']] = (new_mate, new_move)
-                origin.setdefault(row['key'], (
-                    row['mate_in'],
-                    f"{row['key'][:16]} {row['status']} {row['closure']} "
-                    f"| {row['fen']}"))
+        live = dict(overlay)
+        if keys is None:
+            chunks = (None,)
+        else:
+            ordered = sorted(keys)
+            chunks = tuple(ordered[i:i + batch_size]
+                           for i in range(0, len(ordered), batch_size))
+        for chunk in chunks:
+            after = ''
+            while True:
+                base = Position.objects.filter(
+                    status__in=DECISIVE, key__gt=after,
+                ).exclude(closure='TERMINAL')
+                if chunk is not None:
+                    base = base.filter(key__in=chunk)
+                rows = list(base.order_by('key').values(
+                    'key', 'fen', 'status', 'closure', 'proof', 'won_line',
+                    'mate_in', 'best_move')[:batch_size])
+                if not rows:
+                    break
+                after = rows[-1]['key']
+                scanned += len(rows)
+                edges = self._edges_by_parent([row['key'] for row in rows])
+                for row in rows:
+                    raw_edges = edges.get(row['key'])
+                    if not raw_edges or row['key'] in frozen:
+                        continue    # sin hijos no hay nada que derivar
+                    out_edges = [
+                        e if e.child.key not in live else
+                        _Edge(e.move_uci, _Child(
+                            e.child.key, e.child.status, e.child.closure,
+                            e.child.proof, live[e.child.key][0]))
+                        for e in raw_edges]
+                    current = live.get(row['key'],
+                                       (row['mate_in'], row['best_move']))
+                    node = _Node(row, current[0], current[1])
+                    new_mate, new_move = ingest.mate_distance_refresh(
+                        node, out_edges)
+                    if (new_mate, new_move) == current:
+                        continue
+                    pending[row['key']] = (new_mate, new_move)
+                    live[row['key']] = (new_mate, new_move)
+                    origin.setdefault(row['key'], (
+                        row['mate_in'],
+                        f"{row['key'][:16]} {row['status']} {row['closure']} "
+                        f"| {row['fen']}"))
         return pending, scanned
+
+    def _parents_of(self, keys, batch_size):
+        """Frontera de la siguiente pasada: padres CERRADOS de lo movido."""
+        parents = set()
+        ordered = sorted(keys)
+        for i in range(0, len(ordered), batch_size):
+            parents.update(Edge.objects.filter(
+                child_id__in=ordered[i:i + batch_size],
+            ).values_list('parent_id', flat=True))
+        return parents
 
     def _classify(self, overlay, origin, counts, sample):
         """Cuentas y muestras del cambio NETO de cada fila superviviente."""
@@ -284,14 +372,13 @@ class Command(BaseCommand):
                 samples[kind].append(f'{head}mate_in {old} -> {new} |{fen}')
         return samples
 
-    def _edges_by_parent(self, keys, overlay):
+    def _edges_by_parent(self, keys):
+        """Hijos con su valor ALMACENADO: el vigente lo pone la vista live."""
         by_parent = {}
         for parent, move, child, status, closure, proof, mate_in in (
                 Edge.objects.filter(parent_id__in=keys).values_list(
                     'parent_id', 'move_uci', 'child_id', 'child__status',
                     'child__closure', 'child__proof', 'child__mate_in')):
-            if child in overlay:
-                mate_in = overlay[child][0]
             by_parent.setdefault(parent, []).append(
                 _Edge(move, _Child(child, status, closure, proof, mate_in)))
         return by_parent
