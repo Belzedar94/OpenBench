@@ -249,7 +249,6 @@ class CookielessHomeCacheTests(TestCase):
     def setUp(self):
         ingest.get_or_create_position(logic.start_fen())
 
-    @expectedFailure
     def test_a_second_cookieless_visitor_gets_its_own_csrf_state(self):
         first = Client().get('/atomicdb/')
         second = Client().get('/atomicdb/')

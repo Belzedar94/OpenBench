@@ -35,11 +35,23 @@ class CachedReadViewTests(TestCase):
         self.client = Client()
 
     def test_home_still_serves_and_advertises_a_short_cache(self):
+        # La PRIMERA visita sin cookies estrena token CSRF: es una respuesta
+        # personal, no se guarda y no se anuncia cacheable — ni aqui ni aguas
+        # abajo.  Desde la segunda, el visitante ya trae su cookie y entra al
+        # cache con su propia entrada, que es donde estan las tormentas de F5.
+        self.client.get('/atomicdb/')
         response = self.client.get('/atomicdb/')
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('max-age=15', _max_age(response))
         self.assertIn('AtomicDB', response.content.decode())
+
+    def test_a_first_cookieless_visit_is_never_stored(self):
+        response = Client().get('/atomicdb/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('csrftoken', response.cookies)
+        self.assertNotIn('max-age', _max_age(response))
 
     def test_map_and_method_serve_with_a_short_cache(self):
         for url, seconds in (('/atomicdb/map/', 30),
