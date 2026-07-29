@@ -269,6 +269,37 @@ elif _activate_atomicdb_split:
 DATABASE_ROUTERS = ['OpenSite.db_routers.AtomicDBRouter']
 
 
+# Caches
+#
+# Two readers share this: the short ``cache_page`` on the hot read views
+# (home/map/method, and OpenBench's index) and the lineage breadcrumbs behind
+# every explore/goto render.  Django's implicit default is also LocMemCache,
+# but with room for 300 entries — a single home render plus a handful of
+# explorer clicks evicts it, which is a cache that costs memory and returns
+# nothing.
+#
+# Per-process and unshared IS the design, not a compromise.  Five gunicorn
+# workers keeping five independent copies costs five walks instead of one and
+# buys the rest of the win with no Redis to run, no invalidation protocol to
+# get wrong, and nothing new that can be down at 3am.  A restart empties it,
+# which is also the emergency lever.
+#
+# The ceiling is sized off the TTL, not off the tree: nothing survives two
+# minutes, so it only has to cover the distinct positions a burst can touch
+# in that window, and each worker sees roughly a fifth of them.  4000 is well
+# past that.  It is also the memory bound — a breadcrumb entry is a few kB,
+# and the rare 96-ply one about 10kB — so a saturated worker is tens of MB
+# and the fleet stays in double digits.  If the box gets tight, cut this
+# number before reaching for shared infrastructure.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'openbench-default',
+        'OPTIONS': {'MAX_ENTRIES': 4000, 'CULL_FREQUENCY': 4},
+    },
+}
+
+
 # Password validation
 # https://docs.djangoproject.com/en/2.0/ref/settings/#auth-password-validators
 
