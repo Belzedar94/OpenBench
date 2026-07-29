@@ -31,6 +31,12 @@ BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
 # REQUEST_BUDGET_LADDER[0] mecanicamente.
 REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
                          10_000_000_000]
+# Suelo para AVISAR a quien pidio un analisis.  Sigue al primer peldano de la
+# escalera de peticiones — hoy 128M — porque es lo que define "esto lo pidio
+# una persona": todo lo que sale de un click entra por ahi o por encima
+# (``_request_rung``, la expansion de la frontera y el boton de jugadas sin
+# mirar usan los tres el mismo suelo).
+NOTIFY_MIN_BUDGET = REQUEST_BUDGET_LADDER[0]
 # Once the last rung is spent, buying it again would only repeat a search we
 # already have.  The request then becomes a proof-number style expansion of
 # the frontier one ply below: an OR node (the attacker of the conjecture,
@@ -2189,6 +2195,30 @@ def request_analysis(pos, requested_by=''):
         if swapped:
             return RequestOutcome('saturated')
         return _descend_frontier(pos, requested_by=requested_by)
+
+
+def notification_deserved(source, budget_nodes):
+    """Que tareas servidas merecen avisar a quien las pidio.
+
+    La vuelta del circuito de ``request_analysis``, y con el mismo criterio
+    que lo abrio: una tarea es de una PERSONA si entro por la banda USER o,
+    como red de seguridad, si lleva al menos el suelo de la escalera de
+    peticiones.  Lo segundo no es redundante — ``enqueue_unexplored_children``
+    puede DEGRADAR a AUTO una tarea PENDING que nacio de un click y que
+    conserva su ``requested_by`` — y por eso el criterio es una O y no una Y.
+
+    Lo que queda fuera es lo que llenaria la campana de ruido: las semillas de
+    cobertura (``FILL``, 8M, jugadas concretas por ``searchmoves``) y la
+    exploracion autonoma del selector.  Ninguna de las dos la pidio nadie, y
+    una expansion de cobertura puede encolar doscientas de golpe.
+
+    Quien pide una EXPANSION no necesita nada especial aqui: las tareas hijas
+    se crean con el mismo ``requested_by`` y por la misma banda USER, asi que
+    el criterio por-tarea ya las cubre — cada hija que aterriza es un aviso
+    hacia la posicion concreta que la persona podia querer ver.
+    """
+    return (source == AnalysisTask.Source.USER
+            or (budget_nodes or 0) >= NOTIFY_MIN_BUDGET)
 
 
 def _queue_disputed_reanalysis(pos):
