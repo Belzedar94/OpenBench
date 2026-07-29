@@ -6,6 +6,7 @@ maintenance shape, the soft-repertoire descent and the selector flag.
 
 from io import StringIO
 
+from django.conf import settings
 from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
 
@@ -167,7 +168,7 @@ class IncrementalMaintenanceTests(TestCase):
         child = Edge.objects.filter(parent=self.root).first().child
         proof.refresh_proof_numbers([child.key])   # warm: rows now exist
 
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(4, using=settings.ATOMICDB_DATABASE_ALIAS):
             proof.refresh_proof_numbers([child.key], max_plies=1)
 
     def test_an_idempotent_refresh_stops_at_the_first_level(self):

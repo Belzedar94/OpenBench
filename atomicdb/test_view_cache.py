@@ -6,6 +6,7 @@ de workers NO llevan cabecera de cache, y que el interruptor de tema
 sobrevive (la eleccion es client-side, el HTML es el mismo en ambos temas).
 """
 
+from django.conf import settings
 from django.core.cache import cache
 from django.test import Client, override_settings
 
@@ -54,7 +55,9 @@ class CachedReadViewTests(TestCase):
         self.client.get('/atomicdb/')
         self.client.get('/atomicdb/')
 
-        with self.assertNumQueries(0):
+        # Cero sobre la conexion del ALIAS: con la base partida es la unica
+        # que tocaria la home; contar default alli seria vacuo.
+        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
             hit = self.client.get('/atomicdb/')
         self.assertEqual(hit.status_code, 200)
 

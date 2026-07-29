@@ -14,6 +14,7 @@ from OpenSite.db_routers import AtomicDBRouter
 
 from .database import DATABASE_ALIAS, atomic, connection
 from .management.commands._atomicdb_sqlite import (
+    atomicdb_migration_names,
     current_atomicdb_tables,
     schema_snapshot,
     validate_migrations,
@@ -126,11 +127,15 @@ class SeparateSQLiteLockIsolationTests(TransactionTestCase):
 )
 class ShadowMigrationParityTests(TransactionTestCase):
 
-    @staticmethod
-    def _apply_probe(alias):
+    # La sonda ordena DESPUES de cualquier migracion real (0001..): la
+    # validacion compara listas ordenadas por nombre y la semantica de
+    # prefijo exige que lo pendiente quede al final.
+    PROBE = '9999_shadow_probe'
+
+    @classmethod
+    def _apply_probe(cls, alias):
         connection = connections[alias]
-        migration = migrations.Migration(
-            '0014_shadow_probe', 'atomicdb')
+        migration = migrations.Migration(cls.PROBE, 'atomicdb')
         migration.operations = [
             migrations.RunSQL(
                 """
@@ -144,25 +149,12 @@ class ShadowMigrationParityTests(TransactionTestCase):
         with connection.schema_editor() as schema_editor:
             migration.apply(state, schema_editor)
         MigrationRecorder(connection).record_applied(
-            'atomicdb', '0014_shadow_probe')
+            'atomicdb', cls.PROBE)
 
     def test_interrupted_future_migration_is_recoverable_on_both_aliases(self):
-        known_names = (
-            '0001_initial',
-            '0002_position_won_line',
-            '0003_position_last_analysis',
-            '0004_remove_position_is_wall',
-            '0005_analysistask_source_requestlog',
-            '0006_workerping_workerping_uniq_worker_machine',
-            '0007_position_time_invested',
-            '0008_position_mate_in',
-            '0009_analysistask_nodes_searched',
-            '0010_position_proof',
-            '0011_worker_metrics',
-            '0012_analysistask_lease_session',
-            '0013_progresssnapshot',
-            '0014_shadow_probe',
-        )
+        # Las migraciones reales del arbol, no una foto congelada: una
+        # lista fija rompia este test con cada migracion nueva.
+        known_names = tuple(atomicdb_migration_names()) + (self.PROBE,)
         self._apply_probe('default')
         with mock.patch(
                 'atomicdb.management.commands._atomicdb_sqlite.'
