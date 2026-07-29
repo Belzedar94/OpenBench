@@ -13,7 +13,7 @@ from django.test import SimpleTestCase, override_settings
 from . import ingest, logic, proof
 from .models import (AnalysisTask, DBEvent, Edge, Position, ProofCampaign,
                      ProofNode)
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 WHITE_TO_MOVE = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 BLACK_TO_MOVE = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1'
@@ -571,8 +571,7 @@ class SubmitProvenanceTests(TestCase):
     """The engine/net sha are additive: old workers keep working."""
 
     def setUp(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('worker', password='pw')
+        worker_account('worker', 'pw')
         self.pos = ingest.get_or_create_position(logic.start_fen())
         self.task = AnalysisTask.objects.create(
             position=self.pos, budget_nodes=1_000, generation=0,

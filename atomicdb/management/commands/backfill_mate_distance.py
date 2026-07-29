@@ -245,9 +245,9 @@ class Command(BaseCommand):
         orphans = Position.objects.filter(
             status='UNKNOWN', mate_in__isnull=False).count()
         overflow = bool(max_write and len(overlay) > max_write)
-        written = 0
+        written, skipped = 0, 0
         if overlay and not dry_run and not unstable and not overflow:
-            written = self._write(overlay)
+            written, skipped = self._write(overlay, origin)
 
         for kind in ('raised', 'lowered', 'cleared', 'named'):
             for line in samples[kind]:
@@ -257,7 +257,8 @@ class Command(BaseCommand):
         self.stdout.write(
             'backfill_mate_distance: '
             + ' '.join(f'{name}={value}' for name, value in counts.items())
-            + f' passes={passes} written={written} dry_run={bool(dry_run)}'
+            + f' passes={passes} written={written} skipped={skipped}'
+            + f' dry_run={bool(dry_run)}'
             + f' fixed_point={not unstable}')
         if orphans:
             self.stdout.write(
@@ -334,8 +335,11 @@ class Command(BaseCommand):
                         continue
                     pending[row['key']] = (new_mate, new_move)
                     live[row['key']] = (new_mate, new_move)
+                    # La FOTO con la que se leyo la fila, no solo su etiqueta:
+                    # al final se escribe filtrando por ella, asi que hacen
+                    # falta las dos columnas que se van a pisar.
                     origin.setdefault(row['key'], (
-                        row['mate_in'],
+                        row['mate_in'], row['best_move'],
                         f"{row['key'][:16]} {row['status']} {row['closure']} "
                         f"| {row['fen']}"))
         return pending, scanned
@@ -354,7 +358,7 @@ class Command(BaseCommand):
         """Cuentas y muestras del cambio NETO de cada fila superviviente."""
         samples = {'raised': [], 'lowered': [], 'cleared': [], 'named': []}
         for key, (new, _move) in overlay.items():
-            old, label = origin[key]
+            old, _stored_move, label = origin[key]
             if old == new:
                 counts['witness_only'] += 1
                 continue
@@ -383,12 +387,29 @@ class Command(BaseCommand):
                 _Edge(move, _Child(child, status, closure, proof, mate_in)))
         return by_parent
 
-    def _write(self, pending):
+    def _write(self, pending, origin):
+        """Persiste el punto fijo SIN pisar lo que se movio mientras tanto.
+
+        Entre la lectura y esta escritura pueden pasar muchas pasadas largas, y
+        ``backup_cascade`` esta escribiendo ``mate_in``/``best_move`` en vivo
+        sobre las mismas filas.  Un ``bulk_update`` ciego devolvia esas filas al
+        valor derivado de una foto vieja.  Se escribe con la misma disciplina
+        que ``verify_mates``: un UPDATE por fila FILTRADO por la foto de
+        origen, y la que ya no encaje se queda como esta — su valor lo puso
+        alguien con informacion mas fresca que la nuestra.
+
+        Devuelve ``(escritas, saltadas)``.
+        """
         now = timezone.now()
-        updates = [Position(key=key, mate_in=mate_in, best_move=best_move,
-                            updated=now)
-                   for key, (mate_in, best_move) in pending.items()]
+        written, skipped = 0, 0
         with atomic():
-            Position.objects.bulk_update(
-                updates, ['mate_in', 'best_move', 'updated'], batch_size=500)
-        return len(updates)
+            for key, (mate_in, best_move) in pending.items():
+                stored_mate, stored_move, _label = origin[key]
+                changed = Position.objects.filter(
+                    key=key, mate_in=stored_mate, best_move=stored_move,
+                ).update(mate_in=mate_in, best_move=best_move, updated=now)
+                if changed:
+                    written += 1
+                else:
+                    skipped += 1
+        return written, skipped

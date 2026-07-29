@@ -7,7 +7,7 @@ ordering and starts buying expensive noise.
 """
 
 from . import ingest, logic
-from .models import AnalysisTask
+from .models import AnalysisTask, Position
 from .testing import TestCase
 
 
@@ -84,3 +84,71 @@ class MultipvAtCreationSitesTests(TestCase):
         ingest.bootstrap_root()
         for task in AnalysisTask.objects.all():
             self.assertEqual(task.multipv, 5)
+
+
+class RestrictedPassSemanticsTests(TestCase):
+    """Que SIGNIFICA el numero que vuelve de un pase con ``searchmoves``.
+
+    El servidor acota la busqueda a las jugadas sin resolver para no gastar
+    nodos re-derivando defensas ya demostradas.  El precio es que la mejor
+    linea de ese pase es la mejor ENTRE LO QUE QUEDABA: con la jugada buena ya
+    cerrada y fuera de la lista, el numero es PEOR que la posicion, y de
+    ``eval_cp`` comen budget_for, el breadth-swap, witness-refuted y la
+    incertidumbre.  Un pase asi puede mejorar la eval — eso lo ha demostrado —
+    pero no puede empeorarla, que es justo lo que no ha mirado.
+    """
+
+    def setUp(self):
+        self.pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.pos)
+        Position.objects.filter(key=self.pos.key).update(eval_cp=300)
+
+    def _ingest(self, eval_cp, restricted):
+        ingest.ingest_analysis(
+            self.pos.key, [{'move': 'g1f3', 'eval_cp': eval_cp,
+                            'mate': None, 'pv': ['g1f3']}],
+            8_000_000, restricted=restricted)
+        return Position.objects.get(key=self.pos.key)
+
+    def test_a_restricted_pass_does_not_talk_down_the_position(self):
+        fresh = self._ingest(-50, restricted=True)
+
+        self.assertEqual(fresh.eval_cp, 300)
+
+    def test_a_restricted_pass_may_still_talk_it_up(self):
+        fresh = self._ingest(900, restricted=True)
+
+        self.assertEqual(fresh.eval_cp, 900)
+        self.assertEqual(fresh.best_move, 'g1f3')
+
+    def test_a_complete_pass_is_believed_in_both_directions(self):
+        fresh = self._ingest(-50, restricted=False)
+
+        self.assertEqual(fresh.eval_cp, -50)
+
+    def test_black_to_move_reads_improvement_the_other_way(self):
+        black = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        ingest.expand(black)
+        Position.objects.filter(key=black.key).update(eval_cp=-300)
+
+        ingest.ingest_analysis(
+            black.key, [{'move': 'g8f6', 'eval_cp': 100, 'mate': None,
+                         'pv': ['g8f6']}], 8_000_000, restricted=True)
+
+        # +100 en perspectiva blanca es PEOR para las negras, que son quienes
+        # mueven: el pase restringido no puede afirmarlo.
+        self.assertEqual(Position.objects.get(key=black.key).eval_cp, -300)
+
+    def test_a_position_without_an_eval_yet_takes_what_it_can_get(self):
+        # Sin nada almacenado, "no empeorar" no tiene contra que medirse y la
+        # unica alternativa es seguir sin saber nada.
+        blank = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        ingest.expand(blank)
+
+        ingest.ingest_analysis(
+            blank.key, [{'move': 'e7e5', 'eval_cp': -40, 'mate': None,
+                         'pv': ['e7e5']}], 8_000_000, restricted=True)
+
+        self.assertEqual(Position.objects.get(key=blank.key).eval_cp, -40)

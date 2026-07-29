@@ -1,5 +1,6 @@
 from django.urls import path
 from django.views.decorators.cache import cache_page
+from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
 from . import views
@@ -12,7 +13,19 @@ from .conquest_map import map_api
 # ``home`` lleva el cajetin de FEN y, con el, un token CSRF por visitante:
 # varia por cookie para no servirle a nadie el token de otro.  Django ademas
 # se niega a cachear una respuesta que ESTRENA cookie ante una peticion sin
-# cookies, asi que el primer visitante no envenena la entrada compartida.
+# cookies... pero esa negativa mira ``response.cookies``, y con el CSRF puesto
+# por MIDDLEWARE ese diccionario todavia esta vacio cuando el cache guarda:
+# ``cache_page`` es un decorador, asi que cierra ANTES que
+# CsrfViewMiddleware.process_response.  Medido: el segundo visitante sin
+# cookies recibia el cuerpo del primero, token incluido, y ninguna cookie
+# propia — su POST del cajetin de FEN se rechazaba con 403.
+#
+# ``csrf_protect`` va POR DENTRO justamente por eso: pone la cookie antes de
+# que el cache decida, y entonces la guarda de Django dispara de verdad.  El
+# precio, deliberado: la primera visita SIN cookies no se cachea ni anuncia
+# cache — es una respuesta personal y no debe guardarla nadie, aqui ni aguas
+# abajo.  A partir de la segunda peticion ese visitante ya trae cookie y entra
+# al cache con su propia entrada, que es donde estan las tormentas de F5.
 #
 # ``map`` y ``method`` VARIAN POR COOKIE desde que la cabecera lleva zona de
 # identidad.  Antes no tenian nada por visitante y compartian una sola entrada;
@@ -38,9 +51,9 @@ from .conquest_map import map_api
 #   * todo el protocolo de workers (``lease``/``heartbeat``/``submit``).
 #   * ``api/map/v1``: ya negocia su propio ETag sobre un snapshot publicado y
 #     no toca la base viva.
-_home_cached = cache_page(15)(vary_on_cookie(views.home))
-_map_cached = cache_page(30)(vary_on_cookie(views.conquest_map))
-_method_cached = cache_page(30)(vary_on_cookie(views.method))
+_home_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.home)))
+_map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
+_method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
 
 urlpatterns = [
     path('', _home_cached),

@@ -16,13 +16,12 @@ import html as html_module
 import math
 import re
 
-from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.test import Client
 
 from . import ingest, logic, views
 from .models import AnalysisTask, Campaign, CampaignVote, Edge, Position
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 def _reading(body):
@@ -78,7 +77,7 @@ def _tag(campaign, *positions):
 
 
 def _owner_client(username='belzedar', staff=True):
-    user = User.objects.create_user(username=username, password='pw')
+    user = worker_account(username, 'pw')
     if staff:
         user.is_staff = True
         user.save(update_fields=['is_staff'])
@@ -706,7 +705,7 @@ class SelectorBonusTests(TestCase):
         ordenacion, porque lo que hay que garantizar es lo que sirve el
         servidor, no lo que la prueba cree que sirve.
         """
-        User.objects.create_user(username='w', password='p')
+        worker_account('w', 'p')
         campaign = _campaign_on(self.tagged, votes=500)
         _tag(campaign, self.tagged)
         ingest.refresh_priorities(force=True)

@@ -1,3 +1,5 @@
+import re
+
 from . import ingest, logic
 from .testing import TestCase
 
@@ -45,3 +47,38 @@ class PublicHonestyTests(TestCase):
         pos.save()
         response = self.client.get('/atomicdb/api/query', {'fen': pos.fen})
         self.assertEqual(response.json()['trust'], 'DISPUTED')
+
+
+class OnboardingInstructionsTests(TestCase):
+    """Las instrucciones de /method/ tienen que poder COPIARSE.
+
+    La pagina se sirve minificada (``HTML_MINIFY``, sin exclusiones), y el
+    minificador aplana el texto suelto: tres ordenes escritas en tres lineas
+    llegaban al navegador como una sola linea invalida.  Quien entra por aqui
+    es justo quien no puede diagnosticar eso.  El patron ``rawline`` de
+    explore.html pone cada orden en su bloque, que el minificador respeta y
+    el portapapeles tambien.
+    """
+
+    COMMANDS = ('curl -O ', 'pip install requests chess',
+                'python atomicdb_worker.py ')
+
+    def test_each_install_command_survives_the_minifier_on_its_own_line(self):
+        body = self.client.get('/atomicdb/method/').content.decode()
+
+        block = re.search(r'<div class="raw">(.*?)</div>\s*</div>', body,
+                          re.S)
+        self.assertIsNotNone(block, 'el bloque de instalacion no esta')
+        lines = re.findall(r'<div class="rawline">(.*?)</div>',
+                           block.group(1) + '</div>', re.S)
+        self.assertEqual(len(lines), len(self.COMMANDS))
+        for command, line in zip(self.COMMANDS, lines):
+            self.assertTrue(line.startswith(command), line)
+            self.assertNotIn('\n', line)
+
+    def test_the_page_really_is_being_minified(self):
+        # Si el minificador dejara de correr, el test de arriba pasaria por
+        # el motivo equivocado y no probaria nada.
+        body = self.client.get('/atomicdb/method/').content.decode()
+
+        self.assertNotIn('\n<p ', body)

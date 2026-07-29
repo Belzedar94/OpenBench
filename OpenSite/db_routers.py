@@ -51,6 +51,13 @@ class AtomicDBRouter:
     def allow_migrate(self, db, app_label, model_name=None, **hints):
         if app_label == ATOMICDB_APP_LABEL:
             return db in _atomicdb_migration_aliases()
-        if db == ATOMICDB_DATABASE_ALIAS:
+        # La base de AtomicDB no acepta tablas de otras apps.  "La base de
+        # AtomicDB" es el alias SELECCIONADO en settings, no solo el nombre
+        # convencional: comparar contra el literal dejaba sin proteccion a un
+        # despliegue cuyo alias se llame de otra manera (auth y compania se
+        # migrarian dentro).  El literal se conserva ademas para el alias
+        # configurado pero aun no activado.
+        if db != 'default' and db in {ATOMICDB_DATABASE_ALIAS,
+                                      _selected_alias()}:
             return False
         return None

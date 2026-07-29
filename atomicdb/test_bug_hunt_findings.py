@@ -1,24 +1,31 @@
 ﻿"""Pruebas DEMOSTRATIVAS de la revision de caza de bugs.
 
-Un test SIN ``expectedFailure`` es un hallazgo YA ARREGLADO y esta aqui como
-regresion (C1 cascada con save completo, C2 carrera de cierre de hijos).  Un
-test CON el decorador reproduce un hallazgo aun abierto, de forma minima y
-determinista: arreglarlo consiste en quitar el decorador y ver el test pasar.
+Un test CON ``expectedFailure`` reproduce un hallazgo aun ABIERTO, de forma
+minima y determinista: arreglarlo consiste en quitar el decorador y ver el
+test pasar.  Ya no queda ninguno — los ocho hallazgos que este fichero
+demostraba estan cerrados y lo que se lee abajo son sus regresiones:
+
+    1. C1  la cascada guardaba la fila entera y revertia lo ajeno
+    2. C2  dos consumers cerraban el mismo hijo sobre una foto vieja
+    3. A2  el selector df-pn perdia su cota de intentos dentro de /api/lease
+    4. A3  el arriendo SOLVE no tenia relevo tras reinicio
+    5. M3  el recuento de votos se contaba en Python y se guardaba despues
+    6. A4  la home cacheada repartia el token CSRF del primer visitante
+    7. M4  el boton y las filas llamaban "unexplored" a poblaciones distintas
+    8. M5  el tope de propuestas se evadia tirando la cookie
 """
 
 import re
 from datetime import timedelta
-from unittest import expectedFailure
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.test import Client, override_settings
 from django.utils import timezone
 
-from . import ingest, logic, proof
+from . import ingest, logic, proof, views
 from .models import (AnalysisTask, Campaign, CampaignVote, Edge, Position,
                      SolveTask)
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 CACHE_FOR_TESTS = {
     'default': {
@@ -137,7 +144,6 @@ class ProofSelectorAttemptCapTests(TestCase):
                                     budget_nodes=8_000_000,
                                     state='COMPLETED')
 
-    @expectedFailure
     def test_the_descent_loop_stops_at_its_attempt_cap(self):
         wanted = 2
         cap = 4 * wanted
@@ -171,7 +177,7 @@ class ProofSelectorAttemptCapTests(TestCase):
 class SolveLeaseRestartTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         self.root = ingest.get_or_create_position(logic.start_fen())
         self.campaign = proof.ProofCampaign.objects.first()
         SolveTask.objects.create(position=self.root, campaign=self.campaign,
@@ -182,7 +188,6 @@ class SolveLeaseRestartTests(TestCase):
             'username': 'solver', 'password': 'pw', 'machine': 'box-1',
             'lease_session': session, 'threads': 1, 'hash': 64})
 
-    @expectedFailure
     def test_a_restarted_solver_is_relieved_like_an_analysis_worker(self):
         first = self._acquire('session-a')
         self.assertEqual(len(first.json()['tasks']), 1)
@@ -212,18 +217,21 @@ class CampaignVoteCountTests(TestCase):
             name='line', root=self.root, state=Campaign.CState.PROPOSED,
             active=False)
 
-    @expectedFailure
     def test_the_cached_count_never_drifts_from_the_rows(self):
-        original = Campaign.save
+        # El seno de la carrera es el recuento: otro votante COMMITEA justo
+        # antes de que este voto reescriba la cache.  Mientras el COUNT se
+        # hacia en Python y se guardaba despues, ese voto se perdia para
+        # siempre; ahora el COUNT lo hace la base dentro del mismo UPDATE.
+        original = views._recount_campaign_votes
 
-        def racing_save(instance, *args, **kwargs):
-            # Otro votante COMMITEA entre nuestro COUNT y nuestro guardado.
+        def racing_recount(campaign_id):
             if not CampaignVote.objects.filter(token='other').exists():
                 CampaignVote.objects.create(campaign=self.campaign,
                                             token='other')
-            return original(instance, *args, **kwargs)
+            return original(campaign_id)
 
-        with patch.object(Campaign, 'save', racing_save):
+        with patch.object(views, '_recount_campaign_votes',
+                          side_effect=racing_recount):
             response = self.client.post(
                 f'/atomicdb/campaign/{self.campaign.id}/vote/', {})
         self.assertEqual(response.status_code, 200)
@@ -232,6 +240,7 @@ class CampaignVoteCountTests(TestCase):
         self.assertEqual(
             self.campaign.votes,
             CampaignVote.objects.filter(campaign=self.campaign).count())
+        self.assertEqual(self.campaign.votes, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +260,6 @@ class CookielessHomeCacheTests(TestCase):
     def setUp(self):
         ingest.get_or_create_position(logic.start_fen())
 
-    @expectedFailure
     def test_a_second_cookieless_visitor_gets_its_own_csrf_state(self):
         first = Client().get('/atomicdb/')
         second = Client().get('/atomicdb/')
@@ -273,7 +281,6 @@ class CookielessHomeCacheTests(TestCase):
 # ---------------------------------------------------------------------------
 class UnexploredLabelTests(TestCase):
 
-    @expectedFailure
     def test_the_button_count_and_the_unexplored_rows_agree(self):
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)          # todas las aristas existen, ningun eval
@@ -303,7 +310,6 @@ class CampaignProposalCapTests(TestCase):
         self.keys = [edge.child_id for edge in
                      Edge.objects.filter(parent=self.root)[:6]]
 
-    @expectedFailure
     def test_the_daily_cap_holds_for_a_client_that_drops_the_cookie(self):
         from .views import CAMPAIGN_PROPOSALS_PER_VOTER_DAY
 

@@ -8,7 +8,7 @@
   <div class="metric"><div class="v">{{ closed_h }}</div><div class="l">practically solved</div></div>
   <div class="metric"><div class="v">{{ nodes_h }}</div><div class="l">engine nodes</div></div>
   <div class="metric"><div class="v">{{ analyses_h }}</div><div class="l">analyses</div></div>
-  <div class="metric"><div class="v">{{ requested_h }}</div><div class="l">in queue</div></div>
+  <div class="metric" title="Visitor analysis requests still waiting for a worker. Up next previews the selector's own priorities instead, so the two numbers can differ"><div class="v">{{ requested_h }}</div><div class="l">in queue</div></div>
   <div class="metric" title="Workers with a heartbeat in the last 3 minutes"><div class="v">{{ workers_h }}</div><div class="l">active workers</div></div>
   <div class="metric" title="Threads reported by active AtomicDB workers"><div class="v">{{ cores_h }}</div><div class="l">active cores</div></div>
   <div class="metric" title="Sum of each active worker's latest reported engine speed"><div class="v">{{ compute_nps_h }}</div><div class="l">nodes / sec</div></div>
@@ -98,7 +98,7 @@
 
 <div class="queue">
   <div>
-    <h2 style="margin-top:0">Now analyzing</h2>
+    <h2 style="margin-top:0" title="Positions currently leased to a worker, up to 5 shown. Active workers counts every machine with a recent heartbeat, including ones between tasks, so the two numbers can differ">Now analyzing</h2>
     {% if analyzing %}
     <ul class="feed">
       {% for q in analyzing %}
@@ -110,7 +110,7 @@
     {% else %}<p class="dim">No active analyses right now.</p>{% endif %}
   </div>
   <div>
-    <h2 style="margin-top:0">Up next</h2>
+    <h2 style="margin-top:0" title="The unsolved positions the selector ranks highest right now, top 5. The in-queue metric counts visitor requests instead, so the two numbers can differ">Up next</h2>
     {% if upnext %}
     <ul class="feed">
       {% for q in upnext %}

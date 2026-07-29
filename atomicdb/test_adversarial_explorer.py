@@ -375,18 +375,22 @@ class DnRepairTests(TestCase):
         self.assertEqual(looked.call_count, 1)
 
     def test_it_shares_the_fill_cap_with_coverage_completion(self):
-        """Los dos compran el mismo tipo de trabajo: un cupo, no dos.
+        """Cada brazo cuenta SU cola, y la suya la cuenta entera.
 
-        Una tarea FILL que el completado de cobertura ya dejo en la cola
-        consume cupo de este brazo, no de un presupuesto paralelo: si no,
-        "tope de 200 FILL pendientes" no querria decir nada.
+        Los tres productores de FILL viven en dos procesos: si cada uno lee la
+        cola de los otros como si fuera suya, el que llega segundo se encuentra
+        el cupo gastado sin haber encolado nada.  Lo que si tiene que frenarle
+        es su propio trabajo pendiente.
         """
         node = _and_node()
         other = Edge.objects.filter(parent=node).first().child
         AnalysisTask.objects.create(
             position=other, generation=99, budget_nodes=8_000_000,
-            source=AnalysisTask.Source.FILL)
+            source=AnalysisTask.Source.FILL, arm=ingest.COVERAGE_ARM)
 
+        # La cola de cobertura no le quita el turno...
+        self.assertEqual(ingest.enqueue_dn_repair(cap=1), 1)
+        # ...pero la suya propia si, en cuanto llega al tope.
         self.assertEqual(ingest.enqueue_dn_repair(cap=1), 0)
 
     def test_it_never_disguises_itself_as_a_visitor(self):

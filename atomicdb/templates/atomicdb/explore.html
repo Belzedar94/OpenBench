@@ -100,7 +100,7 @@
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
-        title="Queue every reply this position has never looked at">Analyse all {{ unexplored_count }} unexplored replies</button>{% endif %}
+        title="Queue every reply marked unexplored in the table below">Analyse all {{ unexplored_count }} unexplored replies</button>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
@@ -121,6 +121,13 @@
       let below = {% if frontier_exhausted %}key{% else %}null{% endif %};
       function plural(n, one, many) {
         return n + ' ' + (n === 1 ? one : many);
+      }
+      // Los dos botones de peticion POSTean sin formulario, y sus endpoints
+      // ya no estan exentos de CSRF: el token viaja en la cabecera, leido del
+      // input oculto que los formularios de arriba pintan en toda pagina.
+      function csrf() {
+        const field = document.querySelector('[name=csrfmiddlewaretoken]');
+        return field ? field.value : '';
       }
       function showNote(text, spent) {
         note.textContent = text || '';
@@ -200,7 +207,8 @@
         const playRoute = new URLSearchParams(location.search).get('play') || '';
         fetch('/atomicdb/request/{{ pos.key }}/', {
           method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-CSRFToken': csrf()},
           body: new URLSearchParams({route: playRoute}).toString()})
           .then(async r => {
             const data = await r.json().catch(() => null);
@@ -275,7 +283,8 @@
         allbtn.addEventListener('click', function () {
           allbtn.disabled = true;
           allbtn.textContent = 'Queueing...';
-          fetch('/atomicdb/request-unexplored/' + key + '/', {method: 'POST'})
+          fetch('/atomicdb/request-unexplored/' + key + '/',
+                {method: 'POST', headers: {'X-CSRFToken': csrf()}})
             .then(r => r.json().then(d => ({status: r.status, data: d})))
             .then(({status, data}) => {
               if (data.status === 'queued') {
@@ -341,7 +350,8 @@
         <td><a href="{{ m.url }}"{% if m.enters_opening %}
           title="Enters {{ m.enters_opening }}"{% endif %}><strong>{{ m.uci }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}</td>
-        <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
+        <td>{% if m.unexplored %}<span class="dim">unexplored</span>
+            {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<span
             class="backed-mark" title="negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below · {{ m.own_search }}">backed</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
@@ -349,20 +359,20 @@
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% endfor %}
-      {% for u in unexplored %}
+      {% for u in offtree %}
       <tr>
         <td><span class="chip cold"></span></td>
         <td><a href="{{ u.url }}"{% if u.enters_opening %}
           title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}</td>
-        <td><span class="dim">unexplored</span></td>
+        <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim">-</span></td>
         <td class="dim proofnums"></td>
         <td class="dim">-</td>
       </tr>
       {% endfor %}
-      {% if not moves and not unexplored %}
-      <tr><td colspan="5" class="dim">Terminal position: the game ended here.</td></tr>
+      {% if not moves and not offtree %}
+      <tr><td colspan="6" class="dim">Terminal position: the game ended here.</td></tr>
       {% endif %}
     </table>
   </div>

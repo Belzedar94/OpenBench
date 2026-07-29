@@ -719,3 +719,12 @@ class CommunityOverlayTests(TestCase):
         finally:
             OpeningNameSuggestion.objects.filter = original
         self.assertEqual(response.status_code, 200)
+
+    def test_cross_process_staleness_is_bounded_by_a_short_ttl(self):
+        # M9: con LocMem cada proceso de gunicorn tiene SU cache, asi que
+        # ``invalidate()`` solo alcanza al proceso que atendio la moderacion.
+        # El limite real de obsolescencia en los demas es el TTL: si alguien
+        # lo sube "porque total, se invalida a mano", vuelve el nombre viejo
+        # sirviendose un minuto segun a que worker te toque.
+        self.assertGreater(community_names.CACHE_SECONDS, 0)
+        self.assertLessEqual(community_names.CACHE_SECONDS, 10)

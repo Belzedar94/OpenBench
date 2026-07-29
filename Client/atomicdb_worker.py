@@ -33,7 +33,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072807
+ATOMICDB_WORKER_BUILD = 2026072901
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -951,7 +951,66 @@ class Solver:
         return outcome, pn, dn, nodes, elapsed, text, telemetry
 
 
-def _solve_once(server, auth, solver, lease_session):
+class SolveLeaseState:
+    """La asignacion SOLVE viva, para que el latido sepa por quien latir.
+
+    Deliberadamente SIN la guarda de progreso de ``CurrentTaskState``: el
+    buscador de pruebas no publica contadores intermedios, asi que exigirle
+    senales de avance seria condenarlo al silencio, y el silencio es
+    exactamente lo que caduca el arriendo.  Aqui la evidencia de vida es que
+    el hilo sigue dentro de su tarea.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._task_id = None
+        self._lease_token = ''
+
+    def start(self, task_id, lease_token=''):
+        with self._lock:
+            self._task_id = task_id
+            self._lease_token = lease_token or ''
+
+    def clear(self):
+        with self._lock:
+            self._task_id = None
+            self._lease_token = ''
+
+    def snapshot(self):
+        with self._lock:
+            if self._task_id is None:
+                return None
+            return {'id': self._task_id, 'lease_token': self._lease_token}
+
+
+def _solve_heartbeat_loop(server, auth, current_task, stop):
+    """Mantiene vivo el arriendo mientras la prueba corre.
+
+    Una tarea del estrato fortaleza retiene el hilo mucho mas que los
+    ``SOLVE_LEASE_MINUTES`` del servidor.  Sin este latido el arriendo caduca
+    a mitad de la busqueda, otro worker se lleva la misma tarea y el resultado
+    que llega despues se rechaza por ficha caducada: trabajo tirado a la
+    basura por no decir "sigo aqui".
+    """
+    while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+        current = current_task.snapshot()
+        if current is None:
+            continue
+        try:
+            requests.post(server + '/atomicdb/api/solve/heartbeat',
+                          data=dict(auth, task_id=current['id'],
+                                    lease_token=current['lease_token']),
+                          timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
+                    .raise_for_status()
+        except requests.RequestException as exc:
+            print(f'solve heartbeat skipped: {exc}', flush=True)
+
+
+class SolveAcquireAmbiguous(Exception):
+    """El acquire fallo sin saber si el servidor llego a asignar la tarea."""
+
+
+def _solve_once(server, auth, solver, lease_session, current_task=None):
     """Acquire, solve and submit ONE proof task. Returns True if it did work."""
     try:
         response = requests.post(
@@ -961,33 +1020,42 @@ def _solve_once(server, auth, solver, lease_session):
         tasks = response.json().get('tasks') or []
     except (requests.RequestException, ValueError) as exc:
         print(f'solve lease error: {exc}', flush=True)
-        return False
+        # La peticion pudo commitear antes de romperse: quien la repita tiene
+        # que hacerlo con la MISMA sesion o el replay del servidor no la
+        # reconoce y la asignacion se queda huerfana.
+        raise SolveAcquireAmbiguous(str(exc)) from exc
     if not tasks:
         return False
 
     task = tasks[0]
-    outcome, pn, dn, nodes, elapsed, certificate, telemetry = solver.solve(
-        task['fen'], task.get('goal', 'WHITE_WIN'), task['budget_nodes'])
-    payload = {**auth, 'task_id': task['id'], 'outcome': outcome,
-               'nodes': nodes, 'elapsed': f'{elapsed:.2f}',
-               'lease_token': task.get('lease_token', ''), **telemetry}
-    if pn is not None:
-        payload['pn'] = pn
-    if dn is not None:
-        payload['dn'] = dn
-    files = None
-    if certificate:
-        files = {'certificate': ('certificate.gz',
-                                 gzip.compress(certificate.encode('utf-8')),
-                                 'application/gzip')}
+    if current_task is not None:
+        current_task.start(task['id'], task.get('lease_token', ''))
     try:
-        submitted = requests.post(server + '/atomicdb/api/solve/submit',
-                                  data=payload, files=files,
-                                  timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
-                                           SUBMIT_READ_TIMEOUT_SECONDS))
-        summary = submitted.json().get('summary', submitted.text[:200])
-    except (requests.RequestException, ValueError) as exc:
-        summary = f'submit error: {exc}'
+        outcome, pn, dn, nodes, elapsed, certificate, telemetry = solver.solve(
+            task['fen'], task.get('goal', 'WHITE_WIN'), task['budget_nodes'])
+        payload = {**auth, 'task_id': task['id'], 'outcome': outcome,
+                   'nodes': nodes, 'elapsed': f'{elapsed:.2f}',
+                   'lease_token': task.get('lease_token', ''), **telemetry}
+        if pn is not None:
+            payload['pn'] = pn
+        if dn is not None:
+            payload['dn'] = dn
+        files = None
+        if certificate:
+            files = {'certificate': ('certificate.gz',
+                                     gzip.compress(certificate.encode('utf-8')),
+                                     'application/gzip')}
+        try:
+            submitted = requests.post(server + '/atomicdb/api/solve/submit',
+                                      data=payload, files=files,
+                                      timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
+                                               SUBMIT_READ_TIMEOUT_SECONDS))
+            summary = submitted.json().get('summary', submitted.text[:200])
+        except (requests.RequestException, ValueError) as exc:
+            summary = f'submit error: {exc}'
+    finally:
+        if current_task is not None:
+            current_task.clear()
     print(f"solve task {task['id']} {outcome} ({nodes}n, {elapsed:.1f}s) "
           f'-> {summary}', flush=True)
     return True
@@ -999,13 +1067,28 @@ def _solve_loop(server, auth, solver, stop_event):
     engine's threads keep the analysis queue (and visitor requests) moving.
     A fortress-stratum attempt can hold this thread for many minutes; that
     must never freeze the analysis loop again."""
+    current_task = SolveLeaseState()
+    threading.Thread(
+        target=_solve_heartbeat_loop,
+        args=(server, auth, current_task, stop_event),
+        name='atomicdb-solve-heartbeat', daemon=True).start()
+
+    # Nonce de una peticion LOGICA de arriendo, con la misma regla que el
+    # hilo de analisis: se conserva mientras el resultado sea ambiguo (la
+    # asignacion pudo commitear y perderse la respuesta) y se renueva solo
+    # cuando el servidor ya ha contestado algo que cierra la peticion.
+    lease_session = secrets.token_urlsafe(24)
     while not stop_event.is_set():
         did = False
         try:
-            did = _solve_once(server, auth, solver,
-                              secrets.token_urlsafe(24))
+            did = _solve_once(server, auth, solver, lease_session,
+                              current_task)
+            lease_session = secrets.token_urlsafe(24)
+        except SolveAcquireAmbiguous:
+            pass                       # misma sesion en el reintento
         except Exception as exc:  # the thread must survive anything
             print(f'solve loop error: {exc}', flush=True)
+            lease_session = secrets.token_urlsafe(24)
         if not did:
             stop_event.wait(60)
 
@@ -1144,6 +1227,11 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     'elapsed': f'{time.time() - t0:.2f}',
                     'nodes': searched,
                     'lease_token': t.get('lease_token', ''),
+                    # Aditivo: se devuelve la restriccion CON LA QUE SE BUSCO,
+                    # para que el servidor sepa que estas lineas no hablan de
+                    # la posicion entera sino de lo que quedaba sin resolver.
+                    # Un servidor que no la conozca la ignora.
+                    'searchmoves': ' '.join(t.get('searchmoves') or ()),
                 }, t['id'])
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
@@ -1294,8 +1382,17 @@ def main():
           + f' -> {a.S}', flush=True)
 
     if a.once:
-        if a.solve and _solve_once(a.S, dict(auth_base, machine=machines[0]),
-                                   solver, secrets.token_urlsafe(24)):
+        solved = False
+        if a.solve:
+            try:
+                solved = _solve_once(a.S,
+                                     dict(auth_base, machine=machines[0]),
+                                     solver, secrets.token_urlsafe(24))
+            except SolveAcquireAmbiguous:
+                # Una sola pasada no reintenta nada: aqui el acquire roto es
+                # simplemente "no hubo prueba", y se baja al analisis.
+                solved = False
+        if solved:
             stop.set()
             return
         _analysis_slot(0, a, tb, dict(auth_base, machine=machines[0]),

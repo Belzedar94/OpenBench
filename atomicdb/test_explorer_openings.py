@@ -342,7 +342,7 @@ class ExplorerOpeningRouteTests(TestCase):
         )
 
         child = next(
-            move for move in response.context['unexplored']
+            move for move in response.context['offtree']
             if move['uci'] == 'b1c3'
         )
         self.assertEqual(child['enters_opening'], 'Two Knights Opening')

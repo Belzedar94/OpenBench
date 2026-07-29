@@ -23,12 +23,11 @@ asking for more slots.
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.utils import timezone
 
 from . import ingest, logic, views
 from .models import AnalysisTask, Position
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 import importlib.util
 import pathlib
@@ -54,7 +53,7 @@ class LeaseCsrfTests(TestCase):
     def test_a_tokenless_worker_post_can_lease(self):
         from django.test import Client
 
-        User.objects.create_user(username='w', password='p')
+        worker_account('w', 'p')
         pos = ingest.get_or_create_position(logic.start_fen())
         AnalysisTask.objects.create(position=pos, generation=0,
                                     budget_nodes=8_000_000,
@@ -151,7 +150,7 @@ class MachineIdentityTests(TestCase):
 class LeaseConcurrencyTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         self.position = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(self.position)
 

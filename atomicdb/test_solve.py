@@ -6,16 +6,28 @@ the one shape of certificate that is real: the fixtures below came out of the
 engine's own `solve` command, byte for byte.
 """
 
+import importlib.util
+import pathlib
+import threading
 from io import StringIO
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 
 from . import ingest, logic, solve
 from .models import (DBEvent, Position, ProofCampaign, SolveTask)
-from .testing import TestCase
+from .testing import TestCase, worker_account
+
+# El worker publicado no es un modulo importable del proyecto: se carga
+# por ruta, igual que en test_worker_jobs, para probar EL fichero que se
+# distribuye y no una copia.
+_SPEC = importlib.util.spec_from_file_location(
+    'atomicdb_worker_solve_under_test',
+    pathlib.Path(__file__).resolve().parent.parent / 'Client'
+    / 'atomicdb_worker.py')
+worker = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(worker)
 
 # Straight out of `solve 7k/6p1/8/8/8/8/8/Q3K3 w - - 0 1`: Qa1xg7 explodes
 # g7 and the king on h8 with it.
@@ -221,7 +233,7 @@ T mate
 class SolveProtocolTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         self.pos = ingest.get_or_create_position(MATE_IN_ONE_FEN)
         self.campaign = ProofCampaign.objects.filter(active=True).first()
         self.task = SolveTask.objects.create(
@@ -480,3 +492,135 @@ class SolvePilotTests(TestCase):
         self.assertIsNotNone(quiet)
         self.assertLess(quiet, sharp)
         self.assertIsNone(pilot.zeroing_density(None))
+
+
+class _Ok:
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+
+class _NoThread:
+    """Un hilo que no arranca: el latido no pinta nada en estas pruebas."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        return None
+
+
+class _ImpatientStop:
+    """Un ``stop_event`` que no duerme.
+
+    El bucle de pruebas espera un minuto entre vueltas en vacio y no tiene ese
+    intervalo inyectable; con un Event de verdad, cada vuelta de estas pruebas
+    costaria sesenta segundos de suite para no comprobar nada.
+    """
+
+    def __init__(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+    def wait(self, _seconds=None):
+        return self._set
+
+
+class SolveWorkerLeaseTests(TestCase):
+    """El lado del worker del protocolo SOLVE: latido y sesion de arriendo.
+
+    El servidor caduca un arriendo SOLVE a los ``SOLVE_LEASE_MINUTES``, y una
+    tarea del estrato fortaleza retiene el hilo mucho mas que eso.  Las dos
+    piezas que lo sostienen viven aqui: el latido que dice "sigo con esta", y
+    la sesion estable, que es lo unico que el replay del servidor reconoce
+    cuando la respuesta del acquire se pierde despues del commit.
+    """
+
+    def test_the_solve_thread_beats_for_the_task_it_is_proving(self):
+        current = worker.SolveLeaseState()
+        current.start(41, 'token-41')
+        stop = threading.Event()
+        posts = []
+
+        def fake_post(url, data=None, **kwargs):
+            posts.append((url, dict(data or {})))
+            stop.set()
+            return _Ok()
+
+        with patch.object(worker.requests, 'post', side_effect=fake_post):
+            with patch.object(worker, 'HEARTBEAT_INTERVAL_SECONDS', 0.01):
+                worker._solve_heartbeat_loop(
+                    'http://server', {'username': 'solver'}, current, stop)
+
+        self.assertTrue(posts, 'el hilo de pruebas no latio ni una vez')
+        url, payload = posts[0]
+        self.assertTrue(url.endswith('/atomicdb/api/solve/heartbeat'))
+        self.assertEqual(payload['task_id'], 41)
+        self.assertEqual(payload['lease_token'], 'token-41')
+        self.assertEqual(payload['username'], 'solver')
+
+    def test_a_solver_without_an_assignment_stays_quiet(self):
+        current = worker.SolveLeaseState()
+        stop = threading.Event()
+        rounds = []
+
+        def fake_wait(_seconds):
+            rounds.append(1)
+            return len(rounds) > 2        # dos vueltas en vacio y fuera
+
+        stop.wait = fake_wait
+        with patch.object(worker.requests, 'post') as post:
+            worker._solve_heartbeat_loop('http://server', {}, current, stop)
+
+        post.assert_not_called()
+
+    def test_a_broken_acquire_is_reported_as_ambiguous(self):
+        def boom(url, data=None, **kwargs):
+            raise worker.requests.RequestException('conexion cortada')
+
+        with patch.object(worker.requests, 'post', side_effect=boom):
+            with self.assertRaises(worker.SolveAcquireAmbiguous):
+                worker._solve_once('http://server', {}, None, 'sesion-1')
+
+    def test_the_loop_keeps_its_session_across_an_ambiguous_acquire(self):
+        sessions = []
+        stop = _ImpatientStop()
+
+        def fake_solve_once(server, auth, solver, lease_session,
+                            current_task=None):
+            sessions.append(lease_session)
+            if len(sessions) < 3:
+                raise worker.SolveAcquireAmbiguous('respuesta perdida')
+            stop.set()
+            return False
+
+        with patch.object(worker, '_solve_once', side_effect=fake_solve_once):
+            with patch.object(worker.threading, 'Thread', _NoThread):
+                worker._solve_loop('http://server', {}, None, stop)
+
+        self.assertEqual(len(sessions), 3)
+        self.assertEqual(len(set(sessions)), 1)
+
+    def test_a_clean_pass_starts_a_new_session(self):
+        sessions = []
+        stop = _ImpatientStop()
+
+        def fake_solve_once(server, auth, solver, lease_session,
+                            current_task=None):
+            sessions.append(lease_session)
+            if len(sessions) >= 2:
+                stop.set()
+            return False
+
+        with patch.object(worker, '_solve_once', side_effect=fake_solve_once):
+            with patch.object(worker.threading, 'Thread', _NoThread):
+                worker._solve_loop('http://server', {}, None, stop)
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(len(set(sessions)), 2)

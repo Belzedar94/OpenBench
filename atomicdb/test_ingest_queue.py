@@ -13,18 +13,17 @@ Lo que se defiende aqui:
 import json
 from unittest import mock
 
-from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, override_settings
 from django.utils import timezone
 
 from . import ingest, ingest_queue, logic
 from .models import AnalysisTask, Edge, IngestJob, Position, ProofCampaign
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 def _worker():
-    User.objects.create_user(username='w', password='p')
+    worker_account('w', 'p')
     return {'username': 'w', 'password': 'p', 'machine': 'm1'}
 
 
@@ -305,7 +304,7 @@ class SynchronousVsQueuedTests(TestCase):
     LINES_VALUE = -450
 
     def _fixture(self, prefix):
-        User.objects.create_user(username=prefix, password='p')
+        worker_account(prefix, 'p')
         auth = {'username': prefix, 'password': 'p', 'machine': prefix}
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)

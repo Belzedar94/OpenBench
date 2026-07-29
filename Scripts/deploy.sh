@@ -10,20 +10,33 @@ PYTHON=./.venv/bin/python
 
 ./.venv/bin/pip -q install -r req-linux.txt 2>/dev/null || true
 
-database_alias="$("$PYTHON" - <<'PY'
+# The alias NAME says where AtomicDB lives; the ENGINE says which protocol
+# applies.  The SQLite cutover verifiers below only make sense (and only
+# run) for a split SQLite file: branching on the name alone used to send a
+# PostgreSQL-backed alias into verifiers that hard-require SQLite and refuse
+# the deploy.
+database_identity="$("$PYTHON" - <<'PY'
 import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "OpenSite.settings")
 from django.conf import settings
 
 alias = getattr(settings, "ATOMICDB_DATABASE_ALIAS", "default")
-if alias not in {"default", "atomicdb"}:
-    raise SystemExit("Unsupported AtomicDB database alias; refusing deploy")
-print(alias)
+if alias not in settings.DATABASES:
+    raise SystemExit("AtomicDB database alias is not configured; refusing deploy")
+engine = settings.DATABASES[alias]["ENGINE"].rsplit(".", 1)[-1]
+print(alias, engine)
 PY
 )"
+database_alias="${database_identity%% *}"
+database_engine="${database_identity##* }"
 
-if [[ "$database_alias" == "atomicdb" ]]; then
+sqlite_split="no"
+if [[ "$database_alias" != "default" && "$database_engine" == "sqlite3" ]]; then
+    sqlite_split="yes"
+fi
+
+if [[ "$sqlite_split" == "yes" ]]; then
     # Authenticate the existing destination before mutating either database.
     # The verifier opens the copied destination fail-closed and never creates
     # a missing file.
@@ -41,16 +54,21 @@ fi
 # rollback shadow while runtime reads/writes remain routed only to atomicdb.
 "$PYTHON" manage.py migrate --database default --no-input | tail -1
 
-if [[ "$database_alias" == "atomicdb" ]]; then
-    # A deploy interrupted here is re-runnable: shadow may be ahead of active,
-    # but both must still be known histories and shadow must already be current.
-    "$PYTHON" manage.py verify_atomicdb_shadow \
-        --allow-active-pending-migrations
+if [[ "$database_alias" != "default" ]]; then
+    if [[ "$sqlite_split" == "yes" ]]; then
+        # A deploy interrupted here is re-runnable: shadow may be ahead of
+        # active, but both must still be known histories and shadow must
+        # already be current.
+        "$PYTHON" manage.py verify_atomicdb_shadow \
+            --allow-active-pending-migrations
+    fi
     "$PYTHON" manage.py migrate atomicdb \
-        --database atomicdb --no-input | tail -1
-    "$PYTHON" manage.py verify_atomicdb_database
-    "$PYTHON" manage.py verify_atomicdb_shadow \
-        --compare-active-schema
+        --database "$database_alias" --no-input | tail -1
+    if [[ "$sqlite_split" == "yes" ]]; then
+        "$PYTHON" manage.py verify_atomicdb_database
+        "$PYTHON" manage.py verify_atomicdb_shadow \
+            --compare-active-schema
+    fi
 fi
 
 "$PYTHON" manage.py collectstatic --no-input | tail -1

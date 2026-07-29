@@ -371,10 +371,19 @@ def _seed_child_eval(child, ev):
 
 
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
-                    mate_proofs=None):
+                    mate_proofs=None, restricted=False):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
-    Devuelve dict con resumen."""
+    Devuelve dict con resumen.
+
+    ``restricted``: el pase se busco con ``searchmoves`` acotado a las jugadas
+    sin resolver (§ views._live_moves), asi que su mejor linea es la mejor
+    ENTRE LO QUE QUEDABA, no la de la posicion.  Con la jugada buena ya cerrada
+    y fuera de la lista, ese numero es peor que la posicion, y ``eval_cp``
+    alimenta budget_for, el breadth-swap, witness-refuted y la incertidumbre.
+    Un pase asi puede MEJORAR ``eval_cp`` para el que mueve — eso lo ha
+    demostrado — pero nunca empeorarlo, que es lo unico que no ha mirado.
+    """
     if mate_proofs is None:
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
         if snapshot.status != 'UNKNOWN':
@@ -519,6 +528,15 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             elif len(snapshot) >= len(current or prior):
                 prior = []
             pos.last_analysis = (snapshot + prior)[:10]
+        # Un pase restringido no puede EMPEORAR la posicion para el que mueve:
+        # no ha mirado las jugadas que le faltan, asi que su peor numero no es
+        # una afirmacion sobre ellas.  Si mejora, si: eso lo ha demostrado con
+        # una linea concreta, y el best_move la acompana.
+        if restricted and best_eval is not None and pos.eval_cp is not None:
+            improves = (best_eval > pos.eval_cp if stm_white
+                        else best_eval < pos.eval_cp)
+            if not improves:
+                best_eval, best_move = None, None
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:
@@ -1095,9 +1113,11 @@ def _queue_quality_convergence(discrepancies):
     """
     if not discrepancies:
         return 0
+    # Cupo PROPIO: lo que hayan encolado cobertura o la reparacion de dn no es
+    # cola de este brazo y no se le cobra (§ cupos por brazo).
     pending = AnalysisTask.objects.filter(
-        state='PENDING', source=AnalysisTask.Source.FILL).count()
-    room = max(0, COVERAGE_QUEUE_CAP - pending)
+        state='PENDING', arm=QUALITY_ARM).count()
+    room = max(0, QUALITY_QUEUE_CAP - pending)
     if room <= 0:
         return 0
     made = 0
@@ -1118,13 +1138,22 @@ def _queue_quality_convergence(discrepancies):
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
                       'multipv': multipv_for(child.visits, budget),
-                      'source': AnalysisTask.Source.FILL})
+                      'source': AnalysisTask.Source.FILL,
+                      'arm': QUALITY_ARM})
         if created:
             made += 1
         elif task.state == 'PENDING' and task.budget_nodes < budget:
-            task.budget_nodes = budget
-            task.source = AnalysisTask.Source.FILL
-            task.save(update_fields=['budget_nodes', 'source'])
+            # Adoptarla la mete en la cola de ESTE brazo igual que crearla, asi
+            # que cuesta cupo igual que crearla.  Y se escribe sobre el estado
+            # que se leyo: si otro la arrendo entre medias, no hay nada que
+            # subir y tampoco se cobra.
+            adopted = AnalysisTask.objects.filter(
+                id=task.id, state='PENDING',
+                budget_nodes=task.budget_nodes).update(
+                    budget_nodes=budget, source=AnalysisTask.Source.FILL,
+                    arm=QUALITY_ARM)
+            if adopted:
+                made += 1
     if made:
         DBEvent.objects.create(kind='QUALITY_CONVERGENCE', payload={
             'queued': made, 'discrepancies': len(discrepancies)})
@@ -1913,8 +1942,13 @@ def _next_tasks_by_proof(n):
         return []
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
-    budget = 4 * max(1, n)
-    while len(tasks) < n and attempts < budget:
+    # Dos presupuestos que no tienen nada que ver: cuantos DESCENSOS se
+    # permite este selector, y cuantos NODOS se le encargan a la posicion que
+    # encuentre.  Compartian nombre, y el segundo (>= 8.000.000) borraba la
+    # cota del primero en cuanto el bucle acertaba una vez — dentro del camino
+    # HTTP de /api/lease, que es donde menos gracia tiene.
+    attempt_budget = 4 * max(1, n)
+    while len(tasks) < n and attempts < attempt_budget:
         campaign = campaigns[attempts % len(campaigns)]
         pos, _plies = proof.descend(campaign, counter=base + attempts,
                                     avoid=seen)
@@ -2719,7 +2753,25 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
 # entera, se piden esas K jugadas.
 COVERAGE_MISSING_MAX = 3
 COVERAGE_DECISIVE_CP = 800
-COVERAGE_QUEUE_CAP = 200
+# CUPOS POR BRAZO.  El tope de FILL se media sobre ``source='FILL'``, que es la
+# MEZCLA de tres productores repartidos en dos procesos: el convergedor de
+# calidad (dentro del submit), el completado de cobertura y la reparacion de dn
+# (dentro del servicio selector).  Cada uno leia la cola de los otros como si
+# fuera suya, asi que el que llegaba segundo se encontraba el cupo gastado sin
+# haber encolado nada — y las promociones AUTO->FILL engordaban esa poblacion
+# sin contar contra el ``made`` de nadie.  Ahora cada brazo cuenta SU marca,
+# como ya hacia el brazo fragil con ``arm=FRAGILE_ARM``.
+#
+# Los tres cupos suman los 200 de antes: el limite global sigue queriendo decir
+# lo mismo, pero ahora cada brazo tiene su parte GARANTIZADA en vez de
+# competida.  Cobertura se lleva la mitad porque es el unico que cierra nodos;
+# los otros dos informan.
+COVERAGE_ARM = 'coverage'
+DN_ARM = 'dn'
+QUALITY_ARM = 'quality'
+COVERAGE_QUEUE_CAP = 100
+DN_REPAIR_QUEUE_CAP = 50
+QUALITY_QUEUE_CAP = 50
 COVERAGE_SCAN_ROWS = 2_000
 COVERAGE_SEED_NODES = 8_000_000
 
@@ -2780,11 +2832,11 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
 
     Se escanea por ``updated`` descendente y con tope: la cobertura nueva
     aparece justo donde algo acaba de cambiar, asi que mirar lo mas reciente
-    es a la vez lo mas barato y lo mas productivo.  El tope global de la
-    politica se cuenta sobre ``source='FILL'``, que existe para esto.
+    es a la vez lo mas barato y lo mas productivo.  El tope se cuenta sobre la
+    marca de ESTE brazo (§ cupos por brazo), no sobre todo lo que sea FILL.
     """
     pending = AnalysisTask.objects.filter(
-        state='PENDING', source=AnalysisTask.Source.FILL).count()
+        state='PENDING', arm=COVERAGE_ARM).count()
     room = max(0, int(cap) - pending)
     if room <= 0:
         return 0
@@ -2814,15 +2866,23 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
                 defaults={'budget_nodes': max(COVERAGE_SEED_NODES,
                                               budget_for(child)),
                           'multipv': DEPTH_MULTIPV,
-                          'source': AnalysisTask.Source.FILL})
+                          'source': AnalysisTask.Source.FILL,
+                          'arm': COVERAGE_ARM})
             if created:
                 made += 1
             elif task.state == 'PENDING' \
                     and task.source == AnalysisTask.Source.AUTO:
-                # Ya estaba en la cola normal: se promociona sin gastar cupo
-                # nuevo, porque la tarea ya existia.
-                task.source = AnalysisTask.Source.FILL
-                task.save(update_fields=['source'])
+                # Promocionarla mete una tarea mas en la cola de este brazo,
+                # asi que cuesta cupo igual que crearla: contarla como gratis
+                # era justo lo que dejaba crecer la poblacion por encima del
+                # tope.  Se escribe sobre el estado leido y solo cuenta quien
+                # encuentra la tarea todavia como la vio.
+                promoted = AnalysisTask.objects.filter(
+                    id=task.id, state='PENDING',
+                    source=AnalysisTask.Source.AUTO).update(
+                        source=AnalysisTask.Source.FILL, arm=COVERAGE_ARM)
+                if promoted:
+                    made += 1
     if made:
         DBEvent.objects.create(kind='COVERAGE_ENQUEUED', payload={
             'created': made, 'pending_before': pending, 'cap': int(cap),
@@ -2850,9 +2910,9 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
 # QUE NO HACE.  No toca ``api_lease``.  Las tareas salen como ``FILL``, que ya
 # existe y ya se sirve DESPUES de ``USER`` por el orden alfabetico descendente
 # de ``-source``; el orden de servicio no se toca porque no hace falta
-# tocarlo.  Y esta acotado dos veces: por el cupo global de ``FILL``
-# (``COVERAGE_QUEUE_CAP``, compartido con el completado de cobertura, que es
-# trabajo de la misma naturaleza) y por un tope propio por ciclo.
+# tocarlo.  Y esta acotado dos veces: por su cupo PROPIO
+# (``DN_REPAIR_QUEUE_CAP``, contado sobre la marca de este brazo y no sobre
+# todo lo que sea FILL) y por un tope propio por ciclo.
 #
 # Suelo 2, no 1.  ``dn`` 1 es la espina pura; ``dn`` 2 es la espina con una
 # sola replica mirada, que sigue siendo una afirmacion que dos preguntas
@@ -2892,7 +2952,7 @@ def _dn_repair_replies(parent, replies):
     return unexplored_children(parent)[:max(0, int(replies))]
 
 
-def enqueue_dn_repair(cap=COVERAGE_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
+def enqueue_dn_repair(cap=DN_REPAIR_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
                       replies=DN_REPAIR_REPLIES,
                       per_cycle=DN_REPAIR_MAX_PER_CYCLE,
                       max_nodes=DN_REPAIR_MAX_NODES, campaigns=None):
@@ -2902,7 +2962,7 @@ def enqueue_dn_repair(cap=COVERAGE_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
     los conteos, que es de donde sale el KPI.
     """
     pending = AnalysisTask.objects.filter(
-        state='PENDING', source=AnalysisTask.Source.FILL).count()
+        state='PENDING', arm=DN_ARM).count()
     room = min(max(0, int(cap) - pending), max(0, int(per_cycle)))
     if room <= 0:
         return 0
@@ -2947,16 +3007,22 @@ def enqueue_dn_repair(cap=COVERAGE_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
                               # una replica virgen, que es para lo que la
                               # politica de la casa reserva MultiPV 5.
                               'multipv': multipv_for(child.visits, budget),
-                              'source': AnalysisTask.Source.FILL})
+                              'source': AnalysisTask.Source.FILL,
+                              'arm': DN_ARM})
                 if created:
                     made += 1
                     queued_here += 1
                 elif (task.state == 'PENDING'
                       and task.source == AnalysisTask.Source.AUTO):
-                    # Ya estaba en la cola normal: se promociona sin gastar
-                    # cupo, porque la tarea ya existia.
-                    task.source = AnalysisTask.Source.FILL
-                    task.save(update_fields=['source'])
+                    # Promocionarla engorda la cola de este brazo igual que
+                    # crearla, asi que cuesta cupo igual que crearla.
+                    promoted = AnalysisTask.objects.filter(
+                        id=task.id, state='PENDING',
+                        source=AnalysisTask.Source.AUTO).update(
+                            source=AnalysisTask.Source.FILL, arm=DN_ARM)
+                    if promoted:
+                        made += 1
+                        queued_here += 1
             if queued_here:
                 nodes_repaired += 1
     if made:
@@ -3092,19 +3158,28 @@ def adversarial_arms_enabled():
 UNEXPLORED_CLICK_CAP = 64
 
 
-def unexplored_children(pos):
-    """Hijos materializados sobre los que el arbol no sabe NADA todavia.
+def is_unexplored(child):
+    """SIN EXPLORAR: el arbol no sabe NADA de esta jugada todavia.
 
     Ni status, ni respaldo, ni eval propia.  Un hijo con respaldo pero sin
-    eval propia NO cuenta: de ese ya sabemos algo, y este boton existe para
-    los huecos, no para re-pedir lo que ya tiene valor.
+    eval propia NO cuenta: de ese ya sabemos algo, y el boton de la pagina
+    existe para los huecos, no para re-pedir lo que ya tiene valor.
+
+    Vive aqui, con nombre, porque la pagina tiene que ETIQUETAR con el mismo
+    criterio con el que el boton CUENTA: mientras fueron dos predicados, el
+    boton ofrecia "analizar 20 respuestas sin explorar" encima de una tabla
+    con cero filas asi.
     """
+    return (child.status == 'UNKNOWN' and child.eval_cp is None
+            and child.backed_eval is None)
+
+
+def unexplored_children(pos):
+    """Los hijos MATERIALIZADOS de ``pos`` que siguen sin explorar."""
     return [edge.child for edge in
             Edge.objects.filter(parent=pos).select_related('child')
             .order_by('id')
-            if edge.child.status == 'UNKNOWN'
-            and edge.child.eval_cp is None
-            and edge.child.backed_eval is None]
+            if is_unexplored(edge.child)]
 
 
 def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,

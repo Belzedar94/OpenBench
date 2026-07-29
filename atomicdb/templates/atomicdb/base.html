@@ -62,10 +62,10 @@
           <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
         </svg>
         <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for{% if notifications_unseen %}, {{ notifications_unseen }} new{% endif %}</span>
-        {% if notifications_badge %}<span class="bell-badge" aria-hidden="true">{{ notifications_badge }}</span>{% endif %}
+        {% if notifications_badge %}<span class="bell-badge" aria-hidden="true" title="{{ notifications_unseen }} unread result{{ notifications_unseen|pluralize }}">{{ notifications_badge }}</span>{% endif %}
       </a>
       <div class="bell-panel" id="bell-panel" hidden>
-        <div class="bell-panel-head"><span>Analyses you asked for</span>
+        <div class="bell-panel-head"><span title="The latest results, read or not. The badge on the bell counts only the unread ones, so the two numbers can differ">Analyses you asked for</span>
           {% if notifications_unseen %}
           <form class="bell-markall" method="post" action="/atomicdb/notifications/">{% csrf_token %}
             <input type="hidden" name="back" value="{{ identity_next }}">

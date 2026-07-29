@@ -10,13 +10,12 @@ else, because it is important and never urgent.
 
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from . import ingest, logic, solve
 from .models import DBEvent, Edge, Position, SolveTask
 from .test_solve import MATE_IN_ONE_CERT, MATE_IN_ONE_FEN
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 def _engine_debt(fen=MATE_IN_ONE_FEN, **fields):
@@ -97,7 +96,7 @@ class EnqueueDebtTests(TestCase):
 class DebtIsServedLastTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
 
     def _acquire(self):
         return self.client.post('/atomicdb/api/solve/acquire', {
@@ -257,7 +256,7 @@ class DisputeFromSolverTests(TestCase):
 class TelemetryIsAdvisoryTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         self.pos = ingest.get_or_create_position(MATE_IN_ONE_FEN)
         self.task = SolveTask.objects.create(
             position=self.pos, goal='WHITE_WIN', budget_nodes=1_000,

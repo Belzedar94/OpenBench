@@ -20,9 +20,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import (Case, Count, F, FloatField, IntegerField, Q,
-                              Sum, Value, When, Window)
-from django.db.models.functions import RowNumber
+from django.db.models import (Case, Count, F, FloatField, IntegerField,
+                              OuterRef, Q, Subquery, Sum, Value, When, Window)
+from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, ingest, ingest_queue, logic, metrics,
                notifications, openings, proof, solve)
@@ -161,8 +161,24 @@ class PlayRouteConflict(PlayRouteError):
 
 
 def _auth(request):
+    """Credenciales de worker: usuario correcto Y cuenta habilitada.
+
+    Expulsar a alguien es ponerle ``Profile.enabled`` a False, y hasta ahora
+    eso solo le cerraba OpenBench: sus workers seguian arrendando, latiendo y
+    entregando analisis aqui como el primer dia.  El criterio es el mismo que
+    el del protocolo de OpenBench (``authenticate(requireEnabled=True)``): sin
+    perfil habilitado no hay usuario, y quien llame recibe el mismo 403 que
+    quien se equivoca de contrasena.
+    """
+    # Import local, como en ``_approver_gate``: mantiene a AtomicDB importable
+    # sin arrastrar OpenBench.
+    from OpenBench.models import Profile
     user = authenticate(username=request.POST.get('username', ''),
                         password=request.POST.get('password', ''))
+    if user is None:
+        return None
+    if not Profile.objects.filter(user=user, enabled=True).exists():
+        return None
     return user
 
 
@@ -195,7 +211,18 @@ def _touch_worker(request, user):
 def _live_moves(task):
     """Jugadas sin resolver de la posicion: el motor no debe gastar ni un
     nodo re-derivando defensas ya demostradas (go searchmoves). Vacio = sin
-    restriccion (nada resuelto aun, o posicion sin expandir)."""
+    restriccion (nada resuelto aun, o posicion sin expandir).
+
+    QUE SIGNIFICA LO QUE VUELVE DE UN PASE ASI.  Un pase restringido no mide
+    la posicion: mide LO MEJOR ENTRE LO QUE SIGUE SIN RESOLVER.  Si la jugada
+    buena de verdad ya esta cerrada y fuera de la lista, el numero que devuelve
+    el motor es PEOR que la posicion, y ese numero alimenta budget_for, el
+    breadth-swap, witness-refuted y la incertidumbre.  Por eso el worker
+    devuelve la restriccion que le dieron (§ ``ingest.ingest_analysis``,
+    ``restricted``) y un pase restringido nunca puede EMPEORAR ``eval_cp`` para
+    el que mueve: solo puede mejorarlo, que es lo unico que puede afirmar
+    honestamente sobre la posicion entera.
+    """
     pos = task.position
     if not pos.expanded:
         return []
@@ -599,6 +626,12 @@ def api_submit(request):
             'username': user.username,
             'tb_wdl': parsed_wdl,
             'tb_dtz': parsed_dtz,
+            # Estas lineas hablan de la posicion ENTERA o solo de lo que
+            # quedaba sin resolver (§ ``_live_moves``).  El worker devuelve la
+            # restriccion con la que busco; uno anterior a este build no la
+            # manda, y entonces se toma el pase como completo, que es
+            # exactamente lo que se hacia antes.
+            'restricted': bool((request.POST.get('searchmoves') or '').split()),
         })
         task.state, task.machine = 'COMPLETED', machine
         task.completed = timezone.now()
@@ -707,7 +740,21 @@ def api_solve_acquire(request):
                 # The first response may have been lost after the commit.
                 # Replay the same assignment without burning an attempt.
                 return JsonResponse({'tasks': [_solve_payload(active)]})
-            return JsonResponse({'tasks': []})
+            # REINICIO frente a ROBO, el mismo relevo que ya tiene api_lease
+            # (incidente t24).  Una sesion distinta con el latido del titular
+            # ya frio no es un segundo proceso robandole trabajo vivo: es su
+            # relevo pidiendo con su misma identidad de maquina.  Sin esto un
+            # solver relanzado se queda mirando los 20 minutos enteros de
+            # SOLVE_LEASE_MINUTES con la cola llena.
+            beat = active.lease_heartbeat_at or active.leased_at
+            dead = now - timedelta(minutes=RESTART_RECYCLE_MINUTES)
+            if beat is None or beat >= dead:
+                return JsonResponse({'tasks': []})
+            SolveTask.objects.filter(id=active.id, state='LEASED').update(
+                state='PENDING', machine='', lease_heartbeat_at=None,
+                lease_token='', lease_session='')
+            # El relevo no espera al proximo poll: con el zombi reciclado,
+            # ESTA misma peticion baja a elegir tarea.
 
         # Orden: primero todo lo que NO es deuda (peticiones, piloto), y
         # dentro de cada grupo el presupuesto mayor primero.  La deuda de
@@ -842,13 +889,18 @@ def api_solve_submit(request):
 # limite informado el dia que haga falta.
 
 
-@csrf_exempt
 def api_request_unexplored(request, key):
     """Pide TODAS las jugadas sin mirar de una posicion, de una vez.
 
     El completado automatico de cobertura solo actua cuando el nodo esta a
     punto de cerrarse.  Esto es la version humana: alguien mira una posicion,
     ve doce filas que dicen "unexplored" y decide que merecen atencion.
+
+    SIN ``csrf_exempt``, a diferencia del protocolo de workers: esto no lo
+    llama un worker sin navegador, lo llama el explorador — que tiene el token
+    en la pagina y lo manda en ``X-CSRFToken``.  Exento, una pagina de terceros
+    podia encolar hasta ``UNEXPLORED_CLICK_CAP`` analisis a nombre de quien la
+    visitara estando logueado, y quedaban a su nombre.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -858,6 +910,13 @@ def api_request_unexplored(request, key):
         return JsonResponse({'status': 'unknown-position'}, status=404)
     if pos.status != 'UNKNOWN':
         return JsonResponse({'status': 'already-solved'})
+    # La misma puerta que el boton de una sola jugada: una expansion masiva no
+    # tiene MENOS motivos para respetar el tope de cola que una peticion
+    # suelta, y era el unico camino que entraba sin mirarlo.
+    if AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                   position__status='UNKNOWN') \
+                           .count() >= REQUEST_QUEUE_MAX:
+        return JsonResponse({'status': 'queue-full'}, status=503)
 
     ip = _client_ip(request)
 
@@ -961,8 +1020,16 @@ def _api_request_once(request, key):
     return JsonResponse(payload)
 
 
-@csrf_exempt
 def api_request(request, key):
+    """Peticion de analisis de UNA posicion, desde el explorador.
+
+    SIN ``csrf_exempt``: la exencion del protocolo de workers existe porque un
+    worker no tiene navegador ni token, y esto es exactamente lo contrario —
+    un fetch de explore.html, que manda el token de la propia pagina en
+    ``X-CSRFToken``.  Mientras estuvo exenta, cualquier pagina de terceros
+    podia gastarle la escalera de peticiones a un visitante logueado, y las
+    peticiones quedaban atribuidas a el.
+    """
     try:
         return _api_request_once(request, key)
     except OperationalError as error:
@@ -1930,6 +1997,10 @@ def _child_moves(pos):
                          else min(n, 999)) * 1e-3
         pn, dn = numbers.get(c.key, (None, None))
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
+                      # MISMO predicado que cuenta el boton de la cabecera
+                      # (§ ingest.is_unexplored): la fila y el boton tienen
+                      # que hablar de la misma poblacion o el numero miente.
+                      'unexplored': ingest.is_unexplored(c),
                       'pn_h': None if pn is None else proof.format_number(pn),
                       'dn_h': None if dn is None else proof.format_number(dn),
                       'closure': c.closure, 'score': score, 'rank': rank,
@@ -2935,6 +3006,9 @@ def campaign_propose(request):
     title = ' '.join((request.POST.get('title') or '').split())[
         :CAMPAIGN_TITLE_MAX_CHARS]
     proposed_by = _campaign_credit(request)
+    # Se guarda SOLO en las propuestas sin cookie: es lo unico que las agrupa,
+    # y en las demas seria un dato personal que no hace falta para nada.
+    client_ip = _client_ip(request) if minted else ''
     day_ago = timezone.now() - timedelta(days=1)
     with atomic():
         # El bloqueo sobre la RAIZ serializa las propuestas de esa linea: sin
@@ -2948,6 +3022,17 @@ def campaign_propose(request):
             return reply({'status': 'exists', 'id': existing.id})
         if Campaign.objects.filter(
                 proposed_token=token,
+                created__gte=day_ago).count() \
+                >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
+            return reply({'status': 'rate-limited', 'id': None}, 429)
+        # Sin cookie previa el token es NUEVO, asi que su contador vale cero
+        # por construccion y el tope de arriba no acota nada: bastaba con no
+        # devolver la cookie para proponer sin limite, y cada propuesta cuesta
+        # un recorrido de linaje entero.  A esas — y solo a esas — se les
+        # cuenta por direccion, como a las sugerencias de nombre.  El CGNAT
+        # sigue protegido: quien devuelve su cookie no entra aqui jamas.
+        if minted and Campaign.objects.filter(
+                proposed_ip=client_ip,
                 created__gte=day_ago).count() \
                 >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
             return reply({'status': 'rate-limited', 'id': None}, 429)
@@ -2969,7 +3054,8 @@ def campaign_propose(request):
                     # booleano mandaba) dice que si.
                     active=False,
                     proposed_by=proposed_by,
-                    proposed_token=token)
+                    proposed_token=token,
+                    proposed_ip=client_ip)
         except IntegrityError:
             return reply({'status': 'name-taken', 'id': None}, 409)
     return reply({'status': 'ok', 'id': campaign.id})
@@ -2981,6 +3067,13 @@ def campaign_vote(request, campaign_id):
     El recuento cacheado se reescribe con el ``COUNT`` real en la misma
     transaccion que el voto, nunca con un ``+1``: un incremento pierde una
     carrera y deja la portada mintiendo hasta que alguien lo note.
+
+    Pero un ``COUNT`` sin bloquear la campana pierde EXACTAMENTE la misma
+    carrera: dos votantes cuentan a la vez, los dos ven el mismo total y el
+    segundo lo reescribe con el numero del primero.  Aqui no hay nada que lo
+    repare despues — la desviacion es permanente y alimenta CAMPAIGN_BONUS —
+    asi que la campana se bloquea antes de contar y los votos concurrentes
+    hacen cola.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -2995,14 +3088,39 @@ def campaign_vote(request, campaign_id):
         return reply({'status': 'unknown-campaign', 'votes': 0}, 404)
     name = ' '.join((request.POST.get('name') or '').split())
     with atomic():
+        # El bloqueo va PRIMERO y sobre la campana, que es la fila cuyo
+        # recuento se va a reescribir: serializa a los votantes de ESTA
+        # campana y a nadie mas.
+        locked = (Campaign.objects.select_for_update()
+                  .filter(id=campaign.id).first())
+        if locked is None:
+            return reply({'status': 'unknown-campaign', 'votes': 0}, 404)
         _row, created = CampaignVote.objects.get_or_create(
-            campaign=campaign, token=token,
+            campaign=locked, token=token,
             defaults={'name': name[:CAMPAIGN_PROPOSER_MAX_CHARS]})
-        votes = CampaignVote.objects.filter(campaign=campaign).count()
-        if campaign.votes != votes:
-            campaign.votes = votes
-            campaign.save(update_fields=['votes'])
+        votes = _recount_campaign_votes(locked.id)
     return reply({'status': 'voted' if created else 'already', 'votes': votes})
+
+
+def _recount_campaign_votes(campaign_id):
+    """Reescribe la cache de votos con el COUNT que ve LA BASE.
+
+    Contar en Python y guardar despues deja una ventana entre las dos cosas, y
+    un voto que commitee justo ahi se pierde para siempre: no hay ninguna
+    pasada posterior que recalcule esta columna, y de ella come CAMPAIGN_BONUS.
+    Con el COUNT dentro del mismo UPDATE no hay ventana que perder.
+
+    Devuelve lo que quedo escrito, que es lo unico que se le puede contar al
+    votante sin volver a mentirle.
+    """
+    counted = Subquery(
+        CampaignVote.objects.filter(campaign=OuterRef('pk'))
+        .order_by().values('campaign').annotate(n=Count('pk')).values('n'),
+        output_field=IntegerField())
+    Campaign.objects.filter(id=campaign_id).update(
+        votes=Coalesce(counted, Value(0)))
+    return (Campaign.objects.filter(id=campaign_id)
+            .values_list('votes', flat=True).first() or 0)
 
 
 def campaign_state(request, campaign_id):
@@ -3172,13 +3290,17 @@ def explore(request, key):
             move['key'], child_route, child_anchor)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening)
-    unexplored = []
+    # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
+    # explorar" — sin explorar esta una respuesta que EXISTE y a la que nadie
+    # ha mirado, y esa se etiqueta en su propia fila (§ ingest.is_unexplored)
+    # — sino jugadas que todavia no son un nodo.  Pincharlas las crea.
+    offtree = []
     for uci in legal_ucis:
         if uci in known:
             continue
         child_fen = logic.apply_move(pos.fen, uci)
         child_key = logic.key_of(child_fen)
-        unexplored.append({
+        offtree.append({
             'uci': uci,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
@@ -3271,7 +3393,7 @@ def explore(request, key):
         'campaign_credit': _campaign_credit(request),
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
-        'unexplored': unexplored,
+        'offtree': offtree,
         # Spent ladder: a click here lands below, so the page shows the
         # cascade underneath from the first render, before any click.
         'frontier_exhausted': ingest.ladder_exhausted(pos),
