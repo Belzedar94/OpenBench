@@ -35,10 +35,13 @@ def create_default_campaign(apps, schema_editor):
     if ProofCampaign.objects.using(alias).filter(name=CAMPAIGN_NAME).exists():
         return
     key = hashlib.sha256(START_FEN.encode()).hexdigest()
-    root, _created = Position.objects.using(alias).get_or_create(
+    Position.objects.using(alias).get_or_create(
         key=key, defaults={'fen': START_FEN})
+    # FK por id crudo: asignar el OBJETO dispara allow_relation, y durante la
+    # pasada sombra el router la veta (el objeto vive en la base migrada, no
+    # en el alias seleccionado).  El id no pregunta a nadie.
     ProofCampaign.objects.using(alias).create(
-        name=CAMPAIGN_NAME, root=root, goal='WHITE_WIN', active=True,
+        name=CAMPAIGN_NAME, root_id=key, goal='WHITE_WIN', active=True,
         algorithm_version=1, repertoire_policy=dict(DEFAULT_POLICY))
 
 
