@@ -7,6 +7,7 @@ atomicdb-tier1-spec.md. Disciplina central: eval (heuristico) y status
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 
 class Status(models.TextChoices):
@@ -86,12 +87,101 @@ class Edge(models.Model):
 
 
 class Campaign(models.Model):
+    """Una CAMPANA DE EXPLORACION: una linea que la comunidad quiere trabajar.
+
+    El reparto de poder es deliberado y es lo unico que este modelo tiene que
+    hacer cumplir: cualquiera PROPONE y cualquiera VOTA, pero solo el
+    propietario ACTIVA.  Por eso el estado no es un booleano — ``PROPOSED`` y
+    ``PAUSED`` son cosas distintas y las dos son "no activa" — y por eso el
+    recuento de votos NO decide nada por si mismo: entra en el selector como
+    un peso (§ ingest.CAMPAIGN_BONUS) sobre una campana que ya esta ACTIVE.
+
+    ``active`` sobrevive como ESPEJO del estado, no como fuente de verdad.
+    Habia codigo desplegado leyendolo y borrar la columna en la misma
+    migracion que introduce ``state`` seria pedir una ventana de despliegue
+    atomica que nadie necesita; ``apply_state`` mantiene los dos de acuerdo y
+    la columna se retirara cuando no quede lector.
+
+    ``votes`` es una CACHE del ``COUNT`` de ``CampaignVote``: la fila
+    autoritativa es el voto, y esta columna existe para poder ordenar y
+    puntuar sin un GROUP BY por pasada del selector.  Quien la escribe la
+    recalcula entera, nunca la incrementa.
+    """
+
+    class CState(models.TextChoices):
+        PROPOSED = 'PROPOSED'   # en el buzon, esperando al propietario
+        ACTIVE   = 'ACTIVE'     # el selector la esta empujando
+        PAUSED   = 'PAUSED'     # activada y detenida; conserva sus etiquetas
+        DONE     = 'DONE'       # cerrada (raiz resuelta o archivada a mano)
+
+    # Estados en los que una campana sigue "viva" para el dedup de propuestas:
+    # proponer la misma raiz otra vez devuelve la que ya hay.  ``DONE`` no
+    # esta, y eso es lo que permite volver a proponer una linea archivada.
+    OPEN_STATES = (CState.PROPOSED, CState.ACTIVE, CState.PAUSED)
+
     name     = models.CharField(max_length=64, unique=True)
     root     = models.ForeignKey(Position, on_delete=models.PROTECT,
                                  related_name='campaign_roots')
     line_san = models.TextField(default='')      # para mostrar ("1.Nf3 f6 2.Nc3 Nh6")
-    active   = models.BooleanField(default=True)
+    active   = models.BooleanField(default=True)   # DEPRECADO: espejo de state
+    state    = models.CharField(max_length=8, choices=CState.choices,
+                                default=CState.PROPOSED, db_index=True)
+    votes    = models.IntegerField(default=0)      # cache del COUNT de votos
+    proposed_by = models.CharField(max_length=64, blank=True, default='')
+    # Cookie anonima del proponente.  No identifica a nadie; es lo unico que
+    # hace aplicable el tope de propuestas por visitante, que se cuenta contra
+    # la MISMA cookie que los votos (§ views._voter_token).
+    proposed_token = models.CharField(max_length=64, blank=True, default='',
+                                      db_index=True)
+    activated_at = models.DateTimeField(null=True)
     created  = models.DateTimeField(auto_now_add=True)
+
+    def apply_state(self, state, now=None):
+        """Cambia de estado dejando el espejo ``active`` de acuerdo.
+
+        Un ``save`` suelto sobre ``state`` dejaria las dos columnas mintiendo
+        la una sobre la otra, y la que leen los caminos antiguos es justo la
+        que se quedaria vieja.  Una sola puerta, como en el resto del modulo.
+        """
+        fields = ['state', 'active']
+        self.state = state
+        self.active = state == self.CState.ACTIVE
+        if state == self.CState.ACTIVE:
+            self.activated_at = now or timezone.now()
+            fields.append('activated_at')
+        self.save(update_fields=fields)
+        return self
+
+    def __str__(self):
+        return f'{self.name} ({self.state})'
+
+
+class CampaignVote(models.Model):
+    """Un voto por campana y por visitante, sin cuenta.
+
+    La identidad es una cookie opaca, no una IP: una IP compartida (un
+    campus, un movil detras de CGNAT) es una persona sola a efectos de rate
+    limit y son cincuenta a efectos de voto, y elegir la IP habria roto una de
+    las dos.  No pretende ser infalsificable — borrar la cookie da otro voto —
+    sino proporcionado a lo que decide, que es un ORDEN en una lista que el
+    propietario mira antes de activar nada.
+
+    ``name`` es opcional y decorativo: quien quiere que se sepa que voto lo
+    dice, y quien no, no.
+    """
+
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE,
+                                 related_name='vote_rows')
+    token    = models.CharField(max_length=64)
+    name     = models.CharField(max_length=64, blank=True, default='')
+    created  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['campaign', 'token'], name='uniq_campaign_vote')]
+
+    def __str__(self):
+        return f'vote for campaign {self.campaign_id}'
 
 
 class AnalysisTask(models.Model):
