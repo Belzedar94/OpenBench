@@ -35,7 +35,15 @@ def state_from_active(apps, schema_editor):
 
 
 def active_from_state(apps, schema_editor):
-    """Vuelta atras: el booleano recupera el papel de fuente de verdad."""
+    """Vuelta atras: el booleano recupera el papel de fuente de verdad.
+
+    NO es un viaje de ida y vuelta sin perdidas, y no puede serlo: cuatro
+    estados no caben en un bit.  Bajar y volver a subir convierte una
+    ``PROPOSED`` en ``DONE``, porque al bajar se quedo en ``active=False`` y
+    eso, en el vocabulario viejo, solo significaba "cerrada".  Esto es una
+    salida de emergencia para retirar la funcion, no una migracion reversible
+    en el sentido fuerte.
+    """
     Campaign = apps.get_model('atomicdb', 'Campaign')
     Campaign.objects.filter(state='ACTIVE').update(active=True)
     Campaign.objects.exclude(state='ACTIVE').update(active=False)
