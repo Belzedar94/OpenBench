@@ -128,7 +128,10 @@ def get_or_create_position(fen, campaign_id=None):
 
     ``campaign_id`` solo viaja en los ``defaults``, y eso es la mitad de la
     politica de etiquetado: una posicion que YA existia conserva su dueno (o
-    su ausencia de dueno) pase lo que pase.  La otra mitad esta en ``expand``.
+    su ausencia de dueno) pase lo que pase.  La otra mitad la ponen los tres
+    sitios que MATERIALIZAN nodos bajo un padre — ``expand``,
+    ``materialise_won_line`` y el ``goto`` del explorador — pasando el dueno
+    del padre.  El razonamiento entero esta en ``expand``.
     """
     fen = logic.canonical_fen(fen)
     key = logic.key_of(fen)
@@ -1136,8 +1139,12 @@ def materialise_won_line(pos, verify=False):
     for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
         if uci not in logic.legal_moves(node.fen):
             break                       # testigo historico ya no legal
+        # Misma herencia que en ``expand``: la PV verificada tambien
+        # materializa nodos nuevos, y los que nacen bajo una campana son
+        # suyos.  Por el ``campaign_id`` y no por la instancia, que aqui
+        # ademas se pagaria una vez por ply.
         child = get_or_create_position(logic.apply_move(node.fen, uci),
-                                       campaign=node.campaign)
+                                       campaign_id=node.campaign_id)
         _edge, made = Edge.objects.get_or_create(
             parent=node, move_uci=uci, defaults={'child': child})
         if made:

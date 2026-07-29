@@ -422,6 +422,21 @@ class InheritanceTests(TestCase):
 
         self.assertEqual({child.campaign_id for child in children}, {None})
 
+    def test_a_node_born_from_a_click_in_the_explorer_inherits_too(self):
+        """``expand`` no es el unico sitio que materializa nodos: navegar por
+        el tablero tambien crea el hijo, y la herencia tiene que ser la misma
+        o una campana se llenaria de agujeros por donde paso una persona."""
+        parent = _line('g1f3')
+        campaign = _campaign_on(parent)
+        _tag(campaign, parent)
+
+        Client().get(f'/atomicdb/goto/{parent.key}/g8f6/')
+
+        child_key = logic.key_of(logic.canonical_fen(
+            logic.apply_move(parent.fen, 'g8f6')))
+        self.assertEqual(Position.objects.get(key=child_key).campaign_id,
+                         campaign.id)
+
 
 class SelectorBonusTests(TestCase):
     """El peso de una campana en el selector, y lo que NO puede comprar."""

@@ -1243,8 +1243,11 @@ def goto(request, key, uci):
     )
     if uci not in logic.legal_moves(pos.fen):
         return redirect(_explore_url(key, active_ucis, current_anchor))
+    # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
+    # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
+    # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
     child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
-                                          campaign=pos.campaign)
+                                          campaign_id=pos.campaign_id)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                defaults={'child': child})
     if child.status != 'UNKNOWN':
