@@ -67,7 +67,14 @@ def ago(moment):
     pasar.
     """
     text = timesince(moment, depth=1)
-    return 'just now' if text.startswith('0 ') else f'{text} ago'
+    # ``timesince`` une numero y unidad con un espacio DURO para que no se
+    # partan al final de una linea, asi que el numero se saca partiendo por
+    # espacios — que en Python incluye el duro — y no comparando un prefijo
+    # contra un espacio normal, que no casaria nunca.  Lo que se devuelve
+    # conserva el espacio duro, que es lo que se quiere al pintarlo.
+    if text.split()[:1] == ['0']:
+        return 'just now'
+    return f'{text} ago'
 
 
 def presented(username, limit=DROPDOWN_ROWS):

@@ -334,12 +334,14 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
 }
 
 /* Registrarse es lo unico que esta cabecera PIDE, asi que es lo unico que
-   lleva forma de boton.  Contorno, no relleno: por encima esta la marca y al
-   lado el menu, y un boton macizo aqui se comeria a los dos. */
+   lleva forma de boton.  Contorno y no relleno — por encima esta la marca y
+   al lado el menu, y un boton macizo se comeria a los dos — y el mismo radio
+   y el mismo borde que ``.reqbtn``, que es la forma que en esta casa
+   significa "esto se pulsa". */
 .identity-cta {
   padding: .28rem .7rem;
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: 8px;
   color: var(--ink);
 }
 

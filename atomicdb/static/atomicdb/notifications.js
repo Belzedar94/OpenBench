@@ -29,9 +29,14 @@
     bell.setAttribute('aria-expanded', visible ? 'true' : 'false');
   }
 
+  // La insignia y el nombre accesible del boton dicen lo mismo, asi que se
+  // apagan juntos: dejar el "4 new" del lector de pantalla despues de abrir
+  // el panel seria contarle a alguien un estado que ya no existe.
   function clearBadge() {
     const badge = bell.querySelector('.bell-badge');
     if (badge) badge.remove();
+    const label = bell.querySelector('.visually-hidden');
+    if (label && label.dataset.quiet) label.textContent = label.dataset.quiet;
   }
 
   // El marcado es del servidor; esto solo se lo pide sin recargar. Falla en

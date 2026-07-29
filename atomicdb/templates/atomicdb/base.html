@@ -63,8 +63,8 @@
             <path d="M18 15.4V10a6 6 0 1 0-12 0v5.4l-1.5 2.1h15z"></path>
             <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
           </svg>
-          <span class="visually-hidden">Analyses you asked for</span>
-          {% if notifications_badge %}<span class="bell-badge">{{ notifications_badge }}</span>{% endif %}
+          <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for{% if notifications_unseen %}, {{ notifications_unseen }} new{% endif %}</span>
+          {% if notifications_badge %}<span class="bell-badge" aria-hidden="true">{{ notifications_badge }}</span>{% endif %}
         </button>
       </form>
       <div class="bell-panel" id="bell-panel" hidden>
