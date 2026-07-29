@@ -11,14 +11,13 @@ from datetime import timedelta
 from unittest import expectedFailure
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.test import Client, override_settings
 from django.utils import timezone
 
 from . import ingest, logic, proof
 from .models import (AnalysisTask, Campaign, CampaignVote, Edge, Position,
                      SolveTask)
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 CACHE_FOR_TESTS = {
     'default': {
@@ -171,7 +170,7 @@ class ProofSelectorAttemptCapTests(TestCase):
 class SolveLeaseRestartTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         self.root = ingest.get_or_create_position(logic.start_fen())
         self.campaign = proof.ProofCampaign.objects.first()
         SolveTask.objects.create(position=self.root, campaign=self.campaign,

@@ -8,19 +8,18 @@ priority still rules AUTO/FILL/SEED, where the selector computes it for
 exactly that purpose.
 """
 
-from django.contrib.auth.models import User
 from django.test import Client
 
 from . import ingest, logic
 from .models import AnalysisTask, Edge, Position
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 class UserBandFifoTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user(username='w', password='p')
-        User.objects.create_user(username='lesha', password='p')
+        worker_account('w', 'p')
+        worker_account('lesha', 'p')
         self.client = Client()
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)

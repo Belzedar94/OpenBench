@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from . import ingest, logic
 from .models import AnalysisTask, Edge, Position
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 class LogicTests(TestCase):
@@ -422,8 +422,7 @@ class RequestTests(TestCase):
             'username': 'u', 'password': 'p', 'machine': 'm2', 'tb': '1',
             'worker_build': '2026072203', 'lease_session': 'session-m2',
         }
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         premature = self.client.post('/atomicdb/api/lease', lease_payload)
         self.assertNotIn(follow_up.id,
                          [row['id'] for row in premature.json()['tasks']])
@@ -435,8 +434,7 @@ class RequestTests(TestCase):
         self.assertEqual(ready.json()['tasks'][0]['id'], follow_up.id)
 
     def test_deep_follow_up_is_not_run_after_shallow_visit_solves_position(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         AnalysisTask.objects.create(
             position=p, generation=0, budget_nodes=8_000_000,
@@ -467,8 +465,7 @@ class RequestTests(TestCase):
 
     def test_user_requests_leased_first(self):
         import json
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         a = ingest.get_or_create_position(logic.start_fen())
         b = ingest.get_or_create_position(
             logic.apply_move(logic.start_fen(), 'e2e4'))
@@ -642,9 +639,8 @@ class MachineVisibilityTests(TestCase):
 
     def test_lease_and_submit_update_ping(self):
         import json
-        from django.contrib.auth.models import User
         from .models import WorkerPing
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         ingest.get_or_create_position(logic.start_fen())
         payload = {'username': 'u', 'password': 'p', 'machine': 'u-atomicdb',
                    'threads': 8, 'hash': 1024, 'os': 'TestOS 1'}
@@ -674,10 +670,9 @@ class MachineVisibilityTests(TestCase):
         self.assertEqual(task.elapsed_seconds, 2.5)
 
     def test_heartbeat_tracks_current_task_and_keeps_original_lease_time(self):
-        from django.contrib.auth.models import User
         from django.utils import timezone
         from .models import WorkerPing
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         pos = ingest.get_or_create_position(logic.start_fen())
         original_lease = timezone.now() - timedelta(minutes=59)
         task = AnalysisTask.objects.create(
@@ -700,11 +695,10 @@ class MachineVisibilityTests(TestCase):
         self.assertIsNotNone(task.lease_heartbeat_at)
 
     def test_capacity_touch_does_not_overwrite_concurrent_telemetry(self):
-        from django.contrib.auth.models import User
         from django.test import RequestFactory
         from .models import WorkerPing
         from .views import _touch_worker
-        user = User.objects.create_user('u', password='p')
+        user = worker_account('u', 'p')
         stamp = timezone.now() - timedelta(minutes=5)
         ping = WorkerPing.objects.create(
             machine='m1', user='u', tasks_done=7, current_task_id=99,
@@ -722,9 +716,8 @@ class MachineVisibilityTests(TestCase):
 
     def test_non_finite_elapsed_is_safely_ignored(self):
         import json
-        from django.contrib.auth.models import User
         from .models import WorkerPing
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         ingest.get_or_create_position(logic.start_fen())
         payload = {'username': 'u', 'password': 'p', 'machine': 'm1'}
         task = self.client.post('/atomicdb/api/lease', payload).json()['tasks'][0]
@@ -934,8 +927,7 @@ class TbRoutingTests(TestCase):
         return [t['fen'] for t in json.loads(r.content)['tasks']]
 
     def setUp(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         self.lease_number = 0
         self.tbpos = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
         self.normal = ingest.get_or_create_position(logic.start_fen())
@@ -978,9 +970,8 @@ class LeaseReclaimTests(TestCase):
 
     def test_same_machine_does_not_steal_healthy_lease(self):
         import json
-        from django.contrib.auth.models import User
         from django.utils import timezone
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=1000, state='LEASED', machine='m1',
@@ -998,8 +989,7 @@ class LeaseReclaimTests(TestCase):
                          ('LEASED', 'm1', 1, 'healthy-token'))
 
     def test_same_machine_recycles_only_stale_lease(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=1000, state='LEASED', machine='m1',
@@ -1020,8 +1010,7 @@ class LeaseReclaimTests(TestCase):
         self.assertEqual(leased['lease_token'], task.lease_token)
 
     def test_assignment_token_fences_stale_same_machine_process(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         AnalysisTask.objects.create(position=p, budget_nodes=1000)
         payload = {
@@ -1054,8 +1043,7 @@ class LeaseReclaimTests(TestCase):
         self.assertEqual(valid_submit.status_code, 200)
 
     def test_recycled_task_waits_for_token_capable_worker(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=1000, state='PENDING', attempts=1)
@@ -1077,8 +1065,7 @@ class LeaseReclaimTests(TestCase):
         self.assertTrue(modern['lease_token'])
 
     def test_deep_first_attempt_waits_for_token_capable_worker(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=10_000_000_000, state='PENDING')
@@ -1095,8 +1082,7 @@ class LeaseReclaimTests(TestCase):
         self.assertEqual(modern['id'], task.id)
 
     def test_same_session_replays_lost_lease_response_idempotently(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(position=p, budget_nodes=1000)
         payload = {
@@ -1122,9 +1108,8 @@ class LeaseReclaimTests(TestCase):
 
     def test_recent_heartbeat_prevents_expired_assignment_reclaim(self):
         import json
-        from django.contrib.auth.models import User
         from django.utils import timezone
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=10_000_000_000, state='LEASED',
@@ -1141,8 +1126,7 @@ class LeaseReclaimTests(TestCase):
         self.assertEqual((task.state, task.machine), ('LEASED', 'm1'))
 
     def test_predeploy_tokenless_deep_lease_gets_drain_window(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=10_000_000_000, state='LEASED',
@@ -1158,8 +1142,7 @@ class LeaseReclaimTests(TestCase):
         self.assertEqual((task.state, task.machine), ('LEASED', 'm1'))
 
     def test_postdeploy_tokenless_lease_recycles_after_one_hour(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         old = timezone.now() - timedelta(hours=2)
         task = AnalysisTask.objects.create(
@@ -1177,9 +1160,8 @@ class LeaseReclaimTests(TestCase):
         self.assertTrue(task.lease_token)
 
     def test_stale_assignment_and_stale_heartbeat_are_reclaimed(self):
-        from django.contrib.auth.models import User
         from django.utils import timezone
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())
         task = AnalysisTask.objects.create(
             position=p, budget_nodes=10_000_000_000, state='LEASED',
@@ -1200,8 +1182,7 @@ class SearchmovesTests(TestCase):
     """El lease manda las jugadas vivas: el motor no re-deriva lo demostrado."""
 
     def setUp(self):
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
 
     def _lease_task(self, pos):
         import json
@@ -1529,8 +1510,7 @@ class NodesAccountingTests(TestCase):
 
     def test_actual_nodes_recorded_not_budget(self):
         import json
-        from django.contrib.auth.models import User
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         ingest.get_or_create_position(logic.start_fen())
         payload = {'username': 'u', 'password': 'p', 'machine': 'm', 'tb': '1'}
         lease = self.client.post('/atomicdb/api/lease', payload)

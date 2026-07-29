@@ -1,19 +1,20 @@
 import json
 from unittest import mock
 
-from django.contrib.auth.models import User
 from django.utils import timezone
+
+from OpenBench.models import Profile
 
 from . import ingest, ingest_queue, logic
 from .database import connection
 from .models import AnalysisTask, DBEvent, IngestJob, Position
-from .testing import TestCase, TransactionTestCase
+from .testing import TestCase, TransactionTestCase, worker_account
 
 
 class SubmitFencingTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('worker', password='secret')
+        worker_account('worker', 'secret')
         self.position = ingest.get_or_create_position(logic.start_fen())
         self.base = {
             'username': 'worker',
@@ -195,7 +196,7 @@ class SubmitPreparationBoundaryTests(TransactionTestCase):
     reset_sequences = True
 
     def setUp(self):
-        User.objects.create_user('worker', password='secret')
+        worker_account('worker', 'secret')
 
     def _leased_task(self, fen):
         position = ingest.get_or_create_position(fen)
@@ -245,3 +246,49 @@ class SubmitPreparationBoundaryTests(TransactionTestCase):
             ingest_queue.drain()
 
         tb_probe.assert_called_once()
+
+
+class ExpelledAccountTests(TestCase):
+    """Expulsar a alguien tiene que cerrarle tambien el protocolo.
+
+    ``Profile.enabled`` es el interruptor con el que se echa a una cuenta del
+    sitio.  Mientras ``_auth`` solo miraba usuario y contrasena, el expulsado
+    conservaba intactos el arriendo, el latido y la entrega de resultados: se
+    le cerraba la puerta de delante y se le dejaba abierta la de atras.
+    """
+
+    def setUp(self):
+        worker_account('expelled', 'pw', enabled=False)
+        self.position = ingest.get_or_create_position(logic.start_fen())
+        self.credentials = {'username': 'expelled', 'password': 'pw',
+                            'machine': 'box-1'}
+
+    def _post(self, url, **extra):
+        return self.client.post(url, dict(self.credentials, **extra))
+
+    def test_a_disabled_account_cannot_lease(self):
+        AnalysisTask.objects.create(position=self.position, generation=0,
+                                    budget_nodes=1_000, state='PENDING')
+
+        response = self._post('/atomicdb/api/lease')
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AnalysisTask.objects.filter(state='LEASED').count(), 0)
+
+    def test_the_rest_of_the_protocol_is_closed_too(self):
+        for url in ('/atomicdb/api/heartbeat', '/atomicdb/api/submit',
+                    '/atomicdb/api/solve/acquire',
+                    '/atomicdb/api/solve/heartbeat',
+                    '/atomicdb/api/solve/submit'):
+            with self.subTest(url=url):
+                self.assertEqual(self._post(url).status_code, 403)
+
+    def test_re_enabling_the_account_gives_the_protocol_back(self):
+        Profile.objects.filter(user__username='expelled').update(enabled=True)
+        AnalysisTask.objects.create(position=self.position, generation=0,
+                                    budget_nodes=1_000, state='PENDING')
+
+        response = self._post('/atomicdb/api/lease')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()['tasks']), 1)

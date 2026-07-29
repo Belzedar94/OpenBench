@@ -161,8 +161,24 @@ class PlayRouteConflict(PlayRouteError):
 
 
 def _auth(request):
+    """Credenciales de worker: usuario correcto Y cuenta habilitada.
+
+    Expulsar a alguien es ponerle ``Profile.enabled`` a False, y hasta ahora
+    eso solo le cerraba OpenBench: sus workers seguian arrendando, latiendo y
+    entregando analisis aqui como el primer dia.  El criterio es el mismo que
+    el del protocolo de OpenBench (``authenticate(requireEnabled=True)``): sin
+    perfil habilitado no hay usuario, y quien llame recibe el mismo 403 que
+    quien se equivoca de contrasena.
+    """
+    # Import local, como en ``_approver_gate``: mantiene a AtomicDB importable
+    # sin arrastrar OpenBench.
+    from OpenBench.models import Profile
     user = authenticate(username=request.POST.get('username', ''),
                         password=request.POST.get('password', ''))
+    if user is None:
+        return None
+    if not Profile.objects.filter(user=user, enabled=True).exists():
+        return None
     return user
 
 

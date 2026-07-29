@@ -10,19 +10,18 @@ the emergency flag brings the old behaviour back through the same code.
 from io import StringIO
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import override_settings
 
 from . import ingest, logic
 from .models import AnalysisTask, Position
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 class SelectorOutOfRequestTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('worker', password='pw')
+        worker_account('worker', 'pw')
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
 

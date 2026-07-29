@@ -9,13 +9,12 @@ engine's own `solve` command, byte for byte.
 from io import StringIO
 from unittest.mock import patch
 
-from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 
 from . import ingest, logic, solve
 from .models import (DBEvent, Position, ProofCampaign, SolveTask)
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 # Straight out of `solve 7k/6p1/8/8/8/8/8/Q3K3 w - - 0 1`: Qa1xg7 explodes
 # g7 and the king on h8 with it.
@@ -221,7 +220,7 @@ T mate
 class SolveProtocolTests(TestCase):
 
     def setUp(self):
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         self.pos = ingest.get_or_create_position(MATE_IN_ONE_FEN)
         self.campaign = ProofCampaign.objects.filter(active=True).first()
         self.task = SolveTask.objects.create(

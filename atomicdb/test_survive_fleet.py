@@ -17,7 +17,7 @@ from . import ingest, logic, survive
 from .models import DBEvent, Position, SolveTask
 from .test_survive import (KING_WALK_ROOT, _emit, _expand, _shuffle_policy,
                            _thresholds)
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 MINED = (pathlib.Path(__file__).resolve().parent / 'data' / 'survive50'
          / 'mined_king_walk.cert')
@@ -76,8 +76,7 @@ class FortressClassifierTests(TestCase):
 
     def test_it_fires_on_telemetry_that_travelled_the_real_wire(self):
         """End to end through the submit endpoint, not a hand-made dict."""
-        from django.contrib.auth.models import User
-        User.objects.create_user('solver', password='pw')
+        worker_account('solver', 'pw')
         position = ingest.get_or_create_position(KING_WALK_ROOT)
         task = SolveTask.objects.create(position=position, goal='WHITE_WIN',
                                         budget_nodes=1_000, state='LEASED',

@@ -14,7 +14,7 @@ from django.test import override_settings
 
 from . import ingest, logic
 from .models import AnalysisTask, DBEvent, Edge, Position, RequestLog
-from .testing import TestCase
+from .testing import TestCase, worker_account
 
 
 def _exhaust_ladder(pos, budget=None):
@@ -750,9 +750,8 @@ class ExpansionRequestApiTests(TestCase):
         self.assertEqual(RequestLog.objects.filter(position=pos).count(), 2)
 
     def test_an_expanded_child_is_immediately_leasable(self):
-        from django.contrib.auth.models import User
 
-        User.objects.create_user('u', password='p')
+        worker_account('u', 'p')
         pos = self._exhausted_root()
         self.client.post(f'/atomicdb/request/{pos.key}/')
 
