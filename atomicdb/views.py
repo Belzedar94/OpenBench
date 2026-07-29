@@ -723,7 +723,21 @@ def api_solve_acquire(request):
                 # The first response may have been lost after the commit.
                 # Replay the same assignment without burning an attempt.
                 return JsonResponse({'tasks': [_solve_payload(active)]})
-            return JsonResponse({'tasks': []})
+            # REINICIO frente a ROBO, el mismo relevo que ya tiene api_lease
+            # (incidente t24).  Una sesion distinta con el latido del titular
+            # ya frio no es un segundo proceso robandole trabajo vivo: es su
+            # relevo pidiendo con su misma identidad de maquina.  Sin esto un
+            # solver relanzado se queda mirando los 20 minutos enteros de
+            # SOLVE_LEASE_MINUTES con la cola llena.
+            beat = active.lease_heartbeat_at or active.leased_at
+            dead = now - timedelta(minutes=RESTART_RECYCLE_MINUTES)
+            if beat is None or beat >= dead:
+                return JsonResponse({'tasks': []})
+            SolveTask.objects.filter(id=active.id, state='LEASED').update(
+                state='PENDING', machine='', lease_heartbeat_at=None,
+                lease_token='', lease_session='')
+            # El relevo no espera al proximo poll: con el zombi reciclado,
+            # ESTA misma peticion baja a elegir tarea.
 
         # Orden: primero todo lo que NO es deuda (peticiones, piloto), y
         # dentro de cada grupo el presupuesto mayor primero.  La deuda de

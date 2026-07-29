@@ -2,7 +2,7 @@
 
 Un test SIN ``expectedFailure`` es un hallazgo YA ARREGLADO y esta aqui como
 regresion (C1 cascada con save completo, C2 carrera de cierre de hijos, A2
-cota de intentos del selector df-pn).  Un
+cota de intentos del selector df-pn, A3 relevo del solver reiniciado).  Un
 test CON el decorador reproduce un hallazgo aun abierto, de forma minima y
 determinista: arreglarlo consiste en quitar el decorador y ver el test pasar.
 """
@@ -181,7 +181,6 @@ class SolveLeaseRestartTests(TestCase):
             'username': 'solver', 'password': 'pw', 'machine': 'box-1',
             'lease_session': session, 'threads': 1, 'hash': 64})
 
-    @expectedFailure
     def test_a_restarted_solver_is_relieved_like_an_analysis_worker(self):
         first = self._acquire('session-a')
         self.assertEqual(len(first.json()['tasks']), 1)
