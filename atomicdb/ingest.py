@@ -301,7 +301,23 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
-        pos.last_analysis = capped_analysis(lines[:8])
+        # El ESCAPARATE de lineas no se pisa hacia abajo.  Un visitante pide
+        # MultiPV 5 y ve sus cinco lineas; si luego un pase FILL con
+        # searchmoves (1-2 lineas, 8M) re-toca la posicion, ese pase aporta
+        # conocimiento (eval/best_move siguen actualizandose SIEMPRE) pero
+        # no debe sustituir la foto ancha por una rendija — 275 de 400
+        # posiciones revisitadas tenian el clobber cuando Wolfram lo reporto
+        # (29-jul).  Un analisis mas PROFUNDO si sustituye aunque sea mas
+        # estrecho: esa es la politica deliberada de MultiPV 2 en revisitas.
+        snapshot = capped_analysis(lines[:8])
+        if snapshot:
+            snapshot[0]['_budget'] = nodes_budget
+        stored = pos.last_analysis or []
+        stored_budget = (stored[0].get('_budget', 0)
+                         if stored and isinstance(stored[0], dict) else 0)
+        if (not stored or len(snapshot) >= len(stored)
+                or nodes_budget >= stored_budget):
+            pos.last_analysis = snapshot
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:

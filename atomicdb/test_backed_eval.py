@@ -435,6 +435,36 @@ class BackedIngestTests(TestCase):
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
 
+    def test_a_narrow_shallow_pass_does_not_clobber_the_wide_snapshot(self):
+        """The raw-lines showcase never downgrades; knowledge always flows.
+
+        A visitor requests MultiPV 5 and reads five lines; a later FILL
+        pass with searchmoves re-touches the position with two lines at 8M
+        and used to replace the whole snapshot — 275 of 400 revisited
+        positions carried the clobber when Wolfram reported seeing one
+        line where five were promised.  Narrow-and-shallower keeps its
+        knowledge (eval and best_move still update) but not the showcase;
+        DEEPER passes still replace it even when narrower, because that is
+        the deliberate depth-over-width revisit policy.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 128_000_000)
+        pos.refresh_from_db()
+        self.assertEqual(len(pos.last_analysis), 5)
+
+        ingest.ingest_analysis(pos.key, self._lines(pos, [90, 80]), 8_000_000)
+        pos.refresh_from_db()
+        self.assertEqual(len(pos.last_analysis), 5)   # escaparate intacto
+        self.assertEqual(pos.eval_cp, 90)             # conocimiento fluye
+
+        ingest.ingest_analysis(pos.key, self._lines(pos, [70, 60]),
+                               512_000_000)
+        pos.refresh_from_db()
+        self.assertEqual(len(pos.last_analysis), 2)   # mas profundo SI pisa
+
     def test_navigating_onto_a_terminal_closes_the_parent_at_once(self):
         """A goto can DISCOVER a mate — the cascade must fire right there.
 
