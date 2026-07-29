@@ -868,7 +868,10 @@ class SolvedExploreTests(TestCase):
         p.save()
         r = self.client.get(f'/atomicdb/explore/{p.key}/')
         html = r.content.decode()
-        self.assertIn('unexplored', html)
+        # Sin una sola arista, TODA jugada legal esta fuera del arbol: seguirla
+        # es lo que la crea.  Eso no es "sin explorar" — sin explorar esta una
+        # respuesta que ya existe y que nadie ha mirado.
+        self.assertIn('not in tree', html)
         self.assertIn(f'/atomicdb/goto/{p.key}/d7d5/', html)
         self.assertNotIn('Not expanded yet', html)
 

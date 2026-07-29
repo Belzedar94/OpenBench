@@ -1960,6 +1960,10 @@ def _child_moves(pos):
                          else min(n, 999)) * 1e-3
         pn, dn = numbers.get(c.key, (None, None))
         moves.append({'uci': e.move_uci, 'key': c.key, 'status': c.status,
+                      # MISMO predicado que cuenta el boton de la cabecera
+                      # (§ ingest.is_unexplored): la fila y el boton tienen
+                      # que hablar de la misma poblacion o el numero miente.
+                      'unexplored': ingest.is_unexplored(c),
                       'pn_h': None if pn is None else proof.format_number(pn),
                       'dn_h': None if dn is None else proof.format_number(dn),
                       'closure': c.closure, 'score': score, 'rank': rank,
@@ -3249,13 +3253,17 @@ def explore(request, key):
             move['key'], child_route, child_anchor)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening)
-    unexplored = []
+    # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
+    # explorar" — sin explorar esta una respuesta que EXISTE y a la que nadie
+    # ha mirado, y esa se etiqueta en su propia fila (§ ingest.is_unexplored)
+    # — sino jugadas que todavia no son un nodo.  Pincharlas las crea.
+    offtree = []
     for uci in legal_ucis:
         if uci in known:
             continue
         child_fen = logic.apply_move(pos.fen, uci)
         child_key = logic.key_of(child_fen)
-        unexplored.append({
+        offtree.append({
             'uci': uci,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
@@ -3348,7 +3356,7 @@ def explore(request, key):
         'campaign_credit': _campaign_credit(request),
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
-        'unexplored': unexplored,
+        'offtree': offtree,
         # Spent ladder: a click here lands below, so the page shows the
         # cascade underneath from the first render, before any click.
         'frontier_exhausted': ingest.ladder_exhausted(pos),

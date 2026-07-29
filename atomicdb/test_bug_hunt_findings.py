@@ -1,15 +1,22 @@
 ﻿"""Pruebas DEMOSTRATIVAS de la revision de caza de bugs.
 
-Un test SIN ``expectedFailure`` es un hallazgo YA ARREGLADO y esta aqui como
-regresion (C1 cascada con save completo, C2 carrera de cierre de hijos, A2
-cota de intentos del selector df-pn, A3 relevo del solver reiniciado).  Un
-test CON el decorador reproduce un hallazgo aun abierto, de forma minima y
-determinista: arreglarlo consiste en quitar el decorador y ver el test pasar.
+Un test CON ``expectedFailure`` reproduce un hallazgo aun ABIERTO, de forma
+minima y determinista: arreglarlo consiste en quitar el decorador y ver el
+test pasar.  Ya no queda ninguno — los ocho hallazgos que este fichero
+demostraba estan cerrados y lo que se lee abajo son sus regresiones:
+
+    1. C1  la cascada guardaba la fila entera y revertia lo ajeno
+    2. C2  dos consumers cerraban el mismo hijo sobre una foto vieja
+    3. A2  el selector df-pn perdia su cota de intentos dentro de /api/lease
+    4. A3  el arriendo SOLVE no tenia relevo tras reinicio
+    5. M3  el recuento de votos se contaba en Python y se guardaba despues
+    6. A4  la home cacheada repartia el token CSRF del primer visitante
+    7. M4  el boton y las filas llamaban "unexplored" a poblaciones distintas
+    8. M5  el tope de propuestas se evadia tirando la cookie
 """
 
 import re
 from datetime import timedelta
-from unittest import expectedFailure
 from unittest.mock import patch
 
 from django.test import Client, override_settings
@@ -274,7 +281,6 @@ class CookielessHomeCacheTests(TestCase):
 # ---------------------------------------------------------------------------
 class UnexploredLabelTests(TestCase):
 
-    @expectedFailure
     def test_the_button_count_and_the_unexplored_rows_agree(self):
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)          # todas las aristas existen, ningun eval

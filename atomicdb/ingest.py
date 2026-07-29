@@ -2994,19 +2994,28 @@ def adversarial_arms_enabled():
 UNEXPLORED_CLICK_CAP = 64
 
 
-def unexplored_children(pos):
-    """Hijos materializados sobre los que el arbol no sabe NADA todavia.
+def is_unexplored(child):
+    """SIN EXPLORAR: el arbol no sabe NADA de esta jugada todavia.
 
     Ni status, ni respaldo, ni eval propia.  Un hijo con respaldo pero sin
-    eval propia NO cuenta: de ese ya sabemos algo, y este boton existe para
-    los huecos, no para re-pedir lo que ya tiene valor.
+    eval propia NO cuenta: de ese ya sabemos algo, y el boton de la pagina
+    existe para los huecos, no para re-pedir lo que ya tiene valor.
+
+    Vive aqui, con nombre, porque la pagina tiene que ETIQUETAR con el mismo
+    criterio con el que el boton CUENTA: mientras fueron dos predicados, el
+    boton ofrecia "analizar 20 respuestas sin explorar" encima de una tabla
+    con cero filas asi.
     """
+    return (child.status == 'UNKNOWN' and child.eval_cp is None
+            and child.backed_eval is None)
+
+
+def unexplored_children(pos):
+    """Los hijos MATERIALIZADOS de ``pos`` que siguen sin explorar."""
     return [edge.child for edge in
             Edge.objects.filter(parent=pos).select_related('child')
             .order_by('id')
-            if edge.child.status == 'UNKNOWN'
-            and edge.child.eval_cp is None
-            and edge.child.backed_eval is None]
+            if is_unexplored(edge.child)]
 
 
 def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
