@@ -25,6 +25,8 @@
 {% endif %}
 
 {% if has_frontier or has_attribution %}
+<details class="proof-health">
+  <summary class="dim">Proof health &amp; closures by source</summary>
 <div class="progress">
   {% if has_frontier or has_human_close %}
   <div class="pkpis dim">Proof health
@@ -48,6 +50,7 @@
     are counted in none of the shares above.</div>
   {% endif %}
 </div>
+</details>
 {% endif %}
 
 <form class="fenbox" method="post" action="/atomicdb/fen/">{% csrf_token %}

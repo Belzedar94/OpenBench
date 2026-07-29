@@ -22,12 +22,14 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
 # Visitor-requested reanalysis is deliberately steeper than autonomous tree
-# exploration: 512M -> 2B -> 10B.  The 128M first rung died on 28-jul by
-# owner's order: with a 288-core contributor chewing probes in seconds, a
-# first look that shallow wasted the click AND the box.  Legacy note: builds
-# older than LEASE_TOKEN_BUILD cannot take >128M tasks, so every first-visit
-# USER probe now needs a token-capable worker — the whole fleet already is.
-REQUEST_BUDGET_LADDER = [512_000_000, 2_000_000_000, 10_000_000_000]
+# exploration: 128M -> 512M -> 2B -> 10B.  El primer peldano SIGUE a la
+# capacidad donada (orden del propietario): 512M mientras las cajas de 288
+# cores masticaban sondas en segundos (28-jul), de vuelta a 128M cuando la
+# flota se fue (29-jul).  Si vuelve capacidad grande, subirlo es cambiar
+# esta lista y nada mas: el suelo del boton masivo y los tests siguen a
+# REQUEST_BUDGET_LADDER[0] mecanicamente.
+REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
+                         10_000_000_000]
 # Once the last rung is spent, buying it again would only repeat a search we
 # already have.  The request then becomes a proof-number style expansion of
 # the frontier one ply below: an OR node (the attacker of the conjecture,

@@ -758,6 +758,21 @@ h2 {
   font-size: .9rem;
 }
 
+/* Los KPIs de salud de la prueba son para quien los busca, no para la
+   portada entera: plegados por defecto (peticion del propietario, 29-jul). */
+.proof-health {
+  margin-bottom: .9rem;
+}
+
+.proof-health summary {
+  cursor: pointer;
+  font-size: .9rem;
+}
+
+.proof-health[open] summary {
+  margin-bottom: .4rem;
+}
+
 .linebox {
   margin-bottom: .9rem;
   padding: .55rem .8rem;
