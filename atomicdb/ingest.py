@@ -86,7 +86,7 @@ MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 # su 128M.  Un ``backed_eval`` de banda caminado por un visitante tampoco tiene
 # distancia, y ``budget_for`` ni lo mira.
 MATE_CLAMP_PLIES = 6            # hasta M3 contando el ply del defensor
-MATE_CLAMP_FLOOR = 2_000_000    # el mismo F0 con el que el solver contesta esto
+MATE_CLAMP_FLOOR = 2_000_000    # el F0 con el que el solver contesta esto
 MATE_CLAMP_PER_PLY = 4_000_000
 MATE_CLAMP_CAP = 32_000_000
 MATE_CLAMP_MULTIPV = 1

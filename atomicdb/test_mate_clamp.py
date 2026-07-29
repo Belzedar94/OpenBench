@@ -95,7 +95,7 @@ class MateDistanceUnitTests(TestCase):
         self.assertEqual(ingest.claimed_mate_plies(pos), 3)
 
     def test_a_tablebase_clamp_carries_no_distance(self):
-        """El worker recorta los cp de TB a +-9_500 para no fingir distancia."""
+        """El worker recorta los cp de TB a +-9_500: no finge distancia."""
         for value in (9_500, -9_500, 9_000, 9_499):
             pos = _position(CLAIM_FEN, eval_cp=value)
             self.assertIsNone(ingest.claimed_mate_plies(pos), value)
