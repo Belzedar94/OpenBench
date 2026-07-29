@@ -173,6 +173,37 @@ class BreadthSwapTests(TestCase):
         self.assertFalse(Edge.objects.filter(parent=pos).exists())
 
     @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_uncertainty_gap_buys_virgin_children(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        Position.objects.filter(pk=pos.pk).update(eval_cp=100,
+                                                  backed_eval=400)
+        pos.refresh_from_db()
+
+        queued = ingest._uncertainty_expand([pos.key])
+
+        self.assertEqual(queued, 2)
+        tasks = AnalysisTask.objects.all()
+        self.assertEqual(tasks.count(), 2)
+        for task in tasks:
+            self.assertEqual(task.source, AnalysisTask.Source.AUTO)
+        self.assertTrue(
+            DBEvent.objects.filter(kind='UNCERTAINTY_EXPAND').exists())
+
+    def test_uncertainty_stays_quiet_without_flag_or_gap(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        Position.objects.filter(pk=pos.pk).update(eval_cp=100,
+                                                  backed_eval=400)
+        pos.refresh_from_db()
+        self.assertEqual(ingest._uncertainty_expand([pos.key]), 0)
+
+        with override_settings(ATOMICDB_BREADTH_SWAP=True):
+            Position.objects.filter(pk=pos.pk).update(backed_eval=180)
+            self.assertEqual(ingest._uncertainty_expand([pos.key]), 0)
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
     def test_a_mate_band_node_still_buys_depth(self):
         pos = ingest.get_or_create_position(
             logic.apply_move(logic.start_fen(), 'g1f3'))

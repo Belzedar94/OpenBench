@@ -1920,13 +1920,21 @@ def home(request):
                           'san': preview or 'start position',
                           'full': full or 'start position',
                           'budget': _human(task.budget_nodes),
-                          'machine': task.machine})
+                          'machine': task.machine,
+                          'source': task.source})
+    pending_sources = dict(
+        AnalysisTask.objects.filter(
+            position_id__in=[pos.key for pos in upnext_positions],
+            state=AnalysisTask.TState.PENDING)
+        .order_by('position_id', 'generation')
+        .values_list('position_id', 'source'))
     upnext = []
     for pos in upnext_positions:
         preview, full = labels.get(pos.key, ('', ''))
         upnext.append({'key': pos.key,
                        'san': preview or 'start position',
-                       'full': full or 'start position'})
+                       'full': full or 'start position',
+                       'source': pending_sources.get(pos.key, '')})
     events = _friendly_events(event_rows, labels)
     campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())

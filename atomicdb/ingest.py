@@ -378,8 +378,9 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     parent_keys = list(Edge.objects.filter(child_id=pos.key)
                        .values_list('parent_id', flat=True))
     backed = backup_backed_evals([pos.key, *parent_keys])
+    uncertainty = _uncertainty_expand([pos.key, *parent_keys])
     summary = {'closed_children': closed_here, 'backed_up': changed,
-               'backed_evals': backed}
+               'backed_evals': backed, 'uncertainty_expanded': uncertainty}
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
@@ -1975,6 +1976,48 @@ def _descend_frontier(pos):
                                     plies, totals)
         visited.add(following.key)
         node, plies = following, plies + 1
+
+
+# Punto 2 del breadth-swap: desacuerdo propio-vs-respaldado que ya mueve el
+# veredicto.  Por debajo del umbral es ruido de profundidad; por encima, el
+# arbol es fino justo donde soporta carga.
+UNCERTAINTY_GAP = 150
+UNCERTAINTY_EXPAND_CAP = 4
+
+
+def _uncertainty_expand(keys):
+    """Compra los mejores hijos virgenes alli donde eval propio y backed
+    discrepan mas de ``UNCERTAINTY_GAP``.
+
+    Corre tras el refresco de backed de cada ingesta, solo sobre el nodo
+    analizado y sus padres directos (coste acotado).  Entra por banda AUTO:
+    una expansion del sistema no adelanta a las peticiones humanas.  El dedup
+    de tareas y el filtro de hijos virgenes hacen que repetirse sea gratis:
+    en cuanto los hijos existen, el disparador se apaga solo."""
+    if not getattr(settings, 'ATOMICDB_BREADTH_SWAP', False):
+        return 0
+    queued_total = 0
+    rows = Position.objects.filter(
+        key__in=[key for key in keys if key], status='UNKNOWN').only(
+        'key', 'fen', 'eval_cp', 'backed_eval', 'visits', 'expanded')
+    for row in rows:
+        if row.eval_cp is None or row.backed_eval is None:
+            continue
+        if (abs(row.eval_cp) >= MATE_BAND
+                or abs(row.backed_eval) >= MATE_BAND):
+            continue
+        if abs(row.eval_cp - row.backed_eval) <= UNCERTAINTY_GAP:
+            continue
+        queued = enqueue_unexplored_children(
+            row, cap=2, source=AnalysisTask.Source.AUTO)
+        if queued:
+            queued_total += queued
+            DBEvent.objects.create(kind='UNCERTAINTY_EXPAND', payload={
+                'key': row.key, 'own': row.eval_cp,
+                'backed': row.backed_eval, 'queued': queued})
+        if queued_total >= UNCERTAINTY_EXPAND_CAP:
+            break
+    return queued_total
 
 
 def _breadth_swap_eligible(pos):

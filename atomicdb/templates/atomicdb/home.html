@@ -67,7 +67,7 @@
       {% for q in analyzing %}
       <li><span class="chip hot"></span>
         <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>
-        <span class="dim" style="font-size:.8rem">&nbsp;{{ q.budget }} nodes · {{ q.machine }}</span></li>
+        <span class="dim" style="font-size:.8rem">&nbsp;({{ q.source|title }}) · {{ q.budget }} nodes · {{ q.machine }}</span></li>
       {% endfor %}
     </ul>
     {% else %}<p class="dim">No active analyses right now.</p>{% endif %}
@@ -78,7 +78,8 @@
     <ul class="feed">
       {% for q in upnext %}
       <li><span class="t">{{ forloop.counter }}</span>
-        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a></li>
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>{% if q.source %}
+        <span class="dim" style="font-size:.8rem">&nbsp;({{ q.source|title }})</span>{% endif %}</li>
       {% endfor %}
     </ul>
     {% else %}<p class="dim">Queue is empty.</p>{% endif %}
