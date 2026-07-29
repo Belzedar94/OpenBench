@@ -209,7 +209,7 @@ class ShadowMigrationParityTests(TransactionTestCase):
             self.assertTrue(
                 MigrationRecorder(connection).migration_qs.filter(
                     app='atomicdb',
-                    name='0014_shadow_probe',
+                    name=self.PROBE,
                 ).exists())
 
 
