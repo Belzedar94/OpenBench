@@ -935,8 +935,20 @@ def _api_request_once(request, key):
     # otherwise a browser retry could accidentally request the next rung.
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
+    # Ruta declarada por el peticionario (el ?play= de su pagina): validada
+    # entera contra las reglas antes de guardarse.  Una ruta rota no tumba
+    # la peticion — se pide igual y se pinta el linaje canonico.
+    route = ''
+    raw_route = (request.POST.get('route') or '').strip()
+    if raw_route:
+        try:
+            _validated_play_route(raw_route, pos.key)
+            route = raw_route
+        except (PlayRouteError, PlayRouteConflict):
+            route = ''
     with atomic():
-        outcome = ingest.request_analysis(pos, requested_by=requested_by)
+        outcome = ingest.request_analysis(pos, requested_by=requested_by,
+                                          route=route)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -1683,6 +1695,23 @@ def _line_labels(key, preview_plies=10):
     return _line_labels_many([key], preview_plies).get(key, ('', ''))
 
 
+def _route_labels(route, target_key, preview_plies=10):
+    """(preview, full) desde la RUTA DECLARADA del peticionario, o None.
+
+    El DAG transpone y el linaje canonico puede pintar la peticion en un
+    orden de jugadas que su autor no reconoce.  La ruta llego validada al
+    guardarse; aqui se re-valida entera (legalidad, llegada al objetivo,
+    prefijos materializados) porque el arbol pudo cambiar debajo — ante
+    cualquier duda, None y el linaje canonico de siempre."""
+    try:
+        top, line, _ucis = _validated_play_route(route, target_key)
+    except (PlayRouteError, PlayRouteConflict):
+        return None
+    full = _format_san_line(top, line, max_plies=512, keep_head=True)
+    preview = _format_san_line(top, line, max_plies=preview_plies)
+    return preview, full
+
+
 def _san_line(key, max_plies=16, keep_head=False):
     """Backward-compatible single label helper."""
     try:
@@ -1998,25 +2027,36 @@ def home(request):
     analyzing = []
     for task in leased:
         preview, full = labels.get(task.position_id, ('', ''))
+        routed = (_route_labels(task.route, task.position_id)
+                  if task.route else None)
+        if routed is not None:
+            preview, full = routed
         analyzing.append({'key': task.position_id,
                           'san': preview or 'start position',
                           'full': full or 'start position',
                           'budget': _human(task.budget_nodes),
                           'machine': task.machine,
-                          'source': task.source})
-    pending_sources = dict(
-        AnalysisTask.objects.filter(
+                          'source': task.source,
+                          'play': task.route if routed is not None else ''})
+    pending_meta = {}
+    for pid, source, route in (AnalysisTask.objects.filter(
             position_id__in=[pos.key for pos in upnext_positions],
             state=AnalysisTask.TState.PENDING)
-        .order_by('position_id', 'generation')
-        .values_list('position_id', 'source'))
+            .order_by('position_id', 'generation')
+            .values_list('position_id', 'source', 'route')):
+        pending_meta.setdefault(pid, (source, route))
     upnext = []
     for pos in upnext_positions:
         preview, full = labels.get(pos.key, ('', ''))
+        source, route = pending_meta.get(pos.key, ('', ''))
+        routed = _route_labels(route, pos.key) if route else None
+        if routed is not None:
+            preview, full = routed
         upnext.append({'key': pos.key,
                        'san': preview or 'start position',
                        'full': full or 'start position',
-                       'source': pending_sources.get(pos.key, '')})
+                       'source': source,
+                       'play': route if routed is not None else ''})
     events = _friendly_events(event_rows, labels)
     root = ingest.get_or_create_position(logic.start_fen())
     root_legal_ucis = logic.legal_moves(root.fen)

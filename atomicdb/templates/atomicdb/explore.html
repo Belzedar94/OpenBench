@@ -197,7 +197,11 @@
           .catch(() => setTimeout(() => poll(tries - 1), 10000));
       }
       function requestAnalysis(attempt) {
-        fetch('/atomicdb/request/{{ pos.key }}/', {method: 'POST'})
+        const playRoute = new URLSearchParams(location.search).get('play') || '';
+        fetch('/atomicdb/request/{{ pos.key }}/', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: new URLSearchParams({route: playRoute}).toString()})
           .then(async r => {
             const data = await r.json().catch(() => null);
             if (r.status === 503 && data && data.status === 'busy') {

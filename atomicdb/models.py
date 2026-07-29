@@ -212,6 +212,12 @@ class AnalysisTask(models.Model):
     # esa misma cuenta atiende primero sus propias peticiones dentro de la
     # banda USER; para el resto de la flota no cambia nada.
     requested_by = models.CharField(max_length=64, default='', blank=True)
+    # Ruta (UCIs separados por coma) por la que el peticionario LLEGO a la
+    # posicion, ya validada contra las reglas de Atomic.  El DAG transpone:
+    # el linaje canonico puede ensenar otro orden de jugadas y el autor no
+    # reconoce su propia peticion en la portada.  Vacio = sin ruta declarada,
+    # se pinta el linaje canonico como siempre.
+    route        = models.TextField(default='', blank=True)
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')

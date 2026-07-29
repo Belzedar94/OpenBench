@@ -117,6 +117,47 @@ class OwnRequestAffinityTests(UserBandFifoTests):
 
         self.assertEqual(leased['id'], anonymous.id)
 
+    def test_a_declared_route_is_stored_and_wins_the_label(self):
+        """La peticion viaja con el ORDEN DE JUGADAS de su autor.
+
+        El DAG transpone: el linaje canonico puede pintar otro orden y el
+        autor no reconoce su propia peticion en la portada (avistamiento
+        del 29-jul con 1.Nf3 d6 contra 1.Nf3 f6)."""
+        route = 'g1f3,d7d6,b1c3,f7f6'
+        fen = logic.start_fen()
+        prev = ingest.get_or_create_position(fen)
+        for uci in route.split(','):
+            fen = logic.apply_move(fen, uci)
+            child = ingest.get_or_create_position(fen)
+            Edge.objects.get_or_create(parent=prev, move_uci=uci,
+                                       defaults={'child': child})
+            prev = child
+
+        response = self.client.post(f'/atomicdb/request/{prev.key}/',
+                                    {'route': route})
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=prev)
+        self.assertEqual(task.route, route)
+        from .views import _route_labels
+        preview, full = _route_labels(route, prev.key)
+        self.assertEqual(preview, '1. Nf3 d6 2. Nc3 f6')
+        self.assertEqual(full, '1. Nf3 d6 2. Nc3 f6')
+        # Al frente de Up next: la portada solo pinta el top de prioridad.
+        Position.objects.filter(pk=prev.pk).update(priority=99.0)
+        home = self.client.get('/atomicdb/')
+        self.assertContains(home, '1. Nf3 d6 2. Nc3 f6')
+
+    def test_a_broken_route_is_ignored_but_the_click_still_lands(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+
+        response = self.client.post(f'/atomicdb/request/{pos.key}/',
+                                    {'route': 'g1f3,zzzz'})
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=pos)
+        self.assertEqual(task.route, '')
+
     def test_the_request_endpoint_records_the_logged_in_requester(self):
         self.client.login(username='lesha', password='p')
 

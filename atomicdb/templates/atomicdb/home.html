@@ -103,7 +103,7 @@
     <ul class="feed">
       {% for q in analyzing %}
       <li><span class="chip hot"></span>
-        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
         <span class="dim" style="font-size:.8rem">&nbsp;({{ q.source|title }}) · {{ q.budget }} nodes · {{ q.machine }}</span></li>
       {% endfor %}
     </ul>
@@ -115,7 +115,7 @@
     <ul class="feed">
       {% for q in upnext %}
       <li><span class="t">{{ forloop.counter }}</span>
-        <a class="qline" href="/atomicdb/explore/{{ q.key }}/" title="{{ q.full }}">{{ q.san }}</a>{% if q.source %}
+        <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>{% if q.source %}
         <span class="dim" style="font-size:.8rem">&nbsp;({{ q.source|title }})</span>{% endif %}</li>
       {% endfor %}
     </ul>
