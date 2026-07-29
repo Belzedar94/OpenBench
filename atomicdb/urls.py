@@ -44,6 +44,12 @@ urlpatterns = [
     path('method/', _method_cached),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
+    # Campanas de exploracion: las dos primeras son publicas, la tercera es
+    # del propietario y lo comprueba ella misma (no basta con esconder el
+    # boton).  Las tres escriben, asi que ninguna lleva cache.
+    path('campaign/propose/', views.campaign_propose),
+    path('campaign/<int:campaign_id>/vote/', views.campaign_vote),
+    path('campaign/<int:campaign_id>/state/', views.campaign_state),
     path('request/<str:key>/', views.api_request),
     path('request-unexplored/<str:key>/', views.api_request_unexplored),
     path('fen/', views.fen_jump),

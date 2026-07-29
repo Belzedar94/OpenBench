@@ -63,6 +63,20 @@
   </form>
 </details>
 
+<details class="suggest-name">
+  <summary>Propose this line as an exploration campaign</summary>
+  <form method="post" action="/atomicdb/campaign/propose/">{% csrf_token %}
+    <input type="hidden" name="key" value="{{ pos.key }}">
+    <input type="hidden" name="back" value="1">
+    <label>Your name <span class="dim">(optional)</span>
+      <input name="name" maxlength="{{ campaign_name_max }}"
+        placeholder="who is putting it up" autocomplete="off"></label>
+    <button class="reqbtn">Propose this line</button>
+    <span class="dim">Public, no account. A campaign collects votes on the
+      overview page; the site owner decides which one the solver runs.</span>
+  </form>
+</details>
+
 <div class="cols">
   <div>
     {% include "atomicdb/_board.html" %}
