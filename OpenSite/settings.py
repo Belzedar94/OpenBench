@@ -159,6 +159,10 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'django.template.context_processors.media',
+                # Zona de identidad de AtomicDB (sesion + campana de avisos).
+                # Se corta sola fuera de /atomicdb/, asi que para las paginas
+                # de OpenBench es una comparacion de cadenas y nada mas.
+                'atomicdb.notifications.identity',
             ],
         },
     },

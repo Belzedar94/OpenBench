@@ -14,8 +14,14 @@ from .conquest_map import map_api
 # se niega a cachear una respuesta que ESTRENA cookie ante una peticion sin
 # cookies, asi que el primer visitante no envenena la entrada compartida.
 #
-# ``map`` y ``method`` no tienen formularios ni estado por visitante: una
-# unica entrada compartida para todo el mundo.
+# ``map`` y ``method`` VARIAN POR COOKIE desde que la cabecera lleva zona de
+# identidad.  Antes no tenian nada por visitante y compartian una sola entrada;
+# ahora su HTML dice quien eres — nombre, campana, recuento — y una entrada
+# compartida seria servirle a un visitante la sesion de otro.  El precio esta
+# medido y es el que ya paga la home: quien NO ha iniciado sesion sigue
+# compartiendo entrada (la cabecera anonima no lleva formulario, asi que no
+# estrena cookie CSRF por venir aqui), y quien la ha iniciado tiene la suya,
+# que es justo lo que hace falta.
 #
 # El tema no entra en esta ecuacion: la eleccion vive en localStorage y la
 # aplica un script en el propio <html>, asi que el HTML es identico en claro y
@@ -33,8 +39,8 @@ from .conquest_map import map_api
 #   * ``api/map/v1``: ya negocia su propio ETag sobre un snapshot publicado y
 #     no toca la base viva.
 _home_cached = cache_page(15)(vary_on_cookie(views.home))
-_map_cached = cache_page(30)(views.conquest_map)
-_method_cached = cache_page(30)(views.method)
+_map_cached = cache_page(30)(vary_on_cookie(views.conquest_map))
+_method_cached = cache_page(30)(vary_on_cookie(views.method))
 
 urlpatterns = [
     path('', _home_cached),
@@ -44,6 +50,10 @@ urlpatterns = [
     path('method/', _method_cached),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
+    # Avisos: la lista entera y el POST que los marca vistos, en la misma
+    # ruta.  Escribe, y ademas es de una sola persona: sin cache.
+    path('notifications/', views.notifications_page,
+         name='atomicdb-notifications'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.

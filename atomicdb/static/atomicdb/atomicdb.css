@@ -302,6 +302,250 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   outline-offset: 2px;
 }
 
+/* Zona de identidad: sesion y avisos, arriba a la derecha de todas las
+   paginas de AtomicDB.
+
+   El hueco de la derecha no es decorativo: el interruptor de tema es
+   `position: fixed` contra la esquina del viewport, fuera del flujo, asi que
+   sin esa reserva la zona quedaria DEBAJO de el.  Va en la misma unidad que
+   usa el interruptor (2rem de ancho + 16px de margen). */
+.identity {
+  display: flex;
+  /* Encoge antes que romper la fila.  Un nombre de usuario largo en un movil
+     hacia caber marca + identidad y dejaba al interruptor de tema SOLO en una
+     fila propia, alineado a la izquierda: un icono huerfano debajo de la
+     marca.  Con ``min-width: 0`` la zona cede ancho — el nombre ya tiene sus
+     puntos suspensivos — y la fila se mantiene entera. */
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: .75rem;
+  padding-right: 2.4rem;
+  font-size: .88rem;
+}
+
+.identity-link {
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.identity-link:hover {
+  color: var(--ink);
+}
+
+/* Registrarse es lo unico que esta cabecera PIDE, asi que es lo unico que
+   lleva forma de boton.  Contorno, no relleno: por encima esta la marca y al
+   lado el menu, y un boton macizo aqui se comeria a los dos. */
+.identity-cta {
+  padding: .28rem .7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--ink);
+}
+
+.identity-cta:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.identity-user {
+  overflow: hidden;
+  min-width: 0;
+  max-width: 11rem;
+  color: var(--ink-strong);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-user:hover {
+  color: var(--accent);
+}
+
+.bell-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.bell-form {
+  display: flex;
+}
+
+.bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bell:hover {
+  color: var(--accent);
+}
+
+.bell-icon {
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+/* Sin avisos no hay insignia: la campana se queda como un icono discreto mas
+   de la barra.  Con ellos, el unico punto de color de la cabecera. */
+.bell-badge {
+  position: absolute;
+  top: -.1rem;
+  right: -.25rem;
+  min-width: 1.05rem;
+  padding: 0 .25rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: .66rem;
+  font-weight: 700;
+  line-height: 1.05rem;
+  text-align: center;
+}
+
+.bell-panel {
+  position: absolute;
+  top: calc(100% + .55rem);
+  right: -.4rem;
+  z-index: 900;
+  overflow-y: auto;
+  width: 21rem;
+  max-width: calc(100vw - 1.6rem);
+  max-height: min(60vh, 24rem);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-board);
+  font-size: .84rem;
+}
+
+.bell-panel[hidden] {
+  display: none;
+}
+
+.bell-panel-head {
+  padding: .55rem .8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-muted);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.bell-list {
+  list-style: none;
+}
+
+.bell-item + .bell-item {
+  border-top: 1px solid var(--border);
+}
+
+.bell-item a {
+  display: block;
+  padding: .55rem .8rem;
+  color: var(--ink);
+}
+
+.bell-item a:hover {
+  background: var(--surface-hover);
+  text-decoration: none;
+}
+
+/* Lo no visto se marca con una barra en el canto, no con otro color de
+   fondo: el aviso ya enlaza a una posicion y un segundo color competiria con
+   el estado de hover. */
+.bell-item.unseen a {
+  box-shadow: inset .18rem 0 0 var(--accent);
+}
+
+.bell-line {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.bell-line b {
+  color: var(--ink-strong);
+}
+
+.bell-when,
+.notif-when {
+  display: block;
+  margin-top: .12rem;
+  color: var(--ink-muted);
+  font-size: .74rem;
+}
+
+.bell-empty {
+  padding: .7rem .8rem;
+  color: var(--ink-muted);
+  line-height: 1.45;
+}
+
+.bell-all {
+  display: block;
+  padding: .5rem .8rem;
+  border-top: 1px solid var(--border);
+  font-size: .78rem;
+  text-align: center;
+}
+
+/* Pagina completa de avisos: la misma lista, sin la caja. */
+.notif-lede {
+  margin: -.35rem 0 1rem;
+  font-size: .88rem;
+}
+
+.notif-list {
+  list-style: none;
+}
+
+.notif-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .2rem .9rem;
+  padding: .55rem .2rem .55rem .6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.notif-row.unseen {
+  box-shadow: inset .18rem 0 0 var(--accent);
+}
+
+.notif-link {
+  flex: 1 1 18rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.notif-link b {
+  color: var(--ink-strong);
+}
+
+.notif-row .notif-when {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
 main {
   max-width: 1100px;
   margin: 1.4rem auto;
@@ -1147,12 +1391,18 @@ html.theme-ready .tile {
 }
 
 @media (max-width: 560px) {
+  /* Dos filas en un telefono: marca e identidad arriba, menu debajo.  En una
+     sola no caben — el menu ya necesitaba scroll horizontal el solo — y la
+     identidad es lo que no puede quedar detras de ese scroll: es lo que la
+     pagina quiere que alguien vea. */
   header {
+    flex-wrap: wrap;
     gap: .72rem;
     padding: .58rem .75rem;
   }
 
   header h1 {
+    order: 1;
     margin: 0;
   }
 
@@ -1163,7 +1413,8 @@ html.theme-ready .tile {
   }
 
   header nav {
-    flex: 1 1 auto;
+    order: 4;
+    flex: 1 1 100%;
     flex-wrap: nowrap;
     gap: .85rem;
     overflow-x: auto;
@@ -1179,13 +1430,55 @@ html.theme-ready .tile {
     font-size: .86rem;
   }
 
+  .identity {
+    order: 2;
+    /* Un TOPE, no solo la capacidad de encoger: en un contenedor que hace
+       wrap, el reparto en filas se decide con el tamano que cada elemento
+       PIDE, antes de encoger a nadie.  Sin el, un nombre de usuario largo
+       hacia que la identidad pidiera mas de lo que quedaba y el interruptor
+       de tema se iba a una fila para el solo — un icono huerfano alineado a
+       la izquierda, debajo de la marca.  Las 10rem reservadas son la marca,
+       los huecos y el interruptor. */
+    max-width: calc(100% - 10rem);
+    gap: .6rem;
+    margin-left: auto;
+    padding-right: 0;
+  }
+
+  /* El panel deja de colgar de la CAMPANA y pasa a colgar de la BARRA.  A la
+     izquierda del icono no caben 21rem en un telefono, asi que un panel
+     anclado a su borde derecho se salia de la pantalla por la izquierda
+     (medido: 136px fuera a 375px de ancho).  Colgando de la barra ocupa el
+     ancho util entero y cae justo debajo, tenga la barra dos filas o tres. */
+  header {
+    position: relative;
+  }
+
+  .bell-wrap {
+    position: static;
+  }
+
+  .bell-panel {
+    top: calc(100% + .3rem);
+    right: .75rem;
+    left: .75rem;
+    width: auto;
+    max-width: none;
+  }
+
+  /* Un nombre largo no puede empujar a "Sign out" fuera de la pantalla. */
+  .identity-user {
+    max-width: 6.5rem;
+  }
+
   /* In the header row, against the same edge. Fixed positioning is dropped
      on a phone: the bar already reaches the corner, and an icon floating
      there would sit on the scrolling nav. */
   header .theme-toggle {
     position: static;
+    order: 3;
     flex: 0 0 auto;
-    margin-left: auto;
+    margin-left: 0;
   }
 
 }
@@ -1208,11 +1501,19 @@ html.theme-ready .tile {
 }
 
 @media (forced-colors: active) {
-  .theme-toggle {
+  .theme-toggle,
+  .bell {
     forced-color-adjust: auto;
     border: 1px solid ButtonText;
     background: ButtonFace;
     color: ButtonText;
+  }
+
+  /* En alto contraste el color de la insignia desaparece, asi que lo que
+     tiene que sobrevivir es el borde: sin el, el numero flota sobre el
+     icono. */
+  .bell-badge {
+    border: 1px solid ButtonText;
   }
 }
 

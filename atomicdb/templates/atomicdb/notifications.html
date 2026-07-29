@@ -1,0 +1,25 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}Analyses you asked for · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Analyses you asked for</h2>
+<p class="dim notif-lede">Every analysis you request lands here once a worker
+  has served it. If you run workers of your own, they take your requests
+  first.</p>
+
+{% if rows %}
+<ul class="notif-list">
+  {% for n in rows %}
+  <li class="notif-row{% if not n.seen %} unseen{% endif %}">
+    <a class="notif-link" href="/atomicdb/explore/{{ n.key }}/"
+      title="{{ n.full }}">Your analysis of <b>{{ n.san }}</b> is ready</a>
+    <span class="notif-when dim">{{ n.ago }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="dim">Nothing yet. Open a position in the explorer and ask for an
+  analysis: when a worker serves it, it shows up here.</p>
+{% endif %}
+
+{% endblock %}
