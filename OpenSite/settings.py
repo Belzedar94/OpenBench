@@ -107,6 +107,16 @@ ATOMICDB_INLINE_SELECTOR = os.environ.get(
 # encienden cuando ese snapshot esta en la tabla.
 ATOMICDB_ADVERSARIAL = os.environ.get(
     'ATOMICDB_ADVERSARIAL', '').lower() in ('1', 'true', 'yes')
+# Breadth-swap (experimento Torom, 29-jul-2026): la peticion sobre un nodo YA
+# analizado se convierte en expansion de frontera un ply mas abajo en vez de
+# comprar el siguiente peldano profundo. Medido sobre 800 revisitas reales:
+# con un ply de hijos a 128M el veredicto coincide con el re-search profundo
+# el 96-99% de las veces; la profundidad queda para disputas, banda de mate
+# y frontera saturada. APAGADO por defecto: se enciende via drop-in de
+# systemd cuando el propietario lo decida, y apagarlo restaura la escalera
+# clasica sin residuo.
+ATOMICDB_BREADTH_SWAP = os.environ.get(
+    'ATOMICDB_BREADTH_SWAP', '').lower() in ('1', 'true', 'yes')
 
 INSTALLED_APPS = [
     'atomicdb',

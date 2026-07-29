@@ -10,8 +10,10 @@ has to answer every reply.
 
 from unittest import mock
 
+from django.test import override_settings
+
 from . import ingest, logic
-from .models import AnalysisTask, Edge, Position, RequestLog
+from .models import AnalysisTask, DBEvent, Edge, Position, RequestLog
 from .testing import TestCase
 
 
@@ -130,6 +132,59 @@ class UnchangedLadderTests(TestCase):
         response = self.client.post(f'/atomicdb/request/{pos.key}/')
 
         self.assertEqual(response.json(), {'status': 'queued'})
+
+
+class BreadthSwapTests(TestCase):
+    """Con ATOMICDB_BREADTH_SWAP, una revisita compra anchura, no el peldano.
+
+    Medido en produccion (29-jul-2026, n=800 revisitas profundas reales): un
+    ply de hijos a 128M reproduce el veredicto del re-search profundo el
+    96-99% de las veces.  El flag mueve el pivote peticion->expansion de
+    "escalera agotada" a "primera pasada hecha"; la profundidad queda para
+    banda de mate, disputas y frontera saturada."""
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_a_revisit_request_expands_instead_of_deepening(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos, budget=ingest.REQUEST_BUDGET_LADDER[0])
+        Position.objects.filter(pk=pos.pk).update(visits=1, eval_cp=30)
+        pos.refresh_from_db()
+
+        outcome = ingest.request_analysis(pos)
+
+        self.assertEqual(outcome, 'expanded')
+        self.assertEqual(AnalysisTask.objects.filter(position=pos).count(), 1)
+        child_tasks = AnalysisTask.objects.exclude(position=pos)
+        self.assertTrue(child_tasks.exists())
+        for task in child_tasks:
+            self.assertEqual(task.budget_nodes,
+                             ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertTrue(
+            DBEvent.objects.filter(kind='BREADTH_SWAP').exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_the_seeding_pass_is_never_swapped(self):
+        pos = ingest.get_or_create_position(logic.start_fen())
+
+        self.assertEqual(ingest.request_analysis(pos), 'queued')
+
+        task = AnalysisTask.objects.get(position=pos)
+        self.assertEqual(task.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertFalse(Edge.objects.filter(parent=pos).exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_a_mate_band_node_still_buys_depth(self):
+        pos = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'g1f3'))
+        _exhaust_ladder(pos, budget=ingest.REQUEST_BUDGET_LADDER[0])
+        Position.objects.filter(pk=pos.pk).update(
+            visits=1, eval_cp=ingest.MATE_BAND + 50)
+        pos.refresh_from_db()
+
+        self.assertEqual(ingest.request_analysis(pos), 'queued')
+
+        self.assertEqual(AnalysisTask.objects.filter(position=pos).count(), 2)
+        self.assertFalse(DBEvent.objects.filter(kind='BREADTH_SWAP').exists())
 
 
 class OrNodeExpansionTests(TestCase):

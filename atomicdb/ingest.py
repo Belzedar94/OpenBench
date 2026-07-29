@@ -1977,21 +1977,54 @@ def _descend_frontier(pos):
         node, plies = following, plies + 1
 
 
+def _breadth_swap_eligible(pos):
+    """Solo REVISITAS de nodos abiertos fuera de la banda de mate.
+
+    La primera pasada siembra (MultiPV 5) y no se toca; un nodo en banda de
+    mate quiere profundidad para extraer la PV entera; y un nodo cerrado no
+    compra nada.  Medido en produccion (29-jul, n=800): un ply de hijos a
+    128M reproduce el veredicto del re-search profundo el 96-99% de las
+    veces — el peldano profundo por defecto compraba veredicto ya sabido."""
+    if not getattr(settings, 'ATOMICDB_BREADTH_SWAP', False):
+        return False
+    if pos.status != 'UNKNOWN':
+        return False
+    if abs(pos.eval_cp or 0) >= MATE_BAND:
+        return False
+    return _completed_max_budget(pos) is not None
+
+
 def request_analysis(pos):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
 
-    Agotada la escalera (10B ya COMPLETED), repetir el peldano no compra
-    informacion nueva: la peticion se convierte en expansion de frontera un
-    ply mas abajo (estilo proof-number search), y si esa frontera tambien
-    esta agotada el click DESCIENDE por el hijo mas prometedor hasta
-    encontrar trabajo o declararse 'saturated'.
+    Con ``ATOMICDB_BREADTH_SWAP`` activo, una peticion sobre un nodo ya
+    analizado compra ANCHURA en vez del siguiente peldano profundo: la
+    frontera un ply mas abajo (estilo proof-number search), descendiendo por
+    el hijo mas prometedor si hace falta.  Si el descenso se declara
+    saturado, la informacion marginal vuelve a ser la profundidad y se cae
+    al peldano clasico.  Sin el flag, la escalera de siempre; agotada
+    (10B ya COMPLETED), la peticion se convierte en la misma expansion.
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
     | 'saturated'."""
     with atomic():
+        swapped = False
+        if _breadth_swap_eligible(pos):
+            swapped = True
+            outcome = _descend_frontier(pos)
+            if outcome != 'saturated':
+                DBEvent.objects.create(kind='BREADTH_SWAP', payload={
+                    'key': pos.key, 'outcome': str(outcome),
+                    **{name: value
+                       for name, value in getattr(outcome, 'detail',
+                                                  {}).items()
+                       if isinstance(value, (int, str))}})
+                return outcome
         outcome = _request_rung(pos)
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
+        if swapped:
+            return RequestOutcome('saturated')
         return _descend_frontier(pos)
 
 
