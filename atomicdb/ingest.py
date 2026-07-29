@@ -1852,7 +1852,8 @@ def next_tasks(n):
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(pos.visits, budget)})
+                      'multipv': multipv_for(pos.visits, budget,
+                                             clamp=_short_mate_clamp(pos))})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -1925,7 +1926,8 @@ def _next_tasks_by_proof(n):
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(pos.visits, budget)})
+                      'multipv': multipv_for(pos.visits, budget,
+                                             clamp=_short_mate_clamp(pos))})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -2024,12 +2026,21 @@ def _request_rung(pos, requested_by='', route=''):
             if candidate > completed_max:
                 floor = candidate
                 break
+    clamp = _short_mate_clamp(pos)
+    if clamp is not None and clamp[0] > (completed_max or 0):
+        # Un mate corto con distancia conocida se VERIFICA, y una verificacion
+        # no tiene por que entrar por el suelo de la escalera de peticiones: el
+        # click quiere cerrar el nodo, no excavarlo.  La condicion es lo que
+        # impide que esto se vuelva un techo — en cuanto lo ya COMPLETADO
+        # alcanza al clamp, la escalera recupera el mando y el siguiente click
+        # escala como siempre.
+        floor = clamp[0]
     floor = max(floor, budget_for(pos))
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
                   'requested_by': requested_by, 'route': route,
-                  'multipv': multipv_for(pos.visits, floor)})
+                  'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
         return 'queued'
     if task.state == 'PENDING':
@@ -2062,7 +2073,7 @@ def _request_rung(pos, requested_by='', route=''):
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
                     requested_by=requested_by, route=route,
-                    multipv=multipv_for(generation, floor))
+                    multipv=multipv_for(generation, floor, clamp=clamp))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
                 follow_up.source = 'USER'
@@ -3106,14 +3117,28 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
     for child in unexplored_children(pos):
         if queued >= cap:
             break
-        # Un click humano compra sondas de grado peticion, no semillas de
-        # cobertura: el primer analisis de cada respuesta entra por el primer
-        # peldano de la escalera de peticiones (orden 28-jul, 512M).
-        budget = max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+        clamp = _short_mate_clamp(child)
+        if clamp is None:
+            # Un click humano compra sondas de grado peticion, no semillas de
+            # cobertura: el primer analisis de cada respuesta entra por el
+            # primer peldano de la escalera de peticiones (orden 28-jul, 512M).
+            budget = max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+        else:
+            # Salvo que la respuesta ya reclame un mate corto con distancia
+            # conocida: eso se verifica barato.  Hoy es una guarda estructural
+            # mas que un caso vivo — ``unexplored_children`` exige que el hijo
+            # no tenga NI eval propia NI respaldo, asi que lo normal es que no
+            # haya distancia que leer y este brazo no se active.  Esta escrito
+            # para que la politica no dependa de ese filtro: si algun dia un
+            # hijo llega aqui con distancia, no se le compra una excavacion.
+            # ``budget_for`` ya trae la escalera por visitas, que sigue
+            # mandando cuando pide mas que el clamp.
+            budget = budget_for(child)
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(child.visits, budget),
+                      'multipv': multipv_for(child.visits, budget,
+                                             clamp=clamp),
                       'source': source, 'requested_by': requested_by})
         if created:
             queued += 1
