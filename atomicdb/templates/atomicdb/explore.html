@@ -63,6 +63,28 @@
   </form>
 </details>
 
+<details class="suggest-name">
+  <summary>Propose this line as an exploration campaign</summary>
+  <form method="post" action="/atomicdb/campaign/propose/">{% csrf_token %}
+    <input type="hidden" name="key" value="{{ pos.key }}">
+    <input type="hidden" name="back" value="1">
+    <label>Title <span class="dim">(optional)</span>
+      <input name="title" maxlength="{{ campaign_title_max }}"
+        placeholder="e.g. Knight tour into e3, or leave blank for the moves"
+        autocomplete="off"></label>
+    {% if campaign_credit %}
+    <span class="campaign-credit dim">Proposed as <strong>{{ campaign_credit }}</strong></span>
+    {% else %}
+    <label>Your name <span class="dim">(optional)</span>
+      <input name="name" maxlength="{{ campaign_name_max }}"
+        placeholder="who is putting it up" autocomplete="off"></label>
+    {% endif %}
+    <button class="reqbtn">Propose this line</button>
+    <span class="dim">Public, no account. A campaign collects votes on the
+      overview page; the site owner decides which one the solver runs.</span>
+  </form>
+</details>
+
 <div class="cols">
   <div>
     {% include "atomicdb/_board.html" %}

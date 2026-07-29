@@ -51,6 +51,7 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_proofcampaign',           # 0017_proof_manager
     'atomicdb_proofnode',               # 0017_proof_manager
     'atomicdb_solvetask',               # 0020_solve_task
+    'atomicdb_campaignvote',            # 0026_campaign_voting
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.

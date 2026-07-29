@@ -1,4 +1,5 @@
 {% extends "atomicdb/base.html" %}
+{% load l10n %}
 {% block title %}AtomicDB, the Atomic Chess conquest map{% endblock %}
 {% block content %}
 
@@ -15,6 +16,42 @@
 {% if has_proof_numbers %}  <div class="metric" title="Proof number of the campaign root: the estimated remaining effort to PROVE the conjecture. Not a probability, and not a percentage."><div class="v">{{ root_pn_h }}</div><div class="l">proof number</div></div>
   <div class="metric" title="Disproof number of the campaign root: the estimated effort to REFUTE it. A pn that climbs while this one stalls is the earliest honest sign the conjecture may be false."><div class="v">{{ root_dn_h }}</div><div class="l">disproof number</div></div>
 {% endif %}</div>
+
+{% if campaign_message %}<p class="campaign-status">{{ campaign_message }}</p>{% endif %}
+
+{% for c in campaign_cards %}
+<section class="campaign-card">
+  <div class="campaign-kicker">Community campaign · running now</div>
+  <h2 class="campaign-title"><a href="/atomicdb/explore/{{ c.root_key }}/">Campaign: {{ c.title }}</a></h2>
+  {% if c.line_shown %}<div class="campaign-line dim">{{ c.line_shown }}</div>{% endif %}
+  <div class="campaign-stats dim">
+    <span>{{ c.votes }} vote{{ c.votes|pluralize }}</span>
+    <span>{{ c.explored_h }} of {{ c.total_h }} positions explored</span>
+    <span>{{ c.resolved_h }} solved</span>
+    <span>{{ c.solved_pct }}% of the line solved</span>
+  </div>
+  <div class="campaign-bar" role="progressbar" aria-valuemin="0"
+    aria-valuemax="100" aria-valuenow="{{ c.solved_pct|unlocalize }}"
+    aria-label="Share of this campaign already solved">
+    <span style="width:{{ c.solved_pct|unlocalize }}%"></span>
+  </div>
+  <div class="campaign-by dim">Proposed by {{ c.proposed_by_h }}</div>
+  {% if campaign_owner %}
+  <div class="campaign-actions">
+    <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+      <input type="hidden" name="back" value="1">
+      <input type="hidden" name="action" value="pause">
+      <button class="reqbtn ghost">Pause</button>
+    </form>
+    <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+      <input type="hidden" name="back" value="1">
+      <input type="hidden" name="action" value="done">
+      <button class="reqbtn ghost">Close</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+{% endfor %}
 
 {% if first_moves %}
 <div class="progress">
@@ -114,20 +151,41 @@
   </div>
 </div>
 
-<h2>Watched lines</h2>
-{% if campaigns %}
-<table>
-  <tr><th>Line</th><th>Moves</th><th>State</th></tr>
-  {% for c in campaigns %}
-  <tr>
-    <td><a href="/atomicdb/explore/{{ c.root_id }}/">{{ c.name }}</a></td>
-    <td class="dim">{{ c.line_san }}</td>
-    <td>{% if c.active %}<span class="chip hot"></span>open
-        {% else %}<span class="chip won"></span>solved{% endif %}</td>
-  </tr>
+<h2 id="campaigns">Proposed campaigns</h2>
+<p class="dim campaign-lede">Anyone can put a line up and vote for it. The site
+  owner decides which one the solver actually runs.</p>
+{% if campaigns_proposed %}
+<ul class="campaign-list">
+  {% for c in campaigns_proposed %}
+  <li class="campaign-row">
+    <div class="campaign-row-line">
+      <a class="qline" href="/atomicdb/explore/{{ c.root_key }}/">{{ c.title }}</a>
+      {% if c.line_shown %}<div class="campaign-row-san dim">{{ c.line_shown }}</div>{% endif %}
+    </div>
+    <div class="campaign-row-votes dim">proposed by {{ c.proposed_by_h }} · {{ c.votes }} vote{{ c.votes|pluralize }}</div>
+    <div class="campaign-actions">
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/vote/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <button class="reqbtn">Vote</button>
+      </form>
+      {% if campaign_owner %}
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <input type="hidden" name="action" value="activate">
+        <button class="reqbtn">Activate</button>
+      </form>
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <input type="hidden" name="action" value="pause">
+        <button class="reqbtn ghost">Pause</button>
+      </form>
+      {% endif %}
+    </div>
+  </li>
   {% endfor %}
-</table>
-{% else %}<p class="dim">No watched lines yet.</p>{% endif %}
+</ul>
+{% else %}<p class="dim">No campaigns proposed yet. Open a line in the explorer
+  and put it up from there.</p>{% endif %}
 
 <h2>Milestones</h2>
 <ul class="feed">

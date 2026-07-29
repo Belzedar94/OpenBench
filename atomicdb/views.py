@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
 from django.core.cache import cache
-from django.db import OperationalError
+from django.db import IntegrityError, OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -28,7 +28,7 @@ from . import (community_names, ingest, ingest_queue, logic, metrics,
                openings, proof, solve)
 from .database import atomic
 from .metrics import worker_metrics
-from .models import (AnalysisTask, Campaign, DBEvent, Edge,
+from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
                      OpeningNameSuggestion, Position, ProgressSnapshot,
                      ProofCampaign, ProofNode, RequestLog, SolveTask,
                      WorkerPing)
@@ -111,6 +111,34 @@ SUGGESTION_MODERATION_PAGE = 100
 # verdad necesita. Nada de <>&"' ni control chars: el escapado de plantilla ya
 # protege, pero un nombre no tiene por que contener markup para empezar.
 SUGGESTION_NAME_RE = re.compile(r"^[0-9A-Za-zÀ-ÿ][0-9A-Za-zÀ-ÿ .,:'’\-()/]*$")
+
+# ---- campanas de exploracion propuestas y votadas por la comunidad ----
+#
+# La identidad del votante es una cookie opaca, no la IP.  Las dos cosas que
+# se protegen son distintas y una sola llave no vale para las dos: el tope de
+# propuestas quiere "una persona no llena el buzon" (y una IP compartida son
+# muchas personas), y el voto quiere "una persona un voto" (y una IP
+# compartida seguiria siendo un voto).  La cookie separa a los visitantes de
+# un mismo CGNAT sin fingir que identifica a nadie.
+CAMPAIGN_VOTER_COOKIE = 'atomicdb_voter'
+CAMPAIGN_VOTER_BYTES = 24            # token_urlsafe(24) -> 32 caracteres
+CAMPAIGN_VOTER_COOKIE_SECONDS = 400 * 24 * 3600   # tope que aceptan los
+CAMPAIGN_VOTER_RE = re.compile(r'^[A-Za-z0-9_-]{16,64}$')  # navegadores
+CAMPAIGN_PROPOSALS_PER_VOTER_DAY = 3
+CAMPAIGN_PROPOSER_MAX_CHARS = 64
+# Titulo elegido por quien propone.  Es texto plano y se pinta escapado como
+# todo lo demas; lo unico que se hace al recibirlo es colapsar espacios y
+# recortarlo al ancho de la columna, que es tambien el ancho del titular.
+CAMPAIGN_TITLE_MAX_CHARS = 64
+# Cuanta linea entra en el rotulo de una campana. Un breadcrumb sin tope
+# puede traer cien plies, y la tarjeta de portada es un titular.
+CAMPAIGN_LINE_PLIES = 24
+# Tope del etiquetado por BFS al activar. No es una estimacion del tamano de
+# una campana: es lo que se acepta gastar de una vez dentro de un POST.
+CAMPAIGN_TAG_MAX_NODES = 50_000
+CAMPAIGN_TAG_BATCH = 500
+HOME_ACTIVE_CAMPAIGNS = 2
+HOME_PROPOSED_CAMPAIGNS = 6
 
 logger = logging.getLogger(__name__)
 
@@ -1219,8 +1247,11 @@ def goto(request, key, uci):
     )
     if uci not in logic.legal_moves(pos.fen):
         return redirect(_explore_url(key, active_ucis, current_anchor))
+    # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
+    # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
+    # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
     child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
-                                          campaign=pos.campaign)
+                                          campaign_id=pos.campaign_id)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                defaults={'child': child})
     if child.status != 'UNKNOWN':
@@ -1951,7 +1982,6 @@ def home(request):
                        'full': full or 'start position',
                        'source': pending_sources.get(pos.key, '')})
     events = _friendly_events(event_rows, labels)
-    campaigns = Campaign.objects.order_by('-created')[:6]
     root = ingest.get_or_create_position(logic.start_fen())
     root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
@@ -1959,6 +1989,7 @@ def home(request):
     return render(request, 'atomicdb/home.html', {
         **_suggestions_badge(request),
         **_proof_health(now),
+        **_campaign_context(request),
         'root_pn_h': proof.format_number(root_pn),
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,
@@ -1975,7 +2006,7 @@ def home(request):
         'solved_first': solved_first, 'n_first': len(first_moves),
         'solved_pct': solved_pct,
         'closed_24h_h': _human(closed_24h), 'nodes_24h_h': _human(nodes_24h),
-        'first_moves': first_moves, 'events': events, 'campaigns': campaigns,
+        'first_moves': first_moves, 'events': events,
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_fen': root.fen,
         'board_turn': 'white' if root.fen.split()[1] == 'w' else 'black',
@@ -2615,6 +2646,381 @@ def suggestions(request):
     })
 
 
+# ---------------- campanas de exploracion ----------------
+#
+# QUIEN PUEDE QUE.  Proponer y votar es publico y sin cuenta, igual que el
+# buzon de nombres; ACTIVAR es del propietario y de nadie mas.  Esa frontera
+# es el producto entero, asi que esta escrita en un solo sitio (``is_staff``
+# en ``campaign_state``) y no se deduce en ninguna plantilla: la portada
+# esconde los botones por cortesia, el endpoint es quien dice que no.
+#
+# CSRF.  Mismo patron que el buzon de sugerencias: vistas normales, sin
+# ``csrf_exempt``, y el token en el formulario.  Lo que se exime aqui es el
+# protocolo de workers, que no tiene navegador detras; esto si lo tiene.
+
+CAMPAIGN_MESSAGES = {
+    'ok': 'Thanks: your line is on the board and open to votes.',
+    'exists': 'That line was already proposed. Your vote counts on its row.',
+    'rate-limited': 'Daily proposal limit reached, try again tomorrow.',
+    'unknown-position': 'That position is not in the tree yet.',
+    'name-taken': 'That title is already in use. Pick another one.',
+    'voted': 'Vote counted.',
+    'already': 'You had already voted for that campaign.',
+    'activated': 'Campaign activated.',
+    'paused': 'Campaign paused.',
+    'done': 'Campaign closed.',
+}
+
+
+def _voter_token(request):
+    """``(token, recien_creado)`` del visitante que propone o vota.
+
+    Una cookie que no encaje en la forma esperada se DESCARTA y se sustituye
+    en vez de rechazarse: lo que llega en un ``Cookie:`` lo escribe cualquiera,
+    y el unico papel de este valor es agrupar los actos de una misma persona.
+    Tratarlo como un dato de confianza seria darle un poder que no tiene.
+    """
+    raw = (request.COOKIES.get(CAMPAIGN_VOTER_COOKIE) or '').strip()
+    if CAMPAIGN_VOTER_RE.fullmatch(raw):
+        return raw, False
+    return secrets.token_urlsafe(CAMPAIGN_VOTER_BYTES), True
+
+
+def _campaign_reply(request, payload, status=200, token=None, minted=False):
+    """JSON por defecto; vuelta a la portada si el POST vino de un boton.
+
+    Los tres endpoints tienen contrato JSON porque son utiles fuera del
+    navegador, pero los botones de la portada son formularios normales y sin
+    JS — y aterrizar en una pagina de JSON crudo despues de votar es una web
+    rota.  El campo ``back`` lo pide el formulario a proposito; quien no lo
+    manda recibe el JSON tal cual estaba especificado.
+    """
+    if request.POST.get('back'):
+        response = redirect(f"/atomicdb/?campaign={payload['status']}"
+                            f"#campaigns")
+    else:
+        response = JsonResponse(payload, status=status)
+    if token is not None and minted:
+        response.set_cookie(CAMPAIGN_VOTER_COOKIE, token,
+                            max_age=CAMPAIGN_VOTER_COOKIE_SECONDS,
+                            samesite='Lax', httponly=True)
+    return response
+
+
+def _campaign_line_san(key):
+    """El rotulo de una campana, generado del linaje de su raiz.
+
+    Se autogenera y NO se acepta del cliente: es lo que la portada pinta como
+    titulo de la tarjeta, y un titulo que escribe quien propone es un sitio
+    donde escribir cualquier cosa.  La raiz manda; el texto es una lectura de
+    la raiz.
+    """
+    preview, _full = _line_labels(key, preview_plies=CAMPAIGN_LINE_PLIES)
+    return preview or 'start position'
+
+
+def _campaign_name_for(pos, line_san):
+    """Un nombre unico y legible para una campana recien propuesta.
+
+    ``Campaign.name`` es unico desde el primer dia y no hay ningun sitio donde
+    escribirlo a mano, asi que se deriva de la linea.  Chocar solo es posible
+    contra una campana ya ``DONE`` sobre la misma raiz — el dedup cubre todo
+    lo demas — asi que un sufijo corto basta, y si aun asi choca manda la
+    clave, que es unica por construccion.
+    """
+    base = (line_san or '').strip()[:56].strip() or f'line-{pos.key[:12]}'
+    name = base
+    for suffix in range(2, 12):
+        if not Campaign.objects.filter(name=name).exists():
+            return name
+        name = f'{base} #{suffix}'[:64]
+    return f'line-{pos.key[:16]}-{secrets.token_hex(4)}'[:64]
+
+
+def _tag_campaign_subtree(campaign, cap=CAMPAIGN_TAG_MAX_NODES,
+                          batch=CAMPAIGN_TAG_BATCH):
+    """Adopta de una vez el subarbol que YA existia bajo la raiz.
+
+    Sin esto una campana recien activada solo puntuaria sobre lo que naciera a
+    partir de ahora (§ ``ingest.expand``), y lo que la comunidad pide explorar
+    es justo una linea que normalmente ya tiene medio arbol debajo.
+
+    Dos reglas y las dos importan:
+
+    * Solo se adopta lo que no tiene dueno.  Una posicion que ya pertenece a
+      otra campana se queda donde esta: por transposicion los subarboles se
+      solapan, y "el ultimo en activar se lo lleva todo" convertiria cada
+      activacion en un robo silencioso.
+    * Hay tope.  Esto corre dentro de un POST, y un BFS sin techo sobre un
+      grafo de millones de nodos no es una operacion interactiva.  Se recorren
+      como mucho ``cap`` nodos y se dice cuantos; lo que quede fuera lo
+      recogera la herencia segun el arbol crezca.
+
+    Se escribe con ``update`` por lotes y no con ``bulk_update``: todas las
+    filas reciben EL MISMO valor, asi que cargar cincuenta mil instancias para
+    escribir una columna identica en todas seria trabajo puro.
+    """
+    seen = {campaign.root_id}
+    order = [campaign.root_id]
+    frontier = [campaign.root_id]
+    while frontier and len(seen) < cap:
+        children = []
+        for start in range(0, len(frontier), batch):
+            children.extend(Edge.objects.filter(
+                parent_id__in=frontier[start:start + batch],
+            ).values_list('child_id', flat=True))
+        nxt = []
+        for child in children:
+            if child in seen:
+                continue
+            seen.add(child)
+            order.append(child)
+            nxt.append(child)
+            if len(seen) >= cap:
+                break
+        frontier = nxt
+    tagged = 0
+    for start in range(0, len(order), batch):
+        tagged += Position.objects.filter(
+            key__in=order[start:start + batch], campaign__isnull=True,
+        ).update(campaign=campaign)
+    return tagged, len(seen)
+
+
+def _campaign_credit(request):
+    """Quien firma la propuesta.
+
+    Con sesion iniciada manda el usuario y el campo libre se IGNORA: si se
+    aceptase, cualquiera podria firmar con su cuenta el nombre de otro, y un
+    credito que se puede escribir a mano no es un credito.  Sin sesion queda
+    el campo libre, que no afirma identidad ninguna y se pinta como lo que es.
+    """
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated:
+        return user.username[:CAMPAIGN_PROPOSER_MAX_CHARS]
+    return ' '.join((request.POST.get('name') or '').split())[
+        :CAMPAIGN_PROPOSER_MAX_CHARS]
+
+
+def campaign_propose(request):
+    """Propuesta publica de campana, sin cuenta: ``key=<clave de posicion>``.
+
+    Del visitante se acepta QUE posicion, con que TITULO llamarla y, si es
+    anonimo, con que nombre firmarla.  El estado nace ``PROPOSED``: proponer
+    no enciende nada, solo pone la linea en la lista.
+
+    TITULO Y LINEA SON COSAS DISTINTAS.  ``line_san`` sale siempre del linaje
+    y es la IDENTIDAD de la campana — lo que de verdad se va a explorar — asi
+    que no se acepta del cliente ni cuando trae titulo.  El titulo es solo el
+    rotulo: si viene, es el nombre; si no, se deriva de la linea.  Como el
+    nombre es unico en la tabla, un titulo ya usado se rechaza SIN crear nada,
+    para que quien propone elija otro en vez de encontrarse con una campana
+    llamada "lo mismo #2".
+
+    Anti-spam en dos capas, ninguna de ellas un captcha: el dedup por raiz
+    (proponer una linea ya propuesta devuelve la que hay, para que la gente
+    vote en vez de duplicar) y un tope diario por cookie.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    token, minted = _voter_token(request)
+
+    def reply(payload, status=200):
+        return _campaign_reply(request, payload, status, token, minted)
+
+    # La clave se recorta al ancho de la columna antes de consultar: no cambia
+    # ninguna respuesta (nada mas largo puede existir) y evita mandar a la
+    # base una cadena arbitraria del cliente.
+    key = (request.POST.get('key') or '').strip()[:64]
+    if not Position.objects.filter(key=key).exists():
+        return reply({'status': 'unknown-position', 'id': None}, 404)
+    title = ' '.join((request.POST.get('title') or '').split())[
+        :CAMPAIGN_TITLE_MAX_CHARS]
+    proposed_by = _campaign_credit(request)
+    day_ago = timezone.now() - timedelta(days=1)
+    with atomic():
+        # El bloqueo sobre la RAIZ serializa las propuestas de esa linea: sin
+        # el, dos envios simultaneos pasan los dos el dedup y la linea acaba
+        # con dos campanas abiertas que nadie sabe cual es.
+        pos = Position.objects.select_for_update().get(key=key)
+        existing = (Campaign.objects
+                    .filter(root=pos, state__in=Campaign.OPEN_STATES)
+                    .order_by('id').first())
+        if existing is not None:
+            return reply({'status': 'exists', 'id': existing.id})
+        if Campaign.objects.filter(
+                proposed_token=token,
+                created__gte=day_ago).count() \
+                >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
+            return reply({'status': 'rate-limited', 'id': None}, 429)
+        line_san = _campaign_line_san(pos.key)
+        if title and Campaign.objects.filter(name=title).exists():
+            return reply({'status': 'name-taken', 'id': None}, 409)
+        try:
+            # ``atomic`` anidado = savepoint: si la unicidad salta por una
+            # carrera con otra propuesta, se deshace SOLO esto y la
+            # transaccion de fuera sigue viva para poder contestar.
+            with atomic():
+                campaign = Campaign.objects.create(
+                    name=title or _campaign_name_for(pos, line_san),
+                    root=pos, line_san=line_san,
+                    state=Campaign.CState.PROPOSED,
+                    # El espejo deprecado se escribe a mano en el unico sitio
+                    # que no pasa por ``apply_state``: una propuesta NO esta
+                    # activa, y el default del campo (heredado de cuando el
+                    # booleano mandaba) dice que si.
+                    active=False,
+                    proposed_by=proposed_by,
+                    proposed_token=token)
+        except IntegrityError:
+            return reply({'status': 'name-taken', 'id': None}, 409)
+    return reply({'status': 'ok', 'id': campaign.id})
+
+
+def campaign_vote(request, campaign_id):
+    """Un voto por campana y por cookie. Repetirlo no suma.
+
+    El recuento cacheado se reescribe con el ``COUNT`` real en la misma
+    transaccion que el voto, nunca con un ``+1``: un incremento pierde una
+    carrera y deja la portada mintiendo hasta que alguien lo note.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    token, minted = _voter_token(request)
+
+    def reply(payload, status=200):
+        return _campaign_reply(request, payload, status, token, minted)
+
+    try:
+        campaign = Campaign.objects.get(id=campaign_id)
+    except Campaign.DoesNotExist:
+        return reply({'status': 'unknown-campaign', 'votes': 0}, 404)
+    name = ' '.join((request.POST.get('name') or '').split())
+    with atomic():
+        _row, created = CampaignVote.objects.get_or_create(
+            campaign=campaign, token=token,
+            defaults={'name': name[:CAMPAIGN_PROPOSER_MAX_CHARS]})
+        votes = CampaignVote.objects.filter(campaign=campaign).count()
+        if campaign.votes != votes:
+            campaign.votes = votes
+            campaign.save(update_fields=['votes'])
+    return reply({'status': 'voted' if created else 'already', 'votes': votes})
+
+
+def campaign_state(request, campaign_id):
+    """Activar, pausar o cerrar una campana. SOLO el propietario.
+
+    Aqui es donde vive la unica asimetria del diseno: los votos ordenan la
+    lista y no deciden nada.  ``is_staff`` es el criterio — el mismo que
+    distingue al propietario en el Django de este sitio — y responde 403 a
+    todo lo demas, este quien este mirando la portada.
+
+    ``pause`` y ``done`` NO desetiquetan nada.  Las etiquetas son de la
+    posicion, no del turno: una campana pausada que se reactiva tiene que
+    recuperar su subarbol, y borrar cincuenta mil etiquetas para volver a
+    escribirlas manana es trabajo a cambio de nada.  El estado ya basta para
+    que el selector deje de puntuarla.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    user = getattr(request, 'user', None)
+    if user is None or not user.is_authenticated or not user.is_staff:
+        return JsonResponse({'status': 'forbidden'}, status=403)
+    try:
+        campaign = Campaign.objects.get(id=campaign_id)
+    except Campaign.DoesNotExist:
+        return JsonResponse({'status': 'unknown-campaign'}, status=404)
+    action = (request.POST.get('action') or '').strip().lower()
+    if action == 'activate':
+        with atomic():
+            campaign.apply_state(Campaign.CState.ACTIVE)
+            tagged, visited = _tag_campaign_subtree(campaign)
+        return _campaign_reply(request, {'status': 'activated',
+                                         'id': campaign.id,
+                                         'tagged': tagged,
+                                         'visited': visited})
+    if action in ('pause', 'done'):
+        campaign.apply_state(Campaign.CState.PAUSED if action == 'pause'
+                             else Campaign.CState.DONE)
+        return _campaign_reply(request, {
+            'status': 'paused' if action == 'pause' else 'done',
+            'id': campaign.id})
+    return JsonResponse({'status': 'bad-action'}, status=400)
+
+
+def _campaign_identity(campaign):
+    """Titulo, linea y credito de una campana, tal y como se pintan.
+
+    La linea solo baja a subtitulo cuando DICE algo que el titulo no dice ya:
+    sin titulo propio el nombre ES la linea, y repetirla debajo de si misma no
+    informa a nadie.  El credito nunca queda en blanco — una propuesta sin
+    firma es anonima, y decirlo es mas honesto que dejar un hueco.
+    """
+    return {
+        'id': campaign.id, 'title': campaign.name,
+        'line_san': campaign.line_san,
+        'line_shown': ('' if campaign.line_san == campaign.name
+                       else campaign.line_san),
+        'root_key': campaign.root_id, 'votes': campaign.votes,
+        'proposed_by': campaign.proposed_by,
+        'proposed_by_h': campaign.proposed_by or 'anonymous',
+    }
+
+
+def _campaign_context(request):
+    """Lo que la portada pinta de campanas: la activa arriba y el buzon.
+
+    Los conteos de progreso salen de UNA consulta agrupada para todas las
+    campanas activas, no de tres por campana.  No llevan cache propia: la
+    portada entera ya va con ``cache_page(15)`` (§ urls), y una segunda cache
+    dentro de una cacheada solo anadiria una copia mas vieja de los mismos
+    numeros.
+
+    Los botones de propietario se calculan aqui y no en la plantilla por la
+    misma razon que el enlace de moderacion (§ ``_suggestions_badge``): la
+    portada varia por cookie, asi que su render de staff no se le sirve a
+    nadie mas.
+    """
+    active = list(Campaign.objects.filter(state=Campaign.CState.ACTIVE)
+                  .order_by('-votes', 'id')[:HOME_ACTIVE_CAMPAIGNS])
+    totals = {}
+    if active:
+        for row in (Position.objects
+                    .filter(campaign_id__in=[c.id for c in active])
+                    .values('campaign_id')
+                    .annotate(total=Count('key'),
+                              explored=Count('key',
+                                             filter=Q(nodes_invested__gt=0)),
+                              resolved=Count('key',
+                                             filter=~Q(status='UNKNOWN')))):
+            totals[row['campaign_id']] = row
+    cards = []
+    for campaign in active:
+        row = totals.get(campaign.id, {})
+        total = row.get('total', 0)
+        resolved = row.get('resolved', 0)
+        cards.append({
+            **_campaign_identity(campaign),
+            'total': total, 'total_h': _human(total),
+            'explored': row.get('explored', 0),
+            'explored_h': _human(row.get('explored', 0)),
+            'resolved': resolved, 'resolved_h': _human(resolved),
+            'solved_pct': round(100.0 * resolved / total, 1) if total else 0.0,
+        })
+    proposed = [
+        _campaign_identity(campaign)
+        for campaign in Campaign.objects
+        .filter(state=Campaign.CState.PROPOSED)
+        .order_by('-votes', '-created')[:HOME_PROPOSED_CAMPAIGNS]]
+    user = getattr(request, 'user', None)
+    is_owner = bool(user is not None and user.is_authenticated
+                    and user.is_staff)
+    outcome = request.GET.get('campaign', '')
+    return {'campaign_cards': cards, 'campaigns_proposed': proposed,
+            'campaign_owner': is_owner,
+            'campaign_message': CAMPAIGN_MESSAGES.get(outcome, '')}
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -2752,6 +3158,15 @@ def explore(request, key):
         'suggest_message': SUGGESTION_MESSAGES.get(
             request.GET.get('suggested', '')),
         'suggest_ok': request.GET.get('suggested') == 'ok',
+        # Proponer una campana se hace desde la posicion que se esta mirando:
+        # la raiz de la campana ES esta posicion, y pedirle a alguien que
+        # copie una clave de 64 hex en otra pagina es pedirle que no lo haga.
+        'campaign_name_max': CAMPAIGN_PROPOSER_MAX_CHARS,
+        'campaign_title_max': CAMPAIGN_TITLE_MAX_CHARS,
+        # Con sesion iniciada el credito ya esta decidido, asi que la caja no
+        # ofrece un campo que el endpoint va a ignorar: dice con que nombre va
+        # a salir.  El calculo es el MISMO que usa el endpoint.
+        'campaign_credit': _campaign_credit(request),
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,

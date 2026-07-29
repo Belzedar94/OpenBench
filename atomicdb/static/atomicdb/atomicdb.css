@@ -955,6 +955,142 @@ h2 {
   color: var(--ink);
 }
 
+/* Campanas de exploracion: la activa arriba, con su progreso, y el buzon de
+   propuestas mas abajo.  La tarjeta toma prestada la lamina de .opening-card
+   porque es la otra cosa de la casa que dice "esto es lo importante de esta
+   pagina", y asi las dos se leen como la misma familia en claro y en oscuro. */
+.campaign-card {
+  margin: 0 0 1.1rem;
+  padding: .8rem .95rem;
+  border: 1px solid var(--opening-border);
+  border-radius: 10px;
+  background: var(--opening-sheen), var(--surface-1);
+}
+
+.campaign-kicker {
+  display: block;
+  color: var(--accent);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+
+.campaign-card .campaign-title {
+  margin: .18rem 0 .5rem;
+  overflow-wrap: anywhere;
+  font-size: 1.12rem;
+  line-height: 1.3;
+}
+
+/* La linea real debajo del titulo elegido: subtitulo, no titular. Solo
+   aparece cuando dice algo que el titulo no dice ya. */
+.campaign-line {
+  margin: -.3rem 0 .1rem;
+  overflow-wrap: anywhere;
+  font-size: .84rem;
+}
+
+.campaign-row-san {
+  margin-top: .12rem;
+  overflow-wrap: anywhere;
+  font-size: .78rem;
+}
+
+/* Flex con gap: la separacion entre cifras no depende de que sobreviva un
+   salto de linea del HTML, que el minificador se lleva por delante. */
+.campaign-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem .9rem;
+  font-size: .84rem;
+}
+
+.campaign-bar {
+  overflow: hidden;
+  height: .5rem;
+  margin: .55rem 0 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.campaign-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--won);
+}
+
+.campaign-by {
+  margin: .45rem 0 0;
+  font-size: .78rem;
+}
+
+.campaign-lede {
+  margin: -.35rem 0 .7rem;
+  font-size: .85rem;
+}
+
+.campaign-status {
+  margin: 0 0 .9rem;
+  color: var(--accent);
+  font-size: .88rem;
+}
+
+.campaign-list {
+  list-style: none;
+}
+
+.campaign-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem .9rem;
+  padding: .5rem .2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .92rem;
+}
+
+.campaign-row-line {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+/* Un titulo elegido a mano puede ser mas ancho que la fila en un movil, y
+   .qline se dimensiona por su contenido hasta 26rem — sin este tope se sale
+   de la tarjeta.  Con el, manda la fila y los puntos suspensivos que .qline
+   ya trae hacen el resto. */
+.campaign-row-line .qline {
+  max-width: 100%;
+}
+
+.campaign-row-votes {
+  flex: 0 0 auto;
+  font-size: .82rem;
+}
+
+/* Cada boton es su propio formulario (un POST, una accion): sin flex se
+   apilarian, porque un <form> es un bloque. */
+.campaign-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin-top: .55rem;
+}
+
+.campaign-row .campaign-actions {
+  margin-top: 0;
+}
+
+/* Con sesion iniciada la caja no ofrece campo de firma: dice el nombre con
+   el que va a salir.  Ocupa el hueco de la etiqueta que sustituye. */
+.campaign-credit {
+  flex: 1 1 15rem;
+  align-self: center;
+  font-size: .78rem;
+}
+
 /* Marca sobria de "este numero lo respalda el subarbol, no la eval puntual" */
 .backed-mark {
   margin-left: .35rem;
@@ -985,6 +1121,7 @@ html.theme-ready .verdict,
 html.theme-ready .reqbtn,
 html.theme-ready .fenbox input,
 html.theme-ready .linebox,
+html.theme-ready .campaign-card,
 html.theme-ready .opening-card {
   transition:
     background-color 180ms ease,

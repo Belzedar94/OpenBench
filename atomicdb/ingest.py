@@ -7,6 +7,7 @@ Flujo por resultado de analisis (§2):
 
 import contextlib
 import contextvars
+import math
 import time
 
 from django.conf import settings
@@ -122,11 +123,20 @@ def multipv_for(visits, budget_nodes=None, seeding=False):
     return 5 if visits < 3 else 3
 
 
-def get_or_create_position(fen, campaign=None):
+def get_or_create_position(fen, campaign_id=None):
+    """Upsert de una posicion por su identidad canonica.
+
+    ``campaign_id`` solo viaja en los ``defaults``, y eso es la mitad de la
+    politica de etiquetado: una posicion que YA existia conserva su dueno (o
+    su ausencia de dueno) pase lo que pase.  La otra mitad la ponen los tres
+    sitios que MATERIALIZAN nodos bajo un padre — ``expand``,
+    ``materialise_won_line`` y el ``goto`` del explorador — pasando el dueno
+    del padre.  El razonamiento entero esta en ``expand``.
+    """
     fen = logic.canonical_fen(fen)
     key = logic.key_of(fen)
     pos, created = Position.objects.get_or_create(
-        key=key, defaults={'fen': fen, 'campaign': campaign})
+        key=key, defaults={'fen': fen, 'campaign_id': campaign_id})
     if created:
         t = logic.terminal_status(fen)
         if t:
@@ -141,13 +151,27 @@ def get_or_create_position(fen, campaign=None):
 
 
 def expand(pos):
-    """Crea TODAS las aristas legales (movegen del ingestor, §3.3)."""
+    """Crea TODAS las aristas legales (movegen del ingestor, §3.3).
+
+    HERENCIA DE CAMPANA.  Un hijo que NACE aqui bajo una posicion etiquetada
+    nace con la misma etiqueta: es lo que hace que una campana siga creciendo
+    con el arbol en vez de quedarse congelada en el subarbol que existia el
+    dia que se activo.  Un hijo que YA EXISTIA no se toca ni aunque no tenga
+    dueno, y eso es deliberado: por transposicion, media base cuelga de media
+    base, y "adoptar al vuelo lo que me encuentro" convierte a la primera
+    campana activa en propietaria del arbol entero.  El stock que si le toca a
+    una campana se lo da el BFS de activacion, una vez, y con tope.
+
+    Se pasa el ``campaign_id`` y no la instancia para no pagar una consulta a
+    ``Campaign`` por expansion: aqui solo hace falta la clave ajena.
+    """
     if pos.expanded or pos.status != 'UNKNOWN':
         return []
     children = []
     for uci in logic.legal_moves(pos.fen):
         child_fen = logic.apply_move(pos.fen, uci)
-        child = get_or_create_position(child_fen, campaign=pos.campaign)
+        child = get_or_create_position(child_fen,
+                                       campaign_id=pos.campaign_id)
         Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                    defaults={'child': child})
         if child.priority <= DEAD / 2:
@@ -1115,8 +1139,12 @@ def materialise_won_line(pos, verify=False):
     for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
         if uci not in logic.legal_moves(node.fen):
             break                       # testigo historico ya no legal
+        # Misma herencia que en ``expand``: la PV verificada tambien
+        # materializa nodos nuevos, y los que nacen bajo una campana son
+        # suyos.  Por el ``campaign_id`` y no por la instancia, que aqui
+        # ademas se pagaria una vez por ply.
         child = get_or_create_position(logic.apply_move(node.fen, uci),
-                                       campaign=node.campaign)
+                                       campaign_id=node.campaign_id)
         _edge, made = Edge.objects.get_or_create(
             parent=node, move_uci=uci, defaults={'child': child})
         if made:
@@ -1405,16 +1433,35 @@ def _emit_closure_events(pos, **extra):
     DBEvent.objects.create(kind='NODE_CLOSED', payload={
         'key': pos.key, 'status': pos.status, 'closure': pos.closure,
         'source': _closure_source.get(), **extra})
-    for camp in Campaign.objects.filter(root=pos, active=True):
+    for camp in Campaign.objects.filter(root=pos,
+                                        state=Campaign.CState.ACTIVE):
         DBEvent.objects.create(kind='CAMPAIGN_CLOSED', payload={
             'campaign': camp.name, 'status': pos.status})
-        camp.active = False
-        camp.save(update_fields=['active'])
+        camp.apply_state(Campaign.CState.DONE)
 
 
 DEAD = -1e9   # lapida: rama muerta, fuera de la cola para siempre
 REGRET_WEIGHT = 3.0      # unidades de prioridad por cada 100cp de regret
 DISCONNECTED_REGRET = 5  # posiciones sin camino a la raiz (cajetin FEN)
+# Peso de una campana ACTIVA en la prioridad del selector.  La escala esta
+# elegida contra el resto de la formula, no al azar: el termino de cercania al
+# cierre vale como mucho 15, el salto de "mate visto" 50 y el regret resta
+# hasta 90.  Cuarenta unidades por ``log1p(votos)`` ponen una campana muy
+# votada por delante de la exploracion normal SIN llegar a tapar un mate a la
+# vista, y el logaritmo hace que el voto veinte pese bastante menos que el
+# segundo — un brigadeo de cookies mueve el orden, no lo compra.
+CAMPAIGN_BONUS = 40.0
+
+
+def _active_campaign_votes():
+    """{id de campana: votos} de las ACTIVE, en UNA consulta por pasada.
+
+    Se precarga entero a proposito: la alternativa es una consulta por
+    posicion dentro de un bucle que recorre la base al completo.
+    """
+    return dict(Campaign.objects
+                .filter(state=Campaign.CState.ACTIVE)
+                .values_list('id', 'votes'))
 
 
 def _regret_from_root():
@@ -1503,8 +1550,27 @@ def _regret_from_root():
 
 def refresh_priorities(force=False):
     """§4.1 — recalculo global (llamado por el selector). Prioridad =
-    cercania al cierre local - regret acumulado desde la raiz - visitas.
+    cercania al cierre local - regret acumulado desde la raiz - visitas
+    + el bono de la campana ACTIVA a la que pertenezca la posicion.
     Respeta las lapidas (las ramas muertas no resucitan).
+
+    EL BONO DE CAMPANA Y SUS TRES LIMITES.  Es un sumando y nada mas: se anade
+    al final, sobre la prioridad ya calculada, y por eso no puede reescribir
+    ninguna de las decisiones anteriores, solo desempatar a favor de la linea
+    que la comunidad voto.  Los limites no son de estilo, son lo que impide
+    que un voto compre cosas que un voto no puede comprar:
+
+    1. NO RESUCITA LAPIDAS.  El filtro del bucle ya excluye ``priority <=
+       DEAD/2``, asi que una rama enterrada no pasa por aqui ni con mil votos.
+       Enterrarla fue una conclusion sobre el arbol; votar es una preferencia
+       sobre en que mirar, y una preferencia no revoca una conclusion.
+    2. NO PUNTUA LO CERRADO.  El mismo filtro exige ``status='UNKNOWN'``.  Una
+       posicion resuelta no vuelve a la cola porque alguien la vote.
+    3. NO TOCA LA BANDA USER.  El arriendo ordena por ``-source`` ANTES que
+       por nada, y dentro de USER ignora la prioridad de la posicion a
+       proposito (``views.api_lease``, ``human_rank``).  El bono vive en
+       ``Position.priority``, que es lo que ordena AUTO y FILL: una campana
+       muy votada nunca se pone por delante del click de una persona.
 
     Es O(grafo entero) — Dijkstra sobre todos los nodos y aristas, mas dos
     diccionarios con la base cargada en RAM.  A 450k posiciones son segundos
@@ -1523,6 +1589,7 @@ def refresh_priorities(force=False):
         return False
 
     regret = _regret_from_root()
+    campaign_votes = _active_campaign_votes()
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
@@ -1540,6 +1607,14 @@ def refresh_priorities(force=False):
                 + (2.0 if not pos.expanded else 0.0)
                 - REGRET_WEIGHT * runits      # relevancia hacia la raiz
                 - 1.5 * pos.visits)           # frescura
+        # El bono va DESPUES de todo lo demas y solo si la campana de la
+        # posicion esta ACTIVE: una propuesta sin activar, o una en pausa, no
+        # aparece en el diccionario y por tanto no puntua.  Es exactamente la
+        # linea entre "la comunidad pide" y "el propietario concede".
+        if pos.campaign_id is not None:
+            votes = campaign_votes.get(pos.campaign_id)
+            if votes is not None:
+                prio += CAMPAIGN_BONUS * math.log1p(max(0, votes))
         if pos.priority != prio:
             pos.priority = prio
             dirty.append(pos)
@@ -1578,7 +1653,13 @@ def inline_selector_enabled():
 
 
 def next_tasks(n):
-    """Selector global best-first sobre todo el arbol (sin campanas).
+    """Selector global best-first sobre todo el arbol.
+
+    Sigue siendo GLOBAL: no hay una cola por campana ni un cupo reservado.  Lo
+    unico que hacen las campanas activas es pesar mas dentro de la MISMA
+    ordenacion (§ ``refresh_priorities``, ``CAMPAIGN_BONUS``), asi que una
+    linea votada no puede dejar sin servir al resto del arbol — solo se pone
+    delante mientras el resto no traiga algo mas urgente.
 
     Consume ``priority`` TAL Y COMO ESTE.  Quien la mantiene es el servicio
     ``refresh_selector``; aqui no se recalcula nada porque este codigo corre
