@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
 from django.core.cache import cache
-from django.db import OperationalError
+from django.db import IntegrityError, OperationalError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -126,6 +126,10 @@ CAMPAIGN_VOTER_COOKIE_SECONDS = 400 * 24 * 3600   # tope que aceptan los
 CAMPAIGN_VOTER_RE = re.compile(r'^[A-Za-z0-9_-]{16,64}$')  # navegadores
 CAMPAIGN_PROPOSALS_PER_VOTER_DAY = 3
 CAMPAIGN_PROPOSER_MAX_CHARS = 64
+# Titulo elegido por quien propone.  Es texto plano y se pinta escapado como
+# todo lo demas; lo unico que se hace al recibirlo es colapsar espacios y
+# recortarlo al ancho de la columna, que es tambien el ancho del titular.
+CAMPAIGN_TITLE_MAX_CHARS = 64
 # Cuanta linea entra en el rotulo de una campana. Un breadcrumb sin tope
 # puede traer cien plies, y la tarjeta de portada es un titular.
 CAMPAIGN_LINE_PLIES = 24
@@ -2659,6 +2663,7 @@ CAMPAIGN_MESSAGES = {
     'exists': 'That line was already proposed. Your vote counts on its row.',
     'rate-limited': 'Daily proposal limit reached, try again tomorrow.',
     'unknown-position': 'That position is not in the tree yet.',
+    'name-taken': 'That title is already in use. Pick another one.',
     'voted': 'Vote counted.',
     'already': 'You had already voted for that campaign.',
     'activated': 'Campaign activated.',
@@ -2782,12 +2787,35 @@ def _tag_campaign_subtree(campaign, cap=CAMPAIGN_TAG_MAX_NODES,
     return tagged, len(seen)
 
 
+def _campaign_credit(request):
+    """Quien firma la propuesta.
+
+    Con sesion iniciada manda el usuario y el campo libre se IGNORA: si se
+    aceptase, cualquiera podria firmar con su cuenta el nombre de otro, y un
+    credito que se puede escribir a mano no es un credito.  Sin sesion queda
+    el campo libre, que no afirma identidad ninguna y se pinta como lo que es.
+    """
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated:
+        return user.username[:CAMPAIGN_PROPOSER_MAX_CHARS]
+    return ' '.join((request.POST.get('name') or '').split())[
+        :CAMPAIGN_PROPOSER_MAX_CHARS]
+
+
 def campaign_propose(request):
     """Propuesta publica de campana, sin cuenta: ``key=<clave de posicion>``.
 
-    Lo unico que se acepta del visitante es QUE posicion y, si quiere, con que
-    nombre firmarla.  El rotulo sale del linaje y el estado nace ``PROPOSED``:
-    proponer no enciende nada, solo pone la linea en la lista.
+    Del visitante se acepta QUE posicion, con que TITULO llamarla y, si es
+    anonimo, con que nombre firmarla.  El estado nace ``PROPOSED``: proponer
+    no enciende nada, solo pone la linea en la lista.
+
+    TITULO Y LINEA SON COSAS DISTINTAS.  ``line_san`` sale siempre del linaje
+    y es la IDENTIDAD de la campana — lo que de verdad se va a explorar — asi
+    que no se acepta del cliente ni cuando trae titulo.  El titulo es solo el
+    rotulo: si viene, es el nombre; si no, se deriva de la linea.  Como el
+    nombre es unico en la tabla, un titulo ya usado se rechaza SIN crear nada,
+    para que quien propone elija otro en vez de encontrarse con una campana
+    llamada "lo mismo #2".
 
     Anti-spam en dos capas, ninguna de ellas un captcha: el dedup por raiz
     (proponer una linea ya propuesta devuelve la que hay, para que la gente
@@ -2806,7 +2834,9 @@ def campaign_propose(request):
     key = (request.POST.get('key') or '').strip()[:64]
     if not Position.objects.filter(key=key).exists():
         return reply({'status': 'unknown-position', 'id': None}, 404)
-    proposed_by = ' '.join((request.POST.get('name') or '').split())
+    title = ' '.join((request.POST.get('title') or '').split())[
+        :CAMPAIGN_TITLE_MAX_CHARS]
+    proposed_by = _campaign_credit(request)
     day_ago = timezone.now() - timedelta(days=1)
     with atomic():
         # El bloqueo sobre la RAIZ serializa las propuestas de esa linea: sin
@@ -2824,16 +2854,26 @@ def campaign_propose(request):
                 >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
             return reply({'status': 'rate-limited', 'id': None}, 429)
         line_san = _campaign_line_san(pos.key)
-        campaign = Campaign.objects.create(
-            name=_campaign_name_for(pos, line_san), root=pos,
-            line_san=line_san, state=Campaign.CState.PROPOSED,
-            # El espejo deprecado se escribe a mano en el unico sitio que no
-            # pasa por ``apply_state``: una propuesta NO esta activa, y el
-            # default del campo (heredado de cuando el booleano mandaba) dice
-            # que si.
-            active=False,
-            proposed_by=proposed_by[:CAMPAIGN_PROPOSER_MAX_CHARS],
-            proposed_token=token)
+        if title and Campaign.objects.filter(name=title).exists():
+            return reply({'status': 'name-taken', 'id': None}, 409)
+        try:
+            # ``atomic`` anidado = savepoint: si la unicidad salta por una
+            # carrera con otra propuesta, se deshace SOLO esto y la
+            # transaccion de fuera sigue viva para poder contestar.
+            with atomic():
+                campaign = Campaign.objects.create(
+                    name=title or _campaign_name_for(pos, line_san),
+                    root=pos, line_san=line_san,
+                    state=Campaign.CState.PROPOSED,
+                    # El espejo deprecado se escribe a mano en el unico sitio
+                    # que no pasa por ``apply_state``: una propuesta NO esta
+                    # activa, y el default del campo (heredado de cuando el
+                    # booleano mandaba) dice que si.
+                    active=False,
+                    proposed_by=proposed_by,
+                    proposed_token=token)
+        except IntegrityError:
+            return reply({'status': 'name-taken', 'id': None}, 409)
     return reply({'status': 'ok', 'id': campaign.id})
 
 
@@ -2908,6 +2948,25 @@ def campaign_state(request, campaign_id):
     return JsonResponse({'status': 'bad-action'}, status=400)
 
 
+def _campaign_identity(campaign):
+    """Titulo, linea y credito de una campana, tal y como se pintan.
+
+    La linea solo baja a subtitulo cuando DICE algo que el titulo no dice ya:
+    sin titulo propio el nombre ES la linea, y repetirla debajo de si misma no
+    informa a nadie.  El credito nunca queda en blanco — una propuesta sin
+    firma es anonima, y decirlo es mas honesto que dejar un hueco.
+    """
+    return {
+        'id': campaign.id, 'title': campaign.name,
+        'line_san': campaign.line_san,
+        'line_shown': ('' if campaign.line_san == campaign.name
+                       else campaign.line_san),
+        'root_key': campaign.root_id, 'votes': campaign.votes,
+        'proposed_by': campaign.proposed_by,
+        'proposed_by_h': campaign.proposed_by or 'anonymous',
+    }
+
+
 def _campaign_context(request):
     """Lo que la portada pinta de campanas: la activa arriba y el buzon.
 
@@ -2941,9 +3000,7 @@ def _campaign_context(request):
         total = row.get('total', 0)
         resolved = row.get('resolved', 0)
         cards.append({
-            'id': campaign.id, 'line_san': campaign.line_san,
-            'root_key': campaign.root_id, 'votes': campaign.votes,
-            'proposed_by': campaign.proposed_by,
+            **_campaign_identity(campaign),
             'total': total, 'total_h': _human(total),
             'explored': row.get('explored', 0),
             'explored_h': _human(row.get('explored', 0)),
@@ -2951,9 +3008,7 @@ def _campaign_context(request):
             'solved_pct': round(100.0 * resolved / total, 1) if total else 0.0,
         })
     proposed = [
-        {'id': campaign.id, 'line_san': campaign.line_san,
-         'root_key': campaign.root_id, 'votes': campaign.votes,
-         'proposed_by': campaign.proposed_by}
+        _campaign_identity(campaign)
         for campaign in Campaign.objects
         .filter(state=Campaign.CState.PROPOSED)
         .order_by('-votes', '-created')[:HOME_PROPOSED_CAMPAIGNS]]
@@ -3107,6 +3162,11 @@ def explore(request, key):
         # la raiz de la campana ES esta posicion, y pedirle a alguien que
         # copie una clave de 64 hex en otra pagina es pedirle que no lo haga.
         'campaign_name_max': CAMPAIGN_PROPOSER_MAX_CHARS,
+        'campaign_title_max': CAMPAIGN_TITLE_MAX_CHARS,
+        # Con sesion iniciada el credito ya esta decidido, asi que la caja no
+        # ofrece un campo que el endpoint va a ignorar: dice con que nombre va
+        # a salir.  El calculo es el MISMO que usa el endpoint.
+        'campaign_credit': _campaign_credit(request),
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'unexplored': unexplored,

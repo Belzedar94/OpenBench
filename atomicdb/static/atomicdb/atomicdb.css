@@ -983,6 +983,20 @@ h2 {
   line-height: 1.3;
 }
 
+/* La linea real debajo del titulo elegido: subtitulo, no titular. Solo
+   aparece cuando dice algo que el titulo no dice ya. */
+.campaign-line {
+  margin: -.3rem 0 .1rem;
+  overflow-wrap: anywhere;
+  font-size: .84rem;
+}
+
+.campaign-row-san {
+  margin-top: .12rem;
+  overflow-wrap: anywhere;
+  font-size: .78rem;
+}
+
 /* Flex con gap: la separacion entre cifras no depende de que sobreviva un
    salto de linea del HTML, que el minificador se lleva por delante. */
 .campaign-stats {
@@ -1043,6 +1057,14 @@ h2 {
   min-width: 0;
 }
 
+/* Un titulo elegido a mano puede ser mas ancho que la fila en un movil, y
+   .qline se dimensiona por su contenido hasta 26rem — sin este tope se sale
+   de la tarjeta.  Con el, manda la fila y los puntos suspensivos que .qline
+   ya trae hacen el resto. */
+.campaign-row-line .qline {
+  max-width: 100%;
+}
+
 .campaign-row-votes {
   flex: 0 0 auto;
   font-size: .82rem;
@@ -1059,6 +1081,14 @@ h2 {
 
 .campaign-row .campaign-actions {
   margin-top: 0;
+}
+
+/* Con sesion iniciada la caja no ofrece campo de firma: dice el nombre con
+   el que va a salir.  Ocupa el hueco de la etiqueta que sustituye. */
+.campaign-credit {
+  flex: 1 1 15rem;
+  align-self: center;
+  font-size: .78rem;
 }
 
 /* Marca sobria de "este numero lo respalda el subarbol, no la eval puntual" */

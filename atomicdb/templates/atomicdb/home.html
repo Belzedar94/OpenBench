@@ -22,7 +22,8 @@
 {% for c in campaign_cards %}
 <section class="campaign-card">
   <div class="campaign-kicker">Community campaign · running now</div>
-  <h2 class="campaign-title"><a href="/atomicdb/explore/{{ c.root_key }}/">Campaign: {{ c.line_san }}</a></h2>
+  <h2 class="campaign-title"><a href="/atomicdb/explore/{{ c.root_key }}/">Campaign: {{ c.title }}</a></h2>
+  {% if c.line_shown %}<div class="campaign-line dim">{{ c.line_shown }}</div>{% endif %}
   <div class="campaign-stats dim">
     <span>{{ c.votes }} vote{{ c.votes|pluralize }}</span>
     <span>{{ c.explored_h }} of {{ c.total_h }} positions explored</span>
@@ -34,7 +35,7 @@
     aria-label="Share of this campaign already solved">
     <span style="width:{{ c.solved_pct|unlocalize }}%"></span>
   </div>
-  {% if c.proposed_by %}<div class="campaign-by dim">Proposed by {{ c.proposed_by }}</div>{% endif %}
+  <div class="campaign-by dim">Proposed by {{ c.proposed_by_h }}</div>
   {% if campaign_owner %}
   <div class="campaign-actions">
     <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
@@ -158,9 +159,10 @@
   {% for c in campaigns_proposed %}
   <li class="campaign-row">
     <div class="campaign-row-line">
-      <a class="qline" href="/atomicdb/explore/{{ c.root_key }}/">{{ c.line_san }}</a>
+      <a class="qline" href="/atomicdb/explore/{{ c.root_key }}/">{{ c.title }}</a>
+      {% if c.line_shown %}<div class="campaign-row-san dim">{{ c.line_shown }}</div>{% endif %}
     </div>
-    <div class="campaign-row-votes dim">{{ c.votes }} vote{{ c.votes|pluralize }}{% if c.proposed_by %} · by {{ c.proposed_by }}{% endif %}</div>
+    <div class="campaign-row-votes dim">proposed by {{ c.proposed_by_h }} · {{ c.votes }} vote{{ c.votes|pluralize }}</div>
     <div class="campaign-actions">
       <form method="post" action="/atomicdb/campaign/{{ c.id }}/vote/">{% csrf_token %}
         <input type="hidden" name="back" value="1">

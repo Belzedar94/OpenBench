@@ -34,6 +34,17 @@ def _reading(body):
     return ' '.join(html_module.unescape(re.sub(r'<[^>]+>', ' ', body)).split())
 
 
+def _propose_form(body):
+    """Solo el formulario de proponer campana del explorador.
+
+    La pagina lleva tambien la caja de nombres de apertura, que tiene su
+    propio campo ``name``: una asercion sobre el HTML entero comprobaria esa
+    y no esta.
+    """
+    start = body.index('action="/atomicdb/campaign/propose/"')
+    return body[start:body.index('</form>', start)]
+
+
 def _line(*ucis):
     """Materializa una linea desde la raiz y devuelve su ultima posicion."""
     parent = ingest.get_or_create_position(logic.start_fen())
@@ -46,13 +57,19 @@ def _line(*ucis):
     return parent
 
 
-def _campaign_on(position, state=Campaign.CState.ACTIVE, votes=0, name=None):
-    """Una campana ya montada sobre ``position``, sin pasar por la vista."""
-    campaign = Campaign.objects.create(
-        name=name or f'campaign-{position.key[:10]}', root=position,
-        line_san='1. Nf3', state=state, votes=votes,
+def _campaign_on(position, state=Campaign.CState.ACTIVE, votes=0, name=None,
+                 line_san=None, proposed_by=''):
+    """Una campana ya montada sobre ``position``, sin pasar por la vista.
+
+    Sin ``name`` propio, el nombre ES la linea: es lo que hace el
+    autogenerado, y lo que la portada usa para decidir si la linea merece
+    bajar a subtitulo.
+    """
+    line_san = '1. Nf3' if line_san is None else line_san
+    return Campaign.objects.create(
+        name=name or line_san, root=position, line_san=line_san,
+        state=state, votes=votes, proposed_by=proposed_by,
         active=state == Campaign.CState.ACTIVE)
-    return campaign
 
 
 def _tag(campaign, *positions):
@@ -183,7 +200,154 @@ class ProposeTests(TestCase):
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
         self.assertIn('/atomicdb/campaign/propose/', body)
+        self.assertIn('name="title"', body)
         self.assertIn('csrfmiddlewaretoken', body)
+
+
+class ProposalTitleTests(TestCase):
+    """El titulo es del que propone; la linea sigue siendo del arbol."""
+
+    def setUp(self):
+        self.pos = _line('g1f3', 'f7f6')
+        self.client = Client()
+
+    def _propose(self, key=None, **extra):
+        payload = {'key': key or self.pos.key}
+        payload.update(extra)
+        return self.client.post('/atomicdb/campaign/propose/', payload)
+
+    def test_a_chosen_title_becomes_the_name_of_the_campaign(self):
+        self._propose(title='  Knight tour into e3  ')
+
+        campaign = Campaign.objects.get()
+        self.assertEqual(campaign.name, 'Knight tour into e3')
+
+    def test_the_line_is_stored_even_when_a_title_was_given(self):
+        """El titulo es rotulo; la linea es identidad y no la sustituye."""
+        self._propose(title='Knight tour into e3')
+
+        campaign = Campaign.objects.get()
+        self.assertIn('Nf3', campaign.line_san)
+        self.assertNotEqual(campaign.line_san, campaign.name)
+
+    def test_without_a_title_the_name_still_comes_from_the_line(self):
+        self._propose()
+
+        campaign = Campaign.objects.get()
+        self.assertEqual(campaign.name, campaign.line_san)
+
+    def test_a_title_already_in_use_is_refused_without_creating_anything(self):
+        self._propose(title='Knight tour into e3')
+        other = _line('b1c3')
+
+        response = Client().post('/atomicdb/campaign/propose/',
+                                 {'key': other.key,
+                                  'title': 'Knight tour into e3'})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['status'], 'name-taken')
+        self.assertIsNone(response.json()['id'])
+        self.assertEqual(Campaign.objects.count(), 1)
+
+    def test_an_overlong_title_is_cut_to_the_column_not_refused(self):
+        self._propose(title='x' * 200)
+
+        self.assertEqual(len(Campaign.objects.get().name), 64)
+
+    def test_a_blank_title_is_the_same_as_no_title(self):
+        self._propose(title='   ')
+
+        campaign = Campaign.objects.get()
+        self.assertEqual(campaign.name, campaign.line_san)
+
+    def test_markup_in_a_title_reaches_the_page_escaped(self):
+        campaign = _campaign_on(self.pos, name='<b>bold</b> line',
+                                line_san='1. Nf3 f6')
+
+        cache.clear()
+        raw = Client().get('/atomicdb/').content.decode()
+
+        self.assertIn('&lt;b&gt;bold&lt;/b&gt; line', raw)
+        self.assertNotIn('<b>bold</b>', raw)
+        self.assertEqual(Campaign.objects.get(id=campaign.id).name,
+                         '<b>bold</b> line')
+
+    def test_the_title_is_what_the_front_page_puts_in_the_headline(self):
+        self._propose(title='Knight tour into e3')
+        campaign = Campaign.objects.get()
+        campaign.apply_state(Campaign.CState.ACTIVE)
+
+        cache.clear()
+        body = _reading(Client().get('/atomicdb/').content.decode())
+
+        self.assertIn('Campaign: Knight tour into e3', body)
+        self.assertIn(campaign.line_san, body)
+
+
+class ProposalCreditTests(TestCase):
+    """Quien firma una propuesta, y quien no puede firmar por otro."""
+
+    def setUp(self):
+        self.pos = _line('g1f3', 'f7f6')
+
+    def test_an_anonymous_visitor_signs_with_the_free_field(self):
+        Client().post('/atomicdb/campaign/propose/',
+                      {'key': self.pos.key, 'name': 'Wolfram'})
+
+        self.assertEqual(Campaign.objects.get().proposed_by, 'Wolfram')
+
+    def test_a_logged_in_proposer_signs_with_the_account_not_the_field(self):
+        """Un credito que se puede escribir a mano no es un credito."""
+        client = _owner_client(username='lesha', staff=False)
+
+        client.post('/atomicdb/campaign/propose/',
+                    {'key': self.pos.key, 'name': 'somebody else'})
+
+        self.assertEqual(Campaign.objects.get().proposed_by, 'lesha')
+
+    def test_an_unsigned_proposal_is_credited_as_anonymous_on_the_page(self):
+        _campaign_on(self.pos, state=Campaign.CState.PROPOSED,
+                     line_san='1. Nf3 f6')
+
+        cache.clear()
+        body = _reading(Client().get('/atomicdb/').content.decode())
+
+        self.assertIn('proposed by anonymous', body)
+
+    def test_the_credit_shows_on_the_running_campaign_card(self):
+        _campaign_on(self.pos, line_san='1. Nf3 f6', proposed_by='Wolfram')
+
+        cache.clear()
+        body = _reading(Client().get('/atomicdb/').content.decode())
+
+        self.assertIn('Proposed by Wolfram', body)
+
+    def test_the_credit_shows_on_a_proposal_row(self):
+        _campaign_on(self.pos, state=Campaign.CState.PROPOSED,
+                     line_san='1. Nf3 f6', proposed_by='Wolfram')
+
+        cache.clear()
+        body = _reading(Client().get('/atomicdb/').content.decode())
+
+        self.assertIn('proposed by Wolfram', body)
+
+    def test_a_logged_in_visitor_sees_the_name_the_form_will_use(self):
+        """La caja no ofrece un campo que el endpoint va a ignorar."""
+        client = _owner_client(username='lesha', staff=False)
+
+        form = _propose_form(client.get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode())
+
+        self.assertIn('Proposed as', form)
+        self.assertIn('lesha', form)
+        self.assertNotIn('name="name"', form)
+
+    def test_an_anonymous_visitor_still_gets_the_free_field(self):
+        form = _propose_form(Client().get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode())
+
+        self.assertIn('name="name"', form)
+        self.assertNotIn('Proposed as', form)
 
 
 class VoteTests(TestCase):
@@ -569,9 +733,8 @@ class HomeCampaignTests(TestCase):
 
     def setUp(self):
         self.root = _line('g1f3', 'f7f6')
-        self.campaign = _campaign_on(self.root, votes=4)
-        Campaign.objects.filter(id=self.campaign.id).update(
-            line_san='1. Nf3 f6', proposed_by='Wolfram')
+        self.campaign = _campaign_on(self.root, votes=4, line_san='1. Nf3 f6',
+                                     proposed_by='Wolfram')
         extras = [_line('g1f3', 'f7f6', 'b1c3'),
                   _line('g1f3', 'f7f6', 'e2e3'),
                   _line('g1f3', 'f7f6', 'd2d3')]
@@ -602,10 +765,8 @@ class HomeCampaignTests(TestCase):
         self.assertIn('25.0% of the line solved', body)
 
     def test_a_campaign_still_waiting_is_listed_but_not_pinned_on_top(self):
-        waiting = _campaign_on(_line('b1c3'),
-                               state=Campaign.CState.PROPOSED, votes=2,
-                               name='waiting')
-        Campaign.objects.filter(id=waiting.id).update(line_san='1. Nc3')
+        _campaign_on(_line('b1c3'), state=Campaign.CState.PROPOSED, votes=2,
+                     line_san='1. Nc3')
 
         body = self._home()
 
