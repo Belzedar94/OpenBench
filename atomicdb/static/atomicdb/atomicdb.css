@@ -510,6 +510,16 @@ tr:hover td {
   margin-top: .35rem;
 }
 
+.raw .rawdivider {
+  margin-top: .5rem;
+  opacity: .55;
+  font-style: italic;
+}
+
+.raw .rawprior {
+  opacity: .7;
+}
+
 details summary {
   margin: .6rem 0 .3rem;
   color: var(--ink-muted);

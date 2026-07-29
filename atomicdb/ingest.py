@@ -328,11 +328,23 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         if snapshot:
             snapshot[0]['_budget'] = nodes_budget
         stored = pos.last_analysis or []
-        stored_budget = (stored[0].get('_budget', 0)
-                         if stored and isinstance(stored[0], dict) else 0)
-        if (not stored or len(snapshot) >= len(stored)
+        current = [ln for ln in stored
+                   if not (isinstance(ln, dict) and ln.get('prior_pass'))]
+        prior = [ln for ln in stored
+                 if isinstance(ln, dict) and ln.get('prior_pass')]
+        stored_budget = (current[0].get('_budget', 0)
+                         if current and isinstance(current[0], dict) else 0)
+        if (not current or len(snapshot) >= len(current)
                 or nodes_budget >= stored_budget):
-            pos.last_analysis = snapshot
+            # Un pase mas ANCHO que el nuevo no se tira: sus lineas 3..N
+            # llevan informacion que el pase profundo de 2 lineas no repite
+            # (peticion de Wolfram).  Se conservan marcadas como pase
+            # anterior; un pase nuevo igual de ancho las sustituye.
+            if current and len(current) > len(snapshot):
+                prior = [dict(ln, prior_pass=True) for ln in current]
+            elif len(snapshot) >= len(current or prior):
+                prior = []
+            pos.last_analysis = (snapshot + prior)[:10]
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:

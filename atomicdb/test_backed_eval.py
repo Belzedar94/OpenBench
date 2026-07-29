@@ -485,7 +485,21 @@ class BackedIngestTests(TestCase):
         ingest.ingest_analysis(pos.key, self._lines(pos, [70, 60]),
                                512_000_000)
         pos.refresh_from_db()
-        self.assertEqual(len(pos.last_analysis), 2)   # mas profundo SI pisa
+        current = [l for l in pos.last_analysis if not l.get('prior_pass')]
+        prior = [l for l in pos.last_analysis if l.get('prior_pass')]
+        # Mas profundo SI pisa el pase vigente...
+        self.assertEqual(len(current), 2)
+        # ...pero las lineas del pase ancho no se tiran: viajan como pase
+        # anterior (Wolfram: "it should probably preserve lines from lower
+        # depths then").
+        self.assertEqual(len(prior), 5)
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [55, 45, 35, 25, 15]), 128_000_000)
+        pos.refresh_from_db()
+        # Un pase fresco igual de ancho sustituye tambien al anterior.
+        self.assertEqual(len(pos.last_analysis), 5)
+        self.assertFalse(any(l.get('prior_pass') for l in pos.last_analysis))
 
     def test_navigating_onto_a_terminal_closes_the_parent_at_once(self):
         """A goto can DISCOVER a mate — the cascade must fire right there.
