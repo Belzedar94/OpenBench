@@ -228,6 +228,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # evals de hijos reportados por el motor
         best_eval, best_move = None, None
         closed_here = 0
+        certified_here = 0
         revoked_here = []
         for index, ln in enumerate(lines):
             uci = ln['move']
@@ -257,6 +258,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                 if revoked_keys:
                     revoked_here.extend(revoked_keys)
                     child.refresh_from_db()
+            if (child.status != 'UNKNOWN' and prepared_proof is not None
+                    and prepared_proof[2] == 'PROVEN'
+                    and _adopt_certified_line(child, pos, prepared_proof)):
+                certified_here += 1
             if child.status == 'UNKNOWN' and prepared_proof is not None:
                 winner_white, pv_rest, proof_result, worst_run = prepared_proof
                 if proof_result == 'NO_MATE':
@@ -275,7 +280,17 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                 child.proof = ('ANDOR' if proof_result == 'PROVEN'
                                else 'ENGINE')
                 child.won_line = ' '.join(pv_rest)
-                child.mate_in = len(pv_rest)   # linea probada (cota superior)
+                # LONGITUD DEL TESTIGO que se acaba de guardar, ni mas ni
+                # menos.  Con ``proof='ANDOR'`` es ademas una cota de verdad
+                # (la busqueda exhaustiva cubrio len+2 plies); con
+                # ``proof='ENGINE'`` es solo una linea legal que acaba en mate
+                # si el defensor colabora, y puede quedarse CORTA — es
+                # exactamente el caso que la certificacion existe para cazar.
+                # Este brazo cierra un hijo UNKNOWN: aqui no se arbitra nada
+                # contra un valor anterior, porque no lo hay.  El arbitraje
+                # cuando el hijo YA estaba cerrado esta en
+                # ``_adopt_certified_line``.
+                child.mate_in = len(pv_rest)
                 # Prueba exhaustiva: la racha reversible REAL del arbol
                 # probado.  Testigo sin certificar: la cota burda por
                 # longitud, que se recalcula al certificar.
@@ -342,6 +357,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                'backed_evals': backed}
     if revoked_here:
         summary['revoked'] = len(revoked_here)
+    if certified_here:
+        summary['certified'] = certified_here
     return summary
 
 
@@ -369,6 +386,70 @@ def _revoke_contradicted_mate(child, parent, prepared_proof):
     outcome = revoke_closure(child.key, reason='mate-witness-refuted',
                              mark_disputed=True)
     return outcome['revoked']
+
+
+# QUE PASA CUANDO UN ANALISIS NUEVO TRAE OTRA LINEA DE MATE PARA UN HIJO QUE YA
+# ESTABA CERRADO.  La pregunta se plantea sola en cuanto la linea nueva es MAS
+# LARGA que la guardada y del mismo signo: ¿manda el minimo (la cota mas
+# fuerte) o manda la ultima (la busqueda mas profunda)?
+#
+# NINGUNA DE LAS DOS, y la razon esta en lo que ``mate_in`` significa aqui.  No
+# es una cota flotante sobre la distancia: es la LONGITUD DEL TESTIGO guardado
+# en ``won_line``.  Los dos numeros son propiedades de dos lineas distintas, no
+# dos mediciones de la misma cosa:
+#
+# * Quedarse con el minimo es exactamente el bug que Wolfram reporto, un nivel
+#   mas abajo: una PV de motor con horizonte (``proof='ENGINE'``) puede ser
+#   corta porque la defensa que la refuta cae fuera de la busqueda, y el minimo
+#   la conserva para siempre.  El testigo de 4 plies del nodo Ne5 es justo eso.
+# * Quedarse con la ultima porque sea mas profunda tampoco vale: la evidencia
+#   llega por la PV del PADRE, y en un DAG el mismo hijo cuelga de padres
+#   analizados a presupuestos distintos.  "La ultima" haria ping-pong entre
+#   dos afirmaciones igual de incertificadas, y encima dejaria el numero
+#   apuntando a una linea que no es la guardada.
+#
+# ASI QUE: un testigo sin certificar solo lo retira quien puede refutarlo — una
+# busqueda exhaustiva de SU horizonte.  Esa maquinaria ya existe y no se
+# duplica aqui: ``_revoke_contradicted_mate`` online, ``recertify_mates`` y la
+# deuda de la flota (``enqueue_engine_debt``, que encola TODO ``MATE_PV`` con
+# ``proof='ENGINE'``) en diferido.  Una linea nueva mas larga no refuta nada:
+# no dice que el mate corto no exista, solo que esta busqueda no lo vio.
+#
+# LO QUE SI ES EVIDENCIA MEJOR es un veredicto ``PROVEN``: un certificado
+# AND/OR exhaustivo.  Hasta ahora se tiraba a la basura cuando el hijo ya
+# estaba cerrado (el bucle de ingesta solo miraba hijos UNKNOWN), y con el se
+# tiraba la unica forma que tenia el sistema de CORREGIR una distancia online.
+# Sustituye al testigo sin certificar entero — linea, distancia, ``proof`` y
+# ``clock_slack`` — en cualquier direccion, que es la misma regla que
+# ``recertify_mates`` aplica en diferido, aplicada donde el certificado ya
+# estaba en la mano.  De propina saca al nodo de la cola de deuda.
+def _adopt_certified_line(child, parent, prepared_proof):
+    """Un certificado exhaustivo sustituye a un testigo sin certificar."""
+    winner_white, pv_rest, _verdict, worst_run = prepared_proof
+    want = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
+    if (child.status != want or child.closure != 'MATE_PV'
+            or child.proof == 'ANDOR' or not pv_rest):
+        return False
+    was = {'proof': child.proof, 'mate_in': child.mate_in,
+           'won_line': child.won_line}
+    child.proof = 'ANDOR'
+    child.won_line = ' '.join(pv_rest)
+    child.mate_in = len(pv_rest)
+    child.best_move = pv_rest[0]
+    child.clock_slack = (logic.slack_from_run(worst_run)
+                         if worst_run is not None
+                         else logic.slack_from_witness_length(len(pv_rest)))
+    child.save(update_fields=['proof', 'won_line', 'mate_in', 'clock_slack',
+                              'best_move', 'updated'])
+    DBEvent.objects.create(kind='MATE_WITNESS_CERTIFIED', payload={
+        'key': child.key, 'parent': parent.key,
+        'winner': 'WHITE' if winner_white else 'BLACK',
+        'mate_in': child.mate_in, 'was_mate_in': was['mate_in'],
+        'was_proof': was['proof'],
+        'line_changed': was['won_line'] != child.won_line})
+    # La linea nueva tambien tiene que ser navegable, igual que en el cierre.
+    materialise_won_line(child)
+    return True
 
 
 def backup_cascade(seed_keys):
@@ -422,21 +503,10 @@ def backup_cascade(seed_keys):
                              if e.child.status != 'UNKNOWN'), None))
                 if witness:
                     pos.best_move = witness.move_uci
-                # DTM practico: min para el ganador, max para el perdedor;
-                # un hijo sin distancia (cierre TB) la deja en desconocida
-                stm_white_pos = pos.fen.split()[1] == 'w'
-                mover_win = 'WHITE_WIN' if stm_white_pos else 'BLACK_WIN'
-                if new_status == mover_win:
-                    winners = [e for e in edges if e.child.status == new_status
-                               and e.child.mate_in is not None]
-                    if winners:
-                        best = min(winners, key=_witness_rank)
-                        pos.mate_in = 1 + best.child.mate_in
-                        pos.best_move = best.move_uci  # el mate probado mas corto
-                elif new_status != 'DRAW':
-                    dists = [e.child.mate_in for e in edges]
-                    if all(d is not None for d in dists):
-                        pos.mate_in = 1 + max(dists)
+                # El DTM practico (min para el ganador, max para el perdedor,
+                # y un hijo sin distancia la deja desconocida) lo pone el
+                # refresco de abajo, que corre en esta misma vuelta: la regla
+                # vive en UN sitio, ``mate_distance_refresh``.
                 dirty = True
                 _emit_closure_events(pos)
             if pos.closure == 'MINIMAX' and pos.status != 'UNKNOWN':
@@ -449,32 +519,28 @@ def backup_cascade(seed_keys):
                     pos.clock_slack = slack
                     dirty = True
             if pos.status in ('WHITE_WIN', 'BLACK_WIN'):
-                # refinamiento retroactivo del DTM: si aparece (o se acorta)
-                # una linea probada mas corta, la distancia y el testigo
-                # mejoran y la mejora se propaga hacia arriba
-                stm_white_pos = pos.fen.split()[1] == 'w'
-                mover_win = 'WHITE_WIN' if stm_white_pos else 'BLACK_WIN'
-                if pos.status == mover_win:
-                    winners = [e for e in edges
-                               if e.child.status == pos.status
-                               and e.child.mate_in is not None]
-                    if winners:
-                        best = min(winners, key=_witness_rank)
-                        if (pos.mate_in is None
-                                or 1 + best.child.mate_in < pos.mate_in
-                                or (1 + best.child.mate_in == pos.mate_in
-                                    and pos.best_move != best.move_uci
-                                    and _child_is_verified(best.child))):
-                            pos.mate_in = 1 + best.child.mate_in
-                            pos.best_move = best.move_uci
-                            dirty = True
-                else:
-                    dists = [e.child.mate_in for e in edges]
-                    if dists and all(d is not None for d in dists):
-                        new_mate = 1 + max(dists)
-                        if new_mate != pos.mate_in:
-                            pos.mate_in = new_mate
-                            dirty = True
+                # refresco retroactivo del DTM: la distancia de un nodo ya
+                # cerrado se RECALCULA desde sus hijos, en cualquier direccion.
+                #
+                # Aqui vivia el bug que Wolfram reporto (1.Nf3 d5): el bloque
+                # OR solo se dejaba ACORTAR (``1 + hijo < pos.mate_in``),
+                # mientras el AND de al lado ya recalculaba exacto.  Cuando un
+                # hijo CORREGIA su distancia hacia arriba — porque su testigo
+                # de motor resulto ser una cota de horizonte y la certificacion
+                # lo alargo — el ancestro OR se quedaba con la cota vieja para
+                # siempre: el padre enseñaba "≤M2" con un unico hijo ganador a
+                # 4 plies, es decir mate en 3 (1+4 = 5 plies).  Nada en el
+                # sistema podia volver a subir ese numero.
+                #
+                # Que se conserva: el minimo de las cotas ACTUALES sigue siendo
+                # la mejor cota actual, asi que la propiedad de cota superior no
+                # se pierde por recalcular en las dos direcciones — se pierde
+                # justamente por NO hacerlo, que es quedarse con una cota que
+                # ya no sostiene ningun hijo.
+                new_mate, new_move = mate_distance_refresh(pos, edges)
+                if (new_mate, new_move) != (pos.mate_in, pos.best_move):
+                    pos.mate_in, pos.best_move = new_mate, new_move
+                    dirty = True
             if dirty:
                 pos.save()
                 changed_total += 1
@@ -546,6 +612,78 @@ def _minimax_slack(pos, edges):
     return logic.minimax_slack(
         pos.fen, [], [(e.move_uci, e.child.clock_slack) for e in edges],
         mover_wins=False)
+
+
+def mate_distance_refresh(pos, edges):
+    """``(mate_in, best_move)`` de un nodo DECISIVO ya cerrado, desde sus hijos.
+
+    UNA sola regla, y publica: la usan la cascada exacta y el backfill
+    ``backfill_mate_distance``, que asi convergen al MISMO punto fijo en vez de
+    a dos parecidos.  Solo lee ``status``/``closure``/``proof``/``mate_in``/
+    ``won_line``/``best_move`` del nodo y de los hijos, de modo que sirve
+    igual con filas ORM que con proyecciones ligeras.
+
+    * Nodo OR (gana el que mueve): ``min(testigo propio, 1 + mejor hijo
+      ganador)``.  El minimo sobre el subconjunto de hijos CERRADOS es una
+      cota, no un exacto, asi que un hijo puede acortar la distancia pero no
+      alargarla por encima de la linea que el propio nodo tiene guardada.  Un
+      cierre MINIMAX no guarda linea ninguna: su distancia es exactamente la
+      de sus hijos, en las dos direcciones — ahi estaba el bug.
+    * Nodo AND (pierde el que mueve): ``1 + max`` sobre TODOS los hijos, y solo
+      con todos informados.  Eso es informacion completa, luego es exacto, y
+      por eso si puede superar al testigo propio: el testigo sigue UNA defensa
+      y el defensor elige la peor.
+    * Sin nada que nombrar, la distancia se queda en ``None``: un numero que
+      ya no sostiene ningun hijo es peor que no tener numero.
+    """
+    mover_win = 'WHITE_WIN' if pos.fen.split()[1] == 'w' else 'BLACK_WIN'
+    if pos.status != mover_win:
+        dists = [e.child.mate_in for e in edges]
+        if dists and all(d is not None for d in dists):
+            return 1 + max(dists), pos.best_move
+        return pos.mate_in, pos.best_move
+
+    winners = [e for e in edges if e.child.status == pos.status
+               and e.child.mate_in is not None]
+    best = min(winners, key=_witness_rank) if winners else None
+    own = _own_witness_plies(pos)
+    derived = 1 + best.child.mate_in if best else None
+    new_mate = min([d for d in (own, derived) if d is not None], default=None)
+    from_child = best is not None and derived == new_mate
+    if from_child and (new_mate != pos.mate_in
+                       or (pos.best_move != best.move_uci
+                           and _child_is_verified(best.child))):
+        # el mate probado mas corto, y a igualdad el CERTIFICADO (F4b)
+        return new_mate, best.move_uci
+    if not from_child and new_mate != pos.mate_in:
+        line = (pos.won_line or '').split()
+        if own is not None and line:
+            # la distancia vuelve a ser la del testigo propio (el hijo que la
+            # acortaba se perdio): el testigo exportado vuelve con ella
+            return new_mate, line[0]
+    return new_mate, pos.best_move
+
+
+def _own_witness_plies(pos):
+    """Distancia que este nodo sostiene POR SI MISMO, o ``None``.
+
+    Un cierre ``MATE_PV`` lleva su propia linea re-verificada jugada a jugada:
+    ese numero no lo derivo de las filas de sus hijos y por tanto ningun hijo
+    puede ALARGARLO — si la linea guardada es una cota de horizonte del motor,
+    quien la retira es la certificacion (``recertify_mates``, la deuda de la
+    flota, ``_revoke_contradicted_mate``), no un minimax sobre hermanos.
+
+    Las filas historicas que cerraron por MATE_PV antes de que existiera la
+    columna ``won_line`` no tienen linea que medir; su ``mate_in`` almacenado
+    sigue siendo una afirmacion propia, asi que vale de testigo.
+
+    Cualquier otro cierre (MINIMAX, TB, SOLVE) no afirma distancia por su
+    cuenta: la suya es exactamente la de sus hijos.
+    """
+    if pos.closure != 'MATE_PV':
+        return None
+    line = (pos.won_line or '').split()
+    return len(line) if line else pos.mate_in
 
 
 def _witness_rank(edge):
