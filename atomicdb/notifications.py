@@ -22,11 +22,20 @@ COSTE.  Para quien no ha iniciado sesion, cero consultas: se decide con
 iniciado, un recuento por indice y una pagina de diez filas.
 """
 
+import os
 from urllib.parse import quote
 
 from django.utils.timesince import timesince
 
 from .models import RequestNotification
+
+# Version de cache de los estaticos propios: el mtime de la hoja principal en
+# el momento de importar.  Cada deploy que la toque cambia el numero y los
+# navegadores dejan de casar su copia vieja — el estreno de la cabecera se
+# vio ROTO (insignia debajo de la campana, pila vertical) exactamente por una
+# hoja cacheada de antes del deploy.
+STATIC_VERSION = str(int(os.path.getmtime(os.path.join(
+    os.path.dirname(__file__), 'static', 'atomicdb', 'atomicdb.css'))))
 
 
 # Diez filas en el desplegable: es lo que cabe sin convertirlo en una pagina.
@@ -40,8 +49,10 @@ BADGE_CAP = 99
 
 
 def _rows(username, limit):
+    # Sin leer PRIMERO, y dentro de cada grupo lo mas nuevo arriba: la lista
+    # existe para lo pendiente; lo ya visitado es archivo.
     return list(RequestNotification.objects.filter(username=username)
-                .order_by('-created', '-id')[:limit])
+                .order_by('seen', '-created', '-id')[:limit])
 
 
 def unseen_count(username):
@@ -106,11 +117,25 @@ def presented(username, limit=DROPDOWN_ROWS):
     return items
 
 
+def mark_position_seen(username, position_key):
+    """Leida = VISITADA: llegar a la posicion apaga SU aviso y solo el suyo.
+
+    Da igual el camino — el click en el propio aviso o llegar por su pie: la
+    vista de explore llama aqui en cada carga con sesion.  Abrir el panel NO
+    marca nada; para eso esta el boton explicito de ``mark_seen``.
+    """
+    if not username:
+        return 0
+    return RequestNotification.objects.filter(
+        username=username, position_id=position_key,
+        seen=False).update(seen=True)
+
+
 def mark_seen(username):
-    """Marca como vistos los avisos de esta cuenta. Devuelve cuantos cambio.
+    """Marca como vistos TODOS los avisos de esta cuenta (boton explicito).
 
     Un UPDATE en bloque y filtrado por ``seen=False``: no lee para escribir,
-    asi que dos pestanas abriendo la campana a la vez no se pisan y la segunda
+    asi que dos pestanas pulsando a la vez no se pisan y la segunda
     simplemente no cambia nada.
     """
     if not username:
@@ -137,7 +162,8 @@ def identity(request):
     if not request.path.startswith('/atomicdb/'):
         return {}
     user = getattr(request, 'user', None)
-    context = {'identity_next': _return_path(request)}
+    context = {'identity_next': _return_path(request),
+               'static_version': STATIC_VERSION}
     if user is None or not user.is_authenticated:
         return context
     count = unseen_count(user.username)

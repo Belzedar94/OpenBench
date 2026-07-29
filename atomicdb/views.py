@@ -2722,28 +2722,25 @@ def suggestions(request):
 
 
 def notifications_page(request):
-    """La lista completa de avisos, y el POST que los marca vistos.
+    """La lista completa de avisos, y el POST del boton Mark all read.
 
-    Un solo sitio para las dos cosas, y el camino SIN JavaScript es el que
-    manda: la campana de la cabecera es el boton de un formulario, asi que un
-    click sin JS hace este POST, marca los avisos y aterriza aqui con la lista
-    entera.  Con JS el mismo POST viaja de fondo, la insignia se apaga y el
-    desplegable se abre sin recargar.
-
-    Visitar la pagina tambien marca, y despues de leer las filas: quien entra
-    ve resaltado lo que aun no habia visto, y al salir ya no le queda nada
-    pendiente.  Es lo mismo que hace abrir la campana, por el mismo motivo.
+    LEIDA = VISITADA.  Lo que apaga un aviso es llegar a su posicion (la
+    vista de explore lo marca en cada carga con sesion), no abrir el panel ni
+    esta pagina: quien mira su lista y no visita nada conserva sus negritas.
+    El POST es el unico atajo — el boton explicito de marcar todo — y con
+    ``back`` vuelve a la pagina de la que salio el click.
     """
     if not request.user.is_authenticated:
         return redirect(f'/login/?next={quote("/atomicdb/notifications/")}')
     if request.method == 'POST':
         seen = notifications.mark_seen(request.user.username)
-        if request.POST.get('back'):
-            return redirect('/atomicdb/notifications/')
+        back = request.POST.get('back', '')
+        if back:
+            return redirect(back if back.startswith('/atomicdb/')
+                            else '/atomicdb/notifications/')
         return JsonResponse({'ok': True, 'seen': seen})
     rows = notifications.presented(request.user.username,
                                    limit=notifications.PAGE_ROWS)
-    notifications.mark_seen(request.user.username)
     return render(request, 'atomicdb/notifications.html', {'rows': rows})
 
 
@@ -3127,6 +3124,10 @@ def explore(request, key):
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return render(request, 'atomicdb/missing.html', status=404)
+    if request.user.is_authenticated:
+        # Leida = VISITADA: lo que apaga un aviso es llegar a su posicion —
+        # desde el propio aviso o por su pie — no abrir el panel.
+        notifications.mark_position_seen(request.user.username, pos.key)
     moves = _child_moves(pos)
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]

@@ -206,29 +206,56 @@ class NotificationPageTests(TestCase):
         self.assertIn(f'/atomicdb/explore/{self.position.key}/', body)
         self.assertIn('Your analysis of 1. e4 e5 is ready', _reading(body))
 
-    def test_visiting_the_page_marks_everything_seen(self):
+    def test_reading_the_list_marks_nothing(self):
+        """LEIDA = VISITADA: mirar la lista no apaga nada.
+
+        Lo que apaga un aviso es llegar a su posicion; quien repasa su lista
+        sin visitar conserva las negritas para la proxima vez."""
         self.assertEqual(notifications.unseen_count('lesha'), 1)
 
         self.client.get('/atomicdb/notifications/')
-
-        self.assertEqual(notifications.unseen_count('lesha'), 0)
-
-    def test_the_page_still_shows_what_was_new_before_clearing_it(self):
-        # Marcar DESPUES de leer las filas: quien entra ve resaltado lo que no
-        # habia visto, y al salir ya no le queda nada pendiente.
         body = self.client.get('/atomicdb/notifications/').content.decode()
 
+        self.assertEqual(notifications.unseen_count('lesha'), 1)
         self.assertIn('notif-row unseen', body)
-        self.assertNotIn('notif-row unseen',
-                         self.client.get(
-                             '/atomicdb/notifications/').content.decode())
 
-    def test_the_bell_post_marks_seen_and_returns_to_the_list(self):
-        response = self.client.post('/atomicdb/notifications/', {'back': '1'})
+    def test_visiting_the_position_marks_its_notice_and_only_its(self):
+        other = _line('d2d4')
+        RequestNotification.objects.create(
+            username='lesha', position=other,
+            task=_task(other, requested_by='lesha'))
+        self.assertEqual(notifications.unseen_count('lesha'), 2)
+
+        self.client.get(f'/atomicdb/explore/{self.position.key}/')
+
+        self.assertEqual(notifications.unseen_count('lesha'), 1)
+        row = RequestNotification.objects.get(position=self.position)
+        self.assertTrue(row.seen)
+
+    def test_unread_rows_sort_before_read_ones(self):
+        visited = _line('d2d4')
+        RequestNotification.objects.create(
+            username='lesha', position=visited, seen=True,
+            task=_task(visited, requested_by='lesha'))
+
+        rows = notifications.presented('lesha')
+
+        self.assertEqual([row['seen'] for row in rows], [False, True])
+
+    def test_mark_all_read_returns_to_where_the_click_came_from(self):
+        response = self.client.post('/atomicdb/notifications/',
+                                    {'back': '/atomicdb/notifications/'})
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Location'], '/atomicdb/notifications/')
         self.assertEqual(notifications.unseen_count('lesha'), 0)
+
+    def test_mark_all_never_redirects_off_atomicdb(self):
+        response = self.client.post('/atomicdb/notifications/',
+                                    {'back': 'https://evil.example/'})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/atomicdb/notifications/')
 
     def test_the_same_post_answers_json_when_it_comes_from_the_dropdown(self):
         response = self.client.post('/atomicdb/notifications/')
@@ -295,9 +322,13 @@ class HeaderTests(TestCase):
     def test_the_badge_shows_what_is_unseen_and_nothing_else(self):
         RequestNotification.objects.create(
             username='lesha', position=self.position, seen=True)
+        # Los pendientes viven en OTRA posicion: visitar la pagina de una
+        # posicion apaga los avisos de ESA posicion (leida = visitada), y el
+        # test mide la insignia, no el apagado.
+        elsewhere = _line('d2d4')
         for _ in range(2):
             RequestNotification.objects.create(
-                username='lesha', position=self.position)
+                username='lesha', position=elsewhere)
         client = Client()
         client.login(username='lesha', password='pw')
 

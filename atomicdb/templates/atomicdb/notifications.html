@@ -4,10 +4,14 @@
 
 <h2 style="margin-top:0">Analyses you asked for</h2>
 <p class="dim notif-lede">Every analysis you request lands here once a worker
-  has served it. If you run workers of your own, they take your requests
-  first.</p>
+  has served it. Visiting a position marks its notice as read. If you run
+  workers of your own, they take your requests first.</p>
 
 {% if rows %}
+<form class="notif-markall" method="post" action="/atomicdb/notifications/">{% csrf_token %}
+  <input type="hidden" name="back" value="/atomicdb/notifications/">
+  <button type="submit" class="reqbtn ghost">Mark all read</button>
+</form>
 <ul class="notif-list">
   {% for n in rows %}
   <li class="notif-row{% if not n.seen %} unseen{% endif %}">

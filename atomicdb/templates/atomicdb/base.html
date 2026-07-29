@@ -35,9 +35,9 @@
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.base.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.brown.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.cburnett.css' %}">
-<link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}">
-<script src="{% static 'atomicdb/theme.js' %}" defer></script>
-<script src="{% static 'atomicdb/notifications.js' %}" defer></script>
+<link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
+<script src="{% static 'atomicdb/theme.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
+<script src="{% static 'atomicdb/notifications.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -54,21 +54,25 @@
   <div class="identity">
     {% if user.is_authenticated %}
     <div class="bell-wrap" id="bell-wrap">
-      <form class="bell-form" method="post" action="/atomicdb/notifications/">{% csrf_token %}
-        <input type="hidden" name="back" value="1">
-        <button type="submit" class="bell" id="bell"
-          aria-haspopup="true" aria-expanded="false" aria-controls="bell-panel"
-          title="Analyses you asked for">
-          <svg class="bell-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M18 15.4V10a6 6 0 1 0-12 0v5.4l-1.5 2.1h15z"></path>
-            <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
-          </svg>
-          <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for{% if notifications_unseen %}, {{ notifications_unseen }} new{% endif %}</span>
-          {% if notifications_badge %}<span class="bell-badge" aria-hidden="true">{{ notifications_badge }}</span>{% endif %}
-        </button>
-      </form>
+      <a class="bell" id="bell" href="/atomicdb/notifications/"
+        aria-haspopup="true" aria-expanded="false" aria-controls="bell-panel"
+        title="Analyses you asked for">
+        <svg class="bell-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 15.4V10a6 6 0 1 0-12 0v5.4l-1.5 2.1h15z"></path>
+          <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
+        </svg>
+        <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for{% if notifications_unseen %}, {{ notifications_unseen }} new{% endif %}</span>
+        {% if notifications_badge %}<span class="bell-badge" aria-hidden="true">{{ notifications_badge }}</span>{% endif %}
+      </a>
       <div class="bell-panel" id="bell-panel" hidden>
-        <div class="bell-panel-head">Analyses you asked for</div>
+        <div class="bell-panel-head"><span>Analyses you asked for</span>
+          {% if notifications_unseen %}
+          <form class="bell-markall" method="post" action="/atomicdb/notifications/">{% csrf_token %}
+            <input type="hidden" name="back" value="{{ identity_next }}">
+            <button type="submit">Mark all read</button>
+          </form>
+          {% endif %}
+        </div>
         <ul class="bell-list">
           {% for n in notifications %}
           <li class="bell-item{% if not n.seen %} unseen{% endif %}">

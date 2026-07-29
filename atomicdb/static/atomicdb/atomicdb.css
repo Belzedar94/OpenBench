@@ -294,6 +294,7 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
 }
 
 .theme-toggle:hover {
+  background: var(--surface-hover);
   color: var(--accent);
 }
 
@@ -311,15 +312,15 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
    usa el interruptor (2rem de ancho + 16px de margen). */
 .identity {
   display: flex;
-  /* Encoge antes que romper la fila.  Un nombre de usuario largo en un movil
-     hacia caber marca + identidad y dejaba al interruptor de tema SOLO en una
-     fila propia, alineado a la izquierda: un icono huerfano debajo de la
-     marca.  Con ``min-width: 0`` la zona cede ancho — el nombre ya tiene sus
-     puntos suspensivos — y la fila se mantiene entera. */
-  flex: 0 1 auto;
-  min-width: 0;
+  /* En escritorio la identidad NO cede: es compacta por naturaleza y cuando
+     el nav envuelve, el flex encogia al unico encogible — el nombre — y un
+     "belzedar" de ocho letras salia truncado a 719px.  Que envuelva el nav,
+     que para eso envuelve.  En movil (≤560px) el tope y el encogimiento se
+     reactivan en su media query: alli si compiten marca e identidad por la
+     misma fila. */
+  flex: 0 0 auto;
   align-items: center;
-  gap: .75rem;
+  gap: .9rem;
   padding-right: 2.4rem;
   font-size: .88rem;
 }
@@ -392,6 +393,7 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
 }
 
 .bell:hover {
+  background: var(--surface-hover);
   color: var(--accent);
 }
 
@@ -416,6 +418,9 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   padding: 0 .25rem;
   border-radius: 999px;
   background: var(--accent);
+  /* Anillo del color de la barra: despega la insignia de la campana sin
+     sumar un color mas. */
+  box-shadow: 0 0 0 2px var(--surface-1);
   color: var(--accent-contrast);
   font-size: .66rem;
   font-weight: 700;
@@ -444,6 +449,10 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
 }
 
 .bell-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
   padding: .55rem .8rem;
   border-bottom: 1px solid var(--border);
   color: var(--ink-muted);
@@ -451,6 +460,21 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   font-weight: 700;
   letter-spacing: .1em;
   text-transform: uppercase;
+}
+
+.bell-markall button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.bell-markall button:hover {
+  text-decoration: underline;
 }
 
 .bell-list {
@@ -461,10 +485,21 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   border-top: 1px solid var(--border);
 }
 
+/* LEIDA = VISITADA, y se ve: lo pendiente va en NEGRITA con la barra de
+   acento en el canto; lo ya visitado, en peso normal y atenuado.  El mismo
+   idioma que un correo. */
 .bell-item a {
   display: block;
   padding: .55rem .8rem;
+  color: var(--ink-muted);
+}
+
+.bell-item.unseen a {
   color: var(--ink);
+}
+
+.bell-item.unseen .bell-line {
+  font-weight: 600;
 }
 
 .bell-item a:hover {
@@ -533,10 +568,20 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   box-shadow: inset .18rem 0 0 var(--accent);
 }
 
+/* El mismo idioma que la campana: pendiente en negrita, visitado atenuado. */
 .notif-link {
   flex: 1 1 18rem;
-  color: var(--ink);
+  color: var(--ink-muted);
   overflow-wrap: anywhere;
+}
+
+.notif-row.unseen .notif-link {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.notif-markall {
+  margin: 0 0 .8rem;
 }
 
 .notif-link b {
@@ -1440,7 +1485,10 @@ html.theme-ready .tile {
        hacia que la identidad pidiera mas de lo que quedaba y el interruptor
        de tema se iba a una fila para el solo — un icono huerfano alineado a
        la izquierda, debajo de la marca.  Las 10rem reservadas son la marca,
-       los huecos y el interruptor. */
+       los huecos y el interruptor.  El encogimiento vuelve AQUI (en
+       escritorio esta apagado a proposito). */
+    flex-shrink: 1;
+    min-width: 0;
     max-width: calc(100% - 10rem);
     gap: .6rem;
     margin-left: auto;
