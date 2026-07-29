@@ -10,6 +10,7 @@ heuristicas refinadas.
 
 import hashlib
 
+from django.conf import settings
 from django.test import Client
 
 from . import ingest, logic, views
@@ -235,10 +236,13 @@ class BackedPropagationCostTests(TestCase):
         wide = self._wide('WIDE', 60)
 
         # Un nivel entero cuesta lo mismo con tres hijos que con sesenta:
-        # posiciones + aristas/hijos + bulk_update + padres.
-        with self.assertNumQueries(4):
+        # posiciones + aristas/hijos + bulk_update + padres.  Se cuenta
+        # sobre la conexion del ALIAS: con la base partida las queries no
+        # pasan por default.
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with self.assertNumQueries(4, using=alias):
             ingest.backup_backed_evals([narrow.key])
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(4, using=alias):
             ingest.backup_backed_evals([wide.key])
 
     def test_a_second_pass_over_a_wide_level_costs_two_reads(self):
@@ -246,7 +250,7 @@ class BackedPropagationCostTests(TestCase):
         ingest.backup_backed_evals([wide.key])
 
         # Nada cambio: se lee el nivel y se para, sin escribir ni subir.
-        with self.assertNumQueries(2):
+        with self.assertNumQueries(2, using=settings.ATOMICDB_DATABASE_ALIAS):
             ingest.backup_backed_evals([wide.key])
 
     def test_one_level_of_ancestors_costs_a_bounded_number_of_queries(self):
@@ -255,7 +259,7 @@ class BackedPropagationCostTests(TestCase):
         _edge(grand, parent)
 
         # Dos niveles a cuatro sentencias cada uno, sin importar la anchura.
-        with self.assertNumQueries(8):
+        with self.assertNumQueries(8, using=settings.ATOMICDB_DATABASE_ALIAS):
             ingest.backup_backed_evals([parent.key])
         grand.refresh_from_db()
         self.assertIsNotNone(grand.backed_eval)

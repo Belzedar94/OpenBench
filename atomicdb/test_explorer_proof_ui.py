@@ -1,6 +1,8 @@
 """pn/dn beside every reply, and one click for the replies nobody looked at."""
 
 
+from django.conf import settings
+
 from . import ingest, logic, proof
 from .models import (AnalysisTask, DBEvent, Edge, Position, ProofCampaign,
                      ProofNode, RequestLog)
@@ -51,7 +53,9 @@ class ProofNumbersPerRowTests(TestCase):
         keys = [edge.child_id for edge in
                 Edge.objects.filter(parent=self.root)]
         # Twenty rows, two statements: the active campaign and the numbers.
-        with self.assertNumQueries(2):
+        # Counted on the alias connection: with the split database none of
+        # these statements touch default.
+        with self.assertNumQueries(2, using=settings.ATOMICDB_DATABASE_ALIAS):
             _proof_numbers_for(keys)
 
     def test_an_inactive_campaign_paints_no_numbers(self):
