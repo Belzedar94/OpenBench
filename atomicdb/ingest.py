@@ -54,6 +54,45 @@ FRONTIER_CLICK_CAP = 64    # hard ceiling of tasks queued by a single click
 # set and this hard ply guard-rail.
 FRONTIER_DESCENT_MAX_PLIES = 32
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
+# ---------------- mate CORTO: verificacion, no excavacion ----------------
+#
+# LA UNIDAD, PRIMERO, porque aqui se mezclan dos.  ``Position.mate_in`` cuenta
+# PLIES (medias jugadas): es la LONGITUD del testigo guardado en ``won_line``
+# — los tres sitios que lo escriben lo hacen como ``len(pv_rest)`` — y un nodo
+# TERMINAL vale 0.  El MOTOR, en cambio, habla en JUGADAS: el ``score mate N``
+# de UCI, que el worker convierte a ``eval_cp = (10_000 - |N|) * signo``
+# (``Client/atomicdb_worker.py``).  Todo lo que sigue razona en PLIES y hace
+# esa conversion una sola vez, en ``_mate_moves_to_plies``.
+#
+# EL DESPERDICIO.  ``budget_for`` sube el presupuesto a 128M en cuanto |eval|
+# entra en la banda de mate, "para extraer la PV entera".  Para un mate LARGO
+# es exactamente lo que hay que comprar.  Para un M2 es absurdo: el motor lo ve
+# en unos miles de nodos, el worker manda ``go nodes N`` sin parada temprana
+# (no hay forma de decirle "para cuando lo tengas") y el resto del minuto se
+# gasta en alternativas que no deciden nada.
+#
+# LO QUE SE COMPRA EN SU LUGAR: una VERIFICACION.  Presupuesto proporcional a
+# la distancia y UNA sola linea, porque para cerrar un nodo OR ganador basta la
+# linea ganadora — un cierre ``MATE_PV`` no usa la segunda opinion de
+# ordenacion para nada.  Y si la reclamacion era falsa, no se pierde: el
+# testigo refutado ya re-arma la revisita profunda por su cuenta
+# (``_revoke_contradicted_mate`` -> ``_queue_disputed_reanalysis``, y la deuda
+# F0 de la flota), maquinaria que este clamp no toca.
+#
+# NI LOS MATES LARGOS NI LA BANDA SIN DISTANCIA SE MUEVEN.  Solo se clampa una
+# distancia CONOCIDA y corta.  Un cp de tablebase entra en la banda recortado a
+# +-9_500 por el worker y a proposito "sin fingir distancia de mate":
+# decodificarlo daria cientos de jugadas, asi que no pasa el umbral y conserva
+# su 128M.  Un ``backed_eval`` de banda caminado por un visitante tampoco tiene
+# distancia, y ``budget_for`` ni lo mira.
+MATE_CLAMP_PLIES = 6            # hasta M3 contando el ply del defensor
+MATE_CLAMP_FLOOR = 2_000_000    # el mismo F0 con el que el solver contesta esto
+MATE_CLAMP_PER_PLY = 4_000_000
+MATE_CLAMP_CAP = 32_000_000
+MATE_CLAMP_MULTIPV = 1
+# Techo del recorte que el worker aplica a los cp de tablebase.  Por ENCIMA de
+# el, un |eval_cp| solo puede venir de la formula de mate.
+TB_CLAMP_CEILING = 9_500
 # Tope de la PV que se guarda por linea.  ``last_analysis`` es un JSON por
 # POSICION, asi que su tamano medio se multiplica por el numero de posiciones:
 # a 1 KB por fila son 45 GB a 45M posiciones, mas que la tabla de posiciones
@@ -102,7 +141,74 @@ DEPTH_BUDGET_THRESHOLD = 512_000_000
 DEPTH_MULTIPV = 2
 
 
-def multipv_for(visits, budget_nodes=None, seeding=False):
+def _mate_moves_to_plies(moves, winner_white, stm_white):
+    """``score mate N`` de UCI (JUGADAS) -> plies hasta el mate.
+
+    El que manda es el bando al turno: entrega el mate en su jugada N, o sea
+    en el ply ``2N-1``.  Si el que gana es el otro, el mate cae en la jugada N
+    del defensor y el turno actual no cuenta: ``2N`` plies.  Es la misma
+    aritmetica que ya documenta la cascada ("4 plies, es decir mate en 3").
+    """
+    if moves <= 0:
+        return 0
+    return 2 * moves - 1 if winner_white == stm_white else 2 * moves
+
+
+def claimed_mate_plies(pos):
+    """Plies hasta el mate que ``pos`` RECLAMA, o ``None`` si no se sabe.
+
+    Tres fuentes, de la mas explicita a la mas indirecta, y ninguna inventa un
+    numero que no este escrito:
+
+    1. ``mate_in``, que ya viene en plies.
+    2. La distancia DECLARADA por el motor en la linea que encabeza
+       ``last_analysis``: el campo ``mate`` es el ``score mate N`` de UCI tal
+       cual, sin decodificar nada.  Se salta las lineas de un pase ANTERIOR
+       (``prior_pass``), que no son el veredicto vigente.
+    3. ``eval_cp`` decodificado, y solo por ENCIMA del recorte de tablebase:
+       ahi el valor solo puede venir de la formula de mate del worker.  Es la
+       fuente que cubre el caso frecuente — un hijo SEMBRADO desde la linea
+       MultiPV del padre (``_seed_child_eval``) tiene ``eval_cp`` y nada mas.
+
+    Un ``mate`` de la banda pero sin distancia (cp de tablebase recortado)
+    cae por el suelo de las tres y devuelve ``None``, que es lo que hace que
+    conserve el comportamiento de siempre.
+    """
+    if pos.mate_in is not None:
+        return max(0, int(pos.mate_in))
+    stm_white = pos.fen.split()[1] == 'w'
+    for line in (pos.last_analysis or []):
+        if not isinstance(line, dict) or line.get('prior_pass'):
+            continue
+        mate = line.get('mate')
+        if mate:
+            return _mate_moves_to_plies(abs(int(mate)), int(mate) > 0,
+                                        stm_white)
+        break            # la linea vigente no reclama mate: no hay distancia
+    eval_cp = pos.eval_cp
+    if eval_cp is not None and abs(eval_cp) > TB_CLAMP_CEILING:
+        return _mate_moves_to_plies(10_000 - abs(eval_cp), eval_cp > 0,
+                                    stm_white)
+    return None
+
+
+def _short_mate_clamp(pos):
+    """``(budget_nodes, multipv)`` de la verificacion barata, o ``None``.
+
+    ``None`` significa "aqui no manda esta politica": o no hay distancia
+    conocida, o el mate es lo bastante largo como para que extraer la PV
+    entera siga siendo lo que hay que comprar.  Es el UNICO sitio donde se
+    decide que cuenta como mate corto; los sitios que encolan solo consultan.
+    """
+    plies = claimed_mate_plies(pos)
+    if plies is None or plies > MATE_CLAMP_PLIES:
+        return None
+    return (min(MATE_CLAMP_CAP,
+                max(MATE_CLAMP_FLOOR, MATE_CLAMP_PER_PLY * plies)),
+            MATE_CLAMP_MULTIPV)
+
+
+def multipv_for(visits, budget_nodes=None, seeding=False, clamp=None):
     """Cuantas variantes pedirle al motor, segun para que es este analisis.
 
     Medido (caso de la comunidad, 28-jul): con el MISMO presupuesto de nodos,
@@ -119,10 +225,20 @@ def multipv_for(visits, budget_nodes=None, seeding=False):
       un nodo virgen deja al arbol dos hijos informados y nada que comparar.
     * REVISITA CON PRESUPUESTO ALTO: 2.  Dos, no una, para conservar una
       segunda opinion de ordenacion.
+    * VERIFICACION DE MATE CORTO (``clamp`` de ``_short_mate_clamp``): 1.
+      Aqui no se esta ordenando nada — se esta comprobando UNA linea que el
+      motor ya afirma — y la segunda opinion cuesta la mitad del presupuesto
+      de un nodo que se cierra con la primera.  Solo manda si el presupuesto
+      que se va a comprar es de verdad el del clamp: cuando la escalera por
+      visitas ya pide mas, esto es una revisita normal y la anchura vuelve a
+      la politica de la casa.
     * El resto: la politica por visitas de siempre, 5 al empezar y 3 despues.
     """
     if seeding:
         return 5
+    if (clamp is not None and budget_nodes is not None
+            and budget_nodes <= clamp[0]):
+        return clamp[1]
     if (budget_nodes is not None and visits >= 1
             and budget_nodes >= DEPTH_BUDGET_THRESHOLD):
         return DEPTH_MULTIPV
@@ -1669,8 +1785,23 @@ def _still_reachable(pos):
 
 
 def budget_for(pos):
-    """Escalera por visita + salto directo si el motor ya vio mate."""
+    """Escalera por visita + salto directo si el motor ya vio mate.
+
+    CARVE-OUT del salto de banda: una reclamacion de mate CORTO y con
+    distancia CONOCIDA no compra la excavacion de 128M, compra su verificacion
+    (``_short_mate_clamp``).  La banda SIN distancia — un cp de tablebase
+    recortado — y los mates largos siguen saltando a 128M como siempre.
+
+    La escalera por visitas sigue mandando cuando ya pide mas que el clamp, y
+    eso es deliberado: dos sondas baratas que no cerraron el nodo son la senal
+    de que la reclamacion no se sostiene, y desde ahi escalar es lo correcto.
+    El clamp abarata la PRIMERA mirada; no pone un techo permanente ni puede
+    dejar un nodo en un bucle de sondas de dos millones.
+    """
     budget = BUDGET_LADDER[min(pos.visits, len(BUDGET_LADDER) - 1)]
+    clamp = _short_mate_clamp(pos)
+    if clamp is not None:
+        return max(budget, clamp[0])
     if abs(pos.eval_cp or 0) >= MATE_BAND:
         budget = max(budget, BUDGET_LADDER[2])  # extraer la PV entera
     return budget
