@@ -435,6 +435,28 @@ class BackedIngestTests(TestCase):
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
 
+    def test_seed_lost_race_keeps_the_childs_own_analysis(self):
+        """La siembra del padre llega TARDE: el analisis propio del hijo ya
+        aterrizo en otro consumer y es mas fiable que la linea MultiPV."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).order_by('move_uci') \
+                            .first().child
+        Position.objects.filter(key=child.key).update(eval_cp=731)
+        self.assertIsNone(child.eval_cp)   # objeto rancio, como en la carrera
+        self.assertFalse(ingest._seed_child_eval(child, 865))
+        child.refresh_from_db()
+        self.assertEqual(child.eval_cp, 731)
+
+    def test_seed_fresh_child_still_takes_the_parents_line_eval(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).order_by('move_uci') \
+                            .first().child
+        self.assertTrue(ingest._seed_child_eval(child, 123))
+        child.refresh_from_db()
+        self.assertEqual(child.eval_cp, 123)
+
     def test_the_arrow_follows_the_table_not_the_stale_search(self):
         """Board arrow and moves table must move TOGETHER.
 

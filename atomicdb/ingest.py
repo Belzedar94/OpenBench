@@ -206,6 +206,20 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
     return prepared
 
 
+def _seed_child_eval(child, ev):
+    """Siembra con update CONDICIONAL: entre cargar al hijo y escribirlo
+    puede colarse, en otro consumer, el ingest del analisis PROPIO del
+    hijo.  Un save() normal pisaria ese analisis con la linea MultiPV
+    del padre (mas vieja y menos fiable); el filtro eval_cp IS NULL hace
+    que el ultimo en llegar NO gane: gana el analisis propio."""
+    won = Position.objects.filter(
+        key=child.key, eval_cp__isnull=True).update(
+        eval_cp=ev, updated=timezone.now())
+    if won:
+        child.eval_cp = ev
+    return bool(won)
+
+
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     mate_proofs=None):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
@@ -243,8 +257,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             # MultiPV del padre y no debe ser pisado
             if ev is not None and child.status == 'UNKNOWN' \
                     and child.eval_cp is None:
-                child.eval_cp = ev
-                child.save(update_fields=['eval_cp', 'updated'])
+                _seed_child_eval(child, ev)
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)
             if (child.status != 'UNKNOWN' and prepared_proof is not None
