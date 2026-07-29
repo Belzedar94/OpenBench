@@ -435,6 +435,24 @@ class BackedIngestTests(TestCase):
         self.assertEqual(child.backed_eval, -900)   # negras eligen la mejor
         self.assertEqual(root.backed_eval, -900)    # y sube hasta la raiz
 
+    def test_navigating_onto_a_terminal_closes_the_parent_at_once(self):
+        """A goto can DISCOVER a mate — the cascade must fire right there.
+
+        Bxe7 exploding the king is WHITE_WIN TERMINAL the instant the edge
+        exists, but goto created position and edge without any cascade, so
+        the parent kept saying UNSOLVED +302 with a mate-in-one sitting in
+        its own moves table until some unrelated analysis touched the
+        family.  The community read the delay as a bug, because it was one.
+        """
+        parent = ingest.get_or_create_position('k7/pp6/1P6/8/8/8/8/K7 w - - 0 1')
+        self.assertEqual(parent.status, 'UNKNOWN')
+
+        response = Client().get(f'/atomicdb/goto/{parent.key}/b6a7/')
+
+        self.assertEqual(response.status_code, 302)
+        parent.refresh_from_db()
+        self.assertEqual(parent.status, 'WHITE_WIN')
+
     def test_a_walked_mate_line_loses_proof_weight_at_partial_nodes(self):
         """A proof's authority ends where the unproven alternatives begin.
 

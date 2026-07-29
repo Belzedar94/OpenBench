@@ -1208,6 +1208,15 @@ def goto(request, key, uci):
                                           campaign=pos.campaign)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                defaults={'child': child})
+    if child.status != 'UNKNOWN':
+        # Navegar puede DESCUBRIR un terminal (Bxe7 que explota al rey es
+        # mate en 1 nada mas crear la arista).  Sin esta cascada el padre
+        # seguia diciendo UNSOLVED +302 con un hijo WHITE_WIN TERMINAL en la
+        # tabla hasta que algun analisis ajeno tocara la familia — el
+        # "delay" que reporto la comunidad (29-jul).  El descubridor paga
+        # las cuatro consultas de su hallazgo.
+        ingest.backup_cascade([pos.key])
+        ingest.backup_backed_evals([pos.key])
     if child.priority <= ingest.DEAD / 2:
         child.priority = 0.0   # ruta nueva: revive de la lapida
         child.save(update_fields=['priority'])
