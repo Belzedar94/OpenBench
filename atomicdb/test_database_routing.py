@@ -59,6 +59,19 @@ class AtomicDBRouterTests(SimpleTestCase):
             self.assertFalse(
                 router.allow_migrate('atomicdb', 'atomicdb'))
 
+    def test_a_custom_alias_is_protected_like_the_conventional_one(self):
+        # El dia que el alias activo no se llame 'atomicdb' (Postgres, por
+        # ejemplo), su base sigue sin aceptar tablas de otras apps: la guarda
+        # compara contra el alias SELECCIONADO, no contra el nombre de pila.
+        router = AtomicDBRouter()
+        with mock.patch.object(
+                settings, 'ATOMICDB_DATABASE_ALIAS', 'atomic_pg'):
+            self.assertFalse(router.allow_migrate('atomic_pg', 'auth'))
+            self.assertTrue(router.allow_migrate('atomic_pg', 'atomicdb'))
+            # El alias convencional configurado pero no activo sigue a salvo.
+            self.assertFalse(router.allow_migrate('atomicdb', 'auth'))
+            self.assertIsNone(router.allow_migrate('default', 'auth'))
+
 
 class AtomicTransactionBoundaryTests(TransactionTestCase):
 

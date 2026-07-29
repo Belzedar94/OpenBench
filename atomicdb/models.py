@@ -459,8 +459,13 @@ class SolveTask(models.Model):
     outcome      = models.CharField(max_length=24, choices=Outcome.choices,
                                     blank=True, default='')
     certificate  = models.BinaryField(null=True, blank=True)
-    certificate_bytes = models.IntegerField(default=0)
-    certificate_nodes = models.IntegerField(default=0)
+    # Magnitudes de certificado en BigInteger: en Postgres un ``integer`` se
+    # queda en 2^31-1 y un certificado largo (nodos de busqueda, estados de
+    # estrategia, incluso bytes) puede pasarlo — SQLite no protesta y el
+    # desbordamiento se estrenaria justo al migrar de base.  Sus vecinos
+    # ``budget_nodes``/``searched_nodes`` ya lo eran.
+    certificate_bytes = models.BigIntegerField(default=0)
+    certificate_nodes = models.BigIntegerField(default=0)
     # Que verificador replica este certificado.  Hay dos formatos y dos
     # verificadores independientes, y una fila que no dice cual es suyo es una
     # fila que no se puede re-verificar sin adivinar.
@@ -470,7 +475,7 @@ class SolveTask(models.Model):
     # del contador de 50.  Es el valor central del certificado, no telemetria:
     # ``tau <= reloj de entrada`` es exactamente lo que se ha probado.
     survival_tau    = models.SmallIntegerField(null=True, blank=True)
-    survival_states = models.IntegerField(default=0)
+    survival_states = models.BigIntegerField(default=0)
     verified     = models.BooleanField(default=False)
     reject_reason = models.TextField(blank=True, default='')
     # Pistas de planificacion, NUNCA hechos: dependen del build, de la TT y
@@ -577,8 +582,11 @@ class RequestNotification(models.Model):
     resultado, y ese hecho sobrevive a que la fila de la tarea desaparezca.
     Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez — y la
     pone la base, no un ``exists()`` de la vista al que otro procesador de la
-    cola puede adelantarse.  Varias filas con ``task`` a NULL no chocan entre
-    si: para una unicidad, dos NULL son distintos.
+    cola puede adelantarse.  Sobre las filas con ``task`` a NULL esa unicidad
+    NO afirma nada — para una unica, dos NULL son distintos — asi que la
+    constraint lo dice con su condicion en vez de aparentar un limite que no
+    pone: el dedup rige mientras la tarea existe, que es exactamente cuando
+    el procesador de la cola puede intentar avisar dos veces.
     """
 
     username = models.CharField(max_length=64)
@@ -592,7 +600,8 @@ class RequestNotification(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(
-            fields=['task'], name='uniq_notification_per_task')]
+            fields=['task'], condition=models.Q(task__isnull=False),
+            name='uniq_notification_per_task')]
         indexes = [models.Index(fields=['username', 'seen'],
                                 name='atomic_notify_unseen')]
 

@@ -71,6 +71,12 @@ class Command(BaseCommand):
             return
 
         connection.ensure_connection()
+        if connection.vendor == 'sqlite':
+            # Igual que el resto de comandos largos: sin esto, el primer
+            # write ajeno que coincida con el iterator tumba el escaneo con
+            # "database is locked" en vez de esperarle medio minuto.
+            with connection.cursor() as cursor:
+                cursor.execute('PRAGMA busy_timeout = 30000')
         counts = {'scanned': 0, 'with_ep': 0, 'phantom': 0, 'errors': 0}
         offenders = []
         rows = Position.objects.exclude(fen__contains=' - 0 1').values_list(
