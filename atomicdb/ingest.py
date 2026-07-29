@@ -403,8 +403,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                        .values_list('parent_id', flat=True))
     backed = backup_backed_evals([pos.key, *parent_keys])
     uncertainty = _uncertainty_expand([pos.key, *parent_keys])
+    refuted = _witness_refuted_revisit(pos, parent_keys)
     summary = {'closed_children': closed_here, 'backed_up': changed,
-               'backed_evals': backed, 'uncertainty_expanded': uncertainty}
+               'backed_evals': backed, 'uncertainty_expanded': uncertainty,
+               'witness_refuted': refuted}
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
@@ -1831,14 +1833,15 @@ def ladder_exhausted(pos):
             and completed_max >= REQUEST_BUDGET_LADDER[-1])
 
 
-def _request_rung(pos, requested_by=''):
+def _request_rung(pos, requested_by='', route=''):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
     interno _LADDER_EXHAUSTED cuando el ultimo peldano ya esta COMPLETED:
     repetirlo seria gastar 10B en una busqueda que ya tenemos.
-    ``requested_by`` viaja a la tarea para la afinidad worker-peticionario;
-    nunca PISA un nombre ya guardado (el primer click conserva la autoria)."""
+    ``requested_by`` y ``route`` viajan a la tarea (afinidad y orden de
+    jugadas del peticionario); nunca PISAN lo ya guardado (el primer click
+    conserva autoria y ruta)."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
@@ -1860,7 +1863,7 @@ def _request_rung(pos, requested_by=''):
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
-                  'requested_by': requested_by,
+                  'requested_by': requested_by, 'route': route,
                   'multipv': multipv_for(pos.visits, floor)})
     if created:
         return 'queued'
@@ -1870,7 +1873,10 @@ def _request_rung(pos, requested_by=''):
         task.source = 'USER'   # promocion: al frente de la cola
         if requested_by and not task.requested_by:
             task.requested_by = requested_by
-        task.save(update_fields=['source', 'budget_nodes', 'requested_by'])
+        if route and not task.route:
+            task.route = route
+        task.save(update_fields=['source', 'budget_nodes', 'requested_by',
+                                 'route'])
         if promoted:
             return 'queued'
     elif task.state == 'LEASED':
@@ -1890,15 +1896,17 @@ def _request_rung(pos, requested_by=''):
                 AnalysisTask.objects.create(
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
-                    requested_by=requested_by,
+                    requested_by=requested_by, route=route,
                     multipv=multipv_for(generation, floor))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
                 follow_up.source = 'USER'
                 if requested_by and not follow_up.requested_by:
                     follow_up.requested_by = requested_by
+                if route and not follow_up.route:
+                    follow_up.route = route
                 follow_up.save(update_fields=['budget_nodes', 'source',
-                                              'requested_by'])
+                                              'requested_by', 'route'])
             return 'queued'
         # The existing lease already satisfies the requested rung. Mark it
         # as visitor-requested so subsequent clicks can be deduplicated
@@ -2101,6 +2109,69 @@ def _descend_frontier(pos, requested_by=''):
 # arbol es fino justo donde soporta carga.
 UNCERTAINTY_GAP = 150
 UNCERTAINTY_EXPAND_CAP = 4
+# Excepcion de profundidad del breadth-swap: cuando el analisis nuevo de un
+# hijo refuta la PROPIA linea-1 de un padre (el valor del hijo es peor para
+# el que mueve que lo que el padre reclamaba, mas alla del umbral), la
+# resolucion no es esperar cobertura de hermanos: es re-buscar el padre a
+# ancho completo, que re-arbitre entre sus alternativas o conceda.  La
+# guarda direccional retiene el valor viejo A PROPOSITO mientras tanto; sin
+# este disparador, esa retencion correcta parecia un backprop roto (tres
+# avistamientos de comunidad solo el 29-jul).
+WITNESS_REFUTED_CAP = 2
+
+
+def _witness_refuted_revisit(pos, parent_keys):
+    """Encola re-busqueda profunda de los padres cuya linea-1 refuto ``pos``.
+
+    Devuelve cuantas se encolaron.  Mismo flag que el resto del breadth-swap:
+    es la pata de profundidad de la misma politica."""
+    if not getattr(settings, 'ATOMICDB_BREADTH_SWAP', False):
+        return 0
+    # Relectura minima: la cascada de backed acaba de correr y el objeto en
+    # memoria del ingest lleva el respaldo de ANTES de este analisis.
+    row = Position.objects.filter(key=pos.key).only(
+        'key', 'status', 'eval_cp', 'backed_eval').first()
+    if row is None or row.status != 'UNKNOWN':
+        return 0
+    child_value = (row.backed_eval if row.backed_eval is not None
+                   else row.eval_cp)
+    if child_value is None or abs(child_value) >= MATE_BAND:
+        return 0
+    queued = 0
+    parents = Position.objects.filter(
+        key__in=[key for key in parent_keys if key], status='UNKNOWN')
+    for parent in parents:
+        if queued >= WITNESS_REFUTED_CAP:
+            break
+        if parent.eval_cp is None or abs(parent.eval_cp) >= MATE_BAND:
+            continue
+        lines = parent.last_analysis or []
+        first = lines[0] if lines and isinstance(lines[0], dict) else None
+        pv = (first or {}).get('pv') or []
+        witness = pv[0] if pv else parent.best_move
+        if not witness:
+            continue
+        edge = Edge.objects.filter(parent=parent, move_uci=witness,
+                                   child=pos).first()
+        if edge is None:
+            continue
+        mover_white = parent.fen.split()[1] == 'w'
+        refuted = (child_value < parent.eval_cp - UNCERTAINTY_GAP
+                   if mover_white
+                   else child_value > parent.eval_cp + UNCERTAINTY_GAP)
+        if not refuted:
+            continue
+        budget = max(BUDGET_LADDER[1], budget_for(parent))
+        task, created = AnalysisTask.objects.get_or_create(
+            position=parent, generation=parent.visits,
+            defaults={'budget_nodes': budget, 'multipv': DEPTH_MULTIPV,
+                      'source': AnalysisTask.Source.AUTO})
+        if created:
+            queued += 1
+            DBEvent.objects.create(kind='WITNESS_REFUTED', payload={
+                'parent': parent.key, 'child': pos.key, 'move': witness,
+                'claimed': parent.eval_cp, 'child_value': child_value})
+    return queued
 
 
 def _uncertainty_expand(keys):
@@ -2155,11 +2226,13 @@ def _breadth_swap_eligible(pos):
     return _completed_max_budget(pos) is not None
 
 
-def request_analysis(pos, requested_by=''):
+def request_analysis(pos, requested_by='', route=''):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
-    las tareas para la afinidad worker-peticionario del lease.
+    las tareas para la afinidad worker-peticionario del lease; ``route``
+    (UCIs ya VALIDADOS por la vista) para pintar la peticion en el orden de
+    jugadas de su autor.
 
     Con ``ATOMICDB_BREADTH_SWAP`` activo, una peticion sobre un nodo ya
     analizado compra ANCHURA en vez del siguiente peldano profundo: la
@@ -2183,7 +2256,7 @@ def request_analysis(pos, requested_by=''):
                                                   {}).items()
                        if isinstance(value, (int, str))}})
                 return outcome
-        outcome = _request_rung(pos, requested_by)
+        outcome = _request_rung(pos, requested_by, route)
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
         if swapped:

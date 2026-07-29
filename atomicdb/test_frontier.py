@@ -204,6 +204,61 @@ class BreadthSwapTests(TestCase):
         self.assertFalse(AnalysisTask.objects.exists())
 
     @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_a_refuted_own_line_queues_a_deep_revisit_of_the_parent(self):
+        """El hijo de la linea-1 rinde mucho menos de lo reclamado: el padre
+        se re-busca a ancho completo en vez de esperar cobertura de hermanos.
+
+        Forma exacta del avistamiento del 29-jul (padre 1197, hijo de su
+        propia linea-1 a 1266): la guarda direccional retiene el valor viejo
+        a proposito, y sin re-busqueda esa retencion parece backprop roto."""
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        edge = Edge.objects.filter(parent=parent).order_by('move_uci').first()
+        child, move = edge.child, edge.move_uci
+        Position.objects.filter(pk=parent.pk).update(
+            visits=1, eval_cp=100,
+            last_analysis=[{'eval_cp': 100, 'pv': [move]}])
+        ingest.expand(child)
+        replies = list(Edge.objects.filter(parent=child)
+                       .order_by('move_uci')[:3])
+        lines = [{'move': e.move_uci, 'eval_cp': -400 + 50 * i,
+                  'mate': None, 'pv': [e.move_uci]}
+                 for i, e in enumerate(replies)]
+
+        ingest.ingest_analysis(child.key, lines, 1_000_000)
+
+        revisit = AnalysisTask.objects.filter(
+            position=parent, multipv=ingest.DEPTH_MULTIPV).first()
+        self.assertIsNotNone(revisit)
+        self.assertGreaterEqual(revisit.budget_nodes,
+                                ingest.BUDGET_LADDER[1])
+        self.assertTrue(
+            DBEvent.objects.filter(kind='WITNESS_REFUTED').exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_a_witness_within_the_gap_stays_quiet(self):
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        edge = Edge.objects.filter(parent=parent).order_by('move_uci').first()
+        child, move = edge.child, edge.move_uci
+        Position.objects.filter(pk=parent.pk).update(
+            visits=1, eval_cp=100,
+            last_analysis=[{'eval_cp': 100, 'pv': [move]}])
+        ingest.expand(child)
+        replies = list(Edge.objects.filter(parent=child)
+                       .order_by('move_uci')[:3])
+        lines = [{'move': e.move_uci, 'eval_cp': 40 - 10 * i,
+                  'mate': None, 'pv': [e.move_uci]}
+                 for i, e in enumerate(replies)]
+
+        ingest.ingest_analysis(child.key, lines, 1_000_000)
+
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=parent).exists())
+        self.assertFalse(
+            DBEvent.objects.filter(kind='WITNESS_REFUTED').exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
     def test_a_mate_band_node_still_buys_depth(self):
         pos = ingest.get_or_create_position(
             logic.apply_move(logic.start_fen(), 'g1f3'))
