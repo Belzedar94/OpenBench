@@ -82,7 +82,7 @@ class ProposeTests(TestCase):
         payload.update(extra)
         return self.client.post('/atomicdb/campaign/propose/', payload)
 
-    def test_a_public_visitor_files_a_proposed_campaign_without_an_account(self):
+    def test_a_public_visitor_files_a_proposal_without_an_account(self):
         response = self._propose(name='Wolfram')
 
         self.assertEqual(response.status_code, 200)
