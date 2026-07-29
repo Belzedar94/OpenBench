@@ -71,6 +71,65 @@ class FormatSanLineTests(TestCase):
         self.assertGreaterEqual(views.LINEAGE_SEARCH_MAX_PLIES, 96)
 
 
+class AliveLineagePreferenceTests(TestCase):
+    """The breadcrumb runs through the LIVING tree when it can.
+
+    A transposed node can be reached through a parent that is already
+    solved; printing that order as "the line" reads as absurd — nobody
+    plays through a solved position to reach an open one (ubdip, 29-jul).
+    Preference, not exclusion: when every path crosses solved nodes the
+    shortest one still shows, so no node loses its lineage.
+    """
+
+    def test_the_walk_prefers_an_unsolved_parent(self):
+        from . import ingest, views
+        from .models import Edge, Position
+
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        edges = list(Edge.objects.filter(parent=root)
+                     .select_related('child').order_by('move_uci')[:2])
+        solved_parent, open_parent = edges[0].child, edges[1].child
+        # Ambos padres llegan al MISMO nieto por transposicion simulada.
+        via_solved = logic.legal_moves(solved_parent.fen)[0]
+        deep_fen = logic.apply_move(solved_parent.fen, via_solved)
+        grand = ingest.get_or_create_position(deep_fen)
+        Edge.objects.get_or_create(parent=solved_parent, move_uci=via_solved,
+                                   defaults={'child': grand})
+        Edge.objects.get_or_create(
+            parent=open_parent,
+            move_uci=logic.legal_moves(open_parent.fen)[0],
+            defaults={'child': grand})
+        Position.objects.filter(key=solved_parent.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        top, line = views._line_to_root(grand)
+
+        self.assertEqual(line[-2]['key'], open_parent.key,
+                         'el breadcrumb debe entrar por el padre vivo')
+
+    def test_all_solved_paths_still_yield_a_lineage(self):
+        from . import ingest, views
+        from .models import Edge, Position
+
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        only_parent = Edge.objects.filter(parent=root) \
+                                  .order_by('move_uci').first().child
+        via = logic.legal_moves(only_parent.fen)[0]
+        deep_fen = logic.apply_move(only_parent.fen, via)
+        grand = ingest.get_or_create_position(deep_fen)
+        Edge.objects.get_or_create(parent=only_parent, move_uci=via,
+                                   defaults={'child': grand})
+        Position.objects.filter(key=only_parent.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        top, line = views._line_to_root(grand)
+
+        self.assertTrue(line, 'con todos los caminos resueltos sigue habiendo linea')
+        self.assertEqual(top.fen, logic.start_fen())
+
+
 class CappedWalkLabelTests(TestCase):
     """A walk that hits its own ceilings must read as DEEP, not as unrooted.
 

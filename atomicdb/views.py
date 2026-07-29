@@ -1303,7 +1303,7 @@ def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     import pyffish as pf
 
     keys = list(dict.fromkeys(key for key in keys if key))
-    positions = Position.objects.only('key', 'fen').in_bulk(keys)
+    positions = Position.objects.only('key', 'fen', 'status').in_bulk(keys)
     start_key = logic.key_of(logic.start_fen())
     states = {}
     for key in keys:
@@ -1334,15 +1334,25 @@ def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             When(parent_id=start_key, then=Value(0)),
             default=Value(1), output_field=IntegerField(),
         )
+        # Entre varios padres transpuestos, el breadcrumb prefiere los NO
+        # resueltos: un orden de jugadas que atraviesa un nodo ya solved es
+        # un camino muerto y leerlo como "la linea" es absurdo (ubdip,
+        # 29-jul).  Preferencia, no exclusion: si TODOS los caminos pasan
+        # por nodos resueltos, se ensena el mas corto igual que siempre.
+        alive_first = Case(
+            When(parent__status='UNKNOWN', then=Value(0)),
+            default=Value(1), output_field=IntegerField(),
+        )
         edges = (Edge.objects.filter(child_id__in=child_ids)
                  .select_related('parent')
-                 .only('child_id', 'move_uci', 'parent__key', 'parent__fen')
+                 .only('child_id', 'move_uci', 'parent__key', 'parent__fen',
+                       'parent__status')
                  .annotate(_lineage_rank=Window(
                      expression=RowNumber(),
                      partition_by=[F('child_id')],
                      order_by=(
-                         root_first.asc(), F('parent_id').asc(),
-                         F('move_uci').asc(),
+                         root_first.asc(), alive_first.asc(),
+                         F('parent_id').asc(), F('move_uci').asc(),
                      ),
                  ))
                  .filter(_lineage_rank__lte=
@@ -1359,7 +1369,17 @@ def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
         for key in sorted(active):
             state = states[key]
             next_frontier = set()
-            for child_key in sorted(state['frontier']):
+            # En los puntos de UNION del DAG, el primer hijo que reclama a un
+            # padre decide el camino del breadcrumb.  Los nodos vivos van
+            # primero para que la linea reconstruida atraviese el arbol
+            # abierto y no un orden ya resuelto (la preferencia de arriba
+            # solo ordenaba la admision por-hijo, no la eleccion de rama).
+            def _alive_then_key(node_key, _nodes=state['nodes']):
+                node = _nodes.get(node_key)
+                solved = (getattr(node, 'status', 'UNKNOWN') != 'UNKNOWN'
+                          if node is not None else False)
+                return (1 if solved else 0, node_key)
+            for child_key in sorted(state['frontier'], key=_alive_then_key):
                 child_parents = parents_by_child.get(child_key, ())
                 if not child_parents:
                     state['sources'].append(
