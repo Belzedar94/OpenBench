@@ -52,9 +52,7 @@ or the explorer to add them to the tree.</p>
 (instant activation), then run the analysis worker. All you need is python3:
 the worker downloads the reference engine on first run (sha256 verified;
 Windows and Linux x86-64 prebuilts, CPU from ~2013 onwards):</p>
-<div class="raw">curl -O https://belzedar.duckdns.org/atomicdb/engines/atomicdb_worker.py
-pip install requests chess
-python atomicdb_worker.py -U your_user -P your_pass     -S https://belzedar.duckdns.org     -T 8 --hash 1024</div>
+<div class="raw"><div class="rawline">curl -O https://belzedar.duckdns.org/atomicdb/engines/atomicdb_worker.py</div><div class="rawline">pip install requests chess</div><div class="rawline">python atomicdb_worker.py -U your_user -P your_pass -S https://belzedar.duckdns.org -T 8 --hash 1024</div></div>
 <p class="dim" style="font-size:.9rem">The worker is a single self-contained
 file (it also lives in the
 <a href="https://github.com/Belzedar94/OpenBench">OpenBench repo</a> under
