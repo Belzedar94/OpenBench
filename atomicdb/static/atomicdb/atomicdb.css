@@ -505,6 +505,11 @@ tr:hover td {
   word-break: break-all;
 }
 
+/* Cada linea multipv en su bloque: el separador sobrevive al minificador. */
+.raw .rawline + .rawline {
+  margin-top: .35rem;
+}
+
 details summary {
   margin: .6rem 0 .3rem;
   color: var(--ink-muted);
