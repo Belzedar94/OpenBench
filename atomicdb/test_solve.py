@@ -511,6 +511,27 @@ class _NoThread:
         return None
 
 
+class _ImpatientStop:
+    """Un ``stop_event`` que no duerme.
+
+    El bucle de pruebas espera un minuto entre vueltas en vacio y no tiene ese
+    intervalo inyectable; con un Event de verdad, cada vuelta de estas pruebas
+    costaria sesenta segundos de suite para no comprobar nada.
+    """
+
+    def __init__(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+    def wait(self, _seconds=None):
+        return self._set
+
+
 class SolveWorkerLeaseTests(TestCase):
     """El lado del worker del protocolo SOLVE: latido y sesion de arriendo.
 
@@ -569,7 +590,7 @@ class SolveWorkerLeaseTests(TestCase):
 
     def test_the_loop_keeps_its_session_across_an_ambiguous_acquire(self):
         sessions = []
-        stop = threading.Event()
+        stop = _ImpatientStop()
 
         def fake_solve_once(server, auth, solver, lease_session,
                             current_task=None):
@@ -588,7 +609,7 @@ class SolveWorkerLeaseTests(TestCase):
 
     def test_a_clean_pass_starts_a_new_session(self):
         sessions = []
-        stop = threading.Event()
+        stop = _ImpatientStop()
 
         def fake_solve_once(server, auth, solver, lease_session,
                             current_task=None):
