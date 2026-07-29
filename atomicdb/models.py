@@ -208,6 +208,13 @@ class AnalysisTask(models.Model):
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
     source       = models.CharField(max_length=4, choices=Source.choices,
                                     default=Source.AUTO, db_index=True)
+    # Que PRODUCTOR encolo esta tarea ('' = el selector normal o un click).
+    # ``source`` dice como se sirve; ``arm`` dice quien la pidio, y son cosas
+    # distintas: tres brazos distintos escriben FILL y cada uno tiene que poder
+    # contar SU cola sin leer la de los otros como si fuera suya (§ ingest,
+    # cupos por brazo).  Mismo papel que ``SolveTask.arm``.
+    arm          = models.CharField(max_length=16, blank=True, default='',
+                                    db_index=True)
     # Cuenta OB del que PIDIO el analisis (vacio = anonimo).  Un worker de
     # esa misma cuenta atiende primero sus propias peticiones dentro de la
     # banda USER; para el resto de la flota no cambia nada.

@@ -74,9 +74,9 @@ class Command(BaseCommand):
             '--no-adversarial', dest='adversarial', action='store_false',
             help='Skip both adversarial arms this pass.')
         parser.add_argument(
-            '--dn-repair-cap', type=int, default=ingest.COVERAGE_QUEUE_CAP,
-            help='Maximum PENDING FILL tasks before dn repair stops adding '
-                 'more; shared with coverage completion (default: '
+            '--dn-repair-cap', type=int, default=ingest.DN_REPAIR_QUEUE_CAP,
+            help='Maximum PENDING dn-repair tasks before the arm stops '
+                 'adding more; its own quota, not shared (default: '
                  '%(default)s).')
         parser.add_argument(
             '--fragile-cap', type=int, default=ingest.FRAGILE_QUEUE_CAP,
@@ -136,9 +136,9 @@ class Command(BaseCommand):
                 covered = ingest.enqueue_coverage_completion(
                     cap=options['coverage_cap'])
             # Los brazos adversariales, en el MISMO ciclo y detras de todo lo
-            # demas: el cupo de FILL que la cobertura acabe de gastar ya no
-            # esta disponible para la reparacion de dn, que es el orden de
-            # prioridad correcto (cerrar un nodo vale mas que engordar su dn).
+            # demas: el cupo que la cobertura acabe de gastar es suyo y no el
+            # de nadie mas, pero el orden de prioridad sigue siendo el correcto
+            # (cerrar un nodo vale mas que engordar su dn).
             adversarial = options['adversarial']
             if adversarial is None:
                 adversarial = ingest.adversarial_arms_enabled()
@@ -150,7 +150,7 @@ class Command(BaseCommand):
             # Colchon de analisis, DETRAS de los brazos con cupo: la flota
             # no debe esperar al minteo inline del lease (4 con cola vacia
             # = valles de utilizacion), pero el colchon tampoco debe
-            # comerse el cupo de FILL de cobertura/dn/fragiles.
+            # comerse el cupo de cobertura/dn/fragiles.
             pooled = ingest.top_up_analysis_pool(options['pool_target'])
             passes += 1
             elapsed = time.monotonic() - started

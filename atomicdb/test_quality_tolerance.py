@@ -182,7 +182,7 @@ class QualityConvergenceTests(TestCase):
         self.assertEqual(ingest._rung_at_least(10 ** 12),
                          ingest.BUDGET_LADDER[-1])
 
-    def test_the_fill_cap_still_bounds_it(self):
+    def _blocked_parent_and_child(self):
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)
         parent.eval_cp = 369
@@ -192,13 +192,37 @@ class QualityConvergenceTests(TestCase):
         child.backed_eval = 416
         child.backed_nodes = 8_000_000
         child.save()
+        return parent, child
+
+    def _fill_queue(self, rows, arm):
         filler = ingest.get_or_create_position(
             logic.apply_move(logic.start_fen(), 'a2a3'))
-        for index in range(ingest.COVERAGE_QUEUE_CAP):
+        for index in range(rows):
             AnalysisTask.objects.create(
                 position=filler, generation=index, budget_nodes=1,
-                source=AnalysisTask.Source.FILL)
+                source=AnalysisTask.Source.FILL, arm=arm)
+
+    def test_the_fill_cap_still_bounds_it(self):
+        parent, child = self._blocked_parent_and_child()
+        self._fill_queue(ingest.QUALITY_QUEUE_CAP, ingest.QUALITY_ARM)
 
         ingest.backup_backed_evals([parent.key])
 
         self.assertFalse(AnalysisTask.objects.filter(position=child).exists())
+
+    def test_another_arms_backlog_does_not_spend_this_arms_quota(self):
+        """El cupo se cuenta por BRAZO, no sobre todo lo que sea FILL.
+
+        Los tres productores de FILL viven en dos procesos distintos y ninguno
+        puede decidir por los otros: contar la cola ajena como propia hacia que
+        el que llegaba segundo se quedara sin encolar nada.
+        """
+        parent, child = self._blocked_parent_and_child()
+        self._fill_queue(ingest.COVERAGE_QUEUE_CAP + ingest.QUALITY_QUEUE_CAP,
+                         ingest.COVERAGE_ARM)
+
+        ingest.backup_backed_evals([parent.key])
+
+        queued = AnalysisTask.objects.filter(position=child).first()
+        self.assertIsNotNone(queued)
+        self.assertEqual(queued.arm, ingest.QUALITY_ARM)
