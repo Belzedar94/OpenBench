@@ -16,6 +16,31 @@ class _Top:
         self.fen = fen
 
 
+class DistinctDeepPreviewTests(TestCase):
+    """Dos posiciones de la misma linea profunda, dos labels distintos.
+
+    El preview cortaba solo por el final: posiciones consecutivas de una
+    linea profunda pintaban labels IDENTICOS y un worker avanzando por ella
+    parecia encallado en la misma tarea (incidente del 29-jul)."""
+
+    def test_middle_ellipsis_keeps_consecutive_previews_apart(self):
+        top = _Top(logic.start_fen())
+
+        a = views._format_san_line(top, _line(14), max_plies=10)
+        b = views._format_san_line(top, _line(15), max_plies=10)
+
+        self.assertIn('…', a)
+        self.assertNotEqual(a, b)
+
+    def test_small_budgets_keep_a_recognisable_head(self):
+        top = _Top(logic.start_fen())
+
+        preview = views._format_san_line(top, _line(30), max_plies=10)
+
+        head = preview.split(' … ')[0]
+        self.assertGreaterEqual(len(head.split()), 3)
+
+
 def _line(plies):
     return [{'san': f'M{index}', 'white': index % 2 == 0, 'key': str(index)}
             for index in range(plies)]

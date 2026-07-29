@@ -191,6 +191,30 @@ class LeaseConcurrencyTests(TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(again, [])
 
+    def test_a_restarted_worker_reclaims_its_dead_predecessors_lease(self):
+        """Relevo tras reinicio: sesion nueva + heartbeat muerto = reciclar ya.
+
+        Incidente real (29-jul): el worker relanzado se quedo "sin tareas"
+        detras del lease de su predecesor muerto hasta agotar la ventana
+        entera de caducidad, con la cola llena."""
+        self._pending(1)
+        first = self._lease('box-atomicdb#0', 'sesion-vieja').json()['tasks']
+        self.assertEqual(len(first), 1)
+        dead = timezone.now() - timedelta(
+            minutes=views.RESTART_RECYCLE_MINUTES + 1)
+        AnalysisTask.objects.filter(id=first[0]['id']).update(
+            lease_heartbeat_at=dead, leased_at=dead)
+
+        relevo = self._lease('box-atomicdb#0', 'sesion-nueva').json()['tasks']
+
+        self.assertEqual(len(relevo), 1)
+        self.assertEqual(relevo[0]['id'], first[0]['id'])
+        self.assertNotEqual(relevo[0]['lease_token'],
+                            first[0]['lease_token'])
+        task = AnalysisTask.objects.get(pk=first[0]['id'])
+        self.assertEqual((task.state, task.machine),
+                         ('LEASED', 'box-atomicdb#0'))
+
     def test_a_lost_response_still_replays_within_its_slot(self):
         self._pending(4)
         first = self._lease('box-atomicdb#0', 'same-nonce').json()['tasks']

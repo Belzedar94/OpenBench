@@ -36,6 +36,11 @@ from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
 POST_DEPLOY_LEGACY_LEASE_MINUTES = 60
+# Relevo tras reinicio: una peticion con la MISMA identidad de maquina, OTRA
+# sesion y el heartbeat del titular mas viejo que esto recicla el lease en el
+# acto en vez de esperar la ventana entera de caducidad. Los heartbeats van
+# cada ~30-60s: tres minutos de silencio es un proceso muerto, no uno lento.
+RESTART_RECYCLE_MINUTES = 3
 LEGACY_DISPLAY_MINUTES = 60
 # One task per lease is intentional. It makes the queue truthful and prevents
 # a later task in a sequential batch expiring before the worker even starts it.
@@ -353,20 +358,44 @@ def api_lease(request):
                 batch = [active_same_machine]
                 replayed = True
             else:
-                active_task_id = active_same_machine.id
-        elif _machine_at_lease_cap(machine):
-            # La maquina fisica ya tiene LEASES_PER_MACHINE asignaciones
-            # vivas repartidas entre sus slots.  No es un error del worker
-            # honesto -- con --jobs sensato nunca se llega -- asi que se le
-            # responde como a una cola vacia y reintenta, en vez de fallar.
-            pass
-        else:
-            chosen = choose_pending()
-            if chosen is None:
-                ingest.next_tasks(TASK_REFILL_COUNT)
+                # REINICIO frente a ROBO.  Una sesion DISTINTA con el
+                # heartbeat del titular ya frio no es un segundo proceso
+                # robando trabajo vivo: es el relevo del muerto pidiendo
+                # trabajo con su misma identidad.  Sin esto, el worker
+                # relanzado se queda "sin tareas" hasta agotar la ventana
+                # entera de caducidad (incidente t24, 29-jul: ~15 min de
+                # maquina parada con 755 tareas en cola).  Un heartbeat
+                # fresco sigue bloqueando: esa proteccion es la correcta.
+                beat = (active_same_machine.lease_heartbeat_at
+                        or active_same_machine.leased_at)
+                dead = now - timedelta(minutes=RESTART_RECYCLE_MINUTES)
+                if beat is not None and beat < dead:
+                    AnalysisTask.objects.filter(
+                        id=active_same_machine.id, state='LEASED',
+                    ).update(state='PENDING', machine='',
+                             lease_heartbeat_at=None, lease_token='',
+                             lease_session='')
+                    # El relevo no espera al proximo poll: con el zombi
+                    # reciclado, ESTA misma request baja a elegir tarea.
+                    active_same_machine = None
+                else:
+                    active_task_id = active_same_machine.id
+        if (active_same_machine is None and not replayed
+                and active_task_id is None):
+            if _machine_at_lease_cap(machine):
+                # La maquina fisica ya tiene LEASES_PER_MACHINE asignaciones
+                # vivas repartidas entre sus slots.  No es un error del worker
+                # honesto -- con --jobs sensato nunca se llega -- asi que se
+                # le responde como a una cola vacia y reintenta, en vez de
+                # fallar.
+                pass
+            else:
                 chosen = choose_pending()
-            if chosen is not None:
-                batch = [chosen]
+                if chosen is None:
+                    ingest.next_tasks(TASK_REFILL_COUNT)
+                    chosen = choose_pending()
+                if chosen is not None:
+                    batch = [chosen]
         if not replayed:
             assigned_at = timezone.now()
             for t in batch:
@@ -1327,7 +1356,12 @@ def _format_san_line(top, line, max_plies=16, keep_head=False):
         return ' '.join(parts)
     if keep_head:
         return ' '.join(parts[:max_plies]) + ' …'
-    head = max(1, min(SAN_HEAD_PLIES, max_plies - SAN_TAIL_PLIES - 1))
+    # Presupuestos cortos (previews de portada): reparto equilibrado.  Con el
+    # reparto fijo 6+8, un preview de 10 dejaba UN ply de cabeza; y cortar
+    # solo por el final hacia que posiciones distintas de la misma linea
+    # profunda pintaran labels IDENTICOS — un worker avanzando por la linea
+    # parecia encallado en la misma tarea (incidente 29-jul).
+    head = min(SAN_HEAD_PLIES, max(2, (max_plies - 1) // 2))
     tail = max(1, max_plies - head - 1)
     return ' '.join(parts[:head]) + ' … ' + ' '.join(parts[-tail:])
 
@@ -1636,8 +1670,10 @@ def _line_labels_many(keys, preview_plies=10):
     labels = {}
     for key, (top, line) in resolved.items():
         full = _format_san_line(top, line, max_plies=512, keep_head=True)
-        preview = _format_san_line(top, line, max_plies=preview_plies,
-                                   keep_head=True)
+        # Preview con elipsis EN MEDIO: la cabeza dice que apertura es y la
+        # cola dice DONDE va — dos posiciones distintas de la misma linea
+        # profunda nunca deben compartir label.
+        preview = _format_san_line(top, line, max_plies=preview_plies)
         labels[key] = (preview, full)
     return labels
 

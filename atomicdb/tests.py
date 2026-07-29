@@ -1368,7 +1368,11 @@ class MilestoneLineTests(TestCase):
         event = response.context['events'][0]
 
         self.assertTrue(event['san'].startswith('1. Nf3 Nf6'))
-        self.assertTrue(event['san'].endswith('…'))
+        # Elipsis EN MEDIO: la cabeza identifica la apertura y la cola dice
+        # donde va la linea — dos posiciones profundas consecutivas ya no
+        # comparten label (incidente del 29-jul).
+        self.assertIn(' … ', event['san'])
+        self.assertTrue(event['san'].endswith('O-O'))
         self.assertIn('6. O-O O-O', event['full'])
         self.assertContains(response, f'title="{event["full"]}"')
         self.assertContains(response, 'class="milestone-line dim"')
