@@ -59,7 +59,14 @@ from . import openings
 logger = logging.getLogger(__name__)
 
 CACHE_KEY = 'atomicdb.community-opening-names.v1'
-CACHE_SECONDS = 60
+# El backend por defecto es LocMem: UNA cache POR PROCESO.  Con varios workers
+# de gunicorn, ``invalidate()`` solo borra la entrada del proceso que atendio
+# la moderacion — los demas ni se enteran.  El limite real de obsolescencia
+# entre procesos es este TTL, asi que se mantiene CORTO: el mapa son decenas
+# de filas en una consulta, y pagarla cada pocos segundos por proceso cuesta
+# menos que explicar por que un nombre aprobado tarda un minuto en aparecer
+# segun a que worker le toque tu peticion.
+CACHE_SECONDS = 5
 
 
 def approved_map():
@@ -91,6 +98,13 @@ def approved_map():
 
 
 def invalidate():
+    """Borra la entrada DE ESTE PROCESO.
+
+    Con LocMem eso es todo lo que puede prometer: el proceso que sirvio la
+    aprobacion repinta al instante, y el resto converge en ``CACHE_SECONDS``
+    como mucho.  Si algun dia el backend pasa a ser compartido (Redis,
+    memcached), esta misma llamada se vuelve global sin tocar nada mas.
+    """
     cache.delete(CACHE_KEY)
 
 
