@@ -15,7 +15,7 @@ from unittest.mock import patch
 from django.test import Client, override_settings
 from django.utils import timezone
 
-from . import ingest, logic, proof
+from . import ingest, logic, proof, views
 from .models import (AnalysisTask, Campaign, CampaignVote, Edge, Position,
                      SolveTask)
 from .testing import TestCase, worker_account
@@ -210,18 +210,21 @@ class CampaignVoteCountTests(TestCase):
             name='line', root=self.root, state=Campaign.CState.PROPOSED,
             active=False)
 
-    @expectedFailure
     def test_the_cached_count_never_drifts_from_the_rows(self):
-        original = Campaign.save
+        # El seno de la carrera es el recuento: otro votante COMMITEA justo
+        # antes de que este voto reescriba la cache.  Mientras el COUNT se
+        # hacia en Python y se guardaba despues, ese voto se perdia para
+        # siempre; ahora el COUNT lo hace la base dentro del mismo UPDATE.
+        original = views._recount_campaign_votes
 
-        def racing_save(instance, *args, **kwargs):
-            # Otro votante COMMITEA entre nuestro COUNT y nuestro guardado.
+        def racing_recount(campaign_id):
             if not CampaignVote.objects.filter(token='other').exists():
                 CampaignVote.objects.create(campaign=self.campaign,
                                             token='other')
-            return original(instance, *args, **kwargs)
+            return original(campaign_id)
 
-        with patch.object(Campaign, 'save', racing_save):
+        with patch.object(views, '_recount_campaign_votes',
+                          side_effect=racing_recount):
             response = self.client.post(
                 f'/atomicdb/campaign/{self.campaign.id}/vote/', {})
         self.assertEqual(response.status_code, 200)
@@ -230,6 +233,7 @@ class CampaignVoteCountTests(TestCase):
         self.assertEqual(
             self.campaign.votes,
             CampaignVote.objects.filter(campaign=self.campaign).count())
+        self.assertEqual(self.campaign.votes, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +304,6 @@ class CampaignProposalCapTests(TestCase):
         self.keys = [edge.child_id for edge in
                      Edge.objects.filter(parent=self.root)[:6]]
 
-    @expectedFailure
     def test_the_daily_cap_holds_for_a_client_that_drops_the_cookie(self):
         from .views import CAMPAIGN_PROPOSALS_PER_VOTER_DAY
 

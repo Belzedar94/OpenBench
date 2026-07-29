@@ -20,9 +20,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 import re
 
-from django.db.models import (Case, Count, F, FloatField, IntegerField, Q,
-                              Sum, Value, When, Window)
-from django.db.models.functions import RowNumber
+from django.db.models import (Case, Count, F, FloatField, IntegerField,
+                              OuterRef, Q, Subquery, Sum, Value, When, Window)
+from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, ingest, ingest_queue, logic, metrics,
                notifications, openings, proof, solve)
@@ -2965,6 +2965,9 @@ def campaign_propose(request):
     title = ' '.join((request.POST.get('title') or '').split())[
         :CAMPAIGN_TITLE_MAX_CHARS]
     proposed_by = _campaign_credit(request)
+    # Se guarda SOLO en las propuestas sin cookie: es lo unico que las agrupa,
+    # y en las demas seria un dato personal que no hace falta para nada.
+    client_ip = _client_ip(request) if minted else ''
     day_ago = timezone.now() - timedelta(days=1)
     with atomic():
         # El bloqueo sobre la RAIZ serializa las propuestas de esa linea: sin
@@ -2978,6 +2981,17 @@ def campaign_propose(request):
             return reply({'status': 'exists', 'id': existing.id})
         if Campaign.objects.filter(
                 proposed_token=token,
+                created__gte=day_ago).count() \
+                >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
+            return reply({'status': 'rate-limited', 'id': None}, 429)
+        # Sin cookie previa el token es NUEVO, asi que su contador vale cero
+        # por construccion y el tope de arriba no acota nada: bastaba con no
+        # devolver la cookie para proponer sin limite, y cada propuesta cuesta
+        # un recorrido de linaje entero.  A esas — y solo a esas — se les
+        # cuenta por direccion, como a las sugerencias de nombre.  El CGNAT
+        # sigue protegido: quien devuelve su cookie no entra aqui jamas.
+        if minted and Campaign.objects.filter(
+                proposed_ip=client_ip,
                 created__gte=day_ago).count() \
                 >= CAMPAIGN_PROPOSALS_PER_VOTER_DAY:
             return reply({'status': 'rate-limited', 'id': None}, 429)
@@ -2999,7 +3013,8 @@ def campaign_propose(request):
                     # booleano mandaba) dice que si.
                     active=False,
                     proposed_by=proposed_by,
-                    proposed_token=token)
+                    proposed_token=token,
+                    proposed_ip=client_ip)
         except IntegrityError:
             return reply({'status': 'name-taken', 'id': None}, 409)
     return reply({'status': 'ok', 'id': campaign.id})
@@ -3011,6 +3026,13 @@ def campaign_vote(request, campaign_id):
     El recuento cacheado se reescribe con el ``COUNT`` real en la misma
     transaccion que el voto, nunca con un ``+1``: un incremento pierde una
     carrera y deja la portada mintiendo hasta que alguien lo note.
+
+    Pero un ``COUNT`` sin bloquear la campana pierde EXACTAMENTE la misma
+    carrera: dos votantes cuentan a la vez, los dos ven el mismo total y el
+    segundo lo reescribe con el numero del primero.  Aqui no hay nada que lo
+    repare despues — la desviacion es permanente y alimenta CAMPAIGN_BONUS —
+    asi que la campana se bloquea antes de contar y los votos concurrentes
+    hacen cola.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -3025,14 +3047,39 @@ def campaign_vote(request, campaign_id):
         return reply({'status': 'unknown-campaign', 'votes': 0}, 404)
     name = ' '.join((request.POST.get('name') or '').split())
     with atomic():
+        # El bloqueo va PRIMERO y sobre la campana, que es la fila cuyo
+        # recuento se va a reescribir: serializa a los votantes de ESTA
+        # campana y a nadie mas.
+        locked = (Campaign.objects.select_for_update()
+                  .filter(id=campaign.id).first())
+        if locked is None:
+            return reply({'status': 'unknown-campaign', 'votes': 0}, 404)
         _row, created = CampaignVote.objects.get_or_create(
-            campaign=campaign, token=token,
+            campaign=locked, token=token,
             defaults={'name': name[:CAMPAIGN_PROPOSER_MAX_CHARS]})
-        votes = CampaignVote.objects.filter(campaign=campaign).count()
-        if campaign.votes != votes:
-            campaign.votes = votes
-            campaign.save(update_fields=['votes'])
+        votes = _recount_campaign_votes(locked.id)
     return reply({'status': 'voted' if created else 'already', 'votes': votes})
+
+
+def _recount_campaign_votes(campaign_id):
+    """Reescribe la cache de votos con el COUNT que ve LA BASE.
+
+    Contar en Python y guardar despues deja una ventana entre las dos cosas, y
+    un voto que commitee justo ahi se pierde para siempre: no hay ninguna
+    pasada posterior que recalcule esta columna, y de ella come CAMPAIGN_BONUS.
+    Con el COUNT dentro del mismo UPDATE no hay ventana que perder.
+
+    Devuelve lo que quedo escrito, que es lo unico que se le puede contar al
+    votante sin volver a mentirle.
+    """
+    counted = Subquery(
+        CampaignVote.objects.filter(campaign=OuterRef('pk'))
+        .order_by().values('campaign').annotate(n=Count('pk')).values('n'),
+        output_field=IntegerField())
+    Campaign.objects.filter(id=campaign_id).update(
+        votes=Coalesce(counted, Value(0)))
+    return (Campaign.objects.filter(id=campaign_id)
+            .values_list('votes', flat=True).first() or 0)
 
 
 def campaign_state(request, campaign_id):

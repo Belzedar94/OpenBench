@@ -133,6 +133,13 @@ class Campaign(models.Model):
     # la MISMA cookie que los votos (§ views._voter_token).
     proposed_token = models.CharField(max_length=64, blank=True, default='',
                                       db_index=True)
+    # Direccion desde la que se propuso, y SOLO cuando la peticion no traia
+    # cookie.  Un cliente que la tira estrena token en cada peticion y con el
+    # contador siempre a cero el tope no acotaba nada; para esos, y solo para
+    # esos, se cuenta por direccion.  Quien devuelve su cookie sigue contando
+    # por cookie, que es lo correcto detras de un CGNAT (§ CampaignVote).
+    proposed_ip = models.CharField(max_length=64, blank=True, default='',
+                                   db_index=True)
     activated_at = models.DateTimeField(null=True)
     created  = models.DateTimeField(auto_now_add=True)
 
