@@ -4,6 +4,7 @@
 
     <form method="POST" action="/login/">
         {% csrf_token %}
+        {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
         <div class="form">
             <div class="col">
                 <div class="row">

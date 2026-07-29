@@ -23,6 +23,8 @@ import os, base64, hashlib, datetime, json, secrets, stat, sys, re, time
 import django.http
 import django.shortcuts
 import django.contrib.auth
+import django.utils.encoding
+import django.utils.http
 
 import OpenBench.config
 import OpenBench.datagen
@@ -67,6 +69,44 @@ ERROR_MESSAGES = {
 
 class UnableToAuthenticate(Exception):
     pass
+
+def safe_next(request, fallback='/index/'):
+    """Where a login that started somewhere else should land.
+
+    AtomicDB is a public site whose pages link here with ``?next=``: sending a
+    visitor to the test index after they signed in from a chess position is
+    losing them where they were. Only a path on THIS host is honoured -- an
+    absolute URL, a scheme-relative ``//evil.example`` or anything Django's
+    own check rejects falls back -- because a redirect target taken from a
+    query string is exactly how an open redirect is built.
+    """
+
+    destination = request.POST.get('next') or request.GET.get('next') or ''
+
+    if not destination:
+        return fallback
+
+    if not django.utils.http.url_has_allowed_host_and_scheme(
+        destination, allowed_hosts={request.get_host()},
+        require_https=request.is_secure()):
+        return fallback
+
+    return django.utils.encoding.iri_to_uri(destination)
+
+def with_next(request, path):
+    """The same auth page again, still remembering where the visitor came from.
+
+    A mistyped password must not cost the destination: without this, the retry
+    lands on a form with no ``next`` and the successful attempt goes to the
+    index instead of back to the position that sent them here.
+    """
+
+    destination = safe_next(request, '')
+
+    if not destination:
+        return path
+
+    return '%s?%s' % (path, django.utils.http.urlencode({ 'next' : destination }))
 
 def render(request, template, content={}, always_allow=False, error=None, warning=None, status=None):
 
@@ -145,17 +185,17 @@ def register(request):
 
     if request.method == 'GET':
         if not OPENBENCH_CONFIG['require_manual_registration']:
-            return render(request, 'register.html', always_allow=True)
+            return render(request, 'register.html', { 'next' : safe_next(request, '') }, always_allow=True)
         return redirect(request, '/login/', error=ERROR_MESSAGES['manual_registration'])
 
     if request.POST['password1'] != request.POST['password2']:
-        return redirect(request, '/register/', error='Passwords do not match')
+        return redirect(request, with_next(request, '/register/'), error='Passwords do not match')
 
     if not request.POST['username'].isalnum():
-        return redirect(request, '/register/', error='Alpha-numeric usernames Only')
+        return redirect(request, with_next(request, '/register/'), error='Alpha-numeric usernames Only')
 
     if User.objects.filter(username=request.POST['username']):
-        return redirect(request, '/register/', error='That username is already taken')
+        return redirect(request, with_next(request, '/register/'), error='That username is already taken')
 
     email    = request.POST['email']
     username = request.POST['username']
@@ -165,24 +205,25 @@ def register(request):
     django.contrib.auth.login(request, user)
     Profile.objects.create(user=user)
 
-    return redirect(request, '/index/')
+    return redirect(request, safe_next(request))
 
 def login(request):
 
     if request.method == 'GET':
-        return render(request, 'login.html', always_allow=True)
+        return render(request, 'login.html', { 'next' : safe_next(request, '') }, always_allow=True)
 
     try:
         django.contrib.auth.login(request, authenticate(request))
-        return redirect(request, '/index/')
+        return redirect(request, safe_next(request))
 
     except UnableToAuthenticate:
-        return redirect(request, '/login/', error='Unable to authenticate user')
+        return redirect(request, with_next(request, '/login/'), error='Unable to authenticate user')
 
 def logout(request):
 
+    destination = safe_next(request)
     django.contrib.auth.logout(request)
-    return redirect(request, '/index/', status='Logged out')
+    return redirect(request, destination, status='Logged out')
 
 def profile(request):
 
