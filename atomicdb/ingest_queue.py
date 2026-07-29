@@ -38,7 +38,7 @@ from django.utils import timezone
 
 from . import ingest
 from .database import atomic
-from .models import AnalysisTask, IngestJob, Position
+from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,35 @@ def _submitting_user(username):
     return User.objects.filter(username=username).first()
 
 
+def _notify_requester(job, task):
+    """Deja el aviso de que ESTA tarea, que alguien pidio, ya esta servida.
+
+    Corre dentro de la transaccion que pasa el trabajo a DONE: o el resultado
+    entra en el arbol Y el aviso existe, o no ocurre ninguna de las dos cosas.
+    Aqui es donde tiene sentido y no en el submit, que solo RECLAMA la tarea:
+    avisar alli mandaria a la persona a una posicion cuyo resultado todavia
+    esta en la cola.
+
+    ``requested_by`` es texto libre que viajo desde una sesion, asi que el
+    aviso solo se crea si hay una cuenta con ese nombre.  La comprobacion
+    toca la base de OpenBench, no la de AtomicDB; es una consulta por trabajo
+    y solo en los que alguien pidio — la exploracion autonoma no llega aqui.
+    """
+    requested_by = (task or {}).get('requested_by') or ''
+    if not requested_by:
+        return None
+    if not ingest.notification_deserved((task or {}).get('source'),
+                                        (task or {}).get('budget_nodes')):
+        return None
+    if not User.objects.filter(username=requested_by).exists():
+        return None
+    notification, _created = RequestNotification.objects.get_or_create(
+        task_id=job.task_id,
+        defaults={'username': requested_by,
+                  'position_id': job.position_id})
+    return notification
+
+
 def _backoff_seconds(attempts):
     index = min(max(attempts - 1, 0), len(BACKOFF_SECONDS) - 1)
     return BACKOFF_SECONDS[index]
@@ -160,9 +189,12 @@ def apply_job(job):
     # todos los cierres que esta aplicacion vaya a producir — incluidos los
     # que caigan sobre ancestros lejanos en la cascada — asi que se pone aqui
     # y el emisor de eventos lo recoge.  Una tarea borrada deja ``NONE``, que
-    # es la verdad: ya no hay a quien apuntarselo.
-    source = AnalysisTask.objects.filter(pk=job.task_id).values_list(
-        'source', flat=True).first()
+    # es la verdad: ya no hay a quien apuntarselo.  En la misma lectura viaja
+    # lo que decide el aviso al peticionario, que se pregunta lo mismo por la
+    # misma fila.
+    task = AnalysisTask.objects.filter(pk=job.task_id).values(
+        'source', 'requested_by', 'budget_nodes').first()
+    source = (task or {}).get('source')
 
     with atomic(), ingest.closure_attribution(source):
         current = IngestJob.objects.select_for_update().get(pk=job.pk)
@@ -191,6 +223,7 @@ def apply_job(job):
         current.save(update_fields=['state', 'summary', 'claimed_at',
                                     'next_attempt_at', 'last_error',
                                     'updated'])
+        _notify_requester(job, task)
     # Hook del gestor de prueba.  ``backup_cascade`` ya refresca el cono que
     # cambio, pero un trabajo puede no cascadear nada (WDL rechazado, posicion
     # ya cerrada) y aun asi haber movido la eval que inicializa la hoja.  Esto

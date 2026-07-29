@@ -541,6 +541,51 @@ class RequestLog(models.Model):
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
+class RequestNotification(models.Model):
+    """El analisis que ESTE visitante pidio ya esta servido.
+
+    Es la vuelta del circuito que abrio la afinidad worker-peticionario: una
+    peticion de analisis tarda minutos u horas, y sin este aviso la unica
+    forma de saber que llego es recordar la posicion y volver a mirarla.
+
+    ``username`` guarda el nombre de la cuenta, no una FK a ``auth.User``,
+    por la misma razon que ``OpeningNameSuggestion.resolved_by``: el router
+    de bases PROHIBE relaciones entre la base de AtomicDB y la de OpenBench,
+    y con el split activo ``auth_user`` ni siquiera vive en este fichero.  El
+    valor sale tal cual de ``AnalysisTask.requested_by``, que es una columna
+    de texto por lo mismo.  El precio, explicito: borrar una cuenta no
+    cascadea sus avisos.  Se quedan invisibles — nadie llega a ellos sin
+    iniciar sesion con ese nombre — y una cuenta nueva que reclame el mismo
+    nombre los heredaria, que es exactamente lo que ya pasa con la afinidad y
+    con la autoria de las campanas.
+
+    ``task`` es SET_NULL: el aviso habla de una POSICION que ya tiene
+    resultado, y ese hecho sobrevive a que la fila de la tarea desaparezca.
+    Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez — y la
+    pone la base, no un ``exists()`` de la vista al que otro procesador de la
+    cola puede adelantarse.  Varias filas con ``task`` a NULL no chocan entre
+    si: para una unicidad, dos NULL son distintos.
+    """
+
+    username = models.CharField(max_length=64)
+    position = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                 related_name='notifications')
+    task     = models.ForeignKey(AnalysisTask, null=True,
+                                 on_delete=models.SET_NULL,
+                                 related_name='notifications')
+    created  = models.DateTimeField(auto_now_add=True, db_index=True)
+    seen     = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['task'], name='uniq_notification_per_task')]
+        indexes = [models.Index(fields=['username', 'seen'],
+                                name='atomic_notify_unseen')]
+
+    def __str__(self):
+        return f'notification for {self.username} on {self.position_id}'
+
+
 class OpeningNameSuggestion(models.Model):
     """Nombre de apertura propuesto por la comunidad, sin cuenta.
 

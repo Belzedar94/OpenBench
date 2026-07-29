@@ -37,6 +37,7 @@
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.cburnett.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}">
 <script src="{% static 'atomicdb/theme.js' %}" defer></script>
+<script src="{% static 'atomicdb/notifications.js' %}" defer></script>
 {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -50,6 +51,47 @@
       >Suggestions{% if suggestions_pending %} ({{ suggestions_pending }}){% endif %}</a>{% endif %}
     <a href="/index/">OpenBench</a>
   </nav>
+  <div class="identity">
+    {% if user.is_authenticated %}
+    <div class="bell-wrap" id="bell-wrap">
+      <form class="bell-form" method="post" action="/atomicdb/notifications/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <button type="submit" class="bell" id="bell"
+          aria-haspopup="true" aria-expanded="false" aria-controls="bell-panel"
+          title="Analyses you asked for">
+          <svg class="bell-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 15.4V10a6 6 0 1 0-12 0v5.4l-1.5 2.1h15z"></path>
+            <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
+          </svg>
+          <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for{% if notifications_unseen %}, {{ notifications_unseen }} new{% endif %}</span>
+          {% if notifications_badge %}<span class="bell-badge" aria-hidden="true">{{ notifications_badge }}</span>{% endif %}
+        </button>
+      </form>
+      <div class="bell-panel" id="bell-panel" hidden>
+        <div class="bell-panel-head">Analyses you asked for</div>
+        <ul class="bell-list">
+          {% for n in notifications %}
+          <li class="bell-item{% if not n.seen %} unseen{% endif %}">
+            <a href="/atomicdb/explore/{{ n.key }}/" title="{{ n.full }}">
+              <span class="bell-line">Your analysis of <b>{{ n.san }}</b> is ready</span>
+              <span class="bell-when">{{ n.ago }}</span>
+            </a>
+          </li>
+          {% empty %}
+          <li class="bell-empty">Nothing yet. Ask for an analysis from any
+            position and it lands here when a worker serves it.</li>
+          {% endfor %}
+        </ul>
+        <a class="bell-all" href="/atomicdb/notifications/">See all</a>
+      </div>
+    </div>
+    <a class="identity-user" href="/user/{{ user.username }}/">{{ user.username }}</a>
+    <a class="identity-link" href="/logout/?next={{ identity_next }}">Sign out</a>
+    {% else %}
+    <a class="identity-link" href="/login/?next={{ identity_next }}">Sign in</a>
+    <a class="identity-link identity-cta" href="/register/?next={{ identity_next }}">Register</a>
+    {% endif %}
+  </div>
   <button type="button" class="theme-toggle" id="theme-toggle"
     role="switch" aria-checked="true" aria-labelledby="theme-toggle-label"
     title="Switch to light mode">
