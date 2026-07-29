@@ -25,21 +25,27 @@ DEFAULT_POLICY = {'primary': 0.8, 'backup': 0.15, 'explore': 0.05}
 
 
 def create_default_campaign(apps, schema_editor):
+    # Sobre la base QUE SE ESTA MIGRANDO: sin el ``using``, el router mandaba
+    # las dos pasadas (default y alias) a la misma base y la sombra default
+    # se quedaba SIN la campana raiz — en silencio, porque el verificador de
+    # sombra compara esquemas y migraciones, nunca filas.
+    alias = schema_editor.connection.alias
     Position = apps.get_model('atomicdb', 'Position')
     ProofCampaign = apps.get_model('atomicdb', 'ProofCampaign')
-    if ProofCampaign.objects.filter(name=CAMPAIGN_NAME).exists():
+    if ProofCampaign.objects.using(alias).filter(name=CAMPAIGN_NAME).exists():
         return
     key = hashlib.sha256(START_FEN.encode()).hexdigest()
-    root, _created = Position.objects.get_or_create(
+    root, _created = Position.objects.using(alias).get_or_create(
         key=key, defaults={'fen': START_FEN})
-    ProofCampaign.objects.create(
+    ProofCampaign.objects.using(alias).create(
         name=CAMPAIGN_NAME, root=root, goal='WHITE_WIN', active=True,
         algorithm_version=1, repertoire_policy=dict(DEFAULT_POLICY))
 
 
 def drop_default_campaign(apps, schema_editor):
+    alias = schema_editor.connection.alias
     ProofCampaign = apps.get_model('atomicdb', 'ProofCampaign')
-    ProofCampaign.objects.filter(name=CAMPAIGN_NAME).delete()
+    ProofCampaign.objects.using(alias).filter(name=CAMPAIGN_NAME).delete()
 
 
 class Migration(migrations.Migration):

@@ -343,9 +343,20 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     else logic.slack_from_witness_length(len(pv_rest)))
                 if pv_rest:
                     child.best_move = pv_rest[0]
-                child.save(update_fields=['status', 'closure', 'proof',
-                                          'won_line', 'mate_in', 'clock_slack',
-                                          'best_move', 'updated'])
+                # CAS sobre el estado leido: el DAG transpone y el MISMO hijo
+                # cuelga de dos padres — dos consumers pueden llegar aqui a la
+                # vez con fotos UNKNOWN y el segundo pisaria un cierre ya
+                # commiteado (incluso degradando ANDOR a ENGINE o cambiando el
+                # veredicto).  Solo cierra quien encuentra el hijo AUN abierto;
+                # el que pierde no emite eventos ni materializa nada.
+                claimed = Position.objects.filter(
+                    key=child.key, status='UNKNOWN',
+                ).update(status=child.status, closure=child.closure,
+                         proof=child.proof, won_line=child.won_line,
+                         mate_in=child.mate_in, clock_slack=child.clock_slack,
+                         best_move=child.best_move, updated=timezone.now())
+                if not claimed:
+                    continue
                 _emit_closure_events(child)   # tambien cuenta y sale en feed
                 # La linea ganadora deja de ser una cadena de texto y pasa a
                 # ser arbol navegable: sin esto el explorador enseña el cierre
@@ -600,7 +611,17 @@ def backup_cascade(seed_keys):
                     pos.mate_in, pos.best_move = new_mate, new_move
                     dirty = True
             if dirty:
-                pos.save()
+                # Solo las columnas que ESTA cascada decide.  Un save()
+                # completo escribia la fila entera desde una lectura sin
+                # bloqueo y REVERTIA lo que otro consumer acababa de
+                # commitear en el mismo ancestro (visits, eval, backed,
+                # priority, campaign, expanded...) — la misma carrera que
+                # ingest_analysis documenta y evita con update_fields unas
+                # llamadas mas arriba.  En PG la escritura espera al commit
+                # ajeno y luego lo pisaba: perdida garantizada, no azar.
+                pos.save(update_fields=['status', 'closure', 'proof',
+                                        'best_move', 'mate_in',
+                                        'clock_slack', 'updated'])
                 changed_total += 1
                 changed_keys.append(pos.key)
                 for e in Edge.objects.filter(child=pos).values_list(
@@ -1167,11 +1188,18 @@ def materialise_won_line(pos, verify=False):
             child.mate_in = len(suffix)
             child.best_move = suffix[0]
             child.clock_slack = slack
-            child.save(update_fields=['status', 'closure', 'proof',
-                                      'won_line', 'mate_in', 'best_move',
-                                      'clock_slack', 'updated'])
-            _emit_closure_events(child)
-            closed += 1
+            # Mismo CAS que el cierre de hijos del ingest: por transposicion
+            # este nodo puede estar cerrandose a la vez desde otra PV en otro
+            # consumer, y el que pierde no debe pisar ni duplicar eventos.
+            claimed = Position.objects.filter(
+                key=child.key, status='UNKNOWN',
+            ).update(status=child.status, closure=child.closure,
+                     proof=child.proof, won_line=child.won_line,
+                     mate_in=child.mate_in, best_move=child.best_move,
+                     clock_slack=child.clock_slack, updated=timezone.now())
+            if claimed:
+                _emit_closure_events(child)
+                closed += 1
         node = child
     return {'created_edges': created_edges, 'closed': closed, 'plies': walked}
 

@@ -29,9 +29,15 @@ def state_from_active(apps, schema_editor):
     Lo demas estaba abierto y lo unico honesto es llamarlo ``ACTIVE``: eran
     campanas que el selector ya estaba mirando, no propuestas esperando turno.
     """
+    # SIEMPRE sobre la base que se esta migrando: el router manda las
+    # escrituras de atomicdb al alias seleccionado sin mirar que pasada de
+    # migrate es, asi que un manager desnudo aqui escribia en la base
+    # equivocada — y en la pasada sobre default reventaba con "no such
+    # column: state" porque esa columna aun no existia en la otra base.
+    alias = schema_editor.connection.alias
     Campaign = apps.get_model('atomicdb', 'Campaign')
-    Campaign.objects.filter(active=True).update(state='ACTIVE')
-    Campaign.objects.filter(active=False).update(state='DONE')
+    Campaign.objects.using(alias).filter(active=True).update(state='ACTIVE')
+    Campaign.objects.using(alias).filter(active=False).update(state='DONE')
 
 
 def active_from_state(apps, schema_editor):
@@ -44,9 +50,10 @@ def active_from_state(apps, schema_editor):
     salida de emergencia para retirar la funcion, no una migracion reversible
     en el sentido fuerte.
     """
+    alias = schema_editor.connection.alias
     Campaign = apps.get_model('atomicdb', 'Campaign')
-    Campaign.objects.filter(state='ACTIVE').update(active=True)
-    Campaign.objects.exclude(state='ACTIVE').update(active=False)
+    Campaign.objects.using(alias).filter(state='ACTIVE').update(active=True)
+    Campaign.objects.using(alias).exclude(state='ACTIVE').update(active=False)
 
 
 class Migration(migrations.Migration):
