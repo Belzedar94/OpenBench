@@ -1623,9 +1623,14 @@ def top_up_analysis_pool(target=None):
     """Rellena la cola de analisis hasta ``target`` FUERA del camino HTTP.
 
     Devuelve cuantas tareas se mintearon.  Corre en el ciclo del servicio
-    selector, con las prioridades recien refrescadas."""
+    selector, DESPUES de los brazos con cupo (cobertura, dn, fragiles) y
+    contando SOLO las tareas AUTO: si contase toda la cola, un backlog de
+    peticiones USER o de FILL apagaria el colchon justo cuando la flota
+    grande lo va a necesitar, y al reves, el colchon les comeria el cupo a
+    los brazos si corriese antes."""
     target = ANALYSIS_POOL_TARGET if target is None else target
-    pending = AnalysisTask.objects.filter(state='PENDING').count()
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', source=AnalysisTask.Source.AUTO).count()
     if pending >= target:
         return 0
     return len(next_tasks(target - pending))

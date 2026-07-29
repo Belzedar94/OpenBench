@@ -125,9 +125,6 @@ class Command(BaseCommand):
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
             ingest.refresh_priorities(force=True)
-            # Colchon de analisis: la flota nunca debe esperar al minteo
-            # inline del lease (4 con cola vacia = valles de utilizacion).
-            pooled = ingest.top_up_analysis_pool(options['pool_target'])
             # Same process, same timer: the ENGINE debt queue is topped up to
             # its cap here rather than in a cron of its own.  It is bounded
             # work (one bulk_create of at most `cap - pending` rows) and it
@@ -150,6 +147,11 @@ class Command(BaseCommand):
                     cap=options['dn_repair_cap'])
                 fragile = ingest.enqueue_fragile_mate_solves(
                     cap=options['fragile_cap'])
+            # Colchon de analisis, DETRAS de los brazos con cupo: la flota
+            # no debe esperar al minteo inline del lease (4 con cola vacia
+            # = valles de utilizacion), pero el colchon tampoco debe
+            # comerse el cupo de FILL de cobertura/dn/fragiles.
+            pooled = ingest.top_up_analysis_pool(options['pool_target'])
             passes += 1
             elapsed = time.monotonic() - started
             self.stdout.write(json.dumps(
