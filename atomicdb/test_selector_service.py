@@ -7,6 +7,7 @@ things that matter: the lease path does not trigger it, the service does, and
 the emergency flag brings the old behaviour back through the same code.
 """
 
+import json
 from io import StringIO
 from unittest.mock import patch
 
@@ -110,3 +111,54 @@ class RefreshSelectorCommandTests(TestCase):
         self.assertEqual(len(tasks), 3)
         self.assertEqual(AnalysisTask.objects.filter(
             state='PENDING').count(), 3)
+
+
+class SelectorCycleResilienceTests(TestCase):
+    """Un brazo roto no puede llevarse la pasada entera por delante.
+
+    El ciclo era una secuencia sin red: sin ``try`` por paso, una excepcion en
+    cualquier brazo mataba el proceso, systemd lo relanzaba y volvia a morir en
+    el mismo sitio.  Lo que va al final de la lista — el colchon de analisis —
+    no llegaba a correr jamas.
+    """
+
+    def setUp(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+
+    def _pass(self):
+        out = StringIO()
+        call_command('refresh_selector', stdout=out)
+        return json.loads(out.getvalue())
+
+    def test_a_broken_arm_does_not_stop_the_steps_behind_it(self):
+        with patch.object(ingest, 'enqueue_coverage_completion',
+                          side_effect=RuntimeError('cobertura rota')):
+            with patch.object(ingest, 'top_up_analysis_pool',
+                              return_value=7) as pool:
+                report = self._pass()
+
+        pool.assert_called_once()
+        self.assertEqual(report['pool_topped_up'], 7)
+        self.assertEqual(report['coverage_enqueued'], 0)
+
+    def test_the_failure_is_named_in_the_report_and_not_a_silent_zero(self):
+        with patch.object(ingest, 'enqueue_coverage_completion',
+                          side_effect=RuntimeError('cobertura rota')):
+            report = self._pass()
+
+        self.assertIn('coverage', report['failed_steps'])
+        self.assertIn('cobertura rota', report['failed_steps']['coverage'])
+
+    def test_a_healthy_pass_says_nothing_about_failures(self):
+        report = self._pass()
+
+        self.assertNotIn('failed_steps', report)
+
+    def test_even_the_priority_pass_can_fall_without_taking_the_rest(self):
+        with patch.object(ingest, 'refresh_priorities',
+                          side_effect=RuntimeError('dijkstra roto')):
+            report = self._pass()
+
+        self.assertIn('priorities', report['failed_steps'])
+        self.assertIn('pool_topped_up', report)

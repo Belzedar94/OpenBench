@@ -19,13 +19,19 @@ WHAT ELSE RIDES THIS TIMER.  Everything that is a bounded scheduling decision
 rather than a request: the ENGINE debt top-up, coverage completion, and — when
 ``ATOMICDB_ADVERSARIAL`` is on — the two adversarial arms (dn repair and F0
 solves on fragile mate claims).  They belong here and not in crons of their
-own because they compete for the SAME queue allowances, and a decision about
-how to spend one cap should be taken in one place.  The order inside a pass is
-the priority order: debt, coverage, then the adversarial arms last, so a cap
-that coverage just spent is no longer available to dn repair.
+own because they are one scheduling decision and it should be taken in one
+place.  The order inside a pass is the priority order: debt, coverage, then
+the adversarial arms last.
+
+CADA PASO CON SU RED.  Un brazo que revienta se lleva SOLO su propio trabajo:
+el ciclo lo registra en ``failed_steps`` y sigue.  Sin eso, una excepcion en
+cualquier punto mataba el proceso, systemd lo relanzaba y volvia a morir en el
+mismo sitio, con lo que lo ultimo de la lista — el colchon de analisis — no se
+rellenaba jamas.
 """
 
 import json
+import logging
 import signal
 import time
 
@@ -34,6 +40,8 @@ from django.core.management.base import BaseCommand
 from atomicdb import ingest
 from atomicdb.database import connection
 from atomicdb.models import Position
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -121,47 +129,74 @@ class Command(BaseCommand):
         passes = 0
         while not stopping['now']:
             started = time.monotonic()
+            failures = {}
+
+            def step(name, work, default=0):
+                """Un paso del ciclo, con su fallo ACOTADO a el mismo.
+
+                El ciclo era una secuencia sin red: una excepcion en cualquier
+                brazo mataba el proceso, systemd lo relanzaba y volvia a morir
+                en el mismo sitio, con lo que lo que va DETRAS — el colchon de
+                analisis, que es lo ultimo — no se rellenaba nunca.  Un brazo
+                roto tiene que costar su propio trabajo, no el de los demas, y
+                tiene que constar en el JSON de la pasada: un cero silencioso
+                se lee igual que "no habia nada que hacer".
+                """
+                try:
+                    return work()
+                except Exception as error:      # noqa: BLE001 - el ciclo sigue
+                    logger.exception('refresh_selector: paso %s roto', name)
+                    failures[name] = f'{type(error).__name__}: {error}'
+                    return default
+
             # ``force``: the service's own interval is the only clock that
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
-            ingest.refresh_priorities(force=True)
+            step('priorities',
+                 lambda: ingest.refresh_priorities(force=True), None)
             # Same process, same timer: the ENGINE debt queue is topped up to
             # its cap here rather than in a cron of its own.  It is bounded
             # work (one bulk_create of at most `cap - pending` rows) and it
             # belongs with the other scheduling decision, not beside it.
             enqueued = covered = repaired = fragile = 0
             if not options['no_debt']:
-                enqueued = ingest.enqueue_engine_debt(cap=options['debt_cap'])
+                enqueued = step('debt', lambda: ingest.enqueue_engine_debt(
+                    cap=options['debt_cap']))
             if not options['no_coverage']:
-                covered = ingest.enqueue_coverage_completion(
-                    cap=options['coverage_cap'])
+                covered = step(
+                    'coverage', lambda: ingest.enqueue_coverage_completion(
+                        cap=options['coverage_cap']))
             # Los brazos adversariales, en el MISMO ciclo y detras de todo lo
             # demas: el cupo que la cobertura acabe de gastar es suyo y no el
             # de nadie mas, pero el orden de prioridad sigue siendo el correcto
             # (cerrar un nodo vale mas que engordar su dn).
             adversarial = options['adversarial']
             if adversarial is None:
-                adversarial = ingest.adversarial_arms_enabled()
+                adversarial = step('adversarial-flag',
+                                   ingest.adversarial_arms_enabled, False)
             if adversarial:
-                repaired = ingest.enqueue_dn_repair(
-                    cap=options['dn_repair_cap'])
-                fragile = ingest.enqueue_fragile_mate_solves(
-                    cap=options['fragile_cap'])
+                repaired = step('dn-repair', lambda: ingest.enqueue_dn_repair(
+                    cap=options['dn_repair_cap']))
+                fragile = step(
+                    'fragile', lambda: ingest.enqueue_fragile_mate_solves(
+                        cap=options['fragile_cap']))
             # Colchon de analisis, DETRAS de los brazos con cupo: la flota
             # no debe esperar al minteo inline del lease (4 con cola vacia
             # = valles de utilizacion), pero el colchon tampoco debe
             # comerse el cupo de cobertura/dn/fragiles.
-            pooled = ingest.top_up_analysis_pool(options['pool_target'])
+            pooled = step('pool', lambda: ingest.top_up_analysis_pool(
+                options['pool_target']))
             passes += 1
             elapsed = time.monotonic() - started
-            self.stdout.write(json.dumps(
-                {'pass': passes, 'seconds': round(elapsed, 3),
-                 'pool_topped_up': pooled,
-                 'debt_enqueued': enqueued, 'coverage_enqueued': covered,
-                 'adversarial': bool(adversarial),
-                 'dn_repair_enqueued': repaired,
-                 'fragile_enqueued': fragile},
-                sort_keys=True))
+            report = {'pass': passes, 'seconds': round(elapsed, 3),
+                      'pool_topped_up': pooled,
+                      'debt_enqueued': enqueued, 'coverage_enqueued': covered,
+                      'adversarial': bool(adversarial),
+                      'dn_repair_enqueued': repaired,
+                      'fragile_enqueued': fragile}
+            if failures:
+                report['failed_steps'] = failures
+            self.stdout.write(json.dumps(report, sort_keys=True))
             if not options['loop']:
                 break
             deadline = time.monotonic() + max(0.0, interval - elapsed)
