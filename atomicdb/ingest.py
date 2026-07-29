@@ -1750,12 +1750,14 @@ def ladder_exhausted(pos):
             and completed_max >= REQUEST_BUDGET_LADDER[-1])
 
 
-def _request_rung(pos):
+def _request_rung(pos, requested_by=''):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
     interno _LADDER_EXHAUSTED cuando el ultimo peldano ya esta COMPLETED:
-    repetirlo seria gastar 10B en una busqueda que ya tenemos."""
+    repetirlo seria gastar 10B en una busqueda que ya tenemos.
+    ``requested_by`` viaja a la tarea para la afinidad worker-peticionario;
+    nunca PISA un nombre ya guardado (el primer click conserva la autoria)."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
@@ -1777,6 +1779,7 @@ def _request_rung(pos):
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
+                  'requested_by': requested_by,
                   'multipv': multipv_for(pos.visits, floor)})
     if created:
         return 'queued'
@@ -1784,7 +1787,9 @@ def _request_rung(pos):
         task.budget_nodes = max(task.budget_nodes, floor)
         promoted = task.source != 'USER'
         task.source = 'USER'   # promocion: al frente de la cola
-        task.save(update_fields=['source', 'budget_nodes'])
+        if requested_by and not task.requested_by:
+            task.requested_by = requested_by
+        task.save(update_fields=['source', 'budget_nodes', 'requested_by'])
         if promoted:
             return 'queued'
     elif task.state == 'LEASED':
@@ -1804,11 +1809,15 @@ def _request_rung(pos):
                 AnalysisTask.objects.create(
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
+                    requested_by=requested_by,
                     multipv=multipv_for(generation, floor))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
                 follow_up.source = 'USER'
-                follow_up.save(update_fields=['budget_nodes', 'source'])
+                if requested_by and not follow_up.requested_by:
+                    follow_up.requested_by = requested_by
+                follow_up.save(update_fields=['budget_nodes', 'source',
+                                              'requested_by'])
             return 'queued'
         # The existing lease already satisfies the requested rung. Mark it
         # as visitor-requested so subsequent clicks can be deduplicated
@@ -1917,7 +1926,7 @@ def _ensure_expanded(pos):
     return pos
 
 
-def _expand_frontier(parent, limit=None):
+def _expand_frontier(parent, limit=None, requested_by=''):
     """Spend an exhausted request one ply deeper, proof-number style.
 
     Every selected child re-enters the ordinary ladder at its own natural
@@ -1931,7 +1940,7 @@ def _expand_frontier(parent, limit=None):
               'children_solved': 0, 'children_exhausted': 0}
     for child in _frontier_children(parent, limit=limit):
         counts['children_considered'] += 1
-        outcome = _request_rung(child)
+        outcome = _request_rung(child, requested_by)
         if outcome == _LADDER_EXHAUSTED:
             counts['children_exhausted'] += 1
         elif outcome == 'already-solved':
@@ -1947,7 +1956,7 @@ def _descent_outcome(status, stop, node, plies, totals):
                           descent_stop=stop, **totals)
 
 
-def _descend_frontier(pos):
+def _descend_frontier(pos, requested_by=''):
     """Follow the spent line down until the click finds something to buy.
 
     Proof-number search does not give up on a node whose whole frontier is
@@ -1987,7 +1996,9 @@ def _descend_frontier(pos):
         children = _frontier_children(node, limit=remaining)
         spent = _ladder_spent_keys(children)
         if len(spent) < len(children):
-            for name, value in _expand_frontier(node, limit=remaining).items():
+            for name, value in _expand_frontier(
+                    node, limit=remaining,
+                    requested_by=requested_by).items():
                 totals[name] += value
             return _descent_outcome('expanded', 'queued', node, plies, totals)
         # Every candidate here is spent: charge the level and step down.
@@ -2063,9 +2074,11 @@ def _breadth_swap_eligible(pos):
     return _completed_max_budget(pos) is not None
 
 
-def request_analysis(pos):
+def request_analysis(pos, requested_by=''):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
+    ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
+    las tareas para la afinidad worker-peticionario del lease.
 
     Con ``ATOMICDB_BREADTH_SWAP`` activo, una peticion sobre un nodo ya
     analizado compra ANCHURA en vez del siguiente peldano profundo: la
@@ -2080,7 +2093,7 @@ def request_analysis(pos):
         swapped = False
         if _breadth_swap_eligible(pos):
             swapped = True
-            outcome = _descend_frontier(pos)
+            outcome = _descend_frontier(pos, requested_by=requested_by)
             if outcome != 'saturated':
                 DBEvent.objects.create(kind='BREADTH_SWAP', payload={
                     'key': pos.key, 'outcome': str(outcome),
@@ -2089,12 +2102,12 @@ def request_analysis(pos):
                                                   {}).items()
                        if isinstance(value, (int, str))}})
                 return outcome
-        outcome = _request_rung(pos)
+        outcome = _request_rung(pos, requested_by)
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
         if swapped:
             return RequestOutcome('saturated')
-        return _descend_frontier(pos)
+        return _descend_frontier(pos, requested_by=requested_by)
 
 
 def _queue_disputed_reanalysis(pos):
@@ -2737,7 +2750,8 @@ def unexplored_children(pos):
 
 
 def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
-                                source=AnalysisTask.Source.USER):
+                                source=AnalysisTask.Source.USER,
+                                requested_by=''):
     """Encola las jugadas sin mirar de ``pos``. Devuelve cuantas se encolaron.
 
     Es ``enqueue_coverage_completion`` sin su guarda de unilateralidad: alli
@@ -2757,12 +2771,14 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
                       'multipv': multipv_for(child.visits, budget),
-                      'source': source})
+                      'source': source, 'requested_by': requested_by})
         if created:
             queued += 1
         elif task.state == 'PENDING' and task.source != source:
             task.source = source
-            task.save(update_fields=['source'])
+            if requested_by and not task.requested_by:
+                task.requested_by = requested_by
+            task.save(update_fields=['source', 'requested_by'])
             queued += 1
     return queued
 

@@ -276,11 +276,20 @@ def api_lease(request):
                 When(source=AnalysisTask.Source.USER, then=Value(0.0)),
                 default=F('position__priority'),
                 output_field=FloatField())
+            # Afinidad worker-peticionario: dentro de la banda USER, las
+            # peticiones de la MISMA cuenta que corre este worker van
+            # primero (quien pone hierro cobra el suyo antes); entre ellas
+            # y entre las ajenas, el FIFO de siempre.  AUTO/FILL ni se
+            # enteran: own vale 0 en toda la banda.
+            own_first = Case(
+                When(source=AnalysisTask.Source.USER,
+                     requested_by=user.username, then=Value(1)),
+                default=Value(0), output_field=IntegerField())
             queryset = (AnalysisTask.objects
                 .select_for_update(skip_locked=True)
                 .select_related('position').filter(state='PENDING')
-                .annotate(queue_rank=human_rank)
-                .order_by('-source', '-queue_rank', 'id'))
+                .annotate(queue_rank=human_rank, own_first=own_first)
+                .order_by('-source', '-own_first', '-queue_rank', 'id'))
             for candidate in queryset.iterator(chunk_size=64):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
@@ -800,7 +809,9 @@ def api_request_unexplored(request, key):
         pending = ingest.unexplored_children(pos)
         if not pending:
             return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
-        queued = ingest.enqueue_unexplored_children(pos)
+        queued = ingest.enqueue_unexplored_children(
+            pos, requested_by=(request.user.username
+                               if request.user.is_authenticated else ''))
         RequestLog.objects.create(ip=ip, position=pos)
         DBEvent.objects.create(kind='BULK_REQUEST', payload={
             'ip': ip, 'key': pos.key, 'queued': queued,
@@ -865,8 +876,10 @@ def _api_request_once(request, key):
     # Task creation/promotion and its rate-limit receipt are one commit.  A
     # lock while writing RequestLog must roll the task mutation back as well;
     # otherwise a browser retry could accidentally request the next rung.
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
     with atomic():
-        outcome = ingest.request_analysis(pos)
+        outcome = ingest.request_analysis(pos, requested_by=requested_by)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.

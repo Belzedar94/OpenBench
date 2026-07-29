@@ -20,6 +20,7 @@ class UserBandFifoTests(TestCase):
 
     def setUp(self):
         User.objects.create_user(username='w', password='p')
+        User.objects.create_user(username='lesha', password='p')
         self.client = Client()
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
@@ -29,9 +30,9 @@ class UserBandFifoTests(TestCase):
         Position.objects.filter(key=self.despised.key).update(priority=-73.0)
         Position.objects.filter(key=self.beloved.key).update(priority=8.0)
 
-    def _lease(self, machine):
+    def _lease(self, machine, username='w'):
         return self.client.post('/atomicdb/api/lease', {
-            'username': 'w', 'password': 'p', 'machine': machine,
+            'username': username, 'password': 'p', 'machine': machine,
             'worker_build': '2026072203', 'lease_session': machine,
         }).json()
 
@@ -70,3 +71,59 @@ class UserBandFifoTests(TestCase):
         leased = self._lease('m3')['tasks'][0]
 
         self.assertEqual(leased['id'], clicked.id)
+
+
+class OwnRequestAffinityTests(UserBandFifoTests):
+    """Quien pone hierro cobra lo suyo primero, sin robarle el FIFO a nadie.
+
+    Un worker autenticado con la cuenta X sirve antes las peticiones hechas
+    por X; agotadas las suyas, vuelve al primero-en-llegar de siempre.  Las
+    bandas AUTO/FILL y las peticiones anonimas no cambian."""
+
+    def test_a_workers_own_request_jumps_its_band_queue(self):
+        AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+        own = AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='lesha')
+
+        leased = self._lease('m4', username='lesha')['tasks'][0]
+
+        self.assertEqual(leased['id'], own.id)
+
+    def test_after_its_own_the_worker_rejoins_the_fifo(self):
+        oldest_foreign = AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+        AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='lesha')
+
+        self._lease('m5', username='lesha')
+        second = self._lease('m6', username='lesha')['tasks'][0]
+
+        self.assertEqual(second['id'], oldest_foreign.id)
+
+    def test_anonymous_requests_keep_plain_fifo_for_everyone(self):
+        anonymous = AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER)
+        AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+
+        leased = self._lease('m7', username='lesha')['tasks'][0]
+
+        self.assertEqual(leased['id'], anonymous.id)
+
+    def test_the_request_endpoint_records_the_logged_in_requester(self):
+        self.client.login(username='lesha', password='p')
+
+        response = self.client.post(
+            f'/atomicdb/request/{self.beloved.key}/')
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = AnalysisTask.objects.get(position=self.beloved,
+                                        source=AnalysisTask.Source.USER)
+        self.assertEqual(task.requested_by, 'lesha')

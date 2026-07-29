@@ -118,6 +118,10 @@ class AnalysisTask(models.Model):
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
     source       = models.CharField(max_length=4, choices=Source.choices,
                                     default=Source.AUTO, db_index=True)
+    # Cuenta OB del que PIDIO el analisis (vacio = anonimo).  Un worker de
+    # esa misma cuenta atiende primero sus propias peticiones dentro de la
+    # banda USER; para el resto de la flota no cambia nada.
+    requested_by = models.CharField(max_length=64, default='', blank=True)
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')
