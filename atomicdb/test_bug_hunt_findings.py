@@ -1,7 +1,8 @@
 ﻿"""Pruebas DEMOSTRATIVAS de la revision de caza de bugs.
 
 Un test SIN ``expectedFailure`` es un hallazgo YA ARREGLADO y esta aqui como
-regresion (C1 cascada con save completo, C2 carrera de cierre de hijos).  Un
+regresion (C1 cascada con save completo, C2 carrera de cierre de hijos, A2
+cota de intentos del selector df-pn).  Un
 test CON el decorador reproduce un hallazgo aun abierto, de forma minima y
 determinista: arreglarlo consiste en quitar el decorador y ver el test pasar.
 """
@@ -136,7 +137,6 @@ class ProofSelectorAttemptCapTests(TestCase):
                                     budget_nodes=8_000_000,
                                     state='COMPLETED')
 
-    @expectedFailure
     def test_the_descent_loop_stops_at_its_attempt_cap(self):
         wanted = 2
         cap = 4 * wanted

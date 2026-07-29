@@ -1777,8 +1777,13 @@ def _next_tasks_by_proof(n):
         return []
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
-    budget = 4 * max(1, n)
-    while len(tasks) < n and attempts < budget:
+    # Dos presupuestos que no tienen nada que ver: cuantos DESCENSOS se
+    # permite este selector, y cuantos NODOS se le encargan a la posicion que
+    # encuentre.  Compartian nombre, y el segundo (>= 8.000.000) borraba la
+    # cota del primero en cuanto el bucle acertaba una vez — dentro del camino
+    # HTTP de /api/lease, que es donde menos gracia tiene.
+    attempt_budget = 4 * max(1, n)
+    while len(tasks) < n and attempts < attempt_budget:
         campaign = campaigns[attempts % len(campaigns)]
         pos, _plies = proof.descend(campaign, counter=base + attempts,
                                     avoid=seen)
