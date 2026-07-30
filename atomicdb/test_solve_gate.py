@@ -10,7 +10,7 @@ from django.conf import settings
 from django.test import SimpleTestCase, override_settings
 
 from . import ingest, logic, proof, solve_estimate
-from .models import Edge, Position, ProofCampaign, ProofNode
+from .models import DBEvent, Edge, Position, ProofCampaign, ProofNode
 from .testing import TestCase
 
 # Startpos: 32 piezas, blancas al turno.
@@ -342,6 +342,7 @@ class GateOnTests(TestCase):
     """La puerta encendida, por el camino de siempre y sobre el arbol real."""
 
     def setUp(self):
+        proof.reset_solve_gate_log()
         self.campaign = ProofCampaign.objects.get(
             name=proof.DEFAULT_CAMPAIGN_NAME)
         self.root = ingest.get_or_create_position(logic.start_fen())
@@ -384,6 +385,10 @@ class GateOnTests(TestCase):
         posiciones del nivel, aristas con sus hijos y filas de prueba.  El
         estimador lee ``last_analysis`` de la fila que YA vino, nunca de una
         consulta suya.
+
+        Es el coste de REGIMEN: el evento de desacuerdo lo emite la primera
+        pasada y el rate limit lo suprime en las siguientes, que es
+        exactamente por lo que el log lleva rate limit.
         """
         child = self._tedious_child()
         proof.refresh_proof_numbers([child.key], max_plies=1)   # calienta
@@ -419,3 +424,113 @@ class GateOnTests(TestCase):
         self.assertNotEqual(gated, restored)
         self.assertEqual(restored, proof.leaf_numbers(
             child.fen, 'UNKNOWN', 1_200, self.campaign.goal)[0])
+
+
+@override_settings(ATOMICDB_SOLVE_GATE=True)
+class DisagreementQuadrantTests(TestCase):
+    """El log del cuadrante: motor optimista, estimador pesimista.
+
+    No es telemetria decorativa.  Es (a) el detector de callejones sin salida
+    — el sitio donde el motor promete y el estimador cobra — y (b) el conjunto
+    de entrenamiento del estimador aprendido que sustituira al hand-crafted.
+    """
+
+    def setUp(self):
+        proof.reset_solve_gate_log()
+        self.campaign = ProofCampaign.objects.get(
+            name=proof.DEFAULT_CAMPAIGN_NAME)
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+
+    def _events(self):
+        return list(DBEvent.objects.filter(kind='SOLVE_GATE_DISAGREE'))
+
+    def _gate(self, score, annoyance=1.0, key='k1'):
+        return proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', score, 'WHITE_WIN',
+                                  legal_moves=10, annoyance=annoyance, key=key)
+
+    def test_an_optimistic_eval_that_the_gate_taxes_is_logged(self):
+        self._gate(1_200)
+        events = self._events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0].payload,
+            {'key': 'k1', 'eval_cp': 1_200, 'annoyance': 1.0, 'factor': 8.0})
+
+    def test_the_eval_in_the_payload_is_white_pov_like_the_column(self):
+        """Objetivo BLACK_WIN: el atacante es optimista con eval_cp = -1_200."""
+        proof.leaf_numbers(BARE, 'UNKNOWN', -1_200, 'BLACK_WIN',
+                           legal_moves=10, annoyance=1.0, key='k-black')
+        self.assertEqual(self._events()[0].payload['eval_cp'], -1_200)
+
+    def test_a_quiet_eval_is_not_a_disagreement(self):
+        """Sin promesa del motor no hay contradiccion que registrar."""
+        self._gate(120)
+        self._gate(-2_000, key='k2')
+        self.assertEqual(self._events(), [])
+
+    def test_the_mate_band_never_disagrees(self):
+        """Esta exenta de la puerta, asi que no hay nada que contradecir."""
+        self._gate(30_000)
+        self.assertEqual(self._events(), [])
+
+    def test_a_leaf_the_gate_did_not_tax_is_not_logged(self):
+        self._gate(1_200, annoyance=0.0)
+        self.assertEqual(self._events(), [])
+
+    def test_the_same_leaf_is_not_logged_once_per_pass(self):
+        for _ in range(20):
+            self._gate(1_200)
+        self.assertEqual(len(self._events()), 1)
+
+    def test_different_leaves_are_all_logged(self):
+        self._gate(1_200, key='a')
+        self._gate(1_200, key='b')
+        self.assertEqual(len(self._events()), 2)
+
+    def test_the_degraded_edge_view_does_not_write_the_dataset(self):
+        """Sin clave no hay log: dos de las cuatro features estan en neutral."""
+        proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', 1_200, 'WHITE_WIN',
+                           legal_moves=10, annoyance=1.0)
+        self.assertEqual(self._events(), [])
+
+    def test_the_rate_limit_cache_can_be_reset(self):
+        self._gate(1_200)
+        proof.reset_solve_gate_log()
+        self._gate(1_200)
+        self.assertEqual(len(self._events()), 2)
+
+    def test_the_cache_does_not_grow_without_bound(self):
+        original = proof.SOLVE_GATE_LOG_MAX
+        proof.SOLVE_GATE_LOG_MAX = 8
+        try:
+            for index in range(40):
+                self._gate(1_200, key=f'k{index}')
+        finally:
+            proof.SOLVE_GATE_LOG_MAX = original
+        self.assertLessEqual(len(proof._solve_gate_logged),
+                             proof.SOLVE_GATE_LOG_MAX)
+
+    def test_the_real_maintenance_pass_logs_the_frontier_leaf(self):
+        """El camino de produccion, no el laboratorio."""
+        edge = Edge.objects.filter(parent=self.root).order_by('id').first()
+        Position.objects.filter(key=edge.child_id).update(
+            eval_cp=1_500,
+            last_analysis=[{'eval_cp': 1_500, 'pv': MANOEUVRE}])
+
+        proof.refresh_proof_numbers([edge.child_id], max_plies=1)
+
+        events = self._events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].payload['key'], edge.child_id)
+        self.assertEqual(events[0].payload['eval_cp'], 1_500)
+        self.assertGreater(events[0].payload['factor'], 1.0)
+
+    def test_nothing_is_logged_with_the_gate_off(self):
+        with override_settings(ATOMICDB_SOLVE_GATE=False):
+            edge = Edge.objects.filter(parent=self.root).order_by('id').first()
+            Position.objects.filter(key=edge.child_id).update(
+                eval_cp=1_500,
+                last_analysis=[{'eval_cp': 1_500, 'pv': MANOEUVRE}])
+            proof.refresh_proof_numbers([edge.child_id], max_plies=1)
+        self.assertEqual(self._events(), [])

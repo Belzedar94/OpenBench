@@ -76,6 +76,7 @@ porque no son una fuente de verdad.
 """
 
 import hashlib
+import time
 
 from django.conf import settings
 from django.db.models import Q
@@ -134,6 +135,32 @@ DEFAULT_EVAL_BAND = (64, 1)
 # La banda EXENTA de la puerta: donde el motor ya ve mate.  Se lee de
 # ``EVAL_BANDS`` y no se copia para que las dos no puedan separarse.
 SOLVE_GATE_MATE_BAND = EVAL_BANDS[0][0]
+
+# EL CUADRANTE DE DESACUERDO.  Umbral, en perspectiva del atacante, a partir
+# del cual "el motor lo ve ganado": el mismo corte que separa la banda de
+# ventaja clara en ``EVAL_BANDS``, para que la frontera del log y la de la
+# aritmetica sean la misma frontera.
+#
+# Cuando la puerta encarece una hoja QUE EL MOTOR VE GANADA, las dos senales
+# se contradicen, y esa contradiccion es lo mas informativo que produce este
+# sistema: el motor promete y el estimador cobra.  Ahi es donde viven los
+# callejones sin salida — la fortaleza que se cierra, el final que no se
+# convierte — y ese log es ademas el conjunto de entrenamiento del estimador
+# que sustituira al hand-crafted.  Por eso se registra en vez de descartarse.
+SOLVE_GATE_OPTIMISTIC = 300
+
+# Rate limit del log.  Sin el, una pasada de mantenimiento emitiria un evento
+# por hoja y por nivel, y la tabla de eventos — que es un diario operativo,
+# no una serie temporal — se llenaria de la misma frase.  Dedup por clave con
+# ventana: una hoja cuenta UNA vez por ventana, y lo que interesa del
+# cuadrante (que posiciones estan ahi) no se pierde por no repetirlo.
+#
+# El cache es de PROCESO, y eso esta bien: con varios workers el peor caso son
+# unos pocos duplicados con el mismo payload, y el consumidor del dataset
+# deduplica por clave de todas formas.
+SOLVE_GATE_LOG_WINDOW = 900.0
+SOLVE_GATE_LOG_MAX = 4_096
+_solve_gate_logged = {}
 
 # Campos que la pasada de mantenimiento pide de cada posicion.  ``.only`` esta
 # aqui porque ``last_analysis`` es el campo mas grande de la tabla y el
@@ -212,20 +239,60 @@ def shallow_annoyance(fen, eval_cp):
     return solve_estimate.annoyance(solve_estimate.shallow(fen, eval_cp))
 
 
-def gated_pn(pn, annoyance, attacker_score):
+def reset_solve_gate_log():
+    """Vacia el dedup del log.  Existe para los tests y para un reinicio."""
+    _solve_gate_logged.clear()
+
+
+def _log_disagreement(key, eval_cp, annoyance, factor):
+    """``SOLVE_GATE_DISAGREE`` con rate limit por clave.
+
+    ``eval_cp`` va en perspectiva BLANCA, como la columna de la que sale: el
+    consumidor de este log es un dataset que se une a ``Position`` por clave,
+    y una segunda convencion de signo dentro del payload seria una trampa.
+    """
+    now = time.monotonic()
+    seen = _solve_gate_logged.get(key)
+    if seen is not None and now - seen < SOLVE_GATE_LOG_WINDOW:
+        return False
+    if len(_solve_gate_logged) >= SOLVE_GATE_LOG_MAX:
+        cutoff = now - SOLVE_GATE_LOG_WINDOW
+        for stale in [k for k, ts in _solve_gate_logged.items() if ts < cutoff]:
+            del _solve_gate_logged[stale]
+        if len(_solve_gate_logged) >= SOLVE_GATE_LOG_MAX:
+            _solve_gate_logged.clear()
+    _solve_gate_logged[key] = now
+    DBEvent.objects.create(kind='SOLVE_GATE_DISAGREE', payload={
+        'key': key, 'eval_cp': eval_cp,
+        'annoyance': round(float(annoyance), 4),
+        'factor': round(float(factor), 3)})
+    return True
+
+
+def gated_pn(pn, annoyance, attacker_score, key=None, eval_cp=None):
     """``pn`` encarecido por la molestia.  Blando: multiplica, no veta.
 
     Exento el mate en banda: ahi el coste de cerrar ya lo mide la PV y
     encarecerlo solo alejaria al descenso de la via rapida.  El tope de hoja
     se vuelve a aplicar despues del producto — una hoja no puede fingir ser
     infinita, que es lo que la aritmetica reserva para lo REFUTADO.
+
+    ``key`` es OPTATIVA y es lo unico que enciende el log del cuadrante de
+    desacuerdo.  Sin ella la funcion es aritmetica pura y no toca la base:
+    asi las hojas puntuadas con la vista degradada de una arista — que ven dos
+    de sus cuatro features en neutral — no ensucian un dataset que se quiere
+    de fidelidad completa.
     """
     if annoyance is None:
         return pn
     if attacker_score is not None and attacker_score >= SOLVE_GATE_MATE_BAND:
         return pn
     factor = solve_estimate.gate_factor(annoyance)
-    return min(PROOF_MAX_LEAF, max(1, int(pn * factor)))
+    gated = min(PROOF_MAX_LEAF, max(1, int(pn * factor)))
+    if (key and gated > pn and attacker_score is not None
+            and attacker_score >= SOLVE_GATE_OPTIMISTIC):
+        _log_disagreement(key, eval_cp, annoyance, factor)
+    return gated
 
 
 # ---------------- recurrencias ----------------
@@ -261,7 +328,7 @@ def terminal_numbers(status, goal):
 
 
 def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None,
-                 annoyance=None):
+                 annoyance=None, key=None):
     """Inicializacion heuristica documentada de una hoja de la prueba.
 
     ``eval_cp`` viene en perspectiva BLANCA, como todo lo demas del sistema;
@@ -273,6 +340,9 @@ def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None,
     ``None`` = puerta apagada, que es el default y el comportamiento historico
     byte a byte).  Solo encarece ``pn``: ``dn`` mide refutar, y refutar una
     posicion tediosa no es mas caro por ser tediosa — basta una respuesta.
+
+    ``key`` solo sirve para el log del cuadrante de desacuerdo (ver
+    ``gated_pn``); sin ella esta funcion no escribe nada en ninguna parte.
     """
     exact = terminal_numbers(status, goal)
     if exact is not None:
@@ -298,7 +368,7 @@ def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None,
         base_pn, base_dn = branching, 1
     pn = min(PROOF_MAX_LEAF, max(1, base_pn * pn_weight))
     dn = min(PROOF_MAX_LEAF, max(1, base_dn * dn_weight))
-    return gated_pn(pn, annoyance, attacker_score), dn
+    return gated_pn(pn, annoyance, attacker_score, key, eval_cp), dn
 
 
 def internal_numbers(fen, goal, child_numbers):
@@ -411,7 +481,8 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
         # entera delante: es donde la puerta tiene todo lo que necesita.
         pn, dn = leaf_numbers(position.fen, position.status,
                               position.eval_cp, goal,
-                              annoyance=gate_annoyance(position))
+                              annoyance=gate_annoyance(position),
+                              key=position.key)
         return pn, dn, False, None
 
     numbers, moves = [], []
