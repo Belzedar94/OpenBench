@@ -3140,13 +3140,20 @@ def contributor(request, username):
     seria afirmar que esa cuenta contribuye.  Lo que decide es actividad
     REAL — workers, peticiones o nombres propuestos — y no la existencia de
     la cuenta en OpenBench, que es otra base y otra pregunta.
+
+    CON UNA EXCEPCION: la TUYA.  El enlace de la cabecera lleva aqui, asi que
+    con la regla a secas todo el que estrena cuenta y pincha su propio nombre
+    aterrizaba en un 404 — la primera respuesta del sitio a alguien que acaba
+    de llegar.  Su pagina existe porque existe el, con los estados vacios
+    diciendole que hacer; lo que sigue sin existir es la pagina publica de un
+    nombre que no ha hecho nada, que es lo que protege esta regla.
     """
     username = (username or '')[:64]
-    if not contributors.has_activity(username):
+    viewer = (request.user.username if request.user.is_authenticated else '')
+    if viewer != username and not contributors.has_activity(username):
         return render(request, 'atomicdb/missing.html', {
             'missing_note': 'No AtomicDB activity under that name (yet).',
         }, status=404)
-    viewer = (request.user.username if request.user.is_authenticated else '')
     context = contributors.present(username)
     context.update({
         **_suggestions_badge(request),

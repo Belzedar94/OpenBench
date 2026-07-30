@@ -119,6 +119,26 @@ class ExistenceTests(TestCase):
         self.assertIn('No AtomicDB activity under that name',
                       _reading(response.content.decode()))
 
+    def test_your_own_page_exists_before_you_have_done_anything(self):
+        # El enlace de la cabecera lleva aqui: estrenar cuenta y pinchar tu
+        # nombre no puede ser un 404.
+        worker_account('newcomer')
+        client = Client()
+        client.login(username='newcomer', password='pw')
+
+        response = client.get('/atomicdb/user/newcomer/')
+
+        self.assertEqual(response.status_code, 200)
+        body = _reading(response.content.decode())
+        self.assertIn('No analysis requests yet', body)
+        self.assertIn('No workers under this account', body)
+
+    def test_but_nobody_else_can_see_that_empty_page(self):
+        worker_account('newcomer')
+
+        self.assertEqual(
+            self.client.get('/atomicdb/user/newcomer/').status_code, 404)
+
     def test_a_worker_alone_is_enough(self):
         _ping('box-atomicdb', 'alice')
 
