@@ -14,7 +14,7 @@
 </div>
 {% endif %}
 
-<div class="metrics">
+{% if has_counters %}<div class="metrics">
   <div class="metric" title="Analyses this account asked for from the explorer"><div class="v">{{ requests_total_h }}</div><div class="l">requests made</div></div>
 {% if has_nodes %}  <div class="metric" title="Engine nodes searched by this account's workers, all time"><div class="v">{{ nodes_all_h }}</div><div class="l">engine nodes</div></div>
   <div class="metric" title="Analyses served by this account's workers, all time"><div class="v">{{ tasks_all_h }}</div><div class="l">analyses served</div></div>
@@ -22,7 +22,7 @@
   <div class="metric" title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><div class="v">{{ fleet_share }}%</div><div class="l">of the fleet, 24h</div></div>
 {% endif %}{% if rank_all %}  <div class="metric" title="Standing among every account with workers, by engine nodes, all time"><div class="v">#{{ rank_all.rank }}</div><div class="l">of {{ rank_all.of }} all time</div></div>
 {% endif %}{% if rank_24h %}  <div class="metric" title="Standing among the accounts whose workers searched anything in the last 24 hours"><div class="v">#{{ rank_24h.rank }}</div><div class="l">of {{ rank_24h.of }} today</div></div>
-{% endif %}</div>
+{% endif %}</div>{% endif %}
 
 {% if first_at %}<p class="dim contrib-since">First contribution
   {{ first_at|date:"j M Y" }}.</p>{% endif %}

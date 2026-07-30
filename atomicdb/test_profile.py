@@ -132,6 +132,8 @@ class ExistenceTests(TestCase):
         body = _reading(response.content.decode())
         self.assertIn('No analysis requests yet', body)
         self.assertIn('No workers under this account', body)
+        # Sin nada que contar, la fila de medidores no sale.
+        self.assertNotIn('REQUESTS MADE', body.upper())
 
     def test_but_nobody_else_can_see_that_empty_page(self):
         worker_account('newcomer')

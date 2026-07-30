@@ -432,9 +432,14 @@ def present(username, now=None):
             'when': _ago(row.created, now),
         })
 
+    requests_total = mine.count()
     context = {
         'profile_user': username,
-        'requests_total_h': human(mine.count()),
+        'requests_total_h': human(requests_total),
+        # Sin una sola cifra que ensenar, la fila de medidores es un "0"
+        # suelto en una rejilla de seis: la pagina de quien acaba de llegar
+        # empieza directamente por lo que puede hacer.
+        'has_counters': bool(requests_total or nodes_all),
         'queue_pending': pending_rows, 'queue_pending_more': pending_more,
         'queue_leased': leased_rows,
         'queue_done': done_rows, 'queue_done_more': done_more,
