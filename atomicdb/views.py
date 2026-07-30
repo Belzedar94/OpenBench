@@ -25,7 +25,7 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, ingest, ingest_queue, logic, metrics,
-               notifications, openings, proof, solve)
+               notifications, openings, proof, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -948,6 +948,52 @@ def api_request_unexplored(request, key):
                          'candidates': len(pending)})
 
 
+def api_pv_verify(request, key):
+    """Encola analisis por cada posicion de la PV vigente de esta posicion.
+
+    El boton de arriba compra PROFUNDIDAD aqui y el masivo compra ANCHURA aqui;
+    este compra la LINEA. Es la respuesta al nodo cuyo eval propio profundo y
+    cuyo respaldo no se ponen de acuerdo: la PV almacenada reclama algo, y lo
+    unico que puede confirmarlo o tumbarlo es lo que digan los analisis de las
+    posiciones por las que pasa.  Hasta ahora eso se hacia pidiendo analisis a
+    mano, posicion por posicion.
+
+    SIN ``csrf_exempt``, por lo mismo que sus dos vecinos: esto lo llama el
+    fetch de explore.html, que tiene el token en la pagina.  Exento, una pagina
+    de terceros podia encolar hasta ``PV_VERIFY_MAX_PLIES`` analisis a nombre
+    de quien la visitara con sesion iniciada.
+
+    NO escribe ``RequestLog``, y es deliberado: ese recibo es el dedup por
+    ip+posicion del boton de peldano, y esto no compra un peldano en ESTA
+    posicion — pone tareas en las de mas abajo.  Anotarlo aqui haria que el
+    siguiente click en "Request analysis" se leyera como repetido.  Lo que si
+    respeta, porque acota el gasto de verdad, es el tope de cola.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return JsonResponse({'status': 'unknown-position'}, status=404)
+    if pos.status != 'UNKNOWN':
+        return JsonResponse({'status': 'already-solved'})
+    if AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                   position__status='UNKNOWN') \
+                           .count() >= REQUEST_QUEUE_MAX:
+        return JsonResponse({'status': 'queue-full'}, status=503)
+    # Afinidad worker-peticionario, igual que en ``api_request``: la cuenta OB
+    # del visitante logueado viaja hasta cada tarea de la linea.
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
+    with atomic():
+        pos = Position.objects.select_for_update().get(key=key)
+        queued = ingest.enqueue_pv_verification(pos,
+                                                requested_by=requested_by)
+    if not queued:
+        return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
+    return JsonResponse({'status': 'queued', 'queued': queued})
+
+
 def _client_ip(request):
     """Ultima entrada de XFF: la puso nuestro nginx, el cliente no la falsea."""
     return (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
@@ -1833,6 +1879,82 @@ def _san_line(key, max_plies=16, keep_head=False):
                             keep_head=keep_head)
 
 
+# EL FEED DE LA PORTADA CUENTA LA HISTORIA DEL ARBOL, NO SU TELEMETRIA.
+#
+# ``DBEvent`` es una sola tabla para dos publicos.  Uno es el visitante, que
+# viene a leer que le ha pasado al arbol: una posicion cerro, una campana se
+# resolvio, un cierre se cayo, alguien sembro un FEN nuevo.  El otro somos
+# nosotros, y lo que registramos para nosotros son guardas que saltaron, cupos
+# que se llenaron, brazos que eligieron una rama, submissions rechazadas y
+# medidas de coste.  Nada de eso cambia lo que la base AFIRMA sobre ninguna
+# posicion, y ``_friendly_events`` no tiene frase para ello: cae a ``e.kind``
+# y lo pinta crudo, en mayusculas y con guiones bajos.
+#
+# El criterio, entonces: se queda lo que cambia el VEREDICTO PUBLICO sobre una
+# posicion (status, closure, grado de prueba) o lo que es un acto humano sobre
+# el arbol (sembrar una posicion nueva).  Se va todo lo demas.
+#
+# Caso por caso, y por que cada uno cae del lado que cae:
+#
+#   * ``SOLVE_GATE_DISAGREE`` — el cuadrante donde motor y estimador no se
+#     ponen de acuerdo.  Existe para alimentar un dataset offline; su payload
+#     son cuatro numeros de instrumentacion (annoyance, factor) que no
+#     significan nada fuera de esa regresion.  Se emite POR CLAVE, ademas, asi
+#     que ademas de ruido cada fila arrastraba un ``_line_labels``.
+#   * ``BREADTH_SWAP``, ``UNCERTAINTY_EXPAND``, ``WITNESS_REFUTED``,
+#     ``DN_REPAIR`` — decisiones internas de los brazos: por donde gasto el
+#     explorador su siguiente click o su siguiente ciclo.  Encolan trabajo; no
+#     concluyen nada.
+#   * ``CASCADE_GUARD``, ``BACKED_GUARD``, ``REVOKE_GUARD``, ``PROOF_GUARD`` —
+#     topes de recorrido que saltaron.  Son literalmente "esta pasada se paro
+#     antes de tiempo": una alarma nuestra, no una noticia.
+#   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
+#     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
+#     mintearon, con que cupo).  Ni siquiera llevan ``key``.
+#   * ``SOLVE_REJECTED``, ``TB_REJECTED``, ``SOLVE_DISPUTE_SIGNAL`` — auditoria
+#     de lo que llego y no se acepto, con nombre de maquina dentro.  Que una
+#     submission no colase no es un hecho sobre la posicion.
+#   * ``SOLVE_VERIFIED``, ``SURVIVE_VERIFIED`` — la MEDIDA del coste de
+#     verificar (segundos, nodos, bytes del certificado).  Cuando ademas
+#     cierran algo, ese cierre ya sale por ``NODE_CLOSED``, asi que dejarlos
+#     era contar la misma noticia dos veces.
+#   * ``BULK_REQUEST`` — el recibo por IP del boton masivo.  Su propio
+#     comentario lo dice: existe como auditoria para poder reintroducir un
+#     limite informado.  Un recibo no es una historia, y lleva la IP del
+#     visitante.
+#
+# Lo que SE QUEDA, por si alguien anade un kind manana: ``NODE_CLOSED``,
+# ``CAMPAIGN_CLOSED``, ``CLOSURE_REVOKED``, ``MATE_PROOF_DISPUTED``,
+# ``MATE_WITNESS_CERTIFIED``, ``PROOF_UPGRADED`` y ``SEEDED``.
+#
+# Es una LISTA NEGRA a proposito, y tiene su precio: un kind nuevo entra al
+# feed por defecto.  La alternativa — lista blanca — falla al reves y peor,
+# escondiendo en silencio una noticia de verdad el dia que se anada una.  Un
+# kind instrumental nuevo se ve en la portada a la primera y se anade aqui; una
+# noticia que nunca aparece no la echa de menos nadie.
+FEED_HIDDEN_KINDS = {
+    'BACKED_GUARD',
+    'BREADTH_SWAP',
+    'BULK_REQUEST',
+    'CASCADE_GUARD',
+    'COVERAGE_ENQUEUED',
+    'DEBT_ENQUEUED',
+    'DN_REPAIR',
+    'FRAGILE_ENQUEUED',
+    'PROOF_GUARD',
+    'QUALITY_CONVERGENCE',
+    'REVOKE_GUARD',
+    'SOLVE_DISPUTE_SIGNAL',
+    'SOLVE_GATE_DISAGREE',
+    'SOLVE_REJECTED',
+    'SOLVE_VERIFIED',
+    'SURVIVE_VERIFIED',
+    'TB_REJECTED',
+    'UNCERTAINTY_EXPAND',
+    'WITNESS_REFUTED',
+}
+
+
 def _friendly_events(events, labels=None):
     out = []
     for e in events:
@@ -2142,7 +2264,12 @@ def home(request):
         upnext_positions.append(pos)
         if len(upnext_positions) >= 5:
             break
-    event_rows = list(DBEvent.objects.order_by('-ts')[:12])
+    # El filtro va en la CONSULTA, no en el render: descartar despues de
+    # cortar dejaria una portada con siete noticias las noches en que los
+    # brazos internos hablan mucho, y ademas ya habriamos pagado el
+    # ``_line_labels`` de las que se tiran (§ FEED_HIDDEN_KINDS).
+    event_rows = list(DBEvent.objects.exclude(kind__in=FEED_HIDDEN_KINDS)
+                      .order_by('-ts')[:12])
     event_keys = [(event.payload or {}).get('key', '') for event in event_rows]
     labels = _line_labels_many(
         [task.position_id for task in leased]
@@ -3289,6 +3416,27 @@ def _campaign_context(request):
             'campaign_message': CAMPAIGN_MESSAGES.get(outcome, '')}
 
 
+# Por debajo de esto no hay linea que verificar: son la jugada y su respuesta,
+# y para eso ya esta el boton de al lado.
+PV_VERIFY_MIN_PLIES = 4
+
+
+def _pv_verify_plies(pos):
+    """Plies verificables de la PV vigente, o 0 si el boton no procede.
+
+    Cuenta SIN tocar la base — el mismo ``current_line`` que usa el helper que
+    encolara — y no promete legalidad: la PV puede estar rota y el helper corta
+    donde toque.  Lo que decide es si hay algo que ofrecer.
+    """
+    if pos.status != 'UNKNOWN':
+        return 0
+    line = solve_estimate.current_line(pos)
+    pv = (line or {}).get('pv')
+    if not isinstance(pv, list) or len(pv) < PV_VERIFY_MIN_PLIES:
+        return 0
+    return min(len(pv), ingest.PV_VERIFY_MAX_PLIES)
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -3408,6 +3556,12 @@ def explore(request, key):
         'board': _ctx_board(pos.fen),
         'unexplored_count': (len(ingest.unexplored_children(pos))
                              if pos.status == 'UNKNOWN' else 0),
+        # Cuantos plies de la PV VIGENTE se pueden verificar de un click, ya
+        # acotados por el tope del helper.  Cero apaga el boton, y por eso se
+        # cuenta aqui y no en la plantilla: con menos de cuatro plies no hay
+        # linea que contrastar — es la jugada y su respuesta, que es
+        # exactamente lo que el boton de al lado ya compra.
+        'pv_verify_plies': _pv_verify_plies(pos),
         # La flecha apunta al TOP de la misma lista que pinta la tabla (mejor
         # conocimiento, backed incluido), no al best_move de la ultima
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben

@@ -14,7 +14,7 @@ from django.conf import settings
 from django.db.models import Max, Q
 from django.utils import timezone
 
-from . import logic, proof, tb
+from . import logic, proof, solve_estimate, tb
 from .database import atomic
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
@@ -3223,6 +3223,106 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             queued += 1
         elif task.state == 'PENDING' and task.source != source:
             task.source = source
+            if requested_by and not task.requested_by:
+                task.requested_by = requested_by
+            task.save(update_fields=['source', 'requested_by'])
+            queued += 1
+    return queued
+
+
+# ---------------- verificar la PV vigente de una posicion ----------------
+#
+# EL CASO QUE LO PIDIO (Wolfram, 30-jul).  Un nodo dice +9 a mucha profundidad
+# y su respaldo dice +6.  Una de las dos afirmaciones es falsa: o la PV propia
+# reclama una linea que los analisis de los hijos no sostienen, o el respaldo
+# viene de un subarbol que nadie ha mirado lo suficiente.  El unico modo de
+# saber cual era pedir analisis a mano, posicion por posicion, bajando por la
+# linea — que es lo que este boton hace de una vez.
+#
+# DIECISEIS PLIES.  Es una sola decision humana, igual que el boton masivo, asi
+# que su coste tiene que estar acotado por algo que no dependa de lo que el
+# motor decidiera guardar.  Ocho jugadas por bando es donde una discrepancia de
+# tres peones ya se ha manifestado; mas alla, lo que hace falta no es este
+# boton sino una campana.  ``STORED_PV_MAX_PLIES`` (24) recorta lo que se
+# ALMACENA y no vale como tope aqui: es un limite de disco, no de gasto.
+PV_VERIFY_MAX_PLIES = 16
+
+
+def enqueue_pv_verification(pos, requested_by=''):
+    """Encola analisis por CADA posicion de la PV vigente. Devuelve cuantos.
+
+    Camina la linea 1 de ``last_analysis`` — la VIGENTE, saltando el escaparate
+    ancho de un pase anterior, con el mismo criterio que ``claimed_mate_plies``
+    y por la misma funcion que lo dice, ``solve_estimate.current_line``.
+
+    QUE MATERIALIZA.  Lo mismo que un click de navegacion y por las mismas tres
+    llamadas que usa el ``goto`` del explorador: legalidad por
+    ``logic.legal_moves``, nodo por ``get_or_create_position`` heredando la
+    campana del padre, y arista por ``Edge.get_or_create``.  Aqui no se
+    reimplementa ninguna regla; una PV es una ruta como cualquier otra y tiene
+    que producir exactamente el mismo arbol que producirla a mano.
+
+    QUE CORTA Y QUE SALTA, que no es lo mismo:
+
+      * CORTA — y sin error — en cuanto una jugada de la PV no es legal en la
+        posicion en la que toca.  Pasa de verdad: una PV guardada antes de un
+        rekey, o simplemente vieja, deja de aplicar y lo unico honesto es
+        quedarse con el prefijo que si aplica.  Tambien corta, por el mismo
+        camino, al llegar a un TERMINAL: ahi no hay jugada legal que seguir.
+      * SALTA una posicion YA CERRADA y SIGUE CAMINANDO.  Un cierre a mitad de
+        linea no invalida el resto — la discrepancia que se esta persiguiendo
+        puede estar debajo — y comprarle analisis a un nodo resuelto es gastar
+        en una pregunta ya contestada.
+
+    NO se pide nada sobre ``pos``: su eval profundo es justamente la mitad del
+    desacuerdo que hay que contrastar, y ya esta comprado.  Lo que falta es la
+    otra mitad, que vive en la linea.
+
+    Presupuesto: ``max(REQUEST_BUDGET_LADDER[0], budget_for(child))``, el mismo
+    suelo de grado peticion que el boton masivo.  ``budget_for`` manda cuando
+    pide mas, y con el viaja su clamp de mates cortos: un nodo de la PV que ya
+    reclama un mate corto con distancia conocida se VERIFICA barato en vez de
+    excavarse.  Dedup como siempre: una tarea viva en la generacion actual no
+    se duplica.
+
+    El llamante es dueno de la transaccion, igual que en
+    ``enqueue_unexplored_children``.
+    """
+    line = solve_estimate.current_line(pos)
+    pv = (line or {}).get('pv')
+    if not isinstance(pv, list):
+        return 0
+    queued = 0
+    current = pos
+    for uci in pv[:PV_VERIFY_MAX_PLIES]:
+        if not isinstance(uci, str) \
+                or uci not in logic.legal_moves(current.fen):
+            break
+        child = get_or_create_position(logic.apply_move(current.fen, uci),
+                                       campaign_id=current.campaign_id)
+        Edge.objects.get_or_create(parent=current, move_uci=uci,
+                                   defaults={'child': child})
+        if child.priority <= DEAD / 2:
+            child.priority = 0.0   # ruta nueva: revive de la lapida
+            child.save(update_fields=['priority'])
+        current = child
+        if child.status != 'UNKNOWN':
+            continue
+        clamp = _short_mate_clamp(child)
+        budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+                  if clamp is None else budget_for(child))
+        task, created = AnalysisTask.objects.get_or_create(
+            position=child, generation=child.visits,
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(child.visits, budget,
+                                             clamp=clamp),
+                      'source': AnalysisTask.Source.USER,
+                      'requested_by': requested_by})
+        if created:
+            queued += 1
+        elif (task.state == 'PENDING'
+                and task.source != AnalysisTask.Source.USER):
+            task.source = AnalysisTask.Source.USER
             if requested_by and not task.requested_by:
                 task.requested_by = requested_by
             task.save(update_fields=['source', 'requested_by'])
