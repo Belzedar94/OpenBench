@@ -91,7 +91,7 @@
     <div class="verdict {{ verdict_css }}">
       {% if pos.status == 'UNKNOWN' %}
         UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% if eval_backed_light %}<span
-          class="backed-mark light" title="value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically · eval stored on this position {{ eval_point_str }}">walked</span>{% elif eval_backed %}<span
+          class="backed-mark light" title="value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">walked</span>{% elif eval_backed %}<span
           class="backed-mark" title="negamax of what the subtree already knows, {{ eval_backed_plies }} ply(s) below · eval stored on this position {{ eval_point_str }}">backed</span>{% endif %}{% if eval_backed %}<a
           class="backed-jump" href="{{ backed_source_url }}"
           title="jump to the ply this value actually comes from">↓{{ eval_backed_plies }}</a>{% endif %}{% endif %}
