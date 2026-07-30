@@ -311,7 +311,6 @@ def _presented(task, labels, now, extra=None):
         'full': full or 'the start position',
         'play': play,
         'budget': human(task.budget_nodes),
-        'multipv': task.multipv,
     }
     row.update(extra or {})
     return row
