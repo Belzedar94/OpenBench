@@ -42,10 +42,38 @@ subir el reloj solo degrada victorias hacia tablas, nunca al reves.
 
 import hashlib
 import time
+from functools import lru_cache
 
 import pyffish as pf
 
 VARIANT = 'atomic'
+
+# CUANTO CUESTA UNA PREGUNTA AL MOVEGEN, Y POR QUE SE RECUERDAN LAS RESPUESTAS.
+#
+# Medido: una llamada a ``pf.get_fen`` cuesta lo mismo con una jugada que con
+# veinte (~3,5 ms en el servidor, ~16 ms en el portatil de desarrollo), y lo
+# mismo cuesta ``legal_moves`` o ``game_result``.  El trabajo real es
+# despreciable; lo que se paga es MONTAR LA POSICION una vez por llamada,
+# porque la variante es argumento de TODA llamada de pyffish y construirla
+# rehace la tabla de ataques entera (``UCI::init_variant``; el mismo hallazgo
+# que motivo el verificador nativo, § test_survive_native).  Asi que el coste
+# de cualquier cosa que use este modulo no se mide en plies ni en jugadas: se
+# mide en NUMERO DE LLAMADAS.
+#
+# ``apply_move`` y el sondeo al paso son funciones PURAS de sus argumentos —
+# el movegen esta fijado y nada en el proyecto llama a ``pf.set_option`` ni a
+# ``pf.load_variant_config``, asi que la misma entrada da la misma salida
+# durante toda la vida del proceso.  Recordarlas no cambia ninguna respuesta;
+# solo deja de pagar la misma pregunta dos veces.  Quien mas lo nota es el
+# explorador, que rejuega el mismo prefijo de apertura en cada click.
+#
+# El tope existe por memoria, no por correccion: una entrada son unos 350
+# bytes, asi que 16384 son ~6 MB por proceso — nada al lado de los cinco
+# workers de gunicorn, y de sobra para los prefijos que una sesion de
+# navegacion repite.  Un fallo de cache cuesta un diccionario de mas sobre una
+# llamada de milisegundos, asi que el ingestor y el solver, que ven posiciones
+# nuevas casi siempre, no pagan nada medible por esto.
+MOVE_CACHE_ENTRIES = 16384
 
 # Identidad congelada del enunciado que se prueba.  Cambiarla es cambiar el
 # teorema, no un detalle de implementacion: todo cierre decisivo que exista
@@ -92,9 +120,20 @@ def en_passant_changes_the_game(parts):
     leer la reinterpreta en vez de rechazarla, asi que tampoco hay nada que
     conservar; ninguna de las dos cosas llega a la base, donde todas las FEN
     salen del propio movegen.
+
+    Son DOS generaciones de movimientos, y ``canonical_fen`` es idempotente —
+    ``key_of(apply_move(...))`` vuelve a canonicalizar una FEN que ya lo
+    estaba — asi que la misma pregunta se repite constantemente.  Se recuerda
+    (§ MOVE_CACHE_ENTRIES); la respuesta solo depende de los cuatro primeros
+    campos de la FEN.
     """
-    with_right = ' '.join(parts[:4] + ['0', '1'])
-    without_right = ' '.join(parts[:3] + ['-', '0', '1'])
+    return _en_passant_right_exists(' '.join(parts[:4]))
+
+
+@lru_cache(maxsize=MOVE_CACHE_ENTRIES)
+def _en_passant_right_exists(prefix):
+    with_right = prefix + ' 0 1'
+    without_right = ' '.join(prefix.split()[:3] + ['-', '0', '1'])
     try:
         return (set(pf.legal_moves(VARIANT, with_right, []))
                 != set(pf.legal_moves(VARIANT, without_right, [])))
@@ -137,6 +176,7 @@ def legal_moves(fen):
     return pf.legal_moves(VARIANT, fen, [])
 
 
+@lru_cache(maxsize=MOVE_CACHE_ENTRIES)
 def apply_move(fen, uci):
     return canonical_fen(pf.get_fen(VARIANT, fen, [uci]))
 
