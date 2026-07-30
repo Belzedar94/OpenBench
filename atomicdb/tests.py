@@ -1480,6 +1480,62 @@ class MilestoneLineTests(TestCase):
         self.assertLessEqual(len(queries), 4)
 
 
+class HomeFeedKindTests(TestCase):
+    """El feed de la portada cuenta la HISTORIA del arbol, no su telemetria.
+
+    ``DBEvent`` sirve a dos publicos con una sola tabla, y ``_friendly_events``
+    no tiene frase para el nuestro: cae a ``e.kind`` y lo pinta crudo.  Con la
+    puerta doble encendida, un ``SOLVE_GATE_DISAGREE`` por clave habria salido
+    en mayusculas y con guiones bajos, y ademas pagando su ``_line_labels``.
+    """
+
+    def setUp(self):
+        self.pos = ingest.get_or_create_position(logic.start_fen())
+
+    def _event(self, kind, **payload):
+        from .models import DBEvent
+
+        return DBEvent.objects.create(
+            kind=kind, payload={'key': self.pos.key, **payload})
+
+    def test_an_instrumentation_event_never_reaches_the_home(self):
+        from .views import FEED_HIDDEN_KINDS
+
+        for kind in sorted(FEED_HIDDEN_KINDS):
+            with self.subTest(kind=kind):
+                self._event(kind)
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(response.context['events'], [])
+        self.assertNotContains(response, 'SOLVE_GATE_DISAGREE')
+        self.assertNotContains(response, 'BREADTH_SWAP')
+
+    def test_a_historical_event_still_reaches_the_home(self):
+        self._event('NODE_CLOSED', status='WHITE_WIN', closure='MATE_PV')
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(len(response.context['events']), 1)
+        self.assertEqual(response.context['events'][0]['text'],
+                         'Solved: WHITE_WIN via MATE_PV')
+
+    def test_the_twelve_slots_stay_twelve_under_a_noisy_night(self):
+        # El filtro va en la CONSULTA: si se descartara despues de cortar, una
+        # noche de brazos internos habladores dejaria la portada casi vacia.
+        for index in range(30):
+            self._event('SOLVE_GATE_DISAGREE', annoyance=0.5, factor=1.0,
+                        index=index)
+        for index in range(12):
+            self._event('NODE_CLOSED', status='DRAW', closure='MINIMAX',
+                        index=index)
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertEqual(len(response.context['events']), 12)
+        self.assertTrue(all(row['text'].startswith('Solved:')
+                            for row in response.context['events']))
+
+
 class BoardInteractionTests(TestCase):
 
     def test_board_uses_vendored_chessground_with_keyboard_fallback(self):
