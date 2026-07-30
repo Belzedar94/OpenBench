@@ -53,6 +53,15 @@ SPARK_BASELINE = 38
 SPARK_MAX_BAR = 34
 FLEET_CACHE_SECONDS = 60
 FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v1'
+# La portada ensena DIEZ y dice cuantas quedan fuera.  La lista completa seria
+# un directorio, y lo que hace falta en una portada es el cabecero honesto y
+# un camino a la pagina de cada cual.
+LEADERBOARD_ROWS = 10
+# Oro, plata y bronce sin escribir ninguna de las tres palabras y sin un solo
+# emoji: el numero del puesto se pinta con los colores que el sitio ya tiene.
+# Un empate en el segundo puesto da DOS platas y ningun bronce, que es
+# exactamente lo que significa compartir puesto.
+MEDALS = {1: 'first', 2: 'second', 3: 'third'}
 # Clubes de nodos.  De mayor a menor: se pintan todos los alcanzados, y el
 # primero de la lista es el que manda en el titulo.
 MILESTONES = ((10_000_000_000_000, '10T club'),
@@ -158,6 +167,81 @@ def _rank(totals, username):
     ladder = sorted((row['nodes'] for row in totals.values() if row['nodes']),
                     reverse=True)
     return {'rank': ladder.index(mine) + 1, 'of': len(ladder)}
+
+
+def _standings(totals, fleet_nodes, limit=LEADERBOARD_ROWS):
+    """Una ventana del ranking: filas ya ordenadas, con puesto y pie.
+
+    El puesto sale de la MISMA escalera que ``_rank`` — la lista de valores
+    con sus repeticiones — asi que dos cuentas con los mismos nodos son las
+    dos segundas y la siguiente es cuarta.  Dentro de un empate se imprime por
+    nombre: una lista hay que escribirla en algun orden, pero el numero que se
+    ve es el mismo para las dos y no hay desempate escondido.
+
+    El denominador de la cuota es la flota ENTERA, maquinas sin cuenta
+    incluidas (§ ``_by_owner``): esos nodos se buscaron de verdad.  Por eso las
+    cuotas pueden no sumar cien, y el pie dice cuanto falta en vez de
+    repartirlo entre quienes si tienen cuenta.
+    """
+    ladder = sorted((row['nodes'] for row in totals.values() if row['nodes']),
+                    reverse=True)
+    ranked = sorted(((row['nodes'], name) for name, row in totals.items()
+                     if row['nodes']), key=lambda pair: (-pair[0], pair[1]))
+    rows = []
+    for nodes, name in ranked[:limit]:
+        rank = ladder.index(nodes) + 1
+        share = round(100.0 * nodes / fleet_nodes, 1) if fleet_nodes else 0.0
+        rows.append({
+            'rank': rank,
+            'medal': MEDALS.get(rank, ''),
+            'name': name,
+            'nodes_h': human(nodes),
+            'tasks_h': human(totals[name]['tasks']),
+            'share': share,
+            # Una cuota REAL que redondea a cero se escribe "<0.1", nunca
+            # "0.0": ciento veintitres millones de nodos son ciento veintitres
+            # millones aunque la flota entera lleve un billon, y un cero
+            # rotundo al lado de una cifra que no lo es se lee como que esa
+            # persona no puso nada.  Misma disciplina que la barra de un pixel
+            # que conserva el dia flojo en la grafica de contribuidor.
+            'share_h': f'{share:.1f}' if share else '<0.1',
+        })
+    claimed = sum(row['nodes'] for row in totals.values())
+    unclaimed = max(0, fleet_nodes - claimed)
+    return {
+        'rows': rows,
+        'more': len(ladder) - len(rows),
+        'accounts': len(ladder),
+        'fleet_h': human(fleet_nodes),
+        'unclaimed_h': human(unclaimed) if unclaimed else '',
+    }
+
+
+def leaderboard(now=None):
+    """Las dos tablas de la portada, del MISMO snapshot que ya se calcula.
+
+    Ni una consulta por fila ni una consulta por ventana: los dos ordenes
+    salen de los dos diccionarios que ``fleet`` ya trae, asi que lo unico que
+    la portada paga por esta seccion es ese snapshot compartido — tres
+    consultas por minuto para todo el sitio — y nada que crezca con el numero
+    de contribuidores.  Encima va la cache de pagina de 15s (§ urls), que es
+    la que absorbe las tormentas de F5.
+
+    Las claves llevan prefijo ``contrib_``: la portada ya usa ``board`` para
+    el tablero de la posicion inicial y dos cosas distintas con el mismo
+    nombre en el mismo contexto es una plantilla que se rompe callando.
+    """
+    snapshot = fleet(now=now)
+    boards = [
+        {'window': 'Last 24 hours',
+         'empty': 'No worker has searched anything in the last 24 hours.',
+         **_standings(snapshot['users_24h'], snapshot['nodes_24h'])},
+        {'window': 'All time',
+         'empty': 'No worker has searched anything yet.',
+         **_standings(snapshot['users_all'], snapshot['nodes_all'])},
+    ]
+    return {'contrib_boards': boards,
+            'has_contrib_board': any(board['rows'] for board in boards)}
 
 
 def has_activity(username):

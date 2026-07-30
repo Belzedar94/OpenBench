@@ -1747,3 +1747,126 @@ html.theme-ready .tile {
     font-size: .74rem;
   }
 }
+
+/* Ranking de contribuidores de la portada.  Dos ventanas de la MISMA pregunta,
+   una al lado de la otra, y casi todo prestado de lo que ya existe:
+   .contrib-scroll para el desbordamiento, .contrib-sub para el titulillo y
+   .contrib-spec para la segunda linea de una celda.  El reparto en columnas no
+   necesita media query — la rejilla pide 22rem por columna PERO nunca mas de
+   lo que hay, asi que en un telefono se apila sola y en 320px no desborda. */
+.lb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+  gap: .6rem 1.6rem;
+  align-items: start;
+}
+
+.lb-table {
+  font-size: .92rem;
+}
+
+.lb-table td {
+  vertical-align: top;
+}
+
+/* Las cifras alineadas a la derecha y con cifras de ancho fijo: una columna de
+   nodos que no comparte punto decimal no se puede comparar de un vistazo, que
+   es lo unico que una tabla asi tiene que dejar hacer. */
+.lb-table .n {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* La columna del puesto se encoge a su contenido en vez de repartirse el ancho
+   como las demas; el resto de la fila lo agradece en un telefono. */
+.lb-place {
+  width: 1px;
+}
+
+/* El puesto, no una medalla dibujada: el numero dentro de un disco.  Los tres
+   primeros se distinguen por borde y tinta — el dorado que el sitio ya usa
+   para lo raro, el gris fuerte y el ambar — y del cuarto en adelante es texto
+   apagado sin borde.  Dos segundos puestos pintan dos discos iguales. */
+.lb-medal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  padding: 0 .3rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font-size: .82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.lb-medal.first {
+  border-color: var(--opening-ink);
+  background: var(--opening-sheen);
+  color: var(--opening-ink);
+}
+
+.lb-medal.second {
+  border-color: var(--border-strong);
+  color: var(--ink-strong);
+}
+
+.lb-medal.third {
+  border-color: var(--warm);
+  color: var(--warm);
+}
+
+/* Un nombre de cuenta puede no tener un solo espacio y ser mas ancho que su
+   columna; se parte antes que empujar la tabla. */
+.lb-name {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+/* Cuota de la flota, con la misma forma que la barra de campana.  El ancho es
+   el porcentaje DE VERDAD y no una escala relativa al primero: en una flota
+   repartida las barras salen finas, y eso es justamente lo que hay que ver.
+   El minimo de dos pixeles es para que una cuota pequena siga siendo visible,
+   igual que el dia flojo conserva su barra de un pixel en la grafica de la
+   pagina de contribuidor. */
+.lb-bar {
+  overflow: hidden;
+  height: .35rem;
+  max-width: 12rem;
+  margin: .3rem 0 .15rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.lb-bar > span {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.lb-foot {
+  margin-top: .4rem;
+  font-size: .8rem;
+}
+
+@media (max-width: 560px) {
+  .lb-table {
+    font-size: .84rem;
+  }
+
+  .lb-table th,
+  .lb-table td {
+    padding: .4rem .25rem;
+  }
+
+  .lb-table th {
+    font-size: .7rem;
+    letter-spacing: 0;
+  }
+}

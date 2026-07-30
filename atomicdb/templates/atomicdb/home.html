@@ -151,6 +151,45 @@
   </div>
 </div>
 
+<h2 id="contributors">Contributors <span class="dim">by engine nodes</span></h2>
+<p class="dim campaign-lede">Every position in this tree was searched by
+  somebody's machine. Ties share a place, and the share is measured against
+  everything the whole fleet searched in that window.</p>
+{% if has_contrib_board %}
+<div class="lb-grid">
+  {% for b in contrib_boards %}
+  <section>
+    <h3 class="contrib-sub">{{ b.window }}</h3>
+    {% if b.rows %}
+    <div class="contrib-scroll">
+    <table class="lb-table">
+      <tr><th class="lb-place"><span class="visually-hidden">Place</span><span aria-hidden="true">#</span></th>
+        <th>Contributor</th><th class="n">Nodes</th><th class="n">Analyses</th></tr>
+      {% for r in b.rows %}
+      <tr>
+        <td class="lb-place"><span class="lb-medal {{ r.medal }}">{{ r.rank }}</span></td>
+        <td><a class="lb-name" href="/atomicdb/user/{{ r.name|urlencode }}/">{{ r.name }}</a>
+          <div class="lb-bar" aria-hidden="true"><span style="width:{{ r.share|unlocalize }}%"></span></div>
+          <div class="dim contrib-spec">{{ r.share_h }}% of the fleet</div></td>
+        <td class="n">{{ r.nodes_h }}</td>
+        <td class="n">{{ r.tasks_h }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+    {% if b.more %}<p class="dim lb-foot">and {{ b.more }} more.</p>{% endif %}
+    <p class="dim lb-foot">{{ b.accounts }} account{{ b.accounts|pluralize }} ·
+      {{ b.fleet_h }} nodes searched by the whole fleet{% if b.unclaimed_h %},
+      {{ b.unclaimed_h }} of them by machines with no account{% endif %}.</p>
+    {% else %}<p class="dim">{{ b.empty }}</p>{% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% else %}
+<p class="dim">No worker has searched anything yet. Run the AtomicDB client and
+  the machines under your account show up here, with what they searched.</p>
+{% endif %}
+
 <h2 id="campaigns">Proposed campaigns</h2>
 <p class="dim campaign-lede">Anyone can put a line up and vote for it. The site
   owner decides which one the solver actually runs.</p>

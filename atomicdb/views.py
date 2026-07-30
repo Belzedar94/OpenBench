@@ -2435,6 +2435,15 @@ def home(request):
         **_suggestions_badge(request),
         **_proof_health(now),
         **_campaign_context(request),
+        # El ranking de contribuidores sale del snapshot compartido de flota,
+        # que ya lleva su propia cache de un minuto: la portada no gana ni una
+        # consulta por contribuidor (§ contributors.leaderboard).  Y lo que
+        # gana en el peor caso es MENOS de lo que ya pagaba: el GROUP BY de
+        # todos los tiempos recorre el mismo indice de tareas completadas que
+        # el contador ``analyses`` de aqui arriba, pero como mucho una vez por
+        # minuto, mientras que ese contador se recalcula en cada fallo de la
+        # cache de pagina, o sea cada quince segundos.
+        **contributors.leaderboard(now=now),
         'root_pn_h': proof.format_number(root_pn),
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,
