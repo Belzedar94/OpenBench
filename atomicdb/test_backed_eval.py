@@ -661,3 +661,66 @@ class BackedIngestTests(TestCase):
         root.refresh_from_db()
         self.assertEqual(middle.backed_eval, -880)
         self.assertEqual(root.backed_eval, -880)
+
+
+class BackedRelicTests(TestCase):
+    """Reliquias: respaldos escritos con guardas VIEJAS no se recomputan
+    solos.  El caso Wolfram (30-jul): un ancla con eval propio conservaba el
+    9994 que una espina caminada le subio antes de la guarda direccional; la
+    regla vigente calcula el eval propio, pero nada habia vuelto a tocar el
+    nodo.  ``recascade_backed`` existe para ese barrido."""
+
+    def _relic(self):
+        # Ancla negra con eval propio 671 y UNA sola respuesta mirada que
+        # reclama mate blanco: la guarda direccional vigente devuelve 671,
+        # pero la fila guarda el 9994 reliquia de la era pre-guarda.
+        anchor = _pos('RELIC-A', 'b', eval_cp=671, nodes_invested=0,
+                      backed_eval=9994, backed_move='c8g4', backed_plies=6,
+                      backed_nodes=0)
+        spine = _pos('RELIC-S', 'w')
+        _edge(anchor, spine, 'c8g4')
+        leaf = _pos('RELIC-L', 'b', eval_cp=9994, nodes_invested=128_000_000)
+        _edge(spine, leaf, 'c2c3')
+        return anchor, spine
+
+    def test_current_rules_would_not_regenerate_the_relic(self):
+        # Sembrar la ESPINA: la hoja no cambia su propio respaldo (no tiene
+        # hijos) y sin cambio no hay ascenso; la espina si cambia (adopta el
+        # 9994 favorable a su bando) y el ascenso recomputa el ancla, donde
+        # la guarda direccional vigente devuelve el eval propio.
+        anchor, spine = self._relic()
+
+        ingest.backup_backed_evals([spine.key])
+
+        anchor.refresh_from_db()
+        self.assertEqual(anchor.backed_eval, 671)   # la guarda manda hoy
+        self.assertIsNone(anchor.backed_move)
+
+    def test_recascade_command_sweeps_the_relic(self):
+        from django.core.management import call_command
+        anchor, _leaf = self._relic()
+
+        call_command('recascade_backed', '--chunk', '10')
+
+        anchor.refresh_from_db()
+        self.assertEqual(anchor.backed_eval, 671)
+
+
+class WalkedChipTests(TestCase):
+    """El chip de la tabla distingue respaldo VERIFICADO de valor de linea
+    caminada (backed_nodes == 0): 'backed' contra 'walked'."""
+
+    def test_weightless_backed_renders_as_walked(self):
+        parent = _pos('CHIP-P', 'w', expanded=True)
+        walked = _pos('CHIP-W', 'b', backed_eval=9994, backed_plies=5,
+                      backed_nodes=0)
+        verified = _pos('CHIP-V', 'b', eval_cp=100, backed_eval=250,
+                        backed_plies=2, backed_nodes=5_000_000)
+        _edge(parent, walked, 'g2g4')
+        _edge(parent, verified, 'e2e4')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        self.assertIn('>walked</span>', body)
+        self.assertIn('>backed</span>', body)

@@ -1396,6 +1396,16 @@ h2 {
   cursor: help;
 }
 
+/* Respaldo sin peso de busqueda: valor subido por una linea CAMINADA por un
+   visitante, sin un solo analisis de motor debajo.  Borde discontinuo y tinta
+   de aviso para que nadie lo lea como veredicto (caso Wolfram: 9994 "backed"
+   sobre territorio sin explorar). */
+.backed-mark.light {
+  border-style: dashed;
+  color: var(--warn, #b4762a);
+  border-color: var(--warn, #b4762a);
+}
+
 footer {
   margin: 3rem 0 1rem;
   color: var(--ink-muted);

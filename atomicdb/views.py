@@ -2007,6 +2007,15 @@ def _child_moves(pos):
                       'mate': mate, 'point': point,
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
+                      # Territorio VIRGEN de motor: ni el respaldo trae peso
+                      # de busqueda ni el nodo tiene busqueda propia — el
+                      # valor solo puede venir de una linea caminada, y el
+                      # chip lo dice.  Con busqueda propia (aunque el
+                      # respaldo pese 0) el sitio no es virgen y el chip
+                      # normal con su tooltip de own search sigue mandando.
+                      'backed_light': (bool(backed_plies)
+                                       and not (c.backed_nodes or 0)
+                                       and not (c.nodes_invested or 0)),
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
@@ -3370,6 +3379,11 @@ def explore(request, key):
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,
         'eval_backed_plies': pos.backed_plies,
+        # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
+        # valor subio por una linea que un visitante camino, asi que es una
+        # cota sin verificar, no un veredicto del motor.  El chip lo dice.
+        'eval_backed_light': (eval_backed and not (pos.backed_nodes or 0)
+                              and not (pos.nodes_invested or 0)),
         'eval_point_str': None if point_stm is None else f'{point_stm:+d}cp',
         # Propuesta de nombre: en TODAS las posiciones desde el 28-jul.  Donde
         # no hay nombre se propone uno; donde lo hay, la misma caja propone una
