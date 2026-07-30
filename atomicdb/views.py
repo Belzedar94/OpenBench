@@ -25,7 +25,7 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, ingest, ingest_queue, logic, metrics,
-               notifications, openings, proof, solve)
+               notifications, openings, proof, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -934,6 +934,52 @@ def api_request_unexplored(request, key):
             'candidates': len(pending)})
     return JsonResponse({'status': 'queued', 'queued': queued,
                          'candidates': len(pending)})
+
+
+def api_pv_verify(request, key):
+    """Encola analisis por cada posicion de la PV vigente de esta posicion.
+
+    El boton de arriba compra PROFUNDIDAD aqui y el masivo compra ANCHURA aqui;
+    este compra la LINEA. Es la respuesta al nodo cuyo eval propio profundo y
+    cuyo respaldo no se ponen de acuerdo: la PV almacenada reclama algo, y lo
+    unico que puede confirmarlo o tumbarlo es lo que digan los analisis de las
+    posiciones por las que pasa.  Hasta ahora eso se hacia pidiendo analisis a
+    mano, posicion por posicion.
+
+    SIN ``csrf_exempt``, por lo mismo que sus dos vecinos: esto lo llama el
+    fetch de explore.html, que tiene el token en la pagina.  Exento, una pagina
+    de terceros podia encolar hasta ``PV_VERIFY_MAX_PLIES`` analisis a nombre
+    de quien la visitara con sesion iniciada.
+
+    NO escribe ``RequestLog``, y es deliberado: ese recibo es el dedup por
+    ip+posicion del boton de peldano, y esto no compra un peldano en ESTA
+    posicion — pone tareas en las de mas abajo.  Anotarlo aqui haria que el
+    siguiente click en "Request analysis" se leyera como repetido.  Lo que si
+    respeta, porque acota el gasto de verdad, es el tope de cola.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return JsonResponse({'status': 'unknown-position'}, status=404)
+    if pos.status != 'UNKNOWN':
+        return JsonResponse({'status': 'already-solved'})
+    if AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                   position__status='UNKNOWN') \
+                           .count() >= REQUEST_QUEUE_MAX:
+        return JsonResponse({'status': 'queue-full'}, status=503)
+    # Afinidad worker-peticionario, igual que en ``api_request``: la cuenta OB
+    # del visitante logueado viaja hasta cada tarea de la linea.
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
+    with atomic():
+        pos = Position.objects.select_for_update().get(key=key)
+        queued = ingest.enqueue_pv_verification(pos,
+                                                requested_by=requested_by)
+    if not queued:
+        return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
+    return JsonResponse({'status': 'queued', 'queued': queued})
 
 
 def _client_ip(request):
@@ -3327,6 +3373,27 @@ def _campaign_context(request):
             'campaign_message': CAMPAIGN_MESSAGES.get(outcome, '')}
 
 
+# Por debajo de esto no hay linea que verificar: son la jugada y su respuesta,
+# y para eso ya esta el boton de al lado.
+PV_VERIFY_MIN_PLIES = 4
+
+
+def _pv_verify_plies(pos):
+    """Plies verificables de la PV vigente, o 0 si el boton no procede.
+
+    Cuenta SIN tocar la base — el mismo ``current_line`` que usa el helper que
+    encolara — y no promete legalidad: la PV puede estar rota y el helper corta
+    donde toque.  Lo que decide es si hay algo que ofrecer.
+    """
+    if pos.status != 'UNKNOWN':
+        return 0
+    line = solve_estimate.current_line(pos)
+    pv = (line or {}).get('pv')
+    if not isinstance(pv, list) or len(pv) < PV_VERIFY_MIN_PLIES:
+        return 0
+    return min(len(pv), ingest.PV_VERIFY_MAX_PLIES)
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -3446,6 +3513,12 @@ def explore(request, key):
         'board': _ctx_board(pos.fen),
         'unexplored_count': (len(ingest.unexplored_children(pos))
                              if pos.status == 'UNKNOWN' else 0),
+        # Cuantos plies de la PV VIGENTE se pueden verificar de un click, ya
+        # acotados por el tope del helper.  Cero apaga el boton, y por eso se
+        # cuenta aqui y no en la plantilla: con menos de cuatro plies no hay
+        # linea que contrastar — es la jugada y su respuesta, que es
+        # exactamente lo que el boton de al lado ya compra.
+        'pv_verify_plies': _pv_verify_plies(pos),
         # La flecha apunta al TOP de la misma lista que pinta la tabla (mejor
         # conocimiento, backed incluido), no al best_move de la ultima
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
