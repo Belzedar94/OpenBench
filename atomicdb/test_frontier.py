@@ -781,7 +781,10 @@ class ExpansionRequestApiTests(TestCase):
 
         response = self.client.get(f'/atomicdb/explore/{pos.key}/')
 
-        self.assertContains(response, 'Budget exhausted here')
+        # El texto del swap dice lo que PASA (se compro anchura y la
+        # profundidad vuelve sola si los hijos discrepan), no "budget
+        # exhausted" — que Wolfram leyo como un fallo, con razon.
+        self.assertContains(response, 'Bought breadth instead')
         self.assertContains(response, 'children_queued')
 
     def test_an_expansion_says_where_the_work_landed(self):

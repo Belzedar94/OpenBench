@@ -148,11 +148,18 @@
       function descentNote(d) {
         const plies = Number(d.descent_plies) || 0;
         if (d.status === 'expanded') {
-          return 'Budget exhausted here — queued '
+          // Antes decia "Budget exhausted here", que era mentira en el caso
+          // comun: el click se CONVIERTE en anchura a proposito (medido:
+          // un ply de hijos reproduce el veredicto del re-search profundo
+          // ~97% de las veces), y la profundidad vuelve sola si los hijos
+          // contradicen la linea (witness-refuted). Wolfram leyo el texto
+          // viejo como un fallo — con razon.
+          return 'Bought breadth instead — queued '
                  + plural(Number(d.children_queued) || 0, 'reply', 'replies')
-                 + ' below instead'
+                 + ' below'
                  + (plies ? ' (' + plural(plies, 'ply', 'plies')
-                            + ' further down)' : '');
+                            + ' further down)' : '')
+                 + '; a deep re-run auto-triggers if they disagree';
         }
         const seen = Number(d.children_exhausted) || 0;
         if (!plies && !seen) {
