@@ -1607,3 +1607,135 @@ html.theme-ready .tile {
   font-size: .8rem;
   white-space: nowrap;
 }
+
+/* Pagina de contribuidor.  Reutiliza lo que ya existe — .metrics, .feed,
+   .chip, table — y solo anade lo que no tenia sitio: los clubes de nodos, la
+   grafica de dos semanas y la segunda linea de las celdas de la tabla de
+   maquinas.  Un telefono no aguanta nueve columnas, asi que lo secundario
+   (threads, hash, sistema, recuento de analisis) va DEBAJO de su celda en vez
+   de a su lado. */
+.contrib-name {
+  font-size: 1.35rem;
+}
+
+.contrib-lede {
+  max-width: 60ch;
+  margin-bottom: .9rem;
+  font-size: .9rem;
+}
+
+.contrib-since {
+  margin-top: -.9rem;
+  margin-bottom: 1.2rem;
+  font-size: .85rem;
+}
+
+.contrib-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin-bottom: .2rem;
+}
+
+.contrib-badge {
+  padding: .18rem .65rem;
+  border: 1px solid var(--opening-border);
+  border-radius: 999px;
+  background: var(--opening-sheen);
+  color: var(--opening-ink);
+  font-size: .78rem;
+  letter-spacing: .5px;
+}
+
+.contrib-section {
+  margin-bottom: 2rem;
+}
+
+.contrib-sub {
+  margin: 1.1rem 0 .4rem;
+  color: var(--ink-muted);
+  font-size: .78rem;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.contrib-when {
+  color: var(--ink-muted);
+  font-size: .8rem;
+}
+
+.contrib-spec {
+  margin-top: .15rem;
+  font-size: .8rem;
+}
+
+.contrib-workers td {
+  vertical-align: top;
+}
+
+/* Nodos por dia, sin una sola linea de JavaScript: catorce rectangulos y una
+   linea de base.  ``preserveAspectRatio: none`` deja que se estire a lo ancho
+   del sitio que haya — es una FORMA, no una lectura de valores exactos, y
+   esos viven en el tooltip de cada barra. */
+.spark {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  height: 72px;
+}
+
+.spark rect {
+  fill: var(--accent);
+}
+
+.spark rect.quiet {
+  fill: var(--border-strong);
+}
+
+.spark line {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.contrib-sparknote {
+  margin-top: .35rem;
+  font-size: .82rem;
+}
+
+/* En un telefono, cinco columnas solo caben si el nombre de la maquina puede
+   partirse: ``belzedar-ryzen-atomicdb#0`` no tiene un solo espacio y sin esto
+   sacaba la tabla entera fuera de la pantalla (medido: 427px de tabla en 337
+   de sitio).  Se parte el nombre y se aprieta el relleno; nada se esconde. */
+@media (max-width: 560px) {
+  .contrib-workers,
+  .contrib-names {
+    font-size: .84rem;
+  }
+
+  .contrib-workers th,
+  .contrib-workers td,
+  .contrib-names th,
+  .contrib-names td {
+    padding: .4rem .25rem;
+  }
+
+  /* La cabecera en versalitas con interletrado es lo que mas ancho gasta y lo
+     que menos informa: cuatro palabras cortas no necesitan separacion extra
+     para leerse. */
+  .contrib-workers th,
+  .contrib-names th {
+    font-size: .7rem;
+    letter-spacing: 0;
+  }
+
+  .contrib-workers td:first-child,
+  .contrib-names td:first-child {
+    overflow-wrap: anywhere;
+  }
+
+  .contrib-workers .contrib-spec,
+  .contrib-names .contrib-spec {
+    font-size: .74rem;
+  }
+}

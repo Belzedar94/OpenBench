@@ -1,0 +1,141 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}{{ profile_user }} · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 class="contrib-name" style="margin-top:0">{{ profile_user }}</h2>
+<p class="dim contrib-lede">What this account has put into AtomicDB: the
+  analyses it asked for, the machines it runs and the opening names it
+  proposed. <a href="/user/{{ profile_user|urlencode }}/">OpenBench profile</a></p>
+
+{% if badges %}
+<div class="contrib-badges">
+  {% for badge in badges %}<span class="contrib-badge"
+    title="Engine nodes searched by this account's workers">{{ badge }}</span>{% endfor %}
+</div>
+{% endif %}
+
+<div class="metrics">
+  <div class="metric" title="Analyses this account asked for from the explorer"><div class="v">{{ requests_total_h }}</div><div class="l">requests made</div></div>
+{% if has_nodes %}  <div class="metric" title="Engine nodes searched by this account's workers, all time"><div class="v">{{ nodes_all_h }}</div><div class="l">engine nodes</div></div>
+  <div class="metric" title="Analyses served by this account's workers, all time"><div class="v">{{ tasks_all_h }}</div><div class="l">analyses served</div></div>
+  <div class="metric" title="Engine nodes searched by this account's workers in the last 24 hours"><div class="v">{{ nodes_24h_h }}</div><div class="l">nodes last 24h</div></div>
+  <div class="metric" title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><div class="v">{{ fleet_share }}%</div><div class="l">of the fleet, 24h</div></div>
+{% endif %}{% if rank_all %}  <div class="metric" title="Standing among every account with workers, by engine nodes, all time"><div class="v">#{{ rank_all.rank }}</div><div class="l">of {{ rank_all.of }} all time</div></div>
+{% endif %}{% if rank_24h %}  <div class="metric" title="Standing among the accounts whose workers searched anything in the last 24 hours"><div class="v">#{{ rank_24h.rank }}</div><div class="l">of {{ rank_24h.of }} today</div></div>
+{% endif %}</div>
+
+{% if first_at %}<p class="dim contrib-since">First contribution
+  {{ first_at|date:"j M Y" }}.</p>{% endif %}
+
+{% if has_spark %}
+<section class="contrib-section">
+  <h2>Engine nodes per day <span class="dim">last {{ spark_days }} days</span></h2>
+  <svg class="spark" viewBox="0 0 {{ spark_width }} {{ spark_height }}"
+    role="img" preserveAspectRatio="none"
+    aria-label="Engine nodes per day from {{ spark_from }} to {{ spark_to }}, {{ spark_total_h }} in total, peaking at {{ spark_peak_h }} in a day">
+    {% for b in spark_bars %}<rect{% if b.quiet %} class="quiet"{% endif %} x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}"><title>{{ b.day }}: {{ b.nodes }} nodes</title></rect>{% endfor %}
+    <line x1="0" y1="{{ spark_baseline }}" x2="{{ spark_width }}" y2="{{ spark_baseline }}"></line>
+  </svg>
+  <p class="dim contrib-sparknote">{{ spark_from }} to {{ spark_to }} ·
+    {{ spark_total_h }} nodes · busiest day {{ spark_peak_h }}</p>
+</section>
+{% endif %}
+
+<section class="contrib-section">
+  <h2>{{ owner_label }} queue</h2>
+  {% if has_queue %}
+  <h3 class="contrib-sub">Running now</h3>
+  {% if queue_leased %}
+  <ul class="feed">
+    {% for q in queue_leased %}
+    <li><span class="chip hot"></span>
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes on <b>{{ q.machine }}</b>{% if q.since %} · started {{ q.since }}{% endif %}{% if q.quiet %} · no recent heartbeat{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="dim">Nothing of {% if is_self %}yours{% else %}theirs{% endif %} is on a worker right now.</p>{% endif %}
+
+  <h3 class="contrib-sub">Waiting</h3>
+  {% if queue_pending %}
+  <ul class="feed">
+    {% for q in queue_pending %}
+    <li><span class="t">#{{ q.place }}</span>
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.ahead %} · {{ q.ahead }} request{{ q.ahead|pluralize }} ahead{% else %} · next up{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}
+  {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
+
+  <h3 class="contrib-sub">Served</h3>
+  {% if queue_done %}
+  <ul class="feed">
+    {% for q in queue_done %}
+    <li><span class="chip won"></span>
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.nodes }} nodes{% if q.when %} · {{ q.when }}{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% if queue_done_more %}<p class="dim">and {{ queue_done_more }} more served.</p>{% endif %}
+  {% else %}<p class="dim">Nothing served yet.</p>{% endif %}
+  {% else %}
+  <p class="dim">No analysis requests yet. Open any position in the explorer and
+    ask for one: it lands in this queue, and a worker picks it up before the
+    tree's own exploration.</p>
+  {% endif %}
+</section>
+
+<section class="contrib-section">
+  <h2>{{ owner_label }} workers</h2>
+  {% if has_workers %}
+  <table class="contrib-workers">
+    <tr><th>Machine</th><th>State</th><th>Last 24h</th><th>All time</th>
+      <th>Speed</th></tr>
+    {% for w in workers %}
+    <tr>
+      <td><strong>{{ w.machine }}</strong>
+        <div class="dim contrib-spec">{% if w.threads %}{{ w.threads }} thread{{ w.threads|pluralize }}{% else %}threads not reported{% endif %}{% if w.hash_mb %} · {{ w.hash_mb }} MB hash{% endif %}{% if w.os %} · {{ w.os }}{% endif %}</div>
+        {% if w.searching %}<div class="contrib-spec">searching
+          <a class="qline" href="/atomicdb/explore/{{ w.searching.key }}/{% if w.searching.play %}?play={{ w.searching.play|urlencode }}{% endif %}" title="{{ w.searching.full }}">{{ w.searching.san }}</a>
+          <span class="dim">· {{ w.searching.budget }} nodes</span></div>{% endif %}</td>
+      <td><span class="chip {% if w.online %}won{% else %}cold{% endif %}"></span>{% if w.online %}online{% else %}offline{% endif %}
+        <div class="dim contrib-spec">seen {{ w.seen }}</div></td>
+      <td>{{ w.nodes_24h_h }} nodes
+        <div class="dim contrib-spec">{{ w.tasks_24h }} analys{{ w.tasks_24h|pluralize:"is,es" }}</div></td>
+      <td>{{ w.nodes_all_h }} nodes
+        <div class="dim contrib-spec">{{ w.tasks_all }} analys{{ w.tasks_all|pluralize:"is,es" }}</div></td>
+      <td>{% if w.nps_h %}{{ w.nps_h }} n/s{% else %}<span class="dim">not measured</span>{% endif %}
+        {% if w.nps_h %}<div class="dim contrib-spec">average per search</div>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="dim">No workers under this account. A machine that runs the AtomicDB
+    client with these credentials shows up here, with what it has searched.</p>
+  {% endif %}
+</section>
+
+<section class="contrib-section">
+  <h2>{{ owner_label }} opening names</h2>
+  {% if suggestions %}
+  <table class="contrib-names">
+    <tr><th>Proposed name</th><th>Position</th><th>State</th></tr>
+    {% for s in suggestions %}
+    <tr>
+      <td>{% if s.edit %}<span class="dim">'{{ s.previous }}' &rarr;</span>
+        <strong>{{ s.name }}</strong>{% else %}<strong>{{ s.name }}</strong>{% endif %}
+        <div class="dim contrib-spec">{{ s.when }}</div></td>
+      <td><a class="qline" href="/atomicdb/explore/{{ s.key }}/"
+          title="{{ s.full }}">{{ s.san }}</a></td>
+      <td><span class="chip {{ s.css }}"></span>{{ s.status }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if suggestions_more %}<p class="dim">and {{ suggestions_more }} more.</p>{% endif %}
+  {% else %}
+  <p class="dim">No opening names proposed yet. Any position in the explorer
+    takes a suggestion, and an approved one is published on it.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

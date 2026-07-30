@@ -1,0 +1,487 @@
+"""La pagina publica de un CONTRIBUIDOR: su cola, sus maquinas y su huella.
+
+QUE ES.  Una pagina por cuenta con actividad en AtomicDB — peticiones de
+analisis, workers o nombres propuestos — a la que se llega desde la cabecera
+(``/atomicdb/me/``) o por su URL directa.  Todo lo que ensena ya es publico:
+la cola de peticiones se ve en la portada, la flota en los medidores y el
+buzon de nombres en su pagina; lo unico que hace esto es agruparlo POR
+PERSONA.  Lo que NO sale es la IP de una sugerencia, que es el unico dato
+personal que guarda ese modelo.
+
+DE DONDE SALE CADA COSA.  La propiedad de una maquina es ``WorkerPing.user``
+y nunca el prefijo del string ``machine``: un worker se presenta con el
+nombre que quiere, dos personas pueden compartir nombre de host y una
+maquina con ``--jobs`` se parte en slots (``base#3``).  La autoria de una
+peticion es ``AnalysisTask.requested_by``, que es lo que escribe el
+explorador cuando quien pincha tiene sesion.
+
+POR QUE UN AGREGADO COMPARTIDO Y CACHEADO.  Los totales por maquina no son de
+nadie: la misma consulta contesta "cuantos nodos ha puesto esta maquina" y
+"que puesto ocupa esta cuenta entre todas".  Se calculan UNA vez por minuto
+para todo el sitio (dos GROUP BY sobre el indice de tareas completadas) y de
+ahi salen la tabla de maquinas, la cuota de flota y el ranking.  La
+alternativa — una tanda de consultas por cuenta y por visita — repetiria el
+mismo trabajo tantas veces como visitantes haya, y esta pagina
+deliberadamente NO lleva cache de pagina (§ urls): es personal.
+"""
+
+from datetime import date, datetime, timedelta, timezone as dt_timezone
+
+from django.core.cache import cache
+from django.db.models import Count, IntegerField, OuterRef, Subquery, Sum
+from django.db.models.functions import Coalesce, TruncDate
+from django.utils import timezone
+from django.utils.timesince import timesince
+
+from .models import AnalysisTask, OpeningNameSuggestion, WorkerPing
+
+
+# Un worker manda heartbeat cada ~30-60s.  Cuatro minutos de silencio ya no es
+# un ciclo lento: es una maquina apagada.  Mas generoso que los 180s de los
+# medidores de la portada a proposito — alli se cuenta capacidad viva, aqui se
+# le dice a una persona si su ordenador esta puesto.
+ONLINE_SECONDS = 240
+# Listas acotadas: esto es una pagina de cortesia, no un registro de auditoria.
+QUEUE_ROWS = 20
+SUGGESTION_ROWS = 20
+# Dos semanas: suficiente para ver una racha y para que un dia flojo no
+# desaparezca dentro de una barra mensual.
+SPARK_DAYS = 14
+SPARK_WIDTH = 280
+SPARK_HEIGHT = 40
+SPARK_BASELINE = 38
+SPARK_MAX_BAR = 34
+FLEET_CACHE_SECONDS = 60
+FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v1'
+# Clubes de nodos.  De mayor a menor: se pintan todos los alcanzados, y el
+# primero de la lista es el que manda en el titulo.
+MILESTONES = ((10_000_000_000_000, '10T club'),
+              (1_000_000_000_000, '1T club'),
+              (100_000_000_000, '100B club'),
+              (1_000_000_000, '1B club'))
+
+COMPLETED = AnalysisTask.TState.COMPLETED
+LEASED = AnalysisTask.TState.LEASED
+PENDING = AnalysisTask.TState.PENDING
+USER = AnalysisTask.Source.USER
+
+
+def _ago(moment, now):
+    """"3 minutes ago" en UNA unidad, o "just now". Igual que la campana."""
+    if moment is None:
+        return ''
+    text = timesince(moment, now=now, depth=1)
+    if text.split()[:1] == ['0']:
+        return 'just now'
+    return f'{text} ago'
+
+
+def _machine_totals(since=None):
+    """``{maquina: {nodes, tasks, seconds}}`` de las tareas COMPLETADAS.
+
+    Un GROUP BY sobre el indice ``(state, completed)``.  El numero de maquinas
+    distintas es de decenas, asi que lo que vuelve cabe en memoria por
+    construccion — a diferencia de las tareas, que no.
+    """
+    rows = AnalysisTask.objects.filter(state=COMPLETED)
+    if since is not None:
+        rows = rows.filter(completed__gte=since)
+    rows = rows.values('machine').annotate(
+        nodes=Sum('nodes_searched'), tasks=Count('id'),
+        seconds=Sum('elapsed_seconds')).order_by()
+    return {row['machine']: {'nodes': row['nodes'] or 0,
+                             'tasks': row['tasks'] or 0,
+                             'seconds': row['seconds'] or 0.0}
+            for row in rows}
+
+
+def _by_owner(machine_totals, owner):
+    """Los mismos totales plegados por CUENTA.
+
+    Una maquina sin ``WorkerPing`` no tiene dueno conocido y no entra en
+    ninguna cuenta: sus nodos siguen contando en el denominador de la flota,
+    porque se buscaron de verdad, pero atribuirselos a alguien seria inventar.
+    """
+    folded = {}
+    for machine, totals in machine_totals.items():
+        user = owner.get(machine)
+        if not user:
+            continue
+        row = folded.setdefault(user, {'nodes': 0, 'tasks': 0})
+        row['nodes'] += totals['nodes']
+        row['tasks'] += totals['tasks']
+    return folded
+
+
+def fleet(now=None):
+    """Snapshot compartido: totales por maquina y por cuenta, 24h y all-time.
+
+    Un minuto de cache.  La ventana de 24h se mueve dentro de esa entrada, que
+    es exactamente el mismo trato que ya tienen los medidores de la portada:
+    un indicador de tendencia no cambia ninguna decision por sesenta segundos.
+    """
+    cached = cache.get(FLEET_CACHE_KEY)
+    if cached is not None:
+        return cached
+    now = now or timezone.now()
+    owner = dict(WorkerPing.objects.values_list('machine', 'user'))
+    machines_all = _machine_totals()
+    machines_24h = _machine_totals(since=now - timedelta(hours=24))
+    snapshot = {
+        'owner': owner,
+        'machines_all': machines_all,
+        'machines_24h': machines_24h,
+        'users_all': _by_owner(machines_all, owner),
+        'users_24h': _by_owner(machines_24h, owner),
+        'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
+        'nodes_all': sum(row['nodes'] for row in machines_all.values()),
+    }
+    cache.set(FLEET_CACHE_KEY, snapshot, FLEET_CACHE_SECONDS)
+    return snapshot
+
+
+def reset_cache():
+    """Tira el snapshot compartido (tests y despliegues)."""
+    cache.delete(FLEET_CACHE_KEY)
+
+
+def _rank(totals, username):
+    """``{'rank': 2, 'of': 7}`` por nodos, o ``None`` si no ha puesto ninguno.
+
+    Empates COMPARTEN puesto: dos cuentas con los mismos nodos son las dos
+    segundas, y la siguiente es cuarta.  Un desempate por cualquier otra cosa
+    seria un orden inventado.
+    """
+    mine = totals.get(username, {}).get('nodes', 0)
+    if not mine:
+        return None
+    ladder = sorted((row['nodes'] for row in totals.values() if row['nodes']),
+                    reverse=True)
+    return {'rank': ladder.index(mine) + 1, 'of': len(ladder)}
+
+
+def has_activity(username):
+    """Existe pagina para esta cuenta?  Workers, peticiones o nombres."""
+    if not username:
+        return False
+    return (WorkerPing.objects.filter(user=username).exists()
+            or AnalysisTask.objects.filter(source=USER,
+                                           requested_by=username).exists()
+            or OpeningNameSuggestion.objects.filter(
+                suggested_by=username).exists())
+
+
+def _queue_rows(username):
+    """Las tres caras de la cola de esta cuenta, sin etiquetar todavia.
+
+    SOLO ``source=USER``: una tarea AUTO nace del selector y no es de nadie,
+    aunque la maquina que la sirva sea suya — eso se cuenta en la flota, que es
+    otra seccion y otra pregunta.
+    """
+    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    # Cuantas peticiones NOMBRADAS cobran antes que esta.  Mismo orden que
+    # ``choose_pending`` (nombradas por delante de las anonimas, FIFO dentro de
+    # cada estrato) y una sola sentencia: la subconsulta correlacionada evita
+    # un COUNT por fila, que es justo el N+1 que esta pagina no puede pagar.
+    ahead = Coalesce(Subquery(
+        AnalysisTask.objects
+        .filter(state=PENDING, source=USER, requested_by__gt='',
+                id__lt=OuterRef('id'))
+        .order_by().values('source').annotate(c=Count('id')).values('c')[:1],
+        output_field=IntegerField()), 0)
+    pending = list(mine.filter(state=PENDING).annotate(ahead=ahead)
+                   .order_by('id')[:QUEUE_ROWS + 1])
+    leased = list(mine.filter(state=LEASED)
+                  .order_by('-leased_at', '-id')[:QUEUE_ROWS])
+    done = list(mine.filter(state=COMPLETED)
+                .order_by('-completed', '-id')[:QUEUE_ROWS + 1])
+    return pending, leased, done
+
+
+def _overflow(rows, limit, queryset):
+    """Corta a ``limit`` y dice cuantas quedan fuera (0 si ninguna)."""
+    if len(rows) <= limit:
+        return rows, 0
+    return rows[:limit], queryset.count() - limit
+
+
+def _spark(machines, now):
+    """Nodos por dia (UTC) de las ultimas dos semanas, ya en barras SVG.
+
+    Se agrupa en SQL: una fila por dia en vez de una por tarea.  Un dia sin
+    tareas sale con altura cero y ocupa su sitio — un hueco silencioso mentiria
+    sobre la forma de la racha.
+    """
+    if not machines:
+        return {'has_spark': False}
+    midnight = datetime(now.year, now.month, now.day, tzinfo=dt_timezone.utc)
+    since = midnight - timedelta(days=SPARK_DAYS - 1)
+    rows = (AnalysisTask.objects
+            .filter(state=COMPLETED, machine__in=machines,
+                    completed__gte=since)
+            .annotate(day=TruncDate('completed', tzinfo=dt_timezone.utc))
+            .values('day').annotate(nodes=Sum('nodes_searched')).order_by())
+    by_day = {}
+    for row in rows:
+        day = row['day']
+        if isinstance(day, datetime):
+            day = day.date()
+        elif isinstance(day, str):
+            day = date.fromisoformat(day[:10])
+        by_day[day] = (row['nodes'] or 0) + by_day.get(day, 0)
+    days = [(since + timedelta(days=index)).date()
+            for index in range(SPARK_DAYS)]
+    values = [by_day.get(day, 0) for day in days]
+    peak = max(values)
+    if not peak:
+        return {'has_spark': False}
+    slot = SPARK_WIDTH // SPARK_DAYS
+    bars = []
+    for index, (day, value) in enumerate(zip(days, values)):
+        # Un dia sin nodos conserva su barra de un pixel: ocupa su sitio, se
+        # distingue del dia flojo por el color y sigue teniendo tooltip.  Un
+        # hueco vacio se leeria como que ese dia no existe.
+        height = max(1, round(SPARK_MAX_BAR * value / peak)) if value else 1
+        bars.append({
+            'x': index * slot + 2,
+            'y': SPARK_BASELINE - height,
+            'w': slot - 4,
+            'h': height,
+            'day': day.strftime('%b %d'),
+            'nodes': human(value),
+            'quiet': not value,
+        })
+    return {
+        'has_spark': True,
+        'spark_bars': bars,
+        'spark_width': SPARK_WIDTH,
+        'spark_height': SPARK_HEIGHT,
+        'spark_baseline': SPARK_BASELINE,
+        'spark_days': SPARK_DAYS,
+        'spark_peak_h': human(peak),
+        'spark_total_h': human(sum(values)),
+        'spark_from': days[0].strftime('%b %d'),
+        'spark_to': days[-1].strftime('%b %d'),
+    }
+
+
+def human(n):
+    """3322 -> '3,322'; 2400000000 -> '2.40B'. La misma escala del resto."""
+    from .views import _human
+    return _human(n)
+
+
+def _badges(nodes_total):
+    """El club MAS ALTO alcanzado, y solo ese.
+
+    Los cuatro son la misma escalera: quien esta en el de 10T esta en los
+    otros tres por definicion, y pintarlos todos convierte un logro en una
+    fila de ruido.
+    """
+    for threshold, label in MILESTONES:
+        if nodes_total >= threshold:
+            return [label]
+    return []
+
+
+def _labels(keys):
+    from . import views
+    return views._line_labels_many([key for key in keys if key])
+
+
+def _presented(task, labels, now, extra=None):
+    """Una fila de cola con su linea ya legible y su enlace al explorador.
+
+    La ruta declarada por el peticionario gana al linaje canonico cuando sigue
+    siendo valida: el DAG transpone y nadie reconoce su propia peticion pintada
+    en otro orden de jugadas (§ ``AnalysisTask.route``).
+    """
+    from . import views
+
+    preview, full = labels.get(task.position_id, ('', ''))
+    play = ''
+    if task.route:
+        routed = views._route_labels(task.route, task.position_id)
+        if routed is not None and routed[0]:
+            preview, full = routed
+            play = task.route
+    row = {
+        'key': task.position_id,
+        'san': preview or 'the start position',
+        'full': full or 'the start position',
+        'play': play,
+        'budget': human(task.budget_nodes),
+        'multipv': task.multipv,
+    }
+    row.update(extra or {})
+    return row
+
+
+def present(username, now=None):
+    """Todo el contexto de la pagina de ``username``. Sin escribir nada."""
+    from . import views
+
+    now = now or timezone.now()
+    snapshot = fleet(now=now)
+    machines = sorted(WorkerPing.objects.filter(user=username)
+                      .values_list('machine', flat=True))
+
+    pending, leased, done = _queue_rows(username)
+    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    pending, pending_more = _overflow(pending, QUEUE_ROWS,
+                                      mine.filter(state=PENDING))
+    done, done_more = _overflow(done, QUEUE_ROWS, mine.filter(state=COMPLETED))
+
+    suggestions = list(OpeningNameSuggestion.objects
+                       .filter(suggested_by=username)
+                       .order_by('-created')[:SUGGESTION_ROWS + 1])
+    suggestions, suggestions_more = _overflow(
+        suggestions, SUGGESTION_ROWS,
+        OpeningNameSuggestion.objects.filter(suggested_by=username))
+
+    # Lo que las maquinas de esta cuenta tienen arrendado AHORA: es otra
+    # pregunta que la cola de arriba (aquello es lo que PIDIO, esto lo que
+    # CORRE), y las dos caben en una consulta pequena cada una.
+    running = {}
+    if machines:
+        for task in AnalysisTask.objects.filter(state=LEASED,
+                                                machine__in=machines):
+            running.setdefault(task.machine, task)
+
+    labels = _labels([task.position_id for task in pending + leased + done]
+                     + [task.position_id for task in running.values()]
+                     + [row.position_id for row in suggestions])
+
+    lease_cutoff = now - timedelta(minutes=views.LEASE_MINUTES)
+    leased_rows = []
+    for task in leased:
+        beat = task.lease_heartbeat_at or task.leased_at
+        leased_rows.append(_presented(task, labels, now, {
+            'machine': task.machine,
+            'since': _ago(task.leased_at, now),
+            'quiet': beat is None or beat < lease_cutoff,
+        }))
+    pending_rows = [
+        _presented(task, labels, now,
+                   {'ahead': task.ahead, 'place': task.ahead + 1,
+                    'when': _ago(task.created, now)})
+        for task in pending]
+    done_rows = [
+        _presented(task, labels, now,
+                   {'when': _ago(task.completed, now),
+                    'nodes': human(task.nodes_searched)})
+        for task in done]
+
+    online_cutoff = now - timedelta(seconds=ONLINE_SECONDS)
+    workers = []
+    nodes_24h = tasks_24h = nodes_all = tasks_all = 0
+    for ping in WorkerPing.objects.filter(user=username).order_by('machine'):
+        day = snapshot['machines_24h'].get(ping.machine,
+                                           {'nodes': 0, 'tasks': 0})
+        life = snapshot['machines_all'].get(
+            ping.machine, {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
+        nodes_24h += day['nodes']
+        tasks_24h += day['tasks']
+        nodes_all += life['nodes']
+        tasks_all += life['tasks']
+        seconds = life.get('seconds') or 0.0
+        task = running.get(ping.machine)
+        row = {
+            'machine': ping.machine,
+            'threads': ping.threads,
+            'hash_mb': ping.hash_mb,
+            'os': ping.os,
+            'online': ping.last_seen >= online_cutoff,
+            'seen': _ago(ping.last_seen, now),
+            'tasks_done': ping.tasks_done,
+            'nodes_24h_h': human(day['nodes']),
+            'tasks_24h': day['tasks'],
+            'nodes_all': life['nodes'],
+            'nodes_all_h': human(life['nodes']),
+            'tasks_all': life['tasks'],
+            'nps_h': human(int(life['nodes'] / seconds)) if seconds else '',
+        }
+        if task is not None:
+            row['searching'] = _presented(task, labels, now)
+        workers.append(row)
+    # Lo vivo arriba y lo grande primero: una maquina apagada hace meses no
+    # puede encabezar la lista solo porque su nombre empiece por 'a'.
+    workers.sort(key=lambda row: (not row['online'], -row['nodes_all'],
+                                  row['machine']))
+
+    rank_24h = _rank(snapshot['users_24h'], username)
+    rank_all = _rank(snapshot['users_all'], username)
+    share = (round(100.0 * nodes_24h / snapshot['nodes_24h'], 1)
+             if snapshot['nodes_24h'] else 0.0)
+
+    chips = {OpeningNameSuggestion.SState.APPROVED: 'won',
+             OpeningNameSuggestion.SState.REJECTED: 'lost',
+             OpeningNameSuggestion.SState.PENDING: 'hot'}
+    suggestion_rows = []
+    for row in suggestions:
+        preview, full = labels.get(row.position_id, ('', ''))
+        suggestion_rows.append({
+            'name': row.proposed_name,
+            'previous': row.previous_name,
+            'edit': row.kind == OpeningNameSuggestion.SKind.EDIT,
+            'status': row.get_status_display().lower(),
+            'css': chips.get(row.status, 'cold'),
+            'key': row.position_id,
+            'san': preview or 'the start position',
+            'full': full or 'the start position',
+            'when': _ago(row.created, now),
+        })
+
+    context = {
+        'profile_user': username,
+        'requests_total_h': human(mine.count()),
+        'queue_pending': pending_rows, 'queue_pending_more': pending_more,
+        'queue_leased': leased_rows,
+        'queue_done': done_rows, 'queue_done_more': done_more,
+        'has_queue': bool(pending_rows or leased_rows or done_rows),
+        'workers': workers, 'has_workers': bool(workers),
+        'fleet_share': share,
+        'fleet_nodes_24h_h': human(snapshot['nodes_24h']),
+        'nodes_24h_h': human(nodes_24h), 'tasks_24h_h': human(tasks_24h),
+        'nodes_all_h': human(nodes_all), 'tasks_all_h': human(tasks_all),
+        'has_nodes': bool(nodes_all),
+        'rank_24h': rank_24h, 'rank_all': rank_all,
+        'badges': _badges(nodes_all),
+        'suggestions': suggestion_rows,
+        'suggestions_more': suggestions_more,
+        'first_at': _first_contribution(username, machines),
+    }
+    context.update(_spark(machines, now))
+    return context
+
+
+def _first_contribution(username, machines):
+    """La fecha mas antigua que esta cuenta puede reclamar, o ``None``.
+
+    Tres candidatos y el minimo de los que existan: el primer analisis servido
+    por una maquina suya, la primera peticion que hizo y el primer nombre que
+    propuso.  Quien solo pide analisis tambien tiene una primera vez, y
+    empezar la biografia de alguien por su primer worker seria borrarla.
+    """
+    stamps = []
+    if machines:
+        first = (AnalysisTask.objects
+                 .filter(state=COMPLETED, machine__in=machines,
+                         completed__isnull=False)
+                 .order_by('completed').values_list('completed', flat=True)
+                 .first())
+        if first is not None:
+            stamps.append(first)
+    first_request = (AnalysisTask.objects
+                     .filter(source=USER, requested_by=username)
+                     .order_by('created').values_list('created', flat=True)
+                     .first())
+    if first_request is not None:
+        stamps.append(first_request)
+    first_name = (OpeningNameSuggestion.objects
+                  .filter(suggested_by=username)
+                  .order_by('created').values_list('created', flat=True)
+                  .first())
+    if first_name is not None:
+        stamps.append(first_name)
+    return min(stamps) if stamps else None

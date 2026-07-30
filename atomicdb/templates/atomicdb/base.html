@@ -89,7 +89,8 @@
         <a class="bell-all" href="/atomicdb/notifications/">See all</a>
       </div>
     </div>
-    <a class="identity-user" href="/user/{{ user.username }}/">{{ user.username }}</a>
+    <a class="identity-user" href="/atomicdb/me/"
+      title="Your AtomicDB contributions">{{ user.username }}</a>
     <a class="identity-link" href="/logout/?next={{ identity_next }}">Sign out</a>
     {% else %}
     <a class="identity-link" href="/login/?next={{ identity_next }}">Sign in</a>

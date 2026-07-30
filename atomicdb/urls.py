@@ -72,6 +72,15 @@ urlpatterns = [
     # ruta.  Escribe, y ademas es de una sola persona: sin cache.
     path('notifications/', views.notifications_page,
          name='atomicdb-notifications'),
+    # Pagina de contribuidor.  Publica, pero DE UNA PERSONA: sin cache, ni
+    # siquiera variando por cookie.  Una entrada por visitante de una pagina
+    # que ya es distinta para cada uno no absorbe ninguna tormenta de F5 —
+    # solo llenaria el cache de cuerpos de un solo uso.  Sus agregados caros
+    # (totales por maquina de toda la flota) llevan su propia cache de un
+    # minuto, compartida y sin nada personal dentro (§ contributors.fleet).
+    path('user/<str:username>/', views.contributor,
+         name='atomicdb-contributor'),
+    path('me/', views.contributor_me, name='atomicdb-me'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.

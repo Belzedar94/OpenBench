@@ -24,8 +24,8 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
                               OuterRef, Q, Subquery, Sum, Value, When, Window)
 from django.db.models.functions import Coalesce, RowNumber
 
-from . import (community_names, ingest, ingest_queue, logic, metrics,
-               notifications, openings, proof, solve, solve_estimate)
+from . import (community_names, contributors, ingest, ingest_queue, logic,
+               metrics, notifications, openings, proof, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -3113,6 +3113,50 @@ def notifications_page(request):
     rows = notifications.presented(request.user.username,
                                    limit=notifications.PAGE_ROWS)
     return render(request, 'atomicdb/notifications.html', {'rows': rows})
+
+
+# ---------------- pagina de contribuidor ----------------
+
+def contributor_me(request):
+    """Atajo a tu propia pagina. Sin sesion, al login de OpenBench.
+
+    El enlace de la cabecera apunta AQUI y no a ``/atomicdb/user/<yo>/``: asi
+    el chrome de todas las paginas sigue siendo el mismo HTML para cualquier
+    visitante con sesion, y una copia cacheada no puede llevar el nombre de
+    nadie en el destino del enlace (§ urls, por que map y method varian por
+    cookie).  El ``next`` se compone con la ruta literal, no con nada que
+    venga del cliente.
+    """
+    if not request.user.is_authenticated:
+        return redirect(f'/login/?next={quote("/atomicdb/me/")}')
+    return redirect(
+        f'/atomicdb/user/{quote(request.user.username, safe="")}/')
+
+
+def contributor(request, username):
+    """La pagina publica de una cuenta con actividad en AtomicDB.
+
+    404 si no la tiene: una pagina vacia por cada nombre que alguien teclee
+    seria afirmar que esa cuenta contribuye.  Lo que decide es actividad
+    REAL — workers, peticiones o nombres propuestos — y no la existencia de
+    la cuenta en OpenBench, que es otra base y otra pregunta.
+    """
+    username = (username or '')[:64]
+    if not contributors.has_activity(username):
+        return render(request, 'atomicdb/missing.html', {
+            'missing_note': 'No AtomicDB activity under that name (yet).',
+        }, status=404)
+    viewer = (request.user.username if request.user.is_authenticated else '')
+    context = contributors.present(username)
+    context.update({
+        **_suggestions_badge(request),
+        'is_self': viewer == username,
+        # Los titulos hablan de la persona que se esta mirando: "Your queue"
+        # cuando eres tu, "alice's queue" cuando no.  La pagina es publica y
+        # tutear al visitante sobre la cola de otro seria mentirle.
+        'owner_label': 'Your' if viewer == username else f'{username}’s',
+    })
+    return render(request, 'atomicdb/contributor.html', context)
 
 
 # ---------------- campanas de exploracion ----------------
