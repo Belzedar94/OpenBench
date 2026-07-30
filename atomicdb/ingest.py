@@ -2443,20 +2443,31 @@ def _uncertainty_expand(keys):
 
 
 def _breadth_swap_eligible(pos):
-    """Solo REVISITAS de nodos abiertos fuera de la banda de mate.
+    """Solo REVISITAS PROFUNDAS de nodos abiertos fuera de la banda de mate.
 
     La primera pasada siembra (MultiPV 5) y no se toca; un nodo en banda de
     mate quiere profundidad para extraer la PV entera; y un nodo cerrado no
     compra nada.  Medido en produccion (29-jul, n=800): un ply de hijos a
     128M reproduce el veredicto del re-search profundo el 96-99% de las
-    veces — el peldano profundo por defecto compraba veredicto ya sabido."""
+    veces — el peldano profundo por defecto compraba veredicto ya sabido.
+
+    Y EL UMBRAL DE PROFUNDIDAD (Wolfram, 30-jul): aquella medicion era
+    sobre re-searches de nodos que YA tenian su mirada profunda.  Con solo
+    la primera pasada de 128M completada, el click siguiente es exactamente
+    la primera busqueda honda MultiPV 2 — la que orienta el mejor camino —
+    y convertirla en anchura le negaba al peticionario la informacion que
+    estaba comprando ("I specifically wanted the high depth eval of the
+    parent so the engine can hint me the best path").  El swap solo actua
+    cuando el peldano de 512M ya esta gastado; hasta entonces, la escalera
+    clasica manda."""
     if not getattr(settings, 'ATOMICDB_BREADTH_SWAP', False):
         return False
     if pos.status != 'UNKNOWN':
         return False
     if abs(pos.eval_cp or 0) >= MATE_BAND:
         return False
-    return _completed_max_budget(pos) is not None
+    completed = _completed_max_budget(pos)
+    return completed is not None and completed >= REQUEST_BUDGET_LADDER[1]
 
 
 def request_analysis(pos, requested_by='', route=''):

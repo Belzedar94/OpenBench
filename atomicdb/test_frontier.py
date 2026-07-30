@@ -152,10 +152,12 @@ class BreadthSwapTests(TestCase):
     banda de mate, disputas y frontera saturada."""
 
     @override_settings(ATOMICDB_BREADTH_SWAP=True)
-    def test_a_revisit_request_expands_instead_of_deepening(self):
+    def test_a_deep_revisit_request_expands_instead_of_deepening(self):
+        # PROFUNDA: el 512M MultiPV 2 ya esta gastado. Ahi es donde la
+        # medicion del 29-jul aplica y el swap compra anchura.
         pos = ingest.get_or_create_position(logic.start_fen())
-        _exhaust_ladder(pos, budget=ingest.REQUEST_BUDGET_LADDER[0])
-        Position.objects.filter(pk=pos.pk).update(visits=1, eval_cp=30)
+        _exhaust_ladder(pos, budget=ingest.REQUEST_BUDGET_LADDER[1])
+        Position.objects.filter(pk=pos.pk).update(visits=2, eval_cp=30)
         pos.refresh_from_db()
 
         outcome = ingest.request_analysis(pos)
@@ -169,6 +171,27 @@ class BreadthSwapTests(TestCase):
                              ingest.REQUEST_BUDGET_LADDER[0])
         self.assertTrue(
             DBEvent.objects.filter(kind='BREADTH_SWAP').exists())
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_the_first_deep_look_is_never_swapped(self):
+        # Caso Wolfram (30-jul): con SOLO la primera pasada de 128M hecha,
+        # el click siguiente ES la primera busqueda honda MultiPV 2 que
+        # orienta el mejor camino — convertirla en anchura le negaba al
+        # peticionario exactamente lo que compraba.
+        pos = ingest.get_or_create_position(logic.start_fen())
+        _exhaust_ladder(pos, budget=ingest.REQUEST_BUDGET_LADDER[0])
+        Position.objects.filter(pk=pos.pk).update(visits=1, eval_cp=30)
+        pos.refresh_from_db()
+
+        self.assertEqual(ingest.request_analysis(pos), 'queued')
+
+        follow_up = AnalysisTask.objects.get(
+            position=pos, state=AnalysisTask.TState.PENDING)
+        self.assertEqual(follow_up.budget_nodes,
+                         ingest.REQUEST_BUDGET_LADDER[1])
+        self.assertFalse(
+            DBEvent.objects.filter(kind='BREADTH_SWAP').exists())
+        self.assertFalse(Edge.objects.filter(parent=pos).exists())
 
     @override_settings(ATOMICDB_BREADTH_SWAP=True)
     def test_the_seeding_pass_is_never_swapped(self):
