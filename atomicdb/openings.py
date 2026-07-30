@@ -1017,3 +1017,53 @@ def match_line(ucis: Iterable[str]) -> dict[str, object] | None:
     """Serializable last-known-opening lookup for a legal played line."""
     match = match_line_object(ucis)
     return match.as_dict() if match is not None else None
+
+
+def match_line_keys_object(
+        position_keys: Sequence[str]) -> OpeningLineMatch | None:
+    """:func:`match_line_object` for a line that was ALREADY replayed.
+
+    The catalogue is keyed by position, so replaying a line only ever serves
+    to turn it into the sequence of keys it passes through.  Callers that
+    already hold that sequence — the explorer validates ``play`` move by move
+    and holds a key per prefix, and the canonical lineage comes out of the
+    edges with a key per step — were paying a second, identical replay for
+    nothing: one move generation and one position setup per ply, which is the
+    single most expensive thing the explorer did (§ logic, "cuanto cuesta una
+    pregunta al movegen").
+
+    ``position_keys[i]`` is the position after ``i`` plies, so index 0 is the
+    start position and the last element is the page being rendered.  The
+    answer is identical to replaying the moves because the identity of a
+    position is its key and nothing else: the name of ply ``i`` comes from
+    ``match_key`` either way.
+
+    What is NOT re-checked here is legality — the caller replayed the line and
+    is responsible for that.  A malformed key sequence raises
+    :class:`InvalidOpeningLine` rather than quietly naming the wrong position.
+    """
+    keys = list(position_keys)
+    if not keys or any(not isinstance(key, str)
+                       or not _SHA256_RE.fullmatch(key) for key in keys):
+        raise InvalidOpeningLine('line is not a sequence of position keys')
+    opening = match_key(keys[0])
+    matched_ply = 0
+    for ply, key in enumerate(keys[1:], start=1):
+        exact = match_key(key)
+        if exact is not None:
+            opening = exact
+            matched_ply = ply
+    if opening is None:
+        return None
+    return OpeningLineMatch(
+        opening=opening,
+        matched_ply=matched_ply,
+        current_key=keys[-1],
+    )
+
+
+def match_line_keys(
+        position_keys: Sequence[str]) -> dict[str, object] | None:
+    """Serializable :func:`match_line` for an already-replayed line."""
+    match = match_line_keys_object(position_keys)
+    return match.as_dict() if match is not None else None

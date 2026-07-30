@@ -375,9 +375,16 @@ class ExplorerOpeningRouteTests(TestCase):
                 'provenance': {'source_row': '<u>row</u>'},
             }],
         }
+        # Los dos caminos por los que una ruta puede nombrar una apertura: por
+        # sus claves cuando la vista ya las tiene, y rejugandola cuando no
+        # (§ views._navigation_opening).  El escapado es de la plantilla, asi
+        # que da igual cual conteste, pero el test tiene que inyectar por el
+        # que la vista use de verdad.
         with mock.patch(
                 'atomicdb.views.openings.match_line',
                 return_value=malicious), mock.patch(
+                    'atomicdb.views.openings.match_line_keys',
+                    return_value=malicious), mock.patch(
                     'atomicdb.views.openings.lookup_key',
                     return_value=None):
             response = self.client.get(f'/atomicdb/explore/{root.key}/')

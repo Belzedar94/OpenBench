@@ -71,7 +71,16 @@ CACHE_SECONDS = 5
 
 def approved_map():
     """{position_key: {'name', 'kind', 'corrects', 'approved_by',
-    'approved_at'}} — fail-open."""
+    'approved_at'}} — fail-open.
+
+    UNA VEZ POR RENDER, NO UNA POR FILA.  El mapa entero es la unidad: se pide
+    completo, cabe en memoria y responde por cualquier posicion.  La tabla del
+    explorador preguntaba por CADA hijo, y con la cache compartida cada una de
+    esas preguntas es un viaje a Redis — cuarenta y tantos por pagina para
+    devolver siempre el mismo diccionario.  Por eso los consumidores aceptan
+    un ``names`` ya resuelto: quien pinta una lista lo pide una vez y lo
+    reparte.
+    """
     cached = cache.get(CACHE_KEY)
     if cached is not None:
         return cached
@@ -108,13 +117,19 @@ def invalidate():
     cache.delete(CACHE_KEY)
 
 
-def in_force(position_key):
+def in_force(position_key, names=None):
     """La entrada comunitaria que MANDA en esta posicion, o ``None``.
 
     Aqui vive la unica excepcion a "el catalogo auditado manda": una edicion
     aprobada.  Todo lo demas cede ante el catalogo, igual que siempre.
+
+    ``names`` es el mapa completo ya resuelto por quien pinta una lista de
+    posiciones (§ ``approved_map``).  Sin el se pide, que es el comportamiento
+    de siempre para quien pregunta por una sola.
     """
-    entry = approved_map().get(position_key)
+    if names is None:
+        names = approved_map()
+    entry = names.get(position_key)
     if entry is None:
         return None
     from .models import OpeningNameSuggestion
@@ -131,8 +146,8 @@ def in_force(position_key):
     return entry
 
 
-def name_for(position_key):
-    entry = in_force(position_key)
+def name_for(position_key, names=None):
+    entry = in_force(position_key, names=names)
     return None if entry is None else entry['name']
 
 
@@ -156,7 +171,7 @@ def catalog_name(position_key):
     return None if opening is None else opening.name
 
 
-def opening_for(position_key, fen=''):
+def opening_for(position_key, fen='', names=None):
     """Registro con la forma que consumen las vistas, o ``None``.
 
     Deliberadamente sin ``records``/``sources``: un nombre comunitario no
@@ -165,7 +180,7 @@ def opening_for(position_key, fen=''):
     donde sale, y ``catalog_name`` lo que sigue leyendo el catalogo auditado
     cuando esto lo esta corrigiendo.
     """
-    entry = in_force(position_key)
+    entry = in_force(position_key, names=names)
     if entry is None:
         return None
     return {

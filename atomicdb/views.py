@@ -112,6 +112,16 @@ LINEAGE_CACHE_SECONDS = 120
 # Bump when the cached payload shape changes, so a deploy cannot read an old
 # entry with new code.  ``0`` seconds above disables the cache outright.
 LINEAGE_CACHE_VERSION = 1
+# Las claves de los hijos SIN arista de una posicion (§ ``_child_keys``).  Es
+# lo unico cacheado de esta pagina que no puede quedarse obsoleto — el mapa
+# (FEN del padre, jugada) -> clave del hijo no depende de nada que cambie — asi
+# que el TTL no acota frescura, solo memoria, y puede ser mucho mas largo que
+# el del linaje.  Una hora: una entrada son ~3 kB y las posiciones DISTINTAS
+# que ve el explorador en una hora son millares, no millones, asi que el coste
+# son unos pocos MB de un Redis que ya guarda entradas de linaje de 10 kB con
+# dos minutos de vida.  ``0`` lo desactiva y cada render vuelve a preguntarle
+# al movegen.
+CHILD_KEY_CACHE_SECONDS = 3600
 PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
@@ -1354,29 +1364,60 @@ def _validated_opening_anchor(raw, target_key):
     return match, route_ply
 
 
+def _route_prefix_keys(top, line, active_ucis):
+    """Las claves de la ruta activa, ply a ply, o ``None`` si no cuadran.
+
+    Las dos formas de llegar a una ruta activa la traen ya recorrida: la ruta
+    ``play`` se valida jugada a jugada y guarda la clave de cada prefijo, y el
+    linaje canonico sale de las aristas, que son pares (padre, clave del
+    hijo).  Devolver esas claves es lo que le ahorra al catalogo de aperturas
+    un segundo rejuego identico del mismo prefijo (§ ``openings``,
+    ``match_line_keys_object``).
+
+    ``None`` cuando la correspondencia no es exacta — un paso por ply desde la
+    posicion de arriba — y entonces quien pregunta rejuega, como siempre.  No
+    es un caso esperado: es la garantia de que un desajuste degrade a lo
+    lento y no a lo incorrecto.
+    """
+    if active_ucis is None:
+        return None
+    keys = [top.key, *(step['key'] for step in line)]
+    if len(keys) != len(active_ucis) + 1:
+        return None
+    return keys
+
+
 def _navigation_opening(active_ucis, raw_anchor, target_key, *,
-                        explicit_play=False):
+                        explicit_play=False, route_keys=None):
     """Resolve opening state and the route that navigation should propagate.
 
     An explicitly supplied and validated ``play`` route wins.  Otherwise a
     valid target-bound opening anchor wins over reconstructed lineage: the
     latter may be a shorter transposition and must not erase overflow state.
+
+    ``route_keys`` is the already-replayed key of every prefix of
+    ``active_ucis`` (§ :func:`_route_prefix_keys`).  With it the catalogue is
+    read by key; without it the line is replayed, which is the same answer for
+    one move generation and one position setup per ply.
     """
-    if explicit_play and active_ucis is not None:
+    def matched(ucis):
+        if route_keys is not None:
+            try:
+                return openings.match_line_keys(route_keys)
+            except openings.InvalidOpeningLine:
+                pass
         try:
-            match = openings.match_line(active_ucis)
+            return openings.match_line(ucis)
         except openings.InvalidOpeningLine:
-            match = None
-        return match, len(active_ucis), active_ucis
+            return None
+
+    if explicit_play and active_ucis is not None:
+        return matched(active_ucis), len(active_ucis), active_ucis
     anchored, route_ply = _validated_opening_anchor(raw_anchor, target_key)
     if anchored is not None:
         return anchored, route_ply, None
     if active_ucis is not None:
-        try:
-            match = openings.match_line(active_ucis)
-        except openings.InvalidOpeningLine:
-            match = None
-        return match, len(active_ucis), active_ucis
+        return matched(active_ucis), len(active_ucis), active_ucis
     exact = openings.lookup_key(target_key)
     if exact is None:
         return None, None, None
@@ -1532,14 +1573,15 @@ def goto(request, key, uci):
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if route is None:
-        _top, _line, active_ucis = _canonical_route(pos)
+        top, line, active_ucis = _canonical_route(pos)
     else:
-        _top, _line, active_ucis = route
+        top, line, active_ucis = route
     current_opening, route_ply, active_ucis = _navigation_opening(
         active_ucis,
         request.GET.get(OPENING_ANCHOR_PARAM) or board_anchor,
         pos.key,
         explicit_play=route is not None,
+        route_keys=_route_prefix_keys(top, line, active_ucis),
     )
     current_anchor = (
         None if active_ucis is not None
@@ -2368,6 +2410,36 @@ def _proof_numbers_for(keys):
     ).values_list('position_id', 'pn', 'dn')}
 
 
+def _child_keys(pos, ucis):
+    """``{uci: clave del hijo}`` para jugadas legales SIN arista.
+
+    Un hijo materializado ya trae su clave en la arista; estas son las jugadas
+    que todavia no son un nodo, y su clave hay que calcularla con el movegen —
+    una llamada por jugada, que en una posicion abierta son treinta y tantas y
+    el gasto mayor de la pagina despues del rejuego de la ruta (§ ``logic``,
+    "cuanto cuesta una pregunta al movegen").
+
+    Por eso se guarda en el almacen compartido.  Y se puede guardar sin
+    protocolo de invalidacion ninguno porque el mapa es una funcion PURA de
+    (FEN del padre, jugada): el arbol crece por debajo, pero la posicion a la
+    que lleva e4 desde aqui es la misma hoy que dentro de un mes.  Una entrada
+    vieja no puede estar equivocada, asi que el TTL no acota la frescura sino
+    la memoria del almacen (§ CHILD_KEY_CACHE_SECONDS).
+    """
+    wanted = list(dict.fromkeys(ucis))
+    if not wanted:
+        return {}
+    cache_key = f'atomicdb.childkeys.v{LINEAGE_CACHE_VERSION}.{pos.key}'
+    stored = cache.get(cache_key) if CHILD_KEY_CACHE_SECONDS > 0 else None
+    keys = dict(stored) if isinstance(stored, dict) else {}
+    missing = [uci for uci in wanted if uci not in keys]
+    for uci in missing:
+        keys[uci] = logic.key_of(logic.apply_move(pos.fen, uci))
+    if missing and CHILD_KEY_CACHE_SECONDS > 0:
+        cache.set(cache_key, keys, CHILD_KEY_CACHE_SECONDS)
+    return {uci: keys[uci] for uci in wanted}
+
+
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
@@ -3038,7 +3110,7 @@ def _opening_for_template(match):
     return result
 
 
-def _named_right_here(position_key):
+def _named_right_here(position_key, names=None):
     """El nombre que lleva EXACTAMENTE esta posicion, o ``None``.
 
     Una sola fuente para las tres preguntas que se hacen lo mismo: que pinta
@@ -3049,16 +3121,20 @@ def _named_right_here(position_key):
 
     Un nombre HEREDADO de un ancestro no cuenta: aqui se responde por esta
     posicion exacta, igual que hacia el catalogo.
+
+    ``names`` es el mapa comunitario ya resuelto (§ ``community_names``): lo
+    pasa quien pregunta por una lista entera de posiciones para no pedir el
+    mismo diccionario una vez por fila.
     """
-    name = community_names.name_for(position_key)
+    name = community_names.name_for(position_key, names=names)
     if name is not None:
         return name
     match = openings.lookup_key(position_key)
     return None if match is None else match['name']
 
 
-def _exact_child_opening(child_key, current_opening):
-    name = _named_right_here(child_key)
+def _exact_child_opening(child_key, current_opening, names=None):
+    name = _named_right_here(child_key, names=names)
     if name is None:
         return None
     if current_opening is not None and name == current_opening['name']:
@@ -3807,6 +3883,7 @@ def explore(request, key):
         request.GET.get(OPENING_ANCHOR_PARAM),
         pos.key,
         explicit_play=explicit_route is not None,
+        route_keys=_route_prefix_keys(top, line, active_ucis),
     )
     current_anchor = (
         None if active_ucis is not None
@@ -3814,10 +3891,15 @@ def explore(request, key):
             pos.key, current_opening_match, route_ply)
     )
     current_opening = _opening_for_template(current_opening_match)
+    # El mapa de nombres comunitarios, UNA vez: esta pagina pregunta por la
+    # posicion y por cada una de sus jugadas, y con el almacen compartido cada
+    # pregunta suelta es un viaje a Redis (§ community_names.approved_map).
+    community_map = community_names.approved_map()
     # Un nombre comunitario aprobado solo puede aparecer donde el catalogo
     # auditado calla sobre ESTA posicion, y gana a un nombre heredado de un
     # ancestro. La navegacion (anclas firmadas) sigue anclada al catalogo.
-    community = community_names.opening_for(pos.key, pos.fen)
+    community = community_names.opening_for(pos.key, pos.fen,
+                                            names=community_map)
     if community is not None:
         current_opening = _opening_for_template(community)
 
@@ -3834,24 +3916,23 @@ def explore(request, key):
         # espina se paga al pinchar, nunca al pintar la tabla.
         move['backed_url'] = _backed_source_url(move['key'], child_route)
         move['enters_opening'] = _exact_child_opening(
-            move['key'], current_opening)
+            move['key'], current_opening, names=community_map)
     # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
     # explorar" — sin explorar esta una respuesta que EXISTE y a la que nadie
     # ha mirado, y esa se etiqueta en su propia fila (§ ingest.is_unexplored)
     # — sino jugadas que todavia no son un nodo.  Pincharlas las crea.
-    offtree = []
-    for uci in legal_ucis:
-        if uci in known:
-            continue
-        child_fen = logic.apply_move(pos.fen, uci)
-        child_key = logic.key_of(child_fen)
-        offtree.append({
+    offtree_ucis = [uci for uci in legal_ucis if uci not in known]
+    offtree_keys = _child_keys(pos, offtree_ucis)
+    offtree = [
+        {
             'uci': uci,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
             'enters_opening': _exact_child_opening(
-                child_key, current_opening),
-        })
+                offtree_keys[uci], current_opening, names=community_map),
+        }
+        for uci in offtree_ucis
+    ]
     numbered = _numbered_line(
         top,
         line,
@@ -3938,7 +4019,8 @@ def explore(request, key):
         # Propuesta de nombre: en TODAS las posiciones desde el 28-jul.  Donde
         # no hay nombre se propone uno; donde lo hay, la misma caja propone una
         # correccion de ese nombre, que es lo que aqui se pasa a la plantilla.
-        'suggest_current_name': _named_right_here(pos.key) or '',
+        'suggest_current_name': _named_right_here(
+            pos.key, names=community_map) or '',
         'suggest_play': '' if active_ucis is None else ','.join(active_ucis),
         'suggest_anchor': current_anchor or '',
         'suggest_name_max': SUGGESTION_NAME_MAX_CHARS,
