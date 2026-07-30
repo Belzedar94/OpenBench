@@ -1223,6 +1223,19 @@ def _goto_url(key, uci, ucis=None, opening_anchor=None):
     )
 
 
+def _backed_source_url(key, ucis=None):
+    """Enlace al caminante de la espina, con la ruta propia del que pincha.
+
+    A diferencia de ``_explore_url``, una ruta VACIA tambien viaja: en la
+    posicion inicial la historia del visitante es legitimamente de cero plies,
+    y omitir el parametro haria que el destino cayese al linaje canonico en
+    vez de extender lo que esa persona camino de verdad.  ``None`` (sin ruta
+    validada, o ancla de desbordamiento) sigue siendo un enlace pelado.
+    """
+    base = f'/atomicdb/backed-source/{key}/'
+    return base if ucis is None else base + '?play=' + ','.join(ucis)
+
+
 def _signed_opening_anchor(target_key, match, route_ply):
     """Bind the last catalogued opening to one exact explorer target.
 
@@ -1491,6 +1504,87 @@ def goto(request, key, uci):
     child_route, child_anchor = _child_navigation_state(
         active_ucis, current_opening, route_ply, child.key, uci)
     return redirect(_explore_url(child.key, child_route, child_anchor))
+
+
+def _walk_backed_spine(pos):
+    """Baja por la espina de soporte hasta donde NACE el valor respaldado.
+
+    Devuelve ``(origen, ucis_caminados)``.  El valor de un nodo respaldado no
+    es suyo: se lo presta ``backed_move``, y ese hijo puede a su vez estar
+    prestandolo.  Bajar a mano esa cadena es lo que este paseo ahorra.
+
+    PARADAS, todas ellas "este nodo ES el origen":
+      * ``status != UNKNOWN``: el valor viene de un cierre PROBADO, y por
+        debajo de una prueba no hay nada que buscar.
+      * sin ``backed_move``, o ``backed_eval`` a None: no hay espina.
+      * ``backed_eval == eval_cp``: la busqueda propia del nodo ancla el
+        valor; el respaldo solo coincide con lo que el motor ya dijo aqui.
+    Y dos paradas defensivas, que dejan al visitante donde el paseo llego:
+      * la arista ``backed_move`` no existe (respaldo mas viejo que el grafo).
+      * el hijo ya estaba visitado: el DAG transpone y un ciclo colgaria esto.
+    El tope de ``ingest.BACKED_MAX_PLIES`` es el mismo con el que subio el
+    valor, asi que ninguna espina legitima puede ser mas larga que el.
+
+    Una consulta por paso como mucho.  Es un GET esporadico de un click
+    humano, no algo que se pague al pintar una tabla.
+    """
+    node, walked, seen = pos, [], {pos.key}
+    for _ in range(ingest.BACKED_MAX_PLIES):
+        if node.status != 'UNKNOWN':
+            break
+        if not node.backed_move or node.backed_eval is None:
+            break
+        if node.backed_eval == node.eval_cp:
+            break
+        try:
+            edge = (Edge.objects.select_related('child')
+                    .get(parent=node, move_uci=node.backed_move))
+        except Edge.DoesNotExist:
+            break
+        if edge.child.key in seen:
+            break
+        seen.add(edge.child.key)
+        walked.append(node.backed_move)
+        node = edge.child
+    return node, walked
+
+
+def backed_source(request, key):
+    """Salta al ply donde NACE el valor respaldado de esta posicion.
+
+    Un GET puro: lee, redirige y no escribe nada — ni siquiera marca avisos
+    como vistos, porque de eso ya se encarga el ``explore`` de destino.
+
+    La ruta declarada en ``?play=`` se revalida entera contra la posicion DE
+    PARTIDA, igual que en ``api_request``: un enlace no puede materializar una
+    historia con solo nombrarla.  Si vale, el destino la recibe extendida con
+    los ucis de la espina y el visitante aterriza con SU partida, no con un
+    linaje canonico reconstruido.  Si no vale (o no viene), redirect pelado.
+    """
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return render(request, 'atomicdb/missing.html', status=404)
+    try:
+        route = _validated_play_route(request.GET.get('play'), pos.key)
+    except PlayRouteError:
+        route = None
+    origin, walked = _walk_backed_spine(pos)
+    ucis = None
+    if route is not None:
+        _top, _line, play_ucis = route
+        ucis = [*play_ucis, *walked]
+    # El destino revalida la ruta y RECHAZA la que se pase de largo.  Una
+    # espina profunda bajo una partida larga puede desbordar el tope, y
+    # entonces el enlace propio serviria una pagina de error: mejor llegar sin
+    # historia que no llegar.
+    if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
+        ucis = None
+    response = redirect(_explore_url(origin.key, ucis))
+    # El origen se mueve en cuanto cae analisis nuevo bajo esta posicion: este
+    # 302 no es cacheable por nadie.
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 # A truncated breadcrumb keeps its HEAD and its TAIL, with the ellipsis in the
@@ -3513,6 +3607,11 @@ def explore(request, key):
         )
         move['url'] = _explore_url(
             move['key'], child_route, child_anchor)
+        # Salto al origen del respaldo de ESTA fila: misma ruta que su enlace
+        # de navegacion, ya construida arriba.  Solo se pinta cuando la fila
+        # lleva chip; aqui es una cadena, no una consulta — el paseo por la
+        # espina se paga al pinchar, nunca al pintar la tabla.
+        move['backed_url'] = _backed_source_url(move['key'], child_route)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening)
     # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
@@ -3601,6 +3700,9 @@ def explore(request, key):
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,
         'eval_backed_plies': pos.backed_plies,
+        # Salto al origen del respaldo de la CABECERA, con la ruta que el
+        # visitante trae puesta para que la espina la extienda.
+        'backed_source_url': _backed_source_url(pos.key, active_ucis),
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.
