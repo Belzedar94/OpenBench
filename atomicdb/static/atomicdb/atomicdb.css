@@ -948,9 +948,20 @@ details summary {
   margin-bottom: .4rem;
 }
 
+/* Un item de rejilla no baja de su min-content por defecto, asi que una
+   columna con una linea larga dentro empuja la pagina en vez de encogerse. */
+.queue > * {
+  min-width: 0;
+}
+
+/* El tope de 26rem es mas ancho que un telefono, y como la linea no se parte
+   (nowrap + ellipsis) ese ancho se convierte en el min-content de la columna:
+   medido, la rejilla de .queue pedia 361px dentro de 337 y sacaba el body
+   entero fuera de la pantalla.  El tope cede ante el contenedor y la elipsis
+   hace el resto; en pantalla grande no cambia nada. */
 .qline {
   display: inline-block;
-  max-width: 26rem;
+  max-width: min(26rem, 100%);
   overflow: hidden;
   vertical-align: bottom;
   text-overflow: ellipsis;
