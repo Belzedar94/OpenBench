@@ -1808,9 +1808,13 @@ html.theme-ready .tile {
   color: var(--opening-ink);
 }
 
+/* Tinta NEUTRA, no la mas fuerte que hay: lo que marca el primer puesto es el
+   relleno, que ninguno de los otros dos tiene, y en tema claro un segundo
+   puesto en --ink-strong es casi negro — el contraste mas alto de los tres, o
+   sea la plata gritando por encima del oro. */
 .lb-medal.second {
   border-color: var(--border-strong);
-  color: var(--ink-strong);
+  color: var(--ink);
 }
 
 .lb-medal.third {
