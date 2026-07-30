@@ -6,16 +6,23 @@ senales coinciden, y el cuadrante donde NO coinciden — motor optimista,
 estimador pesimista — se registra en vez de descartarse.
 """
 
-from django.test import SimpleTestCase
+from django.conf import settings
+from django.test import SimpleTestCase, override_settings
 
-from . import solve_estimate
+from . import ingest, logic, proof, solve_estimate
+from .models import Edge, Position, ProofCampaign, ProofNode
+from .testing import TestCase
 
 # Startpos: 32 piezas, blancas al turno.
 START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 # Final pelado por encima del horizonte de tablebase (12 piezas).
 BARE = '4k3/pp4pp/8/8/8/8/PP4PP/3RK2R w K - 0 1'
+# El mismo, con negras al turno: nodo AND de una campana WHITE_WIN.
+BARE_BLACK = '4k3/pp4pp/8/8/8/8/PP4PP/3RK2R b K - 0 1'
 # Bajo el horizonte de tablebase: el veredicto es una consulta.
 TABLEBASE = '8/8/8/4k3/8/8/4K3/4R3 w - - 0 1'
+# Una PV de pura maniobra: el contador de 50 no se resetea ni una vez.
+MANOEUVRE = ['d1d2', 'e8e7', 'd2d1', 'e7e8', 'd1d2', 'e8e7']
 
 
 def leaf(fen=START, eval_cp=None, lines=None, mate_in=None):
@@ -234,3 +241,181 @@ class GateFactorTests(SimpleTestCase):
         self.assertEqual(solve_estimate.gate_factor(-5.0), 1.0)
         self.assertEqual(solve_estimate.gate_factor(99.0),
                          float(solve_estimate.MAX_FACTOR))
+
+
+class GateOffIsTheHistoricBehaviourTests(SimpleTestCase):
+    """Con el flag apagado, la hoja vale lo que valia. Byte a byte."""
+
+    def test_the_flag_defaults_to_off(self):
+        self.assertFalse(proof.solve_gate_enabled())
+
+    def test_no_annoyance_is_computed_at_all_when_it_is_off(self):
+        """Apagado no debe costar ni el estimador."""
+        self.assertIsNone(proof.gate_annoyance(leaf(BARE, 1_200)))
+        self.assertIsNone(proof.shallow_annoyance(BARE, 1_200))
+
+    def test_the_numbers_are_the_documented_ones(self):
+        self.assertEqual(
+            proof.leaf_numbers(START, 'UNKNOWN', None, 'WHITE_WIN'), (1, 1))
+        self.assertEqual(
+            proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', 1_200, 'WHITE_WIN',
+                               legal_moves=10),
+            (20, 16))
+
+    def test_passing_no_annoyance_is_the_same_as_the_old_signature(self):
+        for score in (None, -900, 0, 400, 1_200, 30_000):
+            self.assertEqual(
+                proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', score, 'WHITE_WIN',
+                                   legal_moves=8),
+                proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', score, 'WHITE_WIN',
+                                   legal_moves=8, annoyance=None))
+
+    def test_the_maintenance_only_stays_narrow(self):
+        self.assertEqual(proof.maintenance_fields(),
+                         ('key', 'fen', 'status', 'eval_cp'))
+
+
+class GateArithmeticTests(SimpleTestCase):
+    """El factor: que encarece, que no, y hasta donde."""
+
+    def _leaf(self, score, annoyance, moves=10, fen=BARE_BLACK):
+        return proof.leaf_numbers(fen, 'UNKNOWN', score, 'WHITE_WIN',
+                                  legal_moves=moves, annoyance=annoyance)
+
+    def test_annoyance_multiplies_the_pn(self):
+        plain = self._leaf(1_200, None)
+        gated = self._leaf(1_200, 1.0)
+        self.assertEqual(gated[0], plain[0] * solve_estimate.MAX_FACTOR)
+
+    def test_zero_annoyance_changes_nothing(self):
+        self.assertEqual(self._leaf(1_200, 0.0), self._leaf(1_200, None))
+
+    def test_dn_is_never_touched(self):
+        """Refutar una posicion tediosa no es mas caro por ser tediosa."""
+        for annoyance in (0.0, 0.3, 1.0):
+            self.assertEqual(self._leaf(1_200, annoyance)[1],
+                             self._leaf(1_200, None)[1])
+
+    def test_the_mate_band_is_exempt(self):
+        """Ya es la via rapida: encarecerla solo alejaria al descenso."""
+        self.assertEqual(self._leaf(30_000, 1.0), self._leaf(30_000, None))
+        self.assertEqual(self._leaf(9_000, 1.0), self._leaf(9_000, None))
+        # Justo por debajo de la banda si entra.
+        self.assertGreater(self._leaf(8_999, 1.0)[0],
+                           self._leaf(8_999, None)[0])
+
+    def test_the_classic_one_one_is_exempt(self):
+        """Sin informacion tiene que seguir siendo lo mas demostrador."""
+        self.assertEqual(
+            proof.leaf_numbers(START, 'UNKNOWN', None, 'WHITE_WIN',
+                               annoyance=1.0),
+            (1, 1))
+
+    def test_a_closed_leaf_keeps_its_truth_value(self):
+        for status, numbers in (('WHITE_WIN', (0, proof.PROOF_INFINITY)),
+                                ('BLACK_WIN', (proof.PROOF_INFINITY, 0)),
+                                ('DRAW', (proof.PROOF_INFINITY, 0))):
+            self.assertEqual(
+                proof.leaf_numbers(START, status, 1_200, 'WHITE_WIN',
+                                   annoyance=1.0),
+                numbers)
+
+    def test_a_gated_leaf_still_never_claims_infinity(self):
+        for score in (-30_000, -1_000, 0, 1_000):
+            pn, dn = proof.leaf_numbers(START, 'UNKNOWN', score, 'WHITE_WIN',
+                                        legal_moves=200, annoyance=1.0)
+            self.assertLessEqual(pn, proof.PROOF_MAX_LEAF)
+            self.assertLess(pn, proof.PROOF_INFINITY)
+            self.assertLess(dn, proof.PROOF_INFINITY)
+            self.assertGreaterEqual(min(pn, dn), 1)
+
+    def test_the_gate_is_monotone_in_the_annoyance(self):
+        previous = 0
+        for step in range(11):
+            pn = self._leaf(1_200, step / 10.0)[0]
+            self.assertGreaterEqual(pn, previous)
+            previous = pn
+
+
+@override_settings(ATOMICDB_SOLVE_GATE=True)
+class GateOnTests(TestCase):
+    """La puerta encendida, por el camino de siempre y sobre el arbol real."""
+
+    def setUp(self):
+        self.campaign = ProofCampaign.objects.get(
+            name=proof.DEFAULT_CAMPAIGN_NAME)
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+
+    def _tedious_child(self):
+        """Un hijo con eval de ganado y una PV de pura maniobra."""
+        edge = Edge.objects.filter(parent=self.root).order_by('id').first()
+        Position.objects.filter(key=edge.child_id).update(
+            eval_cp=1_200,
+            last_analysis=[{'eval_cp': 1_200, 'pv': MANOEUVRE}])
+        return Position.objects.get(key=edge.child_id)
+
+    def test_the_flag_turns_it_on(self):
+        self.assertTrue(proof.solve_gate_enabled())
+
+    def test_the_maintenance_asks_for_the_pv_it_is_going_to_read(self):
+        """Leerlo diferido costaria un SELECT por fila."""
+        self.assertIn('last_analysis', proof.maintenance_fields())
+        self.assertIn('mate_in', proof.maintenance_fields())
+
+    def test_a_tedious_frontier_leaf_gets_more_expensive(self):
+        child = self._tedious_child()
+        proof.refresh_proof_numbers([child.key], max_plies=1)
+        gated = ProofNode.objects.get(campaign=self.campaign,
+                                      position=child).pn
+
+        with override_settings(ATOMICDB_SOLVE_GATE=False):
+            ProofNode.objects.filter(position=child).delete()
+            proof.refresh_proof_numbers([child.key], max_plies=1)
+            plain = ProofNode.objects.get(campaign=self.campaign,
+                                          position=child).pn
+
+        self.assertGreater(gated, plain)
+
+    def test_a_level_still_costs_a_fixed_number_of_statements(self):
+        """La puerta no puede convertir una pasada en una tormenta.
+
+        Cuatro sentencias, las mismas que sin puerta: campanas activas,
+        posiciones del nivel, aristas con sus hijos y filas de prueba.  El
+        estimador lee ``last_analysis`` de la fila que YA vino, nunca de una
+        consulta suya.
+        """
+        child = self._tedious_child()
+        proof.refresh_proof_numbers([child.key], max_plies=1)   # calienta
+
+        with self.assertNumQueries(4, using=settings.ATOMICDB_DATABASE_ALIAS):
+            proof.refresh_proof_numbers([child.key], max_plies=1)
+
+    def test_the_descent_ranks_the_tedious_child_last(self):
+        """Dos hijos con el MISMO eval de ganado; el gordo va primero.
+
+        Es el caso que la puerta gobierna: nodo OR (se ordena por pn), dos
+        candidatos que el motor ve igual de bien y un estimador que no.
+        """
+        children = [('a1a2', 'key-bare', 'UNKNOWN', 1_200, BARE_BLACK),
+                    ('b1b2', 'key-rich', 'UNKNOWN', 1_200,
+                     logic.apply_move(logic.start_fen(), 'e2e4'))]
+        ranked = proof._ranked_children(self.campaign, self.root, children, {})
+        self.assertEqual([item[2] for item in ranked],
+                         ['key-rich', 'key-bare'])
+
+    def test_turning_it_off_again_restores_the_numbers(self):
+        """Sin residuo: los pn de hoja se recalculan en la pasada siguiente."""
+        child = self._tedious_child()
+        proof.refresh_proof_numbers([child.key], max_plies=1)
+        gated = ProofNode.objects.get(campaign=self.campaign,
+                                      position=child).pn
+
+        with override_settings(ATOMICDB_SOLVE_GATE=False):
+            proof.refresh_proof_numbers([child.key], max_plies=1)
+            restored = ProofNode.objects.get(campaign=self.campaign,
+                                             position=child).pn
+
+        self.assertNotEqual(gated, restored)
+        self.assertEqual(restored, proof.leaf_numbers(
+            child.fen, 'UNKNOWN', 1_200, self.campaign.goal)[0])

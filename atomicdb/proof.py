@@ -47,6 +47,24 @@ combina dos senales, ambas baratas y ambas disponibles:
 
 Sin eval y sin lista legal conocida, se cae al ``1/1`` clasico.
 
+LA PUERTA DOBLE (``ATOMICDB_SOLVE_GATE``, apagada por defecto)
+--------------------------------------------------------------
+La inicializacion de arriba tiene un punto ciego conocido: el eval contesta
+"quien esta mejor" y la prueba necesita "cuanto cuesta cerrar esto".  Un final
+pelado con +1200 promete mucho y no cobra nada, asi que el descenso lo perfora
+una y otra vez mientras la conversion real cuesta cincuenta jugadas de
+tecnica.  Con la puerta encendida entra una SEGUNDA opinion independiente —
+``solve_estimate.annoyance``, que no llama al motor — y el ``pn`` de la hoja
+se multiplica por un factor de 1 a K creciente con la molestia.
+
+Es una puerta BLANDA: encarece, no veta.  Vetar seria afirmar algo sobre el
+arbol ("por aqui no se gana") que un estimador hand-crafted no esta en
+posicion de afirmar; encarecer afirma algo sobre el PRESUPUESTO, que es
+exactamente lo que ``pn`` significa.  Dos exenciones explicitas: la banda de
+mate no se encarece (ya es la via rapida) y el ``1/1`` clasico tampoco — "sin
+informacion" tiene que seguir siendo lo mas demostrador, que es lo que manda
+el descenso a los hermanos sin explorar.
+
 MANTENIMIENTO
 -------------
 Incremental y por NIVELES, con la misma forma que ``ingest.backup_backed_evals``:
@@ -62,7 +80,7 @@ import hashlib
 from django.conf import settings
 from django.db.models import Q
 
-from . import logic
+from . import logic, solve_estimate
 from .models import DBEvent, Edge, Position, ProofCampaign, ProofNode
 
 # 2^62: infinito de la aritmetica de prueba.  Cabe en un BigInteger con sitio
@@ -113,6 +131,19 @@ EVAL_BANDS = (
 )
 DEFAULT_EVAL_BAND = (64, 1)
 
+# La banda EXENTA de la puerta: donde el motor ya ve mate.  Se lee de
+# ``EVAL_BANDS`` y no se copia para que las dos no puedan separarse.
+SOLVE_GATE_MATE_BAND = EVAL_BANDS[0][0]
+
+# Campos que la pasada de mantenimiento pide de cada posicion.  ``.only`` esta
+# aqui porque ``last_analysis`` es el campo mas grande de la tabla y el
+# mantenimiento no lo mira... salvo con la puerta encendida, que lee de el la
+# PV vigente.  Y entonces hay que pedirlo DE ENTRADA: tocarlo diferido dispara
+# un SELECT por fila, que es como una pasada por niveles se convierte en una
+# tormenta de consultas sin que nadie lo vea venir.
+MAINTENANCE_FIELDS = ('key', 'fen', 'status', 'eval_cp')
+SOLVE_GATE_FIELDS = ('last_analysis', 'mate_in')
+
 
 # ---------------- aritmetica saturada ----------------
 
@@ -139,6 +170,62 @@ def saturating_min(values):
 def selector_mode():
     """``regret`` (por defecto) o ``pn``. El default no cambia sin una orden."""
     return str(getattr(settings, 'ATOMICDB_SELECTOR', 'regret')).lower()
+
+
+# ---------------- la puerta de resolucion ----------------
+
+def solve_gate_enabled():
+    """La puerta esta APAGADA salvo que el despliegue la encienda."""
+    return bool(getattr(settings, 'ATOMICDB_SOLVE_GATE', False))
+
+
+def maintenance_fields():
+    """Columnas del ``.only`` de la pasada de mantenimiento."""
+    if solve_gate_enabled():
+        return MAINTENANCE_FIELDS + SOLVE_GATE_FIELDS
+    return MAINTENANCE_FIELDS
+
+
+def gate_annoyance(row, branching=None):
+    """Molestia de una FILA COMPLETA, o ``None`` con la puerta apagada.
+
+    Devolver ``None`` y no ``0.0`` es lo que hace que el flag apagado no
+    cueste ni el estimador ni una rama distinta de aritmetica: ``leaf_numbers``
+    ve exactamente lo que veia antes.
+    """
+    if not solve_gate_enabled():
+        return None
+    return solve_estimate.annoyance(row, branching)
+
+
+def shallow_annoyance(fen, eval_cp):
+    """Molestia de lo que se sabe de una ARISTA: fen y eval, nada mas.
+
+    Los hijos de un nivel viajan como tuplas de ``_children_by_parent``, sin
+    ``last_analysis``: traerlo por arista seria arrastrar el campo mas grande
+    de la tabla por cada hijo del nivel.  El estimador degrada dos de sus
+    cuatro features a neutral y lo dice; a cambio, la ordenacion del descenso
+    y la de la pasada de mantenimiento usan la MISMA puerta.
+    """
+    if not solve_gate_enabled():
+        return None
+    return solve_estimate.annoyance(solve_estimate.shallow(fen, eval_cp))
+
+
+def gated_pn(pn, annoyance, attacker_score):
+    """``pn`` encarecido por la molestia.  Blando: multiplica, no veta.
+
+    Exento el mate en banda: ahi el coste de cerrar ya lo mide la PV y
+    encarecerlo solo alejaria al descenso de la via rapida.  El tope de hoja
+    se vuelve a aplicar despues del producto — una hoja no puede fingir ser
+    infinita, que es lo que la aritmetica reserva para lo REFUTADO.
+    """
+    if annoyance is None:
+        return pn
+    if attacker_score is not None and attacker_score >= SOLVE_GATE_MATE_BAND:
+        return pn
+    factor = solve_estimate.gate_factor(annoyance)
+    return min(PROOF_MAX_LEAF, max(1, int(pn * factor)))
 
 
 # ---------------- recurrencias ----------------
@@ -173,13 +260,19 @@ def terminal_numbers(status, goal):
     return PROOF_INFINITY, 0
 
 
-def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None):
+def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None,
+                 annoyance=None):
     """Inicializacion heuristica documentada de una hoja de la prueba.
 
     ``eval_cp`` viene en perspectiva BLANCA, como todo lo demas del sistema;
     el unico cambio de signo esta aqui dentro, para mirarlo desde el atacante.
     ``legal_moves`` es el numero de jugadas legales del bando al turno cuando
     se conoce (aristas materializadas o lista legal), o ``None``.
+
+    ``annoyance`` es la segunda opinion de la puerta doble (``[0, 1]``, o
+    ``None`` = puerta apagada, que es el default y el comportamiento historico
+    byte a byte).  Solo encarece ``pn``: ``dn`` mide refutar, y refutar una
+    posicion tediosa no es mas caro por ser tediosa — basta una respuesta.
     """
     exact = terminal_numbers(status, goal)
     if exact is not None:
@@ -190,7 +283,10 @@ def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None):
                       else (eval_cp if attacker_white else -eval_cp))
     band = eval_band(attacker_score)
     if band is None and not legal_moves:
-        return 1, 1                       # PNS clasico: sin informacion
+        # PNS clasico: sin informacion.  La puerta tampoco entra aqui — "sin
+        # informacion" tiene que seguir siendo lo mas demostrador del arbol, o
+        # el descenso dejaria de ir a los hermanos sin explorar.
+        return 1, 1
 
     pn_weight, dn_weight = band or (1, 1)
     branching = max(1, int(legal_moves or 1))
@@ -202,7 +298,7 @@ def leaf_numbers(fen, status, eval_cp, goal, legal_moves=None):
         base_pn, base_dn = branching, 1
     pn = min(PROOF_MAX_LEAF, max(1, base_pn * pn_weight))
     dn = min(PROOF_MAX_LEAF, max(1, base_dn * dn_weight))
-    return pn, dn
+    return gated_pn(pn, annoyance, attacker_score), dn
 
 
 def internal_numbers(fen, goal, child_numbers):
@@ -311,8 +407,11 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
         return exact[0], exact[1], False, None
 
     if not children:
+        # La hoja de la FRONTERA, y la unica que se puntua con la fila
+        # entera delante: es donde la puerta tiene todo lo que necesita.
         pn, dn = leaf_numbers(position.fen, position.status,
-                              position.eval_cp, goal)
+                              position.eval_cp, goal,
+                              annoyance=gate_annoyance(position))
         return pn, dn, False, None
 
     numbers, moves = [], []
@@ -321,7 +420,9 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
         if node is not None:
             numbers.append((node.pn, node.dn))
         else:
-            numbers.append(leaf_numbers(fen, status, eval_cp, goal))
+            numbers.append(leaf_numbers(
+                fen, status, eval_cp, goal,
+                annoyance=shallow_annoyance(fen, eval_cp)))
         moves.append(move_uci)
 
     pn, dn = internal_numbers(position.fen, goal, numbers)
@@ -363,7 +464,7 @@ def _refresh_campaign(campaign, seeds, max_plies):
     while frontier and plies < max_plies:
         plies += 1
         positions = list(Position.objects.filter(key__in=frontier).only(
-            'key', 'fen', 'status', 'eval_cp'))
+            *maintenance_fields()))
         if not positions:
             break
         keys = [row.key for row in positions]
@@ -460,7 +561,8 @@ def root_numbers(campaign):
     if node is not None:
         return node.pn, node.dn
     root = campaign.root
-    return leaf_numbers(root.fen, root.status, root.eval_cp, campaign.goal)
+    return leaf_numbers(root.fen, root.status, root.eval_cp, campaign.goal,
+                        annoyance=gate_annoyance(root))
 
 
 # ---------------- seleccion (df-pn descent) ----------------
@@ -505,7 +607,8 @@ def _ranked_children(campaign, position, children, child_nodes):
             continue          # ya resuelto: no queda pregunta que hacerle
         node = child_nodes.get(child_id)
         pn, dn = ((node.pn, node.dn) if node is not None
-                  else leaf_numbers(fen, status, eval_cp, campaign.goal))
+                  else leaf_numbers(fen, status, eval_cp, campaign.goal,
+                                    annoyance=shallow_annoyance(fen, eval_cp)))
         key = (pn, index) if or_node else (dn, index)
         ranked.append((key, move_uci, child_id, fen))
     ranked.sort(key=lambda item: item[0])

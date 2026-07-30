@@ -117,6 +117,17 @@ ATOMICDB_ADVERSARIAL = os.environ.get(
 # clasica sin residuo.
 ATOMICDB_BREADTH_SWAP = os.environ.get(
     'ATOMICDB_BREADTH_SWAP', '').lower() in ('1', 'true', 'yes')
+# Puerta doble de exploracion (idea de Wolfram, 30-jul-2026): un nodo se
+# explora PARA RESOLVER solo cuando el eval del motor y un estimador
+# INDEPENDIENTE de coste de resolver (atomicdb/solve_estimate.py) coinciden en
+# que es prometedor.  Con la puerta encendida, la inicializacion de hojas del
+# gestor de prueba multiplica el pn por un factor 1..K creciente con la
+# molestia estimada, de modo que el descenso df-pn deja de perforar finales
+# tediosos aunque el eval diga +1200.  APAGADA por defecto: enciende via
+# drop-in de systemd, y apagarla restaura los numeros historicos sin residuo
+# (los pn de hoja se recalculan en la siguiente pasada de mantenimiento).
+ATOMICDB_SOLVE_GATE = os.environ.get(
+    'ATOMICDB_SOLVE_GATE', '').lower() in ('1', 'true', 'yes')
 
 INSTALLED_APPS = [
     'atomicdb',
