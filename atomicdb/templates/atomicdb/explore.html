@@ -289,8 +289,15 @@
         allbtn.addEventListener('click', function () {
           allbtn.disabled = true;
           allbtn.textContent = 'Queueing...';
+          // La misma ruta declarada que manda el boton individual: las
+          // tareas hijas heredan ruta+jugada y el aviso vuelve en el orden
+          // del autor, no en el linaje canonico.
+          const playRoute = new URLSearchParams(location.search).get('play') || '';
           fetch('/atomicdb/request-unexplored/' + key + '/',
-                {method: 'POST', headers: {'X-CSRFToken': csrf()}})
+                {method: 'POST',
+                 headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                           'X-CSRFToken': csrf()},
+                 body: new URLSearchParams({route: playRoute}).toString()})
             .then(r => r.json().then(d => ({status: r.status, data: d})))
             .then(({status, data}) => {
               if (data.status === 'queued') {
@@ -328,8 +335,12 @@
         pvbtn.addEventListener('click', function () {
           pvbtn.disabled = true;
           pvbtn.textContent = 'Queueing...';
+          const pvRoute = new URLSearchParams(location.search).get('play') || '';
           fetch('/atomicdb/pv-verify/' + key + '/',
-                {method: 'POST', headers: {'X-CSRFToken': csrf()}})
+                {method: 'POST',
+                 headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                           'X-CSRFToken': csrf()},
+                 body: new URLSearchParams({route: pvRoute}).toString()})
             .then(r => r.json())
             .then(data => {
               if (data.status === 'queued') {

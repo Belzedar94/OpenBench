@@ -932,6 +932,19 @@ def api_request_unexplored(request, key):
 
     ip = _client_ip(request)
 
+    # La ruta declarada del PETICIONARIO hasta esta pagina, igual que en
+    # api_request: cada tarea hija hereda ruta + su jugada, y el aviso de
+    # vuelta habla en el orden del autor y no en el linaje canonico (el bug
+    # reportado: pedia por 1.Nf3 d6 y la campana contaba 1.Nf3 f6).
+    route = ''
+    raw_route = (request.POST.get('route') or '').strip()
+    if raw_route:
+        try:
+            _validated_play_route(raw_route, key)
+            route = raw_route
+        except (PlayRouteError, PlayRouteConflict):
+            route = ''
+
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)
         pending = ingest.unexplored_children(pos)
@@ -939,7 +952,8 @@ def api_request_unexplored(request, key):
             return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
         queued = ingest.enqueue_unexplored_children(
             pos, requested_by=(request.user.username
-                               if request.user.is_authenticated else ''))
+                               if request.user.is_authenticated else ''),
+            route=route)
         RequestLog.objects.create(ip=ip, position=pos)
         DBEvent.objects.create(kind='BULK_REQUEST', payload={
             'ip': ip, 'key': pos.key, 'queued': queued,
@@ -985,10 +999,21 @@ def api_pv_verify(request, key):
     # del visitante logueado viaja hasta cada tarea de la linea.
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
+    # Y la ruta declarada del autor: cada tarea de la PV hereda ruta + los
+    # plies caminados, y el aviso vuelve en SU orden de jugadas.
+    route = ''
+    raw_route = (request.POST.get('route') or '').strip()
+    if raw_route:
+        try:
+            _validated_play_route(raw_route, key)
+            route = raw_route
+        except (PlayRouteError, PlayRouteConflict):
+            route = ''
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)
         queued = ingest.enqueue_pv_verification(pos,
-                                                requested_by=requested_by)
+                                                requested_by=requested_by,
+                                                route=route)
     if not queued:
         return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
     return JsonResponse({'status': 'queued', 'queued': queued})

@@ -2229,21 +2229,32 @@ def _ensure_expanded(pos):
     return pos
 
 
-def _expand_frontier(parent, limit=None, requested_by=''):
+def _expand_frontier(parent, limit=None, requested_by='', route=''):
     """Spend an exhausted request one ply deeper, proof-number style.
 
     Every selected child re-enters the ordinary ladder at its own natural
     floor (typically 128M).  A child whose own ladder is already spent is
     counted and left alone here; following it is the descent's job, and only
     when EVERY candidate at this level is spent.
+
+    ``route`` es la ruta declarada del peticionario hasta ``parent``: cada
+    hija compra su tarea con ``ruta + su jugada`` y el aviso de vuelta habla
+    en el orden del autor (sin esto, los avisos de un swap salian en linaje
+    canonico — mismo bug que el click masivo).
     """
     parent = Position.objects.select_for_update().get(pk=parent.pk)
     expand(parent)   # no-op once the legal edges already exist
+    ucis = {}
+    if route:
+        ucis = {e.child_id: e.move_uci
+                for e in Edge.objects.filter(parent=parent)}
     counts = {'children_considered': 0, 'children_queued': 0,
               'children_solved': 0, 'children_exhausted': 0}
     for child in _frontier_children(parent, limit=limit):
         counts['children_considered'] += 1
-        outcome = _request_rung(child, requested_by)
+        child_route = (route + ',' + ucis[child.key]
+                       if route and child.key in ucis else '')
+        outcome = _request_rung(child, requested_by, child_route)
         if outcome == _LADDER_EXHAUSTED:
             counts['children_exhausted'] += 1
         elif outcome == 'already-solved':
@@ -2259,7 +2270,7 @@ def _descent_outcome(status, stop, node, plies, totals):
                           descent_stop=stop, **totals)
 
 
-def _descend_frontier(pos, requested_by=''):
+def _descend_frontier(pos, requested_by='', route=''):
     """Follow the spent line down until the click finds something to buy.
 
     Proof-number search does not give up on a node whose whole frontier is
@@ -2289,7 +2300,7 @@ def _descend_frontier(pos, requested_by=''):
     totals = {'children_considered': 0, 'children_queued': 0,
               'children_solved': 0, 'children_exhausted': 0}
     visited = {pos.key}
-    node, plies = pos, 0
+    node, plies, walked_route = pos, 0, route
     while True:
         remaining = FRONTIER_CLICK_CAP - totals['children_queued']
         if remaining <= 0:
@@ -2301,7 +2312,8 @@ def _descend_frontier(pos, requested_by=''):
         if len(spent) < len(children):
             for name, value in _expand_frontier(
                     node, limit=remaining,
-                    requested_by=requested_by).items():
+                    requested_by=requested_by,
+                    route=walked_route).items():
                 totals[name] += value
             return _descent_outcome('expanded', 'queued', node, plies, totals)
         # Every candidate here is spent: charge the level and step down.
@@ -2314,6 +2326,13 @@ def _descend_frontier(pos, requested_by=''):
         if plies >= FRONTIER_DESCENT_MAX_PLIES:
             return _descent_outcome('saturated', 'depth-guard', node,
                                     plies, totals)
+        if walked_route:
+            # La ruta del autor se alarga con cada paso del descenso; si la
+            # arista no aparece (transposicion rara), la ruta se suelta y de
+            # ahi para abajo el aviso hablara en canonico — honesto, no roto.
+            step = Edge.objects.filter(parent=node, child=following) \
+                               .values_list('move_uci', flat=True).first()
+            walked_route = (walked_route + ',' + step) if step else ''
         visited.add(following.key)
         node, plies = following, plies + 1
 
@@ -2461,7 +2480,8 @@ def request_analysis(pos, requested_by='', route=''):
         swapped = False
         if _breadth_swap_eligible(pos):
             swapped = True
-            outcome = _descend_frontier(pos, requested_by=requested_by)
+            outcome = _descend_frontier(pos, requested_by=requested_by,
+                                        route=route)
             if outcome != 'saturated':
                 DBEvent.objects.create(kind='BREADTH_SWAP', payload={
                     'key': pos.key, 'outcome': str(outcome),
@@ -2475,7 +2495,7 @@ def request_analysis(pos, requested_by='', route=''):
             return RequestOutcome(outcome)
         if swapped:
             return RequestOutcome('saturated')
-        return _descend_frontier(pos, requested_by=requested_by)
+        return _descend_frontier(pos, requested_by=requested_by, route=route)
 
 
 def notification_deserved(source, budget_nodes):
@@ -3184,14 +3204,23 @@ def unexplored_children(pos):
 
 def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
                                 source=AnalysisTask.Source.USER,
-                                requested_by=''):
+                                requested_by='', route=''):
     """Encola las jugadas sin mirar de ``pos``. Devuelve cuantas se encolaron.
 
     Es ``enqueue_coverage_completion`` sin su guarda de unilateralidad: alli
     el sistema decide que un nodo esta a punto de cerrarse, aqui lo decide una
     persona que esta mirando la pagina.  Lo que si comparte es el dedup: una
     jugada que ya tiene tarea viva no gasta cupo ni crea una segunda.
+
+    ``route`` es la ruta declarada del peticionario HASTA ``pos``; cada tarea
+    hija viaja con ``ruta + su jugada`` para que el aviso de vuelta cuente la
+    linea en el orden del autor (el click masivo era el unico camino USER que
+    perdia la ruta, y sus avisos salian en el linaje canonico).
     """
+    edges_by_child = {}
+    if route:
+        edges_by_child = {e.child_id: e.move_uci
+                          for e in Edge.objects.filter(parent=pos)}
     queued = 0
     for child in unexplored_children(pos):
         if queued >= cap:
@@ -3213,19 +3242,25 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             # ``budget_for`` ya trae la escalera por visitas, que sigue
             # mandando cuando pide mas que el clamp.
             budget = budget_for(child)
+        child_route = ''
+        if route and child.key in edges_by_child:
+            child_route = route + ',' + edges_by_child[child.key]
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
                       'multipv': multipv_for(child.visits, budget,
                                              clamp=clamp),
-                      'source': source, 'requested_by': requested_by})
+                      'source': source, 'requested_by': requested_by,
+                      'route': child_route})
         if created:
             queued += 1
         elif task.state == 'PENDING' and task.source != source:
             task.source = source
             if requested_by and not task.requested_by:
                 task.requested_by = requested_by
-            task.save(update_fields=['source', 'requested_by'])
+            if child_route and not task.route:
+                task.route = child_route
+            task.save(update_fields=['source', 'requested_by', 'route'])
             queued += 1
     return queued
 
@@ -3248,7 +3283,7 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
 PV_VERIFY_MAX_PLIES = 16
 
 
-def enqueue_pv_verification(pos, requested_by=''):
+def enqueue_pv_verification(pos, requested_by='', route=''):
     """Encola analisis por CADA posicion de la PV vigente. Devuelve cuantos.
 
     Camina la linea 1 de ``last_analysis`` — la VIGENTE, saltando el escaparate
@@ -3294,10 +3329,15 @@ def enqueue_pv_verification(pos, requested_by=''):
         return 0
     queued = 0
     current = pos
+    # La ruta declarada del peticionario se alarga con cada ply caminado: el
+    # aviso de cada nodo de la PV vuelve contando SU linea, no la canonica.
+    walked_route = route
     for uci in pv[:PV_VERIFY_MAX_PLIES]:
         if not isinstance(uci, str) \
                 or uci not in logic.legal_moves(current.fen):
             break
+        if walked_route:
+            walked_route = walked_route + ',' + uci
         child = get_or_create_position(logic.apply_move(current.fen, uci),
                                        campaign_id=current.campaign_id)
         Edge.objects.get_or_create(parent=current, move_uci=uci,
@@ -3317,7 +3357,8 @@ def enqueue_pv_verification(pos, requested_by=''):
                       'multipv': multipv_for(child.visits, budget,
                                              clamp=clamp),
                       'source': AnalysisTask.Source.USER,
-                      'requested_by': requested_by})
+                      'requested_by': requested_by,
+                      'route': walked_route})
         if created:
             queued += 1
         elif (task.state == 'PENDING'
@@ -3325,7 +3366,9 @@ def enqueue_pv_verification(pos, requested_by=''):
             task.source = AnalysisTask.Source.USER
             if requested_by and not task.requested_by:
                 task.requested_by = requested_by
-            task.save(update_fields=['source', 'requested_by'])
+            if walked_route and not task.route:
+                task.route = walked_route
+            task.save(update_fields=['source', 'requested_by', 'route'])
             queued += 1
     return queued
 

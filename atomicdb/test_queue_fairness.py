@@ -233,3 +233,31 @@ class NamedBeforeAnonymousTests(UserBandFifoTests):
         body = response.json()
         self.assertEqual(body['status'], 'queued')
         self.assertEqual(body['ahead'], 1)
+
+
+class BulkRouteInheritanceTests(UserBandFifoTests):
+    """El click masivo tambien viaja con la ruta del autor (bug 31-jul).
+
+    El fix de rutas cubrio el click individual, pero "Analyse all" creaba a
+    las hijas sin ruta y sus avisos volvian en linaje canonico: quien pedia
+    por 1.Nf3 d6 recibia campanadas contando 1.Nf3 f6."""
+
+    def test_bulk_children_inherit_route_plus_their_move(self):
+        route = 'g1f3,d7d6'
+        fen = logic.start_fen()
+        pos = ingest.get_or_create_position(fen)
+        for uci in route.split(','):
+            fen = logic.apply_move(fen, uci)
+            pos = ingest.get_or_create_position(fen)
+        ingest.expand(pos)
+
+        queued = ingest.enqueue_unexplored_children(
+            pos, requested_by='lesha', route=route)
+
+        self.assertGreater(queued, 0)
+        for task in AnalysisTask.objects.filter(
+                position__edges_in__parent=pos,
+                source=AnalysisTask.Source.USER):
+            edge = Edge.objects.get(parent=pos, child=task.position)
+            self.assertEqual(task.route, route + ',' + edge.move_uci)
+            self.assertEqual(task.requested_by, 'lesha')
