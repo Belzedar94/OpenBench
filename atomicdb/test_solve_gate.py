@@ -107,7 +107,7 @@ class ReversibleFeatureTests(SimpleTestCase):
         read, zeroing = solve_estimate.zeroing_plies(START, ['e2e4'])
         self.assertEqual((read, zeroing), (1, 1))       # peon
         read, zeroing = solve_estimate.zeroing_plies(START, ['g1f3'])
-        self.assertEqual((read, zeroing), (1, 0))       # caballo a casilla libre
+        self.assertEqual((read, zeroing), (1, 0))      # caballo, casilla libre
 
     def test_a_promotion_counts_as_zeroing(self):
         read, zeroing = solve_estimate.zeroing_plies(
@@ -185,8 +185,9 @@ class EvalBandFeatureTests(SimpleTestCase):
         self.assertEqual(values, sorted(values))
 
     def test_the_sign_does_not_matter(self):
-        self.assertEqual(solve_estimate.eval_band_feature(leaf(eval_cp=1_000)),
-                         solve_estimate.eval_band_feature(leaf(eval_cp=-1_000)))
+        self.assertEqual(
+            solve_estimate.eval_band_feature(leaf(eval_cp=1_000)),
+            solve_estimate.eval_band_feature(leaf(eval_cp=-1_000)))
 
     def test_no_eval_is_neutral(self):
         self.assertEqual(solve_estimate.eval_band_feature(leaf()),
@@ -223,8 +224,8 @@ class AnnoyanceTests(SimpleTestCase):
     def test_an_empty_row_lands_on_the_neutral_middle(self):
         """Sin PV, sin ancho y sin eval solo queda el material del FEN."""
         value = solve_estimate.annoyance(leaf())
-        self.assertAlmostEqual(
-            value, solve_estimate.NEUTRAL * (1 - solve_estimate.MATERIAL_WEIGHT))
+        self.assertAlmostEqual(value, solve_estimate.NEUTRAL * (
+            1 - solve_estimate.MATERIAL_WEIGHT))
 
 
 class GateFactorTests(SimpleTestCase):
@@ -465,7 +466,7 @@ class DisagreementQuadrantTests(TestCase):
             {'key': 'k1', 'eval_cp': 1_200, 'annoyance': 1.0, 'factor': 8.0})
 
     def test_the_eval_in_the_payload_is_white_pov_like_the_column(self):
-        """Objetivo BLACK_WIN: el atacante es optimista con eval_cp = -1_200."""
+        """Objetivo BLACK_WIN: el atacante va bien con eval_cp = -1_200."""
         proof.leaf_numbers(BARE, 'UNKNOWN', -1_200, 'BLACK_WIN',
                            legal_moves=10, annoyance=1.0, key='k-black')
         self.assertEqual(self._events()[0].payload['eval_cp'], -1_200)
@@ -496,7 +497,7 @@ class DisagreementQuadrantTests(TestCase):
         self.assertEqual(len(self._events()), 2)
 
     def test_the_degraded_edge_view_does_not_write_the_dataset(self):
-        """Sin clave no hay log: dos de las cuatro features estan en neutral."""
+        """Sin clave no hay log: dos de las features estan en neutral."""
         proof.leaf_numbers(BARE_BLACK, 'UNKNOWN', 1_200, 'WHITE_WIN',
                            legal_moves=10, annoyance=1.0)
         self.assertEqual(self._events(), [])
@@ -628,7 +629,7 @@ class DumpSolveCostsTests(TestCase):
         self.assertNotIn(self.open_idle.key, self._by_key(self._dump()))
 
     def test_hitting_the_traversal_cap_censors_the_label(self):
-        """El tope es una decision de coste; censurar impide que sea mentira."""
+        """El tope es coste; censurar impide que se vuelva mentira."""
         row = self._by_key(self._dump(max_subdag=1))[self.root.key]
         self.assertEqual(row['censored'], '1')
         self.assertEqual(row['label'], str(1 + 1_000))

@@ -76,7 +76,8 @@ def edge_counts(keys):
     counts = {}
     keys = list(keys)
     for start in range(0, len(keys), QUERY_BATCH):
-        rows = (Edge.objects.filter(parent_id__in=keys[start:start + QUERY_BATCH])
+        window = keys[start:start + QUERY_BATCH]
+        rows = (Edge.objects.filter(parent_id__in=window)
                 .values('parent_id').annotate(total=Count('id'))
                 .values_list('parent_id', 'total'))
         counts.update(dict(rows))

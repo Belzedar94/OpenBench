@@ -267,7 +267,7 @@ def branching_feature(row, branching=None):
 # ---------------- (c) material ----------------
 
 def material_feature(row):
-    """Tienda con el pico en ``BARE_MEN``; cero bajo el horizonte de consulta."""
+    """Tienda con el pico en ``BARE_MEN``; cero bajo el horizonte TB."""
     fen = getattr(row, 'fen', None)
     if not fen:
         return NEUTRAL
@@ -350,7 +350,7 @@ MAX_FACTOR = 8
 
 
 def gate_factor(value):
-    """Factor multiplicativo de ``pn``: 1.0 sin molestia, ``MAX_FACTOR`` con toda.
+    """Factor de ``pn``: 1.0 sin molestia, ``MAX_FACTOR`` con toda.
 
     Lineal y sin sorpresas — la constante es la perilla, no la forma de la
     curva.  Lo que discrimina no es el valor absoluto (un factor comun a todas

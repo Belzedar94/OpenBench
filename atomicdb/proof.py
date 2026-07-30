@@ -257,8 +257,9 @@ def _log_disagreement(key, eval_cp, annoyance, factor):
         return False
     if len(_solve_gate_logged) >= SOLVE_GATE_LOG_MAX:
         cutoff = now - SOLVE_GATE_LOG_WINDOW
-        for stale in [k for k, ts in _solve_gate_logged.items() if ts < cutoff]:
-            del _solve_gate_logged[stale]
+        stale = [k for k, ts in _solve_gate_logged.items() if ts < cutoff]
+        for key_out in stale:
+            del _solve_gate_logged[key_out]
         if len(_solve_gate_logged) >= SOLVE_GATE_LOG_MAX:
             _solve_gate_logged.clear()
     _solve_gate_logged[key] = now
