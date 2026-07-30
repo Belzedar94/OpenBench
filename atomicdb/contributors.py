@@ -393,7 +393,11 @@ def present(username, now=None):
             'os': ping.os,
             'online': ping.last_seen >= online_cutoff,
             'seen': _ago(ping.last_seen, now),
-            'tasks_done': ping.tasks_done,
+            # El contador propio del ping (``tasks_done``) NO se pinta: cuenta
+            # entregas y el sitio entero cuenta tareas COMPLETADAS (la portada
+            # incluida), asi que ensenar los dos numeros seria publicar dos
+            # definiciones de "analisis" que no tienen por que coincidir.  El
+            # que sale es el que comparte denominador con los nodos de al lado.
             'nodes_24h_h': human(day['nodes']),
             'tasks_24h': day['tasks'],
             'nodes_all': life['nodes'],
