@@ -425,6 +425,19 @@ class SuggestionTests(TestCase):
 
         self.assertIn('No workers under this account', body)
 
+    def test_the_wide_tables_scroll_inside_their_own_container(self):
+        # Con maquinas reales la tabla de workers mide mas que un telefono
+        # (492px medidos): o se desplaza dentro de su contenedor o empuja
+        # el body entero fuera de la pantalla.
+        _ping('alice-box-atomicdb', 'alice')
+        _suggestion('alice', 'Belfast Gambit')
+
+        body = self.client.get('/atomicdb/user/alice/').content.decode()
+
+        self.assertEqual(body.count('contrib-scroll'), 2)
+        self.assertLess(body.index('contrib-scroll'),
+                        body.index('contrib-workers'))
+
 
 class VoiceTests(TestCase):
     """La pagina es publica: tutea al dueno y habla en tercera del resto."""

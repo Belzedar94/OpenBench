@@ -1703,6 +1703,14 @@ html.theme-ready .tile {
   font-size: .82rem;
 }
 
+/* Con datos reales el min-content de las cinco columnas supera cualquier
+   telefono (medido: 492px con seis maquinas zen4 y una linea "searching");
+   partir texto no basta.  La tabla ancha se desplaza dentro de su propio
+   contenedor y el body no scrollea horizontal jamas. */
+.contrib-scroll {
+  overflow-x: auto;
+}
+
 /* En un telefono, cinco columnas solo caben si el nombre de la maquina puede
    partirse: ``belzedar-ryzen-atomicdb#0`` no tiene un solo espacio y sin esto
    sacaba la tabla entera fuera de la pantalla (medido: 427px de tabla en 337

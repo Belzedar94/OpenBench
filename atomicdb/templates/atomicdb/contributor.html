@@ -88,6 +88,7 @@
 <section class="contrib-section">
   <h2>{{ owner_label }} workers</h2>
   {% if has_workers %}
+  <div class="contrib-scroll">
   <table class="contrib-workers">
     <tr><th>Machine</th><th>State</th><th>Last 24h</th><th>All time</th>
       <th>Speed</th></tr>
@@ -109,6 +110,7 @@
     </tr>
     {% endfor %}
   </table>
+  </div>
   {% else %}
   <p class="dim">No workers under this account. A machine that runs the AtomicDB
     client with these credentials shows up here, with what it has searched.</p>
@@ -118,6 +120,7 @@
 <section class="contrib-section">
   <h2>{{ owner_label }} opening names</h2>
   {% if suggestions %}
+  <div class="contrib-scroll">
   <table class="contrib-names">
     <tr><th>Proposed name</th><th>Position</th><th>State</th></tr>
     {% for s in suggestions %}
@@ -131,6 +134,7 @@
     </tr>
     {% endfor %}
   </table>
+  </div>
   {% if suggestions_more %}<p class="dim">and {{ suggestions_more }} more.</p>{% endif %}
   {% else %}
   <p class="dim">No opening names proposed yet. Any position in the explorer
