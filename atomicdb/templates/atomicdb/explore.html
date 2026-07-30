@@ -114,6 +114,28 @@
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
+    {% comment %}El selector va DEBAJO del boton, no encima: el boton sigue
+    siendo la accion principal y conserva su sitio de siempre, y esto se lee
+    como lo que es — un ajuste de lo que ese boton va a comprar, con la cifra
+    elegida escrita al lado.  Solo existe para quien puede elegir peldano; para
+    el resto la plantilla no pinta ni el hueco.{% endcomment %}
+    {% if depth_rungs %}
+    <div class="depthrow">
+      <label class="depthlab" for="depth">Depth</label>
+      <span class="depthscale">
+        {% comment %}El valor del control es un INDICE, asi que un lector de
+        pantalla anunciaria "0" a secas; ``aria-valuetext`` dice el peldano, que
+        es lo que significa, y el JS lo mueve con el.{% endcomment %}
+        <input type="range" id="depth" min="0" max="{{ depth_max_index }}"
+               step="1" value="0" aria-describedby="depthnow"
+               aria-valuetext="{{ depth_default_label }} nodes">
+        <span class="depthticks" aria-hidden="true">{% for rung in depth_rungs %}<span>{{ rung.label }}</span>{% endfor %}</span>
+      </span>
+      <span class="depthnow"><strong id="depthnow">{{ depth_default_label }}</strong>
+        nodes{% if depth_spent_label %} <span class="dim">&middot; already searched to {{ depth_spent_label }}</span>{% endif %}</span>
+    </div>
+    {{ depth_rungs|json_script:"atomicdb-depth-rungs" }}
+    {% endif %}
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>
@@ -139,6 +161,27 @@
         const field = document.querySelector('[name=csrfmiddlewaretoken]');
         return field ? field.value : '';
       }
+      {% if depth_rungs %}
+      // Selector de profundidad, bajo la MISMA condicion que pinta el control:
+      // en la pagina de quien no puede elegir no queda ni el nombre de una
+      // variable que diga que esto existe. El indice 0 ES el peldano por
+      // defecto, asi que un deslizador sin tocar no manda campo ninguno y el
+      // POST sale byte a byte como el de siempre.
+      const depth = document.getElementById('depth');
+      const depthNow = document.getElementById('depthnow');
+      const rungs = JSON.parse(
+        document.getElementById('atomicdb-depth-rungs').textContent);
+      function chosenRung() {
+        const index = Number(depth.value);
+        return index > 0 && rungs[index] ? String(rungs[index].nodes) : '';
+      }
+      depth.addEventListener('input', function () {
+        const rung = rungs[Number(depth.value)];
+        if (!rung) { return; }
+        depthNow.textContent = rung.label;
+        depth.setAttribute('aria-valuetext', rung.label + ' nodes');
+      });
+      {% endif %}
       function showNote(text, spent) {
         note.textContent = text || '';
         note.classList.toggle('spent', !!spent);
@@ -222,11 +265,16 @@
       }
       function requestAnalysis(attempt) {
         const playRoute = new URLSearchParams(location.search).get('play') || '';
+        const body = {route: playRoute};
+        {% if depth_rungs %}
+        const rung = chosenRung();
+        if (rung) { body.budget = rung; }
+        {% endif %}
         fetch('/atomicdb/request/{{ pos.key }}/', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded',
                     'X-CSRFToken': csrf()},
-          body: new URLSearchParams({route: playRoute}).toString()})
+          body: new URLSearchParams(body).toString()})
           .then(async r => {
             const data = await r.json().catch(() => null);
             if (r.status === 503 && data && data.status === 'busy') {
@@ -257,6 +305,12 @@
               'already-requested': 'Already requested, waiting...',
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',
+              {% if depth_rungs %}
+              // Un peldano que la escalera ya no contiene. La pagina no puede
+              // producirlo; si llega, la escalera cambio bajo una pestana
+              // abierta y recargar la pone al dia.
+              'bad-budget': 'That depth is gone, reload the page',
+              {% endif %}
               'already-solved': 'Already solved',
               // depth ladder spent here: the request goes one ply deeper,
               // and deeper still while every candidate it meets is spent.

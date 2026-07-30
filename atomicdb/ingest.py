@@ -2038,7 +2038,31 @@ def ladder_exhausted(pos):
             and completed_max >= REQUEST_BUDGET_LADDER[-1])
 
 
-def _request_rung(pos, requested_by='', route=''):
+def _next_rung(completed_max):
+    """El peldano que le toca comprar a lo ya COMPLETADO: el primero por
+    encima, o el ultimo cuando no queda ninguno."""
+    if completed_max is None:
+        return REQUEST_BUDGET_LADDER[0]
+    for candidate in REQUEST_BUDGET_LADDER:
+        if candidate > completed_max:
+            return candidate
+    return REQUEST_BUDGET_LADDER[-1]
+
+
+def request_ladder_state(pos):
+    """``(completed_max, peldano que toca)`` de esta posicion, sin escribir.
+
+    Una sola consulta para las dos respuestas.  Existe para que el explorador
+    pueda pintar el selector de profundidad con EL MISMO peldano por defecto
+    que comprara el click (§ ``depth.context``): dos calculos separados del
+    "siguiente peldano" es como una pagina acaba prometiendo un presupuesto y
+    la vista encolando otro.
+    """
+    completed_max = _completed_max_budget(pos)
+    return completed_max, _next_rung(completed_max)
+
+
+def _request_rung(pos, requested_by='', route='', budget_floor=None):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
@@ -2046,7 +2070,13 @@ def _request_rung(pos, requested_by='', route=''):
     repetirlo seria gastar 10B en una busqueda que ya tenemos.
     ``requested_by`` y ``route`` viajan a la tarea (afinidad y orden de
     jugadas del peticionario); nunca PISAN lo ya guardado (el primer click
-    conserva autoria y ruta)."""
+    conserva autoria y ruta).
+
+    ``budget_floor`` es el peldano ELEGIDO por quien tiene derecho a elegirlo
+    (§ ``depth``), ya validado por la vista.  Solo puede SUBIR el suelo, nunca
+    bajarlo: una eleccion no puede abaratar una peticion por debajo de lo que
+    la escalera compraria sola, asi que un peldano ya gastado (o cualquier cosa
+    por debajo del que toca) no cambia absolutamente nada."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
@@ -2057,13 +2087,7 @@ def _request_rung(pos, requested_by='', route=''):
     if (completed_max is not None
             and completed_max >= REQUEST_BUDGET_LADDER[-1]):
         return _LADDER_EXHAUSTED
-    floor = REQUEST_BUDGET_LADDER[0]
-    if completed_max is not None:
-        floor = REQUEST_BUDGET_LADDER[-1]
-        for candidate in REQUEST_BUDGET_LADDER:
-            if candidate > completed_max:
-                floor = candidate
-                break
+    floor = _next_rung(completed_max)
     clamp = _short_mate_clamp(pos)
     if clamp is not None and clamp[0] > (completed_max or 0):
         # Un mate corto con distancia conocida se VERIFICA, y una verificacion
@@ -2074,6 +2098,11 @@ def _request_rung(pos, requested_by='', route=''):
         # escala como siempre.
         floor = clamp[0]
     floor = max(floor, budget_for(pos))
+    if budget_floor:
+        # Va el ULTIMO y es un maximo, asi que gana tambien al carve-out del
+        # mate corto: ese abarata la PRIMERA mirada de un nodo que reclama M2,
+        # y quien elige 10B a mano no esta pidiendo una verificacion barata.
+        floor = max(floor, budget_floor)
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
@@ -2470,7 +2499,7 @@ def _breadth_swap_eligible(pos):
     return completed is not None and completed >= REQUEST_BUDGET_LADDER[1]
 
 
-def request_analysis(pos, requested_by='', route=''):
+def request_analysis(pos, requested_by='', route='', budget_floor=None):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -2485,11 +2514,18 @@ def request_analysis(pos, requested_by='', route=''):
     saturado, la informacion marginal vuelve a ser la profundidad y se cae
     al peldano clasico.  Sin el flag, la escalera de siempre; agotada
     (10B ya COMPLETED), la peticion se convierte en la misma expansion.
+    ``budget_floor`` (peldano elegido a mano, ya validado por la vista) APAGA
+    ese swap: el swap existe porque la informacion marginal de un click POR
+    DEFECTO suele estar en la anchura, y quien elige un peldano esta diciendo
+    exactamente lo contrario — "quiero la eval profunda de este nodo para que
+    el motor me oriente el mejor camino", que es la queja que acoto el swap en
+    primer lugar (§ ``_breadth_swap_eligible``).
+
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
     | 'saturated'."""
     with atomic():
         swapped = False
-        if _breadth_swap_eligible(pos):
+        if budget_floor is None and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
                                         route=route)
@@ -2501,7 +2537,7 @@ def request_analysis(pos, requested_by='', route=''):
                                                   {}).items()
                        if isinstance(value, (int, str))}})
                 return outcome
-        outcome = _request_rung(pos, requested_by, route)
+        outcome = _request_rung(pos, requested_by, route, budget_floor)
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
         if swapped:

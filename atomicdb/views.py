@@ -25,8 +25,9 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
                               OuterRef, Q, Subquery, Sum, Value, When, Window)
 from django.db.models.functions import Coalesce, RowNumber
 
-from . import (community_names, contributors, ingest, ingest_queue, logic,
-               metrics, notifications, openings, proof, solve, solve_estimate)
+from . import (community_names, contributors, depth, ingest, ingest_queue,
+               logic, metrics, notifications, openings, proof, solve,
+               solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -62,7 +63,15 @@ LEGACY_MAX_BUDGET = 128_000_000
 # y sigue impidiendo que una sola vacie la cola.
 LEASES_PER_MACHINE = 32
 MAX_REPORTED_NPS = 1_000_000_000_000
-REQUEST_QUEUE_MAX = 1000000  # efectivamente sin tope (orden 27-jul; el propietario lo monitoriza)
+# Techo global de peticiones humanas esperando (PENDING, source USER, sobre
+# posiciones aun sin resolver). Estuvo abierto de par en par desde el 27-jul
+# mientras se medía el uso real; con los numeros del 30-jul —la flota sirve
+# ~1.100 tareas/hora y la cola humana viva ronda las 100— cinco mil son unas
+# cuatro horas de trabajo y cincuenta veces el uso normal: quien usa la
+# pagina no lo vera nunca, y el dia que alguien la recorra con un script el
+# freno esta puesto. Lo que se rechaza es solo lo que pide una PERSONA: el
+# selector y los brazos automaticos siguen encolando pase lo que pase.
+REQUEST_QUEUE_MAX = 5000
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
 # Breadcrumb reconstruction is public-request work. Keep the cycle-safe
@@ -1041,6 +1050,13 @@ def _api_request_once(request, key):
     gente que de verdad usa el explorador mientras no frenaba a nadie mas —
     lo que acota el gasto real es el dedup (un click por posicion mientras su
     trabajo sigue vivo) y el techo de la cola, no un contador por IP.
+
+    El peldano puede venir ELEGIDO en el POST (``budget``), y aqui es donde se
+    decide si cuenta: la plantilla esconde el selector a quien no puede
+    elegirlo, pero esconder un control no es negarlo — este endpoint acepta el
+    POST de cualquiera.  ``depth.chosen_rung`` devuelve ``None`` para quien no
+    tiene derecho, y entonces la peticion sigue por el peldano por defecto,
+    exactamente igual que antes de que existiera el selector.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -1049,6 +1065,9 @@ def _api_request_once(request, key):
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
         return JsonResponse({'status': 'unknown-position'}, status=404)
+    chosen, invalid = depth.chosen_rung(request)
+    if invalid:
+        return JsonResponse({'status': 'bad-budget'}, status=400)
     hour_ago = timezone.now() - timedelta(hours=1)
     # A recent click is only a duplicate while the request it represented is
     # still queued or running.  Once that task has completed, the same visitor
@@ -1074,7 +1093,15 @@ def _api_request_once(request, key):
             state__in=(AnalysisTask.TState.PENDING,
                        AnalysisTask.TState.LEASED),
         ).exists()
-    if recent_same_position and active_user_request:
+    if recent_same_position and active_user_request and chosen is None:
+        # Un peldano ELEGIDO no es el mismo click otra vez: es "lo que hay
+        # encolado aqui se me queda corto".  El dedup existe para que un click
+        # repetido no compre dos veces lo mismo, y ``_request_rung`` ya sabe
+        # subirle el presupuesto a la tarea que espera; devolver
+        # 'already-requested' aqui dejaria al selector prometiendo una
+        # profundidad que nunca llegaria a pedirse.  Solo alcanza a quien tiene
+        # derecho a elegir (el resto llega con ``chosen is None``), y el techo
+        # de cola de abajo sigue acotando el gasto igual que siempre.
         return JsonResponse({'status': 'already-requested'})
     if AnalysisTask.objects.filter(state='PENDING', source='USER',
                                    position__status='UNKNOWN') \
@@ -1098,7 +1125,7 @@ def _api_request_once(request, key):
             route = ''
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
-                                          route=route)
+                                          route=route, budget_floor=chosen)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -3864,6 +3891,11 @@ def explore(request, key):
                    and pos.status == 'UNKNOWN')
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
+        # Selector de profundidad del boton de peticion: vacio — y por tanto
+        # invisible, sin hueco ni pista — para quien no puede elegir peldano
+        # (§ depth.context).  Esta pagina no lleva cache (§ urls), asi que un
+        # render con selector no se le sirve a nadie mas.
+        **depth.context(request, pos),
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
