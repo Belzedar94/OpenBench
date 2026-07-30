@@ -23,6 +23,14 @@ own because they are one scheduling decision and it should be taken in one
 place.  The order inside a pass is the priority order: debt, coverage, then
 the adversarial arms last.
 
+And, at the very end, the PUBLIC COUNTERS of the front page.  Those are not a
+scheduling decision, but they are the same kind of thing this process exists
+for: bounded work that used to be paid inside somebody's HTTP request — three
+full scans of ``Position`` and twelve attribution ``COUNT``s, 2.5 s measured,
+on every miss of the 15-second page cache.  Publishing them from here means
+they are computed once for the whole site and read from the shared cache by
+all five gunicorn workers (§ atomicdb.metrics, OpenSite.cache).
+
 CADA PASO CON SU RED.  Un brazo que revienta se lleva SOLO su propio trabajo:
 el ciclo lo registra en ``failed_steps`` y sigue.  Sin eso, una excepcion en
 cualquier punto mataba el proceso, systemd lo relanzaba y volvia a morir en el
@@ -37,7 +45,7 @@ import time
 
 from django.core.management.base import BaseCommand
 
-from atomicdb import ingest
+from atomicdb import ingest, metrics
 from atomicdb.database import connection
 from atomicdb.models import Position
 
@@ -186,6 +194,18 @@ class Command(BaseCommand):
             # comerse el cupo de cobertura/dn/fragiles.
             pooled = step('pool', lambda: ingest.top_up_analysis_pool(
                 options['pool_target']))
+            # LOS CONTADORES PUBLICOS, en este mismo ciclo y por la misma
+            # razon que todo lo de arriba: son trabajo acotado que no es de
+            # ninguna peticion.  Tres barridos de ``Position`` y doce
+            # ``COUNT`` de atribucion costaban 2,5 s DENTRO de la portada, en
+            # cada fallo de su cache de pagina; aqui se pagan una vez por
+            # pasada y todo el sitio los lee de la cache compartida
+            # (§ atomicdb.metrics).  Va el ULTIMO: nada de lo que decide la
+            # cola depende de ello, asi que si esto revienta no se lleva por
+            # delante ninguna decision de planificacion — y la web tiene su
+            # propia red para medirlos ella misma si este paso deja de correr.
+            published = step('public-counters',
+                             lambda: len(metrics.refresh_public_snapshot()))
             passes += 1
             elapsed = time.monotonic() - started
             report = {'pass': passes, 'seconds': round(elapsed, 3),
@@ -193,7 +213,8 @@ class Command(BaseCommand):
                       'debt_enqueued': enqueued, 'coverage_enqueued': covered,
                       'adversarial': bool(adversarial),
                       'dn_repair_enqueued': repaired,
-                      'fragile_enqueued': fragile}
+                      'fragile_enqueued': fragile,
+                      'public_counters_published': published}
             if failures:
                 report['failed_steps'] = failures
             self.stdout.write(json.dumps(report, sort_keys=True))

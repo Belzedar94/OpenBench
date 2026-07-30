@@ -1,5 +1,6 @@
 """API de AtomicDB (worker) + paginas publicas del Explorer."""
 
+import hashlib
 import json
 import logging
 import math
@@ -87,10 +88,17 @@ LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
 # So it is cached, and the TTL is the ONLY invalidation.  That is a choice,
 # not a shortcut: a new edge can only ever make a breadcrumb SHORTER, never
 # wrong, and nobody navigating a 96-ply line needs to see that improvement
-# within the same minute.  Anything stronger (cross-process events, a shared
-# store) is infrastructure this deployment does not have and does not need —
-# five gunicorn workers keep five independent copies, and a restart clears
-# all of them.  Two minutes is also the blast radius if this is ever wrong.
+# within the same minute.  Anything stronger — cross-process events, an
+# invalidation protocol — is still infrastructure this does not need.  Two
+# minutes is the blast radius if this is ever wrong.
+#
+# WHAT CHANGED WITH THE SHARED CACHE.  The store is Redis now, so the five
+# gunicorn workers no longer keep five independent copies — they keep one,
+# which is the point, and it also means RESTARTING THE WEB NO LONGER CLEARS
+# IT.  The emergency lever moved with the store: ``redis-cli -n 1 FLUSHDB``,
+# or bumping the version below, which orphans every old entry at once.
+# Nothing else about the reasoning above changes, and the TTL stays where it
+# was: a longer one would be a separate decision with its own argument.
 LINEAGE_CACHE_SECONDS = 120
 # Bump when the cached payload shape changes, so a deploy cannot read an old
 # entry with new code.  ``0`` seconds above disables the cache outright.
@@ -1383,6 +1391,26 @@ def _child_navigation_state(active_ucis, current_opening, route_ply,
     return None, child_anchor
 
 
+def _batched_sans(fen, ucis):
+    """Los SAN de toda una linea en UNA llamada, o ``None`` si no se pudo.
+
+    ``None`` no significa "ruta invalida": significa "esto hay que hacerlo
+    ply a ply", y quien recibe ``None`` vuelve al bucle estricto.  Ese bucle
+    es el que dice cual fue el ply malo, y esa frase es la que ve el
+    visitante — el lote solo existe para que la ruta BUENA, que es el 99% de
+    los casos, no pague tres generaciones de movimientos por ply.
+    """
+    if not ucis:
+        return []
+    import pyffish as pf
+
+    try:
+        sans = list(pf.get_san_moves('atomic', fen, ucis))
+    except Exception:
+        return None
+    return sans if len(sans) == len(ucis) else None
+
+
 def _validated_play_route(raw, target_key):
     """Return a read-only, startpos-rooted route or ``None``.
 
@@ -1407,11 +1435,21 @@ def _validated_play_route(raw, target_key):
     prefix_keys = [logic.key_of(fen)]
     white = True
     line = []
-    for uci in ucis:
-        if uci not in logic.legal_moves(fen):
-            raise PlayRouteError('move path contains an illegal Atomic move')
+    # UNA llamada parsea y avanza la linea entera y devuelve todos los SAN;
+    # ``get_san_moves`` levanta ``Invalid move`` en cuanto un ply no es legal,
+    # asi que el lote comprueba exactamente lo mismo que el bucle de abajo.
+    # Cuando el lote no sirve — un ply ilegal, o un build de PyFFish que no
+    # sabe hacerlo — se cae al camino de siempre, ply a ply, que es el que
+    # sabe DECIR cual fallo y por que.
+    sans = _batched_sans(fen, ucis)
+    for index, uci in enumerate(ucis):
+        if sans is None:
+            if uci not in logic.legal_moves(fen):
+                raise PlayRouteError(
+                    'move path contains an illegal Atomic move')
         try:
-            san = pf.get_san('atomic', fen, uci)
+            san = sans[index] if sans is not None else pf.get_san(
+                'atomic', fen, uci)
             fen = logic.apply_move(fen, uci)
         except Exception as exc:
             raise PlayRouteError(
@@ -1970,6 +2008,78 @@ def _line_labels(key, preview_plies=10):
     return _line_labels_many([key], preview_plies).get(key, ('', ''))
 
 
+def _route_label_cache_key(route, target_key, preview_plies):
+    # La ruta entra HASHEADA: son hasta 64 UCIs separados por coma, y una
+    # clave de cache de 400 caracteres es una clave que ningun backend
+    # promete tratar bien.  El objetivo y el presupuesto de preview van en
+    # claro porque son cortos y porque los tres juntos son la identidad: la
+    # misma ruta hacia otra posicion es otra etiqueta.
+    digest = hashlib.sha256(route.encode('utf-8', 'replace')).hexdigest()[:32]
+    return (f'atomicdb.routelabel.v{LINEAGE_CACHE_VERSION}'
+            f'.{preview_plies}.{target_key}.{digest}')
+
+
+def _route_labels_many(pairs, preview_plies=10):
+    """``{(route, target_key): (preview, full)}`` para varias filas de golpe.
+
+    ESTO ERA EL GASTO MAYOR DE LA PORTADA.  Cada fila de "Now analyzing" y de
+    "Up next" con ruta declarada rejugaba su linea entera con pyffish —
+    ``legal_moves`` + ``get_san`` + ``get_fen`` por ply, hasta 64 plies, cinco
+    y cinco filas — solo para escribir un rotulo.  Medido en produccion: 2,05
+    s de los 6,2 s de la portada, repetidos tal cual en cada visita que
+    fallaba la cache de pagina.
+
+    El resultado es una funcion PURA de (ruta, destino, presupuesto) mas la
+    pregunta "siguen materializados todos los prefijos", asi que se cachea con
+    el mismo TTL y el mismo argumento que el linaje (§ LINEAGE_CACHE_SECONDS):
+    el arbol solo crece, una ruta valida no deja de serlo, y nadie mirando una
+    cola necesita ver dos minutos antes que una ruta empezo a existir.
+
+    Lo que NO se cachea es el fallo.  Una ruta que hoy no llega puede llegar
+    en cuanto ``goto`` materialice el prefijo que le falta, y guardar esa
+    ausencia seria pintar el linaje canonico durante dos minutos despues de
+    que la ruta ya fuera correcta — el mismo razonamiento que en
+    ``_lines_to_root``, y por el mismo motivo.
+    """
+    wanted = [(route, key) for route, key in dict.fromkeys(pairs)
+              if route and key]
+    if not wanted:
+        return {}
+    ttl = LINEAGE_CACHE_SECONDS
+    if ttl <= 0:
+        return {pair: labels for pair in wanted
+                if (labels := _walk_route_labels(*pair, preview_plies))}
+
+    cache_keys = {pair: _route_label_cache_key(*pair, preview_plies)
+                  for pair in wanted}
+    stored = cache.get_many(list(cache_keys.values()))
+    labels, fresh = {}, {}
+    for pair in wanted:
+        payload = stored.get(cache_keys[pair])
+        if payload is None:
+            computed = _walk_route_labels(*pair, preview_plies)
+            if computed is None:
+                continue
+            fresh[cache_keys[pair]] = list(computed)
+            labels[pair] = computed
+        else:
+            labels[pair] = tuple(payload)
+    if fresh:
+        cache.set_many(fresh, ttl)
+    return labels
+
+
+def _walk_route_labels(route, target_key, preview_plies):
+    """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale."""
+    try:
+        top, line, _ucis = _validated_play_route(route, target_key)
+    except (PlayRouteError, PlayRouteConflict):
+        return None
+    full = _format_san_line(top, line, max_plies=512, keep_head=True)
+    preview = _format_san_line(top, line, max_plies=preview_plies)
+    return preview, full
+
+
 def _route_labels(route, target_key, preview_plies=10):
     """(preview, full) desde la RUTA DECLARADA del peticionario, o None.
 
@@ -1978,13 +2088,8 @@ def _route_labels(route, target_key, preview_plies=10):
     guardarse; aqui se re-valida entera (legalidad, llegada al objetivo,
     prefijos materializados) porque el arbol pudo cambiar debajo — ante
     cualquier duda, None y el linaje canonico de siempre."""
-    try:
-        top, line, _ucis = _validated_play_route(route, target_key)
-    except (PlayRouteError, PlayRouteConflict):
-        return None
-    full = _format_san_line(top, line, max_plies=512, keep_head=True)
-    preview = _format_san_line(top, line, max_plies=preview_plies)
-    return preview, full
+    return _route_labels_many([(route, target_key)],
+                              preview_plies).get((route, target_key))
 
 
 def _san_line(key, max_plies=16, keep_head=False):
@@ -2146,23 +2251,30 @@ def _proof_health(now):
     retraso en un indicador de tendencia no cambia ninguna decision; un
     segundo extra por visita si.
 
-    Los cierres por procedencia SI van en vivo: son ``COUNT`` sobre un indice
-    de fecha y responden a "que esta haciendo el servidor ahora mismo", que es
-    justo la pregunta que una captura horaria contestaria tarde.
+    Los cierres por procedencia tampoco: eran DOCE ``COUNT`` sobre
+    ``atomicdb_dbevent`` filtrando por una clave del payload, casi un segundo
+    medido, y se pagaban enteros en cada fallo de la cache de pagina.  Son
+    publicos e iguales para todo el mundo, asi que se calculan una vez por
+    ciclo y se leen de la cache compartida (§ metrics.attribution_windows).
+    Si todavia no los ha medido nadie, el bloque no se pinta: cero no
+    significa "nadie ha cerrado nada" y no puede parecerlo.
     """
     snapshot = ProgressSnapshot.objects.order_by('-bucket_start').first()
-    day = metrics.closure_attribution_window(now=now, hours=24)
-    week = metrics.closure_attribution_window(now=now, hours=24 * 7)
-    health = {
-        'attribution_24h': _attribution_rows(day),
-        'attribution_7d': _attribution_rows(week),
-        'attribution_stamped_24h': day['stamped'],
-        'attribution_total_24h': day['total'],
-        'attribution_stamped_7d': week['stamped'],
-        'attribution_total_7d': week['total'],
-        'has_attribution': bool(week['stamped']),
-        'has_frontier': False,
-    }
+    windows = metrics.attribution_windows(now=now)
+    if windows is None:
+        health = {'has_attribution': False, 'has_frontier': False}
+    else:
+        day, week = windows['day'], windows['week']
+        health = {
+            'attribution_24h': _attribution_rows(day),
+            'attribution_7d': _attribution_rows(week),
+            'attribution_stamped_24h': day['stamped'],
+            'attribution_total_24h': day['total'],
+            'attribution_stamped_7d': week['stamped'],
+            'attribution_total_7d': week['total'],
+            'has_attribution': bool(week['stamped']),
+            'has_frontier': False,
+        }
     if snapshot is None:
         return health
     health.update({
@@ -2309,26 +2421,35 @@ def _child_moves(pos):
 
 
 def home(request):
-    total = Position.objects.count()
-    closed = Position.objects.exclude(status='UNKNOWN').count()
+    now = timezone.now()
+    # Los tres agregados que barrian la tabla entera salen de la instantanea
+    # compartida, no de esta peticion (§ metrics, "lo caro de la portada").
+    # Siguen siendo conteos EXACTOS; lo unico que cambia es que son de hace un
+    # rato, y ese rato viaja con ellos hasta el tooltip.
+    totals = metrics.tree_totals(now=now)
+    total, closed = totals['total'], totals['closed']
+    nodes = totals['nodes']
+    day_ago = now - timedelta(hours=24)
+    # Estos cuatro se quedan en vivo: son consultas indexadas y baratas, y
+    # "en cola" o "cierres de 24h" son justo los numeros que un visitante mira
+    # para ver si algo se movio hace un minuto.
     analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
     requested = AnalysisTask.objects.filter(
         state='PENDING', source='USER', position__status='UNKNOWN').count()
-    nodes = Position.objects.aggregate(n=Sum('nodes_invested'))['n'] or 0
-    day_ago = timezone.now() - timedelta(hours=24)
     closed_24h = DBEvent.objects.filter(kind='NODE_CLOSED',
                                         ts__gte=day_ago).count()
     nodes_24h = AnalysisTask.objects.filter(
         state='COMPLETED', completed__gte=day_ago).aggregate(
         n=Sum('nodes_searched'))['n'] or 0
-    root_key = logic.key_of(logic.start_fen())
-    try:
-        first_moves = _child_moves(Position.objects.get(key=root_key))
-    except Position.DoesNotExist:
-        first_moves = []
+    # UNA lectura de la raiz para las dos cosas que la necesitan: la tabla de
+    # primeras jugadas y el tablero de abajo.  Eran dos consultas de la misma
+    # fila, y ademas dos ramas distintas para "la raiz no existe" — la de aqui
+    # pintaba la tabla vacia mientras la de abajo la creaba de todas formas.
+    root = ingest.get_or_create_position(logic.start_fen())
+    root_key = root.key
+    first_moves = _child_moves(root)
     solved_first = sum(1 for m in first_moves if m['status'] != 'UNKNOWN')
     solved_pct = round(100.0 * closed / total, 1) if total else 0.0
-    now = timezone.now()
     live_cutoff = now - timedelta(seconds=180)
     live_pings = list(WorkerPing.objects.filter(last_seen__gte=live_cutoff)
                       .order_by('machine'))
@@ -2393,11 +2514,26 @@ def home(request):
     labels = _line_labels_many(
         [task.position_id for task in leased]
         + [pos.key for pos in upnext_positions] + event_keys)
+    pending_meta = {}
+    for pid, source, route in (AnalysisTask.objects.filter(
+            position_id__in=[pos.key for pos in upnext_positions],
+            state=AnalysisTask.TState.PENDING)
+            .order_by('position_id', 'generation')
+            .values_list('position_id', 'source', 'route')):
+        pending_meta.setdefault(pid, (source, route))
+    # Las diez rutas de las dos columnas se resuelven de una vez: una sola
+    # lectura de la cache compartida en lugar de diez, y las que falten se
+    # rejuegan aqui.  Por eso ``pending_meta`` se lee antes de pintar nada —
+    # las rutas de "Up next" viven en el, y buscarlas fila a fila era pedirle
+    # a la cache diez viajes para contestar lo mismo.
+    routes = _route_labels_many(
+        [(task.route, task.position_id) for task in leased]
+        + [(pending_meta.get(pos.key, ('', ''))[1], pos.key)
+           for pos in upnext_positions])
     analyzing = []
     for task in leased:
         preview, full = labels.get(task.position_id, ('', ''))
-        routed = (_route_labels(task.route, task.position_id)
-                  if task.route else None)
+        routed = routes.get((task.route, task.position_id))
         if routed is not None:
             preview, full = routed
         analyzing.append({'key': task.position_id,
@@ -2407,18 +2543,11 @@ def home(request):
                           'machine': task.machine,
                           'source': task.source,
                           'play': task.route if routed is not None else ''})
-    pending_meta = {}
-    for pid, source, route in (AnalysisTask.objects.filter(
-            position_id__in=[pos.key for pos in upnext_positions],
-            state=AnalysisTask.TState.PENDING)
-            .order_by('position_id', 'generation')
-            .values_list('position_id', 'source', 'route')):
-        pending_meta.setdefault(pid, (source, route))
     upnext = []
     for pos in upnext_positions:
         preview, full = labels.get(pos.key, ('', ''))
         source, route = pending_meta.get(pos.key, ('', ''))
-        routed = _route_labels(route, pos.key) if route else None
+        routed = routes.get((route, pos.key))
         if routed is not None:
             preview, full = routed
         upnext.append({'key': pos.key,
@@ -2427,7 +2556,6 @@ def home(request):
                        'source': source,
                        'play': route if routed is not None else ''})
     events = _friendly_events(event_rows, labels)
-    root = ingest.get_or_create_position(logic.start_fen())
     root_legal_ucis = logic.legal_moves(root.fen)
     compute = worker_metrics()
     root_pn, root_dn = proof.headline_numbers()
@@ -2451,6 +2579,10 @@ def home(request):
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),
         'requested_h': _human(requested),
+        # La hora a la que se contaron los tres de arriba, para el tooltip.
+        # Va al lado del numero porque la alternativa — no decirlo — seria
+        # dejar que se lea como "ahora mismo", que es lo unico que no es.
+        'counters_at': totals['measured_at'],
         'workers_h': _human(compute['workers']),
         'cores_h': _human(compute['cores']),
         'compute_nps_h': _human(compute['nps']),

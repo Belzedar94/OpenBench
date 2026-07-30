@@ -13,9 +13,23 @@
 # /atomicdb/api/lease, which meant every worker poll could pay for it, in each
 # of the five gunicorn processes independently.
 #
+# It also publishes the PUBLIC COUNTERS of the front page into the shared
+# cache at the end of every pass — three full scans of ``Position`` and the
+# closure-attribution counts, which used to be paid inside a visitor's request
+# (2.5 s measured) and are now paid once a minute for the whole site.  That is
+# also why the cache has to be shared: a web worker cannot read something
+# published into another process's memory (§ OpenSite/cache.py).
+#
 # If it is stopped, NOTHING breaks: the queue keeps being served in the order
 # the last refresh left, tasks keep being leased and submitted, and priorities
-# simply go stale.  Stale priorities cost relevance, not correctness.
+# simply go stale.  Stale priorities cost relevance, not correctness.  The
+# counters degrade the same way: the web measures them itself, one process at
+# a time behind a lock, so the front page gets slower and stays truthful.
+#
+# The cache it publishes into is ``OPENBENCH_REDIS_URL`` (default
+# redis://127.0.0.1:6379/1).  If the web process is pointed somewhere else,
+# THIS process has to be pointed at the same place or it will be publishing
+# into a cache nobody reads.
 #
 # Start order: after `manage.py migrate`.  Independent of the web service and
 # of atomicdb-ingest.

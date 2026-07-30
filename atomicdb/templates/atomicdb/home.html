@@ -4,9 +4,9 @@
 {% block content %}
 
 <div class="metrics">
-  <div class="metric"><div class="v">{{ total_h }}</div><div class="l">positions</div></div>
-  <div class="metric"><div class="v">{{ closed_h }}</div><div class="l">practically solved</div></div>
-  <div class="metric"><div class="v">{{ nodes_h }}</div><div class="l">engine nodes</div></div>
+  <div class="metric" title="Exact count of every position in the tree, taken at {{ counters_at|date:"Y-m-d H:i" }} UTC"><div class="v">{{ total_h }}</div><div class="l">positions</div></div>
+  <div class="metric" title="Exact count of the positions with a decided status, taken at {{ counters_at|date:"Y-m-d H:i" }} UTC"><div class="v">{{ closed_h }}</div><div class="l">practically solved</div></div>
+  <div class="metric" title="Exact total of the engine nodes invested in the tree, taken at {{ counters_at|date:"Y-m-d H:i" }} UTC"><div class="v">{{ nodes_h }}</div><div class="l">engine nodes</div></div>
   <div class="metric"><div class="v">{{ analyses_h }}</div><div class="l">analyses</div></div>
   <div class="metric" title="Visitor analysis requests still waiting for a worker. Up next previews the selector's own priorities instead, so the two numbers can differ"><div class="v">{{ requested_h }}</div><div class="l">in queue</div></div>
   <div class="metric" title="Workers with a heartbeat in the last 3 minutes"><div class="v">{{ workers_h }}</div><div class="l">active workers</div></div>
