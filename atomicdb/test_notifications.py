@@ -162,9 +162,11 @@ class NotificationCreationTests(TestCase):
         """
         parent = _line('e2e4')
         Position.objects.filter(key=parent.key).update(eval_cp=25)
+        # Mirada PROFUNDA ya gastada: desde el umbral del 30-jul (caso
+        # Wolfram) el swap solo convierte revisitas con el 512M hecho.
         AnalysisTask.objects.create(
             position=parent, generation=0,
-            budget_nodes=ingest.REQUEST_BUDGET_LADDER[0],
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[1],
             state=AnalysisTask.TState.COMPLETED, completed=timezone.now())
 
         outcome = ingest.request_analysis(
