@@ -259,8 +259,17 @@ class AnalysisTask(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(
             fields=['position', 'generation'], name='uniq_task_per_generation')]
-        indexes = [models.Index(fields=['state', 'completed'],
-                                name='atomic_task_state_done')]
+        indexes = [
+            models.Index(fields=['state', 'completed'],
+                         name='atomic_task_state_done'),
+            # La cola de UNA persona.  Sin este indice, "lo ultimo servido de
+            # esta cuenta" se resuelve caminando ``atomic_task_state_done``
+            # hacia atras y descartando lo que no es suyo: para quien todavia
+            # no tiene nada servido, eso es recorrer TODAS las tareas
+            # completadas del proyecto para acabar devolviendo cero filas.
+            models.Index(fields=['requested_by', 'state', 'id'],
+                         name='atomic_task_requester'),
+        ]
 
 
 class ProofCampaign(models.Model):
