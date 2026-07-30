@@ -130,6 +130,29 @@ class VisibilityTests(TestCase):
         self.assertSlider(
             _signed_in('belzedar').get(f'/atomicdb/explore/{self.pos.key}/'))
 
+    def test_a_revoked_account_stops_choosing_even_with_a_live_worker(self):
+        # La revocacion es la misma puerta que cierra el protocolo de workers:
+        # si la cuenta ya no puede entregar analisis, tampoco decide cuanto
+        # cuestan. El ping reciente se deja a proposito — sin el, el test
+        # pasaria por la razon equivocada.
+        from OpenBench.models import Profile
+        _worker('expelled', seen_days_ago=1)
+        Profile.objects.filter(user__username='expelled').update(enabled=False)
+
+        self.assertNoSlider(
+            _signed_in('expelled').get(f'/atomicdb/explore/{self.pos.key}/'))
+
+    def test_a_revoked_account_cannot_choose_through_the_endpoint_either(self):
+        from OpenBench.models import Profile
+        _worker('expelled', seen_days_ago=1)
+        Profile.objects.filter(user__username='expelled').update(enabled=False)
+
+        response = _signed_in('expelled').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(_pending(self.pos).budget_nodes, LADDER[0])
+
     def test_a_solved_position_has_no_selector_for_anyone(self):
         _staff()
         Position.objects.filter(pk=self.pos.pk).update(status='DRAW',

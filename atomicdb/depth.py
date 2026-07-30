@@ -44,11 +44,20 @@ def may_choose(user):
 
     Un anonimo sale por la primera linea SIN tocar la base: el explorador lo
     llama en cada render y la inmensa mayoria de las visitas no tienen sesion.
+
+    Una cuenta REVOCADA no elige aunque su maquina siguiera pingando hace un
+    rato: ``Profile.enabled`` es la misma puerta que cierra el protocolo de
+    workers (§ ``views._worker_account``), y un permiso que sobrevive a la
+    revocacion no es un permiso.  El propietario no pasa por ahi porque
+    ``is_staff`` ya es la llave del sitio entero.
     """
     if user is None or not getattr(user, 'is_authenticated', False):
         return False
     if user.is_staff:
         return True
+    from OpenBench.models import Profile
+    if not Profile.objects.filter(user=user, enabled=True).exists():
+        return False
     since = timezone.now() - timedelta(days=CONTRIBUTOR_WINDOW_DAYS)
     return WorkerPing.objects.filter(user=user.username,
                                      last_seen__gte=since).exists()

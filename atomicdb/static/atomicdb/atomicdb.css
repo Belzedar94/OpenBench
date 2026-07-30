@@ -1531,6 +1531,15 @@ html.theme-ready .tile {
   .queue {
     grid-template-columns: 1fr;
   }
+
+  /* Una columna sola sigue sin poder encogerse por debajo de su contenido: el
+     tablero pedia sus 381px dentro de un telefono de 375 y sacaba la pagina
+     entera de la pantalla (medido en produccion, 401 de scroll en 375). El
+     `min-width: 0` deja que la columna ceda, y como .boardwrap ya es
+     `min(440px, 100%)` el tablero se encoge con ella. */
+  .cols > * {
+    min-width: 0;
+  }
 }
 
 @media (max-width: 560px) {
