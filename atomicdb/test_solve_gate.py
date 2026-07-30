@@ -6,7 +6,14 @@ senales coinciden, y el cuadrante donde NO coinciden — motor optimista,
 estimador pesimista — se registra en vez de descartarse.
 """
 
+import csv
+import os
+import shutil
+import tempfile
+from io import StringIO
+
 from django.conf import settings
+from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
 
 from . import ingest, logic, proof, solve_estimate
@@ -534,3 +541,120 @@ class DisagreementQuadrantTests(TestCase):
                 last_analysis=[{'eval_cp': 1_500, 'pv': MANOEUVRE}])
             proof.refresh_proof_numbers([edge.child_id], max_plies=1)
         self.assertEqual(self._events(), [])
+
+
+class DumpSolveCostsTests(TestCase):
+    """El dataset censurado: coste medido donde se sabe, cota donde no."""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.path = os.path.join(self.directory, 'solve-costs.csv')
+        # Un cono cerrado de tres posiciones colgando de la raiz, mas una
+        # rama abierta con esfuerzo y otra abierta sin tocar.
+        self.root = self._position(logic.start_fen(), 'WHITE_WIN', 1_000,
+                                   eval_cp=1_200, visits=3)
+        self.child = self._position(
+            logic.apply_move(logic.start_fen(), 'e2e4'), 'WHITE_WIN', 500)
+        self.grandchild = self._position(
+            logic.apply_move(logic.apply_move(logic.start_fen(), 'e2e4'),
+                             'e7e5'),
+            'WHITE_WIN', 250)
+        self.open_effort = self._position(
+            logic.apply_move(logic.start_fen(), 'd2d4'), 'UNKNOWN', 700)
+        self.open_idle = self._position(
+            logic.apply_move(logic.start_fen(), 'g1f3'), 'UNKNOWN', 0)
+        Edge.objects.create(parent=self.root, move_uci='e2e4',
+                            child=self.child)
+        Edge.objects.create(parent=self.child, move_uci='e7e5',
+                            child=self.grandchild)
+        Edge.objects.create(parent=self.root, move_uci='d2d4',
+                            child=self.open_effort)
+
+    def _position(self, fen, status, nodes, eval_cp=None, visits=0):
+        row = ingest.get_or_create_position(fen)
+        Position.objects.filter(key=row.key).update(
+            status=status, nodes_invested=nodes, eval_cp=eval_cp,
+            visits=visits, closure='MINIMAX' if status != 'UNKNOWN' else None)
+        return Position.objects.get(key=row.key)
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def _dump(self, **options):
+        call_command('dump_solve_costs', self.path, stdout=StringIO(),
+                     **options)
+        with open(self.path, newline='', encoding='utf-8') as handle:
+            return list(csv.DictReader(handle))
+
+    def _by_key(self, rows):
+        return {row['key']: row for row in rows}
+
+    def test_the_columns_are_the_declared_ones(self):
+        self._dump()
+        with open(self.path, newline='', encoding='utf-8') as handle:
+            header = next(csv.reader(handle))
+        self.assertEqual(tuple(header),
+                         ('key', 'fen', 'eval_cp', 'visits', 'nodes_invested',
+                          'annoyance', 'label', 'censored'))
+
+    def test_a_closed_row_is_labelled_with_its_measured_cost(self):
+        """Sub-DAG de 3 posiciones y 1.750 nodos de motor acumulados."""
+        row = self._by_key(self._dump())[self.root.key]
+        self.assertEqual(row['censored'], '0')
+        self.assertEqual(row['label'], str(3 + 1_000 + 500 + 250))
+        self.assertEqual(row['nodes_invested'], '1000')
+        self.assertEqual(row['visits'], '3')
+        self.assertEqual(row['eval_cp'], '1200')
+
+    def test_the_open_branch_is_not_part_of_the_proof_subdag(self):
+        """700 nodos de una rama que sigue abierta no cerraron nada."""
+        row = self._by_key(self._dump())[self.root.key]
+        self.assertNotIn('700', row['label'])
+
+    def test_a_closed_leaf_costs_at_least_one(self):
+        """TERMINAL y tablebase gastan cero nodos y aun asi costaron algo."""
+        Position.objects.filter(key=self.grandchild.key).update(
+            nodes_invested=0)
+        row = self._by_key(self._dump())[self.grandchild.key]
+        self.assertEqual(row['label'], '1')
+        self.assertEqual(row['censored'], '0')
+
+    def test_an_open_row_with_effort_is_a_censored_lower_bound(self):
+        row = self._by_key(self._dump())[self.open_effort.key]
+        self.assertEqual(row['censored'], '1')
+        self.assertEqual(row['label'], '700')
+
+    def test_an_untouched_open_row_says_nothing_and_is_not_emitted(self):
+        self.assertNotIn(self.open_idle.key, self._by_key(self._dump()))
+
+    def test_hitting_the_traversal_cap_censors_the_label(self):
+        """El tope es una decision de coste; censurar impide que sea mentira."""
+        row = self._by_key(self._dump(max_subdag=1))[self.root.key]
+        self.assertEqual(row['censored'], '1')
+        self.assertEqual(row['label'], str(1 + 1_000))
+
+    def test_the_annoyance_column_is_the_estimator(self):
+        row = self._by_key(self._dump())[self.root.key]
+        value = float(row['annoyance'])
+        self.assertGreaterEqual(value, 0.0)
+        self.assertLessEqual(value, 1.0)
+        self.assertAlmostEqual(
+            value,
+            solve_estimate.annoyance(
+                Position.objects.get(key=self.root.key), branching=2),
+            places=4)
+
+    def test_the_limit_stops_early(self):
+        self.assertEqual(len(self._dump(limit=2)), 2)
+
+    def test_a_tiny_chunk_still_emits_every_row(self):
+        """El volcado va por lotes; el tamano del lote no cambia el dataset."""
+        self.assertEqual(len(self._dump(chunk=1)), len(self._dump(chunk=500)))
+
+    def test_the_command_reports_what_it_wrote(self):
+        out = StringIO()
+        call_command('dump_solve_costs', self.path, stdout=out)
+        text = out.getvalue()
+        self.assertIn('wrote 4 rows', text)
+        self.assertIn('closed (measured)  3', text)
+        self.assertIn('censored (bound)   1', text)
