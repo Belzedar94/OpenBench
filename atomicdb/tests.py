@@ -511,6 +511,16 @@ class RequestTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {'status': 'queue-full'})
 
+    def test_the_queue_ceiling_is_a_real_number(self):
+        # El tope estuvo abierto de par en par (un millon) mientras se medía
+        # el uso; un techo que no frena nada es un techo que no esta puesto,
+        # y el mecanismo entero seguia verde en los tests igualmente. Esto
+        # fija que exista un numero de verdad, holgado sobre el uso real
+        # (~100 peticiones humanas vivas el 30-jul) y lejos del infinito.
+        from . import views
+        self.assertGreaterEqual(views.REQUEST_QUEUE_MAX, 1000)
+        self.assertLessEqual(views.REQUEST_QUEUE_MAX, 50_000)
+
     def test_request_dedup_same_ip_position(self):
         p = ingest.get_or_create_position(logic.start_fen())
         self.client.post(f'/atomicdb/request/{p.key}/')

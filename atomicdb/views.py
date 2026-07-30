@@ -61,7 +61,15 @@ LEGACY_MAX_BUDGET = 128_000_000
 # y sigue impidiendo que una sola vacie la cola.
 LEASES_PER_MACHINE = 32
 MAX_REPORTED_NPS = 1_000_000_000_000
-REQUEST_QUEUE_MAX = 1000000  # efectivamente sin tope (orden 27-jul; el propietario lo monitoriza)
+# Techo global de peticiones humanas esperando (PENDING, source USER, sobre
+# posiciones aun sin resolver). Estuvo abierto de par en par desde el 27-jul
+# mientras se medía el uso real; con los numeros del 30-jul —la flota sirve
+# ~1.100 tareas/hora y la cola humana viva ronda las 100— cinco mil son unas
+# cuatro horas de trabajo y cincuenta veces el uso normal: quien usa la
+# pagina no lo vera nunca, y el dia que alguien la recorra con un script el
+# freno esta puesto. Lo que se rechaza es solo lo que pide una PERSONA: el
+# selector y los brazos automaticos siguen encolando pase lo que pase.
+REQUEST_QUEUE_MAX = 5000
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
 # Breadcrumb reconstruction is public-request work. Keep the cycle-safe
