@@ -7,3 +7,7 @@ whitenoise>=6.6,<7
 psycopg[binary]>=3.1,<4
 pyffish==0.0.89
 python-chess==1.999
+# Shared page/data cache for the five gunicorn workers.  Optional at runtime:
+# without it (or with Redis down) the cache backend degrades to the
+# per-process LocMemCache the site used before (§ OpenSite/cache.py).
+redis>=5,<7

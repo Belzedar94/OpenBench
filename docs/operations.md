@@ -212,6 +212,33 @@ gradual worker-v41 restart, and a one-chunk smoke test. Do not use `--fake` for
 application and backup for rollback. Migration `0009` is the empty merge node
 that joins the production profile-default branch with the v41 DATAGEN branch.
 
+## Caché compartida (Redis) de la web
+
+La portada de AtomicDB y el explorador cachean cosas caras y públicas: la
+página entera durante 15 s, los breadcrumbs de linaje durante 2 min, las
+etiquetas de ruta de la cola, y los contadores del árbol. Con `LocMemCache`
+eso eran **cinco cachés**, una por worker de gunicorn, y además nada de fuera
+de la petición podía publicar en ellas.
+
+- **Servidor**: `redis-server` en `127.0.0.1:6379`, base **1**, sin
+  contraseña (loopback). Paquete `redis` en el venv (`requirements.txt`).
+- **Configuración**: `OPENBENCH_REDIS_URL` (por defecto
+  `redis://127.0.0.1:6379/1`) y `OPENBENCH_CACHE_BACKEND` (`auto` por
+  defecto; `locmem` para no marcar a Redis nunca).
+- **Degradación**: si Redis no está, no responde o no está instalado, cada
+  proceso cae solo a la caché por proceso de siempre durante 30 s y lo
+  registra en WARNING (`cache: Redis unavailable during ...`). El sitio no se
+  cae por Redis; solo pierde el compartir.
+- **Quién publica los contadores**: `refresh_selector --loop`, al final de
+  cada pasada. Su JSON trae `public_counters_published: 2`. Si ese servicio
+  está parado, la web los mide ella misma (un proceso cada 90 s, con
+  cerrojo), así que sigue funcionando más lenta y no rota.
+- **Palanca de emergencia**: `redis-cli -n 1 FLUSHDB`. Un `systemctl restart
+  openbench` ya **no** vacía estas cachés — antes sí, porque vivían dentro
+  de los workers.
+- **Tests en el server**: `manage.py test` fuerza `locmem` solo, para que
+  el `cache.clear()` de la suite no sea un FLUSHDB sobre la caché viva.
+
 ## Deploy y archivado (desde 2026-07-21)
 
 - **Deploy de un comando**: `/opt/openbench` es clon git de

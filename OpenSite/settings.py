@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
 import os
+import sys
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -296,33 +297,69 @@ DATABASE_ROUTERS = ['OpenSite.db_routers.AtomicDBRouter']
 
 # Caches
 #
-# Two readers share this: the short ``cache_page`` on the hot read views
-# (home/map/method, and OpenBench's index) and the lineage breadcrumbs behind
-# every explore/goto render.  Django's implicit default is also LocMemCache,
-# but with room for 300 entries — a single home render plus a handful of
-# explorer clicks evicts it, which is a cache that costs memory and returns
-# nothing.
+# Four readers share this: the short ``cache_page`` on the hot read views
+# (home/map/method, and OpenBench's index), the lineage breadcrumbs behind
+# every explore/goto render, the replayed route labels of the queue rows, and
+# the public counters of the front page.
 #
-# Per-process and unshared IS the design, not a compromise.  Five gunicorn
-# workers keeping five independent copies costs five walks instead of one and
-# buys the rest of the win with no Redis to run, no invalidation protocol to
-# get wrong, and nothing new that can be down at 3am.  A restart empties it,
-# which is also the emergency lever.
+# WHY IT IS SHARED NOW.  The site runs FIVE gunicorn workers, and a
+# per-process LocMemCache gives each of them its own copy of all of that.
+# Three things were measured to be wrong with that, in rising order of cost:
+# the same breadcrumb walk was paid five times; a visitor whose page entry
+# existed on worker 3 missed it four requests out of five; and — the one that
+# no ceiling could fix — a producer OUTSIDE the request path cannot publish
+# into a cache that lives inside a web worker.  The front page's expensive
+# counters are exactly that: full-table aggregates that belong on the
+# selector service's timer, not in a visitor's request (§ atomicdb.metrics,
+# refresh_selector).
 #
-# The ceiling is sized off the TTL, not off the tree: nothing survives two
-# minutes, so it only has to cover the distinct positions a burst can touch
-# in that window, and each worker sees roughly a fifth of them.  4000 is well
-# past that.  It is also the memory bound — a breadcrumb entry is a few kB,
-# and the rare 96-ply one about 10kB — so a saturated worker is tens of MB
-# and the fleet stays in double digits.  If the box gets tight, cut this
-# number before reaching for shared infrastructure.
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'openbench-default',
-        'OPTIONS': {'MAX_ENTRIES': 4000, 'CULL_FREQUENCY': 4},
-    },
+# WHAT IT DOES NOT BUY.  No invalidation protocol: every entry here is
+# public, derived, and expires on its own TTL, so a stale entry is at worst a
+# number a minute old and never a wrong one.  Flushing the Redis database is
+# still a legitimate emergency lever, and so is stopping Redis: the backend
+# below falls back to the per-process cache this deployment used before, so
+# an unreachable Redis costs the fleet its shared copy and nothing else
+# (§ OpenSite.cache).
+#
+# The fallback ceiling is sized off the TTL, not off the tree: nothing
+# survives two minutes, so it only has to cover the distinct positions a
+# burst can touch in that window, and each worker sees roughly a fifth of
+# them.  4000 is well past that.  It is also the memory bound — a breadcrumb
+# entry is a few kB, and the rare 96-ply one about 10kB — so a saturated
+# worker is tens of MB and the fleet stays in double digits.
+REDIS_CACHE_URL = os.environ.get('OPENBENCH_REDIS_URL',
+                                 'redis://127.0.0.1:6379/1')
+# ``auto`` uses Redis and degrades on its own; ``locmem`` never dials it.
+# The test suite forces ``locmem`` below: ``cache.clear()`` between tests is a
+# FLUSHDB on Redis, and running the suite on the deployment box must not
+# empty the cache the live site is serving from.
+CACHE_BACKEND_CHOICE = os.environ.get('OPENBENCH_CACHE_BACKEND', 'auto')
+RUNNING_TESTS = len(sys.argv) > 1 and sys.argv[1] == 'test'
+if RUNNING_TESTS:
+    CACHE_BACKEND_CHOICE = 'locmem'
+
+_LOCMEM_CACHE = {
+    'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    'LOCATION': 'openbench-default',
+    'OPTIONS': {'MAX_ENTRIES': 4000, 'CULL_FREQUENCY': 4},
 }
+
+if CACHE_BACKEND_CHOICE == 'locmem':
+    CACHES = {'default': _LOCMEM_CACHE}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'OpenSite.cache.ResilientRedisCache',
+            'LOCATION': REDIS_CACHE_URL,
+            # Short socket timeouts on purpose: this is a loopback Redis, so
+            # anything slower than this is a Redis that is not answering, and
+            # a front page must find that out in milliseconds rather than
+            # wait on a default timeout.
+            'OPTIONS': {'socket_connect_timeout': 0.1, 'socket_timeout': 1.0},
+            'FALLBACK_LOCATION': 'openbench-default',
+            'FALLBACK_OPTIONS': {'MAX_ENTRIES': 4000, 'CULL_FREQUENCY': 4},
+        },
+    }
 
 
 # Password validation
