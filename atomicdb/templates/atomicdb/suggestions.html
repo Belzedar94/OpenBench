@@ -21,7 +21,7 @@
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td class="dim">{{ item.row.comment }}</td>
     <td class="dim">{{ item.row.created|date:"M d H:i" }} ·
-      {{ item.row.ip }}</td>
+      {% if item.row.suggested_by %}<strong>{{ item.row.suggested_by }}</strong> · {% endif %}{{ item.row.ip }}</td>
     <td>
       <form method="post" action="/atomicdb/suggestions/"
         class="suggest-actions">{% csrf_token %}

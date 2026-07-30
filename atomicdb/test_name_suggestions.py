@@ -728,3 +728,46 @@ class CommunityOverlayTests(TestCase):
         # sirviendose un minuto segun a que worker te toque.
         self.assertGreater(community_names.CACHE_SECONDS, 0)
         self.assertLessEqual(community_names.CACHE_SECONDS, 10)
+
+
+class SuggesterIdentityTests(TestCase):
+    """El aprobador quiere ver QUIEN propone (orden del 30-jul).
+
+    Cuenta logueada -> ``suggested_by`` viaja con la propuesta y se pinta en
+    la cola de moderacion; anonimo -> vacio, como siempre (el formulario
+    sigue siendo publico y sin cuenta)."""
+
+    def _propose(self, name):
+        pos = ingest.get_or_create_position(logic.start_fen())
+        return self.client.post(f'/atomicdb/suggest/{pos.key}/',
+                                {'name': name, 'play': '', 'opening': ''})
+
+    def test_a_logged_in_suggestion_records_the_account(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user('lesha', password='p')
+        self.client.login(username='lesha', password='p')
+
+        self._propose('Lab Defence')
+
+        row = OpeningNameSuggestion.objects.get(proposed_name='Lab Defence')
+        self.assertEqual(row.suggested_by, 'lesha')
+
+    def test_an_anonymous_suggestion_stays_nameless(self):
+        self._propose('Ghost Gambit')
+
+        row = OpeningNameSuggestion.objects.get(proposed_name='Ghost Gambit')
+        self.assertEqual(row.suggested_by, '')
+
+    def test_the_review_queue_shows_the_suggester(self):
+        from django.contrib.auth.models import User
+        from OpenBench.models import Profile
+        User.objects.create_user('lesha', password='p')
+        self.client.login(username='lesha', password='p')
+        self._propose('Lab Defence')
+        approver = User.objects.create_user('belz', password='p')
+        Profile.objects.create(user=approver, approver=True, enabled=True)
+        self.client.login(username='belz', password='p')
+
+        body = self.client.get('/atomicdb/suggestions/').content.decode()
+
+        self.assertIn('<strong>lesha</strong>', body)

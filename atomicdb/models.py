@@ -661,6 +661,10 @@ class OpeningNameSuggestion(models.Model):
                                      default=SKind.NEW)
     previous_name = models.CharField(max_length=60, blank=True, default='')
     comment       = models.CharField(max_length=280, blank=True, default='')
+    # Cuenta del PROPONENTE si estaba logueado ('' si anonimo) — el aprobador
+    # quiere ver quien lo pide.  CharField y no FK por el router, como
+    # resolved_by.
+    suggested_by  = models.CharField(max_length=64, blank=True, default='')
     ip            = models.GenericIPAddressField(db_index=True)
     created       = models.DateTimeField(auto_now_add=True, db_index=True)
     status        = models.CharField(max_length=8, choices=SState.choices,

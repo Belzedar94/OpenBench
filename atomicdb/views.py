@@ -2983,7 +2983,9 @@ def suggest_opening_name(request, key):
         return back('rate-limited')
     OpeningNameSuggestion.objects.create(
         position=pos, proposed_name=name, comment=comment, ip=ip,
-        kind=kind, previous_name=current or '')
+        kind=kind, previous_name=current or '',
+        suggested_by=(request.user.username
+                      if request.user.is_authenticated else ''))
     return back('ok')
 
 
