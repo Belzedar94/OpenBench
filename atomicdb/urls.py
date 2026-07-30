@@ -60,6 +60,11 @@ urlpatterns = [
     path('map/', _map_cached, name='atomicdb-map'),
     path('explore/<str:key>/', views.explore),
     path('goto/<str:key>/<str:uci>/', views.goto),
+    # Salto al origen de un valor respaldado: camina la espina de soporte y
+    # redirige.  Solo LEE (a diferencia de ``goto``, que crea la arista), pero
+    # el destino se mueve con cada analisis que cae debajo, asi que tampoco
+    # lleva cache.
+    path('backed-source/<str:key>/', views.backed_source),
     path('method/', _method_cached),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
