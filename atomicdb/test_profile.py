@@ -452,7 +452,14 @@ class VoiceTests(TestCase):
 
 
 class QueryCostTests(TestCase):
-    """Lo que cuesta la pagina NO puede depender de cuantas filas ensena."""
+    """Lo que cuesta la pagina NO puede depender de cuantas filas ensena.
+
+    Con una excepcion CONOCIDA y acotada: una fila que trae ruta declarada la
+    re-valida (una busqueda por clave primaria, § views._validated_play_route),
+    igual que ya hace la pagina de avisos.  Ese coste esta limitado por los
+    topes de cada lista; lo que este test fija es que el resto — agregados,
+    linaje, sugerencias — no crece con las filas.
+    """
 
     PAWNS = ('a2a3', 'b2b3', 'c2c3', 'd2d3', 'e2e3', 'f2f3', 'g2g3', 'h2h3',
              'a2a4', 'b2b4', 'c2c4', 'd2d4')
