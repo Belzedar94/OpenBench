@@ -792,8 +792,9 @@ class ExpansionRequestApiTests(TestCase):
 
         response = self.client.get(f'/atomicdb/explore/{pos.key}/')
 
-        # "below INSTEAD" is the whole point: the visitor asked for this
-        # position and got work one level down, which is not a failure and is
-        # not what "queued" alone conveys either.
-        self.assertContains(response, 'below instead')
+        # El texto tiene que decir DONDE aterrizo el trabajo (un nivel mas
+        # abajo) y que la profundidad no se ha perdido — que es lo que el
+        # "queued" pelado no contaba y el "budget exhausted" contaba MAL.
+        self.assertContains(response, 'replies')
         self.assertContains(response, 'further down')
+        self.assertContains(response, 'auto-triggers if they disagree')
