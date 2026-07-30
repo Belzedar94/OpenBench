@@ -104,17 +104,21 @@ class OwnRequestAffinityTests(UserBandFifoTests):
 
         self.assertEqual(second['id'], oldest_foreign.id)
 
-    def test_anonymous_requests_keep_plain_fifo_for_everyone(self):
-        anonymous = AnalysisTask.objects.create(
+    def test_a_named_stranger_now_beats_an_older_anonymous_click(self):
+        # CONTRATO CAMBIADO (31-jul, caso Lesha): antes las anonimas
+        # conservaban el FIFO plano contra todos; desde el estrato
+        # named_first, un humano identificado no espera detras de la marea
+        # sin login.  Entre nombradas y entre anonimas, el FIFO sigue.
+        AnalysisTask.objects.create(
             position=self.despised, generation=0, budget_nodes=8_000_000,
             source=AnalysisTask.Source.USER)
-        AnalysisTask.objects.create(
+        named = AnalysisTask.objects.create(
             position=self.beloved, generation=0, budget_nodes=8_000_000,
             source=AnalysisTask.Source.USER, requested_by='w')
 
         leased = self._lease('m7', username='lesha')['tasks'][0]
 
-        self.assertEqual(leased['id'], anonymous.id)
+        self.assertEqual(leased['id'], named.id)
 
     def test_a_declared_route_is_stored_and_wins_the_label(self):
         """La peticion viaja con el ORDEN DE JUGADAS de su autor.
@@ -167,3 +171,65 @@ class OwnRequestAffinityTests(UserBandFifoTests):
         task = AnalysisTask.objects.get(position=self.beloved,
                                         source=AnalysisTask.Source.USER)
         self.assertEqual(task.requested_by, 'lesha')
+
+
+class NamedBeforeAnonymousTests(UserBandFifoTests):
+    """Las peticiones CON NOMBRE cobran antes que la marea anonima.
+
+    Un "Analyse all" sin login encola decenas de tareas de cobertura con
+    ``requested_by=''``; un humano identificado que pide UNA posicion no debe
+    esperar detras de miles de esas (Lesha, 31-jul: sus requests en el puesto
+    ~1400 del FIFO).  Dentro de cada estrato, el FIFO intacto; el own-first
+    del worker sigue mandando por encima."""
+
+    def test_a_named_request_jumps_the_anonymous_flood(self):
+        AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='')
+        named = AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+
+        leased = self._lease('m20')['tasks'][0]
+
+        self.assertEqual(leased['id'], named.id)
+
+    def test_own_first_still_beats_a_named_stranger(self):
+        AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+        own = AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='lesha')
+
+        leased = self._lease('m21', username='lesha')['tasks'][0]
+
+        self.assertEqual(leased['id'], own.id)
+
+    def test_the_click_receipt_tells_how_many_are_ahead(self):
+        # Una anonima delante; el click logueado salta la marea y su
+        # recibo dice cuantas NOMBRADAS le preceden (aqui: ninguna).
+        AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='')
+        self.client.login(username='lesha', password='p')
+
+        response = self.client.post(
+            f'/atomicdb/request/{self.beloved.key}/')
+
+        body = response.json()
+        self.assertEqual(body['status'], 'queued')
+        self.assertEqual(body['ahead'], 0)
+
+    def test_an_anonymous_click_counts_the_whole_named_tier_ahead(self):
+        named = AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+        self.assertIsNotNone(named)
+
+        response = self.client.post(
+            f'/atomicdb/request/{self.beloved.key}/')
+
+        body = response.json()
+        self.assertEqual(body['status'], 'queued')
+        self.assertEqual(body['ahead'], 1)

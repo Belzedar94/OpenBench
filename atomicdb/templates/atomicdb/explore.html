@@ -232,9 +232,12 @@
           })
           .then(d => {
             const descent = d.status === 'expanded' || d.status === 'saturated';
+            const inline = (d.ahead === undefined) ? ''
+              : (' (~' + d.ahead + ' ahead)');
             btn.textContent = {
-              'queued': 'Queued, waiting for a worker...',
-              'already-queued': 'In the queue, waiting for a worker...',
+              'queued': 'Queued, waiting for a worker...' + inline,
+              'already-queued': 'In the queue, waiting for a worker...'
+                + inline,
               'already-requested': 'Already requested, waiting...',
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',

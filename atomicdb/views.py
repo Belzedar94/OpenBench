@@ -345,11 +345,23 @@ def api_lease(request):
                 When(source=AnalysisTask.Source.USER,
                      requested_by=user.username, then=Value(1)),
                 default=Value(0), output_field=IntegerField())
+            # Peticiones CON NOMBRE por delante de la marea anonima.  Un
+            # "Analyse all" sin login encola decenas de tareas de cobertura;
+            # un humano identificado que pide UNA posicion no debe esperar
+            # detras de dos mil de esas (Lesha, 31-jul: sus requests en el
+            # puesto ~1400 del FIFO, horas de cola).  Dentro de cada estrato
+            # el FIFO de siempre; AUTO/FILL ni se enteran.
+            named_first = Case(
+                When(source=AnalysisTask.Source.USER,
+                     requested_by__gt='', then=Value(1)),
+                default=Value(0), output_field=IntegerField())
             queryset = (AnalysisTask.objects
                 .select_for_update(skip_locked=True)
                 .select_related('position').filter(state='PENDING')
-                .annotate(queue_rank=human_rank, own_first=own_first)
-                .order_by('-source', '-own_first', '-queue_rank', 'id'))
+                .annotate(queue_rank=human_rank, own_first=own_first,
+                          named_first=named_first)
+                .order_by('-source', '-own_first', '-named_first',
+                          '-queue_rank', 'id'))
             for candidate in queryset.iterator(chunk_size=64):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
@@ -1017,7 +1029,38 @@ def _api_request_once(request, key):
     # Only a frontier expansion carries counters; every other status keeps
     # the exact single-key body explore.html has always parsed.
     payload.update(getattr(outcome, 'detail', None) or {})
+    if str(outcome) in ('queued', 'already-queued'):
+        ahead = _user_queue_ahead(pos)
+        if ahead is not None:
+            payload['ahead'] = ahead
     return JsonResponse(payload)
+
+
+def _user_queue_ahead(pos):
+    """Cuantas tareas USER PENDING cobran antes que la de esta posicion.
+
+    El mismo orden que ``choose_pending`` (nombradas por delante de las
+    anonimas, FIFO dentro de cada estrato), sin el matiz own-first porque
+    depende de que worker pregunte.  Es transparencia, no contrato: la cifra
+    que ve el humano es "cuanta cola tengo delante", que era exactamente lo
+    que el boton de espera no decia (Lesha, 31-jul: horas de espera con cara
+    de 'waiting...' generico).
+    """
+    task = (AnalysisTask.objects
+            .filter(position=pos, source=AnalysisTask.Source.USER,
+                    state=AnalysisTask.TState.PENDING)
+            .order_by('id').first())
+    if task is None:
+        return None
+    named = AnalysisTask.objects.filter(
+        state=AnalysisTask.TState.PENDING, source=AnalysisTask.Source.USER,
+        requested_by__gt='')
+    anon = AnalysisTask.objects.filter(
+        state=AnalysisTask.TState.PENDING, source=AnalysisTask.Source.USER,
+        requested_by='')
+    if task.requested_by:
+        return named.filter(id__lt=task.id).count()
+    return named.count() + anon.filter(id__lt=task.id).count()
 
 
 def api_request(request, key):
