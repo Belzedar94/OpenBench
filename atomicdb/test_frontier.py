@@ -126,12 +126,20 @@ class UnchangedLadderTests(TestCase):
                          ingest.REQUEST_BUDGET_LADDER[1])
         self.assertFalse(Edge.objects.filter(parent=pos).exists())
 
-    def test_ordinary_status_keeps_its_single_key_body(self):
+    def test_ordinary_status_carries_status_and_queue_receipt(self):
+        # CONTRATO AMPLIADO (31-jul, caso Lesha): 'queued'/'already-queued'
+        # llevan ademas 'ahead' — cuantas tareas USER cobran antes que la
+        # de esta posicion — porque un "waiting..." sin numero escondia
+        # esperas de horas.  El resto de statuses conserva su cuerpo de
+        # una sola clave y el JS lee 'ahead' de forma tolerante.
         pos = ingest.get_or_create_position(logic.start_fen())
 
         response = self.client.post(f'/atomicdb/request/{pos.key}/')
 
-        self.assertEqual(response.json(), {'status': 'queued'})
+        body = response.json()
+        self.assertEqual(body['status'], 'queued')
+        self.assertEqual(body['ahead'], 0)
+        self.assertEqual(set(body), {'status', 'ahead'})
 
 
 class BreadthSwapTests(TestCase):
