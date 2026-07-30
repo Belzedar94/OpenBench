@@ -595,6 +595,12 @@ class RequestNotification(models.Model):
     task     = models.ForeignKey(AnalysisTask, null=True,
                                  on_delete=models.SET_NULL,
                                  related_name='notifications')
+    # El ORDEN DE JUGADAS del peticionario, copiado de la tarea al avisar y
+    # no leido via ``task`` porque la tarea es SET_NULL y el aviso la
+    # sobrevive.  Un DAG transpone: sin esto, el enlace del aviso llevaba al
+    # linaje canonico (1.Nf3 f6...) y no a la linea que la persona estaba
+    # explorando (1.Nf3 d6...) — mismo nodo, otra historia.
+    route    = models.TextField(default='', blank=True)
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
     seen     = models.BooleanField(default=False)
 

@@ -15,7 +15,7 @@
 <ul class="notif-list">
   {% for n in rows %}
   <li class="notif-row{% if not n.seen %} unseen{% endif %}">
-    <a class="notif-link" href="/atomicdb/explore/{{ n.key }}/"
+    <a class="notif-link" href="/atomicdb/explore/{{ n.key }}/{% if n.play %}?play={{ n.play }}{% endif %}"
       title="{{ n.full }}">Your analysis of <b>{{ n.san }}</b> is ready</a>
     <span class="notif-when dim">{{ n.ago }}</span>
   </li>

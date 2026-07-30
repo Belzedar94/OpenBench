@@ -129,7 +129,8 @@ def _notify_requester(job, task):
     notification, _created = RequestNotification.objects.get_or_create(
         task_id=job.task_id,
         defaults={'username': requested_by,
-                  'position_id': job.position_id})
+                  'position_id': job.position_id,
+                  'route': (task or {}).get('route') or ''})
     return notification
 
 
@@ -197,7 +198,7 @@ def apply_job(job):
     # lo que decide el aviso al peticionario, que se pregunta lo mismo por la
     # misma fila.
     task = AnalysisTask.objects.filter(pk=job.task_id).values(
-        'source', 'requested_by', 'budget_nodes').first()
+        'source', 'requested_by', 'budget_nodes', 'route').first()
     source = (task or {}).get('source')
 
     with atomic(), ingest.closure_attribution(source):

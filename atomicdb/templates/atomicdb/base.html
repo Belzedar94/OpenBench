@@ -76,7 +76,7 @@
         <ul class="bell-list">
           {% for n in notifications %}
           <li class="bell-item{% if not n.seen %} unseen{% endif %}">
-            <a href="/atomicdb/explore/{{ n.key }}/" title="{{ n.full }}">
+            <a href="/atomicdb/explore/{{ n.key }}/{% if n.play %}?play={{ n.play }}{% endif %}" title="{{ n.full }}">
               <span class="bell-line">Your analysis of <b>{{ n.san }}</b> is ready</span>
               <span class="bell-when">{{ n.ago }}</span>
             </a>

@@ -531,3 +531,56 @@ class LoginReturnTests(TestCase):
 
         self.assertIn('name="next"', body)
         self.assertIn('/atomicdb/map/', body)
+
+
+class RouteAwareNotificationTests(TestCase):
+    """El aviso vuelve por la LINEA DEL PETICIONARIO, no por la canonica.
+
+    Un DAG transpone: quien pide 1.Nf3 d6 2.Nc3 f6 recibia un enlace que
+    aterrizaba contando 1.Nf3 f6 2.Nc3 d6 — mismo nodo, otra historia — y
+    para explorar UN opening concreto eso descoloca (Belzedar, 31-jul)."""
+
+    ROUTE = 'g1f3,d7d6,b1c3,f7f6'
+
+    def _position_at_route_end(self):
+        fen = logic.start_fen()
+        pos = ingest.get_or_create_position(fen)
+        for uci in self.ROUTE.split(','):
+            child_fen = logic.apply_move(fen, uci)
+            child = ingest.get_or_create_position(child_fen)
+            Edge.objects.get_or_create(parent=pos, move_uci=uci,
+                                       defaults={'child': child})
+            fen, pos = child_fen, child
+        return pos
+
+    def test_presented_uses_the_requesters_move_order(self):
+        pos = self._position_at_route_end()
+        RequestNotification.objects.create(
+            username='lesha', position=pos, route=self.ROUTE)
+
+        item = notifications.presented('lesha')[0]
+
+        self.assertEqual(item['play'], self.ROUTE)
+        self.assertIn('1. Nf3 d6 2. Nc3 f6', item['full'])
+
+    def test_the_link_carries_the_play_route(self):
+        pos = self._position_at_route_end()
+        RequestNotification.objects.create(
+            username='lesha', position=pos, route=self.ROUTE)
+        User.objects.create_user('lesha', password='p')
+        self.client.login(username='lesha', password='p')
+
+        body = self.client.get('/atomicdb/notifications/').content.decode()
+
+        self.assertIn(f'/atomicdb/explore/{pos.key}/?play={self.ROUTE}',
+                      body)
+
+    def test_a_stale_route_falls_back_to_the_canonical_line(self):
+        pos = self._position_at_route_end()
+        RequestNotification.objects.create(
+            username='lesha', position=pos, route='g1f3,zzzz')
+
+        item = notifications.presented('lesha')[0]
+
+        self.assertEqual(item['play'], '')
+        self.assertIn('Nf3', item['full'])

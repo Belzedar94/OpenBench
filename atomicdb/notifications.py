@@ -106,10 +106,28 @@ def presented(username, limit=DROPDOWN_ROWS):
     items = []
     for row in rows:
         preview, full = labels.get(row.position_id, ('', ''))
+        play = ''
+        if row.route:
+            # El aviso habla en el ORDEN DE JUGADAS de quien pidio, no en el
+            # linaje canonico del DAG: la misma posicion tiene tantas
+            # historias como transposiciones, y el enlace debe volver a LA
+            # SUYA (pidio 1.Nf3 d6... y el aviso le ensenaba 1.Nf3 f6...).
+            # La ruta se re-valida contra las reglas al pintar: si dejo de
+            # ser legal (rekey, PV vieja) o ya no llega a este nodo, el aviso
+            # cae al linaje canonico sin romper la campana.
+            try:
+                labelled = views._route_labels(row.route, row.position_id,
+                                               preview_plies=8)
+            except views.PlayRouteError:
+                labelled = None
+            if labelled and labelled[0]:
+                preview, full = labelled
+                play = row.route
         items.append({
             'key': row.position_id,
             'san': preview or 'the start position',
             'full': full or 'the start position',
+            'play': play,
             'created': row.created,
             'ago': ago(row.created),
             'seen': row.seen,
