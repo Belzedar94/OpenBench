@@ -1393,23 +1393,30 @@ h2 {
   letter-spacing: .04em;
   text-transform: uppercase;
   vertical-align: .08em;
+  /* Con los plies DENTRO, el chip es una sola pieza: si el renglon se acaba
+     salta entero, nunca partido en dos recuadros a medio borde. */
+  white-space: nowrap;
   cursor: help;
 }
 
-/* Salto al ply donde NACE el valor respaldado.  Va pegado al chip y con su
-   misma tinta apagada: es una salida mas del mismo dato, no un boton. */
-.backed-jump {
-  margin-left: .25rem;
-  color: var(--ink-muted);
-  font-size: .68rem;
+/* El chip ES el salto al ply donde NACE el valor: el numero de plies vive
+   dentro de la etiqueta y todo el chip se pincha.  En reposo no se distingue
+   del chip mudo — la tinta apagada de .backed-mark manda sobre el color de
+   enlace global; solo al apuntarlo toma el acento.  Una flecha suelta al lado
+   se leia como el sube/baja de una clasificacion, no como un enlace. */
+a.backed-mark {
   text-decoration: none;
   cursor: pointer;
 }
 
-.backed-jump:hover,
-.backed-jump:focus {
-  color: var(--ink);
+a.backed-mark:hover,
+a.backed-mark:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  /* Subrayado del TEXTO, no del borde: el recuadro ya se pinta de acento. */
   text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: .18em;
 }
 
 /* Respaldo sin peso de busqueda: valor subido por una linea CAMINADA por un

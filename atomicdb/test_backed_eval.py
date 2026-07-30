@@ -9,6 +9,7 @@ heuristicas refinadas.
 """
 
 import hashlib
+import re
 
 from django.conf import settings
 from django.test import Client
@@ -722,5 +723,14 @@ class WalkedChipTests(TestCase):
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        self.assertIn('>walked</span>', body)
-        self.assertIn('>backed</span>', body)
+        # El chip ES el enlace al origen, y lleva sus plies dentro.
+        self.assertIn('walked ·5</a>', body)
+        self.assertIn('backed ·2</a>', body)
+        self.assertIsNotNone(
+            re.search(r'<a\b[^>]*class="backed-mark light"[^>]*>walked ·5</a>',
+                      body))
+        self.assertIsNotNone(
+            re.search(r'<a\b[^>]*class="backed-mark"[^>]*>backed ·2</a>',
+                      body))
+        self.assertIn(f'href="/atomicdb/backed-source/{walked.key}/"', body)
+        self.assertIn(f'href="/atomicdb/backed-source/{verified.key}/"', body)

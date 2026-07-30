@@ -8,6 +8,8 @@ visitante extendida para que aterrice dentro de SU partida.
 """
 
 import hashlib
+import re
+from unittest import mock
 
 from django.conf import settings
 
@@ -271,7 +273,13 @@ class BackedSourceRouteTests(TestCase):
 
 
 class BackedJumpRenderTests(TestCase):
-    """El chip deja de ser solo una etiqueta: se puede pinchar."""
+    """El chip deja de ser solo una etiqueta: EL CHIP ES el enlace.
+
+    La flecha suelta de al lado (``↓12``) se leia como el sube/baja de una
+    clasificacion de liga, no como una salida al ply que explica el numero.
+    Ahora hay UN solo elemento: los plies viven dentro de la etiqueta tras un
+    interpunto y todo el recuadro se pincha.
+    """
 
     def _tree_with_a_backed_child(self):
         root = ingest.get_or_create_position(logic.start_fen())
@@ -286,18 +294,37 @@ class BackedJumpRenderTests(TestCase):
         Edge.objects.create(parent=root, move_uci='d2d4', child=child)
         return root, child
 
-    def test_a_backed_row_paints_a_jump_link_to_the_child(self):
+    def _chip(self, body, tag, text):
+        """La etiqueta entera que envuelve ese texto, sea ``a`` o ``span``.
+
+        Se busca por el texto y no por el orden de los atributos: el
+        minificador los reordena y un assert atado a ese orden solo prueba
+        que el minificador no ha cambiado.
+        """
+        found = re.search(rf'<{tag}\b[^>]*>{re.escape(text)}</{tag}>', body)
+        self.assertIsNotNone(found, f'no hay <{tag}> con {text!r}')
+        return found.group(0)
+
+    def test_a_backed_row_is_itself_the_jump_link_to_the_child(self):
         root, child = self._tree_with_a_backed_child()
 
         body = self.client.get(
             f'/atomicdb/explore/{root.key}/').content.decode()
 
-        self.assertIn('backed-jump', body)
+        chip = self._chip(body, 'a', 'backed ·12')
+        self.assertIn('class="backed-mark"', chip)
         self.assertIn(
-            f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', body)
-        self.assertIn('↓12', body)
+            f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
+        self.assertIn(
+            'aria-label="jump to the source of this value, 12 ply(s) below"',
+            chip)
+        self.assertIn('click to jump to the position this value comes from',
+                      chip)
+        # La flecha suelta de al lado ya no existe.
+        self.assertNotIn('backed-jump', body)
+        self.assertNotIn('↓12', body)
 
-    def test_a_row_without_backing_paints_no_link(self):
+    def test_a_row_without_backing_paints_no_chip_and_no_jump(self):
         root = ingest.get_or_create_position(logic.start_fen())
         child = ingest.get_or_create_position(
             logic.apply_move(root.fen, 'd2d4'))
@@ -309,16 +336,42 @@ class BackedJumpRenderTests(TestCase):
             f'/atomicdb/explore/{root.key}/').content.decode()
 
         self.assertNotIn('backed-jump', body)
+        self.assertNotIn('backed-mark', body)
+        self.assertNotIn('backed-source', body)
 
-    def test_the_header_chip_carries_its_own_jump(self):
+    def test_the_header_chip_is_itself_the_jump(self):
         _root, child = self._tree_with_a_backed_child()
 
         body = self.client.get(
             f'/atomicdb/explore/{child.key}/').content.decode()
 
-        self.assertIn('backed-jump', body)
+        chip = self._chip(body, 'a', 'backed ·12')
+        self.assertIn('class="backed-mark"', chip)
         self.assertIn(
-            f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', body)
+            f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
+        self.assertIn(
+            'aria-label="jump to the source of this value, 12 ply(s) below"',
+            chip)
+        self.assertNotIn('backed-jump', body)
+
+    def test_a_chip_without_a_jump_stays_a_mute_span(self):
+        """Sin URL no se inventa un salto: el chip vuelve a ser etiqueta.
+
+        Los plies se quedan dentro igual — lo que desaparece es el enlace,
+        con su promesa de click en el tooltip.
+        """
+        root, _child = self._tree_with_a_backed_child()
+
+        with mock.patch.object(views, '_backed_source_url', return_value=''):
+            body = self.client.get(
+                f'/atomicdb/explore/{root.key}/').content.decode()
+
+        chip = self._chip(body, 'span', 'backed ·12')
+        self.assertIn('class="backed-mark"', chip)
+        self.assertNotIn('href', chip)
+        self.assertNotIn('click to jump', chip)
+        self.assertNotIn('backed-source', body)
+        self.assertIsNone(re.search(r'<a\b[^>]*backed-mark', body))
 
     def test_painting_the_link_costs_no_queries(self):
         """El paseo se paga al pinchar; la tabla solo escribe una cadena."""
