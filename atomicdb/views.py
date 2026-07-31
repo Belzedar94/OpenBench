@@ -26,8 +26,8 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
-               logic, metrics, notifications, openings, proof, solve,
-               solve_estimate)
+               live_request, logic, metrics, notifications, openings, proof,
+               solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -1161,22 +1161,17 @@ def _user_queue_ahead(pos):
     que ve el humano es "cuanta cola tengo delante", que era exactamente lo
     que el boton de espera no decia (Lesha, 31-jul: horas de espera con cara
     de 'waiting...' generico).
+
+    El recuento vive en ``live_request``: la misma cifra la dice ahora el
+    recibo del click Y la linea de estado del explorador, y dos implementaciones
+    de "cuanta cola tengo delante" acabarian discrepando el dia que cambie el
+    orden de servicio.
     """
     task = (AnalysisTask.objects
             .filter(position=pos, source=AnalysisTask.Source.USER,
                     state=AnalysisTask.TState.PENDING)
             .order_by('id').first())
-    if task is None:
-        return None
-    named = AnalysisTask.objects.filter(
-        state=AnalysisTask.TState.PENDING, source=AnalysisTask.Source.USER,
-        requested_by__gt='')
-    anon = AnalysisTask.objects.filter(
-        state=AnalysisTask.TState.PENDING, source=AnalysisTask.Source.USER,
-        requested_by='')
-    if task.requested_by:
-        return named.filter(id__lt=task.id).count()
-    return named.count() + anon.filter(id__lt=task.id).count()
+    return live_request.queue_ahead(task)
 
 
 def api_request(request, key):
@@ -2969,6 +2964,27 @@ def api_frontier(request, key):
     return JsonResponse({'key': key, 'status': status, **level})
 
 
+def api_live_request(request, key):
+    """En que va la peticion viva de esta posicion, para la linea de estado.
+
+    Devuelve el texto YA compuesto por ``live_request.summary``: la pagina lo
+    pinta al cargar y esto lo devuelve identico, asi que la redaccion — y sobre
+    todo la decision de si se puede prometer un tiempo — vive en un solo sitio.
+
+    ``live: false`` significa "aqui ya no hay nada en vuelo", y es la senal con
+    la que el sondeo del explorador se para solo.  Una posicion que no existe
+    es 404 y no un ``live: false``: no es lo mismo "termino" que "no hay tal
+    cosa", y el que pregunta merece poder distinguirlo.
+    """
+    pos = Position.objects.filter(key=key).only('key', 'status').first()
+    if pos is None:
+        return JsonResponse({'error': 'unknown position'}, status=404)
+    row = live_request.summary(pos)
+    if row is None:
+        return JsonResponse({'live': False})
+    return JsonResponse({'live': True, **row})
+
+
 def _trust_for(pos):
     # SOLVE joins TERMINAL and TB: a certificate that the server replayed in
     # full, with its own move generator, is verified evidence in the same
@@ -3977,6 +3993,10 @@ def explore(request, key):
         # (§ depth.context).  Esta pagina no lleva cache (§ urls), asi que un
         # render con selector no se le sirve a nadie mas.
         **depth.context(request, pos),
+        # En que va la peticion viva de ESTA posicion: esperando en la cola, o
+        # buscandose ahora y cuanto falta.  Vacio cuando no hay tarea viva, y
+        # entonces la plantilla no pinta ni el hueco (§ live_request.context).
+        **live_request.context(pos),
         'pos': pos, 'moves': moves, 'parents': parents,
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,

@@ -46,8 +46,10 @@ from .conquest_map import map_api
 #     una linea base falsa (recargas fantasma, o recargas que no llegan).
 #     Ademas cambia de estado en cuanto alguien pide analisis ahi.
 #   * ``goto`` y ``fen``: escriben en el arbol.
-#   * ``request``, ``api/query`` y ``api/frontier``: estado vivo, y son
-#     justo lo que el explorador consulta para saber si algo cambio.
+#   * ``request``, ``api/query``, ``api/frontier`` y ``api/live-request``:
+#     estado vivo, y son justo lo que el explorador consulta para saber si
+#     algo cambio.  El ultimo ademas cuenta el tiempo que falta: servir un
+#     cuerpo de hace treinta segundos seria servir una cuenta atras vieja.
 #   * todo el protocolo de workers (``lease``/``heartbeat``/``submit``).
 #   * ``api/map/v1``: ya negocia su propio ETag sobre un snapshot publicado y
 #     no toca la base viva.
@@ -93,6 +95,7 @@ urlpatterns = [
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),
     path('api/frontier/<str:key>/', views.api_frontier),
+    path('api/live-request/<str:key>/', views.api_live_request),
     path('api/map/v1', map_api),
     path('api/lease', views.api_lease),
     path('api/heartbeat', views.api_heartbeat),

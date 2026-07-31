@@ -136,6 +136,15 @@
     </div>
     {{ depth_rungs|json_script:"atomicdb-depth-rungs" }}
     {% endif %}
+    {% comment %}En que va la peticion viva de ESTA posicion: esperando en la
+    cola, o buscandose ahora y cuanto falta.  Sin tarea viva llega vacia y
+    ``hidden``, que es un elemento sin caja — no hay hueco donde no hay nada
+    que decir, igual que la nota del boton y la cascada de aqui debajo.  El
+    texto lo compone el servidor entero (§ live_request) para que lo que se
+    pinta al cargar y lo que trae el sondeo sean el mismo byte.{% endcomment %}
+    <p class="livereq" id="livereq"{% if not live_request %} hidden{% endif %}><span
+      class="chip {{ live_request.chip }}" id="livereq-chip"></span><span
+      id="livereq-text">{{ live_request.text }}</span></p>
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>
@@ -230,6 +239,56 @@
           })
           .catch(() => {});
       }
+      // Live request line. The server renders it on load and this asks the
+      // same helper for it again, so the wording -- and above all the decision
+      // of whether a time can be promised -- lives in one place. It stops on
+      // its own as soon as the endpoint says nothing is in flight here, and it
+      // spends nothing at all behind a hidden tab.
+      const live = document.getElementById('livereq');
+      const liveChip = document.getElementById('livereq-chip');
+      const liveText = document.getElementById('livereq-text');
+      const LIVE_EVERY_MS = 20000;
+      // Past this many asks the page stops guessing and says so. A 10B search
+      // on the slowest machine in the fleet is under an hour, so anything
+      // still open here has outlived what this line can honestly narrate.
+      const LIVE_MAX_ASKS = 200;
+      let liveAsks = 0;
+      let liveWatching = false;
+      function liveSay(text, chip) {
+        liveText.textContent = text;
+        liveChip.className = 'chip ' + chip;
+        live.hidden = false;
+      }
+      function liveLater() {
+        setTimeout(liveNow, LIVE_EVERY_MS);
+      }
+      function liveNow() {
+        // A tab nobody is looking at pays nothing: the clock keeps running and
+        // the text is refreshed the moment it comes back to the front.
+        if (document.hidden) { liveLater(); return; }
+        if (liveAsks >= LIVE_MAX_ASKS) {
+          liveSay('Reload for the latest on this request', 'cold');
+          return;
+        }
+        liveAsks += 1;
+        fetch('/atomicdb/api/live-request/' + key + '/')
+          .then(r => r.json())
+          .then(d => {
+            if (!d || d.error) { return; }
+            if (d.live) { liveSay(d.text, d.chip); liveLater(); return; }
+            // It was in flight and now it is not, so this page is out of date
+            // about its own position. Said, not done: reloading a page someone
+            // is reading is not this line's decision to make.
+            liveSay('Analysis landed here · reload to see it', 'won');
+          })
+          .catch(() => liveLater());
+      }
+      function liveWatch(askNow) {
+        if (liveWatching) { return; }
+        liveWatching = true;
+        if (askNow) { liveNow(); } else { liveLater(); }
+      }
+      if (!live.hidden) { liveWatch(false); }
       // Digest de los HIJOS: el request normal toca visits/status del propio
       // nodo, pero el boton masivo analiza a los hijos y este nodo no cambia
       // ni un campo — el poller tiene que mirar tambien la tabla de Moves.
@@ -325,6 +384,13 @@
                      d.status === 'saturated');
             if (d.descent_key) { below = d.descent_key; }
             if (d.status === 'saturated') { showCascade(); }
+            // The status line narrates the task on THIS position, so only what
+            // queues HERE turns it on: 'expanded' bought below, and the
+            // cascade underneath is what counts that.
+            if (['queued', 'already-queued',
+                 'already-requested'].includes(d.status)) {
+              liveWatch(true);
+            }
             if (['queued', 'already-queued', 'already-requested',
                  'expanded'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia

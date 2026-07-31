@@ -985,6 +985,19 @@ details summary {
   color: var(--ink);
 }
 
+/* Linea de estado de la peticion viva de esta posicion: va DEBAJO del boton y
+   del selector porque narra lo que ese boton compro, no lo que ofrece.  Un
+   nombre de maquina no tiene un solo espacio donde partirse
+   (``belzedar-ryzen-atomicdb#0``, la misma leccion que la tabla de maquinas),
+   asi que se parte donde haga falta antes que empujar la pagina en un
+   telefono. */
+.livereq {
+  margin: .1rem 0 .55rem;
+  color: var(--ink);
+  font-size: .8rem;
+  overflow-wrap: anywhere;
+}
+
 .progress {
   margin: .9rem 0 1.1rem;
 }
