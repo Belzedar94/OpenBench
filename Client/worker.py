@@ -2836,6 +2836,43 @@ def engine_memory_mb(config, branch, engine_name):
     return measured or estimate
 
 
+def available_commit_mb():
+
+    ## How much more memory Windows will actually let anyone COMMIT: the
+    ## pagefile-backed limit, not physical RAM. psutil has no portable name
+    ## for this, so ask the kernel directly. None on any failure or any
+    ## platform where the concept does not apply -- the caller treats None
+    ## as "no extra information", never as zero.
+
+    if os.name != 'nt':
+        return None
+
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ('dwLength'               , ctypes.c_uint32),
+                ('dwMemoryLoad'           , ctypes.c_uint32),
+                ('ullTotalPhys'           , ctypes.c_uint64),
+                ('ullAvailPhys'           , ctypes.c_uint64),
+                ('ullTotalPageFile'       , ctypes.c_uint64),
+                ('ullAvailPageFile'       , ctypes.c_uint64),
+                ('ullTotalVirtual'        , ctypes.c_uint64),
+                ('ullAvailVirtual'        , ctypes.c_uint64),
+                ('ullAvailExtendedVirtual', ctypes.c_uint64),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullAvailPageFile) // (1024 ** 2)
+
+    except Exception:                       # noqa: BLE001 - never block work
+        return None
+
+
 def memory_capped_concurrency(config, dev_name, base_name,
                               cutechess_cnt, concurrency_per):
 
@@ -2864,6 +2901,18 @@ def memory_capped_concurrency(config, dev_name, base_name,
         budget_mb    = min(config.ram_total_mb * 2 // 5,
                            max(available_mb - 2048, config.ram_total_mb // 6))
 
+        # Physical RAM is not what Windows enforces. Allocations die against
+        # the COMMIT limit (RAM + pagefile), and the two can disagree wildly:
+        # measured on the reference machine, 9.5 GB of physical memory free
+        # with 0.1 GB of commit left, and every engine aborting on bad_alloc.
+        # The crash rate tracked concurrency exactly (0% at 24 engines, 71%
+        # at 48) while this cap, sized off physical memory, said everything
+        # fit. So the commit headroom clamps the budget too; the per-game
+        # floor keeps a busy desktop from cutting the worker to zero.
+        commit_mb = available_commit_mb()
+        if commit_mb is not None:
+            budget_mb = min(budget_mb, max(commit_mb - 2048, per_game_mb))
+
         total_games = cutechess_cnt * concurrency_per
         allowed     = max(1, budget_mb // per_game_mb)
         if total_games <= allowed:
@@ -2876,8 +2925,9 @@ def memory_capped_concurrency(config, dev_name, base_name,
               % (concurrency_per, capped))
         print('[Note]   %s needs %d MB, %s needs %d MB, %d MB per game'
               % (dev_name, dev_mb, base_name, base_mb, per_game_mb))
-        print('[Note]   budget %d MB of %d MB total (%d MB free right now)'
-              % (budget_mb, config.ram_total_mb, available_mb))
+        print('[Note]   budget %d MB of %d MB total (%d MB free, %s MB commit)'
+              % (budget_mb, config.ram_total_mb, available_mb,
+                 commit_mb if commit_mb is not None else '?'))
         return capped
 
     except Exception as error:              # noqa: BLE001 - never block work
