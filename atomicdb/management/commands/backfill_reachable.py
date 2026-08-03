@@ -34,6 +34,16 @@ sabiendo que durante la pasada la periferia cobra precio de cajetin suelto.  El
 apagon de la marca dura lo que dura el recorrido y no deja la base peor que
 antes de la migracion, pero no es transparente y no conviene fingir que lo es.
 
+QUE PREGUNTA CONTESTA LA COLUMNA, que es lo que se equivoco la primera vez.
+No es "¿existe una arista desde la raiz?" sino "¿existe un camino que el
+Dijkstra del selector recorreria?", y esas dos preguntas se separan en cuanto
+hay un nodo CERRADO por medio: un cierre no relaja hacia abajo, asi que el
+recorrido se para ahi.  El BFS hace lo mismo — marca el cerrado y no hereda a
+traves de el — porque la columna solo vale si contesta lo que el motor que la
+lee habria contestado solo.  Un BFS que cruza el muro le pone precio de nodo
+lejano (30) a un subarbol que la foto global tasaba como suelto (5), y esas 75
+unidades son mas que el techo entero de la formula.
+
 UNA CLAVE SIN FILA SE SALTA.  Una arista puede apuntar a una posicion que
 todavia no esta visible (la carrera que mata al Dijkstra v1); aqui no es un
 caso especial siquiera: el filtro ``key__in`` devuelve lo que existe, y lo que
@@ -175,7 +185,24 @@ class Command(BaseCommand):
     # ---------------- adyacencia ----------------
 
     def _children_of(self, parents):
-        return set(Edge.objects.filter(parent_id__in=parents)
+        """Los hijos que se alcanzan POR UN PADRE ABIERTO.
+
+        El ``parent__status='UNKNOWN'`` es la linea entera de este fichero.  La
+        columna existe para contestar la pregunta que el Dijkstra dejaba de
+        contestar al acotarse, y la pregunta del Dijkstra no es "¿hay una
+        arista?" sino "¿hay un camino que yo recorreria?" — y el Dijkstra NO
+        baja por un nodo cerrado (``_regret_from_root``, ``if k in settled:
+        continue``).  Un BFS que si baja marca ``reachable`` un subarbol que
+        ningun motor visita, y el selector acotado le cobra entonces las 30
+        unidades del nodo lejano cuando la foto global le cobraba las 5 del
+        suelto: 75 unidades de diferencia sobre una formula cuyo techo entero
+        son 67.  Eso fue el ``jaccard=0,011`` de la sombra del 3-ago.
+
+        El nodo cerrado SI se marca — se alcanza, y el Dijkstra tambien lo
+        saca del heap.  Lo que no se hereda es el paso A TRAVES de el.
+        """
+        return set(Edge.objects.filter(parent_id__in=parents,
+                                       parent__status='UNKNOWN')
                    .values_list('child_id', flat=True))
 
 

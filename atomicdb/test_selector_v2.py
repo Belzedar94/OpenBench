@@ -355,20 +355,21 @@ class HorizonTests(TestCase):
 
 
 class BehindAClosedWallTests(TestCase):
-    """La UNICA diferencia deliberada entre los dos motores, escrita.
+    """Detras de un muro cerrado los dos motores dicen el MISMO numero.
 
     Un nodo cuyo unico camino desde la raiz pasa por un nodo CERRADO no lo
     alcanza ninguno de los dos: un cierre no relaja hacia abajo, y esa regla no
-    cambia.  Pero ``reachable`` si lo marca, porque la arista existe.  La
-    version global le daba las 5 unidades del cajetin suelto — no por
-    decidirlo, sino porque "no me consta camino" y "no hay camino" eran el
-    mismo ``inf`` —
-    y el acotado le da las 30 del nodo lejano.
+    cambia.  La foto global le daba ``inf``, o sea las 5 unidades del cajetin
+    suelto, y el acotado tiene que decir 5 tambien — para lo cual la columna
+    tiene que estar sembrada con la MISMA regla que el recorrido, que es lo que
+    hace ``backfill_reachable`` al no cruzar el muro.
 
-    Se prueba aqui y no se arregla porque no esta roto: un nodo enterrado bajo
-    un subarbol resuelto no merece el beneficio de la duda que se le da a una
-    posicion recien pegada a mano.  Y quien lo entierra de verdad sigue siendo
-    ``_still_reachable``, que no se toca.
+    Esta clase existio antes para documentar lo contrario: la columna se
+    sembraba con un BFS de aristas, marcaba el subarbol, y el acotado le cobraba
+    30 donde la global cobraba 5.  Setenta y cinco unidades sobre una formula
+    cuyo techo son 67 no son un matiz: son la cima entera, y es lo que la sombra
+    del 3-ago midio como ``jaccard=0,011`` con ``tau=0,997`` — pertenencia rota
+    con el orden intacto.
     """
 
     def setUp(self):
@@ -386,24 +387,33 @@ class BehindAClosedWallTests(TestCase):
         call_command('backfill_reachable', stdout=StringIO())
         self.hidden.refresh_from_db()
 
-    def test_the_edge_marks_it_reachable_even_though_no_walk_arrives(self):
-        self.assertTrue(self.hidden.reachable)
+    def test_the_walk_stops_at_the_wall_and_so_does_the_column(self):
+        """La columna dice lo que dice el recorrido, no lo que dice la arista."""
+        self.assertFalse(self.hidden.reachable)
         self.assertNotIn(self.hidden.key, ingest._regret_from_root_bounded())
         self.assertEqual(ingest._regret_from_root()[self.hidden.key],
                          float('inf'))
 
-    def test_v1_pays_the_loose_price_and_v2_the_far_one(self):
+    def test_the_wall_itself_is_marked(self):
+        """Se para EN el cerrado, no antes: el cerrado se alcanza."""
+        self.wall.refresh_from_db()
+        self.assertTrue(self.wall.reachable)
+
+    def test_both_engines_pay_the_loose_price(self):
         first = ingest.refresh_priorities_v1(force=True, top_k=10_000)
         second = ingest.refresh_priorities_v2(force=True, top_k=10_000)
-        self.assertAlmostEqual(
-            first[self.hidden.key],
-            ingest.priority_of(60, False, 0, None,
-                               ingest.DISCONNECTED_REGRET, {}), delta=1e-9)
-        self.assertAlmostEqual(
-            second[self.hidden.key],
-            ingest.priority_of(60, False, 0, None, ingest.FAR_REGRET, {}),
-            delta=1e-9)
-        self.assertLess(second[self.hidden.key], first[self.hidden.key])
+        loose = ingest.priority_of(60, False, 0, None,
+                                   ingest.DISCONNECTED_REGRET, {})
+        self.assertAlmostEqual(first[self.hidden.key], loose, delta=1e-9)
+        self.assertAlmostEqual(second[self.hidden.key], loose, delta=1e-9)
+
+    def test_the_heads_agree(self):
+        """El sombra, en miniatura: mismo conjunto y mismo orden."""
+        first = ingest.refresh_priorities_v1(force=True, top_k=10)
+        second = ingest.refresh_priorities_v2(force=True, top_k=10)
+        self.assertEqual(set(first), set(second))
+        for key, value in first.items():
+            self.assertAlmostEqual(value, second[key], delta=1e-9)
 
 
 @contextlib.contextmanager

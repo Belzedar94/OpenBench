@@ -2391,18 +2391,19 @@ def refresh_priorities_v2(force=False, top_k=None):
     Por eso el orden del despliegue no es negociable: migracion, luego
     ``backfill_reachable``, y solo entonces el conmutador.
 
-    Y AHI HAY UNA DIFERENCIA DELIBERADA, la unica de todo esto, que conviene
-    tener escrita antes de que alguien la encuentre en el sombra.  Un nodo cuyo
-    UNICO camino desde la raiz pasa por un nodo CERRADO no lo alcanza ninguno
-    de los dos motores (un cierre no relaja hacia abajo, misma regla en los
-    dos), pero ``reachable`` si lo marca: la arista existe.  La version global
-    le daba las 5 unidades del cajetin suelto — no porque lo hubiera decidido,
-    sino porque "no me consta camino" y "no hay camino" eran el mismo ``inf``.
-    Aqui cobra 30.  Es el precio correcto de los dos: un nodo enterrado bajo un
-    subarbol ya resuelto no merece el beneficio de la duda que se le da a una
-    posicion que un humano acaba de pegar en el cajetin.  Y no lo entierra este
-    cambio: ``_still_reachable`` sigue siendo quien le pone la lapida cuando
-    ``next_tasks`` se lo encuentra.
+    Y POR ESO LA COLUMNA TIENE QUE CONTESTAR LA PREGUNTA DEL DIJKSTRA, no la
+    de la adyacencia.  Un nodo cuyo UNICO camino desde la raiz pasa por un nodo
+    CERRADO no lo alcanza ninguno de los dos motores — un cierre no relaja
+    hacia abajo, misma regla en los dos — asi que la foto global le daba
+    ``inf``, o sea las 5 unidades del cajetin suelto.  Si ``reachable`` se
+    sembrara con un BFS de aristas lo marcaria igual (la arista existe) y aqui
+    cobraria 30: 75 unidades de diferencia sobre una formula cuyo techo entero
+    son 67, que es decir cimas distintas.  ``backfill_reachable`` para el
+    recorrido en los cerrados por esto y solo por esto; el precio de los dos
+    motores vuelve a ser el mismo numero.
+
+    Lo que sigue sin cambiar es quien entierra de verdad: ``_still_reachable``
+    le pone la lapida cuando ``next_tasks`` se lo encuentra.
 
     ESCRIBIR MIENTRAS SE LEE, Y POR QUE ES SEGURO.  El barrido y los
     ``bulk_update`` se intercalan a proposito (es lo que acota la memoria), asi
