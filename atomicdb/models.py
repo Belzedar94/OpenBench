@@ -63,6 +63,35 @@ class Position(models.Model):
     clock_slack = models.SmallIntegerField(null=True)
     last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
+    # ¿CUELGA ESTA POSICION DE LA RAIZ?  Lo sabia el Dijkstra global — un nodo
+    # sin regret finito estaba desconectado — y saberlo costaba recorrer el
+    # grafo entero, 6,2M aristas en RAM, cada pasada del selector.  La
+    # respuesta no cambia casi nunca y es monotona: una vez alcanzable, un
+    # nodo lo es para siempre (las aristas no se borran).  Guardarla convierte
+    # la pregunta en una columna y deja al selector acotado distinguir
+    # "conectado pero lejos" (regret saturado, 30 unidades) de "cajetin FEN
+    # suelto" (``DISCONNECTED_REGRET``, 5) SIN recorrer nada.
+    #
+    # DONDE SE LEE, Y SOLO AHI: en la PERIFERIA.  Un nodo que el Dijkstra
+    # acotado alcanza de verdad recibe su regret real y esta columna no le
+    # afecta; la columna solo pone precio a lo que quedo fuera de la bola, que
+    # por construccion es lo que no compite.  Por eso una marca vieja o
+    # incompleta desordena la cola, no la corrompe.
+    #
+    # La escribe ``ingest.expand`` al crear la arista (un hijo de padre
+    # alcanzable nace alcanzable, UN ply: una transposicion que aterrice sobre
+    # un subarbol antes suelto deja el interior sin marcar) y la RECALCULA
+    # entera ``backfill_reachable``, que es quien repara justo eso — y quien
+    # la siembra por primera vez sobre todo lo que ya existia.
+    #
+    # DEFAULT False, Y HAY QUE LEERLO BIEN: sin marcar NO es "barato", es el
+    # precio GENEROSO de los 5 de ``DISCONNECTED_REGRET`` — el cajetin FEN que
+    # un humano pego merece mirada aunque no este en el arbol.  De ahi el
+    # orden obligatorio del despliegue: primero la migracion, luego el
+    # backfill, y solo entonces ``ATOMICDB_SELECTOR_V2``.  Encender el
+    # conmutador sobre una base sin sembrar le pondria precio de cajetin a
+    # media base.
+    reachable = models.BooleanField(default=False)
     depth_invested = models.IntegerField(default=0)
     nodes_invested = models.BigIntegerField(default=0)
     time_invested  = models.FloatField(default=0.0)   # segundos de motor acumulados
@@ -71,6 +100,21 @@ class Position(models.Model):
     campaign  = models.ForeignKey('Campaign', null=True, on_delete=models.SET_NULL,
                                   related_name='positions')
     updated   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            # Indice PARCIAL sobre el lado que se consulta: los NO alcanzables.
+            # En una base sana casi todo cuelga de la raiz, asi que un indice
+            # completo sobre el booleano seria una copia de la tabla para
+            # responder "dame los pocos raros"; con la condicion, el indice
+            # tiene el tamano de la respuesta.  Quien pregunta: el backfill
+            # (lo que le queda por marcar) y el chequeo de salud del selector
+            # (cuantos cajetines sueltos hay).  El camino caliente — el
+            # selector acotado — no consulta esta columna con un filtro: se la
+            # lleva en el mismo ``values_list`` por lotes que ya paga.
+            models.Index(fields=['reachable'], name='atomic_pos_unreached',
+                         condition=models.Q(reachable=False)),
+        ]
 
 
 class Edge(models.Model):

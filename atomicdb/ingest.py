@@ -7,6 +7,8 @@ Flujo por resultado de analisis (§2):
 
 import contextlib
 import contextvars
+import functools
+import heapq
 import math
 import time
 
@@ -249,6 +251,18 @@ def multipv_for(visits, budget_nodes=None, seeding=False, clamp=None):
     return 5 if visits < 3 else 3
 
 
+@functools.lru_cache(maxsize=1)
+def root_key():
+    """La clave de la posicion inicial, calculada una vez por proceso.
+
+    ``logic.start_fen()`` es una constante de la variante: mismo FEN, misma
+    canonicalizacion, mismo sha256 hasta que alguien cambie de juego.  Se
+    cachea porque hay caminos — ``get_or_create_position``, y por tanto cada
+    hijo de cada expansion — que la preguntan decenas de veces por nodo.
+    """
+    return logic.key_of(logic.start_fen())
+
+
 def get_or_create_position(fen, campaign_id=None):
     """Upsert de una posicion por su identidad canonica.
 
@@ -258,11 +272,19 @@ def get_or_create_position(fen, campaign_id=None):
     sitios que MATERIALIZAN nodos bajo un padre — ``expand``,
     ``materialise_won_line`` y el ``goto`` del explorador — pasando el dueno
     del padre.  El razonamiento entero esta en ``expand``.
+
+    LA RAIZ NACE ALCANZABLE, y aqui porque es el unico sitio por el que pasa
+    entera: la siembran ``bootstrap_root``, el gestor de prueba y cada test
+    que monta un arbol, y todos entran por esta puerta.  Cualquier otra
+    posicion nace SIN marcar y se la gana por herencia en ``expand`` — tener
+    un FEN no demuestra un camino.
     """
     fen = logic.canonical_fen(fen)
     key = logic.key_of(fen)
+    is_root = key == root_key()
     pos, created = Position.objects.get_or_create(
-        key=key, defaults={'fen': fen, 'campaign_id': campaign_id})
+        key=key, defaults={'fen': fen, 'campaign_id': campaign_id,
+                           'reachable': is_root})
     if created:
         t = logic.terminal_status(fen)
         if t:
@@ -273,6 +295,12 @@ def get_or_create_position(fen, campaign_id=None):
                 pos.clock_slack = logic.CLOCK_SLACK_MAX
             pos.save(update_fields=['status', 'closure', 'mate_in',
                                     'clock_slack'])
+    elif is_root and not pos.reachable:
+        # Raiz de una base anterior a la columna: se corrige sola en la
+        # primera pasada en vez de esperar al backfill, que es lo que hace
+        # que el BFS pueda arrancar aunque nadie lo haya sembrado.
+        pos.reachable = True
+        pos.save(update_fields=['reachable'])
     return pos
 
 
@@ -290,6 +318,16 @@ def expand(pos):
 
     Se pasa el ``campaign_id`` y no la instancia para no pagar una consulta a
     ``Campaign`` por expansion: aqui solo hace falta la clave ajena.
+
+    HERENCIA DE ALCANZABILIDAD.  La arista que se acaba de crear ES el camino:
+    si el padre cuelga de la raiz, el hijo cuelga de la raiz, y con eso el
+    selector acotado deja de necesitar el recorrido global que antes contestaba
+    esa misma pregunta (§ docs/selector-incremental.md).  Se propaga UN PLY y
+    a proposito: marcar transitivamente desde aqui convertiria una expansion —
+    trabajo acotado, dentro de una peticion — en un BFS de profundidad
+    desconocida.  Lo que ese ply no alcanza (una transposicion que aterriza
+    sobre un subarbol que nacio suelto) lo recoge ``backfill_reachable``, que
+    recalcula la columna entera y esta hecho para volver a correr.
     """
     if pos.expanded or pos.status != 'UNKNOWN':
         return []
@@ -300,9 +338,15 @@ def expand(pos):
                                        campaign_id=pos.campaign_id)
         Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                    defaults={'child': child})
+        touched = []
         if child.priority <= DEAD / 2:
             child.priority = 0.0   # ruta nueva via transposicion: revive
-            child.save(update_fields=['priority'])
+            touched.append('priority')
+        if pos.reachable and not child.reachable:
+            child.reachable = True
+            touched.append('reachable')
+        if touched:
+            child.save(update_fields=touched)
         children.append(child)
     pos.expanded = True
     pos.save(update_fields=['expanded'])
@@ -1278,18 +1322,30 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     return changed_total
 
 
+def known_eval_of(status, backed_eval, eval_cp):
+    """``best_known_eval`` a partir de las COLUMNAS, sin instancia delante.
+
+    Existe la version por columnas porque el selector acotado lee la base con
+    ``values_list`` y no tiene fila que preguntar: materializar un
+    ``Position`` por nodo para contestar lo que ya trae en la mano es justo el
+    gasto que ese selector viene a quitar.  La regla de precedencia es UNA y
+    vive aqui; ``best_known_eval`` la llama con los campos de la instancia.
+    """
+    exact = _status_eval(status)
+    if exact is not None:
+        return exact
+    if backed_eval is not None:
+        return backed_eval
+    return eval_cp
+
+
 def best_known_eval(pos):
     """Mejor conocimiento actual del nodo, en perspectiva blanca.
 
     Es lo que deben pintar tanto la cabecera de la posicion como la fila de
     la arista que apunta a ella: status probado > backed > eval puntual.
     """
-    exact = _status_eval(pos.status)
-    if exact is not None:
-        return exact
-    if pos.backed_eval is not None:
-        return pos.backed_eval
-    return pos.eval_cp
+    return known_eval_of(pos.status, pos.backed_eval, pos.eval_cp)
 
 
 # ---------------- materializacion de la linea ganadora ----------------
@@ -1659,6 +1715,23 @@ DISCONNECTED_REGRET = 5  # posiciones sin camino a la raiz (cajetin FEN)
 # vista, y el logaritmo hace que el voto veinte pese bastante menos que el
 # segundo — un brigadeo de cookies mueve el orden, no lo compra.
 CAMPAIGN_BONUS = 40.0
+# Los tres sumandos y los dos restandos de la formula, con nombre.  Estaban
+# escritos como literales dentro del bucle y ahi se quedaron mientras el bucle
+# fue uno; con dos motores (v1 y el acotado) y un horizonte de poda que
+# necesita el TECHO de lo que la formula puede sumar, un numero suelto en tres
+# sitios es una divergencia esperando su turno.  Mismos valores, un solo sitio.
+EVAL_PROXIMITY_CAP = 1500   # centipeones: tope del termino de cercania (15 u.)
+MATE_BAND_BONUS = 50.0      # el motor ya vio mate: rematar
+UNEXPANDED_BONUS = 2.0      # un nodo sin abrir cuesta poco y ensena mucho
+VISIT_WEIGHT = 1.5          # frescura: cada visita ya pagada resta
+REGRET_CAP = 3000           # centipeones: saturacion del regret (30 unidades)
+# Precio del nodo CONECTADO pero fuera de la bola explorada.  Es la saturacion
+# del regret, no un numero nuevo: el Dijkstra completo le habria dado como
+# mucho esto, y quedarse fuera del horizonte significa exactamente "su camino
+# desde la raiz cuesta al menos lo que ya no compensa medir".  Se llama aparte
+# de ``DISCONNECTED_REGRET`` porque son la MISMA pregunta con respuestas
+# opuestas: lejos (30) castiga, suelto (5) perdona.
+FAR_REGRET = REGRET_CAP / 100.0
 
 
 def _active_campaign_votes():
@@ -1670,6 +1743,129 @@ def _active_campaign_votes():
     return dict(Campaign.objects
                 .filter(state=Campaign.CState.ACTIVE)
                 .values_list('id', 'votes'))
+
+
+def _campaign_bonus(campaign_id, campaign_votes):
+    """El sumando de campana, o cero.
+
+    Solo puntua una campana ACTIVE: una propuesta sin activar, o una en pausa,
+    no aparece en el diccionario.  Es exactamente la linea entre "la comunidad
+    pide" y "el propietario concede".
+    """
+    if campaign_id is None:
+        return 0.0
+    votes = campaign_votes.get(campaign_id)
+    if votes is None:
+        return 0.0
+    return CAMPAIGN_BONUS * math.log1p(max(0, votes))
+
+
+def _runits(regret):
+    """Regret en UNIDADES de prioridad, con sus dos topes.
+
+    ``inf`` no es "infinitamente malo": es "no cuelga de la raiz", y eso es el
+    cajetin FEN que alguien pego a mano, que merece mirada aunque no este en
+    el arbol.  El otro tope, la saturacion, dice que a partir de 30 unidades
+    dar mas detalle no ordena nada mejor.
+    """
+    if regret == float('inf'):
+        return DISCONNECTED_REGRET
+    return min(regret, REGRET_CAP) / 100.0
+
+
+def priority_of(known, expanded, visits, campaign_id, runits, campaign_votes):
+    """LA formula del selector, en un solo sitio (§ ``refresh_priorities``).
+
+    Los dos motores — la foto global y el acotado — tienen que dar el MISMO
+    numero para el mismo nodo, y esa igualdad es la unica prueba que autoriza
+    a conmutar.  Compartir la funcion la hace cierta por construccion en vez
+    de por vigilancia.
+    """
+    e = abs(known) if known is not None else 0
+    return (min(e, EVAL_PROXIMITY_CAP) / 100.0      # cercania al cierre
+            + (MATE_BAND_BONUS if e >= MATE_BAND else 0.0)
+            + (0.0 if expanded else UNEXPANDED_BONUS)
+            - REGRET_WEIGHT * runits                # relevancia hacia la raiz
+            - VISIT_WEIGHT * visits                 # frescura
+            # El bono va DESPUES de todo lo demas: es un sumando, no puede
+            # reescribir ninguna decision anterior, solo desempatar a favor de
+            # la linea que la comunidad voto.
+            + _campaign_bonus(campaign_id, campaign_votes))
+
+
+def _priority_ceiling(campaign_votes):
+    """Techo de TODO lo que la formula puede sumarle a un nodo cualquiera.
+
+    Es la mitad de arriba del horizonte de poda: si ni sumando el maximo
+    imaginable — cercania al tope, mate visto, sin expandir y la campana mas
+    votada que haya — un nodo alcanza el corte del top-N, tampoco lo alcanzan
+    sus descendientes, cuyo regret solo puede ser mayor.  Los restandos no
+    entran: ``visits`` es >= 0 y solo puede bajar el numero.
+    """
+    best_votes = max(campaign_votes.values(), default=0)
+    return (EVAL_PROXIMITY_CAP / 100.0 + MATE_BAND_BONUS + UNEXPANDED_BONUS
+            + CAMPAIGN_BONUS * math.log1p(max(0, best_votes)))
+
+
+class _TopK:
+    """Los K mejores por prioridad, con memoria acotada a K.
+
+    Dos usos y los dos son el mismo problema.  El horizonte de poda necesita
+    saber cual es la prioridad del N-esimo mejor VISTO HASTA AHORA, y el modo
+    sombra necesita devolver una cima sin escribirla.  Guardar todo y ordenar
+    al final habria sido reintroducir exactamente el diccionario de millones
+    de filas que este trabajo viene a quitar.
+
+    El corte (``cut``) solo puede SUBIR segun entran candidatos, y eso es lo
+    que hace que podar con el sea seguro: un corte bajo poda de menos — se
+    explora de mas y se tarda mas — mientras que uno alto tiraria nodos que
+    merecian estar.  Se peca por el lado que solo cuesta tiempo.
+    """
+
+    def __init__(self, k):
+        self._k = max(0, int(k))
+        self._heap = []
+
+    def offer(self, key, priority):
+        if self._k == 0:
+            return
+        if len(self._heap) < self._k:
+            heapq.heappush(self._heap, (priority, key))
+        elif priority > self._heap[0][0]:
+            heapq.heapreplace(self._heap, (priority, key))
+
+    @property
+    def cut(self):
+        """Prioridad del K-esimo mejor, o ``-inf`` mientras no haya K."""
+        if len(self._heap) < self._k or not self._heap:
+            return float('-inf')
+        return self._heap[0][0]
+
+    def as_dict(self):
+        return {key: priority for priority, key in self._heap}
+
+
+SELECTOR_HORIZON_FLOOR = 1_000
+
+
+def selector_horizon_width():
+    """Cuantos candidatos sostienen el corte del horizonte.
+
+    Es la anchura de lo que alguien consume de verdad: ``next_tasks`` mira el
+    top ``4*n`` y quien lo llama pide ``TASK_REFILL_COUNT`` por arriendo.  El
+    suelo de mil manda mientras ese lote sea pequeno, y esta escrito como un
+    maximo para que subir el lote suba el horizonte solo, sin que nadie tenga
+    que acordarse.
+
+    ``TASK_REFILL_COUNT`` se importa AQUI DENTRO y no arriba porque ``views``
+    importa este modulo: el ciclo se evita retrasando la lectura hasta que hay
+    alguien preguntando.
+    """
+    from .views import TASK_REFILL_COUNT
+    return max(4 * TASK_REFILL_COUNT, SELECTOR_HORIZON_FLOOR)
+
+
+BOUNDED_BATCH = 500   # claves por lote de expansion: un IN que toda base traga
 
 
 def _regret_from_root():
@@ -1698,9 +1894,7 @@ def _regret_from_root():
     for key, fen, eval_cp, backed_eval, status in \
             Position.objects.values_list(
                 'key', 'fen', 'eval_cp', 'backed_eval', 'status'):
-        known = backed_eval if backed_eval is not None else eval_cp
-        val[key] = {'WHITE_WIN': 10_000, 'BLACK_WIN': -10_000,
-                    'DRAW': 0}.get(status, known)
+        val[key] = known_eval_of(status, backed_eval, eval_cp)
         white_stm[key] = fen.split()[1] == 'w'
         if status != 'UNKNOWN':
             settled.add(key)
@@ -1710,10 +1904,10 @@ def _regret_from_root():
 
     INF = float('inf')
     regret = dict.fromkeys(val, INF)
-    root_key = logic.key_of(logic.start_fen())
-    if root_key in regret:
-        regret[root_key] = 0.0
-    heap = [(0.0, root_key)]
+    root = root_key()
+    if root in regret:
+        regret[root] = 0.0
+    heap = [(0.0, root)]
     while heap:
         r, k = heapq.heappop(heap)
         if r > regret.get(k, INF):
@@ -1756,7 +1950,165 @@ def _regret_from_root():
     return regret
 
 
-def refresh_priorities(force=False):
+class _BoundedNode:
+    """La foto que el Dijkstra acotado necesita de un nodo, sin ORM detras.
+
+    Un ``Position`` completo trae ``last_analysis`` (un JSON por fila), la FEN,
+    la ``won_line`` y veinte columnas mas que aqui no pinta ninguna.  A
+    millones de nodos eso es la diferencia entre una bola que cabe y una
+    pasada que se come la maquina.
+    """
+
+    __slots__ = ('value', 'white_stm', 'settled', 'expanded', 'visits',
+                 'campaign_id', 'priority')
+
+    def __init__(self, fen, eval_cp, backed_eval, status, expanded, visits,
+                 campaign_id, priority):
+        self.value = known_eval_of(status, backed_eval, eval_cp)
+        self.white_stm = fen.split()[1] == 'w'
+        self.settled = status != 'UNKNOWN'
+        self.expanded = expanded
+        self.visits = visits
+        self.campaign_id = campaign_id
+        self.priority = priority
+
+
+def _regret_from_root_bounded(campaign_votes=None, top_n=None,
+                              batch_size=BOUNDED_BATCH):
+    """El mismo regret que ``_regret_from_root``, sin la foto del grafo.
+
+    MISMA SEMANTICA, OTRA MEMORIA.  Los gaps se calculan igual, los nodos
+    cerrados siguen sin relajar hacia abajo y las transposiciones siguen
+    tomando la mejor ruta.  Lo que cambia es de donde salen los datos: en vez
+    de dos diccionarios con la base entera dentro, la adyacencia y los valores
+    se leen POR LOTES al expandir la frontera, y el cache local solo guarda la
+    BOLA explorada y su borde.  Devuelve ``{clave: regret}`` de los nodos
+    FINALIZADOS — quien no este es que quedo fuera de la bola, y quien pregunta
+    (``refresh_priorities_v2``) sabe ponerle precio a eso.
+
+    EL HORIZONTE.  Dijkstra saca del heap en orden no decreciente de regret,
+    asi que en cuanto el mejor caso imaginable de lo que queda por sacar
+    — todo lo que la formula puede sumar, menos lo que ya resta este regret —
+    no alcanza al corte del top-N, no queda nada por descubrir que importe: lo
+    de mas abajo solo puede tener MAS regret.  Ahi se para.  No es una
+    aproximacion sobre la cima; es la observacion de que nadie consume las
+    prioridades del fondo de la tabla.
+
+    Y LO QUE ESO NO GARANTIZA, porque la memoria acotada depende de ello: la
+    bola es pequena cuando el corte es ALTO.  Si el N-esimo mejor puntua bajo
+    — pocos candidatos, o un arbol sin nada urgente — el horizonte no llega a
+    morder y esto recorre lo que haga falta.  No es un fallo, es el mismo
+    trabajo que hacia la version global y por el mismo motivo; lo que ya no
+    hace es cargar el grafo entero ANTES de saber si le hace falta.  Cuanto
+    mide la bola de verdad lo dice ``selector_shadow`` sobre la base viva, que
+    es justo para lo que esta.
+
+    LA CARRERA MUERE AQUI, Y NO POR UN ``try``.  El ``KeyError`` de la version
+    global salia de mezclar dos fotos tomadas en momentos distintos: una clave
+    que la adyacencia conocia y el mapa de valores no.  Con lecturas por lotes
+    no hay dos fotos que casar — una clave que no vuelve del lote es un nodo
+    recien nacido o una fila que aun no se ve, se salta, y la pasada siguiente
+    la encuentra.  Saltarla cuesta un minuto de prioridad vieja; el
+    ``KeyError`` costaba la pasada entera.
+    """
+    if campaign_votes is None:
+        campaign_votes = _active_campaign_votes()
+    if top_n is None:
+        top_n = selector_horizon_width()
+    ceiling = _priority_ceiling(campaign_votes)
+    candidates = _TopK(top_n)
+
+    INF = float('inf')
+    node = {}        # clave -> _BoundedNode (la bola y su borde, nada mas)
+    regret = {}      # mejor regret conocido (incluye frontera sin sacar)
+    done = {}        # regret FINAL de lo que ya salio del heap
+
+    root = root_key()
+    regret[root] = 0.0
+    heap = [(0.0, root)]
+    while heap:
+        batch = []
+        while heap and len(batch) < batch_size:
+            r, key = heapq.heappop(heap)
+            if key in done or r > regret.get(key, INF):
+                continue          # entrada rancia: ya salio por mejor camino
+            batch.append((r, key))
+        if not batch:
+            continue              # el heap solo tenia rancias
+
+        # EL CORTE, ANTES DE PAGAR NINGUNA CONSULTA.  El primero del lote es
+        # el de menor regret; si ni el llega, ninguno de los que vienen detras
+        # va a llegar tampoco.
+        if (ceiling - REGRET_WEIGHT * min(batch[0][0], REGRET_CAP) / 100.0
+                < candidates.cut):
+            break
+
+        keys = [key for _, key in batch]
+        _load_bounded_nodes(node, keys)
+        for r, key in batch:
+            done[key] = r
+            row = node.get(key)
+            if row is None:
+                continue          # fila que no esta: se salta, nunca KeyError
+            # Solo los nodos que la cola puede servir sostienen el corte: un
+            # cerrado o una lapida con prioridad alta lo subiria sin ser nunca
+            # candidato a nada, y con el corte inflado se podaria de mas.
+            if not row.settled and row.priority > DEAD / 2:
+                candidates.offer(key, priority_of(
+                    row.value, row.expanded, row.visits, row.campaign_id,
+                    _runits(r), campaign_votes))
+
+        # Un nodo CERRADO no relaja hacia abajo (misma regla que la version
+        # global, y por la misma razon), asi que su adyacencia ni se pide.
+        expanding = [key for _, key in batch
+                     if key in node and not node[key].settled]
+        adjacency = {}
+        if expanding:
+            for parent, child in Edge.objects.filter(
+                    parent_id__in=expanding).values_list('parent_id',
+                                                         'child_id'):
+                adjacency.setdefault(parent, []).append(child)
+        _load_bounded_nodes(node, {child for kids in adjacency.values()
+                                   for child in kids})
+
+        for r, key in batch:
+            row = node.get(key)
+            if row is None or row.settled:
+                continue
+            kids = adjacency.get(key, ())
+            if not kids:
+                continue
+            seen = [node[c].value for c in kids
+                    if c in node and node[c].value is not None]
+            best = ((max(seen) if row.white_stm else min(seen))
+                    if seen else None)
+            for child in kids:
+                target = node.get(child)
+                if target is None or child in done:
+                    continue
+                gap = 0.0
+                if target.value is not None and best is not None:
+                    gap = ((best - target.value) if row.white_stm
+                           else (target.value - best))
+                nr = r + gap
+                if nr < regret.get(child, INF):
+                    regret[child] = nr
+                    heapq.heappush(heap, (nr, child))
+    return done
+
+
+def _load_bounded_nodes(node, keys):
+    """Rellena el cache local con las claves que aun no estan, por lotes."""
+    missing = sorted({key for key in keys if key not in node})
+    for start in range(0, len(missing), BOUNDED_BATCH):
+        chunk = missing[start:start + BOUNDED_BATCH]
+        for row in Position.objects.filter(key__in=chunk).values_list(
+                'key', 'fen', 'eval_cp', 'backed_eval', 'status', 'expanded',
+                'visits', 'campaign_id', 'priority'):
+            node[row[0]] = _BoundedNode(*row[1:])
+
+
+def refresh_priorities_v1(force=False, top_k=None):
     """§4.1 — recalculo global (llamado por el selector). Prioridad =
     cercania al cierre local - regret acumulado desde la raiz - visitas
     + el bono de la campana ACTIVA a la que pertenezca la posicion.
@@ -1789,15 +2141,22 @@ def refresh_priorities(force=False):
 
     ``force`` salta la cache de PRIORITY_REFRESH_SECONDS; el servicio la usa
     para que su propio intervalo sea el unico reloj que manda.
+
+    ``top_k`` lo pone en MODO SOLO CALCULO: no escribe nada y devuelve
+    ``{clave: prioridad}`` con los ``top_k`` mejores.  Existe para que el
+    sombra (``selector_shadow``) pueda correr los dos motores sobre la MISMA
+    base sin que ninguno pise al otro — comparar despues de escribir no
+    compara nada.
     """
     now = time.monotonic()
     cached = _priority_refresh_cache
-    if (not force and cached['at']
+    if (top_k is None and not force and cached['at']
             and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
         return False
 
     regret = _regret_from_root()
     campaign_votes = _active_campaign_votes()
+    collector = _TopK(top_k) if top_k is not None else None
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
@@ -1805,31 +2164,123 @@ def refresh_priorities(force=False):
         # Mismo criterio que el mapa del Dijkstra: un nodo sin eval
         # propia pero con respaldo decidido no es un nodo sin
         # informacion, ni en un sentido ni en el otro.
-        known = best_known_eval(pos)
-        e = abs(known) if known is not None else 0
-        r = regret.get(pos.key, float('inf'))
-        runits = DISCONNECTED_REGRET if r == float('inf') \
-            else min(r, 3000) / 100.0
-        prio = (min(e, 1500) / 100.0          # cercania al cierre
-                + (50.0 if e >= MATE_BAND else 0.0)  # mate visto: rematar
-                + (2.0 if not pos.expanded else 0.0)
-                - REGRET_WEIGHT * runits      # relevancia hacia la raiz
-                - 1.5 * pos.visits)           # frescura
-        # El bono va DESPUES de todo lo demas y solo si la campana de la
-        # posicion esta ACTIVE: una propuesta sin activar, o una en pausa, no
-        # aparece en el diccionario y por tanto no puntua.  Es exactamente la
-        # linea entre "la comunidad pide" y "el propietario concede".
-        if pos.campaign_id is not None:
-            votes = campaign_votes.get(pos.campaign_id)
-            if votes is not None:
-                prio += CAMPAIGN_BONUS * math.log1p(max(0, votes))
+        prio = priority_of(best_known_eval(pos), pos.expanded, pos.visits,
+                           pos.campaign_id,
+                           _runits(regret.get(pos.key, float('inf'))),
+                           campaign_votes)
+        if collector is not None:
+            collector.offer(pos.key, prio)
+            continue
         if pos.priority != prio:
             pos.priority = prio
             dirty.append(pos)
+    if collector is not None:
+        return collector.as_dict()
     for i in range(0, len(dirty), 500):
         Position.objects.bulk_update(dirty[i:i + 500], ['priority'])
     cached['at'] = now
     return True
+
+
+PRIORITY_WRITE_BATCH = 500
+
+
+def refresh_priorities_v2(force=False, top_k=None):
+    """La MISMA pasada de ``refresh_priorities_v1``, acotada en memoria.
+
+    Tres cosas cambian y ninguna es la formula:
+
+    1. El regret sale del Dijkstra POR LOTES (``_regret_from_root_bounded``),
+       que explora la bola competitiva en vez del grafo entero.
+    2. El barrido lee COLUMNAS (``values_list`` + ``iterator``), no
+       instancias: un ``Position`` completo arrastra ``last_analysis``, la FEN
+       y la ``won_line``, y multiplicado por millones de filas eso era la
+       mitad del problema.
+    3. Las escrituras salen en lotes de ``PRIORITY_WRITE_BATCH`` sobre shells
+       ``Position(key=...)`` con SOLO ``priority`` dentro, y la lista se vacia
+       en cada vuelta.  La version global acumulaba todas las filas sucias
+       antes del primer ``bulk_update``.
+
+    LO QUE PASA CON LO QUE QUEDA FUERA DE LA BOLA, que es el unico sitio donde
+    los dos motores pueden diferir: un nodo que el Dijkstra acotado no alcanzo
+    cobra 30 unidades si cuelga de la raiz (``reachable``) y 5 si no.  Son las
+    dos respuestas que ya daba la version global — la saturacion del regret y
+    ``DISCONNECTED_REGRET`` — y con la columna se distinguen sin recorrer nada.
+    Por eso el orden del despliegue no es negociable: migracion, luego
+    ``backfill_reachable``, y solo entonces el conmutador.
+
+    Y AHI HAY UNA DIFERENCIA DELIBERADA, la unica de todo esto, que conviene
+    tener escrita antes de que alguien la encuentre en el sombra.  Un nodo cuyo
+    UNICO camino desde la raiz pasa por un nodo CERRADO no lo alcanza ninguno
+    de los dos motores (un cierre no relaja hacia abajo, misma regla en los
+    dos), pero ``reachable`` si lo marca: la arista existe.  La version global
+    le daba las 5 unidades del cajetin suelto — no porque lo hubiera decidido,
+    sino porque "no me consta camino" y "no hay camino" eran el mismo ``inf``.
+    Aqui cobra 30.  Es el precio correcto de los dos: un nodo enterrado bajo un
+    subarbol ya resuelto no merece el beneficio de la duda que se le da a una
+    posicion que un humano acaba de pegar en el cajetin.  Y no lo entierra este
+    cambio: ``_still_reachable`` sigue siendo quien le pone la lapida cuando
+    ``next_tasks`` se lo encuentra.
+
+    ESCRIBIR MIENTRAS SE LEE, Y POR QUE ES SEGURO.  El barrido y los
+    ``bulk_update`` se intercalan a proposito (es lo que acota la memoria), asi
+    que una fila puede colarse o repetirse si el motor de base decide recorrer
+    por el indice de ``priority``.  Repetida da el mismo numero; colada se
+    queda con la prioridad de la pasada anterior — sesenta segundos de retraso
+    en una heuristica sobre HACIA DONDE MIRAR, que es exactamente la tolerancia
+    que esta columna declara desde que dejo de calcularse dentro de la request.
+    """
+    now = time.monotonic()
+    cached = _priority_refresh_cache
+    if (top_k is None and not force and cached['at']
+            and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
+        return False
+
+    campaign_votes = _active_campaign_votes()
+    regret = _regret_from_root_bounded(campaign_votes=campaign_votes)
+    collector = _TopK(top_k) if top_k is not None else None
+    dirty = []
+    for (key, eval_cp, backed_eval, expanded, visits, campaign_id, priority,
+         reachable) in (Position.objects
+                        .filter(status='UNKNOWN', priority__gt=DEAD / 2)
+                        .values_list('key', 'eval_cp', 'backed_eval',
+                                     'expanded', 'visits', 'campaign_id',
+                                     'priority', 'reachable')
+                        .iterator(chunk_size=2000)):
+        r = regret.get(key)
+        runits = (_runits(r) if r is not None
+                  else (FAR_REGRET if reachable else DISCONNECTED_REGRET))
+        prio = priority_of(known_eval_of('UNKNOWN', backed_eval, eval_cp),
+                           expanded, visits, campaign_id, runits,
+                           campaign_votes)
+        if collector is not None:
+            collector.offer(key, prio)
+            continue
+        if priority != prio:
+            dirty.append(Position(key=key, priority=prio))
+            if len(dirty) >= PRIORITY_WRITE_BATCH:
+                Position.objects.bulk_update(dirty, ['priority'])
+                dirty = []
+    if collector is not None:
+        return collector.as_dict()
+    if dirty:
+        Position.objects.bulk_update(dirty, ['priority'])
+    cached['at'] = now
+    return True
+
+
+def refresh_priorities(force=False, top_k=None):
+    """Puerta unica del recalculo: v1 por defecto, v2 con el conmutador.
+
+    Los dos motores viven a la vez y eso es el plan, no un descuido.  El
+    sombra (``selector_shadow``) necesita poder correr los dos sobre la misma
+    base para publicar Jaccard y Kendall del top-1000 ANTES de que nadie
+    conmute nada, y el dia que se conmute hace falta poder volver con una
+    variable de entorno y un reinicio, sin desplegar codigo.
+    """
+    if selector_v2_enabled():
+        return refresh_priorities_v2(force=force, top_k=top_k)
+    return refresh_priorities_v1(force=force, top_k=top_k)
 
 
 def _still_reachable(pos):
@@ -1873,6 +2324,18 @@ def inline_selector_enabled():
     sin desplegar otro camino de codigo.
     """
     return bool(getattr(settings, 'ATOMICDB_INLINE_SELECTOR', False))
+
+
+def selector_v2_enabled():
+    """El selector ACOTADO en lugar de la foto global del grafo.
+
+    APAGADO por defecto, y va a seguir apagado hasta que el sombra publique
+    sus numeros: v1 sigue siendo lo desplegado y lo medido, y un motor nuevo
+    que ordena la cola de toda la flota no se enciende porque los tests pasen.
+    El orden completo esta en ``docs/selector-incremental.md``; el resumen es
+    migracion, ``backfill_reachable``, sombra, y entonces esta variable.
+    """
+    return bool(getattr(settings, 'ATOMICDB_SELECTOR_V2', False))
 
 
 def next_tasks(n):

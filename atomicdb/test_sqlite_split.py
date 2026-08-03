@@ -425,10 +425,11 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                 connection.execute(
                     """
                     INSERT INTO atomicdb_position
-                        (key, fen, status, expanded, depth_invested,
-                         nodes_invested, time_invested, visits, priority,
-                         backed_plies, backed_nodes, updated)
-                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0.0, 0, 0.0, 0, 0, ?)
+                        (key, fen, status, expanded, reachable,
+                         depth_invested, nodes_invested, time_invested,
+                         visits, priority, backed_plies, backed_nodes,
+                         updated)
+                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0, 0.0, 0, 0.0, 0, 0, ?)
                     """,
                     (
                         '2' * 64,

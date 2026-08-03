@@ -15,6 +15,15 @@ FALLBACK.  ``ATOMICDB_INLINE_SELECTOR = True`` in the web process restores the
 old inline behaviour through the same code path, so this service can be stopped
 without stopping the project.  See Documentation/atomicdb-selector.service.
 
+QUE MOTOR CORRE AQUI.  El paso ``priorities`` llama a la puerta unica
+(``ingest.refresh_priorities``), que elige: la foto global del grafo por
+defecto, y el Dijkstra acotado con ``ATOMICDB_SELECTOR_V2``.  Este proceso no
+sabe cual de los dos esta corriendo ni tiene por que saberlo — el conmutador es
+una variable de entorno y un reinicio, que es justo lo que hace posible volver
+atras sin desplegar.  Antes de encenderlo: migracion 0036,
+``backfill_reachable`` en cada base y ``selector_shadow`` publicando sus
+numeros (§ docs/selector-incremental.md).
+
 WHAT ELSE RIDES THIS TIMER.  Everything that is a bounded scheduling decision
 rather than a request: the ENGINE debt top-up, coverage completion, and — when
 ``ATOMICDB_ADVERSARIAL`` is on — the two adversarial arms (dn repair and F0

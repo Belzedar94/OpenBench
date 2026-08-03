@@ -101,6 +101,16 @@ ATOMICDB_SELECTOR = os.environ.get('ATOMICDB_SELECTOR', 'regret')
 # si el servicio refresh_selector no esta corriendo.
 ATOMICDB_INLINE_SELECTOR = os.environ.get(
     'ATOMICDB_INLINE_SELECTOR', '').lower() in ('1', 'true', 'yes')
+# Selector ACOTADO (P1.6): Dijkstra por lotes con horizonte de poda en vez de
+# la foto del grafo entero en RAM.  APAGADO por defecto y no por prudencia
+# generica: v1 es lo que esta desplegado y medido, y este conmutador no se
+# toca hasta que ``selector_shadow`` publique el Jaccard y el Kendall del
+# top-1000 sobre la base viva.  Antes de encenderlo hay que haber aplicado la
+# migracion 0036 y corrido ``backfill_reachable`` en CADA base — sin sembrar,
+# la columna le pone precio de cajetin suelto a media base
+# (§ docs/selector-incremental.md).
+ATOMICDB_SELECTOR_V2 = os.environ.get(
+    'ATOMICDB_SELECTOR_V2', '').lower() in ('1', 'true', 'yes')
 # Brazos adversariales del explorador (reparacion de dn y solves F0 sobre
 # afirmaciones fragiles de mate).  APAGADOS por defecto a proposito: el
 # paquete existe para medir si mejoran los cierres, y esa medida necesita un
