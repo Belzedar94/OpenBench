@@ -158,6 +158,38 @@ def _mark_failure(job, error):
     return exhausted
 
 
+def _absorb_shadowed(job, searched):
+    """Cierra las peticiones que este analisis acaba de dejar sin trabajo.
+
+    Reporte de comunidad: peticiones que "are stuck forever in your queue on
+    profile description... if you click them, position is already analysed".
+    Dos tareas sobre la MISMA posicion — la del selector y la de un click, o
+    dos clicks a profundidades distintas — y solo una llega a un worker: la
+    otra se quedaba PENDING para siempre, porque nada en el ciclo de vida
+    miraba a las demas cuando una entregaba su resultado.  La posicion aparece
+    analizada al abrirla y la fila sigue en la cola de su autor, contradiciendo
+    a la pagina que la pinta.
+
+    El corte es ``budget_nodes <= searched``: nodos REALMENTE buscados, no lo
+    que la tarea servida tenia presupuestado.  Lo que pedia menos de lo que
+    acaba de correr ya no puede comprar nada nuevo; lo que pide mas se queda
+    esperando, que es exactamente lo que su autor encargo.
+
+    LEASED no se toca: esa esta corriendo y cerrara sola, con sus nodos y su
+    maquina.  Absorber es COMPLETED sin nodos y sin maquina — el trabajo se
+    hizo, pero no lo hizo esta fila y no puede cobrarlo: los agregados por
+    maquina filtran ``machine__in`` (§ contributors), asi que una fila sin
+    maquina cae fuera de la contabilidad sola.
+    """
+    return (AnalysisTask.objects
+            .filter(position_id=job.position_id,
+                    state=AnalysisTask.TState.PENDING,
+                    budget_nodes__lte=searched)
+            .exclude(pk=job.task_id)
+            .update(state=AnalysisTask.TState.COMPLETED,
+                    completed=timezone.now(), nodes_searched=0))
+
+
 def apply_job(job):
     """Aplica UN trabajo con la semantica transaccional de siempre.
 
@@ -215,6 +247,12 @@ def apply_job(job):
             summary = ingest.ingest_analysis(
                 job.position_id, lines, searched, machine=machine,
                 mate_proofs=mate_proofs, restricted=restricted)
+            # Las peticiones que este pase deja sin trabajo se cierran AQUI,
+            # dentro de la misma transaccion que lo aplica: si el analisis se
+            # revierte, vuelven enteras a su cola.
+            absorbed = _absorb_shadowed(job, searched)
+            if absorbed:
+                summary['absorbed'] = absorbed
         # El tiempo de motor solo se contabiliza cuando el resultado entra:
         # un WDL rechazado no compra nada y no gasta reloj.
         if elapsed and not summary.get('tb_rejected'):

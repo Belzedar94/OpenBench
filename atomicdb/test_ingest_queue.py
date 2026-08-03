@@ -7,7 +7,9 @@ Lo que se defiende aqui:
     mismo fixture);
   * un fallo reintenta con backoff y acaba en FAILED con su payload intacto;
   * aplicar dos veces el mismo payload no duplica nada;
-  * un lease no puede caducar mientras su payload espera en la cola.
+  * un lease no puede caducar mientras su payload espera en la cola;
+  * una peticion que el pase acaba de dejar sin trabajo se cierra, en vez de
+    quedarse PENDING sobre una posicion ya analizada.
 """
 
 import json
@@ -17,7 +19,7 @@ from django.core.management import call_command
 from django.test import Client, override_settings
 from django.utils import timezone
 
-from . import ingest, ingest_queue, logic
+from . import contributors, ingest, ingest_queue, logic
 from .models import AnalysisTask, Edge, IngestJob, Position, ProofCampaign
 from .testing import TestCase, worker_account
 
@@ -263,6 +265,157 @@ class ProcessorTests(TestCase):
         call_command('process_ingest_queue', status=True, stdout=out)
 
         self.assertEqual(json.loads(out.getvalue().strip()), {'PENDING': 1})
+
+
+class AbsorptionTests(TestCase):
+    """Una peticion que otra busqueda ya sirvio se CIERRA, no se queda colgada.
+
+    Reporte de comunidad: peticiones que "are stuck forever in your queue on
+    profile description... if you click them, position is already analysed".
+    Dos tareas sobre la misma posicion y un solo worker que llega: la que no
+    llego se quedaba PENDING para siempre y la cola de su autor la seguia
+    ensenando como pendiente encima de una posicion ya analizada.
+
+    La cola del perfil se comprueba desde aqui a proposito: es la MISMA
+    absorcion vista por el otro lado, y separarlas dejaria la causa y su efecto
+    en dos ficheros que pueden dejar de hablarse.
+    """
+
+    def setUp(self):
+        self.auth = _worker()
+        self.client = Client()
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.target = (Edge.objects.filter(parent=self.root)
+                       .order_by('move_uci').first().child)
+        ingest.expand(self.target)
+        # La que el worker va a servir: 512M, la primera de la cola.
+        self.served = self._task(0, 512_000_000)
+        # Y las tres que viven a su sombra sobre la MISMA posicion.
+        self.shadowed = self._task(1, 128_000_000)
+        self.deeper = self._task(2, 10_000_000_000)
+        self.running = self._task(3, 128_000_000,
+                                  state=AnalysisTask.TState.LEASED,
+                                  machine='m2', leased_at=timezone.now(),
+                                  lease_heartbeat_at=timezone.now())
+
+    def _task(self, generation, budget, **fields):
+        return AnalysisTask.objects.create(
+            position=self.target, generation=generation, budget_nodes=budget,
+            source=AnalysisTask.Source.USER, requested_by='w', **fields)
+
+    def _serve(self, nodes=512_000_000):
+        """El worker coge la de 512M, la busca y su payload se aplica."""
+        leased = _lease(self.client, self.auth)['tasks'][0]
+        self.assertEqual(leased['id'], self.served.id)
+        self.client.post('/atomicdb/api/submit', dict(
+            self.auth, task_id=leased['id'],
+            lines=json.dumps(_analysis_lines(self.target)),
+            nodes=str(nodes), elapsed='12.5',
+            lease_token=leased['lease_token']))
+        self.assertEqual(ingest_queue.drain(), {'done': 1, 'failed': 0})
+
+    def test_the_pass_absorbs_what_it_left_without_work(self):
+        self._serve()
+
+        for task in (self.shadowed, self.deeper, self.running):
+            task.refresh_from_db()
+        # 128M pedidos contra 512M ya buscados: no queda nada que comprar.
+        self.assertEqual(self.shadowed.state, 'COMPLETED')
+        self.assertIsNotNone(self.shadowed.completed)
+        # Los 10B siguen siendo una busqueda que nadie ha hecho.
+        self.assertEqual(self.deeper.state, 'PENDING')
+        # Y la arrendada esta CORRIENDO: cerrara sola, con sus nodos.
+        self.assertEqual(self.running.state, 'LEASED')
+
+    def test_an_absorbed_row_claims_no_nodes_and_no_machine(self):
+        self._serve()
+
+        self.shadowed.refresh_from_db()
+        self.assertEqual(self.shadowed.nodes_searched, 0)
+        self.assertEqual(self.shadowed.machine, '')
+
+    def test_the_profile_queue_shows_it_served_instead_of_waiting(self):
+        self._serve()
+
+        pending, _leased, done = contributors._queue_rows('w')
+
+        self.assertNotIn(self.shadowed.id, [task.id for task in pending])
+        self.assertIn(self.shadowed.id, [task.id for task in done])
+        # Y la honda sigue esperando: lo que se cierra es lo que sobra.
+        self.assertIn(self.deeper.id, [task.id for task in pending])
+
+    def test_the_completed_ladder_reads_the_same_as_before(self):
+        """El maximo COMPLETED manda, y lo absorbido siempre esta por debajo:
+        su presupuesto cabia en los nodos que de verdad se buscaron."""
+        self._serve()
+
+        self.assertEqual(ingest._completed_max_budget(self.target),
+                         512_000_000)
+
+    def test_another_position_is_none_of_its_business(self):
+        other = (Edge.objects.filter(parent=self.root)
+                 .order_by('move_uci')[1].child)
+        elsewhere = AnalysisTask.objects.create(
+            position=other, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+
+        self._serve()
+
+        elsewhere.refresh_from_db()
+        self.assertEqual(elsewhere.state, 'PENDING')
+
+
+class ShadowBackfillTests(TestCase):
+    """La pasada UNICA para las que ya estaban colgadas (§ management)."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.target = (Edge.objects.filter(parent=self.root)
+                       .order_by('move_uci').first().child)
+        AnalysisTask.objects.create(
+            position=self.target, generation=0, budget_nodes=512_000_000,
+            state=AnalysisTask.TState.COMPLETED, machine='m1',
+            nodes_searched=512_000_000, completed=timezone.now())
+        self.shadowed = AnalysisTask.objects.create(
+            position=self.target, generation=1, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+        self.deeper = AnalysisTask.objects.create(
+            position=self.target, generation=2, budget_nodes=10_000_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+
+    def _run(self, **options):
+        from io import StringIO
+        out = StringIO()
+        call_command('absorb_shadowed_tasks', stdout=out, **options)
+        return out.getvalue().strip()
+
+    def test_the_dry_run_counts_without_touching_a_single_row(self):
+        output = self._run(dry_run=True)
+
+        self.assertEqual(
+            output,
+            'absorb_shadowed_tasks: 1 por absorber (dry-run, sin escribir)')
+        self.shadowed.refresh_from_db()
+        self.assertEqual(self.shadowed.state, 'PENDING')
+
+    def test_the_pass_absorbs_the_shadowed_and_leaves_the_deeper_alone(self):
+        output = self._run()
+
+        self.assertEqual(output, 'absorb_shadowed_tasks: 1 absorbidas')
+        self.shadowed.refresh_from_db()
+        self.deeper.refresh_from_db()
+        self.assertEqual(self.shadowed.state, 'COMPLETED')
+        self.assertEqual(self.shadowed.nodes_searched, 0)
+        self.assertEqual(self.shadowed.machine, '')
+        self.assertIsNotNone(self.shadowed.completed)
+        self.assertEqual(self.deeper.state, 'PENDING')
+
+    def test_a_second_pass_finds_nothing_left(self):
+        self._run()
+
+        self.assertEqual(self._run(), 'absorb_shadowed_tasks: 0 absorbidas')
 
 
 class SynchronousFallbackTests(TestCase):
