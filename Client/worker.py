@@ -2754,17 +2754,23 @@ def measure_engine_memory_mb(engine_name, options, budget_seconds=12.0):
         proc.stdin.write('\n'.join(commands) + '\n')
         proc.stdin.flush()
 
-        # Poll the resident size instead of parsing stdout: no blocking read
-        # can hang the worker, and the peak is what has to fit, not the end.
+        # Poll memory instead of parsing stdout: no blocking read can hang
+        # the worker, and the peak is what has to fit, not the end. On
+        # Windows the honest figure is the COMMIT charge (pagefile), not the
+        # resident size: this engine commits a 256 MiB move arena it barely
+        # touches, so RSS said 392 MB while the commit charge was 658 --
+        # and the commit charge is the number allocations die against.
         watcher  = psutil.Process(proc.pid)
         deadline = time.time() + budget_seconds
         peak = 0
         while time.time() < deadline and proc.poll() is None:
             try:
-                rss = watcher.memory_info().rss // (1024 ** 2)
+                info = watcher.memory_info()
+                used = getattr(info, 'pagefile', 0) or info.rss
+                used //= (1024 ** 2)
             except (psutil.Error, OSError):
                 break
-            peak = max(peak, rss)
+            peak = max(peak, used)
             time.sleep(0.25)
         # Sampled for the whole window on purpose. An earlier version stopped
         # as soon as the figure stopped climbing and caught the engines mid
