@@ -56,6 +56,21 @@ PENDING = AnalysisTask.TState.PENDING
 LEASED = AnalysisTask.TState.LEASED
 USER = AnalysisTask.Source.USER
 
+# Cuanto espera una peticion antes de que la cola deje de tener estratos.
+# El estrato NOMBRADO ordena el trafico del dia — un humano identificado no
+# espera detras de la marea sin login (Lesha, 31-jul) — pero sin caducidad no
+# ordena nada: mata de hambre.  Medido el 30-jul en produccion: 318 peticiones
+# USER PENDING, 269 de mas de 24h y 126 de mas de 72h, con la cola sirviendo
+# sin parar (6 arriendos, todos jovenes).  Mientras entre UNA nombrada al dia,
+# la banda anonima no llega jamas al frente.  Un dia es el numero porque es la
+# escala a la que el sitio ya habla de esta cola: la portada cuenta cierres en
+# 24h y el perfil dice "asked N hours ago".
+STARVED_AFTER = timedelta(hours=24)
+# Una PENDING sobre una posicion CERRADA no la sirve nadie: ``choose_pending``
+# salta lo que no esta en 'UNKNOWN'.  No es cola por delante de nadie, y desde
+# el cierre tampoco se queda ahi (§ ingest._emit_closure_events).  Una LAPIDA
+# si es serveable — ``choose_pending`` no mira la prioridad — asi que cuenta.
+SERVEABLE = Q(position__status='UNKNOWN')
 # Cuanto silencio invalida una PROMESA de tiempo.  Tres intervalos de heartbeat
 # del worker (60s, § Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS) y
 # exactamente la ventana con la que los medidores de la portada deciden si una
@@ -81,26 +96,45 @@ MAX_PROMISE_SECONDS = 6 * 3600
 MAX_LIVE_ROWS = 8
 
 
+def named_tier(now=None):
+    """Q de las que cobran en el estrato NOMBRADO de la banda USER.
+
+    Un nombre O un dia de espera, por el mismo sitio.  El orden de servicio
+    (``views.choose_pending``) y las dos cifras de "cuanta cola tengo delante"
+    (``queue_ahead`` y ``contributors._queue_rows``) leen esta misma regla:
+    tres implementaciones de un mismo estrato acabarian discrepando el dia que
+    cambie, y la que discrepa le miente a un humano que esta esperando.
+    """
+    return (Q(requested_by__gt='')
+            | Q(created__lt=(now or timezone.now()) - STARVED_AFTER))
+
+
 def queue_ahead(task):
     """Cuantas peticiones de visitante cobran antes que ``task``, o ``None``.
 
-    El mismo orden que ``choose_pending`` (nombradas por delante de las
-    anonimas, FIFO dentro de cada estrato), sin el matiz own-first porque
-    depende de que worker pregunte.  Es transparencia, no contrato.
+    El mismo orden que ``choose_pending`` (estrato nombrado por delante de la
+    marea anonima fresca, FIFO dentro de cada estrato), sin el matiz own-first
+    porque depende de que worker pregunte.  Es transparencia, no contrato.
 
-    UNA sola sentencia: los dos recuentos que hacen falta salen del mismo
+    Solo cuenta lo que de verdad puede cobrar antes: una PENDING sobre una
+    posicion ya cerrada no la sirve nadie, y sumarla era decirle a quien acaba
+    de pedir que tiene por delante una cola que no existe.
+
+    UNA sola sentencia: los tres recuentos que hacen falta salen del mismo
     barrido con ``filter=`` encima, porque esto ya no lo llama solo el recibo
     de un click — lo llama tambien el explorador, en cada render con una
     peticion esperando.
     """
     if task is None or task.state != PENDING or task.source != USER:
         return None
-    rows = AnalysisTask.objects.filter(state=PENDING, source=USER).aggregate(
-        named=Count('id', filter=Q(requested_by__gt='')),
-        named_before=Count('id', filter=Q(requested_by__gt='',
-                                          id__lt=task.id)),
-        anon_before=Count('id', filter=Q(requested_by='', id__lt=task.id)))
-    if task.requested_by:
+    now = timezone.now()
+    named = named_tier(now)
+    rows = (AnalysisTask.objects.filter(state=PENDING, source=USER)
+            .filter(SERVEABLE).aggregate(
+                named=Count('id', filter=named),
+                named_before=Count('id', filter=named & Q(id__lt=task.id)),
+                anon_before=Count('id', filter=~named & Q(id__lt=task.id))))
+    if task.requested_by or task.created < now - STARVED_AFTER:
         return rows['named_before']
     return rows['named'] + rows['anon_before']
 

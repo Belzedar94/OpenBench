@@ -384,9 +384,19 @@ def api_lease(request):
             # detras de dos mil de esas (Lesha, 31-jul: sus requests en el
             # puesto ~1400 del FIFO, horas de cola).  Dentro de cada estrato
             # el FIFO de siempre; AUTO/FILL ni se enteran.
+            #
+            # ...Y una espera larga vale por un nombre.  El estrato ordenaba
+            # el trafico del dia, pero sin caducidad no ordena: mata de hambre.
+            # 30-jul, 318 peticiones USER PENDING con 269 de mas de 24h y 126
+            # de mas de 72h mientras la cola servia sin parar — mientras entre
+            # UNA nombrada al dia, lo anonimo no llega jamas al frente.
+            # Pasado ``STARVED_AFTER`` la fila entra en el estrato nombrado, y
+            # ahi su id la pone delante de todo lo fresco: vuelve al FIFO.  La
+            # regla es la MISMA que cuentan las dos cifras de "cuanta cola
+            # tengo delante", y por eso se lee de un solo sitio.
             named_first = Case(
-                When(source=AnalysisTask.Source.USER,
-                     requested_by__gt='', then=Value(1)),
+                When(Q(source=AnalysisTask.Source.USER)
+                     & live_request.named_tier(), then=Value(1)),
                 default=Value(0), output_field=IntegerField())
             queryset = (AnalysisTask.objects
                 .select_for_update(skip_locked=True)

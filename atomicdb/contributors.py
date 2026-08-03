@@ -33,6 +33,7 @@ from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 from django.utils.timesince import timesince
 
+from . import live_request
 from .models import AnalysisTask, OpeningNameSuggestion, WorkerPing
 
 
@@ -263,14 +264,18 @@ def _queue_rows(username):
     otra seccion y otra pregunta.
     """
     mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
-    # Cuantas peticiones NOMBRADAS cobran antes que esta.  Mismo orden que
-    # ``choose_pending`` (nombradas por delante de las anonimas, FIFO dentro de
-    # cada estrato) y una sola sentencia: la subconsulta correlacionada evita
-    # un COUNT por fila, que es justo el N+1 que esta pagina no puede pagar.
+    # Cuantas peticiones del estrato NOMBRADO cobran antes que esta.  Mismo
+    # orden que ``choose_pending``, leido del mismo sitio (``named_tier``:
+    # un nombre o un dia de espera), y solo lo SERVEABLE — una PENDING sobre
+    # una posicion ya cerrada no la sirve nadie, y ponerla aqui era pintarle a
+    # su autor una cola por delante que no existe.  Toda fila de ``mine`` es
+    # nombrada (esto es un perfil), asi que su estrato es siempre este.  Una
+    # sola sentencia: la subconsulta correlacionada evita un COUNT por fila,
+    # que es justo el N+1 que esta pagina no puede pagar.
     ahead = Coalesce(Subquery(
         AnalysisTask.objects
-        .filter(state=PENDING, source=USER, requested_by__gt='',
-                id__lt=OuterRef('id'))
+        .filter(state=PENDING, source=USER, id__lt=OuterRef('id'))
+        .filter(live_request.SERVEABLE).filter(live_request.named_tier())
         .order_by().values('source').annotate(c=Count('id')).values('c')[:1],
         output_field=IntegerField()), 0)
     pending = list(mine.filter(state=PENDING).annotate(ahead=ahead)

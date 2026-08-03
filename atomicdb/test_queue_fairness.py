@@ -8,9 +8,12 @@ priority still rules AUTO/FILL/SEED, where the selector computes it for
 exactly that purpose.
 """
 
-from django.test import Client
+from datetime import timedelta
 
-from . import ingest, logic
+from django.test import Client
+from django.utils import timezone
+
+from . import contributors, ingest, logic
 from .models import AnalysisTask, Edge, Position
 from .testing import TestCase, worker_account
 
@@ -261,3 +264,110 @@ class BulkRouteInheritanceTests(UserBandFifoTests):
             edge = Edge.objects.get(parent=pos, child=task.position)
             self.assertEqual(task.route, route + ',' + edge.move_uci)
             self.assertEqual(task.requested_by, 'lesha')
+
+
+class StarvedRequestTests(UserBandFifoTests):
+    """Una espera larga vale por un nombre.
+
+    El estrato NOMBRADO ordena el trafico del dia, pero sin caducidad no
+    ordena: mata de hambre.  30-jul en produccion: 318 peticiones USER
+    PENDING, 269 de mas de 24h y 126 de mas de 72h, con la cola sirviendo sin
+    parar (6 arriendos, todos jovenes).  Mientras entre UNA nombrada al dia,
+    lo anonimo no llega jamas al frente.  Pasado ``STARVED_AFTER`` la fila
+    entra en el estrato nombrado, donde su id la pone la primera.
+    """
+
+    def _age(self, task, hours):
+        AnalysisTask.objects.filter(pk=task.pk).update(
+            created=timezone.now() - timedelta(hours=hours))
+        return task
+
+    def test_a_starved_anonymous_click_beats_a_fresh_named_one(self):
+        # La inversion exacta de antes: sin nombre valia 0 en ``named_first``
+        # y cualquier nombrada fresca la adelantaba, para siempre.
+        starved = self._age(AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by=''), hours=30)
+        AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+
+        leased = self._lease('m30')['tasks'][0]
+
+        self.assertEqual(leased['id'], starved.id)
+
+    def test_the_fresh_anonymous_flood_still_waits_its_turn(self):
+        """El contrato de Lesha intacto: lo que caduca es la espera, no la regla."""
+        AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='')
+        named = AnalysisTask.objects.create(
+            position=self.beloved, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+
+        leased = self._lease('m31')['tasks'][0]
+
+        self.assertEqual(leased['id'], named.id)
+
+    def test_the_receipt_counts_the_starved_tier_ahead(self):
+        self._age(AnalysisTask.objects.create(
+            position=self.despised, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by=''), hours=30)
+        self.client.login(username='lesha', password='p')
+
+        response = self.client.post(
+            f'/atomicdb/request/{self.beloved.key}/')
+
+        # La misma anonima que antes valia cero: ahora cobra antes que este
+        # click, y el recibo lo dice en vez de prometer un turno que no hay.
+        self.assertEqual(response.json()['ahead'], 1)
+
+
+class AheadCountTruthTests(UserBandFifoTests):
+    """La cifra de "cuanta cola tengo delante" cuenta solo lo serveable.
+
+    Sintoma reportado: tras pedir, el sitio anuncia MAS peticiones por delante
+    de las que existen de verdad.  Una PENDING sobre una posicion ya cerrada no
+    la sirve nadie — ``choose_pending`` salta lo que no esta en 'UNKNOWN' — asi
+    que sumarla es pintarle al humano una cola que no va a moverse.
+    """
+
+    def _children(self, count):
+        root = ingest.get_or_create_position(logic.start_fen())
+        return [edge.child for edge in Edge.objects.filter(parent=root)
+                .order_by('move_uci')[:count]]
+
+    def _named_pending(self, position):
+        return AnalysisTask.objects.create(
+            position=position, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='quasa')
+
+    def test_a_fresh_request_does_not_count_the_zombies_ahead_of_it(self):
+        alive, dead_one, dead_two, mine = self._children(4)
+        for position in (alive, dead_one, dead_two):
+            self._named_pending(position)
+        Position.objects.filter(key__in=[dead_one.key, dead_two.key]).update(
+            status='WHITE_WIN', closure='MINIMAX')
+        self.client.login(username='lesha', password='p')
+
+        response = self.client.post(f'/atomicdb/request/{mine.key}/')
+
+        body = response.json()
+        self.assertEqual(body['status'], 'queued')
+        # Tres filas por delante, dos de ellas zombis: cobra UNA.
+        self.assertEqual(body['ahead'], 1)
+
+    def test_the_profile_queue_counts_the_same_way(self):
+        alive, dead, mine = self._children(3)
+        self._named_pending(alive)
+        self._named_pending(dead)
+        Position.objects.filter(key=dead.key).update(status='WHITE_WIN',
+                                                     closure='MINIMAX')
+        waiting = AnalysisTask.objects.create(
+            position=mine, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by='lesha')
+
+        pending, _leased, _done = contributors._queue_rows('lesha')
+
+        self.assertEqual([task.id for task in pending], [waiting.id])
+        self.assertEqual(pending[0].ahead, 1)
