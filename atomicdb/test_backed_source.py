@@ -119,7 +119,9 @@ class BackedSpineWalkTests(TestCase):
 
     def test_a_transposition_cycle_cuts_instead_of_hanging(self):
         # 1.Nf3 Nf6 2.Ng1 Ng8 vuelve a la posicion inicial: la espina puede
-        # cerrarse sobre si misma y el paseo tiene que terminar.
+        # cerrarse sobre si misma y el paseo tiene que terminar.  Y terminar
+        # asi no es aterrizar en un origen: es una REPETICION, y el destino la
+        # recibe etiquetada para poder decirlo.
         a = _pos('CA', 'w', eval_cp=1, backed_eval=120, backed_move='a1a1')
         b = _pos('CB', 'b', eval_cp=2, backed_eval=120, backed_move='b1b1')
         _edge(a, b, 'a1a1')
@@ -129,7 +131,7 @@ class BackedSpineWalkTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Location'],
-                         f'/atomicdb/explore/{b.key}/')
+                         f'/atomicdb/explore/{b.key}/?repetition=1')
 
     def test_the_ply_cap_bounds_the_descent(self):
         """El mismo tope con el que el valor SUBIO acota lo que se baja."""
@@ -157,10 +159,11 @@ class BackedSpineWalkTests(TestCase):
         # Dos aristas caminadas, dos consultas: el hijo viaja en el mismo
         # select_related y la parada no cuesta nada.
         with self.assertNumQueries(2, using=alias):
-            origin, walked = views._walk_backed_spine(a)
+            origin, walked, repetition = views._walk_backed_spine(a)
 
         self.assertEqual(origin.key, c.key)
         self.assertEqual(walked, ['a1a1', 'a1a1'])
+        self.assertFalse(repetition)
 
     def test_an_unknown_key_is_a_404(self):
         response = _jump(self.client, _key('nobody'))

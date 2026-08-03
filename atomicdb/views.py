@@ -126,6 +126,12 @@ PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
 OPENING_ANCHOR_PARAM = 'opening'
+# El salto al origen de un respaldo puede acabar en una REPETICION en vez de en
+# una fuente (§ ``_walk_backed_spine``).  Viaja como parametro porque el que lo
+# sabe es el paseo, y el que lo tiene que decir es la pagina de destino; pintar
+# el aviso sin el implicaria caminar la espina en cada render, que es
+# justamente lo que ese paseo no hace.
+BACKED_REPETITION_PARAM = 'repetition'
 OPENING_ANCHOR_SALT = 'atomicdb.explorer.opening-anchor.v1'
 OPENING_ANCHOR_MAX_CHARS = 1024
 # board.js predates opening anchors and carries only one ``play`` value.
@@ -1611,9 +1617,10 @@ def goto(request, key, uci):
 def _walk_backed_spine(pos):
     """Baja por la espina de soporte hasta donde NACE el valor respaldado.
 
-    Devuelve ``(origen, ucis_caminados)``.  El valor de un nodo respaldado no
-    es suyo: se lo presta ``backed_move``, y ese hijo puede a su vez estar
-    prestandolo.  Bajar a mano esa cadena es lo que este paseo ahorra.
+    Devuelve ``(origen, ucis_caminados, repeticion)``.  El valor de un nodo
+    respaldado no es suyo: se lo presta ``backed_move``, y ese hijo puede a su
+    vez estar prestandolo.  Bajar a mano esa cadena es lo que este paseo
+    ahorra.
 
     PARADAS, todas ellas "este nodo ES el origen":
       * ``status != UNKNOWN``: el valor viene de un cierre PROBADO, y por
@@ -1627,10 +1634,17 @@ def _walk_backed_spine(pos):
     El tope de ``ingest.BACKED_MAX_PLIES`` es el mismo con el que subio el
     valor, asi que ninguna espina legitima puede ser mas larga que el.
 
+    Esa ultima parada no es solo defensiva: una espina que vuelve sobre sus
+    pasos no tiene origen que enseñar, tiene una REPETICION — el mismo ciclo
+    que ``ingest._draw_cycling_children`` valora como tablas al subir.  El
+    tercer valor lo dice para que el explorador lo pueda etiquetar en vez de
+    dejar al visitante creyendo que aterrizo en la fuente del numero.
+
     Una consulta por paso como mucho.  Es un GET esporadico de un click
     humano, no algo que se pague al pintar una tabla.
     """
     node, walked, seen = pos, [], {pos.key}
+    repetition = False
     for _ in range(ingest.BACKED_MAX_PLIES):
         if node.status != 'UNKNOWN':
             break
@@ -1644,11 +1658,12 @@ def _walk_backed_spine(pos):
         except Edge.DoesNotExist:
             break
         if edge.child.key in seen:
+            repetition = True
             break
         seen.add(edge.child.key)
         walked.append(node.backed_move)
         node = edge.child
-    return node, walked
+    return node, walked, repetition
 
 
 def backed_source(request, key):
@@ -1671,7 +1686,7 @@ def backed_source(request, key):
         route = _validated_play_route(request.GET.get('play'), pos.key)
     except PlayRouteError:
         route = None
-    origin, walked = _walk_backed_spine(pos)
+    origin, walked, repetition = _walk_backed_spine(pos)
     ucis = None
     if route is not None:
         _top, _line, play_ucis = route
@@ -1682,7 +1697,12 @@ def backed_source(request, key):
     # historia que no llegar.
     if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
         ucis = None
-    response = redirect(_explore_url(origin.key, ucis))
+    url = _explore_url(origin.key, ucis)
+    if repetition:
+        # La espina se cerro sobre si misma: aqui no nace ningun valor.  El
+        # destino lo dice en vez de dejar que el aterrizaje parezca una fuente.
+        url += ('&' if '?' in url else '?') + BACKED_REPETITION_PARAM + '=1'
+    response = redirect(url)
     # El origen se mueve en cuanto cae analisis nuevo bajo esta posicion: este
     # 302 no es cacheable por nadie.
     response['Cache-Control'] = 'no-store'
@@ -4058,6 +4078,9 @@ def explore(request, key):
         # Salto al origen del respaldo de la CABECERA, con la ruta que el
         # visitante trae puesta para que la espina la extienda.
         'backed_source_url': _backed_source_url(pos.key, active_ucis),
+        # Y si el salto acabo dando la vuelta, se dice: el visitante pincho
+        # buscando de donde sale el numero y lo que hay es una repeticion.
+        'backed_repetition': bool(request.GET.get(BACKED_REPETITION_PARAM)),
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.

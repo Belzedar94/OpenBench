@@ -1033,6 +1033,10 @@ BACKED_EPSILON_CP = 10       # ruido que no merece seguir subiendo
 # queria distinguir.
 BACKED_QUALITY_TOLERANCE = 0.5
 PROVEN_QUALITY = 1 << 60     # calidad de un valor exacto (gana a toda busqueda)
+# TOPE DEL PASEO QUE BUSCA LA REPETICION (§ _draw_cycling_children).  Mismo
+# tope de cordura que ``FRONTIER_DESCENT_MAX_PLIES``: una espina mas larga que
+# esto se deja pasar SIN reclamar ciclo, que es el error seguro.
+BACKED_CYCLE_MAX_PLIES = 32
 
 _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 
@@ -1040,15 +1044,21 @@ _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
-    __slots__ = ('move', 'value', 'quality', 'plies')
+    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine')
 
-    def __init__(self, move, value, quality, plies):
+    def __init__(self, move, value, quality, plies, key=None, spine=None):
         self.move, self.value = move, value
         self.quality, self.plies = quality, plies
+        # Lo que necesita el paseo de repeticion: a donde lleva esta arista y
+        # por donde sigue el hijo prestandose el valor.  ``spine`` solo se
+        # rellena cuando el valor es PRESTADO: un status probado o una eval
+        # propia no vienen de ninguna espina y no pueden ciclar.
+        self.key, self.spine = key, spine
 
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
-                        nodes_invested, backed_plies):
+                        nodes_invested, backed_plies, child_key=None,
+                        backed_move=None):
     """Valor y calidad de un hijo, en perspectiva blanca.
 
     Un status resuelto entra con su valor de VERDAD (mate/tablas) y calidad
@@ -1057,7 +1067,7 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
     """
     exact = _status_eval(status)
     if exact is not None:
-        return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0)
+        return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0, child_key)
     if backed_eval is not None:
         # La calidad del mejor conocimiento del hijo es TODO lo invertido en
         # el, no solo el soporte de la hoja que respaldo el valor.  Con solo
@@ -1071,14 +1081,148 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
         # debe verlo con el peso de todo lo que lo corrobora.
         return _ChildValue(move_uci, backed_eval,
                            max(backed_nodes or 0, nodes_invested or 0),
-                           backed_plies or 0)
+                           backed_plies or 0, child_key, backed_move)
     if eval_cp is not None:
-        return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0)
-    return _ChildValue(move_uci, None, 0, 0)
+        return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0,
+                           child_key)
+    return _ChildValue(move_uci, None, 0, 0, child_key)
 
 
 def _better_for_mover(value, reference, stm_white):
     return value > reference if stm_white else value < reference
+
+
+# ---------------- repeticion: el hijo que vuelve a su propio padre ----------
+#
+# EL CASO EXACTO (comunidad).  "Move repetition creates illusion that line is
+# solved as +9, while it is not the case ... due to the loop it uses
+# circular reasoning to justify this eval and is unsound".  Y su version
+# envenenada: "if engine erroneously evaluated something as +4 because it
+# missed a tactics (and in fact it is a draw), and made a loop from +4, and you
+# already know a refutation by deeper analysis, it is not possible to 'cleanse'
+# that loop in the database by backpropagating evaluation from outside this
+# loop".
+#
+# Son el mismo defecto.  El grafo es un DAG CON CICLOS de verdad — 1.Nf3 Nf6
+# 2.Ng1 Ng8 ES la posicion inicial una vez fuera los contadores — asi que un
+# valor puede salir de X, dar la vuelta y volver a entrar en X como si fuera
+# conocimiento nuevo.  Se sostiene a si mismo, y nada de fuera del ciclo puede
+# limpiarlo: el minimax prefiere el numero inflado a la refutacion honesta y la
+# refutacion no tiene por donde entrar.
+#
+# La regla no es un parche, es teoria de juegos: una jugada que devuelve a una
+# posicion que ya esta en su PROPIA linea de mejor juego es una REPETICION, y
+# una repeticion vale TABLAS.  Ese hijo aporta 0 a este respaldo, no el numero
+# que el ciclo se inventa.  Los que no ciclan compiten con su valor de verdad y
+# el max/min elige honestamente: con alternativa real gana la alternativa, y
+# sin ninguna el nodo vale tablas — que es exactamente lo que vale poder
+# repetir.
+#
+# COSTE.  Solo se camina lo que ya esta RESPALDADO (un status probado o una
+# eval propia no vienen de ninguna espina) y el paseo se corta en el primer
+# nodo sin ``backed_move``, que en un arbol normal es el primer paso.  Un ply
+# del paseo es UNA consulta para todos los caminantes del nivel, no una por
+# hijo.
+#
+# Y lo caminado se RECUERDA (``_SpineCache``), que es lo que separa un coste
+# lineal de uno cuadratico: el ascenso sube por la misma espina nivel tras
+# nivel, asi que sin memoria cada nivel volveria a bajarla entera.  Con ella,
+# un nivel paga un solo paso nuevo — el suyo — y el resto del descenso ya
+# estaba resuelto.  Lo que se guarda es o inmutable (a donde lleva una arista,
+# el status del hijo) o lo mantiene al dia la propia cascada, que avisa a la
+# cache de cada ``backed_move`` que escribe.
+
+
+class _SpineCache:
+    """Lo que el paseo de repeticion recuerda durante UNA cascada.
+
+    ``steps`` son hechos del grafo: una arista lleva siempre al mismo hijo y
+    el status del hijo no lo toca este ascenso.  ``spines`` es el
+    ``backed_move`` VIGENTE de cada nodo que se ha leido o escrito, y por eso
+    el bucle de niveles llama a ``wrote`` con cada fila que actualiza: la
+    unica pieza mutable de la cache se entera de su propio cambio en vez de
+    quedarse vieja.
+    """
+
+    __slots__ = ('steps', 'spines')
+
+    def __init__(self):
+        self.steps = {}      # (nodo, jugada) -> (hijo, status del hijo)
+        self.spines = {}     # nodo -> backed_move vigente
+
+    def wrote(self, key, move):
+        self.spines[key] = move
+
+
+def _draw_cycling_children(by_parent, cache):
+    """Pone a TABLAS todo hijo cuyo valor vuelve a su propio padre.
+
+    Camina la espina del HIJO (``backed_move`` a ``backed_move``) buscando al
+    padre que lo esta evaluando.  Si aparece, el valor del hijo esta pasando
+    por X para justificarse en X: es una repeticion y aporta 0.
+
+    Paradas, todas ellas "no hay ciclo": la espina se acaba (nodo sin respaldo
+    que prestar), la arista del respaldo ya no existe (respaldo mas viejo que
+    el grafo), la espina llega a un nodo PROBADO (debajo de una prueba el
+    valor no es prestado, es verdad) o se cierra sobre si misma sin pasar por
+    X (ese ciclo es problema de OTRO padre, y ese padre lo vera cuando le
+    toque).  Agotar el tope tampoco reclama nada: equivocarse hacia "no hay
+    ciclo" deja el valor como estaba, y hacia "hay ciclo" inventaria tablas.
+    """
+    walks = []
+    for parent_key, children in by_parent.items():
+        for child in children:
+            if child.value is None or not child.spine:
+                continue          # sin espina propia no hay ciclo que buscar
+            walks.append([parent_key, child, child.key, child.spine,
+                          {child.key}])
+    for _ in range(BACKED_CYCLE_MAX_PLIES):
+        if not walks:
+            break
+        _resolve_spine_steps(cache, walks)
+        alive = []
+        for walk in walks:
+            parent_key, child, node, move, seen = walk
+            step = cache.steps.get((node, move))
+            if step is None:
+                continue                    # arista perdida: no hay ciclo
+            below, status = step
+            if below == parent_key:
+                # Repeticion: vale tablas, y la distancia es CERO porque esas
+                # tablas nacen en esta misma arista — no las presta nadie de
+                # mas abajo.  Ademas es lo que hace converger a ``recascade_-
+                # backed``: con la distancia del ciclo, cada pasada le sumaba
+                # un ply a la anterior y la barrida no llegaba nunca a punto
+                # fijo.
+                child.value, child.plies = 0, 0
+                continue
+            spine = cache.spines.get(below)
+            if below in seen or not spine or status != 'UNKNOWN':
+                continue
+            seen.add(below)
+            walk[2], walk[3] = below, spine
+            alive.append(walk)
+        walks = alive
+
+
+def _resolve_spine_steps(cache, walks):
+    """Una consulta para los pasos del nivel que la cache todavia no sabe.
+
+    Trae el hijo, su status y su ``backed_move`` de golpe, asi que un paso
+    cacheado nunca necesita una segunda pregunta para seguir bajando.
+    """
+    unknown = [(node, move) for _p, _c, node, move, _s in walks
+               if (node, move) not in cache.steps]
+    if not unknown:
+        return
+    for parent_id, move_uci, child_id, status, spine in (
+            Edge.objects.filter(
+                parent_id__in={node for node, _m in unknown},
+                move_uci__in={move for _n, move in unknown})
+            .values_list('parent_id', 'move_uci', 'child_id',
+                         'child__status', 'child__backed_move')):
+        cache.steps[(parent_id, move_uci)] = (child_id, status)
+        cache.spines[child_id] = spine
 
 
 def coverage_is_partial(row, children):
@@ -1253,13 +1397,13 @@ def _backed_children_by_parent(parent_keys):
     rows = Edge.objects.filter(parent_id__in=parent_keys).values_list(
         'parent_id', 'move_uci', 'child__status', 'child__eval_cp',
         'child__backed_eval', 'child__backed_nodes', 'child__nodes_invested',
-        'child__backed_plies')
+        'child__backed_plies', 'child_id', 'child__backed_move')
     by_parent = {}
     for (parent_id, move_uci, status, eval_cp, backed_eval, backed_nodes,
-         nodes_invested, backed_plies) in rows:
+         nodes_invested, backed_plies, child_id, backed_move) in rows:
         by_parent.setdefault(parent_id, []).append(_child_contribution(
             move_uci, status, eval_cp, backed_eval, backed_nodes,
-            nodes_invested, backed_plies))
+            nodes_invested, backed_plies, child_id, backed_move))
     return by_parent
 
 
@@ -1276,6 +1420,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
     visits, changed_total, processed, plies = {}, 0, 0, 0
+    spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     while frontier and plies < max_plies:
         plies += 1
         rows = list(Position.objects.filter(key__in=frontier).only(
@@ -1284,9 +1429,13 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         if not rows:
             break
         children = _backed_children_by_parent([row.key for row in rows])
+        # Antes de que nadie compare: el hijo que se justifica pasando por su
+        # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
+        _draw_cycling_children(children, spines)
         dirty, propagate, discrepancies = [], [], []
         for row in rows:
             processed += 1
+            spines.wrote(row.key, row.backed_move)
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies)
             if _backed_stored(row, value, move, below, quality):
@@ -1295,6 +1444,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                 propagate.append(row.key)
             row.backed_eval, row.backed_move = value, move
             row.backed_plies, row.backed_nodes = below, quality
+            spines.wrote(row.key, move)     # la cache no se queda vieja
             dirty.append(row)
         if dirty:
             Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)

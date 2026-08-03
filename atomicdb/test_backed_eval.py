@@ -260,7 +260,11 @@ class BackedPropagationCostTests(TestCase):
         _edge(grand, parent)
 
         # Dos niveles a cuatro sentencias cada uno, sin importar la anchura.
-        with self.assertNumQueries(8, using=settings.ATOMICDB_DATABASE_ALIAS):
+        # La novena es el paseo de repeticion del segundo nivel: ahi el hijo ya
+        # tiene ``backed_move`` y hay espina que mirar.  Cuesta UNA sentencia
+        # por ply caminado y la comparten todos los hijos del nivel, asi que
+        # tampoco crece con la anchura — que es lo que este test vigila.
+        with self.assertNumQueries(9, using=settings.ATOMICDB_DATABASE_ALIAS):
             ingest.backup_backed_evals([parent.key])
         grand.refresh_from_db()
         self.assertIsNotNone(grand.backed_eval)
@@ -837,6 +841,182 @@ class BackedRelicTests(TestCase):
 
         anchor.refresh_from_db()
         self.assertEqual(anchor.backed_eval, 671)
+
+
+class BackedRepetitionTests(TestCase):
+    """Un hijo que vuelve a su PROPIO padre por su espina aporta TABLAS.
+
+    Dos reportes de la comunidad, un solo defecto.  "Move repetition
+    creates illusion that line is solved as +9, while it is not the case ...
+    due to the loop it uses circular reasoning to justify this eval and is
+    unsound".  Y el ciclo envenenado: "if engine erroneously evaluated
+    something as +4 because it missed a tactics (and in fact it is a draw),
+    and made a loop from +4, and you already know a refutation by deeper
+    analysis, it is not possible to 'cleanse' that loop in the database by
+    backpropagating evaluation from outside this loop".
+
+    PERSPECTIVA: como todo el modulo, estos valores son de las BLANCAS.  El
+    "+4" de un reporte escrito desde el bando que mueve es -400 aqui cuando el
+    que mueve son las negras, y por eso cada fixture dice de quien es el turno.
+    """
+
+    def _ring(self, length, value=640):
+        """Anillo: un ``top`` y una cadena de ``length`` que vuelve a el.
+
+        Todos los eslabones se prestan el mismo valor por ``backed_move``, que
+        es lo unico que el paseo mira.
+        """
+        top = _pos('RING-TOP', 'b', expanded=True)
+        chain = [_pos(f'RING-{i}', 'w' if i % 2 == 0 else 'b', eval_cp=i,
+                      backed_eval=value, backed_move='a1a1',
+                      backed_plies=length - i, backed_nodes=1_000)
+                 for i in range(length)]
+        _edge(top, chain[0], 'a1a1')
+        for upper, lower in zip(chain, chain[1:]):
+            _edge(upper, lower, 'a1a1')
+        _edge(chain[-1], top, 'a1a1')     # el anillo se cierra
+        return top, chain
+
+    def test_a_two_move_loop_cannot_justify_its_own_value(self):
+        # A <-> B y nada mas: cada uno se presta el +9 del otro y ninguno lo
+        # sostiene.  Sin alternativa, lo que vale el nodo es lo que vale poder
+        # repetir: tablas.
+        a = _pos('LOOP-A', 'w', expanded=True, backed_eval=900,
+                 backed_move='g1f3', backed_plies=4, backed_nodes=1_000)
+        b = _pos('LOOP-B', 'b', expanded=True, backed_eval=900,
+                 backed_move='g8f6', backed_plies=3, backed_nodes=1_000)
+        _edge(a, b, 'g1f3')
+        _edge(b, a, 'g8f6')          # 1.Nf3 Nf6 2.Ng1 Ng8 otra vez aqui
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        b.refresh_from_db()
+        self.assertEqual(a.backed_eval, 0)
+        self.assertEqual(a.backed_move, 'g1f3')
+        self.assertEqual(b.backed_eval, 0)
+        # Y es PUNTO FIJO: las tablas nacen en la arista, asi que la distancia
+        # no crece pasada tras pasada y ``recascade_backed`` puede terminar.
+        self.assertEqual(a.backed_plies, 1)
+        self.assertEqual(ingest.backup_backed_evals([a.key]), 0)
+
+    def test_a_real_alternative_beats_the_loop_that_outranked_it(self):
+        # El caso de math_god: el ciclo publicaba +9.30 y con eso tapaba una
+        # jugada que de verdad vale +9.14.  Con la repeticion valorada a 0 la
+        # de verdad gana el max, y ``backed_move`` la senala.
+        x = _pos('ALT-X', 'w', expanded=True)
+        loop = _pos('ALT-LOOP', 'b', expanded=True, backed_eval=930,
+                    backed_move='e8d7', backed_plies=3, backed_nodes=5_000)
+        real = _pos('ALT-REAL', 'b', eval_cp=914, nodes_invested=9_000)
+        _edge(x, loop, 'd1d2')
+        _edge(x, real, 'd7e8')
+        _edge(loop, x, 'e8d7')       # el brazo del ciclo vuelve a X
+
+        ingest.backup_backed_evals([x.key])
+
+        x.refresh_from_db()
+        self.assertEqual(x.backed_eval, 914)
+        self.assertEqual(x.backed_move, 'd7e8')
+
+    def test_an_outside_refutation_finally_reaches_a_poisoned_loop(self):
+        # Mueven NEGRAS, asi que el "+4" del ciclo es -400 en esta
+        # perspectiva.  La refutacion honesta viene de una busqueda mucho mas
+        # honda FUERA del ciclo y dice -200: peor para las negras que la
+        # ilusion, y ahora alcanzable, que es justo lo que el reporte decia
+        # que era imposible.
+        x = _pos('POISON-X', 'b', expanded=True)
+        loop = _pos('POISON-LOOP', 'w', expanded=True, backed_eval=-400,
+                    backed_move='b1c3', backed_plies=2, backed_nodes=8_000)
+        refutation = _pos('POISON-REF', 'w', eval_cp=-200,
+                          nodes_invested=128_000_000)
+        _edge(x, loop, 'b8c6')
+        _edge(x, refutation, 'e7e5')
+        _edge(loop, x, 'b1c3')
+
+        ingest.backup_backed_evals([x.key])
+
+        x.refresh_from_db()
+        self.assertEqual(x.backed_eval, -200)
+        self.assertEqual(x.backed_move, 'e7e5')
+
+    def test_a_transposition_that_does_not_come_back_keeps_its_value(self):
+        # Rombo A->B->D, A->C->D.  La transposicion es REAL y no pasa por A:
+        # nadie se justifica a si mismo y nadie pierde su valor.  Es el falso
+        # positivo que la regla no puede permitirse, porque transponer es lo
+        # que este grafo hace todo el rato.
+        a = _pos('DIA-A', 'w', expanded=True)
+        b = _pos('DIA-B', 'b', expanded=True)
+        c = _pos('DIA-C', 'b', expanded=True)
+        d = _pos('DIA-D', 'w', eval_cp=-260, nodes_invested=1_000)
+        _edge(a, b, 'g1f3')
+        _edge(a, c, 'b1c3')
+        _edge(b, d, 'b1c3')
+        _edge(c, d, 'g1f3')
+
+        ingest.backup_backed_evals([b.key, c.key])
+
+        for node in (b, c, a):
+            node.refresh_from_db()
+            self.assertEqual(node.backed_eval, -260, node.key)
+        self.assertIn(a.backed_move, ('g1f3', 'b1c3'))
+
+    def test_a_cycle_beyond_the_guard_is_not_claimed(self):
+        # El tope del paseo es cordura, no verdad: una espina mas larga que el
+        # sale SIN reclamar repeticion y con su valor intacto.  Equivocarse
+        # hacia "no hay ciclo" deja las cosas como estaban; hacia "hay ciclo"
+        # inventaria unas tablas que nadie ha demostrado.
+        top, _chain = self._ring(ingest.BACKED_CYCLE_MAX_PLIES + 4)
+
+        children = ingest._backed_children_by_parent([top.key])
+        ingest._draw_cycling_children(children, ingest._SpineCache())
+
+        self.assertEqual([child.value for child in children[top.key]], [640])
+
+    def test_the_spine_walk_reports_the_repetition_to_the_explorer(self):
+        # Mitad de PANTALLA: la espina de un ciclo no tiene origen que ensenar.
+        # El paseo se corta, lo dice, y el destino lo etiqueta en vez de dejar
+        # al visitante creyendo que aterrizo en la fuente del numero.
+        # Las jugadas son LEGALES en el fen sintetico: esta pagina pinta
+        # tambien la migaja de pan, y esa si replica la linea de verdad.
+        a = _pos('SPINE-A', 'w', eval_cp=1, backed_eval=120,
+                 backed_move='e1e2')
+        b = _pos('SPINE-B', 'b', eval_cp=2, backed_eval=120,
+                 backed_move='e8e7')
+        _edge(a, b, 'e1e2')
+        _edge(b, a, 'e8e7')
+
+        origin, walked, repetition = views._walk_backed_spine(a)
+
+        self.assertEqual(origin.key, b.key)
+        self.assertEqual(walked, ['e1e2'])
+        self.assertTrue(repetition)
+
+        jump = self.client.get(f'/atomicdb/backed-source/{a.key}/')
+        self.assertEqual(jump['Location'],
+                         f'/atomicdb/explore/{b.key}/?repetition=1')
+        body = self.client.get(jump['Location']).content.decode()
+        self.assertIn('>repetition</span>', body)
+
+    def test_a_spine_that_does_not_repeat_is_left_alone(self):
+        a = _pos('OPEN-A', 'w', eval_cp=1, backed_eval=500,
+                 backed_move='e1e2')
+        b = _pos('OPEN-B', 'b', eval_cp=2, backed_eval=500,
+                 backed_move='e8e7')
+        origin_node = _pos('OPEN-C', 'w', eval_cp=500, backed_eval=500)
+        _edge(a, b, 'e1e2')
+        _edge(b, origin_node, 'e8e7')
+
+        node, walked, repetition = views._walk_backed_spine(a)
+
+        self.assertEqual(node.key, origin_node.key)
+        self.assertEqual(walked, ['e1e2', 'e8e7'])
+        self.assertFalse(repetition)
+
+        jump = self.client.get(f'/atomicdb/backed-source/{a.key}/')
+        self.assertEqual(jump['Location'],
+                         f'/atomicdb/explore/{origin_node.key}/')
+        body = self.client.get(jump['Location']).content.decode()
+        self.assertNotIn('>repetition</span>', body)
 
 
 class WalkedChipTests(TestCase):
