@@ -1079,6 +1079,10 @@ def _pv_verify_payload(outcome):
     return {'status': 'queued' if queued else 'nothing-to-do',
             'queued': queued,
             'line': detail.get('line', 0),
+            # ``line`` a secas ya no basta para saber que se camino: el numero
+            # 3 puede ser la tercera linea vigente o un hijo del arbol al que
+            # le toco ese puesto (§ ingest._verify_candidates).
+            'from_tree': bool(detail.get('from_tree')),
             'plies': detail.get('plies', 0),
             'covered_plies': detail.get('covered_plies', 0),
             'message': _pv_verify_message(queued, detail)}
@@ -1115,6 +1119,20 @@ def _pv_verify_san(detail):
     return f'...{san}' if black else san
 
 
+def _pv_verify_line(detail):
+    """Como se nombra el candidato que se camino: "line 3", "line 3 (from the
+    tree)".
+
+    Lo segundo cuando no salio de un analisis vigente sino de la tabla de hijos
+    (§ ingest._verify_candidates).  Se dice porque no es lo mismo: una linea
+    vigente es lo que el motor sostiene HOY, y un hijo del arbol es una jugada
+    que un pase ancho anterior dejo sembrada y que nadie ha vuelto a mirar.
+    """
+    line = detail.get('line') or 0
+    return (f'line {line} (from the tree)' if detail.get('from_tree')
+            else f'line {line}')
+
+
 def _pv_verify_message(queued, detail):
     """Que acabo haciendo el click, en una frase.
 
@@ -1124,19 +1142,19 @@ def _pv_verify_message(queued, detail):
     mudarse a la segunda linea porque la primera esta entera — y sin esta
     frase las dos se veian exactamente igual desde fuera: un numero.
     """
-    line = detail.get('line') or 0
+    where = _pv_verify_line(detail)
     covered = detail.get('covered_plies') or 0
     if queued:
         nodes = _human(detail.get('budget'))
         san = _pv_verify_san(detail)
         if covered:
             after = f', after {san}' if san else ''
-            said = (f'Line {line} was already verified '
+            said = (f'{where.capitalize()} was already verified '
                     f'{_human_plies(covered)} down — queued {nodes} nodes '
                     f'below that{after}')
         else:
             after = f', starting after {san}' if san else ''
-            said = f'Queued {nodes} nodes down line {line}{after}'
+            said = f'Queued {nodes} nodes down {where}{after}'
         if queued > 1:
             said += f' ({queued} positions in all)'
         return said + '.'
@@ -1144,15 +1162,18 @@ def _pv_verify_message(queued, detail):
     if in_flight:
         what = ('1 position on it is' if in_flight == 1
                 else f'{in_flight} positions on it are')
-        return f'Line {line} is already queued — {what} still in flight.'
+        return f'{where.capitalize()} is already queued — {what} still in ' \
+               'flight.'
     tried = detail.get('lines_tried') or 0
     if not tried:
         return 'No engine line is stored here yet, so there is nothing to ' \
                'verify.'
     if covered:
-        where = 'line 1' if tried == 1 else f'the top {tried} lines'
+        # Aqui no se nombra un candidato sino CUANTOS se caminaron, asi que la
+        # cifra es ``lines_tried`` y no el numero del que se compro.
+        scope = 'line 1' if tried == 1 else f'the top {tried} lines'
         return ('Everything this button can verify is already analysed — '
-                f'{where} covered {_human_plies(covered)} down.')
+                f'{scope} covered {_human_plies(covered)} down.')
     return ('The stored line no longer applies here, so there was nothing '
             'to verify.')
 

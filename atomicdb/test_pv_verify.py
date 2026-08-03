@@ -339,6 +339,149 @@ class EnqueuePvVerificationTests(TestCase):
         self.assertEqual(AnalysisTask.objects.count(), 0)
 
 
+class TreeCandidateTests(TestCase):
+    """Cuando las lineas VIGENTES se acaban, el paseo sigue por el ARBOL.
+
+    Reporte de comunidad (Wolfram, 3-ago): "top 2 lines were covered, but top 5
+    lines from one of earlier passes were not, thus 4. h3 can still be covered
+    by Verify PV".  El ultimo pase fue mas profundo y mas estrecho que el
+    anterior, asi que el escaparate ancho de antes dejo de ser la instantanea
+    vigente — ese arbitraje es deliberado y no se toca.  Pero sus JUGADAS no se
+    fueron con el: el ingest las sembro como hijos con eval, y ahi siguen.
+    """
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+
+    def _store(self, lines):
+        self.root.last_analysis = lines
+        self.root.save(update_fields=['last_analysis'])
+        self.root.refresh_from_db()
+
+    def _seeded_child(self, uci, eval_cp):
+        """Un hijo como lo deja un pase ancho: arista y eval, sin busqueda."""
+        child = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, uci))
+        Position.objects.filter(key=child.key).update(eval_cp=eval_cp)
+        Edge.objects.get_or_create(parent=self.root, move_uci=uci,
+                                   defaults={'child': child})
+        return Position.objects.get(key=child.key)
+
+    def test_a_child_the_current_lines_forgot_is_still_walkable(self):
+        self._store([_analysis(['e2e4']), _analysis(['d2d4'])])
+        for uci in ('e2e4', 'd2d4'):
+            _covered(logic.apply_move(logic.start_fen(), uci))
+        forgotten = self._seeded_child('h2h3', 40)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 1)
+        self.assertEqual(queued.detail['line'], 3)
+        self.assertTrue(queued.detail['from_tree'])
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=forgotten.key,
+            state=AnalysisTask.TState.PENDING).exists())
+
+    def test_the_receipt_says_the_candidate_came_from_the_tree(self):
+        """Sin decirlo, "line 3" mentiria por omision: no hay tercera linea en
+        el analisis vigente, hay una jugada que el arbol recuerda."""
+        self._store([_analysis(['e2e4']), _analysis(['d2d4'])])
+        for uci in ('e2e4', 'd2d4'):
+            _covered(logic.apply_move(logic.start_fen(), uci))
+        self._seeded_child('h2h3', 40)
+
+        data = self.client.post(
+            f'/atomicdb/pv-verify/{self.root.key}/').json()
+
+        self.assertEqual(data['status'], 'queued')
+        self.assertEqual((data['line'], data['from_tree']), (3, True))
+        self.assertIn('down line 3 (from the tree), starting after h3',
+                      data['message'])
+
+    def test_the_tree_candidates_go_in_order_of_what_the_tree_knows(self):
+        self._store([_analysis(['e2e4'])])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'))
+        best = self._seeded_child('h2h3', 400)
+        worst = self._seeded_child('a2a3', 40)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 1)
+        self.assertEqual(queued.detail['line'], 2)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=best.key).exists())
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=worst.key).exists())
+
+    def test_a_tree_child_already_verified_hands_the_click_to_the_next(self):
+        """El candidato del arbol pasa por la MISMA puerta que una linea: lo ya
+        completado a este presupuesto se cruza sin gastar, y el click sigue."""
+        self._store([_analysis(['e2e4'])])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'))
+        strong = self._seeded_child('h2h3', 400)
+        weak = self._seeded_child('a2a3', 40)
+        _covered(strong.fen)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 1)
+        self.assertEqual((queued.detail['line'], queued.detail['from_tree']),
+                         (3, True))
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=strong.key,
+            state=AnalysisTask.TState.PENDING).exists())
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=weak.key).exists())
+
+    def test_three_current_lines_leave_no_room_for_the_tree(self):
+        """El tope acota lo que UN click camina, no lo que camina cada
+        fuente por su cuenta."""
+        self._store([_analysis(['e2e4']), _analysis(['d2d4']),
+                     _analysis(['g1f3'])])
+        for uci in ('e2e4', 'd2d4', 'g1f3'):
+            _covered(logic.apply_move(logic.start_fen(), uci))
+        forgotten = self._seeded_child('h2h3', 400)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(queued.detail['lines_tried'], 3)
+        self.assertFalse(
+            AnalysisTask.objects.filter(position_id=forgotten.key).exists())
+
+    def test_what_the_tree_knows_nothing_about_is_not_a_candidate(self):
+        """La frontera entre los dos botones: esto verifica lo que ya tiene
+        valor, y comprar anchura a ciegas es el de al lado."""
+        self._store([_analysis(['e2e4'])])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'))
+        blank = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'a2a3'))
+        Edge.objects.create(parent=self.root, move_uci='a2a3', child=blank)
+        closed = self._seeded_child('h2h3', 400)
+        Position.objects.filter(key=closed.key).update(
+            status='DRAW', closure='MINIMAX')
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).count(), 0)
+
+    def test_black_to_move_ranks_the_lowest_white_eval_first(self):
+        """El orden es el de la tabla del explorador: mejor PARA EL QUE MUEVE.
+        En blanco-POV eso es el numero mas bajo cuando mueven las negras."""
+        after_e4 = ingest.get_or_create_position(
+            logic.apply_move(logic.start_fen(), 'e2e4'))
+        for uci, ev in (('e7e5', 30), ('c7c5', -120)):
+            child = ingest.get_or_create_position(
+                logic.apply_move(after_e4.fen, uci))
+            Position.objects.filter(key=child.key).update(eval_cp=ev)
+            Edge.objects.create(parent=after_e4, move_uci=uci, child=child)
+
+        self.assertEqual(ingest._verify_tree_moves(after_e4, set()),
+                         ['c7c5', 'e7e5'])
+
+
 class PvVerifyEndpointTests(TestCase):
 
     def setUp(self):
@@ -364,8 +507,8 @@ class PvVerifyEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {
-            'status': 'queued', 'queued': 4, 'line': 1, 'plies': 4,
-            'covered_plies': 0,
+            'status': 'queued', 'queued': 4, 'line': 1, 'from_tree': False,
+            'plies': 4, 'covered_plies': 0,
             'message': 'Queued 128.0M nodes down line 1, starting after e4 '
                        '(4 positions in all).'})
         self.assertEqual(AnalysisTask.objects.count(), 4)
@@ -394,8 +537,8 @@ class PvVerifyEndpointTests(TestCase):
         response = self.client.post(self.url)
 
         self.assertEqual(response.json(), {
-            'status': 'nothing-to-do', 'queued': 0, 'line': 1, 'plies': 4,
-            'covered_plies': 0,
+            'status': 'nothing-to-do', 'queued': 0, 'line': 1,
+            'from_tree': False, 'plies': 4, 'covered_plies': 0,
             'message': 'Line 1 is already queued — 4 positions on it are '
                        'still in flight.'})
 

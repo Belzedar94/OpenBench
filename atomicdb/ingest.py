@@ -4011,6 +4011,12 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
 # haciendo, que es la otra mitad de lo que pidio: "tell user directly after
 # pressing the button what it actually did".
 #
+# DE DONDE SALEN LAS LINEAS.  De ``last_analysis`` mientras queden vigentes, y
+# despues del ARBOL: cuando el ultimo pase fue mas profundo y mas estrecho que
+# el anterior, las jugadas del ancho de ayer ya no estan en el escaparate pero
+# siguen siendo hijos con eval sembrada, y por ahi se puede caminar igual (§
+# ``_verify_candidates``).  El aviso dice cuando un candidato salio de ahi.
+#
 # DE QUIEN ES LA LINEA QUE SE SIGUE.  Del nodo donde se esta parado, siempre
 # que ese nodo tenga analisis propio que la respalde: bajar es exactamente
 # cambiar de opinion sobre la continuacion, y lo que sabe el de abajo es mas
@@ -4066,6 +4072,76 @@ def _verify_lines(pos):
     """
     return [line for line in (pos.last_analysis or [])
             if isinstance(line, dict) and not line.get('prior_pass')]
+
+
+def _verify_tree_moves(pos, taken):
+    """Los HIJOS que valen como candidato, mejor conocimiento primero.
+
+    Ordenados como la tabla del explorador ordena sus filas: por el mejor
+    conocimiento actual del hijo (§ ``best_known_eval``) puesto en la
+    perspectiva del que mueve.  El desempate por UCI es solo para que dos
+    clicks iguales compren lo mismo.
+
+    QUE NO ENTRA.  Las jugadas que ya cubre una linea caminada (``taken``),
+    porque seria caminar dos veces lo mismo; los hijos ya CERRADOS, que no
+    tienen linea que verificar sino un veredicto; y los hijos de los que el
+    arbol no sabe absolutamente nada — para esos esta el boton de al lado, que
+    compra ANCHURA (§ ``is_unexplored``), y meterlos aqui convertiria un click
+    de verificacion en uno de expansion a ciegas.
+    """
+    stm_white = pos.fen.split()[1] == 'w'
+    ranked = []
+    for edge in Edge.objects.filter(parent=pos).select_related('child'):
+        child = edge.child
+        if edge.move_uci in taken or child.status != 'UNKNOWN':
+            continue
+        known = best_known_eval(child)
+        if known is None:
+            continue
+        ranked.append((-(known if stm_white else -known), edge.move_uci))
+    ranked.sort()
+    return [uci for _, uci in ranked]
+
+
+def _verify_candidates(pos):
+    """Que puede caminar este click: ``(numero, pv, sale del arbol)``.
+
+    DOS FUENTES.  Primero las lineas VIGENTES de ``last_analysis``, que son las
+    de siempre.  Y cuando se acaban — porque el ultimo pase fue mas profundo y
+    mas estrecho que el anterior — se sigue por los HIJOS del arbol.
+
+    POR QUE HACE FALTA LA SEGUNDA (Wolfram, 3-ago): "top 2 lines were covered,
+    but top 5 lines from one of earlier passes were not, thus 4. h3 can still
+    be covered by Verify PV".  El arbitraje entre pases es deliberado y no se
+    toca: un pase mas profundo manda sobre el escaparate ancho de ayer, asi que
+    ``_verify_lines`` deja fuera las lineas viejas y hace bien.  Pero las
+    JUGADAS de aquel pase ancho no se fueron con el: el ingest las sembro como
+    hijos con su eval (§ ``_seed_child_eval``), y ahi siguen, en el arbol, con
+    conocimiento suficiente para saber cual mirar primero.  El escaparate viejo
+    es una reclamacion caduca; el hijo expandido es un hecho.
+
+    El tope es el de siempre — ``PV_VERIFY_MAX_LINES`` en TOTAL, no por fuente
+    — porque lo que acota es lo que un click puede llegar a caminar, y al paseo
+    le da igual de donde salio la jugada.
+    """
+    candidates, taken, slot = [], set(), 0
+    for index, line in enumerate(_verify_lines(pos)[:PV_VERIFY_MAX_LINES],
+                                 start=1):
+        slot = index
+        pv = line.get('pv')
+        if not isinstance(pv, list) or not pv:
+            continue           # una linea sin PV no es una linea que caminar
+        candidates.append((index, list(pv), False))
+        taken.add(pv[0])
+    room = PV_VERIFY_MAX_LINES - len(candidates)
+    if room > 0:
+        for offset, uci in enumerate(_verify_tree_moves(pos, taken)[:room],
+                                     start=1):
+            # Una jugada suelta ES una linea: el paseo compra ese hijo y, si ya
+            # estaba cubierto, sigue por la linea PROPIA del hijo — la misma
+            # regla de ``_verify_step``, sin excepcion para esta puerta.
+            candidates.append((slot + offset, [uci], True))
+    return candidates
 
 
 def _verify_step(node, spine, trust_own):
@@ -4223,29 +4299,27 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
 
     Empieza por la linea VIGENTE de ``last_analysis`` — saltando el escaparate
     ancho de un pase anterior, con el mismo criterio que ``claimed_mate_plies``
-    — y baja por ella con ``_walk_pv_frontier``.
+    — y baja por ella con ``_walk_pv_frontier``.  Cuando esas lineas se acaban
+    la lista sigue por los hijos del arbol (§ ``_verify_candidates``).
 
-    CUANDO SE PASA A LA SIGUIENTE LINEA, que es la parte nueva: solo cuando la
-    anterior no ha dejado NADA que hacer.  Una linea que ya esta cubierta hasta
-    su hoja es la peticion 1 de Wolfram — la principal esta hecha, lo que falta
-    por expandir es la 2a o la 3a — y ahi pasar es exactamente lo que se pide.
+    CUANDO SE PASA AL SIGUIENTE CANDIDATO: solo cuando el anterior no ha
+    dejado NADA que hacer.  Una linea que ya esta cubierta hasta su hoja es
+    la peticion 1 de Wolfram — la principal esta hecha, lo que falta por
+    expandir es la 2a o la 3a — y ahi pasar es exactamente lo que se pide.
     Una linea que esta EN LA COLA, en cambio, ya se pago: un segundo click
     sobre ella tiene que decir "esperando", no comprar la linea siguiente,
     porque si no doblar clicks doblaria la factura.
 
     Devuelve un ``VerifyOutcome``: el numero de tareas de siempre, y colgado de
-    el lo que hara falta para CONTARLO — la linea que se siguio, cuantos plies
-    de ella estaban ya verificados y que se compro al final.
+    el lo que hara falta para CONTARLO — la linea que se siguio, si salio
+    del arbol o de un analisis vigente, cuantos plies de ella estaban ya
+    verificados y que se compro al final.
 
     El llamante es dueno de la transaccion, igual que en
     ``enqueue_unexplored_children``.
     """
     covered, walked, tried = 0, 0, 0
-    for index, line in enumerate(_verify_lines(pos)[:PV_VERIFY_MAX_LINES],
-                                 start=1):
-        pv = line.get('pv')
-        if not isinstance(pv, list) or not pv:
-            continue           # una linea sin PV no es una linea que caminar
+    for index, pv, from_tree in _verify_candidates(pos):
         tried += 1
         walk = _walk_pv_frontier(pos, pv, requested_by=requested_by,
                                  route=route)
@@ -4254,14 +4328,15 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
         if walk['queued'] or walk['in_flight']:
             return VerifyOutcome(
                 walk['queued'], line=index, lines_tried=tried,
+                from_tree=from_tree,
                 covered_plies=walk['covered_plies'], plies=walk['plies'],
                 in_flight=walk['in_flight'], budget=walk['budget'],
                 move=walk['move'], move_fen=walk['move_fen'])
     # Sin compra no hay linea que nombrar, pero si hay paseo que contar: lo que
     # se recorrio es lo que respalda el "ya esta todo verificado" del aviso.
-    return VerifyOutcome(0, line=0, lines_tried=tried, covered_plies=covered,
-                         plies=walked, in_flight=0, budget=None, move='',
-                         move_fen='')
+    return VerifyOutcome(0, line=0, lines_tried=tried, from_tree=False,
+                         covered_plies=covered, plies=walked, in_flight=0,
+                         budget=None, move='', move_fen='')
 
 
 def _upgrade_by_certificate(task, report):
