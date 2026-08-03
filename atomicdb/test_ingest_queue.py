@@ -42,6 +42,12 @@ def _analysis_lines(position, value=-320):
                                     .order_by('move_uci')[:5]]
 
 
+# Mate forzado real (el mismo de test_mate_sign): cierra de verdad, sin
+# mockear el prover.
+FORCED_MATE_FEN = '4p3/8/8/7k/n7/Kp2n3/3p4/1Q6 w - - 0 1'
+FORCED_MATE_PV = ['b1g6', 'h5h4', 'g6g4']
+
+
 class SubmitEnqueueTests(TestCase):
 
     def setUp(self):
@@ -366,6 +372,114 @@ class AbsorptionTests(TestCase):
         self.assertEqual(elsewhere.state, 'PENDING')
 
 
+class ClosureAbsorbsItsQuestionsTests(TestCase):
+    """Cerrar una posicion cierra sus PREGUNTAS.
+
+    Una PENDING sobre algo ya resuelto es un zombi perfecto: ``choose_pending``
+    salta lo que no esta en 'UNKNOWN', asi que no la sirve nadie nunca, y la
+    absorcion por analisis solo dispara cuando un analisis ATERRIZA en esa
+    posicion — justo lo que ya no puede pasar.  30-jul en produccion: 126
+    peticiones USER de mas de 72h, las mas viejas del dueno sobre posiciones
+    con ``eval_cp=-9999`` y ``nodes_invested=0``, cerradas por PROPAGACION sin
+    que ningun motor las mirase.
+
+    Los cinco caminos de cierre pasan por ``_emit_closure_events``, que es
+    donde vive la regla; aqui se recorren los tres que un worker produce.
+    """
+
+    def _waiting(self, position, generation=0, **fields):
+        return AnalysisTask.objects.create(
+            position=position, generation=generation,
+            budget_nodes=128_000_000, source=AnalysisTask.Source.USER,
+            requested_by='w', **fields)
+
+    def _elsewhere(self):
+        """Una peticion sobre OTRA posicion, que no es asunto de este cierre."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        other = Edge.objects.filter(parent=root).order_by('move_uci')[0].child
+        return self._waiting(other)
+
+    def test_a_mate_witness_closes_the_children_it_leaves_without_work(self):
+        """Cierre por testigo de mate dentro del propio pase (§ ingest)."""
+        parent = ingest.get_or_create_position(FORCED_MATE_FEN)
+        ingest.expand(parent)
+        child = Edge.objects.get(parent=parent,
+                                 move_uci=FORCED_MATE_PV[0]).child
+        waiting = self._waiting(child)
+        running = self._waiting(child, generation=1,
+                                state=AnalysisTask.TState.LEASED,
+                                machine='m1', leased_at=timezone.now())
+        elsewhere = self._elsewhere()
+
+        ingest.ingest_analysis(parent.key, [{
+            'move': FORCED_MATE_PV[0], 'eval_cp': 9_999, 'mate': 2,
+            'pv': FORCED_MATE_PV}], nodes_budget=1_000)
+
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'WHITE_WIN')
+        waiting.refresh_from_db()
+        self.assertEqual(waiting.state, 'COMPLETED')
+        self.assertIsNotNone(waiting.completed)
+        # No cobra: el trabajo se hizo, pero no lo hizo esta fila.
+        self.assertEqual(waiting.nodes_searched, 0)
+        self.assertEqual(waiting.machine, '')
+        # La arrendada CORRE: cerrara sola, con sus nodos y su maquina.
+        running.refresh_from_db()
+        self.assertEqual(running.state, 'LEASED')
+        self.assertEqual(running.machine, 'm1')
+        elsewhere.refresh_from_db()
+        self.assertEqual(elsewhere.state, 'PENDING')
+
+    def test_a_propagated_closure_absorbs_the_question_it_answered(self):
+        """El caso de produccion: la posicion nunca vio un motor."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        for edge in Edge.objects.filter(parent=root).select_related('child'):
+            child = edge.child
+            child.status, child.closure = 'BLACK_WIN', 'MATE_PV'
+            child.proof, child.mate_in = 'ANDOR', 1
+            child.clock_slack = 90       # margen comodo: § test_clock_slack
+            child.save()
+        waiting = self._waiting(root)
+
+        ingest.backup_cascade(list(Edge.objects.filter(parent=root)
+                                   .values_list('child_id', flat=True)))
+
+        root.refresh_from_db()
+        self.assertEqual(root.status, 'BLACK_WIN')
+        self.assertEqual(root.closure, 'MINIMAX')
+        # Cero nodos invertidos y aun asi cerrada: sin esto la fila se queda
+        # PENDING para siempre, porque ningun analisis va a aterrizar ya aqui.
+        self.assertEqual(root.nodes_invested, 0)
+        waiting.refresh_from_db()
+        self.assertEqual(waiting.state, 'COMPLETED')
+        self.assertEqual(waiting.nodes_searched, 0)
+
+    def test_materialising_a_won_line_absorbs_what_it_closes(self):
+        parent = ingest.get_or_create_position(FORCED_MATE_FEN)
+        ingest.expand(parent)
+        witness = Edge.objects.get(parent=parent,
+                                   move_uci=FORCED_MATE_PV[0]).child
+        witness.status, witness.closure, witness.proof = ('WHITE_WIN',
+                                                          'MATE_PV', 'ENGINE')
+        witness.won_line = ' '.join(FORCED_MATE_PV[1:])
+        witness.best_move, witness.mate_in = FORCED_MATE_PV[1], 2
+        witness.save()
+        suffix = ingest.get_or_create_position(
+            logic.apply_move(witness.fen, FORCED_MATE_PV[1]))
+        waiting = self._waiting(suffix)
+
+        ingest.materialise_won_line(witness)
+
+        suffix.refresh_from_db()
+        self.assertEqual(suffix.status, 'WHITE_WIN')
+        self.assertEqual(suffix.closure, 'MATE_PV')
+        waiting.refresh_from_db()
+        self.assertEqual(waiting.state, 'COMPLETED')
+        self.assertEqual(waiting.nodes_searched, 0)
+
+
 class ShadowBackfillTests(TestCase):
     """La pasada UNICA para las que ya estaban colgadas (§ management)."""
 
@@ -385,6 +499,19 @@ class ShadowBackfillTests(TestCase):
             position=self.target, generation=2, budget_nodes=10_000_000_000,
             source=AnalysisTask.Source.USER, requested_by='w')
 
+    def _other_child(self, index=1):
+        return (Edge.objects.filter(parent=self.root)
+                .order_by('move_uci')[index].child)
+
+    def _on_closed_position(self):
+        """Una PENDING sobre una posicion CERRADA: nadie la sirve jamas."""
+        closed = self._other_child()
+        Position.objects.filter(key=closed.key).update(
+            status='BLACK_WIN', closure='MINIMAX')
+        return AnalysisTask.objects.create(
+            position=closed, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+
     def _run(self, **options):
         from io import StringIO
         out = StringIO()
@@ -392,18 +519,22 @@ class ShadowBackfillTests(TestCase):
         return out.getvalue().strip()
 
     def test_the_dry_run_counts_without_touching_a_single_row(self):
+        zombie = self._on_closed_position()
+
         output = self._run(dry_run=True)
 
         self.assertEqual(
-            output,
-            'absorb_shadowed_tasks: 1 por absorber (dry-run, sin escribir)')
-        self.shadowed.refresh_from_db()
-        self.assertEqual(self.shadowed.state, 'PENDING')
+            output, 'absorb_shadowed_tasks: 1 sombreadas + 1 sobre posicion '
+                    'cerrada por absorber (dry-run, sin escribir)')
+        for task in (self.shadowed, zombie):
+            task.refresh_from_db()
+            self.assertEqual(task.state, 'PENDING')
 
     def test_the_pass_absorbs_the_shadowed_and_leaves_the_deeper_alone(self):
         output = self._run()
 
-        self.assertEqual(output, 'absorb_shadowed_tasks: 1 absorbidas')
+        self.assertEqual(output, 'absorb_shadowed_tasks: 1 sombreadas + 0 '
+                                 'sobre posicion cerrada absorbidas')
         self.shadowed.refresh_from_db()
         self.deeper.refresh_from_db()
         self.assertEqual(self.shadowed.state, 'COMPLETED')
@@ -412,10 +543,63 @@ class ShadowBackfillTests(TestCase):
         self.assertIsNotNone(self.shadowed.completed)
         self.assertEqual(self.deeper.state, 'PENDING')
 
-    def test_a_second_pass_finds_nothing_left(self):
+    def test_the_pass_absorbs_the_pending_on_a_closed_position(self):
+        """La clase que nada cubria: cerrada sin analisis que la sombree."""
+        zombie = self._on_closed_position()
+
+        output = self._run()
+
+        self.assertEqual(output, 'absorb_shadowed_tasks: 1 sombreadas + 1 '
+                                 'sobre posicion cerrada absorbidas')
+        zombie.refresh_from_db()
+        self.assertEqual(zombie.state, 'COMPLETED')
+        self.assertEqual(zombie.nodes_searched, 0)
+        self.assertEqual(zombie.machine, '')
+        self.assertIsNotNone(zombie.completed)
+
+    def test_a_leased_row_on_a_closed_position_keeps_running(self):
+        closed = self._other_child()
+        Position.objects.filter(key=closed.key).update(status='BLACK_WIN')
+        running = AnalysisTask.objects.create(
+            position=closed, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w',
+            state=AnalysisTask.TState.LEASED, machine='m1',
+            leased_at=timezone.now())
+
         self._run()
 
-        self.assertEqual(self._run(), 'absorb_shadowed_tasks: 0 absorbidas')
+        running.refresh_from_db()
+        self.assertEqual(running.state, 'LEASED')
+        self.assertEqual(running.machine, 'm1')
+
+    def test_a_second_pass_finds_nothing_left(self):
+        self._on_closed_position()
+        self._run()
+
+        self.assertEqual(self._run(), 'absorb_shadowed_tasks: 0 sombreadas '
+                                      '+ 0 sobre posicion cerrada absorbidas')
+
+    def test_a_tombstoned_position_is_not_a_zombie_and_is_still_served(self):
+        """La LAPIDA saca a la posicion del SELECTOR, no de la cola.
+
+        ``priority <= DEAD/2`` es lo que impide crear tareas NUEVAS ahi
+        (``next_tasks`` filtra ``priority__gt=DEAD/2``), pero la posicion sigue
+        en 'UNKNOWN' y ``choose_pending`` no mira la prioridad en ningun sitio:
+        la peticion que ya existe se arrienda como cualquier otra.  Absorberla
+        seria inventarse un cierre que nadie ha probado."""
+        buried = self._other_child()
+        Position.objects.filter(key=buried.key).update(priority=ingest.DEAD)
+        alive = AnalysisTask.objects.create(
+            position=buried, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+
+        self._run()
+
+        alive.refresh_from_db()
+        self.assertEqual(alive.state, 'PENDING')
+        auth = _worker()
+        leased = _lease(Client(), auth)['tasks'][0]
+        self.assertEqual(leased['id'], alive.id)
 
 
 class SynchronousFallbackTests(TestCase):

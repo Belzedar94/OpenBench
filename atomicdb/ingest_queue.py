@@ -175,19 +175,16 @@ def _absorb_shadowed(job, searched):
     acaba de correr ya no puede comprar nada nuevo; lo que pide mas se queda
     esperando, que es exactamente lo que su autor encargo.
 
-    LEASED no se toca: esa esta corriendo y cerrara sola, con sus nodos y su
-    maquina.  Absorber es COMPLETED sin nodos y sin maquina — el trabajo se
-    hizo, pero no lo hizo esta fila y no puede cobrarlo: los agregados por
-    maquina filtran ``machine__in`` (§ contributors), asi que una fila sin
-    maquina cae fuera de la contabilidad sola.
+    El COMO de absorber (COMPLETED sin nodos ni maquina, y LEASED intacta)
+    vive en ``ingest.absorb_tasks``: aqui solo se dice QUE filas.  Este pase y
+    el cierre de la posicion (§ ingest._emit_closure_events) responden a la
+    misma pregunta desde dos sitios distintos, y dos escrituras parecidas
+    acabarian discrepando el dia que cambie una.
     """
-    return (AnalysisTask.objects
-            .filter(position_id=job.position_id,
-                    state=AnalysisTask.TState.PENDING,
-                    budget_nodes__lte=searched)
-            .exclude(pk=job.task_id)
-            .update(state=AnalysisTask.TState.COMPLETED,
-                    completed=timezone.now(), nodes_searched=0))
+    return ingest.absorb_tasks(AnalysisTask.objects
+                               .filter(position_id=job.position_id,
+                                       budget_nodes__lte=searched)
+                               .exclude(pk=job.task_id))
 
 
 def apply_job(job):

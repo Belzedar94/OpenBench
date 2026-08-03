@@ -1834,6 +1834,25 @@ def current_closure_source():
     return _closure_source.get()
 
 
+def absorb_tasks(queryset):
+    """El UNICO idioma de absorcion: PENDING que ya no compra nada, cerrada.
+
+    Absorber es ``COMPLETED`` sin nodos y sin maquina: el trabajo se hizo,
+    pero no lo hizo esta fila y no puede cobrarlo — los agregados por maquina
+    filtran ``machine__in`` (§ contributors), asi que una fila sin maquina cae
+    fuera de la contabilidad sola.  ``LEASED`` nunca entra: esa esta corriendo
+    y cerrara sola, con sus nodos y su maquina.
+
+    El filtro de estado vive AQUI y no en cada llamada, que es lo que hace de
+    esto un idioma y no tres copias: quien absorbe solo dice QUE filas, y el
+    como es siempre el mismo (§ ``ingest_queue._absorb_shadowed``,
+    § ``_emit_closure_events``, § management/absorb_shadowed_tasks).
+    """
+    return (queryset.filter(state=AnalysisTask.TState.PENDING)
+            .update(state=AnalysisTask.TState.COMPLETED,
+                    completed=timezone.now(), nodes_searched=0))
+
+
 def _emit_closure_events(pos, **extra):
     """El UNICO emisor de ``NODE_CLOSED``.
 
@@ -1843,10 +1862,23 @@ def _emit_closure_events(pos, **extra):
     por certificado contaba DOS veces en el "cierres en 24h" de la portada y
     un cierre TB no cerraba la campana que colgaba de el.  Una sola puerta
     arregla las dos cosas.
+
+    Y cerrar una posicion cierra sus PREGUNTAS.  Una PENDING sobre algo ya
+    resuelto es un zombi perfecto: el selector salta lo que no esta en
+    'UNKNOWN' (§ views.choose_pending), asi que no la sirve nadie nunca, y la
+    absorcion por analisis (§ ingest_queue._absorb_shadowed) solo dispara
+    cuando un analisis ATERRIZA en esa misma posicion — que es justo lo que ya
+    no puede pasar.  30-jul en produccion: 318 peticiones USER PENDING, 126 de
+    mas de 72h, y las mas viejas del dueno sobre posiciones con
+    ``eval_cp=-9999`` y ``nodes_invested=0``, cerradas por propagacion sin que
+    ningun motor las mirara.  Aqui pasan por las cinco puertas de cierre
+    (terminal, MATE_PV, MINIMAX, certificado y TB) porque las cinco pasan por
+    esta.
     """
     DBEvent.objects.create(kind='NODE_CLOSED', payload={
         'key': pos.key, 'status': pos.status, 'closure': pos.closure,
         'source': _closure_source.get(), **extra})
+    absorb_tasks(AnalysisTask.objects.filter(position_id=pos.key))
     for camp in Campaign.objects.filter(root=pos,
                                         state=Campaign.CState.ACTIVE):
         DBEvent.objects.create(kind='CAMPAIGN_CLOSED', payload={
