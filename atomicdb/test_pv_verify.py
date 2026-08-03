@@ -33,6 +33,26 @@ def _analysis(pv, extra=None):
     return line
 
 
+def _covered(fen, own_pv=None, budget=512_000_000):
+    """Una posicion YA VERIFICADA a ``budget``, opcionalmente con linea propia.
+
+    Es el terreno que el paseo tiene que CRUZAR sin comprar: analisis
+    COMPLETADO por encima del suelo de peticion y la visita ya contada, o sea
+    que el dedup por generacion no cubre nada de esto — lo unico que salva el
+    gasto es mirar lo completado.
+    """
+    pos = ingest.get_or_create_position(fen)
+    AnalysisTask.objects.create(
+        position=pos, generation=pos.visits, budget_nodes=budget,
+        source=AnalysisTask.Source.USER,
+        state=AnalysisTask.TState.COMPLETED)
+    fields = {'visits': 1}
+    if own_pv is not None:
+        fields['last_analysis'] = [_analysis(own_pv)]
+    Position.objects.filter(key=pos.key).update(**fields)
+    return Position.objects.get(key=pos.key)
+
+
 class EnqueuePvVerificationTests(TestCase):
 
     def setUp(self):
@@ -129,6 +149,109 @@ class EnqueuePvVerificationTests(TestCase):
         self.assertFalse(AnalysisTask.objects.filter(
             position_id=exact.key,
             state=AnalysisTask.TState.PENDING).exists())
+
+    def test_the_walk_descends_through_covered_ground_and_buys_below(self):
+        """El uso 2 de Wolfram: 10B en un nodo interno, y luego este boton.
+
+        "You request 10B analysis in internal node and then once it is ready
+        you click Verify PV to expand better white moves than are currently in
+        a tree.  Here it might be counter-productive to expand a leaf if it is
+        present yet."  El hijo ya verificado no se vuelve a comprar: lo que se
+        compra esta por DEBAJO, y por la linea que dice EL — no por la que su
+        padre guardo antes de que ese analisis aterrizara.
+        """
+        self._store([_analysis(['e2e4', 'e7e5'])])
+        after_e4 = logic.apply_move(logic.start_fen(), 'e2e4')
+        _covered(after_e4, own_pv=['c7c5', 'g1f3'])
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 2)
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=logic.key_of(after_e4),
+            state=AnalysisTask.TState.PENDING).exists())
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=logic.key_of(
+                logic.apply_move(after_e4, 'c7c5'))).exists())
+        # ...y NADA por la continuacion que el padre guardo: 1.e4 e5 era su
+        # opinion de antes, y quien esta debajo ha mirado despues y mas hondo.
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=logic.key_of(
+                logic.apply_move(after_e4, 'e7e5'))).exists())
+        # El recibo: un ply verificado cruzado, la compra en la linea 1.
+        self.assertEqual(queued.detail['line'], 1)
+        self.assertEqual(queued.detail['covered_plies'], 1)
+        self.assertEqual(queued.detail['move'], 'c7c5')
+
+    def test_a_line_covered_to_its_leaf_hands_the_click_to_the_next(self):
+        """El uso 1 de Wolfram, con sus palabras: "once you covered the first
+        PV, the highest leaf node can be 2nd or 3rd line a PV, and would be
+        nice to have it expanded with one button"."""
+        self._store([_analysis(['e2e4']), _analysis(['d2d4', 'd7d5'])])
+        after_e4 = logic.apply_move(logic.start_fen(), 'e2e4')
+        _covered(after_e4)          # verificado y sin linea propia: se acabo
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 2)
+        self.assertEqual(queued.detail['line'], 2)
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=logic.key_of(after_e4),
+            state=AnalysisTask.TState.PENDING).exists())
+        for fen in _line_fens(['d2d4', 'd7d5']):
+            self.assertTrue(AnalysisTask.objects.filter(
+                position_id=logic.key_of(fen)).exists(), fen)
+
+    def test_with_every_line_covered_the_click_buys_nothing_and_says_so(self):
+        """Tres lineas miradas, ningun hueco: el boton no inventa gasto."""
+        self._store([_analysis(['e2e4']), _analysis(['d2d4']),
+                     _analysis(['g1f3'])])
+        for uci in ('e2e4', 'd2d4', 'g1f3'):
+            _covered(logic.apply_move(logic.start_fen(), uci))
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).count(), 0)
+        self.assertEqual(queued.detail['line'], 0)
+        self.assertEqual(queued.detail['lines_tried'], 3)
+        self.assertEqual(queued.detail['covered_plies'], 1)
+
+    def test_a_cycle_of_covered_lines_terminates(self):
+        """1.Nf3 Nf6 2.Ng1 Ng8 ES la posicion inicial una vez quitados los
+        contadores, asi que un paseo que solo siga lineas propias puede volver
+        a casa.  El conjunto de visitados lo corta ahi mismo, igual que en el
+        descenso de la frontera."""
+        self._store([_analysis(['g1f3'])])
+        fens = _line_fens(['g1f3', 'g8f6', 'f3g1'])
+        for fen, own in zip(fens, (['g8f6'], ['f3g1'], ['f6g8'])):
+            _covered(fen, own_pv=own)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(queued.detail['covered_plies'], 3)
+        self.assertEqual(queued.detail['plies'], 4)   # el 4o cierra el ciclo
+        # Y sobre todo: la posicion pulsada NO se compra a si misma por haber
+        # vuelto a pasar por ella.
+        self.assertFalse(
+            AnalysisTask.objects.filter(position_id=self.root.key).exists())
+
+    def test_a_line_already_in_the_queue_does_not_pay_for_the_next_one(self):
+        """Un segundo click no se muda a la linea 2: lo que hay debajo de la 1
+        ya se pago y sigue en vuelo.  Si se mudara, doblar clicks doblaria la
+        factura — que es justo lo que el dedup existe para impedir."""
+        self._store([_analysis(['e2e4']), _analysis(['d2d4'])])
+
+        first = ingest.enqueue_pv_verification(self.root)
+        second = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual((first, second), (1, 0))
+        self.assertEqual(second.detail['in_flight'], 1)
+        self.assertEqual(second.detail['line'], 1)
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=logic.key_of(_line_fens(['d2d4'])[0])).exists())
 
     def test_a_second_click_does_not_duplicate_live_work(self):
         self._store([_analysis(LINE)])
@@ -240,8 +363,11 @@ class PvVerifyEndpointTests(TestCase):
                                     HTTP_X_CSRFTOKEN=self._token())
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(),
-                         {'status': 'queued', 'queued': 4})
+        self.assertEqual(response.json(), {
+            'status': 'queued', 'queued': 4, 'line': 1, 'plies': 4,
+            'covered_plies': 0,
+            'message': 'Queued 128.0M nodes down line 1, starting after e4 '
+                       '(4 positions in all).'})
         self.assertEqual(AnalysisTask.objects.count(), 4)
 
     def test_a_get_is_not_a_request(self):
@@ -267,8 +393,53 @@ class PvVerifyEndpointTests(TestCase):
 
         response = self.client.post(self.url)
 
-        self.assertEqual(response.json(),
-                         {'status': 'nothing-to-do', 'queued': 0})
+        self.assertEqual(response.json(), {
+            'status': 'nothing-to-do', 'queued': 0, 'line': 1, 'plies': 4,
+            'covered_plies': 0,
+            'message': 'Line 1 is already queued — 4 positions on it are '
+                       'still in flight.'})
+
+    def test_the_receipt_names_the_line_the_plies_and_what_it_bought(self):
+        """La otra mitad de lo que pidio Wolfram: "tell user directly after
+        pressing the button what it actually did".  Una linea cubierta y una
+        compra por debajo se veian igual desde fuera — las dos, un numero."""
+        self.root.last_analysis = [_analysis(['e2e4']),
+                                   _analysis(['d2d4', 'd7d5'])]
+        self.root.save(update_fields=['last_analysis'])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'))
+
+        data = self.client.post(self.url).json()
+
+        self.assertEqual(data['status'], 'queued')
+        self.assertEqual((data['line'], data['queued']), (2, 2))
+        self.assertEqual(data['message'],
+                         'Queued 128.0M nodes down line 2, starting after d4 '
+                         '(2 positions in all).')
+
+    def test_a_purchase_below_verified_ground_says_how_deep_it_walked(self):
+        self.root.last_analysis = [_analysis(['e2e4', 'e7e5'])]
+        self.root.save(update_fields=['last_analysis'])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'),
+                 own_pv=['c7c5'])
+
+        data = self.client.post(self.url).json()
+
+        self.assertEqual((data['line'], data['covered_plies']), (1, 1))
+        self.assertEqual(data['message'],
+                         'Line 1 was already verified 1 ply down — queued '
+                         '128.0M nodes below that, after ...c5.')
+
+    def test_with_nothing_to_verify_the_receipt_says_that_much(self):
+        self.root.last_analysis = [_analysis(['e2e4'])]
+        self.root.save(update_fields=['last_analysis'])
+        _covered(logic.apply_move(logic.start_fen(), 'e2e4'))
+
+        data = self.client.post(self.url).json()
+
+        self.assertEqual(data['status'], 'nothing-to-do')
+        self.assertEqual(data['message'],
+                         'Everything this button can verify is already '
+                         'analysed — line 1 covered 1 ply down.')
 
     def test_a_logged_in_visitor_keeps_the_affinity(self):
         from .testing import worker_account

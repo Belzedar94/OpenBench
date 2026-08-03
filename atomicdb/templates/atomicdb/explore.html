@@ -110,7 +110,7 @@
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
         title="Queue every reply marked unexplored in the table below">Analyse all {{ unexplored_count }} unexplored replies</button>{% endif %}
       {% if pv_verify_plies %}<button class="reqbtn" id="pvbtn"
-        title="queues engine analysis for every position down this line, so the backed value and the deep eval can be reconciled">Verify PV</button>{% endif %}
+        title="walks down this line and queues engine analysis where it is still missing — past whatever is already verified, and on to the next line when this one is covered end to end">Verify PV</button>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
@@ -464,11 +464,17 @@
       // Verificar la PV: mismo patron que los otros dos botones — fetch con el
       // token de la pagina y el recuento que devuelve el endpoint, dicho tal
       // cual.  Encola por debajo, asi que hereda el mismo poller.
+      //
+      // El boton dice CUANTO se compro y la nota dice DONDE: el mismo click
+      // puede acabar comprando por debajo de terreno ya verificado o mudarse a
+      // la segunda linea, y en el recuento a secas esas dos cosas se veian
+      // igual.  La frase la compone el servidor, que es quien camino.
       const pvbtn = document.getElementById('pvbtn');
       if (pvbtn) {
         pvbtn.addEventListener('click', function () {
           pvbtn.disabled = true;
           pvbtn.textContent = 'Queueing...';
+          showNote('');   // un click nuevo no hereda el veredicto del anterior
           const pvRoute = new URLSearchParams(location.search).get('play') || '';
           fetch('/atomicdb/pv-verify/' + key + '/',
                 {method: 'POST',
@@ -477,6 +483,8 @@
                  body: new URLSearchParams({route: pvRoute}).toString()})
             .then(r => r.json())
             .then(data => {
+              showNote(data.message || '',
+                       data.status === 'nothing-to-do');
               if (data.status === 'queued') {
                 const n = data.queued;
                 pvbtn.textContent = 'Queued ' + n + ' analys'
@@ -484,10 +492,9 @@
                 poll(36);
               } else {
                 pvbtn.textContent = {
-                  // Cada posicion de la linea ya tiene trabajo vivo (o la
-                  // linea entera esta cerrada): cierto, y los resultados
-                  // simplemente siguen en vuelo.
-                  'nothing-to-do': 'Whole line already queued or solved',
+                  // Nada que comprar: la nota de al lado dice por que — todo
+                  // verificado, o en vuelo desde un click anterior.
+                  'nothing-to-do': 'Nothing left to verify here',
                   'queue-full': 'Queue is full, try later',
                   'already-solved': 'Already solved',
                 }[data.status] || 'Something went wrong';
