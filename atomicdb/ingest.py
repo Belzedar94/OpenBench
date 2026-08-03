@@ -3957,6 +3957,43 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
 # saber cual era pedir analisis a mano, posicion por posicion, bajando por la
 # linea — que es lo que este boton hace de una vez.
 #
+# LOS DOS USOS, QUE NO SON EL MISMO (Wolfram, 3-ago).  El boton se pulsa por
+# dos motivos y hasta hoy solo servia bien para uno:
+#
+#   1. EXPANDIR HOJAS.  "once you covered the first PV, the highest leaf node
+#      can be 2nd or 3rd line a PV, and would be nice to have it expanded with
+#      one button."
+#   2. MEJORAR LA PV DE UN NODO INTERNO.  "You request 10B analysis in internal
+#      node and then once it is ready you click Verify PV to expand better
+#      white moves than are currently in a tree.  Here it might be
+#      counter-productive to expand a leaf if it is present yet."
+#
+# No hacen falta dos botones ni un desplegable donde elegir cual: los dos piden
+# LO MISMO — comprar analisis exactamente donde falta verificacion — y solo se
+# diferencian en donde esta ese sitio.  Asi que el click no pregunta, CAMINA:
+# baja por la linea, cruza sin gastar todo lo que ya esta verificado y compra
+# en el primer hueco.  Si el nodo interno acaba de recibir sus 10B, el paseo
+# atraviesa lo cubierto y aparece por debajo (uso 2); si la linea 1 esta
+# cubierta entera hasta su hoja, se pasa a la linea 2 y luego a la 3 (uso 1).
+# Un solo boton, y el aviso de vuelta dice cual de las dos cosas acabo
+# haciendo, que es la otra mitad de lo que pidio: "tell user directly after
+# pressing the button what it actually did".
+#
+# DE QUIEN ES LA LINEA QUE SE SIGUE.  Del nodo donde se esta parado, siempre
+# que ese nodo tenga analisis propio que la respalde: bajar es exactamente
+# cambiar de opinion sobre la continuacion, y lo que sabe el de abajo es mas
+# nuevo y mas profundo que la PV que el padre guardo.  Cuando el nodo no tiene
+# con que opinar — nadie lo ha mirado todavia — sigue mandando la reclamacion
+# heredada del nodo que se pulso.  El paseo avanza sobre AFIRMACIONES y nunca
+# sobre ausencias, y de ahi sale solo la regla que se pedia: por debajo de un
+# nodo sin verificar no hay nada de que fiarse, asi que en cuanto seguir exige
+# inventarse su continuacion, el paseo se para.
+#
+# GUARDARRAILES, los mismos que el descenso de la frontera (§
+# ``_descend_frontier``): un conjunto de visitados — el DAG transpone y hasta
+# cierra ciclos, que 1.Nf3 Nf6 2.Ng1 Ng8 ES la posicion inicial — y un tope
+# duro de plies.
+#
 # DIECISEIS PLIES.  Es una sola decision humana, igual que el boton masivo, asi
 # que su coste tiene que estar acotado por algo que no dependa de lo que el
 # motor decidiera guardar.  Ocho jugadas por bando es donde una discrepancia de
@@ -3964,14 +4001,125 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
 # boton sino una campana.  ``STORED_PV_MAX_PLIES`` (24) recorta lo que se
 # ALMACENA y no vale como tope aqui: es un limite de disco, no de gasto.
 PV_VERIFY_MAX_PLIES = 16
+# TRES LINEAS, y no las cinco que puede traer un multipv ancho: el respaldo lo
+# mueven las alternativas que de verdad compiten con la principal, y a partir
+# de la cuarta lo que hay es relleno de un escaparate.  El tope tambien acota
+# lo que un click puede llegar a CAMINAR cuando no compra nada.
+PV_VERIFY_MAX_LINES = 3
 
 
-def enqueue_pv_verification(pos, requested_by='', route=''):
-    """Encola analisis por CADA posicion de la PV vigente. Devuelve cuantos.
+class VerifyOutcome(int):
+    """Cuantas tareas compro el click, con el recibo de lo que hizo pegado.
 
-    Camina la linea 1 de ``last_analysis`` — la VIGENTE, saltando el escaparate
-    ancho de un pase anterior, con el mismo criterio que ``claimed_mate_plies``
-    y por la misma funcion que lo dice, ``solve_estimate.current_line``.
+    Sigue siendo un ``int`` a proposito, por lo mismo que ``RequestOutcome``
+    sigue siendo un ``str``: la vista lo mete en ``{'queued': ...}`` tal cual y
+    quien solo quiera el numero lo compara con un numero.  El detalle — que
+    linea se siguio, cuanto llevaba verificado y que se compro — viaja aparte,
+    para el unico que lo necesita: el aviso que lee el humano.
+    """
+
+    def __new__(cls, value, **detail):
+        outcome = super().__new__(cls, value)
+        outcome.detail = detail
+        return outcome
+
+
+def _verify_lines(pos):
+    """Las lineas VIGENTES de ``pos``, en el orden en que las emitio el motor.
+
+    Mismo criterio que ``solve_estimate.current_line`` — que es exactamente el
+    primer elemento de esta lista — porque saltarse el escaparate ancho de un
+    pase ANTERIOR es la misma regla contada dos veces: verificar la linea 2 de
+    ayer seria verificar el veredicto de ayer.
+    """
+    return [line for line in (pos.last_analysis or [])
+            if isinstance(line, dict) and not line.get('prior_pass')]
+
+
+def _verify_step(node, spine, trust_own):
+    """La jugada que toca desde ``node`` y la linea que queda por debajo.
+
+    DOS FUENTES Y UN ORDEN.  Manda la linea PROPIA del nodo cuando el nodo
+    tiene con que opinar (``trust_own``: su analisis ya cubre lo que este click
+    le compraria); si no, sigue mandando la reclamacion heredada del nodo que
+    se pulso.
+
+    Devuelve ``(None, [])`` cuando no queda jugada legal que seguir — una PV
+    vieja, o de antes de un rekey, deja de aplicar a mitad, y un TERMINAL no
+    tiene continuacion ninguna.  Ahi el paseo se acaba sin error: el prefijo
+    que si aplica es informacion, el resto no existe.
+    """
+    legal = logic.legal_moves(node.fen)
+    if trust_own:
+        own = (solve_estimate.current_line(node) or {}).get('pv')
+        if isinstance(own, list) and own and isinstance(own[0], str) \
+                and own[0] in legal:
+            return own[0], list(own[1:])
+    if spine and isinstance(spine[0], str) and spine[0] in legal:
+        return spine[0], list(spine[1:])
+    return None, []
+
+
+def _buy_verification(child, requested_by='', route=''):
+    """Compra la verificacion de UN nodo.  Devuelve ``(estado, presupuesto)``.
+
+    Tres estados y ninguno es un error: ``'covered'`` (ya tiene COMPLETADO ese
+    presupuesto o mas), ``'in-flight'`` (ya hay trabajo vivo suyo en la cola) y
+    ``'queued'`` (creada, o promovida desde autonoma — que para quien mira la
+    cola es lo mismo: adelanta).
+
+    Presupuesto: ``max(REQUEST_BUDGET_LADDER[0], budget_for(child))``, el mismo
+    suelo de grado peticion que el boton masivo.  ``budget_for`` manda cuando
+    pide mas, y con el viaja su clamp de mates cortos: un nodo que ya reclama
+    un mate corto con distancia conocida se VERIFICA barato en vez de
+    excavarse.
+
+    Lo COMPLETADO manda sobre el suelo de peticion.  El suelo existe para que
+    un click no pague calderilla, no para encargar una busqueda peor que la
+    guardada: un hijo con 512M completados no necesita los 128M del boton del
+    padre, y encargarlos gastaba computo donado en repetir la respuesta que ya
+    estaba.  Vale para las dos ramas del presupuesto — el clamp de mate corto
+    pide aun menos, asi que lo respeta con mas razon.
+    """
+    clamp = _short_mate_clamp(child)
+    budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+              if clamp is None else budget_for(child))
+    done = _completed_max_budget(child)
+    if done is not None and done >= budget:
+        return 'covered', budget
+    task, created = AnalysisTask.objects.get_or_create(
+        position=child, generation=child.visits,
+        defaults={'budget_nodes': budget,
+                  'multipv': multipv_for(child.visits, budget, clamp=clamp),
+                  'source': AnalysisTask.Source.USER,
+                  'requested_by': requested_by,
+                  'route': route})
+    if created:
+        return 'queued', budget
+    if task.state == 'PENDING' and task.source != AnalysisTask.Source.USER:
+        task.source = AnalysisTask.Source.USER
+        if requested_by and not task.requested_by:
+            task.requested_by = requested_by
+        if route and not task.route:
+            task.route = route
+        task.save(update_fields=['source', 'requested_by', 'route'])
+        return 'queued', budget
+    return 'in-flight', budget
+
+
+def _mark_verified(counts, plies):
+    """Alarga el prefijo YA VERIFICADO del paseo, mientras siga siendo prefijo.
+
+    Es la cifra que el aviso dice en voz alta ("covered for 6 plies"), asi que
+    tiene que ser contigua y anterior a la primera compra: un nodo cubierto
+    suelto por debajo del hueco no hace mas profunda la parte verificada.
+    """
+    if not counts['queued'] and counts['covered_plies'] == plies - 1:
+        counts['covered_plies'] = plies
+
+
+def _walk_pv_frontier(pos, pv, requested_by='', route=''):
+    """Baja por ``pv`` comprando donde falta verificacion.  Devuelve el conteo.
 
     QUE MATERIALIZA.  Lo mismo que un click de navegacion y por las mismas tres
     llamadas que usa el ``goto`` del explorador: legalidad por
@@ -3980,92 +4128,108 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     reimplementa ninguna regla; una PV es una ruta como cualquier otra y tiene
     que producir exactamente el mismo arbol que producirla a mano.
 
-    QUE CORTA Y QUE SALTA, que no es lo mismo:
-
-      * CORTA — y sin error — en cuanto una jugada de la PV no es legal en la
-        posicion en la que toca.  Pasa de verdad: una PV guardada antes de un
-        rekey, o simplemente vieja, deja de aplicar y lo unico honesto es
-        quedarse con el prefijo que si aplica.  Tambien corta, por el mismo
-        camino, al llegar a un TERMINAL: ahi no hay jugada legal que seguir.
-      * SALTA una posicion YA CERRADA y SIGUE CAMINANDO.  Un cierre a mitad de
-        linea no invalida el resto — la discrepancia que se esta persiguiendo
-        puede estar debajo — y comprarle analisis a un nodo resuelto es gastar
-        en una pregunta ya contestada.
+    QUE CRUZA SIN GASTAR: una posicion YA CERRADA (comprarle analisis a un nodo
+    resuelto es gastar en una pregunta contestada) y una YA VERIFICADA a este
+    presupuesto o mas.  Las dos se cuentan como parte de la linea cubierta y el
+    paseo SIGUE: la discrepancia que se persigue puede estar debajo.
 
     NO se pide nada sobre ``pos``: su eval profundo es justamente la mitad del
     desacuerdo que hay que contrastar, y ya esta comprado.  Lo que falta es la
     otra mitad, que vive en la linea.
-
-    Presupuesto: ``max(REQUEST_BUDGET_LADDER[0], budget_for(child))``, el mismo
-    suelo de grado peticion que el boton masivo.  ``budget_for`` manda cuando
-    pide mas, y con el viaja su clamp de mates cortos: un nodo de la PV que ya
-    reclama un mate corto con distancia conocida se VERIFICA barato en vez de
-    excavarse.  Dedup como siempre: una tarea viva en la generacion actual no
-    se duplica — y un nodo que ya tiene COMPLETADO ese presupuesto o mas se
-    salta entero: la linea se camina igual, pero no se le compra una busqueda
-    mas floja que la que ya tiene guardada.
-
-    El llamante es dueno de la transaccion, igual que en
-    ``enqueue_unexplored_children``.
     """
-    line = solve_estimate.current_line(pos)
-    pv = (line or {}).get('pv')
-    if not isinstance(pv, list):
-        return 0
-    queued = 0
-    current = pos
+    counts = {'queued': 0, 'in_flight': 0, 'covered_plies': 0, 'plies': 0,
+              'budget': None, 'move': '', 'move_fen': ''}
+    visited = {pos.key}
+    node, spine, plies = pos, list(pv), 0
+    # En ``pos`` la linea ya la eligio el llamante — es la que se esta
+    # verificando — asi que su propio ``last_analysis`` no vuelve a opinar.
+    trust_own = False
     # La ruta declarada del peticionario se alarga con cada ply caminado: el
-    # aviso de cada nodo de la PV vuelve contando SU linea, no la canonica.
+    # aviso de cada nodo vuelve contando SU linea, no la canonica.
     walked_route = route
-    for uci in pv[:PV_VERIFY_MAX_PLIES]:
-        if not isinstance(uci, str) \
-                or uci not in logic.legal_moves(current.fen):
+    while plies < PV_VERIFY_MAX_PLIES:
+        uci, spine = _verify_step(node, spine, trust_own)
+        if uci is None:
             break
-        if walked_route:
-            walked_route = walked_route + ',' + uci
-        child = get_or_create_position(logic.apply_move(current.fen, uci),
-                                       campaign_id=current.campaign_id)
-        Edge.objects.get_or_create(parent=current, move_uci=uci,
+        child = get_or_create_position(logic.apply_move(node.fen, uci),
+                                       campaign_id=node.campaign_id)
+        Edge.objects.get_or_create(parent=node, move_uci=uci,
                                    defaults={'child': child})
         if child.priority <= DEAD / 2:
             child.priority = 0.0   # ruta nueva: revive de la lapida
             child.save(update_fields=['priority'])
-        current = child
+        if walked_route:
+            walked_route = walked_route + ',' + uci
+        parent_fen, node, plies = node.fen, child, plies + 1
+        if child.key in visited:
+            break              # ciclo o transposicion: la arista queda escrita
+        visited.add(child.key)
         if child.status != 'UNKNOWN':
+            # Un cierre no tiene linea que seguir, tiene un testigo: de aqui
+            # para abajo vuelve a mandar la reclamacion heredada.
+            trust_own = False
+            _mark_verified(counts, plies)
             continue
-        clamp = _short_mate_clamp(child)
-        budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
-                  if clamp is None else budget_for(child))
-        # Lo que este nodo YA tiene comprado manda sobre el suelo de peticion.
-        # El suelo existe para que un click no pague calderilla, no para
-        # encargar una busqueda peor que la guardada: un hijo con 512M
-        # COMPLETADOS no necesita los 128M del boton del padre, y encargarlos
-        # gastaba computo donado en repetir la respuesta que ya estaba.  Vale
-        # para las dos ramas del presupuesto — el clamp de mate corto pide
-        # aun menos, asi que lo respeta con mas razon.
-        done = _completed_max_budget(child)
-        if done is not None and done >= budget:
+        state, budget = _buy_verification(child, requested_by, walked_route)
+        trust_own = state == 'covered'
+        if state == 'covered':
+            _mark_verified(counts, plies)
             continue
-        task, created = AnalysisTask.objects.get_or_create(
-            position=child, generation=child.visits,
-            defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(child.visits, budget,
-                                             clamp=clamp),
-                      'source': AnalysisTask.Source.USER,
-                      'requested_by': requested_by,
-                      'route': walked_route})
-        if created:
-            queued += 1
-        elif (task.state == 'PENDING'
-                and task.source != AnalysisTask.Source.USER):
-            task.source = AnalysisTask.Source.USER
-            if requested_by and not task.requested_by:
-                task.requested_by = requested_by
-            if walked_route and not task.route:
-                task.route = walked_route
-            task.save(update_fields=['source', 'requested_by', 'route'])
-            queued += 1
-    return queued
+        if state == 'in-flight':
+            counts['in_flight'] += 1
+            continue
+        if not counts['queued']:
+            counts['budget'], counts['move'] = budget, uci
+            counts['move_fen'] = parent_fen
+        counts['queued'] += 1
+    counts['plies'] = plies
+    return counts
+
+
+def enqueue_pv_verification(pos, requested_by='', route=''):
+    """Compra analisis donde la verificacion de la linea FALTA.  Cuantas.
+
+    Empieza por la linea VIGENTE de ``last_analysis`` — saltando el escaparate
+    ancho de un pase anterior, con el mismo criterio que ``claimed_mate_plies``
+    — y baja por ella con ``_walk_pv_frontier``.
+
+    CUANDO SE PASA A LA SIGUIENTE LINEA, que es la parte nueva: solo cuando la
+    anterior no ha dejado NADA que hacer.  Una linea que ya esta cubierta hasta
+    su hoja es la peticion 1 de Wolfram — la principal esta hecha, lo que falta
+    por expandir es la 2a o la 3a — y ahi pasar es exactamente lo que se pide.
+    Una linea que esta EN LA COLA, en cambio, ya se pago: un segundo click
+    sobre ella tiene que decir "esperando", no comprar la linea siguiente,
+    porque si no doblar clicks doblaria la factura.
+
+    Devuelve un ``VerifyOutcome``: el numero de tareas de siempre, y colgado de
+    el lo que hara falta para CONTARLO — la linea que se siguio, cuantos plies
+    de ella estaban ya verificados y que se compro al final.
+
+    El llamante es dueno de la transaccion, igual que en
+    ``enqueue_unexplored_children``.
+    """
+    covered, walked, tried = 0, 0, 0
+    for index, line in enumerate(_verify_lines(pos)[:PV_VERIFY_MAX_LINES],
+                                 start=1):
+        pv = line.get('pv')
+        if not isinstance(pv, list) or not pv:
+            continue           # una linea sin PV no es una linea que caminar
+        tried += 1
+        walk = _walk_pv_frontier(pos, pv, requested_by=requested_by,
+                                 route=route)
+        covered = max(covered, walk['covered_plies'])
+        walked = max(walked, walk['plies'])
+        if walk['queued'] or walk['in_flight']:
+            return VerifyOutcome(
+                walk['queued'], line=index, lines_tried=tried,
+                covered_plies=walk['covered_plies'], plies=walk['plies'],
+                in_flight=walk['in_flight'], budget=walk['budget'],
+                move=walk['move'], move_fen=walk['move_fen'])
+    # Sin compra no hay linea que nombrar, pero si hay paseo que contar: lo que
+    # se recorrio es lo que respalda el "ya esta todo verificado" del aviso.
+    return VerifyOutcome(0, line=0, lines_tried=tried, covered_plies=covered,
+                         plies=walked, in_flight=0, budget=None, move='',
+                         move_fen='')
 
 
 def _upgrade_by_certificate(task, report):

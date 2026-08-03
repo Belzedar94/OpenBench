@@ -1015,6 +1015,12 @@ def api_pv_verify(request, key):
     posicion — pone tareas en las de mas abajo.  Anotarlo aqui haria que el
     siguiente click en "Request analysis" se leyera como repetido.  Lo que si
     respeta, porque acota el gasto de verdad, es el tope de cola.
+
+    DEVUELVE UN AVISO ESCRITO, no solo un numero: el mismo click puede acabar
+    comprando por debajo de terreno ya verificado o mudarse a la segunda linea,
+    y desde fuera las dos cosas se veian igual.  El texto lo compone el
+    servidor entero, como la linea de estado del explorador, para que lo que
+    dice el boton y lo que sabe el paseo no puedan discrepar.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -1044,12 +1050,101 @@ def api_pv_verify(request, key):
             route = ''
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)
-        queued = ingest.enqueue_pv_verification(pos,
-                                                requested_by=requested_by,
-                                                route=route)
-    if not queued:
-        return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
-    return JsonResponse({'status': 'queued', 'queued': queued})
+        outcome = ingest.enqueue_pv_verification(pos,
+                                                 requested_by=requested_by,
+                                                 route=route)
+    return JsonResponse(_pv_verify_payload(outcome))
+
+
+def _pv_verify_payload(outcome):
+    """El recibo del paseo, en el orden en que se lee: estado, cifras, frase.
+
+    ``status`` y ``queued`` son los de siempre — explore.html lleva desde el
+    primer dia decidiendo con ellos — y lo nuevo va al lado sin quitarles el
+    sitio: que linea se siguio, cuantos plies de ella estaban ya verificados y
+    la frase que lo cuenta.
+    """
+    detail = getattr(outcome, 'detail', None) or {}
+    queued = int(outcome)
+    return {'status': 'queued' if queued else 'nothing-to-do',
+            'queued': queued,
+            'line': detail.get('line', 0),
+            'plies': detail.get('plies', 0),
+            'covered_plies': detail.get('covered_plies', 0),
+            'message': _pv_verify_message(queued, detail)}
+
+
+def _human_plies(n):
+    """1 -> '1 ply'; 6 -> '6 plies'. Un plural mal puesto se lee como un bug."""
+    return f'{n} ply' if n == 1 else f'{n} plies'
+
+
+def _pv_verify_san(detail):
+    """La jugada que abre el hueco, en SAN, con el UCI como red de seguridad.
+
+    Con los puntos suspensivos delante cuando la juegan las negras, que es como
+    se nombra una jugada suelta en cualquier tablero: sin ellos "e6" y "e4" se
+    leen como si movieran el mismo bando.  La FEN canonica no guarda el numero
+    de jugada, asi que no se inventa uno.
+
+    El movegen puede negarse — una FEN que ya no admite esa jugada por lo que
+    sea — y quedarse sin frase por un adorno seria absurdo: el UCI dice lo
+    mismo con menos gracia.
+    """
+    import pyffish as pf
+
+    move = detail.get('move') or ''
+    fen = detail.get('move_fen') or ''
+    if not (move and fen):
+        return move
+    black = fen.split()[1:2] == ['b']
+    try:
+        san = pf.get_san(logic.VARIANT, fen, move)
+    except Exception:
+        san = move
+    return f'...{san}' if black else san
+
+
+def _pv_verify_message(queued, detail):
+    """Que acabo haciendo el click, en una frase.
+
+    La peticion literal de Wolfram: "tell user directly after pressing the
+    button what it actually did".  El boton hace dos cosas distintas segun
+    donde este el hueco — comprar por debajo de terreno ya verificado, o
+    mudarse a la segunda linea porque la primera esta entera — y sin esta
+    frase las dos se veian exactamente igual desde fuera: un numero.
+    """
+    line = detail.get('line') or 0
+    covered = detail.get('covered_plies') or 0
+    if queued:
+        nodes = _human(detail.get('budget'))
+        san = _pv_verify_san(detail)
+        if covered:
+            after = f', after {san}' if san else ''
+            said = (f'Line {line} was already verified '
+                    f'{_human_plies(covered)} down — queued {nodes} nodes '
+                    f'below that{after}')
+        else:
+            after = f', starting after {san}' if san else ''
+            said = f'Queued {nodes} nodes down line {line}{after}'
+        if queued > 1:
+            said += f' ({queued} positions in all)'
+        return said + '.'
+    in_flight = detail.get('in_flight') or 0
+    if in_flight:
+        what = ('1 position on it is' if in_flight == 1
+                else f'{in_flight} positions on it are')
+        return f'Line {line} is already queued — {what} still in flight.'
+    tried = detail.get('lines_tried') or 0
+    if not tried:
+        return 'No engine line is stored here yet, so there is nothing to ' \
+               'verify.'
+    if covered:
+        where = 'line 1' if tried == 1 else f'the top {tried} lines'
+        return ('Everything this button can verify is already analysed — '
+                f'{where} covered {_human_plies(covered)} down.')
+    return ('The stored line no longer applies here, so there was nothing '
+            'to verify.')
 
 
 def _client_ip(request):
