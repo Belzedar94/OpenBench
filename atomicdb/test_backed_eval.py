@@ -352,7 +352,10 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(row['own_search'], 'no direct search yet')
 
     def test_an_eval_with_no_nodes_behind_it_claims_no_support(self):
-        self.assertEqual(views._own_search(388, 0), 'own search: +388')
+        # Cero nodos no es una busqueda propia flaca: es que no la hay. El
+        # numero esta sembrado de la linea del padre y la frase lo dice.
+        self.assertEqual(views._own_search(388, 0),
+                         '+388 from a line, no direct search yet')
 
     def test_the_page_paints_the_tooltip_on_the_badge(self):
         root = ingest.get_or_create_position(logic.start_fen())
@@ -390,8 +393,12 @@ class BackedDisplayTests(TestCase):
         self.assertIn('+30cp', body)          # la puntual sigue visible
 
     def test_explore_header_falls_back_to_the_point_eval(self):
+        # Con busqueda propia detras: sin respaldo no hay chip que pintar, y
+        # el numero es del motor mirando AQUI (§ views._walked_value), asi que
+        # tampoco lleva la marca de caminado.
         pos = ingest.get_or_create_position(logic.start_fen())
-        Position.objects.filter(key=pos.key).update(eval_cp=30, expanded=True)
+        Position.objects.filter(key=pos.key).update(
+            eval_cp=30, nodes_invested=128_000_000, expanded=True)
 
         body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
 
@@ -1046,3 +1053,84 @@ class WalkedChipTests(TestCase):
                       body))
         self.assertIn(f'href="/atomicdb/backed-source/{walked.key}/"', body)
         self.assertIn(f'href="/atomicdb/backed-source/{verified.key}/"', body)
+
+
+class SeededValueTests(TestCase):
+    """La eval SEMBRADA tambien es caminada (§ views._walked_value).
+
+    Reporte de comunidad, literal: "walking eval still not fixed ... long line
+    without any request analysis ... and pretends to have accurate eval ... not
+    even marked as walked".  El respaldo caminado ya bajaba de tier y llevaba
+    su chip; esta otra no llevaba nada, porque el numero no viene de un
+    respaldo sino de la linea MultiPV del padre, que el ingest siembra en el
+    hijo al aterrizar un pase (§ ingest._seed_child_eval).  Para quien mira la
+    pagina es la misma afirmacion sin comprobar, asi que se dice igual.
+    """
+
+    def test_a_seeded_child_does_not_outrank_what_the_engine_looked_at(self):
+        parent = _pos('SEED-P', 'w', expanded=True)
+        # +900 sembrados de la linea del padre: nadie ha buscado nunca aqui.
+        seeded = _pos('SEED-S', 'b', eval_cp=900)
+        # +20 con 128M detras.  Modesto, pero mirado.
+        searched = _pos('SEED-E', 'b', eval_cp=20, nodes_invested=128_000_000)
+        _edge(parent, seeded, 'e7e6')
+        _edge(parent, searched, 'd7d5')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
+        self.assertEqual([row['tier'] for row in rows], [3, 2])
+        # La fila sembrada se ensena entera: baja de puesto y se marca, no se
+        # esconde.  Y no lleva chip de respaldo, porque respaldo no tiene.
+        self.assertTrue(rows[1]['walked'])
+        self.assertFalse(rows[1]['backed'])
+        self.assertFalse(rows[1]['backed_light'])
+        self.assertEqual(rows[1]['score'], 900)
+        # La fila buscada no se toca: sigue siendo conocimiento de motor.
+        self.assertFalse(rows[0]['walked'])
+
+    def test_backing_with_search_weight_is_still_engine_knowledge(self):
+        """El predicado mira NODOS, no de donde vino el numero: un respaldo con
+        busqueda de verdad debajo sigue en el tier de motor aunque el nodo no
+        tenga busqueda propia."""
+        parent = _pos('SEED-WP', 'w', expanded=True)
+        heavy = _pos('SEED-WB', 'b', eval_cp=10, backed_eval=400,
+                     backed_plies=3, backed_nodes=5_000_000)
+        _edge(parent, heavy, 'e7e6')
+
+        row = next(iter(views._child_moves(parent)))
+
+        self.assertEqual(row['tier'], 3)
+        self.assertFalse(row['walked'])
+        self.assertTrue(row['backed'])
+        self.assertFalse(row['backed_light'])
+
+    def test_the_seeded_row_wears_the_walked_mark(self):
+        parent = _pos('SEED-RP', 'w', expanded=True)
+        _edge(parent, _pos('SEED-RS', 'b', eval_cp=900), 'e7e6')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        self.assertIn('>walked</span>', body)
+        self.assertIn('nothing has searched this position itself yet', body)
+
+    def test_the_header_of_a_seeded_position_says_walked(self):
+        pos = _pos('SEED-HS', 'w', eval_cp=180, expanded=True)
+
+        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+
+        self.assertIn('best line +180cp', body)
+        self.assertIn('>walked</span>', body)
+
+    def test_the_header_of_a_searched_position_carries_no_mark(self):
+        pos = _pos('SEED-HE', 'w', eval_cp=180, nodes_invested=128_000_000,
+                   expanded=True)
+
+        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+
+        self.assertIn('best line +180cp', body)
+        # ``walked`` a secas sale tambien del JS del boton de frontera; lo que
+        # no puede existir es el chip.
+        self.assertNotIn('>walked</span>', body)
+        self.assertNotIn('backed-mark', body)

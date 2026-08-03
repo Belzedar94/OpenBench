@@ -99,7 +99,9 @@
           class="backed-mark{% if eval_backed_light %} light{% endif %}"{% if backed_source_url %}
           href="{{ backed_source_url }}"
           aria-label="{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }} — jump to the source of this value, {{ eval_backed_plies }} ply(s) below"{% endif %}
-          title="{% if eval_backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} ply(s) below{% endif %}{% if backed_source_url %} — click to jump to the position this value comes from{% endif %}{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</{% if backed_source_url %}a{% else %}span{% endif %}>{% endif %}{% endif %}{% if backed_repetition %} <span
+          title="{% if eval_backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} ply(s) below{% endif %}{% if backed_source_url %} — click to jump to the position this value comes from{% endif %}{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</{% if backed_source_url %}a{% else %}span{% endif %}>{% elif eval_walked %}<span
+          class="backed-mark light"
+          title="this value came down a line the engine reported somewhere else — nothing has searched this position itself yet, so it is a claim, not a verdict">walked</span>{% endif %}{% endif %}{% if backed_repetition %} <span
           class="backed-mark"
           title="the line that carries this value returns to a position it has already been through — a repetition, which is worth a draw, not a verdict">repetition</span>{% endif %}
       {% else %}
@@ -552,7 +554,9 @@
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }} — jump to the source of this value, {{ m.backed_plies }} ply(s) below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below{% endif %}{% if m.backed_url %} — click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            title="{% if m.backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below{% endif %}{% if m.backed_url %} — click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% elif m.walked %}<span
+            class="backed-mark light"
+            title="this value came down a line the engine reported somewhere else — nothing has searched this position itself yet, so it is a claim, not a verdict">walked</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>

@@ -2485,6 +2485,32 @@ def _proof_health(now):
     return health
 
 
+def _walked_value(pos):
+    """El numero que se ensena de ``pos`` NO lo avala ninguna busqueda SUYA.
+
+    UN SOLO PREDICADO para las dos maneras de llegar a un valor sin motor
+    debajo, porque para quien mira la pagina son exactamente la misma cosa:
+
+      * respaldo CAMINADO: alguien profundizo la linea a mano y el negamax
+        subio sin que nadie buscara en ninguna parte (el viejo
+        ``backed_light``);
+      * eval SEMBRADA: el hijo la heredo de la linea MultiPV de su padre
+        cuando aterrizo un pase (§ ``ingest._seed_child_eval``), asi que es lo
+        que el motor dijo de UNA LINEA que pasa por aqui, no de esta posicion.
+
+    La segunda no llevaba marca ninguna y ademas ordenaba como conocimiento de
+    motor.  Reporte de comunidad, literal: "walking eval still not fixed ...
+    long line without any request analysis ... and pretends to have accurate
+    eval ... not even marked as walked".
+
+    El discriminante son los NODOS, no la procedencia del numero: cero busqueda
+    propia y cero peso en el respaldo es cero motor mirando AQUI.  Con
+    cualquiera de los dos el sitio deja de ser virgen y vuelve a ser
+    conocimiento de motor, con su chip normal y su tooltip de own search.
+    """
+    return not (pos.nodes_invested or 0) and not (pos.backed_nodes or 0)
+
+
 def _own_search(point, nodes):
     """Que dijo el motor MIRANDO ESA POSICION, para las filas [BACKED].
 
@@ -2494,11 +2520,16 @@ def _own_search(point, nodes):
     perspectiva del que mueve, igual que la celda; el soporte es lo que hace
     honesta la frase, porque "+388" con 2.000 nodos detras y "+388" con 128M
     no son la misma afirmacion.  Sin eval propia se dice, sin adornos.
+
+    Y sin NODOS tampoco se dice "own search": una eval con cero busqueda detras
+    esta sembrada de la linea del padre (§ ``ingest._seed_child_eval``), o sea
+    que nadie ha buscado aqui.  Llamar a eso busqueda propia es justo lo que el
+    reporte de comunidad llama pretender.
     """
     if point is None:
         return 'no direct search yet'
     if not nodes:
-        return f'own search: {point:+d}'
+        return f'{point:+d} from a line, no direct search yet'
     return f'own search: {point:+d} @ {_human(nodes)} nodes'
 
 
@@ -2574,10 +2605,12 @@ def _child_moves(pos):
     numero:
 
       4  victoria probada del que mueve
-      3  conocimiento de MOTOR: eval propia, respaldo con busqueda de verdad
-         detras, o tablas probadas
-      2  respaldo CAMINADO (``backed_light``): alguien profundizo la linea a
-         mano y el valor subio sin que nadie buscara en ninguna parte
+      3  conocimiento de MOTOR: eval propia con nodos detras, respaldo con
+         busqueda de verdad debajo, o tablas probadas
+      2  valor CAMINADO (``walked``, § ``_walked_value``): nadie ha buscado en
+         esta posicion — ni respaldo con peso ni busqueda propia — asi que el
+         numero sale de una linea, caminada a mano o sembrada del MultiPV del
+         padre
       1  sin analizar
       0  derrota probada
 
@@ -2603,6 +2636,7 @@ def _child_moves(pos):
             c.eval_cp if stm_white else -c.eval_cp)
         backed_plies = 0
         backed_light = False
+        walked = False
         if c.status == win:
             score, rank, tier = 10_000, 10_001, 4
         elif c.status == loss:
@@ -2615,15 +2649,17 @@ def _child_moves(pos):
             rank = score
             if c.backed_eval is not None and c.backed_eval != c.eval_cp:
                 backed_plies = c.backed_plies
-            # Territorio VIRGEN de motor: ni el respaldo trae peso de busqueda
-            # ni el nodo tiene busqueda propia — el valor solo puede venir de
-            # una linea caminada, y el chip lo dice.  Con busqueda propia
-            # (aunque el respaldo pese 0) el sitio no es virgen y el chip
-            # normal con su tooltip de own search sigue mandando.
-            backed_light = (bool(backed_plies)
-                            and not (c.backed_nodes or 0)
-                            and not (c.nodes_invested or 0))
-            tier = 2 if backed_light else 3
+            # Territorio VIRGEN de motor, UN solo predicado (§ _walked_value):
+            # ni el respaldo trae peso de busqueda ni el nodo tiene busqueda
+            # propia, asi que el valor sale de una linea — caminada a mano o
+            # sembrada del MultiPV del padre — y da igual cual de las dos, que
+            # nadie ha mirado aqui en ninguno de los dos casos.
+            walked = _walked_value(c)
+            # ``backed_light`` es ese mismo hecho ACLARANDO EL CHIP DE
+            # RESPALDO, asi que solo existe donde hay chip que aclarar; la fila
+            # sembrada no tiene respaldo ninguno y lleva su propia marca.
+            backed_light = walked and bool(backed_plies)
+            tier = 2 if walked else 3
         else:
             # sin analizar: encima de perder, debajo de lo caminado
             score, rank, tier = None, -9_999.5, 1
@@ -2659,6 +2695,10 @@ def _child_moves(pos):
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
                       'backed_light': backed_light,
+                      # Lo que decide el tier viaja en la fila: la marca que
+                      # pinta la plantilla y el orden tienen que salir del
+                      # MISMO hecho o la tabla vuelve a decir dos cosas.
+                      'walked': walked,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
@@ -4139,6 +4179,11 @@ def explore(request, key):
         pos.eval_cp if stm_white else -pos.eval_cp)
     eval_backed = (known is not None and known != pos.eval_cp
                    and pos.status == 'UNKNOWN')
+    # Y si NADIE ha buscado aqui, la cabecera lo dice — con respaldo o sin el.
+    # Sin respaldo no habia chip ninguno, asi que una posicion en mitad de una
+    # linea caminada ensenaba su eval sembrada tan segura como una de 512M
+    # (§ _walked_value).  Mismo predicado que ordena la tabla de abajo.
+    eval_walked = eval_stm is not None and _walked_value(pos)
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
         # Selector de profundidad del boton de peticion: vacio — y por tanto
@@ -4189,8 +4234,10 @@ def explore(request, key):
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.
-        'eval_backed_light': (eval_backed and not (pos.backed_nodes or 0)
-                              and not (pos.nodes_invested or 0)),
+        'eval_backed_light': eval_backed and eval_walked,
+        # Y sin respaldo que aclarar, la marca va sola: el numero es de una
+        # linea que pasa por aqui, no de una busqueda de aqui.
+        'eval_walked': eval_walked,
         'eval_point_str': None if point_stm is None else f'{point_stm:+d}cp',
         # Propuesta de nombre: en TODAS las posiciones desde el 28-jul.  Donde
         # no hay nombre se propone uno; donde lo hay, la misma caja propone una

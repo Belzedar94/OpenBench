@@ -332,7 +332,10 @@ class BackedJumpRenderTests(TestCase):
         root = ingest.get_or_create_position(logic.start_fen())
         child = ingest.get_or_create_position(
             logic.apply_move(root.fen, 'd2d4'))
+        # Con busqueda propia: sin respaldo no hay salto que ofrecer, y el
+        # valor es de motor, asi que tampoco entra la marca de caminado.
         child.eval_cp = 20
+        child.nodes_invested = 128_000_000
         child.save()
         Edge.objects.create(parent=root, move_uci='d2d4', child=child)
 
