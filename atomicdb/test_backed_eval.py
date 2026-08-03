@@ -353,9 +353,12 @@ class BackedDisplayTests(TestCase):
 
     def test_an_eval_with_no_nodes_behind_it_claims_no_support(self):
         # Cero nodos no es una busqueda propia flaca: es que no la hay. El
-        # numero esta sembrado de la linea del padre y la frase lo dice.
+        # numero esta sembrado de la linea del padre y la frase lo dice — y
+        # dice ademas que la siembra se repite pase tras pase, que es lo que
+        # explica una tabla con mas filas sembradas que lineas tiene un pase.
         self.assertEqual(views._own_search(388, 0),
-                         '+388 from a line, no direct search yet')
+                         '+388 from an engine line (passes seed their top '
+                         'moves over time), no direct search yet')
 
     def test_the_page_paints_the_tooltip_on_the_badge(self):
         root = ingest.get_or_create_position(logic.start_fen())

@@ -277,7 +277,10 @@ class CookielessHomeCacheTests(TestCase):
 # DISJUNTAS.  El boton usa ingest.unexplored_children (hijos MATERIALIZADOS
 # sin ningun conocimiento) y la tabla lista las jugadas legales que NO tienen
 # arista.  Un nodo expandido cuyos hijos estan todos sin analizar ensena
-# "Analyse all N unexplored replies" con CERO filas "unexplored" debajo.
+# "Analyse all N unexplored replies" con CERO filas "unexplored" debajo.  El
+# boton dice hoy otra cosa ("Analyse the N unanalysed moves"), pero lo que este
+# test fija no es el texto: es que su numero y las filas de abajo sigan siendo
+# la misma poblacion.
 # ---------------------------------------------------------------------------
 class UnexploredLabelTests(TestCase):
 
@@ -288,7 +291,7 @@ class UnexploredLabelTests(TestCase):
         page = self.client.get(f'/atomicdb/explore/{root.key}/')
         body = page.content.decode()
 
-        advertised = re.search(r'Analyse all (\d+) unexplored replies', body)
+        advertised = re.search(r'Analyse the (\d+) unanalysed moves?', body)
         self.assertIsNotNone(advertised, 'the button is not on the page')
         # explore.html:358 marca cada fila sin explorar con este texto.
         rows = len(re.findall(r'>unexplored<', body))

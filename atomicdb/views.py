@@ -2546,11 +2546,19 @@ def _own_search(point, nodes):
     esta sembrada de la linea del padre (§ ``ingest._seed_child_eval``), o sea
     que nadie ha buscado aqui.  Llamar a eso busqueda propia es justo lo que el
     reporte de comunidad llama pretender.
+
+    La frase dice ademas COMO llego el numero, porque la siembra se ACUMULA y
+    sin eso la tabla parece imposible: cada pase siembra su top-5 en los hijos
+    y el escaparate nuevo no borra las siembras del pase anterior, asi que un
+    nodo con millones de nodos invertidos acaba con casi toda su lista legal
+    sembrada.  Reporte de comunidad, literal: "why there are so many moves
+    evaluated if it only has multipv 5".
     """
     if point is None:
         return 'no direct search yet'
     if not nodes:
-        return f'{point:+d} from a line, no direct search yet'
+        return (f'{point:+d} from an engine line (passes seed their top '
+                f'moves over time), no direct search yet')
     return f'own search: {point:+d} @ {_human(nodes)} nodes'
 
 
@@ -2653,6 +2661,11 @@ def _child_moves(pos):
     for e in edges:
         c = e.child
         mate = None
+        # Motor MIRANDO ESTA JUGADA, el mismo predicado de la fila caminada
+        # leido del derecho (§ _walked_value): busqueda propia o respaldo con
+        # peso.  Viaja en la fila porque el resumen de la cabecera cuenta lo
+        # mismo que la tabla ordena, y dos predicados serian dos historias.
+        searched = not _walked_value(c)
         point = None if c.eval_cp is None else (
             c.eval_cp if stm_white else -c.eval_cp)
         backed_plies = 0
@@ -2720,6 +2733,7 @@ def _child_moves(pos):
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.
                       'walked': walked,
+                      'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
@@ -4083,6 +4097,83 @@ def _pv_verify_plies(pos):
     return min(len(pv), ingest.PV_VERIFY_MAX_PLIES)
 
 
+def _queued_children(moves):
+    """Cuantos de estos hijos tienen analisis EN VUELO, en UNA consulta.
+
+    Es la unica de las tres cifras del resumen que no viaja ya en la fila, y
+    entra por un ``IN`` sobre claves indexadas — no por una pregunta por hijo:
+    una tabla abierta son treinta y tantas filas, y ese patron es exactamente
+    el que convierte una pagina publica en treinta viajes a la base.
+
+    "En vuelo" es lo MISMO que llama vivo la linea de estado de esta posicion
+    (§ live_request): esperando en la cola o ya arrendado a un worker.  Dos
+    definiciones de vivo en la misma pagina son dos numeros que se contradicen.
+    """
+    keys = [move['key'] for move in moves if move['key']]
+    if not keys:
+        return 0
+    return (AnalysisTask.objects
+            .filter(position_id__in=keys,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED))
+            .values('position_id').distinct().count())
+
+
+def _moves_summary(moves):
+    """De que esta hecha la tabla de abajo, en una linea de cabecera.
+
+    Reporte de comunidad sobre un nodo con cinco lineas vigentes y 136 MILLONES
+    de nodos invertidos: "here I can request remaining moves while no analysis
+    is done in the node ... and just a bunch of walked evals ... feels wrong
+    idk".  El nodo tenia analisis de sobra; lo que no tenia era una frase que
+    dijera cuanto de esa lista es motor mirando ESA jugada y cuanto es una
+    siembra de las lineas de aqui.  Sin ella la unica lectura posible era la
+    peor: veintitantas filas con numero y ni una busqueda detras.
+
+    Los dos primeros numeros salen del MISMO predicado que ordena la tabla
+    (§ _walked_value), asi que el resumen y el orden no pueden discrepar.  Lo
+    que no suma al total de hijos son las jugadas sin valor de ningun tipo, y
+    esas las cuenta el boton de anchura, que es ademas lo unico que se puede
+    hacer con ellas.
+    """
+    if not moves:
+        return ''
+    searched = sum(1 for move in moves if move['searched'])
+    walked = sum(1 for move in moves if move['walked'])
+    queued = _queued_children(moves)
+    # El primero se dice SIEMPRE, cero incluido: "0 searched" es justo la
+    # historia del nodo del reporte, y callarlo la deja sin contar.
+    parts = [f'{searched} searched']
+    if walked:
+        parts.append(f'{walked} from lines only')
+    if queued:
+        parts.append(f'{queued} queued')
+    return 'Moves here: ' + ' · '.join(parts)
+
+
+def _node_story(pos):
+    """Lo que ESTA posicion tiene detras, dicho por la cabecera.
+
+    La pagina ensenaba los nodos invertidos en una linea gris debajo del FEN,
+    junto a las visitas y los segundos, y el visitante del reporte leyo la
+    cabecera entera como "no analysis is done in the node".  Con busqueda
+    propia el nodo lo dice arriba y con sus dos numeros: cuanto se busco y en
+    cuantos pases, que es ademas la explicacion de por que la tabla de abajo
+    tiene mas jugadas con valor que lineas tiene un pase (§ _own_search).
+
+    Sin nodos no hay frase: el caso sembrado ya lo cuenta su chip ``walked``, y
+    repetirlo aqui seria decir dos veces lo mismo con dos redacciones.
+    """
+    nodes = pos.nodes_invested or 0
+    if nodes <= 0:
+        return ''
+    passes = pos.visits or 0
+    if passes <= 0:
+        return f'This position: analysed ({_human(nodes)} nodes)'
+    return (f'This position: analysed ({_human(nodes)} nodes across '
+            f'{passes} pass{"" if passes == 1 else "es"})')
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -4217,6 +4308,12 @@ def explore(request, key):
         # entonces la plantilla no pinta ni el hueco (§ live_request.context).
         **live_request.context(pos),
         'pos': pos, 'moves': moves, 'parents': parents,
+        # La historia del conocimiento de este nodo, arriba y en claro: que se
+        # busco AQUI y de que esta hecha la tabla de abajo.  Las dos frases las
+        # compone el servidor, como la linea de peticion viva, para que lo que
+        # se cuenta y lo que se pinta salgan del mismo sitio.
+        'node_story': _node_story(pos),
+        'moves_summary': _moves_summary(moves),
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
