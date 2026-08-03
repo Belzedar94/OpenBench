@@ -26,6 +26,7 @@ importa y esta fijado: primero v1, que es el que se sabe caro, y luego v2.  Un
 la que v1 ya habia pedido — que es exactamente el aprobado que se busca.
 """
 
+import csv
 import json
 import math
 import os
@@ -66,6 +67,12 @@ class Command(BaseCommand):
         parser.add_argument(
             '--json', action='store_true',
             help='Emit one JSON object per pass instead of the table.')
+        parser.add_argument(
+            '--dump', metavar='PATH',
+            help='Vuelca a CSV la UNION de las dos cimas con las columnas '
+                 'que explican por que difieren.  Son 2*top filas como mucho, '
+                 'no la base: un volcado que hubiera que abrir por lotes no '
+                 'se abre.')
 
     def handle(self, *args, **options):
         passes = max(1, options['passes'])
@@ -119,6 +126,11 @@ class Command(BaseCommand):
             # tocar el conmutador, y "0,97" no contesta esa pregunta solo.
             'verdict': 'PASS' if verdict else 'FAIL',
         }
+        # El volcado sale de la ULTIMA pasada: si el veredicto es FAIL, lo que
+        # hay que mirar es la foto que lo produjo, no un promedio de tres.
+        if options['dump']:
+            summary['dump'] = _dump(options['dump'], first['head'],
+                                    second['head'])
         self.stdout.write(json.dumps(summary, sort_keys=True))
 
     def _run(self, engine, refresh, top):
@@ -194,6 +206,117 @@ def _kendall_tau(left, right):
     if denominator == 0:
         return 0.0, n     # un lado entero empatado: no hay orden que comparar
     return (concordant - discordant) / denominator, n
+
+
+# ---------------- el volcado ----------------
+
+DUMP_BATCH = 500
+
+DUMP_COLUMNS = ('key', 'klass', 'in_v1', 'in_v2', 'in_ball', 'reachable',
+                'prio_v1', 'prio_v2', 'delta', 'runits_v1', 'runits_v2',
+                'regret_ball', 'status', 'mate_band', 'expanded', 'visits',
+                'campaign', 'eval_cp', 'backed_eval')
+
+
+def _runits_of(priority, base):
+    """Las unidades de regret que un motor cobro, DESPEJADAS de su prioridad.
+
+    La formula es ``base - REGRET_WEIGHT * runits`` y ``base`` sale entera de
+    las columnas de la fila, asi que esta resta devuelve exactamente lo que el
+    motor uso — sin pagar un segundo Dijkstra global para preguntarselo.  Es la
+    diferencia entre un diagnostico que se puede lanzar en la maquina de
+    produccion y uno que hay que pedir por ventana tranquila.
+    """
+    if priority is None:
+        return None
+    return round((base - priority) / ingest.REGRET_WEIGHT, 6)
+
+
+def _klass(in_first, in_second, in_ball, reachable):
+    """La CLASE de la fila, que es el diagnostico ya masticado.
+
+    Las cuatro banderas se combinan en pocas formas y cada una tiene un nombre
+    y una causa.  ``walled`` es la que hay que buscar cuando el veredicto sale
+    FAIL con el orden intacto: nadie la alcanza caminando (un cierre no relaja
+    hacia abajo) pero la columna dice que cuelga de la raiz, asi que la foto
+    global le perdona el regret y el acotado se lo cobra saturado.
+    """
+    if in_first and in_second:
+        return 'agree'
+    if in_ball:
+        return 'in-ball-disagree'      # no deberia pasar: la formula es una
+    if reachable:
+        return 'walled'                # sin camino abierto, con arista
+    return 'loose'                     # suelta de verdad: los dos cobran 5
+
+
+def _dump(path, first, second):
+    """La union de las dos cimas, con el porque de cada fila al lado.
+
+    Se vuelca la UNION y no la base: lo que hay que contestar es "quien esta en
+    una cima y no en la otra, y que columna lo explica", y para eso sobran dos
+    mil filas.  Un volcado de cinco millones no se abre.
+
+    LO QUE NO SE HACE AQUI, Y POR QUE.  No se recalcula el Dijkstra GLOBAL para
+    poder poner el ``runits`` de v1 en las filas que v1 dejo fuera de su cima:
+    esa foto son los 4,7 GB que este trabajo viene a quitar, y un diagnostico
+    que hay que pedir por ventana tranquila deja de lanzarse.  La pregunta se
+    contesta igual de bien con ``in_ball`` — que sale del recorrido ACOTADO,
+    barato — mas ``reachable``: una fila que nadie alcanzo caminando pero que
+    la columna marca es exactamente la que los dos motores tasan distinto, y
+    ``klass`` ya la llama por su nombre.
+    """
+    from atomicdb.models import Position
+
+    keys = sorted(set(first) | set(second))
+    votes = ingest._active_campaign_votes()
+    ball = ingest._regret_from_root_bounded(campaign_votes=votes)
+    buckets = {}
+    written = 0
+    with open(path, 'w', encoding='utf-8', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=DUMP_COLUMNS)
+        writer.writeheader()
+        for start in range(0, len(keys), DUMP_BATCH):
+            chunk = keys[start:start + DUMP_BATCH]
+            for (key, eval_cp, backed_eval, status, expanded, visits,
+                 campaign_id, reachable) in (
+                     Position.objects.filter(key__in=chunk).values_list(
+                         'key', 'eval_cp', 'backed_eval', 'status', 'expanded',
+                         'visits', 'campaign_id', 'reachable')):
+                known = ingest.known_eval_of(status, backed_eval, eval_cp)
+                base = ingest.priority_of(known, expanded, visits, campaign_id,
+                                          0.0, votes)
+                one, two = first.get(key), second.get(key)
+                in_ball = key in ball
+                klass = _klass(key in first, key in second, in_ball, reachable)
+                buckets[klass] = buckets.get(klass, 0) + 1
+                writer.writerow({
+                    'key': key, 'klass': klass,
+                    'in_v1': int(key in first), 'in_v2': int(key in second),
+                    'in_ball': int(in_ball), 'reachable': int(reachable),
+                    'prio_v1': _round6(one), 'prio_v2': _round6(two),
+                    'delta': (None if one is None or two is None
+                              else round(one - two, 6)),
+                    'runits_v1': _runits_of(one, base),
+                    'runits_v2': _runits_of(two, base),
+                    'regret_ball': _round6(ball.get(key)),
+                    'status': status,
+                    'mate_band': int(known is not None
+                                     and abs(known) >= ingest.MATE_BAND),
+                    'expanded': int(expanded), 'visits': visits,
+                    'campaign': campaign_id, 'eval_cp': eval_cp,
+                    'backed_eval': backed_eval})
+                written += 1
+    # El recuento por clase es el diagnostico en una linea.  Un FAIL con
+    # ``walled`` grande no necesita que nadie abra el CSV: dice que la columna
+    # y el recorrido no contestan la misma pregunta.
+    return {'path': path, 'rows': written, 'union': len(keys),
+            'classes': dict(sorted(buckets.items(),
+                                   key=lambda item: -item[1]))}
+
+
+def _round6(value):
+    return None if value is None else round(value, 6)
 
 
 # ---------------- memoria ----------------
