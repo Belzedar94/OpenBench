@@ -485,16 +485,17 @@ class BackedIngestTests(TestCase):
         self.assertIn('data-best-move="e2e3"', body)
 
     def test_a_narrow_shallow_pass_does_not_clobber_the_wide_snapshot(self):
-        """The raw-lines showcase never downgrades; knowledge always flows.
+        """The raw-lines showcase never downgrades, in width or in depth.
 
         A visitor requests MultiPV 5 and reads five lines; a later FILL
         pass with searchmoves re-touches the position with two lines at 8M
         and used to replace the whole snapshot — 275 of 400 revisited
         positions carried the clobber when Wolfram reported seeing one
-        line where five were promised.  Narrow-and-shallower keeps its
-        knowledge (eval and best_move still update) but not the showcase;
-        DEEPER passes still replace it even when narrower, because that is
-        the deliberate depth-over-width revisit policy.
+        line where five were promised.  A shallower pass now keeps its
+        accounting but arbitrates nothing: neither the showcase nor the
+        number.  DEEPER passes still replace it even when narrower, because
+        that is the deliberate depth-over-width revisit policy, and at
+        EQUAL depth width decides exactly as before.
         """
         pos = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(pos)
@@ -507,7 +508,7 @@ class BackedIngestTests(TestCase):
         ingest.ingest_analysis(pos.key, self._lines(pos, [90, 80]), 8_000_000)
         pos.refresh_from_db()
         self.assertEqual(len(pos.last_analysis), 5)   # escaparate intacto
-        self.assertEqual(pos.eval_cp, 90)             # conocimiento fluye
+        self.assertEqual(pos.eval_cp, 50)             # y el numero, tambien
 
         ingest.ingest_analysis(pos.key, self._lines(pos, [70, 60]),
                                512_000_000)
@@ -522,11 +523,67 @@ class BackedIngestTests(TestCase):
         self.assertEqual(len(prior), 5)
 
         ingest.ingest_analysis(pos.key, self._lines(
-            pos, [55, 45, 35, 25, 15]), 128_000_000)
+            pos, [55, 45, 35, 25, 15]), 512_000_000)
         pos.refresh_from_db()
-        # Un pase fresco igual de ancho sustituye tambien al anterior.
+        # A la MISMA hondura, un pase fresco igual de ancho sustituye tambien
+        # al anterior.
         self.assertEqual(len(pos.last_analysis), 5)
         self.assertFalse(any(l.get('prior_pass') for l in pos.last_analysis))
+
+    def test_a_shallow_repeat_never_undoes_a_deeper_search(self):
+        """640M invertidos y mandando el pase de 128M: computo tirado.
+
+        La otra mitad de lo que reporto la comunidad (30-jul).  Un click de
+        Verify PV en el padre encargaba el suelo de peticion sobre un nodo que
+        ya tenia 512M, y ese pase — igual de ancho, mucho mas superficial — se
+        llevaba por delante escaparate, eval y best_move: "moreover, after
+        that deeper analysis was overwritten by more shallow one".  Ahora el
+        trabajo se cobra igual (visitas y nodos siguen sumando) pero no
+        arbitra nada.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        deep_move = Edge.objects.filter(parent=pos) \
+                        .order_by('move_uci')[4].move_uci
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [10, 20, 30, 40, 50]), 512_000_000)
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [90, 80, 70, 60, 55]), 128_000_000)
+        pos.refresh_from_db()
+
+        self.assertEqual([l['eval_cp'] for l in pos.last_analysis],
+                         [10, 20, 30, 40, 50])
+        self.assertEqual(pos.eval_cp, 50)
+        self.assertEqual(pos.best_move, deep_move)
+        # El pase superficial no manda, pero se hizo: 512M + 128M donados.
+        self.assertEqual(pos.nodes_invested, 640_000_000)
+        self.assertEqual(pos.visits, 2)
+
+    def test_at_the_same_budget_the_width_rule_still_decides(self):
+        """Empatar hondura le devuelve la palabra a la anchura, como antes."""
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 128_000_000)
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [60, 45, 35, 25, 15]), 128_000_000)
+        pos.refresh_from_db()
+
+        self.assertEqual([l['eval_cp'] for l in pos.last_analysis],
+                         [60, 45, 35, 25, 15])
+        self.assertEqual(pos.eval_cp, 60)
+
+        # Y a esa misma hondura uno mas ESTRECHO sigue sin tocar el
+        # escaparate, con su conocimiento entrando igual: la regla de anchura
+        # no se ha movido de donde estaba.
+        ingest.ingest_analysis(pos.key, self._lines(pos, [95, 85]),
+                               128_000_000)
+        pos.refresh_from_db()
+        current = [l for l in pos.last_analysis if not l.get('prior_pass')]
+        self.assertEqual(len(current), 5)
+        self.assertEqual(pos.eval_cp, 95)
 
     def test_navigating_onto_a_terminal_closes_the_parent_at_once(self):
         """A goto can DISCOVER a mate — the cascade must fire right there.

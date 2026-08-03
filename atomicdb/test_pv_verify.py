@@ -76,6 +76,60 @@ class EnqueuePvVerificationTests(TestCase):
         self.assertGreater(ingest.REQUEST_BUDGET_LADDER[0],
                            ingest.BUDGET_LADDER[0])
 
+    def test_a_node_already_analysed_deeper_is_not_bought_again(self):
+        """El suelo de peticion no encarga 128M sobre lo que ya tiene 512M.
+
+        Es el gasto que la comunidad vio de cerca: "already has 640M analysis
+        but requested 128M because clicked Verify PV in parent".  El suelo
+        existe para que un click no compre calderilla, no para repetir peor
+        una busqueda que ya esta guardada.
+        """
+        self._store([_analysis(LINE)])
+        fens = _line_fens(LINE)
+        deep = ingest.get_or_create_position(fens[0])
+        AnalysisTask.objects.create(
+            position=deep, generation=deep.visits, budget_nodes=512_000_000,
+            source=AnalysisTask.Source.USER,
+            state=AnalysisTask.TState.COMPLETED)
+        # Ese analisis ya aterrizo, o sea que la generacion viva es otra: el
+        # dedup por generacion no cubre este caso, y por eso hacia falta mirar
+        # lo COMPLETADO.
+        Position.objects.filter(key=deep.key).update(visits=1)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 3)
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=deep.key,
+            state=AnalysisTask.TState.PENDING).exists())
+        # ...y el resto de la linea se compra igual: saltar no es cortar.
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=logic.key_of(fens[3])).exists())
+
+    def test_only_a_completed_budget_that_reaches_the_request_skips(self):
+        """8M completados no son la respuesta que este click viene a comprar;
+        128M completados, exactamente el suelo, si lo son."""
+        self._store([_analysis(LINE)])
+        fens = _line_fens(LINE)
+        cheap = ingest.get_or_create_position(fens[0])
+        exact = ingest.get_or_create_position(fens[1])
+        for node, budget in ((cheap, 8_000_000),
+                             (exact, ingest.REQUEST_BUDGET_LADDER[0])):
+            AnalysisTask.objects.create(
+                position=node, generation=node.visits, budget_nodes=budget,
+                state=AnalysisTask.TState.COMPLETED)
+            Position.objects.filter(key=node.key).update(visits=1)
+
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual(queued, 3)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=cheap.key,
+            state=AnalysisTask.TState.PENDING).exists())
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=exact.key,
+            state=AnalysisTask.TState.PENDING).exists())
+
     def test_a_second_click_does_not_duplicate_live_work(self):
         self._store([_analysis(LINE)])
 

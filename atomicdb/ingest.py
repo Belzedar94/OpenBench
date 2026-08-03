@@ -499,14 +499,32 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
-        # El ESCAPARATE de lineas no se pisa hacia abajo.  Un visitante pide
-        # MultiPV 5 y ve sus cinco lineas; si luego un pase FILL con
-        # searchmoves (1-2 lineas, 8M) re-toca la posicion, ese pase aporta
-        # conocimiento (eval/best_move siguen actualizandose SIEMPRE) pero
-        # no debe sustituir la foto ancha por una rendija — 275 de 400
-        # posiciones revisitadas tenian el clobber cuando Wolfram lo reporto
-        # (29-jul).  Un analisis mas PROFUNDO si sustituye aunque sea mas
-        # estrecho: esa es la politica deliberada de MultiPV 2 en revisitas.
+        # El ESCAPARATE de lineas no se pisa NI hacia abajo NI hacia atras.
+        #
+        # ANCHURA.  Un visitante pide MultiPV 5 y ve sus cinco lineas; si
+        # luego un pase FILL con searchmoves (1-2 lineas, 8M) re-toca la
+        # posicion, ese pase aporta conocimiento pero no debe sustituir la
+        # foto ancha por una rendija — 275 de 400 posiciones revisitadas
+        # tenian el clobber cuando Wolfram lo reporto (29-jul).  Un analisis
+        # mas PROFUNDO si sustituye aunque sea mas estrecho: esa es la
+        # politica deliberada de MultiPV 2 en revisitas.
+        #
+        # PROFUNDIDAD.  La anchura entraba por su propia puerta — bastaba
+        # empatar el numero de lineas para sustituir — asi que un pase de
+        # 128M con cinco lineas borraba una foto de 640M con cinco lineas y
+        # la posicion se quedaba contando la version pobre de lo que ya
+        # sabia.  Un pase por DEBAJO del presupuesto que escribio la foto
+        # vigente no tiene nada que anadirle: no manda ni el escaparate, ni
+        # ``eval_cp``, ni ``best_move``.  Todo lo demas del ingest si ocurre
+        # — visitas, nodos invertidos, hijos, mates, respaldo, credito de
+        # maquina: el trabajo se hizo y se paga, simplemente no arbitra.  A
+        # IGUAL presupuesto vuelve a decidir la anchura.
+        #
+        # DESCARTADO a proposito: colar al pase superficial cuando reclama
+        # mate.  Los mates ya viajan por su propio canal — la prueba
+        # certificada y ``won_line`` — que este arbitraje no toca; abrirles
+        # ademas esta puerta seria decidir dos veces la misma cosa, y la
+        # segunda con la evidencia peor.
         snapshot = capped_analysis(lines[:8])
         if snapshot:
             snapshot[0]['_budget'] = nodes_budget
@@ -517,8 +535,9 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                  if isinstance(ln, dict) and ln.get('prior_pass')]
         stored_budget = (current[0].get('_budget', 0)
                          if current and isinstance(current[0], dict) else 0)
-        if (not current or len(snapshot) >= len(current)
-                or nodes_budget >= stored_budget):
+        shallower = bool(current) and nodes_budget < stored_budget
+        if not shallower and (not current or nodes_budget > stored_budget
+                              or len(snapshot) >= len(current)):
             # Un pase mas ANCHO que el nuevo no se tira: sus lineas 3..N
             # llevan informacion que el pase profundo de 2 lineas no repite
             # (peticion de Wolfram).  Se conservan marcadas como pase
@@ -537,6 +556,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                         else best_eval < pos.eval_cp)
             if not improves:
                 best_eval, best_move = None, None
+        if shallower:
+            # Mismo arbitraje que el escaparate, y por lo mismo: este numero
+            # sale de una busqueda que la foto vigente ya supero.
+            best_eval, best_move = None, None
         if best_move:
             pos.best_move = best_move
         if best_eval is not None:
@@ -3365,7 +3388,9 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     pide mas, y con el viaja su clamp de mates cortos: un nodo de la PV que ya
     reclama un mate corto con distancia conocida se VERIFICA barato en vez de
     excavarse.  Dedup como siempre: una tarea viva en la generacion actual no
-    se duplica.
+    se duplica — y un nodo que ya tiene COMPLETADO ese presupuesto o mas se
+    salta entero: la linea se camina igual, pero no se le compra una busqueda
+    mas floja que la que ya tiene guardada.
 
     El llamante es dueno de la transaccion, igual que en
     ``enqueue_unexplored_children``.
@@ -3398,6 +3423,16 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
         clamp = _short_mate_clamp(child)
         budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
                   if clamp is None else budget_for(child))
+        # Lo que este nodo YA tiene comprado manda sobre el suelo de peticion.
+        # El suelo existe para que un click no pague calderilla, no para
+        # encargar una busqueda peor que la guardada: un hijo con 512M
+        # COMPLETADOS no necesita los 128M del boton del padre, y encargarlos
+        # gastaba computo donado en repetir la respuesta que ya estaba.  Vale
+        # para las dos ramas del presupuesto — el clamp de mate corto pide
+        # aun menos, asi que lo respeta con mas razon.
+        done = _completed_max_budget(child)
+        if done is not None and done >= budget:
+            continue
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
