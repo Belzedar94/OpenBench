@@ -407,6 +407,81 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(payload['backed_plies'], 3)
 
 
+class WalkedOrderTests(TestCase):
+    """Un valor CAMINADO no puede encabezar la tabla (§ views._child_moves).
+
+    Reporte de comunidad: "after d4 e6 c3 displayed as top move despite the
+    fact that there is no engine analysis in that position and just someone
+    did Be7 move and analyzed it".  Y no era una tonteria academica: tras
+    Qh4-e4-c2 las blancas pierden material, o sea que el primer puesto lo
+    ocupaba una jugada que nadie habia mirado y que ademas es mala.
+    """
+
+    def test_a_walked_value_does_not_outrank_what_the_engine_looked_at(self):
+        parent = _pos('WKP', 'w', expanded=True)
+        # +9000 caminados: espina respaldada, cero busqueda en ninguna parte.
+        walked = _pos('WKW', 'b', backed_eval=9_000, backed_plies=4)
+        # +20 de verdad, con 128M detras.  Modesto, pero comprobado.
+        searched = _pos('WKS', 'b', eval_cp=20, nodes_invested=128_000_000)
+        _edge(parent, walked, 'e7e6')
+        _edge(parent, searched, 'd7d5')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
+        self.assertEqual([row['tier'] for row in rows], [3, 2])
+        # Y el numero caminado sigue en su fila, entero y con su chip: baja de
+        # puesto, no se esconde.
+        self.assertTrue(rows[1]['backed_light'])
+        self.assertEqual(rows[1]['score'], 9_000)
+
+    def test_a_walked_value_still_beats_a_row_nobody_has_touched(self):
+        """Caminado es poco, pero es mas que nada: sigue encima de lo vacio."""
+        parent = _pos('WBP', 'w', expanded=True)
+        walked = _pos('WBW', 'b', backed_eval=-400, backed_plies=2)
+        blank = _pos('WBN', 'b')
+        _edge(parent, walked, 'e7e6')
+        _edge(parent, blank, 'd7d5')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
+        self.assertEqual([row['tier'] for row in rows], [2, 1])
+
+    def test_the_proven_ends_of_the_table_do_not_move(self):
+        parent = _pos('WEP', 'w', expanded=True)
+        won = _pos('WEW', 'b', status='WHITE_WIN', closure='TERMINAL')
+        lost = _pos('WEL', 'b', status='BLACK_WIN', closure='TERMINAL')
+        walked = _pos('WEK', 'b', backed_eval=9_000, backed_plies=4)
+        searched = _pos('WES', 'b', eval_cp=20, nodes_invested=128_000_000)
+        blank = _pos('WEN', 'b')
+        _edge(parent, won, 'h5f7')
+        _edge(parent, lost, 'a7a6')
+        _edge(parent, walked, 'e7e6')
+        _edge(parent, searched, 'd7d5')
+        _edge(parent, blank, 'b7b6')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows],
+                         ['h5f7', 'd7d5', 'e7e6', 'b7b6', 'a7a6'])
+        self.assertEqual([row['tier'] for row in rows], [4, 3, 2, 1, 0])
+
+    def test_two_walked_rows_keep_their_own_order(self):
+        """Dentro del tier manda el score de siempre: el tier no lo aplana."""
+        parent = _pos('WWP', 'w', expanded=True)
+        better = _pos('WWB', 'b', backed_eval=300, backed_plies=2)
+        worse = _pos('WWO', 'b', backed_eval=-300, backed_plies=6)
+        _edge(parent, worse, 'e7e6')
+        _edge(parent, better, 'd7d5')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
+        self.assertEqual([row['tier'] for row in rows], [2, 2])
+        self.assertEqual([row['score'] for row in rows], [300, -300])
+
+
 class BackedIngestTests(TestCase):
     """La propagacion viaja DENTRO del flujo de submit, sobre el arbol real."""
 

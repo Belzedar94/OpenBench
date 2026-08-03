@@ -2442,7 +2442,29 @@ def _child_moves(pos):
     Cada fila muestra el MEJOR CONOCIMIENTO ACTUAL del hijo (status probado >
     backed > eval puntual); ``point`` conserva la eval puntual cruda para que
     el respaldo nunca borre lo que el motor dijo de verdad.
-    Orden: victorias del que mueve, luego por score, derrotas al final."""
+
+    Orden: ``(-tier, -rank)``.  El ``rank`` es el de siempre — el score, con
+    los desempates de distancia de mate dentro de las victorias y de las
+    derrotas — y ordena DENTRO de su tier; el tier dice DE QUE esta hecho ese
+    numero:
+
+      4  victoria probada del que mueve
+      3  conocimiento de MOTOR: eval propia, respaldo con busqueda de verdad
+         detras, o tablas probadas
+      2  respaldo CAMINADO (``backed_light``): alguien profundizo la linea a
+         mano y el valor subio sin que nadie buscara en ninguna parte
+      1  sin analizar
+      0  derrota probada
+
+    El tier existe por un reporte de comunidad: "after d4 e6 c3 displayed as
+    top move despite the fact that there is no engine analysis in that
+    position and just someone did Be7 move and analyzed it" — y en efecto,
+    tras Qh4-e4-c2 las blancas pierden material.  Un valor VIRGEN de motor no
+    puede ganarle el puesto a lo que el motor SI ha mirado: no es que sea
+    peor, es que nadie lo ha comprobado, y la tabla ordena por conocimiento
+    antes que por optimismo.  La fila caminada se sigue ensenando entera, con
+    su chip y su numero; lo unico que pierde es el derecho a ponerse por
+    encima de lo avalado."""
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
@@ -2455,20 +2477,31 @@ def _child_moves(pos):
         point = None if c.eval_cp is None else (
             c.eval_cp if stm_white else -c.eval_cp)
         backed_plies = 0
+        backed_light = False
         if c.status == win:
-            score, rank = 10_000, 10_001
+            score, rank, tier = 10_000, 10_001, 4
         elif c.status == loss:
-            score, rank = -10_000, -10_001
+            score, rank, tier = -10_000, -10_001, 0
         elif c.status == 'DRAW':
-            score, rank = 0, 0
+            score, rank, tier = 0, 0, 3   # probado: es conocimiento de motor
         elif c.backed_eval is not None or c.eval_cp is not None:
             known = ingest.best_known_eval(c)
             score = known if stm_white else -known
             rank = score
             if c.backed_eval is not None and c.backed_eval != c.eval_cp:
                 backed_plies = c.backed_plies
+            # Territorio VIRGEN de motor: ni el respaldo trae peso de busqueda
+            # ni el nodo tiene busqueda propia — el valor solo puede venir de
+            # una linea caminada, y el chip lo dice.  Con busqueda propia
+            # (aunque el respaldo pese 0) el sitio no es virgen y el chip
+            # normal con su tooltip de own search sigue mandando.
+            backed_light = (bool(backed_plies)
+                            and not (c.backed_nodes or 0)
+                            and not (c.nodes_invested or 0))
+            tier = 2 if backed_light else 3
         else:
-            score, rank = None, -9_999.5   # sin analizar: encima de perder
+            # sin analizar: encima de perder, debajo de lo caminado
+            score, rank, tier = None, -9_999.5, 1
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -2494,23 +2527,18 @@ def _child_moves(pos):
                       'pn_h': None if pn is None else proof.format_number(pn),
                       'dn_h': None if dn is None else proof.format_number(dn),
                       'closure': c.closure, 'score': score, 'rank': rank,
+                      # De que esta hecho el numero (§ docstring): el orden
+                      # pregunta primero por esto y solo despues por el score.
+                      'tier': tier,
                       'mate': mate, 'point': point,
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
-                      # Territorio VIRGEN de motor: ni el respaldo trae peso
-                      # de busqueda ni el nodo tiene busqueda propia — el
-                      # valor solo puede venir de una linea caminada, y el
-                      # chip lo dice.  Con busqueda propia (aunque el
-                      # respaldo pese 0) el sitio no es virgen y el chip
-                      # normal con su tooltip de own search sigue mandando.
-                      'backed_light': (bool(backed_plies)
-                                       and not (c.backed_nodes or 0)
-                                       and not (c.nodes_invested or 0)),
+                      'backed_light': backed_light,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
-    moves.sort(key=lambda m: -m['rank'])
+    moves.sort(key=lambda m: (-m['tier'], -m['rank']))
     return moves
 
 
