@@ -26,6 +26,31 @@ CLI: accepts the cutechess flag set the worker builds (-repeat -recover
 apply. UCI option names may contain spaces because the worker passes a real
 argv list to the runner.
 
+-fenrelay (opt-in) switches the position relay from movetext to FEN: see
+"FEN relay" below. Without the flag nothing about a game changes.
+
+FEN relay
+---------
+By default each engine is handed `position fen <opening> moves <every move so
+far>`. That only works while both engines generate the same moves: an engine
+resolves an incoming move token by matching it against its OWN move list, and
+Spell-Stockfish treats a token it cannot match as fatal --
+
+    info string CRITICAL ERROR: Command `position ... moves e2e5` failed.
+    Reason: Illegal move: e2e5                       (then exit code 1)
+
+so a patch that makes dev generate moves base does not have cannot be measured
+at all: base dies the first time dev plays one of the new moves.
+
+With -fenrelay the engines never see each other's move strings. The runner
+keeps the game state as a FEN, hands each side `position fen <current>` and
+nothing else, and after a bestmove asks THAT engine -- the only one that is
+guaranteed to know the move, since it just generated it -- to apply the token
+and print the resulting position (`position fen <cur> moves <best>` + `d`).
+The runner validates the transition itself in the spell FEN dialect (see
+spellfen.py) before relaying it, and a mover whose own parser rejects its own
+bestmove loses the game as an illegal move.
+
 Example (local smoke):
   python tools/uci_pair_runner.py -repeat -recover -variant standard \
       -concurrency 2 -games 8 \
@@ -57,6 +82,10 @@ NONE_MOVES = ("(none)", "0000", "none")
 MOVE_RE = re.compile(r"^[A-Za-z0-9@+=,\-]{2,12}$")
 
 _out_lock = threading.Lock()
+
+# Spell FEN dialect helpers. Imported only when -fenrelay is on, so a movetext
+# run neither needs nor touches the module.
+spellfen = None
 
 # Every live engine subprocess, so that no exit path can leak one: normal
 # exit (atexit), boot failures, and the hard-exit taken when our stdout pipe
@@ -112,12 +141,32 @@ def warn(msg):
     sys.stderr.flush()
 
 
+def load_spellfen():
+    """Import spellfen.py, which ships next to this runner.
+
+    Called once from main() when -fenrelay is on, so a missing module aborts
+    the batch before any game is started rather than mid-relay.
+    """
+    global spellfen
+    if spellfen is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import spellfen as module
+        spellfen = module
+    return spellfen
+
+
 class EngineDied(RuntimeError):
     pass
 
 
 class EngineStalled(RuntimeError):
     pass
+
+
+class IllegalMove(RuntimeError):
+    """-fenrelay: a mover's bestmove was refused by its own move parser."""
 
 
 # --------------------------------------------------------------------------
@@ -357,6 +406,45 @@ class Engine:
                 best = parts[1] if len(parts) > 1 else "(none)"
                 return best, info, elapsed_ms
 
+    def apply_move(self, fen, move):
+        """-fenrelay: apply this engine's OWN bestmove; return the new FEN.
+
+        The mover is asked because it is the only side guaranteed to know the
+        token it just produced -- which is the whole point of the mode. What
+        comes back is checked here before it is relayed any further.
+        """
+        self.send("position fen %s moves %s" % (fen, move))
+        self.send("d")
+        self.send("isready")
+        try:
+            lines = self.read_until("readyok", timeout=60)
+        except EngineDied as exc:
+            # Spell-Stockfish answers a token that is not in its own move list
+            # with 'CRITICAL ERROR: ... Illegal move: <token>' and exits(1).
+            # An engine refusing its own bestmove is an illegal move, not a
+            # crash, and the two are counted separately by the worker.
+            if "Illegal move" in str(exc) or "CRITICAL ERROR" in str(exc):
+                raise IllegalMove("%s refused its own bestmove %s"
+                                  % (self.name, move)) from exc
+            raise
+        new_fen = None
+        for line in lines:
+            text = line.strip()
+            if text.startswith("Fen:"):
+                new_fen = text[len("Fen:"):].strip()
+        if new_fen is None:
+            raise IllegalMove("%s printed no position after %s"
+                              % (self.name, move))
+        # The runner certifies the transition, not the engine: a FEN that is
+        # not in the spell dialect, or one whose side to move did not flip,
+        # means the move did not happen and must not reach the opponent.
+        if (len(spellfen.fields(new_fen)) < 7
+                or spellfen.side_to_move(new_fen)
+                == spellfen.side_to_move(fen)):
+            raise IllegalMove("%s did not move for %s: %s"
+                              % (self.name, move, new_fen))
+        return new_fen
+
     def quit(self):
         try:
             self.send("quit")
@@ -423,6 +511,7 @@ def play_game(white, black, fen, cfg):
     moves = []
     record = []
     stm0, _ = _fen_fields(fen)
+    cur_fen = fen          # -fenrelay: the game state, replayed to nobody
 
     def finish(result, reason, termination="normal", restart=False):
         out = Outcome(result, reason, termination, restart)
@@ -443,9 +532,14 @@ def play_game(white, black, fen, cfg):
         tc = eng.spec.tc
         clk = clocks[eng]
 
-        pos_cmd = "position fen %s" % fen
-        if moves:
-            pos_cmd += " moves " + " ".join(moves)
+        if cfg.fenrelay:
+            # No movetext at all: the opponent's move strings never reach this
+            # engine, only the position they produced.
+            pos_cmd = "position fen %s" % cur_fen
+        else:
+            pos_cmd = "position fen %s" % fen
+            if moves:
+                pos_cmd += " moves " + " ".join(moves)
 
         if tc.kind == TimeControl.TIMED:
             mine = max(1, int(clk["time"]))
@@ -516,6 +610,25 @@ def play_game(white, black, fen, cfg):
         if not MOVE_RE.match(best):
             return loses(eng, "%s makes an illegal move: %s"
                          % (side_of(eng), best), "illegal move")
+
+        if cfg.fenrelay:
+            try:
+                cur_fen = eng.apply_move(cur_fen, best)
+            except IllegalMove as exc:
+                warn(str(exc))
+                # The engine exits(1) on this path, so the pair is rebooted
+                # exactly as it is after a crash.
+                return loses(eng, "%s makes an illegal move: %s"
+                             % (side_of(eng), best), "illegal move",
+                             restart=True)
+            except EngineStalled as exc:
+                warn(str(exc))
+                return loses(eng, "%s's connection stalls" % side_of(eng),
+                             "stalled connection", restart=True)
+            except EngineDied as exc:
+                warn(str(exc))
+                return loses(eng, "%s disconnects" % side_of(eng),
+                             "abandoned", restart=True)
 
         moves.append(best)
         record.append((best, _fmt_comment(info, elapsed_ms)))
@@ -641,7 +754,8 @@ ONE_ARG_FLAGS = {"-variant", "-concurrency", "-games", "-rounds", "-srand",
                  "-ratinginterval", "-tournament", "-maxmoves",
                  "--seed", "--max-plies", "--stall-draw-cp", "--adj-cp",
                  "--adj-plies", "--stall-grace", "--fixed-budget"}
-ZERO_ARG_FLAGS = {"-repeat", "-recover", "-wait", "--debug", "-debug"}
+ZERO_ARG_FLAGS = {"-repeat", "-recover", "-wait", "--debug", "-debug",
+                  "-fenrelay"}
 IGNORED = {"-tb", "-tbpieces", "-event", "-site", "-ratinginterval",
            "-tournament", "-rounds", "-wait", "-sprt", "-maxmoves"}
 
@@ -691,6 +805,7 @@ def parse_cli(argv):
     cfg.stall_grace_s = 10.0
     cfg.fixed_budget_s = 600.0
     cfg.debug = False
+    cfg.fenrelay = False
 
     i = 0
     while i < len(argv):
@@ -720,6 +835,8 @@ def parse_cli(argv):
                 cfg.repeat = True
             elif flag in ("--debug", "-debug"):
                 cfg.debug = True
+            elif flag == "-fenrelay":
+                cfg.fenrelay = True
             # -recover: always-on behavior; -wait: ignored
             i += 1
             continue
@@ -844,6 +961,10 @@ def elo_stats(w, losses, d):
 def main():
     cfg = parse_cli(sys.argv[1:])
     dev, base = cfg.specs  # first -engine = dev, plays White in odd games
+
+    if cfg.fenrelay:
+        # Fail here rather than mid-game if the dialect helpers are missing.
+        load_spellfen()
 
     book = load_book(cfg.openings["file"])
     order = cfg.openings.get("order", "sequential")
