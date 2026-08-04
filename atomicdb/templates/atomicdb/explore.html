@@ -563,11 +563,11 @@
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
-        {# Mismo chip-enlace que la cabecera, con la URL de ESTA fila.  Y en el
-           hueco del chip mudo, cuando la jugada encabeza una linea VIGENTE, su
-           numero: mismo aviso y mismo tier, dicho por su nombre (§
-           views._line_numbers).  El chip pelado se queda para las siembras que
-           ya no tienen linea. #}
+        {% comment %}Mismo chip-enlace que la cabecera, con la URL de ESTA
+           fila.  Y en el hueco del chip mudo, cuando la jugada encabeza una
+           linea VIGENTE, su numero: mismo aviso y mismo tier, dicho por su
+           nombre (§ views._line_numbers).  El chip pelado se queda para las
+           siembras que ya no tienen linea.{% endcomment %}
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
