@@ -99,7 +99,19 @@ class Position(models.Model):
     priority  = models.FloatField(default=0.0, db_index=True)      # selector (§4.1)
     campaign  = models.ForeignKey('Campaign', null=True, on_delete=models.SET_NULL,
                                   related_name='positions')
-    updated   = models.DateTimeField(auto_now=True)
+    # "QUE SE HA MOVIDO DESDE LAS Y CUARTO".  Lo escribe ``auto_now`` en cada
+    # ``save()``, y NO lo escribe un ``bulk_update`` de columnas concretas —
+    # que es justo lo que hace util la marca: la pasada del selector reescribe
+    # ``priority`` a millones de filas sin ensuciar ninguna, asi que "tocada"
+    # sigue significando "alguien cambio lo que esta posicion SABE".  Lo que si
+    # tiene que ponerla A MANO es todo ``update`` de queryset que toque un
+    # termino de la formula, porque ahi ``auto_now`` no dispara.
+    #
+    # Indexada desde el modo delta del selector (§ ingest, ``_delta_keys``) y
+    # desde el completado de cobertura, que pide las mas recientes con un
+    # ``order_by('-updated')`` acotado: sin indice eso es ordenar la tabla
+    # entera cada minuto para quedarse con las primeras filas.
+    updated   = models.DateTimeField(auto_now=True, db_index=True)
 
     class Meta:
         indexes = [

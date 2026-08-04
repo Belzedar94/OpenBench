@@ -11,6 +11,7 @@ import functools
 import heapq
 import math
 import time
+from datetime import timedelta
 
 from django.conf import settings
 from django.db.models import Max, Q
@@ -1728,16 +1729,29 @@ def _revive_tombstones(keys):
     subarbol, asi que la lapida deja de ser cierta.  Se levanta un solo nivel:
     los nietos vuelven solos en cuanto el selector visite a sus padres, y una
     resurreccion recursiva del cono entero seria un UPDATE sin cota.
+
+    ``updated`` SE ESCRIBE A MANO, y no es adorno.  Un ``update`` de queryset
+    no dispara ``auto_now``, y resucitar es exactamente el momento en que esta
+    fila vuelve a existir para el selector: pasa de lapida (fuera del filtro de
+    vivas para siempre) a candidata con prioridad 0,0 — que ademas es un numero
+    ALTO al lado de las que arrastran regret.  Sin la marca, una pasada
+    incremental (§ modo delta) no la veria moverse, y una resucitada que
+    quedase fuera de la bola se quedaria en la cola con ese 0,0 provisional.
+    Mismo gesto que ya hacen los cierres (``_close_child``) y la siembra de
+    eval del padre.
     """
     if not keys:
         return 0
+    now = timezone.now()
     revived = Position.objects.filter(
-        key__in=list(keys), priority__lte=DEAD / 2).update(priority=0.0)
+        key__in=list(keys), priority__lte=DEAD / 2).update(priority=0.0,
+                                                           updated=now)
     child_keys = list(Edge.objects.filter(parent_id__in=list(keys))
                       .values_list('child_id', flat=True))
     if child_keys:
         revived += Position.objects.filter(
-            key__in=child_keys, priority__lte=DEAD / 2).update(priority=0.0)
+            key__in=child_keys, priority__lte=DEAD / 2).update(priority=0.0,
+                                                               updated=now)
     return revived
 
 
@@ -2395,9 +2409,16 @@ def refresh_priorities_v1(force=False, top_k=None):
             and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
         return False
 
+    started = time.monotonic()
+    # v1 no tiene modo delta y no va a tenerlo, pero SI deja el ancla: una
+    # pasada suya repuntua el universo entero, asi que su hora es un "todo
+    # estaba al dia aqui" perfectamente valido para el delta de v2 si alguien
+    # conmuta de motor sin reiniciar.
+    delivered_at = timezone.now()
     regret = _regret_from_root()
     campaign_votes = _active_campaign_votes()
     collector = _TopK(top_k) if top_k is not None else None
+    scored = 0
     dirty = []
     for pos in Position.objects.filter(status='UNKNOWN',
                                        priority__gt=DEAD / 2) \
@@ -2409,6 +2430,7 @@ def refresh_priorities_v1(force=False, top_k=None):
                            pos.campaign_id,
                            _runits(regret.get(pos.key, float('inf'))),
                            campaign_votes)
+        scored += 1
         if collector is not None:
             collector.offer(pos.key, prio)
             continue
@@ -2420,13 +2442,158 @@ def refresh_priorities_v1(force=False, top_k=None):
     for i in range(0, len(dirty), 500):
         Position.objects.bulk_update(dirty[i:i + 500], ['priority'])
     cached['at'] = now
+    _record_pass('full', scored, started, delivered_at=delivered_at)
     return True
 
 
 PRIORITY_WRITE_BATCH = 500
 
+# ---------------- MODO DELTA: repuntuar lo que se movio ----------------
+#
+# EL PROBLEMA QUE RESUELVE.  El Dijkstra acotado dejo la lectura del grafo en
+# la bola competitiva, pero la fase de ESCRITURA seguia recorriendo el
+# universo UNKNOWN entero: doce millones y pico de filas leidas y
+# re-puntuadas cada pasada para reescribir unas pocas.  Con la base tranquila
+# eso son 206 s medidos; bajo tormenta de ingesta, con la misma tabla siendo
+# escrita por el procesador de la cola, la pasada se estiraba a 2.400 s por
+# contencion — o sea cuarenta minutos de retraso en una heuristica que dice
+# hacia donde mirar, justo cuando mas se mueve el arbol.
+#
+# QUE SE REPUNTUA EN UNA PASADA DELTA, Y POR QUE ESAS TRES COSAS:
+#
+#   1. LA BOLA entera, siempre.  Es donde vive la cima, es la unica parte que
+#      alguien consume de verdad, y ya esta calculada y en memoria: repuntuarla
+#      no cuesta ninguna consulta extra que no estuviera pagada.  El delta
+#      nunca puede dejar la cima vieja.
+#   2. LO TOCADO desde la ultima pasada (``updated > since``).  Fuera de la
+#      bola el regret es una CONSTANTE — 30 unidades si cuelga de la raiz, 5
+#      si no — asi que la prioridad de un nodo de ahi fuera solo cambia si
+#      cambian SUS columnas, y eso es exactamente lo que marca ``updated``.
+#   3. LOS PADRES DIRECTOS de lo tocado.  Es el unico agujero real de la marca
+#      y esta medido en el codigo, no supuesto: la cascada de respaldo escribe
+#      a los padres con ``bulk_update(dirty, _BACKED_FIELDS)`` y esa lista NO
+#      lleva ``updated``, asi que un padre puede estrenar ``backed_eval`` — que
+#      ES un termino de la formula, via ``known_eval_of`` — sin que su marca se
+#      mueva.  Un ply de padres cose el lado de las hojas (que cubre
+#      ``updated``) con el lado de la raiz (que cubre la bola): los ancestros
+#      mas altos de una cascada estan mas cerca de la raiz, y eso es estar
+#      dentro de la bola.
+#
+# LO QUE NO CAMBIA, y es la frontera de esta palanca: la FORMULA, la semantica
+# de los precios de fuera de la bola, las lapidas y el filtro
+# ``status='UNKNOWN' AND priority > DEAD/2``.  El delta decide QUE FILAS SE
+# REESCRIBEN, nunca CON QUE NUMERO.
+#
+# EL PRECIO, DICHO EN CLARO.  Una fila que no se toco y que quedo fuera de la
+# bola conserva la prioridad de una pasada anterior.  Es la misma tolerancia
+# que esta columna declara desde que dejo de calcularse dentro de la request —
+# es una heuristica de hacia donde mirar, no una fuente de verdad — y la
+# diferencia solo puede vivir en el FONDO de la tabla, que es la parte que
+# ningun consumidor lee.
 
-def refresh_priorities_v2(force=False, top_k=None):
+# Sin pasada en este intervalo, la siguiente es COMPLETA.  No es que el delta
+# deje de ser correcto con una ventana larga (no deja: ``updated > since`` es
+# igual de cierto con diez minutos que con uno), es que un hueco asi significa
+# que algo no fue normal — el servicio reinicio, el reloj salto, la maquina se
+# quedo parada — y ante eso la respuesta barata es pagar una pasada entera.
+SELECTOR_DELTA_MAX_GAP = timedelta(minutes=10)
+
+# El estado de la ultima pasada, POR PROCESO, exactamente como
+# ``_priority_refresh_cache``: el servicio del selector no persiste nada en la
+# base y esto no va a ser lo primero que lo haga.  Un arranque en frio no tiene
+# ``at`` y por lo tanto hace pasada completa, que es el fallback que se pide de
+# todas formas; y con el inline de emergencia, cada proceso web lleva su propia
+# ventana contigua, que es lo unico que hace falta para no saltarse una fila
+# (repuntuar de mas es idempotente, saltarse algo no lo seria).
+_selector_delta_state = {'at': None, 'mode': '', 'rows': 0, 'seconds': 0.0}
+
+_PRIORITY_COLUMNS = ('key', 'eval_cp', 'backed_eval', 'expanded', 'visits',
+                     'campaign_id', 'priority', 'reachable')
+
+
+def selector_delta_enabled():
+    """Pasadas incrementales.  ENCENDIDO por defecto, con vuelta atras.
+
+    Al reves que ``ATOMICDB_SELECTOR_V2``: aquello estrenaba un motor y tenia
+    que demostrarse en sombra antes de tocar nada, esto no cambia ningun
+    numero — la formula, los precios y las lapidas son los mismos — solo deja
+    de reescribir filas que nadie ha movido.  ``ATOMICDB_SELECTOR_DELTA =
+    False`` devuelve la pasada completa con una linea de settings y un
+    reinicio, sin desplegar.
+    """
+    return bool(getattr(settings, 'ATOMICDB_SELECTOR_DELTA', True))
+
+
+def reset_selector_delta_state():
+    """Olvida la ultima pasada: la siguiente sera completa.
+
+    La usan los tests (cada uno tiene que empezar con la misma historia) y
+    cualquiera que quiera forzar una pasada entera sin reiniciar el servicio.
+    """
+    _selector_delta_state.update({'at': None, 'mode': '', 'rows': 0,
+                                  'seconds': 0.0})
+
+
+def selector_pass_report():
+    """Lo que la ultima pasada hizo, para el log del servicio."""
+    return {'mode': _selector_delta_state['mode'],
+            'rows': _selector_delta_state['rows'],
+            'seconds': _selector_delta_state['seconds']}
+
+
+def _record_pass(mode, rows, started, delivered_at=None):
+    _selector_delta_state['mode'] = mode
+    _selector_delta_state['rows'] = rows
+    _selector_delta_state['seconds'] = round(time.monotonic() - started, 3)
+    if delivered_at is not None:
+        _selector_delta_state['at'] = delivered_at
+
+
+def _delta_since(now, delta=None):
+    """Desde cuando mira esta pasada, o ``None`` si toca completa."""
+    if delta is False or (delta is None and not selector_delta_enabled()):
+        return None
+    last = _selector_delta_state['at']
+    if last is None:
+        return None                       # primera pasada de este proceso
+    if now - last > SELECTOR_DELTA_MAX_GAP:
+        return None                       # demasiado tiempo sin pasar por aqui
+    return last
+
+
+def _delta_keys(since, ball):
+    """Bola + tocadas desde ``since`` + padres directos de las tocadas."""
+    touched = sorted(Position.objects.filter(updated__gt=since)
+                     .values_list('key', flat=True)
+                     .iterator(chunk_size=2000))
+    candidates = set(ball)
+    candidates.update(touched)
+    for start in range(0, len(touched), BOUNDED_BATCH):
+        chunk = touched[start:start + BOUNDED_BATCH]
+        candidates.update(Edge.objects.filter(child_id__in=chunk)
+                          .values_list('parent_id', flat=True))
+    return candidates
+
+
+def _priority_rows(since, ball):
+    """Las filas vivas que esta pasada tiene que repuntuar.
+
+    El filtro de vivas es EL MISMO en los dos modos — abiertas y sin lapida —
+    porque el modo no puede cambiar a quien se le pone precio, solo a cuantos
+    se les vuelve a poner.
+    """
+    live = Position.objects.filter(status='UNKNOWN', priority__gt=DEAD / 2)
+    if since is None:
+        yield from live.values_list(*_PRIORITY_COLUMNS).iterator(
+            chunk_size=2000)
+        return
+    keys = sorted(_delta_keys(since, ball))
+    for start in range(0, len(keys), BOUNDED_BATCH):
+        chunk = keys[start:start + BOUNDED_BATCH]
+        yield from live.filter(key__in=chunk).values_list(*_PRIORITY_COLUMNS)
+
+
+def refresh_priorities_v2(force=False, top_k=None, delta=None):
     """La MISMA pasada de ``refresh_priorities_v1``, acotada en memoria.
 
     Tres cosas cambian y ninguna es la formula:
@@ -2471,6 +2638,15 @@ def refresh_priorities_v2(force=False, top_k=None):
     queda con la prioridad de la pasada anterior — sesenta segundos de retraso
     en una heuristica sobre HACIA DONDE MIRAR, que es exactamente la tolerancia
     que esta columna declara desde que dejo de calcularse dentro de la request.
+
+    MODO DELTA (``delta``, y § "repuntuar lo que se movio" mas arriba).  La
+    pasada normal repuntua el universo UNKNOWN entero; la delta repuntua la
+    bola, lo tocado desde la ultima pasada y los padres directos de lo tocado.
+    ``None`` sigue al conmutador de settings, ``False`` fuerza la completa y
+    ``True`` la pide aunque el conmutador este apagado — con o sin conmutador,
+    la primera pasada del proceso y la que llega tras un hueco largo son
+    completas de todas formas.  El modo sombra (``top_k``) NO usa delta jamas:
+    compara cimas de dos motores y una cima a medio reescribir no compara nada.
     """
     now = time.monotonic()
     cached = _priority_refresh_cache
@@ -2478,23 +2654,27 @@ def refresh_priorities_v2(force=False, top_k=None):
             and now - cached['at'] < PRIORITY_REFRESH_SECONDS):
         return False
 
+    started = time.monotonic()
+    # El reloj se coge ANTES de nada: lo que se escriba mientras esta pasada
+    # corre entra en la siguiente.  Al reves — cogerlo al final — habria una
+    # ventana del tamano de la pasada en la que una escritura no la ve nadie.
+    delivered_at = timezone.now()
     campaign_votes = _active_campaign_votes()
     regret = _regret_from_root_bounded(campaign_votes=campaign_votes)
     collector = _TopK(top_k) if top_k is not None else None
+    since = None if collector is not None else _delta_since(delivered_at,
+                                                            delta)
+    scored = 0
     dirty = []
     for (key, eval_cp, backed_eval, expanded, visits, campaign_id, priority,
-         reachable) in (Position.objects
-                        .filter(status='UNKNOWN', priority__gt=DEAD / 2)
-                        .values_list('key', 'eval_cp', 'backed_eval',
-                                     'expanded', 'visits', 'campaign_id',
-                                     'priority', 'reachable')
-                        .iterator(chunk_size=2000)):
+         reachable) in _priority_rows(since, regret):
         r = regret.get(key)
         runits = (_runits(r) if r is not None
                   else (FAR_REGRET if reachable else DISCONNECTED_REGRET))
         prio = priority_of(known_eval_of('UNKNOWN', backed_eval, eval_cp),
                            expanded, visits, campaign_id, runits,
                            campaign_votes)
+        scored += 1
         if collector is not None:
             collector.offer(key, prio)
             continue
@@ -2508,10 +2688,12 @@ def refresh_priorities_v2(force=False, top_k=None):
     if dirty:
         Position.objects.bulk_update(dirty, ['priority'])
     cached['at'] = now
+    _record_pass('delta' if since is not None else 'full', scored, started,
+                 delivered_at=delivered_at)
     return True
 
 
-def refresh_priorities(force=False, top_k=None):
+def refresh_priorities(force=False, top_k=None, delta=None):
     """Puerta unica del recalculo: v1 por defecto, v2 con el conmutador.
 
     Los dos motores viven a la vez y eso es el plan, no un descuido.  El
@@ -2519,9 +2701,14 @@ def refresh_priorities(force=False, top_k=None):
     base para publicar Jaccard y Kendall del top-1000 ANTES de que nadie
     conmute nada, y el dia que se conmute hace falta poder volver con una
     variable de entorno y un reinicio, sin desplegar codigo.
+
+    ``delta`` solo significa algo con v2 puesto: v1 no tiene modo incremental
+    y su pasada es completa por construccion.  Se acepta aqui igualmente para
+    que quien llama a la puerta unica no tenga que saber cual de los dos
+    motores hay detras.
     """
     if selector_v2_enabled():
-        return refresh_priorities_v2(force=force, top_k=top_k)
+        return refresh_priorities_v2(force=force, top_k=top_k, delta=delta)
     return refresh_priorities_v1(force=force, top_k=top_k)
 
 

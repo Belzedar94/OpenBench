@@ -24,6 +24,14 @@ atras sin desplegar.  Antes de encenderlo: migracion 0036,
 ``backfill_reachable`` en cada base y ``selector_shadow`` publicando sus
 numeros (§ docs/selector-incremental.md).
 
+Y CADA PASADA DICE COMO FUE.  El JSON lleva ``selector_mode``
+(``delta``/``full``), ``selector_rows`` (filas repuntuadas) y
+``selector_seconds``.  La PRIMERA pasada tras arrancar es siempre completa —
+el estado del delta vive en el proceso, igual que la cache de refresco — y
+tambien lo es la que llega tras ``SELECTOR_DELTA_MAX_GAP`` sin pasar por aqui.
+Una racha de ``full`` en journalctl no es un fallo del delta: es este proceso
+diciendo que lleva reiniciandose, y eso es lo que hay que mirar.
+
 WHAT ELSE RIDES THIS TIMER.  Everything that is a bounded scheduling decision
 rather than a request: the ENGINE debt top-up, coverage completion, and — when
 ``ATOMICDB_ADVERSARIAL`` is on — the two adversarial arms (dn repair and F0
@@ -225,7 +233,17 @@ class Command(BaseCommand):
                              lambda: len(metrics.refresh_public_snapshot()))
             passes += 1
             elapsed = time.monotonic() - started
+            # QUE HIZO EL SELECTOR ESTA PASADA, en la misma linea de JSON que
+            # ya lee journalctl.  Sin estos tres numeros, "delta" y "completa"
+            # se parecen demasiado desde fuera: las dos escriben lo mismo y las
+            # dos tardan lo que tardan, y la unica forma de saber si el modo
+            # incremental esta haciendo su trabajo — o si lleva media hora
+            # cayendose a pasada completa — es que la pasada lo diga.
+            selector = ingest.selector_pass_report()
             report = {'pass': passes, 'seconds': round(elapsed, 3),
+                      'selector_mode': selector['mode'],
+                      'selector_rows': selector['rows'],
+                      'selector_seconds': selector['seconds'],
                       'pool_topped_up': pooled,
                       'debt_enqueued': enqueued, 'coverage_enqueued': covered,
                       'adversarial': bool(adversarial),

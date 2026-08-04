@@ -69,6 +69,63 @@ bola competitiva es una fracción pequeña del grafo.
    modo delta (solo posiciones con `updated > última_pasada` y sus padres;
    el patrón ya existe en `enqueue_coverage_completion`, `ingest.py:2934`).
 
+## Modo delta (implementado, 4-ago-2026)
+
+La palanca del punto 5, tirada: la lectura ya estaba acotada por la bola, pero
+la fase de ESCRITURA seguía recorriendo el universo UNKNOWN entero — 206 s con
+la base tranquila y hasta 2.400 s bajo tormenta de ingesta, por contención con
+el procesador de la cola sobre la misma tabla.
+
+Una pasada delta re-puntúa tres conjuntos y nada más:
+
+1. **la bola entera**, siempre: es donde vive la cima, es lo único que alguien
+   consume, y ya está calculada y en memoria;
+2. **lo tocado** desde la última pasada (`updated > since`): fuera de la bola
+   el regret es una constante (30 conectado / 5 suelto), así que la prioridad
+   de un nodo de ahí fuera sólo cambia si cambian *sus* columnas;
+3. **los padres directos de lo tocado**, que es el único agujero real de la
+   marca y está medido en el código: `backup_backed_evals` escribe a los
+   padres con `bulk_update(dirty, _BACKED_FIELDS)` y esa lista no lleva
+   `updated`, así que un padre puede estrenar `backed_eval` — un término de la
+   fórmula — sin que su marca se mueva. Un ply de padres cose el lado de las
+   hojas (que cubre `updated`) con el lado de la raíz (que cubre la bola).
+
+**No cambia la fórmula, ni los precios de fuera de la bola, ni las lápidas, ni
+el filtro de vivas.** El delta decide *qué filas se reescriben*, nunca *con qué
+número*: el ancla de paridad (`test_selector_v2`) sigue comparando v1 contra v2
+en modo completo, y `DeltaAgreesWithTheCompletePassTests` compara los dos modos
+del mismo motor.
+
+**Precio declarado:** una fila que nadie tocó y que quedó fuera de la bola
+conserva la prioridad de una pasada anterior. Vive sólo en el fondo de la
+tabla, que es la parte que ningún consumidor lee.
+
+**Estado y fallback:** el timestamp de la última pasada vive en el proceso
+(`ingest._selector_delta_state`), igual que `_priority_refresh_cache` — el
+servicio no persiste nada en la base y esto no iba a ser lo primero. Primera
+pasada tras arrancar: completa. Más de `SELECTOR_DELTA_MAX_GAP` (10 min) sin
+pasada: completa. Modo sombra (`top_k`): nunca delta. `ATOMICDB_SELECTOR_DELTA
+= False` devuelve la pasada completa sin desplegar.
+
+**Se arregló de camino** lo que el delta destapó: dos sitios escribían términos
+de la fórmula con un `update` de queryset, que no dispara `auto_now`, así que
+cambiaban el precio de una fila a espaldas de la marca — `_revive_tombstones`
+(una lápida levantada vuelve con prioridad 0,0, que es *alta*) y
+`_tag_campaign_subtree` (el bono de campaña son hasta 40 unidades). Los dos
+ponen ya `updated` a mano, como ya hacían los cierres y la siembra de eval.
+
+**Instrumentación:** cada pasada del servicio publica `selector_mode`,
+`selector_rows` y `selector_seconds` en su línea de JSON, visible en
+journalctl. Una racha de `full` no es un fallo del delta: es el proceso
+diciendo que lleva reiniciándose.
+
+**Migración 0038** (`Position.updated` indexada). No hace falta para que el
+delta sea *correcto* — sin índice la consulta da las mismas filas y sólo tarda
+más — así que no hay ninguna prisa que justifique una ventana de bloqueo mala
+en Postgres. De paso arregla el `order_by('-updated')` de
+`enqueue_coverage_completion`, que sin índice ordenaba la tabla entera cada
+pasada del mismo servicio.
+
 ## Lo que NO cambia
 
 Banda USER del lease, inline fallback (`ATOMICDB_INLINE_SELECTOR`), el orden

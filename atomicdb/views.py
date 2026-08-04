@@ -3842,9 +3842,16 @@ def _tag_campaign_subtree(campaign, cap=CAMPAIGN_TAG_MAX_NODES,
         frontier = nxt
     tagged = 0
     for start in range(0, len(order), batch):
+        # ``updated`` A MANO, y no es cosmetico.  Un ``update`` de queryset no
+        # dispara ``auto_now``, y adoptar una posicion CAMBIA su prioridad —
+        # el bono de campana es un termino de la formula del selector.  Con la
+        # marca quieta, la pasada incremental (§ ingest, modo delta) no veria
+        # moverse nada aqui y el subarbol adoptado se quedaria con su precio de
+        # huerfano hasta que alguien lo tocara por otro motivo.  Mismo gesto
+        # que ya hacen los cierres y la siembra de eval del padre.
         tagged += Position.objects.filter(
             key__in=order[start:start + batch], campaign__isnull=True,
-        ).update(campaign=campaign)
+        ).update(campaign=campaign, updated=timezone.now())
     return tagged, len(seen)
 
 

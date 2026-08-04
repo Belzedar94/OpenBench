@@ -11,16 +11,28 @@ def _atomicdb_test_databases():
 
 
 class _IsolatedViewCache:
-    """Start every test with an empty view cache.
+    """Start every test with an empty view cache and no selector history.
 
     The hot read views carry a short ``cache_page``.  The default locmem
     backend outlives a single test, so without this a page rendered by one
     test would be served, verbatim and contextless, to the next one.
     ``_pre_setup`` runs before ``setUp`` and no subclass has to remember it.
+
+    Lo mismo, y por lo mismo, con el estado del modo delta del selector: vive
+    en el proceso (§ ingest, ``_selector_delta_state``) y el proceso es UNO
+    para toda la suite.  Sin esto, un test que refresca prioridades le dejaria
+    al siguiente una "ultima pasada" que el no hizo, y la suya saldria
+    incremental sobre una base que acaba de nacer — un test verde o rojo segun
+    el orden en el que se ejecute, que es la peor clase de test.  El import va
+    aqui dentro: ``ingest`` arrastra medio proyecto y este modulo lo importan
+    los tests de todo lo demas.
     """
 
     def _pre_setup(self):
+        from . import ingest
+
         cache.clear()
+        ingest.reset_selector_delta_state()
         super()._pre_setup()
 
 

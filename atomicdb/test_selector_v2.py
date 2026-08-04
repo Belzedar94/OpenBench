@@ -25,13 +25,15 @@ por que.
 import contextlib
 import json
 import math
+from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
 from django.test import override_settings
+from django.utils import timezone
 
-from . import ingest, logic
+from . import ingest, logic, views
 from .database import connection
 from .models import Campaign, Edge, Position, ProofCampaign
 from .testing import TestCase, TransactionTestCase
@@ -248,13 +250,21 @@ class AnchorTests(TestCase):
                          before)
 
     def test_written_priorities_match_too(self):
-        """El modo solo calculo y el que escribe tienen que decir lo mismo."""
+        """El modo solo calculo y el que escribe tienen que decir lo mismo.
+
+        ``delta=False`` porque la preparacion de aqui borra las prioridades con
+        un ``update`` de queryset, o sea SIN mover ``updated``: una pasada
+        incremental tiene todo el derecho a no ver ese borrado (§ ingest, modo
+        delta), y lo que este test compara es la formula de los dos motores,
+        no cuantas filas reescribe cada modo.  De eso ultimo se ocupan los
+        ``DeltaPassTests``.
+        """
         ingest.refresh_priorities_v1(force=True)
         expected = dict(Position.objects.filter(status='UNKNOWN')
                         .values_list('key', 'priority'))
         Position.objects.all().update(priority=0.0)
 
-        ingest.refresh_priorities_v2(force=True)
+        ingest.refresh_priorities_v2(force=True, delta=False)
         written = dict(Position.objects.filter(status='UNKNOWN')
                        .values_list('key', 'priority'))
         self.assertEqual(set(expected), set(written))
@@ -641,3 +651,322 @@ class SelectorSwitchTests(TestCase):
                          ingest.SELECTOR_HORIZON_FLOOR)
         with patch('atomicdb.views.TASK_REFILL_COUNT', 500):
             self.assertEqual(ingest.selector_horizon_width(), 2_000)
+
+
+class DeltaFixture:
+    """Una linea larga bajo una jugada refutada, para tener FUERA DE LA BOLA.
+
+    El modo delta solo se distingue de la pasada completa en lo que queda
+    fuera del horizonte: dentro, las dos repuntuan todo.  Asi que el fixture
+    tiene que producir de verdad nodos que la bola no alcance, y para eso hace
+    falta lo de siempre — un hijo que abra un gap grande y una cadena colgando
+    de el — mas un horizonte estrecho al puntuar.
+    """
+
+    def build(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        children = {edge.move_uci: edge.child
+                    for edge in Edge.objects.filter(parent=self.root)
+                                            .select_related('child')}
+        # El mejor sube el corte del horizonte; el peor abre el gap.
+        self.good = children['e2e4']
+        self.good.eval_cp = 9_800
+        self.good.save()
+        self.bad = children['a2a3']
+        self.bad.eval_cp = -6_000
+        self.bad.save()
+        # Cadena bajo el refutado: padre, hijo y un tercero de control que
+        # cuelga aparte y al que no va a tocar nadie.
+        self.mid = self._chained(self.bad, 'a3a4', 0)
+        self.leaf = self._chained(self.mid, 'a4a5', 1)
+        self.bystander = self._chained(self.bad, 'a3b4', 2)
+        return self
+
+    def _chained(self, parent, move, file_index):
+        node = ingest.get_or_create_position(quiet_fen(file_index, rank=5))
+        Edge.objects.create(parent=parent, move_uci=move, child=node)
+        Position.objects.filter(key=node.key).update(reachable=True)
+        return Position.objects.get(key=node.key)
+
+
+@override_settings(ATOMICDB_SELECTOR_V2=True)
+class DeltaPassTests(TestCase):
+    """Repuntuar lo que se movio: que se repuntua, que no, y cuando no aplica.
+
+    El estado del delta vive en el proceso y ``testing.TestCase`` lo borra
+    antes de cada test (§ ``_IsolatedViewCache``), asi que aqui la primera
+    pasada es SIEMPRE completa y la segunda es la que se examina.  Sin ese
+    borrado estos tests dirian una cosa u otra segun el orden de ejecucion.
+    """
+
+    NARROW = 1        # horizonte de un solo candidato: la bola se queda enana
+    STOMP = -777.0    # una prioridad que ninguna formula produce
+
+    def setUp(self):
+        self.fixture = DeltaFixture().build()
+
+    def _pass(self, **kwargs):
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            return ingest.refresh_priorities(force=True, **kwargs)
+
+    def _ball(self):
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            return set(ingest._regret_from_root_bounded())
+
+    def _priority(self, node):
+        return Position.objects.values_list('priority', flat=True).get(
+            key=node.key)
+
+    def _stomp(self, *nodes):
+        """Prioridad imposible SIN tocar ``updated``: un ``update`` de columna.
+
+        Es la unica forma de ver si una fila se reescribio o no: si la pasada
+        la repuntua, el numero imposible desaparece; si no la mira, se queda.
+        """
+        Position.objects.filter(key__in=[node.key for node in nodes]).update(
+            priority=self.STOMP)
+
+    def test_the_fixture_really_leaves_nodes_outside_the_ball(self):
+        """Sin esto, los tests de abajo compararian dos pasadas identicas."""
+        ball = self._ball()
+        self.assertIn(self.fixture.root.key, ball)
+        for node in (self.fixture.mid, self.fixture.leaf,
+                     self.fixture.bystander):
+            self.assertNotIn(node.key, ball)
+
+    def test_the_first_pass_of_a_process_is_complete(self):
+        self._pass()
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_the_second_one_is_incremental(self):
+        self._pass()
+        self._pass()
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+
+    def test_a_touched_row_is_repriced(self):
+        self._pass()
+        self.fixture.leaf.visits = 3
+        self.fixture.leaf.save()          # ``auto_now`` mueve la marca
+        self._stomp(self.fixture.leaf)
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+        self.assertAlmostEqual(
+            self._priority(self.fixture.leaf),
+            ingest.priority_of(None, False, 3, None, ingest.FAR_REGRET, {}),
+            delta=1e-9)
+
+    def test_the_direct_parent_of_a_touched_row_is_repriced_too(self):
+        """La cascada de respaldo escribe a los padres SIN mover su marca.
+
+        ``backup_backed_evals`` usa ``bulk_update(dirty, _BACKED_FIELDS)`` y
+        esa lista no lleva ``updated``: un padre puede estrenar ``backed_eval``
+        — que es un termino de la formula — sin que ``updated`` se entere.  Por
+        eso el delta sube un ply desde lo tocado, y por eso este test mira al
+        padre y no al hijo.
+        """
+        self._pass()
+        self.fixture.leaf.visits = 1
+        self.fixture.leaf.save()
+        self._stomp(self.fixture.mid)
+
+        self._pass()
+
+        self.assertNotEqual(self._priority(self.fixture.mid), self.STOMP)
+
+    def test_an_untouched_row_keeps_its_priority(self):
+        """Y este es el precio declarado del delta, escrito como test."""
+        self._pass()
+        self.fixture.leaf.visits = 1
+        self.fixture.leaf.save()
+        self._stomp(self.fixture.bystander)
+
+        self._pass()
+
+        self.assertEqual(self._priority(self.fixture.bystander), self.STOMP)
+
+    def test_the_ball_is_repriced_every_pass_whatever_happened(self):
+        """La cima no puede quedarse vieja ni cuando no se movio nada."""
+        self._pass()
+        inside = list(Position.objects.filter(key__in=self._ball(),
+                                              status='UNKNOWN'))
+        self.assertGreater(len(inside), 1)
+        self._stomp(*inside)
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+        for node in inside:
+            self.assertNotEqual(self._priority(node), self.STOMP)
+
+    def test_a_delta_pass_reprices_fewer_rows_than_a_full_one(self):
+        self._pass()
+        full = ingest.selector_pass_report()['rows']
+        self._pass()
+        incremental = ingest.selector_pass_report()['rows']
+
+        self.assertGreater(full, incremental)
+        self.assertEqual(full, len(live_keys()))
+
+    def test_a_long_silence_falls_back_to_a_complete_pass(self):
+        """Un hueco largo no rompe el delta; dice que algo no fue normal."""
+        self._pass()
+        self._pass()
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+        ingest._selector_delta_state['at'] = (
+            timezone.now() - ingest.SELECTOR_DELTA_MAX_GAP
+            - timedelta(seconds=1))
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    @override_settings(ATOMICDB_SELECTOR_DELTA=False)
+    def test_the_switch_brings_the_complete_pass_back(self):
+        self.assertFalse(ingest.selector_delta_enabled())
+        self._pass()
+        self._pass()
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_the_shadow_never_runs_incremental(self):
+        """Comparar dos cimas exige que las dos se hayan calculado enteras."""
+        self._pass()
+        self._pass()
+        anchor = ingest._selector_delta_state['at']
+
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            prices = ingest.refresh_priorities_v2(force=True, top_k=10_000)
+
+        self.assertEqual(set(prices), live_keys())
+        self.assertEqual(ingest._selector_delta_state['at'], anchor)
+
+    def test_the_priority_write_does_not_dirty_the_marker(self):
+        """El supuesto sobre el que se apoya todo esto, como test.
+
+        Si ``bulk_update`` de una columna moviese ``updated``, cada pasada
+        marcaria como tocado todo lo que acaba de escribir y la siguiente
+        seria una completa disfrazada.  No lo mueve — ``auto_now`` es cosa de
+        ``save()`` — y aqui queda dicho.
+        """
+        self._pass()
+        before = dict(Position.objects.values_list('key', 'updated'))
+        Position.objects.filter(status='UNKNOWN').update(priority=0.0)
+        ingest.refresh_priorities_v2(force=True, delta=False)
+
+        self.assertEqual(dict(Position.objects.values_list('key', 'updated')),
+                         before)
+
+
+@override_settings(ATOMICDB_SELECTOR_V2=True)
+class DeltaAgreesWithTheCompletePassTests(TestCase):
+    """Lo tocado, repuntuado: delta y completa escriben el MISMO numero.
+
+    El ancla de ``AnchorTests`` prueba que los dos MOTORES coinciden; esto
+    prueba que los dos MODOS del mismo motor tambien, sobre las filas que el
+    delta se compromete a mirar.  Son dos afirmaciones distintas y hacen falta
+    las dos.
+    """
+
+    def setUp(self):
+        self.fixture = DeltaFixture().build()
+
+    def test_delta_writes_what_a_complete_pass_would_write(self):
+        with patch.object(ingest, 'selector_horizon_width', return_value=1):
+            ingest.refresh_priorities_v2(force=True)
+            self.fixture.leaf.visits = 2
+            self.fixture.leaf.save()
+            self.fixture.mid.eval_cp = -80
+            self.fixture.mid.save()
+
+            ingest.refresh_priorities_v2(force=True)
+            self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+            incremental = dict(Position.objects.filter(status='UNKNOWN')
+                               .values_list('key', 'priority'))
+
+            ingest.refresh_priorities_v2(force=True, delta=False)
+            complete = dict(Position.objects.filter(status='UNKNOWN')
+                            .values_list('key', 'priority'))
+
+        self.assertEqual(set(incremental), set(complete))
+        for key, priority in complete.items():
+            self.assertAlmostEqual(incremental[key], priority, delta=1e-9,
+                                   msg='divergen en {}'.format(key))
+
+
+class MarkingWhatMovedTests(TestCase):
+    """Quien cambia un termino de la formula tiene que mover ``updated``.
+
+    Es el contrato del que cuelga el modo delta, y NO se cumple solo: un
+    ``update`` de queryset no dispara ``auto_now``, asi que cada sitio que
+    escribe columnas del selector por esa via tiene que poner la marca a mano.
+    Los cierres y la siembra de eval ya lo hacian; los dos de aqui no, y sin
+    ellos una fila cambiaba de precio a espaldas de la pasada incremental.
+
+    Esto se prueba sobre la MARCA y no sobre la prioridad resultante a
+    proposito: la prioridad de un nodo concreto depende de la bola, del
+    horizonte y de la formula entera, y lo que hay que fijar aqui es mucho mas
+    simple — que la fila diga que se movio.
+    """
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.child = Edge.objects.filter(parent=self.root).first().child
+
+    def _marks(self):
+        return dict(Position.objects.values_list('key', 'updated'))
+
+    def test_reviving_a_tombstone_marks_the_row(self):
+        Position.objects.filter(key=self.child.key).update(
+            priority=ingest.DEAD)
+        before = self._marks()
+
+        revived = ingest._revive_tombstones([self.child.key])
+
+        self.assertEqual(revived, 1)
+        self.assertGreater(self._marks()[self.child.key],
+                           before[self.child.key])
+
+    def test_reviving_marks_the_direct_children_too(self):
+        """El nivel de hijos vuelve en el mismo UPDATE, y con la misma marca."""
+        grandchild = ingest.get_or_create_position(quiet_fen(0, rank=5))
+        Edge.objects.create(parent=self.child, move_uci='h1h2',
+                            child=grandchild)
+        Position.objects.filter(key=grandchild.key).update(
+            priority=ingest.DEAD)
+        before = self._marks()
+
+        ingest._revive_tombstones([self.child.key])
+
+        self.assertGreater(self._marks()[grandchild.key],
+                           before[grandchild.key])
+
+    def test_a_row_that_was_not_a_tombstone_is_not_marked(self):
+        """Resucitar lo que ya estaba vivo seria ensuciar la marca por nada."""
+        before = self._marks()
+
+        self.assertEqual(ingest._revive_tombstones([self.child.key]), 0)
+
+        self.assertEqual(self._marks(), before)
+
+    def test_adopting_a_subtree_into_a_campaign_marks_the_rows(self):
+        """El bono de campana es un termino de la formula, no una etiqueta."""
+        campaign = Campaign.objects.create(
+            name='adoptante', root=self.root, votes=3,
+            state=Campaign.CState.ACTIVE)
+        before = self._marks()
+
+        tagged, _seen = views._tag_campaign_subtree(campaign)
+
+        self.assertGreater(tagged, 0)
+        marks = self._marks()
+        adopted = Position.objects.filter(campaign=campaign).values_list(
+            'key', flat=True)
+        self.assertGreater(len(adopted), 0)
+        for key in adopted:
+            self.assertGreater(marks[key], before[key])
