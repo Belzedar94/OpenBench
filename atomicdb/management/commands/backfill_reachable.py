@@ -174,13 +174,18 @@ class Command(BaseCommand):
         return cleared, marked
 
     def _mark(self, keys, batch_size):
-        """``reachable=True`` sobre shells, en lotes: nada de instancias."""
+        """``reachable=True`` en lotes, con ``update`` y no ``bulk_update``.
+
+        Todos los valores son la MISMA constante: un ``bulk_update`` genera un
+        CASE de ``batch_size`` brazos que el planificador paga por fila,
+        mientras que ``filter(key__in=...).update(...)`` es un UPDATE plano.
+        Con lotes grandes la diferencia es el dia entero de la pasada.
+        """
         written = 0
         for chunk in _chunks(list(keys), batch_size):
             _retry_deadlock(
-                lambda rows=chunk: Position.objects.bulk_update(
-                    [Position(key=key, reachable=True) for key in rows],
-                    ['reachable']))
+                lambda rows=chunk: Position.objects.filter(key__in=rows)
+                .update(reachable=True))
             written += len(chunk)
         return written
 
