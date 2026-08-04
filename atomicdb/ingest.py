@@ -2165,16 +2165,25 @@ def _regret_from_root():
             # calcular el gap de sus hermanos, que es justo lo que hace que
             # una alternativa perdedora cargue con su distancia al mate.
             continue
+        stm = white_stm.get(k)
+        if stm is None:
+            # RECIEN NACIDA entre las dos fotos: esta en la adyacencia (una
+            # arista ya la nombra) pero no en el snapshot de posiciones, asi
+            # que no se sabe ni quien mueve.  Saltarla es la misma regla
+            # estructural del motor acotado: la siguiente pasada la ve
+            # entera.  Era el KeyError que el servicio absorbia unas veces
+            # por hora y que mataba la sombra en crudo (4-ago).
+            continue
         kids = children.get(k, ())
         if not kids:
             continue
         known = [val[c] for c in kids if val.get(c) is not None]
-        best = (max(known) if white_stm[k] else min(known)) if known else None
+        best = (max(known) if stm else min(known)) if known else None
         for c in kids:
             v = val.get(c)
             gap = 0.0
             if v is not None and best is not None:
-                gap = (best - v) if white_stm[k] else (v - best)
+                gap = (best - v) if stm else (v - best)
             nr = r + gap
             if nr < regret.get(c, INF):
                 regret[c] = nr
