@@ -2620,6 +2620,46 @@ def _child_keys(pos, ucis):
     return {uci: keys[uci] for uci in wanted}
 
 
+def _line_numbers(pos):
+    """``{uci: N}`` de la PRIMERA jugada de cada linea VIGENTE, 1-based.
+
+    De donde viene el chip ``walked`` de una fila: de que nadie ha buscado en
+    el hijo (§ ``_walked_value``).  Eso es cierto y es todo lo que decia, y por
+    eso una jugada que el motor acaba de nombrar en su MultiPV — con su linea
+    entera visible unos parrafos mas arriba, en el mismo renglon en que la
+    pagina promete cinco — se leia como territorio abandonado.  Reporte de
+    comunidad, literal: "why a line that was one of 5 multi-pv is now always
+    marked as WALKED? very annoying".
+
+    Las dos cosas son ciertas a la vez y la fila puede decir la mejor: de esta
+    jugada el motor SI dijo algo, dijo la linea N, y el numero de la fila es
+    justo lo que sembro esa linea al aterrizar el pase.  Lo que no hay es
+    busqueda en el hijo, que es lo que sigue diciendo el tier y el aviso del
+    tooltip.
+
+    VIGENTE quiere decir lo mismo que en todas partes (§
+    ``solve_estimate.current_line``): sin la marca ``prior_pass``, que es el
+    escaparate ancho de un pase ANTERIOR y ya no es el veredicto de ahora.  Una
+    siembra de aquel pase se quedo huerfana de linea y conserva su chip pelado,
+    que es exactamente lo que es.
+
+    El numero N es la posicion en las lineas vigentes, contando tambien las que
+    no traen jugada legible: es el mismo ordinal que ensena el bloque de salida
+    cruda del motor, y dos numeraciones para las mismas cinco lineas serian dos
+    historias.
+    """
+    numbers = {}
+    current = [line for line in (pos.last_analysis or [])
+               if isinstance(line, dict) and not line.get('prior_pass')]
+    for index, line in enumerate(current, start=1):
+        pv = line.get('pv')
+        uci = line.get('move') or (pv[0] if isinstance(pv, list) and pv
+                                   else None)
+        if uci:
+            numbers.setdefault(uci, index)
+    return numbers
+
+
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
@@ -2658,6 +2698,9 @@ def _child_moves(pos):
     moves = []
     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
     numbers = _proof_numbers_for([edge.child.key for edge in edges])
+    # Sale del ``last_analysis`` que la fila de arriba ya trae cargado: ni una
+    # consulta mas por una tabla de treinta y tantas filas.
+    line_numbers = _line_numbers(pos)
     for e in edges:
         c = e.child
         mate = None
@@ -2733,6 +2776,11 @@ def _child_moves(pos):
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.
                       'walked': walked,
+                      # De QUE linea vigente es esta jugada la primera, si lo
+                      # es (§ _line_numbers).  No toca ni el tier ni el orden
+                      # ni el resumen de la cabecera: solo dice, donde iba un
+                      # chip mudo, lo que el motor ya habia dicho de ella.
+                      'line_no': line_numbers.get(e.move_uci),
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else

@@ -1198,3 +1198,114 @@ class SeededValueTests(TestCase):
         # no puede existir es el chip.
         self.assertNotIn('>walked</span>', body)
         self.assertNotIn('backed-mark', body)
+
+
+class LineProvenanceTests(TestCase):
+    """La jugada que encabeza una linea VIGENTE dice CUAL, no "walked".
+
+    Reporte de comunidad, literal: "why a line that was one of 5 multi-pv is
+    now always marked as WALKED? very annoying".  Las dos cosas eran ciertas —
+    el motor nombro esa jugada en su MultiPV y nadie ha buscado en el hijo — y
+    la fila solo contaba la segunda, justo debajo del bloque donde se leen las
+    cinco lineas enteras.
+    """
+
+    def _parent(self, lines, **kw):
+        return _pos('LINE-P', 'w', expanded=True, last_analysis=lines, **kw)
+
+    def _lines(self, *ucis, prior=()):
+        current = [{'move': uci, 'eval_cp': 40, 'pv': [uci]} for uci in ucis]
+        return current + [{'move': uci, 'eval_cp': 40, 'pv': [uci],
+                           'prior_pass': True} for uci in prior]
+
+    def test_the_row_knows_which_line_it_heads(self):
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        _edge(parent, _pos('LINE-A', 'b', eval_cp=40), 'd7d5')
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+        _edge(parent, _pos('LINE-C', 'b', eval_cp=20), 'g8f6')
+
+        rows = {row['uci']: row for row in views._child_moves(parent)}
+
+        self.assertEqual(rows['d7d5']['line_no'], 1)
+        self.assertEqual(rows['e7e6']['line_no'], 2)
+        # La tercera no la nombra ninguna linea: sembrada por un pase que ya
+        # no manda, o caminada a mano.  Sigue sin provenance que ensenar.
+        self.assertIsNone(rows['g8f6']['line_no'])
+
+    def test_the_chip_says_line_two_instead_of_walked(self):
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        # La celda entera: el numero y su chip, con la misma clase que
+        # llevaba el chip mudo — mismo tier, misma tinta de aviso.
+        self.assertRegex(body, r'<td>30<span class="backed-mark light"')
+        self.assertIn('>line 2</span>', body)
+        self.assertIn("first move of engine line 2 from this node's current "
+                      'analysis', body)
+
+    def test_a_seed_with_no_line_left_keeps_the_bare_chip(self):
+        """El chip pelado no se va: es lo que le queda a la siembra de un pase
+        ANTERIOR, que ya no es el veredicto de nadie."""
+        parent = self._parent(self._lines('d7d5', prior=('e7e6',)))
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        self.assertIn('>walked</span>', body)
+        self.assertNotIn('>line 1</span>', body)
+        self.assertNotIn('>line 2</span>', body)
+
+    def test_an_old_pass_does_not_lend_its_numbering(self):
+        """El ordinal es el de las lineas VIGENTES, el mismo que ensena la
+        salida cruda del motor: el escaparate viejo no cuenta puestos."""
+        parent = self._parent(self._lines('d7d5', prior=('e7e6', 'g8f6')))
+        _edge(parent, _pos('LINE-A', 'b', eval_cp=40), 'd7d5')
+
+        rows = {row['uci']: row for row in views._child_moves(parent)}
+
+        self.assertEqual(rows['d7d5']['line_no'], 1)
+
+    def test_a_searched_row_is_not_given_a_chip_it_did_not_have(self):
+        """La linea 1 con busqueda propia debajo no necesita provenance: su
+        numero lo avala un motor mirando ESA posicion."""
+        parent = self._parent(self._lines('d7d5'))
+        _edge(parent, _pos('LINE-A', 'b', eval_cp=40,
+                           nodes_invested=128_000_000), 'd7d5')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        self.assertNotIn('>line 1</span>', body)
+        self.assertNotIn('>walked</span>', body)
+
+    def test_the_refreshed_value_orders_where_its_number_says(self):
+        """El criterio de orden no se toca: sigue siendo (-tier, -rank).  Lo
+        que arregla el orden es que el numero de la fila y el de la linea
+        vuelvan a ser el mismo (§ ingest._seed_child_eval)."""
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        # Linea 1 (+40) y linea 2 (+300): manda el valor, no el puesto en el
+        # escaparate ni el chip que lleva la fila.
+        _edge(parent, _pos('LINE-A', 'b', eval_cp=40), 'd7d5')
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=300), 'e7e6')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
+        self.assertEqual([row['line_no'] for row in rows], [2, 1])
+        self.assertEqual([row['score'] for row in rows], [300, 40])
+        self.assertEqual([row['tier'] for row in rows], [2, 2])
+
+    def test_the_header_summary_still_counts_them_as_lines_only(self):
+        """El resumen del nodo no cambia de cuentas: una fila con provenance
+        de linea sigue siendo una jugada sin buscar."""
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        _edge(parent, _pos('LINE-A', 'b', eval_cp=40), 'd7d5')
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+
+        summary = views._moves_summary(views._child_moves(parent))
+
+        self.assertEqual(summary, 'Moves here: 0 searched · 2 from lines only')
