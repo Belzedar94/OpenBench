@@ -52,11 +52,34 @@ no existe lo recogera la pasada siguiente.
 
 import json
 
+import random
+import time
+
 from django.core.management.base import BaseCommand
+from django.db.utils import OperationalError
 
 from atomicdb import ingest
 from atomicdb.database import connection
 from atomicdb.models import Edge, Position
+
+
+def _retry_deadlock(fn, attempts=6):
+    """Ejecuta ``fn`` sobreviviendo a deadlocks de PG.
+
+    La pasada convive con la ingesta viva y dos escritores que tocan filas en
+    ordenes distintos ACABAN cruzandose; PG mata a uno y eso no es un error
+    del backfill sino el precio de no parar el mundo. Las escrituras de aqui
+    son idempotentes (marcar/limpiar un booleano), asi que repetir el lote es
+    correcto. Solo se reintenta el deadlock: cualquier otro OperationalError
+    sube tal cual, y el ultimo intento tambien.
+    """
+    for i in range(attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if 'deadlock detected' not in str(exc) or i == attempts - 1:
+                raise
+            time.sleep(1.5 * (i + 1) + random.uniform(0, 1))
 
 
 class Command(BaseCommand):
@@ -118,11 +141,21 @@ class Command(BaseCommand):
         incluida; la primera dice cuanto habia antes y solo sirve para leer el
         parte con contexto.
         """
-        # Un solo ``UPDATE`` sobre lo que estuviera marcado: sin esto, la marca
-        # que ``expand`` fue dejando desde la migracion hace de muro y el
-        # recorrido se para en el primer nivel (ver la cabecera del modulo).
-        cleared = Position.objects.filter(reachable=True).update(
-            reachable=False)
+        # La limpieza va POR LOTES y no en un solo ``UPDATE``: la version
+        # global mantenia una transaccion con millones de bloqueos de fila
+        # durante minutos, y el 4-ago (con la ingesta a ~900 analisis/10m)
+        # PG la mato por deadlock contra un escritor concurrente. Cada lote
+        # re-consulta ``reachable=True``, asi que el conjunto encoge hasta
+        # vaciarse y una repeticion tras reintento no cuenta doble.
+        cleared = 0
+        while True:
+            batch = list(Position.objects.filter(reachable=True)
+                         .values_list('key', flat=True)[:batch_size])
+            if not batch:
+                break
+            cleared += _retry_deadlock(
+                lambda keys=batch: Position.objects.filter(key__in=keys)
+                .update(reachable=False))
         frontier = [root]
         marked = self._mark(frontier, batch_size)
         while frontier:
@@ -144,9 +177,10 @@ class Command(BaseCommand):
         """``reachable=True`` sobre shells, en lotes: nada de instancias."""
         written = 0
         for chunk in _chunks(list(keys), batch_size):
-            Position.objects.bulk_update(
-                [Position(key=key, reachable=True) for key in chunk],
-                ['reachable'])
+            _retry_deadlock(
+                lambda rows=chunk: Position.objects.bulk_update(
+                    [Position(key=key, reachable=True) for key in rows],
+                    ['reachable']))
             written += len(chunk)
         return written
 
