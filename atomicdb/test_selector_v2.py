@@ -469,10 +469,18 @@ class MissingRowTests(TransactionTestCase):
         Edge.objects.create(parent=self.ghost, move_uci='h3h4',
                             child=self.tail)
 
-    def test_v1_dies_on_it(self):
+    def test_v1_skips_the_newborn(self):
+        # Historico: aqui se exigia el KeyError que el servicio absorbia unas
+        # veces por hora (y que mato la sombra en crudo el 4-ago).  Desde el
+        # fix, v1 aplica la misma regla estructural que v2: una clave que
+        # esta en la adyacencia pero no en el snapshot se salta esta pasada.
         with child_row_missing(self.ghost.key):
-            with self.assertRaises(KeyError):
-                ingest._regret_from_root()
+            regret = ingest._regret_from_root()
+        self.assertIn(self.root.key, regret)
+        # El fantasma no se expande y lo que colgaba de el no hereda regret
+        # util: sin fila del padre no hay gap que calcular.
+        self.assertEqual(regret.get(self.tail.key, float('inf')),
+                         float('inf'))
 
     def test_v2_finishes_the_pass(self):
         with child_row_missing(self.ghost.key):
