@@ -119,7 +119,9 @@ ponen ya `updated` a mano, como ya hacían los cierres y la siembra de eval.
 journalctl. Una racha de `full` no es un fallo del delta: es el proceso
 diciendo que lleva reiniciándose.
 
-**Migración 0038** (`Position.updated` indexada). No hace falta para que el
+**Migración 0038** (`Position.updated` indexada, como `AddIndex` en `Meta` y
+no como `db_index` en la columna: lo segundo es un `AlterField`, y en SQLite
+eso reconstruye la tabla entera). No hace falta para que el
 delta sea *correcto* — sin índice la consulta da las mismas filas y sólo tarda
 más — así que no hay ninguna prisa que justifique una ventana de bloqueo mala
 en Postgres. De paso arregla el `order_by('-updated')` de

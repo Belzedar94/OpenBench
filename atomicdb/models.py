@@ -107,11 +107,9 @@ class Position(models.Model):
     # tiene que ponerla A MANO es todo ``update`` de queryset que toque un
     # termino de la formula, porque ahi ``auto_now`` no dispara.
     #
-    # Indexada desde el modo delta del selector (§ ingest, ``_delta_keys``) y
-    # desde el completado de cobertura, que pide las mas recientes con un
-    # ``order_by('-updated')`` acotado: sin indice eso es ordenar la tabla
-    # entera cada minuto para quedarse con las primeras filas.
-    updated   = models.DateTimeField(auto_now=True, db_index=True)
+    # El indice va en ``Meta`` y NO en un ``db_index`` de aqui: ver
+    # ``atomic_pos_updated`` mas abajo, donde esta escrito por que.
+    updated   = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
@@ -130,6 +128,22 @@ class Position(models.Model):
             # sentido en el que se recorre esto, y asi el corte es el prefijo.
             models.Index(fields=['status', '-priority'],
                          name='atomic_pos_queue'),
+            # QUE SE HA MOVIDO DESDE LAS Y CUARTO.  Lo pregunta el modo delta
+            # del selector (§ ingest, ``_delta_keys``) y el completado de
+            # cobertura, que pide las mas recientes con un ``order_by
+            # ('-updated')`` acotado: sin indice eso es ordenar la tabla entera
+            # cada minuto para quedarse con las primeras filas.
+            #
+            # AQUI Y NO EN ``db_index=True``, y la diferencia no es de estilo.
+            # Un ``db_index`` sobre una columna que ya existe se convierte en
+            # un ``AlterField``, y SQLite no sabe alterar una columna: Django
+            # RECONSTRUYE la tabla — ``CREATE TABLE new__``, ``INSERT SELECT``
+            # de todas las filas, ``DROP``, ``RENAME`` y todos los indices otra
+            # vez.  Sobre esta tabla eso es copiar gigabytes, y hay que
+            # migrarla en las DOS bases.  Declarado en ``Meta`` es un
+            # ``AddIndex``, o sea un ``CREATE INDEX`` a secas en los dos
+            # motores, que es exactamente lo que se pide.
+            models.Index(fields=['updated'], name='atomic_pos_updated'),
             # Indice PARCIAL sobre el lado que se consulta: los NO alcanzables.
             # En una base sana casi todo cuelga de la raiz, asi que un indice
             # completo sobre el booleano seria una copia de la tabla para

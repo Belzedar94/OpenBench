@@ -11,11 +11,19 @@ mas recientes con ``order_by('-updated')`` acotado a unas miles de filas, y
 eso, sin indice, es ordenar la tabla ENTERA cada pasada del mismo servicio
 para quedarse con el principio.
 
-EL PRECIO, Y POR QUE ES DE LOS BARATOS.  Una entrada mas que mantener por
-escritura de fila.  ``updated`` es ``auto_now``, o sea monotona: las altas
-entran siempre por el extremo derecho del arbol, que es el caso amable de un
-B-tree, y no hay reordenacion de paginas por el medio.  Nada que reescribir en
-los datos, ningun backfill, ningun orden de despliegue que respetar.
+UN ``AddIndex``, NO UN ``db_index`` EN LA COLUMNA, y la diferencia es de otro
+orden de magnitud: un ``db_index=True`` sobre una columna que ya existe se
+convierte en ``AlterField``, y SQLite no sabe alterar una columna — Django
+reconstruye la tabla entera (``CREATE TABLE new__``, ``INSERT SELECT`` de
+todas las filas, ``DROP``, ``RENAME``, y todos los indices de nuevo).  Sobre
+esta tabla eso es copiar gigabytes, en las dos bases.  Declarado en ``Meta``
+es un ``CREATE INDEX`` a secas en los dos motores.
+
+EL PRECIO CORRIENTE, Y POR QUE ES DE LOS BARATOS.  Una entrada mas que
+mantener por escritura de fila.  ``updated`` es ``auto_now``, o sea monotona:
+las altas entran siempre por el extremo derecho del arbol, que es el caso
+amable de un B-tree.  Nada que reescribir en los datos, ningun backfill,
+ningun orden de despliegue que respetar.
 
 ESTE PROYECTO TIENE DOS BASES Y NINGUNA ORDEN DE ESQUEMA SE LANZA SIN DECIR
 SOBRE CUAL.  Al desplegar hacen falta las dos, explicitas:
@@ -33,10 +41,9 @@ instante.  Dos formas de hacerlo sin ventana mala, en orden de preferencia:
 
   * con el servicio del selector y el procesador de la cola parados, y
     entonces esto tal cual; o
-  * a mano y ``CONCURRENTLY``, usando el NOMBRE EXACTO que Django espera —
-    ``manage.py sqlmigrate atomicdb 0038`` lo imprime — y despues
-    ``migrate atomicdb 0038 --fake --database ...`` en cada base.  Con otro
-    nombre, la migracion volveria a crear el indice.
+  * a mano y ``CONCURRENTLY`` con el nombre exacto (``atomic_pos_updated``, y
+    ``manage.py sqlmigrate atomicdb 0038`` lo confirma), y despues
+    ``migrate atomicdb 0038 --fake --database ...`` en cada base.
 
 El modo delta no necesita este indice para ser CORRECTO: sin el la consulta da
 las mismas filas y solo tarda mas.  No hay ninguna prisa aqui que justifique
@@ -53,9 +60,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterField(
+        migrations.AddIndex(
             model_name='position',
-            name='updated',
-            field=models.DateTimeField(auto_now=True, db_index=True),
+            index=models.Index(fields=['updated'], name='atomic_pos_updated'),
         ),
     ]
