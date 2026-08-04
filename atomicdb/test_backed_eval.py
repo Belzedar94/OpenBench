@@ -421,17 +421,61 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(payload['backed_plies'], 3)
 
 
-class WalkedOrderTests(TestCase):
-    """Un valor CAMINADO no puede encabezar la tabla (§ views._child_moves).
+class ValueOrderTests(TestCase):
+    """La tabla ordena por VALOR y solo por valor (§ views._child_moves).
 
-    Reporte de comunidad: "after d4 e6 c3 displayed as top move despite the
-    fact that there is no engine analysis in that position and just someone
-    did Be7 move and analyzed it".  Y no era una tonteria academica: tras
-    Qh4-e4-c2 las blancas pierden material, o sea que el primer puesto lo
-    ocupaba una jugada que nadie habia mirado y que ademas es mala.
+    Hubo dos dias de particion por procedencia — lo buscado por encima de lo
+    sembrado — y rompia la tabla justo donde mas se mira.  Feedback del
+    reporte: "the moves with captions are not sorted in correct order with
+    other moves" / "return all the stuff as it was like 2 days ago without
+    stupid captions on moves and kekega sorting orders".
+
+    El aviso que aquella particion queria dar no se pierde: sigue entero en la
+    tinta de la celda y en su tooltip (§ LineProvenanceTests).  Lo que ya no
+    hace es mover a nadie de sitio.
     """
 
-    def test_a_walked_value_does_not_outrank_what_the_engine_looked_at(self):
+    def test_seeded_line_two_outranks_worse_searched_moves_ab19c3e4(self):
+        """El caso del reporte, reproducido: nodo ``ab19c3e4...``.
+
+        g7g6 vale -625 y es la LINEA 2 del propio motor; a8a7 (-1534), d8d6
+        (-1684) y a6a5 (-1732) tienen busqueda propia y son peores.  Con la
+        particion, g7g6 salia en el puesto 11 por debajo de las tres.  Sin
+        ella sale donde dice su numero: primera.
+        """
+        # Negras al turno, como en el nodo real: lo almacenado es White-POV y
+        # la vista voltea una sola vez, asi que +625 guardado se lee -625.
+        parent = _pos('AB19-P', 'b', expanded=True, last_analysis=[
+            {'move': 'h7h6', 'eval_cp': -600, 'pv': ['h7h6']},
+            {'move': 'g7g6', 'eval_cp': -625, 'pv': ['g7g6']}])
+        seeded = _pos('AB19-G7G6', 'w', eval_cp=625)
+        for name, uci, white_pov in (('AB19-A8A7', 'a8a7', 1_534),
+                                     ('AB19-D8D6', 'd8d6', 1_684),
+                                     ('AB19-A6A5', 'a6a5', 1_732)):
+            _edge(parent, _pos(name, 'w', eval_cp=white_pov,
+                               nodes_invested=128_000_000), uci)
+        _edge(parent, seeded, 'g7g6')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows],
+                         ['g7g6', 'a8a7', 'd8d6', 'a6a5'])
+        self.assertEqual([row['score'] for row in rows],
+                         [-625, -1_534, -1_684, -1_732])
+        # Mezcladas de verdad: la primera es una siembra y las otras tres
+        # tienen busqueda propia, y aun asi el orden solo mira el numero.
+        self.assertEqual([row['searched'] for row in rows],
+                         [False, True, True, True])
+        # Y la primera dice lo que es, en su tooltip y sin ocupar una palabra.
+        self.assertEqual(rows[0]['line_no'], 2)
+        self.assertIn('engine line 2', rows[0]['claim'])
+
+    def test_a_claim_may_head_the_table_and_still_says_what_it_is(self):
+        """Lo que la particion protegia — "after d4 e6 c3 displayed as top move
+        despite the fact that there is no engine analysis in that position" —
+        se sigue protegiendo, pero sin tocar el orden: la fila encabeza si su
+        numero lo dice, y sigue diciendo de que esta hecho ese numero (aqui,
+        con el chip-enlace de respaldo sin peso que lleva desde julio)."""
         parent = _pos('WKP', 'w', expanded=True)
         # +9000 caminados: espina respaldada, cero busqueda en ninguna parte.
         walked = _pos('WKW', 'b', backed_eval=9_000, backed_plies=4)
@@ -442,12 +486,11 @@ class WalkedOrderTests(TestCase):
 
         rows = views._child_moves(parent)
 
-        self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
-        self.assertEqual([row['tier'] for row in rows], [3, 2])
-        # Y el numero caminado sigue en su fila, entero y con su chip: baja de
-        # puesto, no se esconde.
-        self.assertTrue(rows[1]['backed_light'])
-        self.assertEqual(rows[1]['score'], 9_000)
+        self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
+        self.assertEqual(rows[0]['score'], 9_000)
+        self.assertTrue(rows[0]['backed_light'])
+        # El tier sigue calculandose — lo usa el estilo — pero ya no ordena.
+        self.assertEqual([row['tier'] for row in rows], [2, 3])
 
     def test_a_walked_value_still_beats_a_row_nobody_has_touched(self):
         """Caminado es poco, pero es mas que nada: sigue encima de lo vacio."""
@@ -460,9 +503,12 @@ class WalkedOrderTests(TestCase):
         rows = views._child_moves(parent)
 
         self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
-        self.assertEqual([row['tier'] for row in rows], [2, 1])
 
     def test_the_proven_ends_of_the_table_do_not_move(self):
+        """Los extremos son lo unico que sigue colocado por su estado: la
+        victoria probada arriba, la derrota probada abajo, y la fila que nadie
+        ha tocado justo encima de la derrota.  En medio manda el numero, y por
+        eso el +9000 caminado adelanta ahora al +20 buscado."""
         parent = _pos('WEP', 'w', expanded=True)
         won = _pos('WEW', 'b', status='WHITE_WIN', closure='TERMINAL')
         lost = _pos('WEL', 'b', status='BLACK_WIN', closure='TERMINAL')
@@ -478,11 +524,47 @@ class WalkedOrderTests(TestCase):
         rows = views._child_moves(parent)
 
         self.assertEqual([row['uci'] for row in rows],
-                         ['h5f7', 'd7d5', 'e7e6', 'b7b6', 'a7a6'])
-        self.assertEqual([row['tier'] for row in rows], [4, 3, 2, 1, 0])
+                         ['h5f7', 'e7e6', 'd7d5', 'b7b6', 'a7a6'])
+
+    def test_a_proven_draw_sits_at_the_value_it_is_worth(self):
+        """Las tablas PROBADAS valen cero y ordenan por cero, ni mas ni menos:
+        por debajo de lo que promete ventaja y por encima de lo que promete
+        desventaja, venga el numero de donde venga."""
+        parent = _pos('WDP', 'w', expanded=True)
+        _edge(parent, _pos('WDA', 'b', eval_cp=300), 'e7e6')
+        _edge(parent, _pos('WDD', 'b', status='DRAW', closure='TERMINAL'),
+              'd7d5')
+        _edge(parent, _pos('WDB', 'b', eval_cp=-300,
+                           nodes_invested=128_000_000), 'g8f6')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows],
+                         ['e7e6', 'd7d5', 'g8f6'])
+
+    def test_an_open_value_of_ten_thousand_stays_inside_the_open_band(self):
+        """Un respaldo de ±10.000 es el negamax de un hijo ya probado que
+        todavia no ha cerrado a su padre.  Es un numero, no un veredicto: no
+        adelanta a la victoria PROBADA ni cae por debajo de la fila vacia."""
+        parent = _pos('WCP', 'w', expanded=True)
+        _edge(parent, _pos('WCW', 'b', status='WHITE_WIN',
+                           closure='TERMINAL'), 'h5f7')
+        _edge(parent, _pos('WCH', 'b', backed_eval=10_000, backed_plies=2),
+              'e7e6')
+        _edge(parent, _pos('WCL', 'b', backed_eval=-10_000, backed_plies=2),
+              'g8f6')
+        _edge(parent, _pos('WCN', 'b'), 'b7b6')
+
+        rows = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in rows],
+                         ['h5f7', 'e7e6', 'g8f6', 'b7b6'])
+        # El numero que se PINTA no se toca: lo acotado es el puesto.
+        self.assertEqual([row['score'] for row in rows[1:3]],
+                         [10_000, -10_000])
 
     def test_two_walked_rows_keep_their_own_order(self):
-        """Dentro del tier manda el score de siempre: el tier no lo aplana."""
+        """Entre caminadas manda el score, como entre todo lo demas."""
         parent = _pos('WWP', 'w', expanded=True)
         better = _pos('WWB', 'b', backed_eval=300, backed_plies=2)
         worse = _pos('WWO', 'b', backed_eval=-300, backed_plies=6)
@@ -492,7 +574,6 @@ class WalkedOrderTests(TestCase):
         rows = views._child_moves(parent)
 
         self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
-        self.assertEqual([row['tier'] for row in rows], [2, 2])
         self.assertEqual([row['score'] for row in rows], [300, -300])
 
 
@@ -1168,14 +1249,15 @@ class SeededValueTests(TestCase):
 
     Reporte de comunidad, literal: "walking eval still not fixed ... long line
     without any request analysis ... and pretends to have accurate eval ... not
-    even marked as walked".  El respaldo caminado ya bajaba de tier y llevaba
-    su chip; esta otra no llevaba nada, porque el numero no viene de un
-    respaldo sino de la linea MultiPV del padre, que el ingest siembra en el
-    hijo al aterrizar un pase (§ ingest._seed_child_eval).  Para quien mira la
-    pagina es la misma afirmacion sin comprobar, asi que se dice igual.
+    even marked as walked".  El respaldo caminado ya llevaba su chip; esta otra
+    no llevaba nada, porque el numero no viene de un respaldo sino de la linea
+    MultiPV del padre, que el ingest siembra en el hijo al aterrizar un pase
+    (§ ingest._seed_child_eval).  Para quien mira la pagina es la misma
+    afirmacion sin comprobar, asi que se dice igual — hoy con la tinta de la
+    celda y su tooltip, que es lo que no le quita el puesto a nadie.
     """
 
-    def test_a_seeded_child_does_not_outrank_what_the_engine_looked_at(self):
+    def test_a_seeded_child_is_marked_without_being_moved(self):
         parent = _pos('SEED-P', 'w', expanded=True)
         # +900 sembrados de la linea del padre: nadie ha buscado nunca aqui.
         seeded = _pos('SEED-S', 'b', eval_cp=900)
@@ -1186,16 +1268,19 @@ class SeededValueTests(TestCase):
 
         rows = views._child_moves(parent)
 
-        self.assertEqual([row['uci'] for row in rows], ['d7d5', 'e7e6'])
-        self.assertEqual([row['tier'] for row in rows], [3, 2])
-        # La fila sembrada se ensena entera: baja de puesto y se marca, no se
-        # esconde.  Y no lleva chip de respaldo, porque respaldo no tiene.
-        self.assertTrue(rows[1]['walked'])
-        self.assertFalse(rows[1]['backed'])
-        self.assertFalse(rows[1]['backed_light'])
-        self.assertEqual(rows[1]['score'], 900)
-        # La fila buscada no se toca: sigue siendo conocimiento de motor.
-        self.assertFalse(rows[0]['walked'])
+        # Ordena por su numero, como todo el mundo.
+        self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
+        # Y lo que la distingue viaja con ella, no en su puesto: sin chip de
+        # respaldo (respaldo no tiene) y con el aviso listo para el tooltip.
+        self.assertTrue(rows[0]['walked'])
+        self.assertFalse(rows[0]['backed'])
+        self.assertFalse(rows[0]['backed_light'])
+        self.assertEqual(rows[0]['score'], 900)
+        self.assertIn('no direct search yet', rows[0]['claim'])
+        # La fila buscada no se toca: sigue siendo conocimiento de motor, y su
+        # numero se pinta pelado.
+        self.assertFalse(rows[1]['walked'])
+        self.assertIsNone(rows[1]['claim'])
 
     def test_backing_with_search_weight_is_still_engine_knowledge(self):
         """El predicado mira NODOS, no de donde vino el numero: un respaldo con
@@ -1213,15 +1298,17 @@ class SeededValueTests(TestCase):
         self.assertTrue(row['backed'])
         self.assertFalse(row['backed_light'])
 
-    def test_the_seeded_row_wears_the_walked_mark(self):
+    def test_the_seeded_row_is_marked_in_ink_and_not_in_words(self):
         parent = _pos('SEED-RP', 'w', expanded=True)
         _edge(parent, _pos('SEED-RS', 'b', eval_cp=900), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        self.assertIn('>walked</span>', body)
-        self.assertIn('nothing has searched this position itself yet', body)
+        self.assertRegex(body, r'<td><em class="dim eval-claim"[^>]*>900</em>')
+        self.assertIn('no direct search yet', body)
+        # Ni una palabra suelta en la fila.
+        self.assertNotIn('>walked</span>', body)
 
     def test_the_header_of_a_seeded_position_says_walked(self):
         pos = _pos('SEED-HS', 'w', eval_cp=180, expanded=True)
@@ -1245,13 +1332,18 @@ class SeededValueTests(TestCase):
 
 
 class LineProvenanceTests(TestCase):
-    """La jugada que encabeza una linea VIGENTE dice CUAL, no "walked".
+    """La procedencia de un numero vive en su TINTA y en su tooltip.
 
     Reporte de comunidad, literal: "why a line that was one of 5 multi-pv is
-    now always marked as WALKED? very annoying".  Las dos cosas eran ciertas —
-    el motor nombro esa jugada en su MultiPV y nadie ha buscado en el hijo — y
-    la fila solo contaba la segunda, justo debajo del bloque donde se leen las
-    cinco lineas enteras.
+    now always marked as WALKED? very annoying".  La respuesta fue nombrar la
+    linea en el chip, y el chip seguia siendo una palabra suelta por fila en
+    una tabla de treinta y tantas.  Feedback del usuario principal: "return all
+    the stuff as it was like 2 days ago without stupid captions on moves".
+
+    Asi que la fila no gasta ni una palabra: el eval sin busqueda propia
+    detras se pinta atenuado y en cursiva, y el ``title`` de esa misma celda
+    cuenta la historia entera — de que linea vigente sale, o que lo sembro un
+    pase anterior.
     """
 
     def _parent(self, lines, **kw):
@@ -1276,32 +1368,41 @@ class LineProvenanceTests(TestCase):
         # no manda, o caminada a mano.  Sigue sin provenance que ensenar.
         self.assertIsNone(rows['g8f6']['line_no'])
 
-    def test_the_chip_says_line_two_instead_of_walked(self):
+    def test_the_line_number_lives_in_the_tooltip_not_in_the_row(self):
         parent = self._parent(self._lines('d7d5', 'e7e6'))
         _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        # La celda entera: el numero y su chip, con la misma clase que
-        # llevaba el chip mudo — mismo tier, misma tinta de aviso.
-        self.assertRegex(body, r'<td>30<span class="backed-mark light"')
-        self.assertIn('>line 2</span>', body)
-        self.assertIn("first move of engine line 2 from this node's current "
-                      'analysis', body)
+        # La celda entera: el numero con su tinta de reclamacion, y la
+        # historia completa donde se pregunta por el — en el title.  El
+        # apostrofo de "node's" sale escapado de la plantilla (la frase entra
+        # por una variable) y el minificador lo devuelve a caracter suelto: el
+        # patron admite las dos formas para no fijar ese detalle del pipeline.
+        self.assertRegex(
+            body,
+            r'<td><em class="dim eval-claim"[^>]*'
+            r'title="from engine line 2 of this node\S+s current analysis — '
+            r'no direct search of the resulting position yet"[^>]*>30</em>')
+        # Y ni "line 2" ni "walked" ocupan sitio en la fila.
+        self.assertNotIn('>line 2</span>', body)
+        self.assertNotIn('>walked</span>', body)
 
-    def test_a_seed_with_no_line_left_keeps_the_bare_chip(self):
-        """El chip pelado no se va: es lo que le queda a la siembra de un pase
-        ANTERIOR, que ya no es el veredicto de nadie."""
+    def test_a_seed_with_no_line_left_says_it_came_from_an_older_pass(self):
+        """La siembra de un pase ANTERIOR ya no es el veredicto de nadie, y su
+        tooltip lo dice sin poder nombrar ninguna linea vigente."""
         parent = self._parent(self._lines('d7d5', prior=('e7e6',)))
         _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        self.assertIn('>walked</span>', body)
-        self.assertNotIn('>line 1</span>', body)
-        self.assertNotIn('>line 2</span>', body)
+        self.assertIn('title="seeded by an earlier pass (passes seed their '
+                      'top moves over time); no direct search yet"', body)
+        # Ninguna linea vigente la nombra, asi que no se le atribuye ninguna.
+        self.assertNotIn('from engine line', body)
+        self.assertNotIn('>walked</span>', body)
 
     def test_an_old_pass_does_not_lend_its_numbering(self):
         """El ordinal es el de las lineas VIGENTES, el mismo que ensena la
@@ -1313,9 +1414,9 @@ class LineProvenanceTests(TestCase):
 
         self.assertEqual(rows['d7d5']['line_no'], 1)
 
-    def test_a_searched_row_is_not_given_a_chip_it_did_not_have(self):
+    def test_a_searched_row_is_painted_exactly_as_it_always_was(self):
         """La linea 1 con busqueda propia debajo no necesita provenance: su
-        numero lo avala un motor mirando ESA posicion."""
+        numero lo avala un motor mirando ESA posicion, y se pinta pelado."""
         parent = self._parent(self._lines('d7d5'))
         _edge(parent, _pos('LINE-A', 'b', eval_cp=40,
                            nodes_invested=128_000_000), 'd7d5')
@@ -1323,16 +1424,59 @@ class LineProvenanceTests(TestCase):
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
+        self.assertIn('<td>40</td>', body)
+        self.assertNotIn('eval-claim', body)
         self.assertNotIn('>line 1</span>', body)
         self.assertNotIn('>walked</span>', body)
 
+    def test_a_full_table_spends_no_words_on_provenance(self):
+        """La tabla entera, con las cuatro procedencias a la vez: ni una
+        palabra suelta en ninguna fila.
+
+        El chip-enlace de respaldo NO entra en esto y se queda tal cual: no es
+        una etiqueta de procedencia sino el salto al ply donde nace el valor,
+        lleva sus plies dentro y estaba ahi mucho antes del episodio.
+        """
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        # linea 1, con busqueda propia          -> numero pelado
+        _edge(parent, _pos('FULL-A', 'b', eval_cp=40,
+                           nodes_invested=128_000_000), 'd7d5')
+        # linea 2, sembrada                     -> tinta + tooltip
+        _edge(parent, _pos('FULL-B', 'b', eval_cp=30), 'e7e6')
+        # siembra huerfana de linea             -> tinta + tooltip
+        _edge(parent, _pos('FULL-C', 'b', eval_cp=20), 'g8f6')
+        # respaldo sin peso                     -> chip-enlace de siempre
+        _edge(parent, _pos('FULL-D', 'b', backed_eval=10, backed_plies=5),
+              'a7a6')
+        # sin nada                              -> "unexplored"
+        _edge(parent, _pos('FULL-E', 'b'), 'b7b6')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+        # Solo las filas del ARBOL: detras van las respuestas legales que
+        # todavia no son nodo, que enlazan a /goto/ y no tienen eval ninguna.
+        rows = [row for row in re.findall(r'<tr><td><span class="chip.*?</tr>',
+                                          body)
+                if '/atomicdb/explore/' in row]
+
+        self.assertEqual(len(rows), 5)
+        for row in rows:
+            self.assertNotIn('>walked</span>', row)
+            self.assertNotIn('>line 1</span>', row)
+            self.assertNotIn('>line 2</span>', row)
+        # Dos filas con tinta de reclamacion, una pelada, y el chip-enlace
+        # entero en la suya.
+        self.assertEqual(sum('eval-claim' in row for row in rows), 2)
+        self.assertIn('<td>40</td>', body)
+        self.assertIn('walked ·5</a>', body)
+
     def test_the_refreshed_value_orders_where_its_number_says(self):
-        """El criterio de orden no se toca: sigue siendo (-tier, -rank).  Lo
-        que arregla el orden es que el numero de la fila y el de la linea
-        vuelvan a ser el mismo (§ ingest._seed_child_eval)."""
+        """El criterio de orden es el numero y nada mas.  Lo que arregla el
+        orden es ademas que el numero de la fila y el de la linea vuelvan a
+        ser el mismo (§ ingest._seed_child_eval)."""
         parent = self._parent(self._lines('d7d5', 'e7e6'))
         # Linea 1 (+40) y linea 2 (+300): manda el valor, no el puesto en el
-        # escaparate ni el chip que lleva la fila.
+        # escaparate ni de donde salio el numero.
         _edge(parent, _pos('LINE-A', 'b', eval_cp=40), 'd7d5')
         _edge(parent, _pos('LINE-B', 'b', eval_cp=300), 'e7e6')
 
@@ -1341,7 +1485,6 @@ class LineProvenanceTests(TestCase):
         self.assertEqual([row['uci'] for row in rows], ['e7e6', 'd7d5'])
         self.assertEqual([row['line_no'] for row in rows], [2, 1])
         self.assertEqual([row['score'] for row in rows], [300, 40])
-        self.assertEqual([row['tier'] for row in rows], [2, 2])
 
     def test_the_header_summary_still_counts_them_as_lines_only(self):
         """El resumen del nodo no cambia de cuentas: una fila con provenance

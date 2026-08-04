@@ -114,9 +114,14 @@
     done in the node ... just a bunch of walked evals": el dato estaba, en una
     linea gris debajo del FEN y en veintitantos chips sueltos, y nadie lo
     contaba.  Las dos frases las compone la vista (§ views._node_story,
-    views._moves_summary).{% endcomment %}
-    {% if node_story %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{{ node_story }}</p>{% endif %}
-    {% if moves_summary %}<p class="dim" style="font-size:.85rem;margin:.2rem 0 0" title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</p>{% endif %}
+    views._moves_summary).
+
+    Van en UN renglon, no en dos: ahora que la procedencia ya no ocupa una
+    palabra por fila, la cabecera tampoco tiene por que gastar dos lineas para
+    decir de donde viene lo de abajo.  Siguen siendo dos frases con dos
+    tooltips propios — cada una explica lo suyo — separadas por una raya para
+    que el ``·`` de dentro del resumen no compita con el de fuera.{% endcomment %}
+    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} — {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
@@ -564,17 +569,27 @@
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
         {% comment %}Mismo chip-enlace que la cabecera, con la URL de ESTA
-           fila.  Y en el hueco del chip mudo, cuando la jugada encabeza una
-           linea VIGENTE, su numero: mismo aviso y mismo tier, dicho por su
-           nombre (§ views._line_numbers).  El chip pelado se queda para las
-           siembras que ya no tienen linea.{% endcomment %}
-        <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{{ m.score }}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
+           fila: dice cuantos plies abajo nace el valor y salta hasta alli.
+
+           Lo que ya no existe es la palabra suelta en la fila — el "walked" /
+           "line N" que ocupaba el hueco del chip mudo.  Un numero sin busqueda
+           propia detras se pinta atenuado y en cursiva, y su tooltip cuenta la
+           historia entera (§ views._claim_note); un numero con busqueda propia
+           se pinta como siempre, sin marca ninguna.
+
+           El estilo va EN LINEA a proposito: atomicdb.css NO entra en el
+           digest que mueve el ``?v=`` de base.html (§ OpenBench.config,
+           OPENBENCH_STATIC_ASSETS), asi que una clase nueva declarada alli no
+           llegaria a un navegador que ya tiene la hoja en cache.  ``dim`` si
+           esta en esa hoja desde hace meses, y de ahi sale la tinta apagada;
+           ``eval-claim`` viaja como gancho estable para los tests.{% endcomment %}
+        <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{% if m.claim %}<em
+            class="dim eval-claim" style="font-style:italic"
+            title="{{ m.claim }}">{{ m.score }}</em>{% else %}{{ m.score }}{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }} — jump to the source of this value, {{ m.backed_plies }} ply(s) below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below{% endif %}{% if m.backed_url %} — click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% elif m.walked %}<span
-            class="backed-mark light"
-            title="{% if m.line_no %}first move of engine line {{ m.line_no }} from this node's current analysis — nothing has searched the position it leads to yet, so the value is a claim, not a verdict{% else %}this value was seeded from an engine line through this move, and every pass seeds its top moves, so they pile up over passes; nothing has searched this position itself yet, so it is a claim, not a verdict{% endif %}">{% if m.line_no %}line {{ m.line_no }}{% else %}walked{% endif %}</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            title="{% if m.backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below{% endif %}{% if m.backed_url %} — click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>

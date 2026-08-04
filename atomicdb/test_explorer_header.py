@@ -247,6 +247,25 @@ class NodeKnowledgeSummaryTests(TestCase):
         self.assertEqual(response.context['moves_summary'], '')
         self.assertNotIn('Moves here:', response.content.decode())
 
+    def test_the_two_sentences_share_one_line_and_keep_two_tooltips(self):
+        """Ahora que la procedencia no gasta una palabra por fila, la cabecera
+        tampoco gasta dos renglones en decir de donde viene lo de abajo.  Una
+        linea, dos frases, y cada una con su propia explicacion al pasar el
+        raton: el resumen de la tabla la necesita, la del nodo no."""
+        parent = self._mixed()
+
+        body = self.client.get(
+            f'/atomicdb/explore/{parent.key}/').content.decode()
+
+        self.assertRegex(
+            body,
+            r'<p class="dim"[^>]*>'
+            r'<span>This position: analysed \(136\.4M nodes across 27 '
+            r'passes\)</span> — <span title="searched = an engine looked at '
+            r'that move itself[^"]*">'
+            r'Moves here: 1 searched · 2 from lines only · 1 queued'
+            r'</span></p>')
+
     def test_the_queue_count_is_one_statement_for_the_whole_table(self):
         """El unico numero que no viaja ya en la fila entra por un IN, no por
         una pregunta por hijo: una tabla abierta son treinta y tantas."""

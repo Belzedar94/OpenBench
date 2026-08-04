@@ -2562,6 +2562,32 @@ def _own_search(point, nodes):
     return f'own search: {point:+d} @ {_human(nodes)} nodes'
 
 
+def _claim_note(line_no):
+    """De donde sale un numero que NINGUNA busqueda suya avala.
+
+    Es lo que decia el chip de la fila — ``line N`` cuando la jugada encabeza
+    una linea vigente, ``walked`` a secas cuando la siembra ya se quedo sin
+    ella — y ahora vive en el ``title`` de la celda del eval, que es justo
+    donde se pregunta por el numero.
+
+    El chip decia esto mismo a gritos: una palabra suelta por fila, en una
+    tabla de treinta y tantas, repetida veintitantas veces debajo del bloque
+    que ya ensena las cinco lineas enteras.  Feedback del reporte, literal:
+    "return all the stuff as it was like 2 days ago without stupid captions on
+    moves".  La celda se pinta ademas atenuada y en cursiva (§ explore.html),
+    asi que la fila se sigue distinguiendo de un vistazo y sin gastar palabras.
+
+    Las dos redacciones son las que ya se habian afinado para el tooltip del
+    chip; lo unico que cambia es que ahora son TODO lo que se dice, asi que
+    dicen la historia entera y no la mitad que no cabia en dos palabras.
+    """
+    if line_no:
+        return (f"from engine line {line_no} of this node's current analysis"
+                ' — no direct search of the resulting position yet')
+    return ('seeded by an earlier pass (passes seed their top moves over '
+            'time); no direct search yet')
+
+
 def _move_css(status, score, win_status):
     """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
     if status == 'DRAW':
@@ -2634,8 +2660,9 @@ def _line_numbers(pos):
     Las dos cosas son ciertas a la vez y la fila puede decir la mejor: de esta
     jugada el motor SI dijo algo, dijo la linea N, y el numero de la fila es
     justo lo que sembro esa linea al aterrizar el pase.  Lo que no hay es
-    busqueda en el hijo, que es lo que sigue diciendo el tier y el aviso del
-    tooltip.
+    busqueda en el hijo, y eso lo sigue diciendo el aviso de la celda
+    (§ ``_claim_note``) — que es hoy lo unico que lo dice, porque ni el orden
+    ni ninguna palabra en la fila vuelven a hablar de procedencia.
 
     VIGENTE quiere decir lo mismo que en todas partes (§
     ``solve_estimate.current_line``): sin la marca ``prior_pass``, que es el
@@ -2668,10 +2695,34 @@ def _child_moves(pos):
     backed > eval puntual); ``point`` conserva la eval puntual cruda para que
     el respaldo nunca borre lo que el motor dijo de verdad.
 
-    Orden: ``(-tier, -rank)``.  El ``rank`` es el de siempre — el score, con
-    los desempates de distancia de mate dentro de las victorias y de las
-    derrotas — y ordena DENTRO de su tier; el tier dice DE QUE esta hecho ese
-    numero:
+    Orden: UNO solo, y es el VALOR — ``-rank``.  El ``rank`` es el de siempre
+    (el score en perspectiva del que mueve, con los desempates de distancia de
+    mate dentro de las victorias y de las derrotas) y trae ademas los tres
+    centinelas que colocan los EXTREMOS de la tabla: victoria probada arriba
+    del todo, derrota probada abajo del todo, y "sin analizar" justo encima de
+    la derrota.  Entre esos extremos no hay particiones: una jugada abierta se
+    ordena por su mejor valor conocido y da igual de donde salga el numero.
+
+    Hubo una particion por procedencia — un ``tier`` que ponia lo buscado por
+    encima de lo sembrado — y duro dos dias.  Rompia la tabla justo donde mas
+    se mira: en ``ab19c3e4...`` la linea 2 del propio motor (g7g6, -625) salia
+    en el puesto 11, debajo de a8a7 (-1534), d8d6 (-1684) y a6a5 (-1732),
+    porque aquellas tres tenian busqueda propia y g7g6 era una siembra.
+    Feedback del reporte, literal: "the moves with captions are not sorted in
+    correct order with other moves" / "return all the stuff as it was like 2
+    days ago without stupid captions on moves and kekega sorting orders".
+
+    Y es que una tabla de jugadas es un TABLERO, no un inventario: se lee de
+    arriba abajo preguntando "que es lo mejor aqui", y una fila que vale -625
+    no puede ir debajo de una que vale -1732 por muy comprobada que este la
+    segunda.  Lo que la particion queria advertir — "de este numero no hay
+    busqueda propia detras" — se sigue diciendo entero, pero donde no estorba
+    al orden: en la tinta de la celda y en su tooltip (§ ``_claim_note``).
+    Ese aviso es el mismo que ya daba el frontier para elegir que comprar
+    (§ ``ingest._frontier_rank``), que ordena por valor y solo por valor.
+
+    ``tier`` sobrevive como DATO de la fila — de que esta hecho el numero — y
+    ya no toca la clave de ordenacion:
 
       4  victoria probada del que mueve
       3  conocimiento de MOTOR: eval propia con nodos detras, respaldo con
@@ -2681,17 +2732,7 @@ def _child_moves(pos):
          numero sale de una linea, caminada a mano o sembrada del MultiPV del
          padre
       1  sin analizar
-      0  derrota probada
-
-    El tier existe por un reporte de comunidad: "after d4 e6 c3 displayed as
-    top move despite the fact that there is no engine analysis in that
-    position and just someone did Be7 move and analyzed it" — y en efecto,
-    tras Qh4-e4-c2 las blancas pierden material.  Un valor VIRGEN de motor no
-    puede ganarle el puesto a lo que el motor SI ha mirado: no es que sea
-    peor, es que nadie lo ha comprobado, y la tabla ordena por conocimiento
-    antes que por optimismo.  La fila caminada se sigue ensenando entera, con
-    su chip y su numero; lo unico que pierde es el derecho a ponerse por
-    encima de lo avalado."""
+      0  derrota probada"""
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
@@ -2723,7 +2764,15 @@ def _child_moves(pos):
         elif c.backed_eval is not None or c.eval_cp is not None:
             known = ingest.best_known_eval(c)
             score = known if stm_white else -known
-            rank = score
+            # El valor de una jugada ABIERTA ordena DENTRO de la banda abierta.
+            # Con un solo criterio de orden, los centinelas de los extremos ya
+            # no estan protegidos por ningun tier, y un respaldo de ±10.000
+            # existe: es el negamax de un hijo ya probado que todavia no ha
+            # cerrado a su padre.  Eso es un numero, no un veredicto, y no
+            # puede colarse ni por encima de la victoria PROBADA ni por debajo
+            # de la fila que no ha tocado nadie.  El score que se PINTA es el
+            # de siempre; lo que se acota es el puesto.
+            rank = max(-9_999.0, min(9_999.0, float(score)))
             if c.backed_eval is not None and c.backed_eval != c.eval_cp:
                 backed_plies = c.backed_plies
             # Territorio VIRGEN de motor, UN solo predicado (§ _walked_value):
@@ -2778,15 +2827,21 @@ def _child_moves(pos):
                       'walked': walked,
                       # De QUE linea vigente es esta jugada la primera, si lo
                       # es (§ _line_numbers).  No toca ni el tier ni el orden
-                      # ni el resumen de la cabecera: solo dice, donde iba un
-                      # chip mudo, lo que el motor ya habia dicho de ella.
+                      # ni el resumen de la cabecera: solo afina la redaccion
+                      # del aviso de abajo.
                       'line_no': line_numbers.get(e.move_uci),
+                      # El aviso de "este numero no lo avala ninguna busqueda
+                      # suya", para el tooltip de la celda del eval.  Existe
+                      # exactamente donde antes iba el chip mudo de la fila:
+                      # caminado y sin respaldo que lo explique por su cuenta.
+                      'claim': (_claim_note(line_numbers.get(e.move_uci))
+                                if walked and not backed_plies else None),
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
-    moves.sort(key=lambda m: (-m['tier'], -m['rank']))
+    moves.sort(key=lambda m: -m['rank'])
     return moves
 
 
