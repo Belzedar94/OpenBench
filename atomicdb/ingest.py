@@ -9,9 +9,11 @@ import contextlib
 import contextvars
 import functools
 import heapq
+import json
 import math
+import os
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db.models import Max, Q
@@ -2493,19 +2495,88 @@ PRIORITY_WRITE_BATCH = 500
 
 # Sin pasada en este intervalo, la siguiente es COMPLETA.  No es que el delta
 # deje de ser correcto con una ventana larga (no deja: ``updated > since`` es
-# igual de cierto con diez minutos que con uno), es que un hueco asi significa
-# que algo no fue normal — el servicio reinicio, el reloj salto, la maquina se
-# quedo parada — y ante eso la respuesta barata es pagar una pasada entera.
-SELECTOR_DELTA_MAX_GAP = timedelta(minutes=10)
+# igual de cierto con doce horas que con un minuto), es que a partir de cierto
+# hueco lo tocado se acerca al universo entero y el delta pierde su razon.
+#
+# POR QUE DOCE HORAS Y NO DIEZ MINUTOS.  El hueco se mide entre INICIOS de
+# pasada (el reloj se coge antes de leer nada, § refresh_priorities_v2), asi
+# que el minimo alcanzable es la duracion de la pasada anterior mas el
+# intervalo del servicio.  Con diez minutos el delta era inalcanzable por
+# construccion: la primera pasada de un proceso es completa por diseno, una
+# completa tarda mas de diez minutos en este grafo, y por lo tanto la
+# siguiente tampoco calificaba — full para siempre, con el guard bloqueando
+# exactamente lo que decia proteger.  El 4 de agosto de 2026 el servicio paso
+# el dia entero asi: seis pasadas ``full`` de 24 minutos a 2,2 horas, doce
+# millones de filas reescritas cada vez, y la web pagandolo.  El umbral tiene
+# que ser MAS LARGO que cualquier pasada completa plausible; doce horas lo es
+# con margen, y una ventana de doce horas sigue tocando una fraccion pequena
+# del grafo (la bola manda en el coste de todas formas).
+SELECTOR_DELTA_MAX_GAP = timedelta(hours=12)
 
-# El estado de la ultima pasada, POR PROCESO, exactamente como
-# ``_priority_refresh_cache``: el servicio del selector no persiste nada en la
-# base y esto no va a ser lo primero que lo haga.  Un arranque en frio no tiene
-# ``at`` y por lo tanto hace pasada completa, que es el fallback que se pide de
-# todas formas; y con el inline de emergencia, cada proceso web lleva su propia
-# ventana contigua, que es lo unico que hace falta para no saltarse una fila
-# (repuntuar de mas es idempotente, saltarse algo no lo seria).
-_selector_delta_state = {'at': None, 'mode': '', 'rows': 0, 'seconds': 0.0}
+# El estado de la ultima pasada, POR PROCESO, mas una copia del marcador en
+# disco.  El servicio del selector sigue sin persistir nada en la base; el
+# marcador ``at`` va a un fichero en ``ATOMICDB_STATE_DIR`` (en el servidor,
+# el ``StateDirectory=`` de systemd) porque sin el cada reinicio — deploy,
+# crash, lo que sea — pagaba una pasada completa de horas justo despues de
+# arrancar, que es el peor momento.  Solo se persiste el marcador de pasadas
+# COMPLETADAS: una pasada matada a mitad no escribio el suyo, asi que la
+# siguiente cubre desde el ultimo snapshot entero y no se salta nada
+# (repuntuar de mas es idempotente, saltarse algo no lo seria).  Sin
+# ``ATOMICDB_STATE_DIR`` — tests, desarrollo, el inline de emergencia — todo
+# se comporta como antes: cada proceso lleva su propia ventana contigua.
+_selector_delta_state = {'at': None, 'mode': '', 'rows': 0, 'seconds': 0.0,
+                         'disk_checked': False}
+
+
+def _delta_state_path():
+    root = str(getattr(settings, 'ATOMICDB_STATE_DIR', '') or '')
+    if not root:
+        return None
+    return os.path.join(root, 'selector_delta.json')
+
+
+def _load_delta_state():
+    """El marcador que dejo el proceso anterior, si hay y es de fiar.
+
+    Cualquier cosa rara — fichero ausente, JSON roto, fecha sin zona — vale
+    ``None`` y por lo tanto pasada completa, que es el fallback de siempre.
+    La persistencia es una optimizacion; jamas puede tumbar una pasada.
+    """
+    path = _delta_state_path()
+    if path is None:
+        return None
+    try:
+        with open(path, encoding='utf-8') as fh:
+            raw = json.load(fh).get('at')
+        at = datetime.fromisoformat(raw)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if timezone.is_naive(at):
+        return None
+    return at
+
+
+def _persist_delta_state(at):
+    path = _delta_state_path()
+    if path is None:
+        return
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump({'at': at.isoformat()}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _forget_delta_state_on_disk():
+    path = _delta_state_path()
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 _PRIORITY_COLUMNS = ('key', 'eval_cp', 'backed_eval', 'expanded', 'visits',
                      'campaign_id', 'priority', 'reachable')
@@ -2529,9 +2600,12 @@ def reset_selector_delta_state():
 
     La usan los tests (cada uno tiene que empezar con la misma historia) y
     cualquiera que quiera forzar una pasada entera sin reiniciar el servicio.
+    Olvidar incluye el disco: si el marcador persistido sobreviviera, el
+    olvido no seria tal en cuanto el proceso reiniciase.
     """
     _selector_delta_state.update({'at': None, 'mode': '', 'rows': 0,
-                                  'seconds': 0.0})
+                                  'seconds': 0.0, 'disk_checked': False})
+    _forget_delta_state_on_disk()
 
 
 def selector_pass_report():
@@ -2547,6 +2621,7 @@ def _record_pass(mode, rows, started, delivered_at=None):
     _selector_delta_state['seconds'] = round(time.monotonic() - started, 3)
     if delivered_at is not None:
         _selector_delta_state['at'] = delivered_at
+        _persist_delta_state(delivered_at)
 
 
 def _delta_since(now, delta=None):
@@ -2554,8 +2629,12 @@ def _delta_since(now, delta=None):
     if delta is False or (delta is None and not selector_delta_enabled()):
         return None
     last = _selector_delta_state['at']
+    if last is None and not _selector_delta_state['disk_checked']:
+        _selector_delta_state['disk_checked'] = True
+        last = _load_delta_state()        # el marcador del proceso anterior
+        _selector_delta_state['at'] = last
     if last is None:
-        return None                       # primera pasada de este proceso
+        return None                       # primera pasada de esta historia
     if now - last > SELECTOR_DELTA_MAX_GAP:
         return None                       # demasiado tiempo sin pasar por aqui
     return last

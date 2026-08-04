@@ -25,6 +25,8 @@ por que.
 import contextlib
 import json
 import math
+import os
+import tempfile
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
@@ -860,6 +862,119 @@ class DeltaPassTests(TestCase):
 
         self.assertEqual(dict(Position.objects.values_list('key', 'updated')),
                          before)
+
+
+@override_settings(ATOMICDB_SELECTOR_V2=True)
+class DeltaMarkerPersistenceTests(TestCase):
+    """El marcador sobrevive al proceso; el reinicio deja de costar horas.
+
+    La leccion del 4 de agosto de 2026, en dos mitades.  Primera: el hueco
+    del fallback se mide entre INICIOS de pasada, asi que el umbral tiene que
+    ser mas largo que cualquier pasada completa plausible — con 10 minutos el
+    delta era inalcanzable por construccion y el servicio paso el dia en
+    pasadas de 12M de filas.  Segunda: el marcador vivia solo en el proceso,
+    y cada reinicio (deploy, guardarrail) pagaba una completa de horas justo
+    despues de arrancar.  Aqui se fija el umbral, la lectura del disco en
+    frio, y que el disco jamas tumba una pasada.
+    """
+
+    NARROW = 1
+
+    def setUp(self):
+        self.fixture = DeltaFixture().build()
+        self.state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_dir.cleanup)
+        overridden = override_settings(ATOMICDB_STATE_DIR=self.state_dir.name)
+        overridden.enable()
+        self.addCleanup(overridden.disable)
+
+    def _pass(self, **kwargs):
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            return ingest.refresh_priorities(force=True, **kwargs)
+
+    def _marker_file(self):
+        return ingest._delta_state_path()
+
+    def _cold_process(self):
+        """Lo que queda tras un reinicio: memoria virgen, disco intacto."""
+        ingest._selector_delta_state.update(
+            {'at': None, 'mode': '', 'rows': 0, 'seconds': 0.0,
+             'disk_checked': False})
+
+    def test_the_gap_outlives_any_plausible_complete_pass(self):
+        """El numero que hizo el dano, fijado como contrato.
+
+        La pasada completa mas larga observada en la base viva duro 2,2
+        horas.  Si alguien vuelve a bajar este umbral por debajo de eso, el
+        delta vuelve a ser inalcanzable por construccion y este test es el
+        unico sitio donde esa historia esta escrita en ejecutable.
+        """
+        self.assertGreaterEqual(ingest.SELECTOR_DELTA_MAX_GAP,
+                                timedelta(hours=6))
+
+    def test_a_completed_pass_leaves_the_marker_on_disk(self):
+        self._pass()
+        with open(self._marker_file(), encoding='utf-8') as fh:
+            marker = json.load(fh)
+        self.assertEqual(marker['at'], ingest._selector_delta_state['at']
+                         .isoformat())
+
+    def test_a_restart_resumes_incremental_from_disk(self):
+        """El test del titular: reiniciar ya no cuesta una pasada completa."""
+        self._pass()
+        self._cold_process()
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'delta')
+
+    def test_reset_forgets_the_disk_too(self):
+        """Forzar una completa tiene que poder mas que la persistencia."""
+        self._pass()
+        ingest.reset_selector_delta_state()
+        self.assertFalse(os.path.exists(self._marker_file()))
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_a_broken_marker_means_a_complete_pass(self):
+        with open(self._marker_file(), 'w', encoding='utf-8') as fh:
+            fh.write('{esto no es json')
+        self._cold_process()
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_a_naive_timestamp_is_distrusted(self):
+        """Sin zona no hay aritmetica de huecos que valga."""
+        with open(self._marker_file(), 'w', encoding='utf-8') as fh:
+            json.dump({'at': '2026-08-04T21:00:00'}, fh)
+        self._cold_process()
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_a_stale_marker_falls_back_to_a_complete_pass(self):
+        """El disco entra por la MISMA puerta del hueco que la memoria."""
+        stale = timezone.now() - ingest.SELECTOR_DELTA_MAX_GAP - timedelta(
+            seconds=1)
+        with open(self._marker_file(), 'w', encoding='utf-8') as fh:
+            json.dump({'at': stale.isoformat()}, fh)
+        self._cold_process()
+
+        self._pass()
+
+        self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+    def test_an_unwritable_state_dir_does_not_kill_the_pass(self):
+        with override_settings(ATOMICDB_STATE_DIR=os.path.join(
+                self.state_dir.name, 'no', 'existe')):
+            self.assertTrue(self._pass())
+            self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
 
 
 @override_settings(ATOMICDB_SELECTOR_V2=True)

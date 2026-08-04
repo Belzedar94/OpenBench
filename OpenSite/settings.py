@@ -111,6 +111,12 @@ ATOMICDB_INLINE_SELECTOR = os.environ.get(
 # (§ docs/selector-incremental.md).
 ATOMICDB_SELECTOR_V2 = os.environ.get(
     'ATOMICDB_SELECTOR_V2', '').lower() in ('1', 'true', 'yes')
+# Directorio de estado del selector (en el servidor, el ``StateDirectory=``
+# de systemd).  Hoy guarda una sola cosa: el marcador de la ultima pasada
+# completada, para que un reinicio del servicio no fuerce una pasada completa
+# de horas.  Vacio = sin persistencia (tests, desarrollo): cada proceso lleva
+# su ventana en memoria, como siempre.
+ATOMICDB_STATE_DIR = os.environ.get('ATOMICDB_STATE_DIR', '')
 # Brazos adversariales del explorador (reparacion de dn y solves F0 sobre
 # afirmaciones fragiles de mate).  APAGADOS por defecto a proposito: el
 # paquete existe para medir si mejoran los cierres, y esa medida necesita un
