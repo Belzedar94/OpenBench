@@ -401,13 +401,33 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
 
 
 def _seed_child_eval(child, ev):
-    """Siembra con update CONDICIONAL: entre cargar al hijo y escribirlo
-    puede colarse, en otro consumer, el ingest del analisis PROPIO del
-    hijo.  Un save() normal pisaria ese analisis con la linea MultiPV
-    del padre (mas vieja y menos fiable); el filtro eval_cp IS NULL hace
-    que el ultimo en llegar NO gane: gana el analisis propio."""
-    won = Position.objects.filter(
-        key=child.key, eval_cp__isnull=True).update(
+    """Siembra la linea del padre en el hijo con un update CONDICIONAL.
+
+    QUE PROTEGE, y sigue protegiendo.  Entre cargar al hijo y escribirlo puede
+    colarse, en otro consumer, el ingest del analisis PROPIO del hijo.  Un
+    save() normal pisaria ese analisis con la linea MultiPV del padre — mas
+    vieja y menos fiable — asi que la condicion viaja en el WHERE del propio
+    UPDATE y no en un ``if`` aparte: el hueco entre mirar y escribir es
+    exactamente por donde se cuela la carrera.  El ultimo en llegar no gana por
+    llegar el ultimo; gana quien busco.
+
+    QUE YA NO PROTEGE: una SIEMBRA anterior.  Con ``eval_cp IS NULL`` a secas,
+    el primer numero que se sembrara jamas en ese hijo se quedaba para siempre,
+    aunque el pase de hoy dijera otra cosa por la misma jugada: la fila ensenaba
+    el valor de anteayer mientras la linea vigente de arriba ensenaba el de
+    ahora, y la tabla ordenaba por el viejo.  Reporte de comunidad, literal:
+    "walked lines are not ordered correctly together with actual lines".  Una
+    siembra no es una medida, es una reclamacion heredada; y a una reclamacion
+    la sustituye la reclamacion nueva.
+
+    EL DISCRIMINANTE son los NODOS, el mismo que decide el chip de la tabla
+    (§ ``views._walked_value``): cero busqueda propia y cero peso en el respaldo
+    significa que nadie ha mirado AQUI, y eso — solo eso — es lo que la siembra
+    puede refrescar.  Con cualquiera de los dos, el numero es conocimiento de
+    motor sobre esta posicion y la linea del padre no lo toca.
+    """
+    won = Position.objects.filter(key=child.key).filter(
+        Q(eval_cp__isnull=True) | Q(nodes_invested=0, backed_nodes=0)).update(
         eval_cp=ev, updated=timezone.now())
     if won:
         child.eval_cp = ev
@@ -455,11 +475,14 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                 continue  # el motor propuso algo que nuestro movegen no reconoce: fuera
             child = edge.child
             ev = ln.get('eval_cp')
-            # solo SIEMBRA hijos sin eval: el valor propio del hijo (analisis
-            # directo o backup de su subarbol) es mas fiable que la linea
-            # MultiPV del padre y no debe ser pisado
-            if ev is not None and child.status == 'UNKNOWN' \
-                    and child.eval_cp is None:
+            # La siembra solo pisa territorio SIN busqueda: el valor propio del
+            # hijo (analisis directo o backup de su subarbol) es mas fiable que
+            # la linea MultiPV del padre.  Este filtro es el atajo barato sobre
+            # la foto ya cargada — quien decide de verdad es el WHERE del
+            # UPDATE, que es atomico (§ _seed_child_eval).
+            if (ev is not None and child.status == 'UNKNOWN'
+                    and (child.eval_cp is None
+                         or not (child.nodes_invested or child.backed_nodes))):
                 _seed_child_eval(child, ev)
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)

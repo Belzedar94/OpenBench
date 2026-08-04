@@ -531,14 +531,36 @@ class BackedIngestTests(TestCase):
 
     def test_seed_lost_race_keeps_the_childs_own_analysis(self):
         """La siembra del padre llega TARDE: el analisis propio del hijo ya
-        aterrizo en otro consumer y es mas fiable que la linea MultiPV."""
+        aterrizo en otro consumer y es mas fiable que la linea MultiPV.
+
+        Un analisis propio llega SIEMPRE con sus nodos — eval_cp y
+        nodes_invested se guardan en la misma llamada — y son los nodos los que
+        lo hacen intocable para la siembra.
+        """
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
         child = Edge.objects.filter(parent=root).order_by('move_uci') \
                             .first().child
-        Position.objects.filter(key=child.key).update(eval_cp=731)
+        Position.objects.filter(key=child.key).update(
+            eval_cp=731, nodes_invested=8_000_000)
         self.assertIsNone(child.eval_cp)   # objeto rancio, como en la carrera
         self.assertFalse(ingest._seed_child_eval(child, 865))
+        child.refresh_from_db()
+        self.assertEqual(child.eval_cp, 731)
+
+    def test_seed_never_overwrites_a_value_the_subtree_backs(self):
+        """El respaldo con peso de busqueda debajo tambien es conocimiento de
+        motor sobre este hijo, y la linea del padre no lo arbitra."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).order_by('move_uci') \
+                            .first().child
+        Position.objects.filter(key=child.key).update(
+            eval_cp=731, backed_eval=742, backed_plies=4,
+            backed_nodes=128_000_000)
+
+        self.assertFalse(ingest._seed_child_eval(child, 865))
+
         child.refresh_from_db()
         self.assertEqual(child.eval_cp, 731)
 
@@ -550,6 +572,45 @@ class BackedIngestTests(TestCase):
         self.assertTrue(ingest._seed_child_eval(child, 123))
         child.refresh_from_db()
         self.assertEqual(child.eval_cp, 123)
+
+    def test_a_seed_refreshes_an_older_seed_because_neither_is_a_search(self):
+        """Una siembra no es una medida: la sustituye la reclamacion nueva."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).order_by('move_uci') \
+                            .first().child
+        self.assertTrue(ingest._seed_child_eval(child, 123))
+
+        self.assertTrue(ingest._seed_child_eval(child, -456))
+
+        child.refresh_from_db()
+        self.assertEqual(child.eval_cp, -456)
+
+    def test_a_new_pass_refreshes_the_seed_the_old_one_left_behind(self):
+        """La fila y la linea vigente dejan de contar dos numeros distintos.
+
+        Reporte de comunidad, literal: "walked lines are not ordered correctly
+        together with actual lines".  Con el filtro viejo — sembrar solo sobre
+        eval_cp NULL — el hijo se quedaba con el PRIMER numero que se sembrara
+        jamas: el escaparate de arriba pasaba a decir 500 y la fila de abajo
+        seguia diciendo 50, que es ademas por donde ordenaba.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        top = Edge.objects.filter(parent=pos).order_by('move_uci').first()
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 128_000_000)
+        seeded = Position.objects.get(key=top.child_id)
+        self.assertEqual(seeded.eval_cp, 50)
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [500, 400, 300, 200, 100]), 512_000_000)
+
+        seeded.refresh_from_db()
+        self.assertEqual(seeded.eval_cp, 500)
+        pos.refresh_from_db()
+        self.assertEqual(pos.last_analysis[0]['eval_cp'], 500)
 
     def test_the_arrow_follows_the_table_not_the_stale_search(self):
         """Board arrow and moves table must move TOGETHER.
