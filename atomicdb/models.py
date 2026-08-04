@@ -103,6 +103,21 @@ class Position(models.Model):
 
     class Meta:
         indexes = [
+            # LA CIMA DE LA COLA, en un solo salto.  Las dos consultas que la
+            # piden — el arriendo (``next_tasks``) y el widget "Up next" de la
+            # portada — son la misma forma: ``status='UNKNOWN'`` ordenado por
+            # ``-priority``, cortado en unas pocas filas.  Con los dos indices
+            # sueltos que habia, el motor bajaba por el de ``priority`` y
+            # descartaba fila a fila lo que no fuera UNKNOWN... y lo cerrado
+            # CONSERVA su prioridad, porque el refresco solo repuntua lo
+            # abierto: cada cierre en la zona alta deja una entrada mas que
+            # saltar, para siempre.  Con el compuesto, doce filas leidas son
+            # doce entradas del indice.
+            #
+            # El orden descendente esta en el indice a proposito: es el unico
+            # sentido en el que se recorre esto, y asi el corte es el prefijo.
+            models.Index(fields=['status', '-priority'],
+                         name='atomic_pos_queue'),
             # Indice PARCIAL sobre el lado que se consulta: los NO alcanzables.
             # En una base sana casi todo cuelga de la raiz, asi que un indice
             # completo sobre el booleano seria una copia de la tabla para
@@ -604,6 +619,27 @@ class DBEvent(models.Model):
     ts      = models.DateTimeField(auto_now_add=True, db_index=True)
     kind    = models.CharField(max_length=32)     # SUBTREE_CLOSED, WALL, CAMPAIGN...
     payload = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [
+            # UNA CLASE DE EVENTO EN UNA VENTANA.  Es la unica forma en la que
+            # se consulta esta tabla como agregado: los cierres de las ultimas
+            # 24h de la portada y los doce ``COUNT`` de atribucion, que son
+            # todos ``kind='NODE_CLOSED'`` sobre una ventana.  Con el indice
+            # suelto de ``ts`` habia que bajar por el rango entero y mirar el
+            # ``kind`` de cada fila; el cierre es una minoria de lo que se
+            # escribe aqui, asi que casi todo ese recorrido era descarte.
+            #
+            # El indice suelto de ``ts`` se queda: el feed de hitos pide las
+            # doce ULTIMAS de cualquier clase menos unas pocas, y para eso el
+            # orden global por fecha es exactamente el indice correcto.
+            #
+            # ``payload`` no entra y no puede entrar: agrupar por una clave
+            # JSON depende de como decodifique cada backend un
+            # ``KeyTransform``, y esa averiguacion no se hace en un indice
+            # (§ metrics.closure_attribution_totals).
+            models.Index(fields=['kind', 'ts'], name='atomic_event_kind_ts'),
+        ]
 
 
 class RequestLog(models.Model):

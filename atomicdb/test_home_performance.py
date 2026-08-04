@@ -28,9 +28,9 @@ from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from . import logic, metrics, views
-from .models import (AnalysisTask, DBEvent, Edge, Position, ProgressSnapshot,
-                     WorkerPing)
+from . import contributors, logic, metrics, views
+from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
+                     ProgressSnapshot, WorkerPing)
 from .testing import TestCase
 
 
@@ -44,18 +44,24 @@ CACHE_FOR_TESTS = {
 # PRESUPUESTO DE CONSULTAS de una portada con la cache compartida caliente,
 # que es el caso de CADA visitante en produccion (la cache de pagina varia por
 # cookie, asi que casi nadie llega a una entrada suya ya hecha, pero todo el
-# mundo llega a los datos ya calculados).  Medido en 19 con este arbol; el
+# mundo llega a los datos ya calculados).  Medido en 15 con este arbol; el
 # margen es para que anadir una fila a una tabla no rompa el test, no para que
 # quepa otra tanda de consultas por fila.
 #
+# Baja de 26 a 21 porque bajaron las consultas: los cuatro contadores de
+# actividad y el progreso de campanas se fueron a la instantanea compartida, y
+# el widget "Up next" dejo de traerse la fila entera.  El techo se baja CON
+# ellas a proposito — un techo que ya no aprieta no guarda nada.
+#
 # Si esto sube, la pregunta correcta no es "subo el numero" sino "que le puse
 # a la portada que consulta por fila".
-HOME_QUERY_BUDGET = 26
-# Y con TODO frio: la unica visita que paga la BFS de linaje y los rejuegos de
-# ruta es la primera despues de vaciar la cache.  Medido en 52 con la linea de
-# doce plies de aqui — la BFS gasta una consulta por ply para TODAS las filas
-# a la vez, asi que este techo crece con la profundidad del arbol y no con el
-# numero de filas.  El techo existe para que eso no cambie sin que se note.
+HOME_QUERY_BUDGET = 21
+# Y con TODO frio: la unica visita que paga la BFS de linaje, los rejuegos de
+# ruta y la medida de los agregados es la primera despues de vaciar la cache.
+# Medido en 53 con la linea de doce plies de aqui — la BFS gasta una consulta
+# por ply para TODAS las filas a la vez, asi que este techo crece con la
+# profundidad del arbol y no con el numero de filas.  El techo existe para que
+# eso no cambie sin que se note.
 HOME_COLD_QUERY_BUDGET = 70
 
 
@@ -292,6 +298,237 @@ class PublicCounterTests(TestCase):
 
         self.assertFalse(health['has_attribution'])
         self.assertNotIn('attribution_24h', health)
+
+
+@override_settings(CACHES=CACHE_FOR_TESTS)
+class ActivityCounterTests(TestCase):
+    """Los cuatro contadores que se fueron de la peticion a la instantanea.
+
+    Lo que se prueba es el CONTRATO de la cache, no la cache de Django: que un
+    acierto no consulte, que un fallo mida de verdad, que una entrada vencida
+    se vuelva a medir, y que una entrada vencida CON alguien ya midiendo se
+    sirva tal cual en vez de hacer esperar a nadie.  Ese ultimo es el unico
+    que distingue esta maquinaria de un ``cache.get``/``set``.
+    """
+
+    def setUp(self):
+        cache.clear()
+        metrics.reset_public_snapshot()
+        self.now = timezone.now()
+        populate_home(self.now)
+
+    def _counted(self, work):
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+        with CaptureQueriesContext(connection) as captured:
+            value = work()
+        return value, len(captured.captured_queries)
+
+    def test_a_miss_measures_the_real_numbers(self):
+        activity, queries = self._counted(
+            lambda: metrics.activity_totals(now=self.now))
+
+        self.assertGreater(queries, 0)
+        self.assertEqual(activity['analyses'],
+                         AnalysisTask.objects.filter(state='COMPLETED')
+                         .count())
+        self.assertEqual(
+            activity['requested'],
+            AnalysisTask.objects.filter(state='PENDING', source='USER',
+                                        position__status='UNKNOWN').count())
+        self.assertEqual(activity['closed_24h'], 12)
+        self.assertEqual(activity['nodes_24h'], 0)
+
+    def test_a_hit_does_not_measure_anything(self):
+        metrics.refresh_public_snapshot(now=self.now)
+
+        _activity, queries = self._counted(
+            lambda: metrics.activity_totals(now=self.now))
+
+        self.assertEqual(queries, 0)
+
+    def test_a_stale_entry_is_measured_again(self):
+        """Vencida la frescura, el siguiente lector la renueva y ve lo nuevo."""
+        metrics.refresh_public_snapshot(now=self.now)
+        AnalysisTask.objects.create(
+            position_id=logic.key_of(logic.start_fen()), generation=500,
+            budget_nodes=1, state=AnalysisTask.TState.COMPLETED,
+            completed=self.now, nodes_searched=4_321)
+        stale = self.now + timedelta(seconds=metrics.PUBLIC_FRESH_SECONDS + 1)
+
+        before = metrics.activity_totals(now=self.now)
+        after = metrics.activity_totals(now=stale)
+
+        self.assertEqual(after['analyses'], before['analyses'] + 1)
+        self.assertEqual(after['nodes_24h'], 4_321)
+        self.assertEqual(after['measured_at'], stale)
+
+    def test_a_stale_entry_is_served_while_one_reader_refreshes(self):
+        """Vieja + cerrojo cogido = se sirve lo viejo, sin esperar ni medir."""
+        metrics.refresh_public_snapshot(now=self.now)
+        cache.add(metrics.PUBLIC_ACTIVITY_KEY + '.lock', 1, 60)
+        stale = self.now + timedelta(hours=2)
+
+        activity, queries = self._counted(
+            lambda: metrics.activity_totals(now=stale))
+
+        self.assertEqual(queries, 0)
+        self.assertEqual(activity['measured_at'], self.now)
+
+    def test_with_nothing_published_it_counts_rather_than_print_zero(self):
+        """Sin entrada y sin cerrojo libre se mide igual.
+
+        Un cero en "analyses" afirma que la flota no ha analizado nada nunca,
+        y eso no se puede decir por no querer pagar una consulta.  Este
+        agregado no tiene respaldo horario del que tirar, asi que la unica
+        salida honesta es medirlo.
+        """
+        cache.add(metrics.PUBLIC_ACTIVITY_KEY + '.lock', 1, 60)
+
+        activity, queries = self._counted(
+            lambda: metrics.activity_totals(now=self.now))
+
+        self.assertGreater(queries, 0)
+        self.assertEqual(activity['closed_24h'], 12)
+
+    def test_the_page_shows_what_the_snapshot_published(self):
+        metrics.refresh_public_snapshot(now=self.now)
+        for index in range(3):
+            DBEvent.objects.create(kind='NODE_CLOSED', payload={},
+                                   ts=self.now)
+
+        body = Client().get('/atomicdb/').content.decode()
+
+        # Doce, los publicados, y no los quince que hay debajo: eso es
+        # exactamente lo que significa leer un contador compartido.
+        self.assertIn('12 closures', body)
+        self.assertNotIn('15 closures', body)
+
+
+@override_settings(CACHES=CACHE_FOR_TESTS)
+class CampaignProgressTests(TestCase):
+    """El progreso de campanas: compartido, y con su fallo bien definido."""
+
+    def setUp(self):
+        cache.clear()
+        metrics.reset_public_snapshot()
+        self.now = timezone.now()
+        self.keys, _route = build_line()
+        root = Position.objects.get(key=self.keys[0])
+        self.campaign = Campaign.objects.create(
+            name='linea de prueba', root=root, line_san='1. a3',
+            state=Campaign.CState.ACTIVE)
+        Position.objects.filter(key__in=self.keys[:4]).update(
+            campaign=self.campaign, nodes_invested=10)
+
+    def test_a_hit_does_not_regroup(self):
+        metrics.refresh_public_snapshot(now=self.now)
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+
+        with CaptureQueriesContext(connection) as captured:
+            rows = metrics.campaign_progress([self.campaign.id],
+                                             now=self.now)
+
+        self.assertEqual(len(captured.captured_queries), 0)
+        self.assertEqual(rows[self.campaign.id]['total'], 4)
+        self.assertEqual(rows[self.campaign.id]['explored'], 4)
+
+    def test_a_campaign_born_after_the_snapshot_is_measured_now(self):
+        """Recien activada: se mide, no se pinta a cero durante minuto y medio."""
+        metrics.refresh_public_snapshot(now=self.now)
+        newborn = Campaign.objects.create(
+            name='recien activada', root_id=self.keys[0], line_san='1. b3',
+            state=Campaign.CState.ACTIVE)
+        Position.objects.filter(key__in=self.keys[4:7]).update(
+            campaign=newborn)
+
+        rows = metrics.campaign_progress([newborn.id], now=self.now)
+
+        self.assertEqual(rows[newborn.id]['total'], 3)
+
+    def test_a_campaign_with_no_positions_is_not_a_miss(self):
+        """Cero posiciones y "no la conozco" no son lo mismo, y se distinguen.
+
+        Sin la lista de ids activos dentro de la medida, una campana vacia
+        seria un fallo del snapshot en CADA visita: la consulta agrupada no
+        devuelve fila para ella, y quien preguntase la mediria en vivo una y
+        otra vez.
+        """
+        empty = Campaign.objects.create(
+            name='sin posiciones', root_id=self.keys[0], line_san='1. c3',
+            state=Campaign.CState.ACTIVE)
+        metrics.refresh_public_snapshot(now=self.now)
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+
+        with CaptureQueriesContext(connection) as captured:
+            rows = metrics.campaign_progress([empty.id], now=self.now)
+
+        self.assertEqual(len(captured.captured_queries), 0)
+        self.assertEqual(rows[empty.id]['total'], 0)
+
+    def test_the_card_shows_the_same_numbers_it_always_showed(self):
+        body = Client().get('/atomicdb/').content.decode()
+
+        self.assertIn('4 of 4 positions explored', body)
+
+
+@override_settings(CACHES=CACHE_FOR_TESTS)
+class FleetSnapshotTests(TestCase):
+    """La flota: el agregado mas caro que quedaba dentro de una peticion."""
+
+    def setUp(self):
+        cache.clear()
+        metrics.reset_public_snapshot()
+        contributors.reset_cache()
+        self.now = timezone.now()
+        populate_home(self.now)
+        WorkerPing.objects.filter(machine='box0').update(user='someone')
+        AnalysisTask.objects.filter(machine='box0').update(
+            state=AnalysisTask.TState.COMPLETED, completed=self.now,
+            nodes_searched=1_000)
+
+    def test_the_service_publishes_it(self):
+        """Publicado desde fuera, ninguna visita lo mide."""
+        metrics.refresh_public_snapshot(now=self.now)
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+
+        with CaptureQueriesContext(connection) as captured:
+            snapshot = contributors.fleet(now=self.now)
+
+        self.assertEqual(len(captured.captured_queries), 0)
+        self.assertEqual(snapshot['nodes_all'], 1_000)
+        self.assertEqual(snapshot['users_all']['someone']['nodes'], 1_000)
+
+    def test_a_stale_entry_is_served_while_one_reader_refreshes(self):
+        """Sin cerrojo, los cinco procesos recorrian a la vez la misma tabla."""
+        metrics.refresh_public_snapshot(now=self.now)
+        cache.add(contributors.FLEET_CACHE_KEY + '.lock', 1, 60)
+        stale = self.now + timedelta(hours=2)
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+
+        with CaptureQueriesContext(connection) as captured:
+            snapshot = contributors.fleet(now=stale)
+
+        self.assertEqual(len(captured.captured_queries), 0)
+        self.assertEqual(snapshot['measured_at'], self.now)
+
+    def test_a_stale_entry_is_measured_again(self):
+        metrics.refresh_public_snapshot(now=self.now)
+        stale = self.now + timedelta(seconds=contributors.FLEET_CACHE_SECONDS
+                                     + 1)
+        AnalysisTask.objects.filter(machine='box0').update(
+            nodes_searched=2_000)
+
+        self.assertEqual(contributors.fleet(now=self.now)['nodes_all'], 1_000)
+        self.assertEqual(contributors.fleet(now=stale)['nodes_all'], 2_000)
+
+    def test_resetting_the_cache_also_drops_the_lock(self):
+        """Un cerrojo huerfano dejaria el refresco "cogido" por nadie."""
+        metrics.refresh_public_snapshot(now=self.now)
+        cache.add(contributors.FLEET_CACHE_KEY + '.lock', 1, 60)
+
+        contributors.reset_cache()
+
+        self.assertIsNone(cache.get(contributors.FLEET_CACHE_KEY + '.lock'))
 
 
 @override_settings(CACHES=CACHE_FOR_TESTS)

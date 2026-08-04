@@ -22,7 +22,7 @@ from django.views.decorators.csrf import csrf_exempt
 import re
 
 from django.db.models import (Case, Count, F, FloatField, IntegerField,
-                              OuterRef, Q, Subquery, Sum, Value, When, Window)
+                              OuterRef, Q, Subquery, Value, When, Window)
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
@@ -2799,18 +2799,17 @@ def home(request):
     totals = metrics.tree_totals(now=now)
     total, closed = totals['total'], totals['closed']
     nodes = totals['nodes']
-    day_ago = now - timedelta(hours=24)
-    # Estos cuatro se quedan en vivo: son consultas indexadas y baratas, y
-    # "en cola" o "cierres de 24h" son justo los numeros que un visitante mira
-    # para ver si algo se movio hace un minuto.
-    analyses = AnalysisTask.objects.filter(state='COMPLETED').count()
-    requested = AnalysisTask.objects.filter(
-        state='PENDING', source='USER', position__status='UNKNOWN').count()
-    closed_24h = DBEvent.objects.filter(kind='NODE_CLOSED',
-                                        ts__gte=day_ago).count()
-    nodes_24h = AnalysisTask.objects.filter(
-        state='COMPLETED', completed__gte=day_ago).aggregate(
-        n=Sum('nodes_searched'))['n'] or 0
+    # Y estos cuatro TAMBIEN salen de la instantanea compartida desde hoy.  Se
+    # quedaron en vivo porque eran "consultas indexadas y baratas", y a 3,5M de
+    # filas lo eran; a 12,8M los cuatro recorren (§ metrics, "actividad").
+    # Siguen siendo los MISMOS conteos exactos y siguen pintandose igual: lo
+    # unico que cambia es que se miden una vez por ciclo del servicio en vez de
+    # una vez por visitante.
+    activity = metrics.activity_totals(now=now)
+    analyses = activity['analyses']
+    requested = activity['requested']
+    closed_24h = activity['closed_24h']
+    nodes_24h = activity['nodes_24h']
     # UNA lectura de la raiz para las dos cosas que la necesitan: la tabla de
     # primeras jugadas y el tablero de abajo.  Eran dos consultas de la misma
     # fila, y ademas dos ramas distintas para "la raiz no existe" — la de aqui
@@ -2865,14 +2864,22 @@ def home(request):
         selected_machines.add(task.machine)
     leased = leased[:5]
     leased_keys = {t.position_id for t in leased}
-    upnext_positions = []
-    for pos in Position.objects.filter(status='UNKNOWN',
-                                       priority__gt=-1e8) \
-                               .order_by('-priority')[:12]:
-        if pos.key in leased_keys:
+    # La cima de la cola, y SOLO la clave.  Un ``Position`` entero arrastra la
+    # FEN, la ``won_line`` y el ``last_analysis`` — un JSON de MultiPV por
+    # fila — y de las cinco filas que se pintan no se usa ni una de esas
+    # columnas: solo la clave, para el rotulo y el enlace.  Con el indice
+    # ``atomic_pos_queue`` (status, priority DESC) la consulta ademas se
+    # resuelve dentro del propio indice: doce entradas leidas y ninguna fila
+    # visitada.  Antes, con el indice suelto de ``priority``, habia que bajar
+    # por TODAS las prioridades altas descartando las cerradas — que conservan
+    # la suya, porque el refresco solo repuntua UNKNOWN — hasta juntar doce.
+    upnext_keys = []
+    for key in (Position.objects.filter(status='UNKNOWN', priority__gt=-1e8)
+                .order_by('-priority').values_list('key', flat=True)[:12]):
+        if key in leased_keys:
             continue
-        upnext_positions.append(pos)
-        if len(upnext_positions) >= 5:
+        upnext_keys.append(key)
+        if len(upnext_keys) >= 5:
             break
     # El filtro va en la CONSULTA, no en el render: descartar despues de
     # cortar dejaria una portada con siete noticias las noches en que los
@@ -2882,11 +2889,10 @@ def home(request):
                       .order_by('-ts')[:12])
     event_keys = [(event.payload or {}).get('key', '') for event in event_rows]
     labels = _line_labels_many(
-        [task.position_id for task in leased]
-        + [pos.key for pos in upnext_positions] + event_keys)
+        [task.position_id for task in leased] + upnext_keys + event_keys)
     pending_meta = {}
     for pid, source, route in (AnalysisTask.objects.filter(
-            position_id__in=[pos.key for pos in upnext_positions],
+            position_id__in=upnext_keys,
             state=AnalysisTask.TState.PENDING)
             .order_by('position_id', 'generation')
             .values_list('position_id', 'source', 'route')):
@@ -2898,8 +2904,7 @@ def home(request):
     # a la cache diez viajes para contestar lo mismo.
     routes = _route_labels_many(
         [(task.route, task.position_id) for task in leased]
-        + [(pending_meta.get(pos.key, ('', ''))[1], pos.key)
-           for pos in upnext_positions])
+        + [(pending_meta.get(key, ('', ''))[1], key) for key in upnext_keys])
     analyzing = []
     for task in leased:
         preview, full = labels.get(task.position_id, ('', ''))
@@ -2914,13 +2919,13 @@ def home(request):
                           'source': task.source,
                           'play': task.route if routed is not None else ''})
     upnext = []
-    for pos in upnext_positions:
-        preview, full = labels.get(pos.key, ('', ''))
-        source, route = pending_meta.get(pos.key, ('', ''))
-        routed = routes.get((route, pos.key))
+    for key in upnext_keys:
+        preview, full = labels.get(key, ('', ''))
+        source, route = pending_meta.get(key, ('', ''))
+        routed = routes.get((route, key))
         if routed is not None:
             preview, full = routed
-        upnext.append({'key': pos.key,
+        upnext.append({'key': key,
                        'san': preview or 'start position',
                        'full': full or 'start position',
                        'source': source,
@@ -4074,10 +4079,13 @@ def _campaign_context(request):
     """Lo que la portada pinta de campanas: la activa arriba y el buzon.
 
     Los conteos de progreso salen de UNA consulta agrupada para todas las
-    campanas activas, no de tres por campana.  No llevan cache propia: la
-    portada entera ya va con ``cache_page(15)`` (§ urls), y una segunda cache
-    dentro de una cacheada solo anadiria una copia mas vieja de los mismos
-    numeros.
+    campanas activas, no de tres por campana — y desde hoy esa consulta la
+    paga el ciclo del servicio, no el visitante.  La cache de pagina de 15 s
+    no bastaba: varia por cookie, asi que cada visitante distinto pagaba su
+    propio recorrido de las posiciones etiquetadas, y una campana popular
+    etiqueta cientos de miles (§ metrics.campaign_progress).  Lo que se cede
+    es lo mismo que ceden los contadores de arriba: la edad de la medida, no
+    su exactitud.
 
     Los botones de propietario se calculan aqui y no en la plantilla por la
     misma razon que el enlace de moderacion (§ ``_suggestions_badge``): la
@@ -4086,17 +4094,7 @@ def _campaign_context(request):
     """
     active = list(Campaign.objects.filter(state=Campaign.CState.ACTIVE)
                   .order_by('-votes', 'id')[:HOME_ACTIVE_CAMPAIGNS])
-    totals = {}
-    if active:
-        for row in (Position.objects
-                    .filter(campaign_id__in=[c.id for c in active])
-                    .values('campaign_id')
-                    .annotate(total=Count('key'),
-                              explored=Count('key',
-                                             filter=Q(nodes_invested__gt=0)),
-                              resolved=Count('key',
-                                             filter=~Q(status='UNKNOWN')))):
-            totals[row['campaign_id']] = row
+    totals = metrics.campaign_progress([c.id for c in active]) if active else {}
     cards = []
     for campaign in active:
         row = totals.get(campaign.id, {})

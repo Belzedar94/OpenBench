@@ -40,6 +40,14 @@ on every miss of the 15-second page cache.  Publishing them from here means
 they are computed once for the whole site and read from the shared cache by
 all five gunicorn workers (§ atomicdb.metrics, OpenSite.cache).
 
+Ese paso publica CINCO instantaneas, no dos: a los totales del arbol y la
+atribucion de cierres se han sumado los cuatro contadores de actividad
+(analisis completados, cola de peticiones, cierres y nodos de 24h), el
+progreso de las campanas activas y el snapshot de flota.  Los tres eran lo que
+quedaba pagandose dentro de la peticion, y el de flota era el peor: dos GROUP
+BY sobre TODAS las tareas completadas, sin cerrojo, que al vencer su minuto de
+cache pagaban a la vez todos los visitantes que llegaran.
+
 CADA PASO CON SU RED.  Un brazo que revienta se lleva SOLO su propio trabajo:
 el ciclo lo registra en ``failed_steps`` y sigue.  Sin eso, una excepcion en
 cualquier punto mataba el proceso, systemd lo relanzaba y volvia a morir en el

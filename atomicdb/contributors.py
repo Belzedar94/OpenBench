@@ -52,6 +52,9 @@ SPARK_WIDTH = 280
 SPARK_HEIGHT = 40
 SPARK_BASELINE = 38
 SPARK_MAX_BAR = 34
+# FRESCURA de la entrada de flota, no su vida: pasado este minuto la entrada
+# se sigue sirviendo mientras alguien la renueva (§ ``fleet``).  Sesenta
+# segundos porque es la cadencia del servicio que la publica.
 FLEET_CACHE_SECONDS = 60
 FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v1'
 # La portada ensena DIEZ y dice cuantas quedan fuera.  La lista completa seria
@@ -123,21 +126,19 @@ def _by_owner(machine_totals, owner):
     return folded
 
 
-def fleet(now=None):
-    """Snapshot compartido: totales por maquina y por cuenta, 24h y all-time.
+def measure_fleet(now):
+    """Totales por maquina y por cuenta, 24h y all-time.  DOS GROUP BY caros.
 
-    Un minuto de cache.  La ventana de 24h se mueve dentro de esa entrada, que
-    es exactamente el mismo trato que ya tienen los medidores de la portada:
-    un indicador de tendencia no cambia ninguna decision por sesenta segundos.
+    El de "all time" agrupa TODAS las tareas completadas del proyecto y suma
+    tres columnas que no estan en el indice: a 12,8M de posiciones es el
+    trabajo mas caro que se hacia dentro de una peticion HTTP en todo el
+    sitio.  No entra en la portada porque la portada lo necesite vivo — no lo
+    necesita — sino porque era lo unico que quedaba sin publicar desde fuera.
     """
-    cached = cache.get(FLEET_CACHE_KEY)
-    if cached is not None:
-        return cached
-    now = now or timezone.now()
     owner = dict(WorkerPing.objects.values_list('machine', 'user'))
     machines_all = _machine_totals()
     machines_24h = _machine_totals(since=now - timedelta(hours=24))
-    snapshot = {
+    return {
         'owner': owner,
         'machines_all': machines_all,
         'machines_24h': machines_24h,
@@ -146,13 +147,43 @@ def fleet(now=None):
         'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
         'nodes_all': sum(row['nodes'] for row in machines_all.values()),
     }
-    cache.set(FLEET_CACHE_KEY, snapshot, FLEET_CACHE_SECONDS)
-    return snapshot
+
+
+def fleet(now=None):
+    """Snapshot compartido: totales por maquina y por cuenta, 24h y all-time.
+
+    QUE CAMBIA RESPECTO AL ``cache.get``/``set`` de antes, y por que importa.
+    Era un minuto de cache sin nada mas: al vencer, el visitante que llegaba
+    primero pagaba los dos GROUP BY enteros DENTRO de su peticion, y como no
+    habia cerrojo, todos los que llegaban mientras tanto los pagaban tambien
+    — cinco procesos de gunicorn recorriendo a la vez la tabla de tareas para
+    escribir el mismo diccionario.  Con la maquinaria compartida
+    (§ metrics.shared_snapshot) una entrada vieja se SIRVE mientras UNO sola
+    la renueva, y en produccion ni siquiera la renueva un visitante: la
+    publica el servicio del selector en su propio ciclo.
+
+    La ventana de 24h se mueve dentro de la entrada, que es el mismo trato que
+    ya tienen los medidores de la portada: un indicador de tendencia no cambia
+    ninguna decision por sesenta segundos.
+
+    ``required``: esta pagina y el ranking de la portada tienen que salir con
+    numeros.  Sin entrada y con el cerrojo cogido se mide, igual que los
+    contadores publicos.
+    """
+    from . import metrics
+    return metrics.shared_snapshot(FLEET_CACHE_KEY, build=measure_fleet,
+                                   required=True, now=now,
+                                   fresh_seconds=FLEET_CACHE_SECONDS)
 
 
 def reset_cache():
-    """Tira el snapshot compartido (tests y despliegues)."""
-    cache.delete(FLEET_CACHE_KEY)
+    """Tira el snapshot compartido (tests y despliegues).
+
+    El cerrojo se va con el: dejarlo puesto haria que la siguiente lectura se
+    encontrase sin entrada y con el refresco "ya cogido" por un proceso que no
+    existe.
+    """
+    cache.delete_many([FLEET_CACHE_KEY, FLEET_CACHE_KEY + '.lock'])
 
 
 def _rank(totals, username):

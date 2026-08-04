@@ -9,8 +9,8 @@ from django.core.cache import cache
 from django.db.models import Count, Min, Q, Sum
 from django.utils import timezone
 
-from .models import (AnalysisTask, DBEvent, Position, ProgressSnapshot,
-                     RequestLog, WorkerPing)
+from .models import (AnalysisTask, Campaign, DBEvent, Position,
+                     ProgressSnapshot, RequestLog, WorkerPing)
 
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,32 @@ def closure_attribution_window(*, now=None, hours=24):
 # en noventa segundos; una cifra inventada si mentiria.
 PUBLIC_COUNTERS_KEY = 'atomicdb.public-counters.v1'
 ATTRIBUTION_KEY = 'atomicdb.closure-attribution.v1'
+# Los cuatro numeros de ACTIVIDAD que quedaban en vivo, y por que dejan de
+# estarlo.  Se dejaron fuera por baratos ("consultas indexadas"), y a 3,5M de
+# filas lo eran; a 12,8M ninguno de los cuatro se resuelve ya sin recorrer:
+#
+#   * ``analyses``    COUNT de TODAS las tareas COMPLETED: el indice
+#                     ``atomic_task_state_done`` lo sirve, pero servirlo es
+#                     recorrer una entrada por tarea completada del proyecto.
+#   * ``requested``   COUNT con JOIN a ``Position`` para mirar el status de
+#                     cada peticion PENDING de la banda USER.
+#   * ``closed_24h``  COUNT de eventos de cierre de la ventana.
+#   * ``nodes_24h``   SUM sobre las completadas de la ventana; el sumando no
+#                     esta en el indice, asi que cada fila es una visita mas.
+#
+# Ninguno es de nadie y ninguno cambia por quien mira.  Se miden una vez por
+# ciclo del servicio y se leen de la cache compartida, igual que los tres de
+# arriba.  LA FRESCURA QUE SE CEDE ESTA ACOTADA Y ES LA MISMA: hasta
+# ``PUBLIC_FRESH_SECONDS``, y el conteo sigue siendo EXACTO — de hace un rato,
+# nunca estimado.  La portada ya iba con una cache de pagina de 15 s, asi que
+# "en vivo" nunca significo "de este milisegundo".
+PUBLIC_ACTIVITY_KEY = 'atomicdb.public-activity.v1'
+# El progreso de las campanas ACTIVAS.  Tres conteos agrupados sobre las
+# posiciones etiquetadas: una campana popular etiqueta cientos de miles de
+# filas y los dos ``Count`` condicionados obligan a mirar ``status`` y
+# ``nodes_invested`` de cada una.  Mismo trato que el resto: publico, derivado
+# y de nadie.
+CAMPAIGN_PROGRESS_KEY = 'atomicdb.campaign-progress.v1'
 # Por encima del paso del selector (60 s) a proposito: mientras ese servicio
 # viva, la entrada nunca llega a envejecer y ninguna visita recalcula nada.
 PUBLIC_FRESH_SECONDS = 90
@@ -181,9 +207,9 @@ PUBLIC_TTL_SECONDS = 3600
 PUBLIC_LOCK_SECONDS = 60
 
 
-def _shared_snapshot(key, *, build, seed=None, required=False, now=None,
-                     force=False, fresh_seconds=PUBLIC_FRESH_SECONDS,
-                     ttl=PUBLIC_TTL_SECONDS):
+def shared_snapshot(key, *, build, seed=None, required=False, now=None,
+                    force=False, fresh_seconds=PUBLIC_FRESH_SECONDS,
+                    ttl=PUBLIC_TTL_SECONDS):
     """Una entrada compartida, cara de calcular y barata de leer.
 
     Fresca: se sirve.  Vieja: se sirve igual y UN solo proceso la renueva
@@ -197,6 +223,11 @@ def _shared_snapshot(key, *, build, seed=None, required=False, now=None,
     afirmar que el arbol esta vacio.  La atribucion de cierres no: ahi ``None``
     significa "no se ha medido" y la portada esconde el bloque, que es lo
     unico honesto que se puede hacer con un porcentaje que nadie ha calculado.
+
+    Es publica porque tiene un lector de FUERA de este modulo: el snapshot de
+    flota de ``contributors`` guardaba lo mismo con un ``cache.get``/``set``
+    pelado y le faltaban las dos propiedades que aqui estan escritas una sola
+    vez — servir lo viejo mientras uno renueva, y que renueve UNO.
     """
     now = now or timezone.now()
     if force:
@@ -277,9 +308,98 @@ def _seed_tree_totals(now):
 
 def tree_totals(*, now=None, force=False):
     """``{'total', 'closed', 'nodes', 'measured_at'}`` para la portada."""
-    return _shared_snapshot(PUBLIC_COUNTERS_KEY, build=_measure_tree_totals,
-                            seed=_seed_tree_totals, required=True, now=now,
-                            force=force)
+    return shared_snapshot(PUBLIC_COUNTERS_KEY, build=_measure_tree_totals,
+                           seed=_seed_tree_totals, required=True, now=now,
+                           force=force)
+
+
+def _measure_activity(now):
+    """Los cuatro contadores de actividad, en el mismo instante.
+
+    Se miden juntos a proposito: "analisis completados" y "cierres de las
+    ultimas 24h" contados en momentos distintos son dos fotos que un lector
+    lee como una, y aqui no cuesta nada que sean la misma.
+    """
+    day_ago = now - timedelta(hours=24)
+    return {
+        'analyses': AnalysisTask.objects.filter(state='COMPLETED').count(),
+        'requested': AnalysisTask.objects.filter(
+            state='PENDING', source='USER',
+            position__status='UNKNOWN').count(),
+        'closed_24h': DBEvent.objects.filter(kind='NODE_CLOSED',
+                                             ts__gte=day_ago).count(),
+        'nodes_24h': AnalysisTask.objects.filter(
+            state='COMPLETED', completed__gte=day_ago).aggregate(
+                n=Sum('nodes_searched'))['n'] or 0,
+    }
+
+
+def activity_totals(*, now=None, force=False):
+    """``{'analyses', 'requested', 'closed_24h', 'nodes_24h'}``, compartidos.
+
+    ``required`` y SIN respaldo: la captura horaria no trae estos cuatro, asi
+    que la unica alternativa a medirlos seria pintar ceros — y un cero aqui
+    afirma que la flota no ha analizado nada nunca.  Con la cache caliente,
+    que es el caso de todas las visitas mientras el servicio corra, esto no
+    cuesta ni una consulta.
+    """
+    return shared_snapshot(PUBLIC_ACTIVITY_KEY, build=_measure_activity,
+                           required=True, now=now, force=force)
+
+
+def _campaign_row(row):
+    return {'total': row.get('total') or 0,
+            'explored': row.get('explored') or 0,
+            'resolved': row.get('resolved') or 0}
+
+
+def _measure_campaign_progress(now):
+    """Los tres conteos de CADA campana activa, en una consulta agrupada.
+
+    Las campanas activas se listan aqui dentro y no las trae quien pregunta:
+    el snapshot tiene que poder distinguir "esta campana tiene cero
+    posiciones" de "esta campana no existia cuando se midio", y para eso la
+    lista de ids conocidos forma parte de la medida.  Sin esa distincion, una
+    campana recien activada se pintaria a cero durante minuto y medio.
+    """
+    active = list(Campaign.objects.filter(state=Campaign.CState.ACTIVE)
+                  .values_list('id', flat=True))
+    totals = {campaign_id: {'total': 0, 'explored': 0, 'resolved': 0}
+              for campaign_id in active}
+    if active:
+        for row in (Position.objects.filter(campaign_id__in=active)
+                    .values('campaign_id')
+                    .annotate(total=Count('key'),
+                              explored=Count('key',
+                                             filter=Q(nodes_invested__gt=0)),
+                              resolved=Count('key',
+                                             filter=~Q(status='UNKNOWN')))):
+            totals[row['campaign_id']] = _campaign_row(row)
+    return {'totals': totals}
+
+
+def campaign_progress(campaign_ids, *, now=None, force=False):
+    """``{id: {'total', 'explored', 'resolved'}}`` de las campanas pedidas.
+
+    Del snapshot lo que el snapshot conozca; lo que no — una campana activada
+    despues de la ultima medida — se mide en el acto, que es una campana
+    todavia pequena y una sola vez por ciclo.
+    """
+    snapshot = shared_snapshot(CAMPAIGN_PROGRESS_KEY,
+                               build=_measure_campaign_progress,
+                               required=True, now=now, force=force)
+    known = snapshot['totals']
+    rows = {}
+    for campaign_id in campaign_ids:
+        row = known.get(campaign_id)
+        if row is None:
+            row = _campaign_row(Position.objects.filter(
+                campaign_id=campaign_id).aggregate(
+                    total=Count('key'),
+                    explored=Count('key', filter=Q(nodes_invested__gt=0)),
+                    resolved=Count('key', filter=~Q(status='UNKNOWN'))))
+        rows[campaign_id] = row
+    return rows
 
 
 def _measure_attribution(now):
@@ -300,8 +420,30 @@ def attribution_windows(*, now=None, force=False):
     esconde el bloque en vez de pintar ceros que se leerian como "nadie ha
     cerrado nada".
     """
-    return _shared_snapshot(ATTRIBUTION_KEY, build=_measure_attribution,
-                            now=now, force=force)
+    return shared_snapshot(ATTRIBUTION_KEY, build=_measure_attribution,
+                           now=now, force=force)
+
+
+# TODO lo que la portada agrega, en UNA lista.  Publicar es recorrerla; tirar
+# lo publicado tambien.  Anadir un agregado y olvidarse de una de las dos
+# cosas es exactamente como se acaba teniendo un numero que el servicio no
+# refresca o un test que ve la medida del test anterior.
+PUBLIC_SNAPSHOTS = (
+    (PUBLIC_COUNTERS_KEY, lambda: _measure_tree_totals),
+    (ATTRIBUTION_KEY, lambda: _measure_attribution),
+    (PUBLIC_ACTIVITY_KEY, lambda: _measure_activity),
+    (CAMPAIGN_PROGRESS_KEY, lambda: _measure_campaign_progress),
+)
+
+
+def _fleet_snapshot():
+    """La medida de flota, importada tarde para no cerrar un ciclo.
+
+    ``contributors`` lee de aqui (``shared_snapshot``), asi que este modulo no
+    puede leer de el en el import.  Mismo patron que ``_closure_sources``.
+    """
+    from . import contributors
+    return contributors.FLEET_CACHE_KEY, contributors.measure_fleet
 
 
 def refresh_public_snapshot(*, now=None):
@@ -310,15 +452,22 @@ def refresh_public_snapshot(*, now=None):
     Devuelve las claves refrescadas, para que el ciclo pueda registrarlo.
     """
     now = now or timezone.now()
-    refresh_shared(PUBLIC_COUNTERS_KEY, build=_measure_tree_totals, now=now)
-    refresh_shared(ATTRIBUTION_KEY, build=_measure_attribution, now=now)
-    return (PUBLIC_COUNTERS_KEY, ATTRIBUTION_KEY)
+    keys = []
+    for key, build in PUBLIC_SNAPSHOTS:
+        refresh_shared(key, build=build(), now=now)
+        keys.append(key)
+    fleet_key, fleet_build = _fleet_snapshot()
+    refresh_shared(fleet_key, build=fleet_build, now=now)
+    keys.append(fleet_key)
+    return tuple(keys)
 
 
 def reset_public_snapshot():
     """Tira lo publicado (tests y despliegues)."""
-    cache.delete_many([PUBLIC_COUNTERS_KEY, PUBLIC_COUNTERS_KEY + '.lock',
-                       ATTRIBUTION_KEY, ATTRIBUTION_KEY + '.lock'])
+    keys = [key for key, _build in PUBLIC_SNAPSHOTS]
+    keys.append(_fleet_snapshot()[0])
+    cache.delete_many([entry for key in keys
+                       for entry in (key, key + '.lock')])
 
 
 def human_close_latency(*, now=None, days=HUMAN_CLOSE_WINDOW_DAYS,
