@@ -182,6 +182,16 @@ class Command(BaseCommand):
                     failures[name] = f'{type(error).__name__}: {error}'
                     return default
 
+            # LOS CONTADORES PUBLICOS TAMBIEN AL PRINCIPIO del ciclo: la
+            # publicacion de cierre llega tarde cuando la pasada de
+            # prioridades es larga (la primera full tras un arranque, o una
+            # delta cayendose a full bajo tormenta de ingesta) — el snapshot
+            # caduca a mitad y una peticion de portada paga la recomputacion
+            # inline (30-40 s medidos el 4-ago).  Publicar aqui mantiene la
+            # cache caliente durante TODA la pasada; el coste ya lo paga
+            # este proceso y no la web, que es el reparto correcto.
+            step('public-counters-pre',
+                 lambda: len(metrics.refresh_public_snapshot()))
             # ``force``: the service's own interval is the only clock that
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
