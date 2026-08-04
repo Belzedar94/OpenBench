@@ -919,7 +919,13 @@ class SeedNotStompTests(TestCase):
         e = Edge.objects.filter(parent=root, move_uci='g1f3') \
                         .select_related('child').first()
         deep = e.child
-        deep.eval_cp = 441   # analisis directo profundo del hijo
+        # Analisis directo profundo del hijo: eval Y NODOS, que es como llega
+        # siempre — los dos se escriben en la misma llamada — y son los nodos
+        # los que lo hacen intocable para la linea del padre
+        # (§ ingest._seed_child_eval).  Sin ellos esto no es una busqueda: es
+        # una siembra, y a una siembra la refresca la siembra nueva.
+        deep.eval_cp = 441
+        deep.nodes_invested = 128_000_000
         deep.save()
         ingest.ingest_analysis(root.key, [
             {'move': 'g1f3', 'eval_cp': 306, 'mate': None, 'pv': ['g1f3']},

@@ -103,7 +103,7 @@ class ChildClosureRaceTests(TestCase):
         lines = [{'move': 'g1f3', 'eval_cp': 30, 'mate': 5,
                   'pv': ['g1f3', 'e7e5', 'f3e5']}]
 
-        def concurrent_consumer(child, ev):
+        def concurrent_consumer(child, ev, refresh=True):
             # Otro consumer cierra el MISMO hijo por otro padre (el DAG
             # transpone) mientras este ingest tiene su foto ``UNKNOWN``.
             Position.objects.filter(key=child.key).update(

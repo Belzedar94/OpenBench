@@ -612,6 +612,50 @@ class BackedIngestTests(TestCase):
         pos.refresh_from_db()
         self.assertEqual(pos.last_analysis[0]['eval_cp'], 500)
 
+    def test_a_shallower_pass_does_not_refresh_the_seed_either(self):
+        """Refrescar una siembra ES arbitrar, y ese pase no arbitra.
+
+        Medido: con el refresco a secas, un pase de 8M sobre un nodo con foto
+        de 512M dejaba la fila en +900 mientras la linea 1 de arriba seguia
+        diciendo +50 — la misma discrepancia, con los papeles cambiados.  La
+        siembra sigue la autoridad del escaparate, que es la que ya decidia
+        eval_cp y best_move.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        top = Edge.objects.filter(parent=pos).order_by('move_uci').first()
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 512_000_000)
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [900, 800, 700, 600, 500]), 8_000_000)
+
+        pos.refresh_from_db()
+        self.assertEqual(pos.last_analysis[0]['eval_cp'], 50)
+        self.assertEqual(pos.eval_cp, 50)
+        self.assertEqual(Position.objects.get(key=top.child_id).eval_cp, 50)
+
+    def test_a_shallower_pass_still_seeds_the_children_nobody_had_named(self):
+        """Estrenar un hijo vacio no pisa a nadie: eso es el conocimiento
+        bajando por las aristas, y cualquier pase puede traerlo."""
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+        edges = list(Edge.objects.filter(parent=pos).order_by('move_uci'))
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 512_000_000)
+        forgotten = edges[7]
+        self.assertIsNone(
+            Position.objects.get(key=forgotten.child_id).eval_cp)
+
+        ingest.ingest_analysis(pos.key, [{'move': forgotten.move_uci,
+                                          'eval_cp': 900,
+                                          'pv': [forgotten.move_uci]}],
+                               8_000_000)
+
+        self.assertEqual(
+            Position.objects.get(key=forgotten.child_id).eval_cp, 900)
+
     def test_the_arrow_follows_the_table_not_the_stale_search(self):
         """Board arrow and moves table must move TOGETHER.
 

@@ -400,7 +400,7 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
     return prepared
 
 
-def _seed_child_eval(child, ev):
+def _seed_child_eval(child, ev, refresh=True):
     """Siembra la linea del padre en el hijo con un update CONDICIONAL.
 
     QUE PROTEGE, y sigue protegiendo.  Entre cargar al hijo y escribirlo puede
@@ -425,9 +425,17 @@ def _seed_child_eval(child, ev):
     significa que nadie ha mirado AQUI, y eso — solo eso — es lo que la siembra
     puede refrescar.  Con cualquiera de los dos, el numero es conocimiento de
     motor sobre esta posicion y la linea del padre no lo toca.
+
+    ``refresh`` lo decide QUIEN LLAMA, porque no es una propiedad del hijo sino
+    del pase: un pase que no arbitra este nodo puede estrenar hijos, pero no
+    reescribir lo que dice la foto vigente (§ ``ingest_analysis``).  Con
+    ``refresh=False`` la condicion vuelve a ser la de siempre, ``eval_cp IS
+    NULL`` a secas, y sigue viviendo dentro del WHERE por lo mismo de arriba.
     """
-    won = Position.objects.filter(key=child.key).filter(
-        Q(eval_cp__isnull=True) | Q(nodes_invested=0, backed_nodes=0)).update(
+    condition = Q(eval_cp__isnull=True)
+    if refresh:
+        condition |= Q(nodes_invested=0, backed_nodes=0)
+    won = Position.objects.filter(key=child.key).filter(condition).update(
         eval_cp=ev, updated=timezone.now())
     if won:
         child.eval_cp = ev
@@ -462,6 +470,23 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         expand(pos)
         stm_white = pos.fen.split()[1] == 'w'
 
+        # REFRESCAR UNA SIEMBRA ES ARBITRAR, asi que solo lo hace quien arbitra.
+        # Un pase mas superficial que la foto vigente no manda en este nodo — ni
+        # en el escaparate, ni en eval_cp, ni en best_move (§ mas abajo) — y
+        # dejarle reescribir la siembra de los hijos seria colarle el voto por
+        # la puerta de atras: la fila diria +900 de un pase de 8M mientras la
+        # linea 1 de arriba sigue diciendo +50 con 512M debajo, que es
+        # exactamente la discrepancia que el refresco viene a quitar.  Estrenar
+        # hijos que no tenian nada si puede, y siempre pudo: eso es el
+        # conocimiento bajando por las aristas y no pisa a nadie.
+        #
+        # Esto LEE los mismos datos que el arbitraje y no decide nada por el:
+        # la foto vigente se vuelve a mirar abajo, en su sitio, sin cambios.
+        showcase = [ln for ln in (pos.last_analysis or [])
+                    if isinstance(ln, dict) and not ln.get('prior_pass')]
+        seed_arbitrates = not (showcase and nodes_budget
+                               < showcase[0].get('_budget', 0))
+
         # evals de hijos reportados por el motor
         best_eval, best_move = None, None
         closed_here = 0
@@ -482,8 +507,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             # UPDATE, que es atomico (§ _seed_child_eval).
             if (ev is not None and child.status == 'UNKNOWN'
                     and (child.eval_cp is None
-                         or not (child.nodes_invested or child.backed_nodes))):
-                _seed_child_eval(child, ev)
+                         or (seed_arbitrates
+                             and not (child.nodes_invested
+                                      or child.backed_nodes)))):
+                _seed_child_eval(child, ev, refresh=seed_arbitrates)
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)
             if (child.status != 'UNKNOWN' and prepared_proof is not None
