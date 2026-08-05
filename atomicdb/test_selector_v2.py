@@ -32,7 +32,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from . import ingest, logic, views
@@ -655,6 +655,52 @@ class SelectorSwitchTests(TestCase):
             self.assertEqual(ingest.selector_horizon_width(), 2_000)
 
 
+class SelectorDeltaSwitchTests(SimpleTestCase):
+    """La salida de emergencia del modo delta, cableada de punta a punta.
+
+    ``selector_delta_enabled`` leia el ajuste desde el primer dia, pero
+    settings no lo leia del ENTORNO: la linea que esperaba en la unidad de
+    systemd para apagarlo no apagaba nada, y eso no se nota hasta el dia en que
+    hace falta apagarlo.  Aqui quedan fijadas las dos mitades: que el valor por
+    defecto es ENCENDIDO — distinto del resto de conmutadores del fichero, y
+    por eso hay que decirlo — y que una variable de entorno devuelve la pasada
+    completa.
+    """
+
+    def _mapped(self, value):
+        """Lo que settings deduce del entorno, con el modulo importado fresco.
+
+        La expresion se evalua UNA vez, al arrancar el proceso, asi que la
+        unica forma de verla desde un test es volver a importar el modulo con
+        el entorno puesto; el segundo import deja las cosas como estaban.
+        """
+        import importlib
+        import sys
+
+        with patch.dict(os.environ, {'ATOMICDB_SELECTOR_DELTA': value},
+                        clear=False):
+            module = importlib.reload(sys.modules['OpenSite.settings'])
+            try:
+                return module.ATOMICDB_SELECTOR_DELTA
+            finally:
+                importlib.reload(sys.modules['OpenSite.settings'])
+
+    def test_an_empty_environment_leaves_the_incremental_pass_on(self):
+        self.assertTrue(self._mapped(''))
+        self.assertTrue(ingest.selector_delta_enabled())
+
+    def test_the_environment_can_bring_the_complete_pass_back(self):
+        for value in ('0', 'false', 'no', 'FALSE', 'No'):
+            self.assertFalse(self._mapped(value),
+                             msg='{!r} tenia que apagarlo'.format(value))
+
+    def test_anything_that_is_not_a_no_keeps_it_on(self):
+        """Un valor raro no puede apagar lo que esta desplegado."""
+        for value in ('1', 'true', 'yes', 'si', 'delta'):
+            self.assertTrue(self._mapped(value),
+                            msg='{!r} no tenia que apagarlo'.format(value))
+
+
 class DeltaFixture:
     """Una linea larga bajo una jugada refutada, para tener FUERA DE LA BOLA.
 
@@ -975,6 +1021,122 @@ class DeltaMarkerPersistenceTests(TestCase):
                 self.state_dir.name, 'no', 'existe')):
             self.assertTrue(self._pass())
             self.assertEqual(ingest.selector_pass_report()['mode'], 'full')
+
+
+@override_settings(ATOMICDB_SELECTOR_V2=True)
+class WriteVolumeTests(TestCase):
+    """Cuantas filas escribe una pasada, y de que tamano son esos cambios.
+
+    ``selector_rows`` mide LECTURA, no escritura, y esa confusion salio cara:
+    con el guard de ``priority != prio`` puesto, el selector reescribia unos
+    cinco millones de filas por pasada — 704 UPDATE/s medidos — porque las
+    prioridades si cambiaban, solo que por milesimas de micro-deriva del regret
+    y de los votos.  Desde fuera, repuntuar doce millones y reescribir cinco se
+    veian exactamente igual.
+
+    Lo que se fija aqui es la medida que tiene que decidir el epsilon de
+    escritura: las que se escriben, las que salen identicas y como se reparten
+    por tamano del cambio.  Sin el histograma, el umbral seria un numero
+    elegido a ojo, y equivocarse por arriba congela la cima.
+    """
+
+    NARROW = 1        # el mismo horizonte enano que el resto de estos tests
+    STOMP = -777.0    # una prioridad que ninguna formula produce
+
+    def setUp(self):
+        self.fixture = DeltaFixture().build()
+
+    def _pass(self, **kwargs):
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            return ingest.refresh_priorities(force=True, **kwargs)
+
+    def _stomp(self, *nodes):
+        Position.objects.filter(key__in=[node.key for node in nodes]).update(
+            priority=self.STOMP)
+
+    def test_a_rewritten_row_is_counted_and_its_change_is_sized(self):
+        """Un cambio enorme se cuenta, y cae en el cajon de los enormes.
+
+        El stomp esta a 777 unidades de cualquier precio que la formula sepa
+        escribir — el techo entero son 67 — asi que no hay cajon pequeno que
+        pueda quedarselo.
+        """
+        self._pass()
+        self._stomp(self.fixture.leaf)
+
+        self._pass(delta=False)
+
+        report = ingest.selector_pass_report()
+        self.assertGreaterEqual(report['written'], 1)
+        self.assertEqual(report['hist']['gt+1'], report['written'])
+        self.assertEqual(sum(report['hist'].values()), report['written'])
+
+    def test_a_second_pass_over_a_quiet_graph_writes_nothing(self):
+        """El otro extremo, y el que hace util a la medida.
+
+        Cuando el guard ES la respuesta correcta se ve igual de claro que
+        cuando no lo es; sin estos contadores, los dos casos producian
+        exactamente el mismo log.
+        """
+        self._pass()
+
+        self._pass()
+
+        report = ingest.selector_pass_report()
+        self.assertEqual(report['mode'], 'delta')
+        self.assertEqual(report['written'], 0)
+        self.assertGreater(report['unchanged'], 0)
+        self.assertEqual(sum(report['hist'].values()), 0)
+
+    def test_the_ball_is_reported_and_fits_inside_what_was_scored(self):
+        """El tamano de la bola es lo que fija el coste de todo lo demas."""
+        self._pass()
+
+        report = ingest.selector_pass_report()
+        self.assertGreater(report['ball'], 0)
+        self.assertLessEqual(report['ball'], report['rows'])
+
+    def test_the_shadow_does_not_disturb_the_last_real_pass(self):
+        """El sombra no escribe, asi que no tiene nada que contar.
+
+        Si tocara estos numeros, el JSON del servicio estaria hablando de una
+        pasada que no cambio ni una fila.
+        """
+        self._pass()
+        self._stomp(self.fixture.leaf)
+        self._pass(delta=False)
+        before = ingest.selector_pass_report()
+        self.assertGreater(before['written'], 0)
+
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            ingest.refresh_priorities_v2(force=True, top_k=10_000)
+
+        self.assertEqual(ingest.selector_pass_report(), before)
+
+    def test_the_service_publishes_the_write_counters(self):
+        """El sitio donde alguien va a leer esto de verdad es journalctl.
+
+        El olvido del medio es lo que hace que la pasada del servicio sea
+        completa: el stomp no mueve ``updated`` — no puede, es lo que le da
+        sentido — asi que una delta no mirara una fila que quedo fuera de la
+        bola, y aqui lo que se comprueba es el JSON, no el modo.
+        """
+        self._pass()
+        self._stomp(self.fixture.leaf)
+        ingest.reset_selector_delta_state()
+        out = StringIO()
+        with patch.object(ingest, 'selector_horizon_width',
+                          return_value=self.NARROW):
+            call_command('refresh_selector', stdout=out)
+
+        report = json.loads(out.getvalue())
+        self.assertGreaterEqual(report['selector_written'], 1)
+        self.assertEqual(report['selector_delta_hist']['gt+1'],
+                         report['selector_written'])
+        self.assertGreater(report['selector_ball'], 0)
+        self.assertIn('selector_unchanged', report)
 
 
 @override_settings(ATOMICDB_SELECTOR_V2=True)

@@ -103,9 +103,12 @@ tabla, que es la parte que ningún consumidor lee.
 **Estado y fallback:** el timestamp de la última pasada vive en el proceso
 (`ingest._selector_delta_state`), igual que `_priority_refresh_cache` — el
 servicio no persiste nada en la base y esto no iba a ser lo primero. Primera
-pasada tras arrancar: completa. Más de `SELECTOR_DELTA_MAX_GAP` (10 min) sin
-pasada: completa. Modo sombra (`top_k`): nunca delta. `ATOMICDB_SELECTOR_DELTA
-= False` devuelve la pasada completa sin desplegar.
+pasada tras arrancar: completa. Más de `SELECTOR_DELTA_MAX_GAP` (12 h, y el
+porqué de que no sean 10 min está encima del número) sin pasada: completa. Modo sombra (`top_k`): nunca delta. `ATOMICDB_SELECTOR_DELTA
+= False` devuelve la pasada completa sin desplegar, y desde el 5-ago el ajuste
+se lee del entorno (`ATOMICDB_SELECTOR_DELTA=0` en la unidad de systemd): antes
+la variable existía en `/etc` pero no llegaba a `settings`, así que la salida
+de emergencia estaba escrita y no cableada.
 
 **Se arregló de camino** lo que el delta destapó: dos sitios escribían términos
 de la fórmula con un `update` de queryset, que no dispara `auto_now`, así que
@@ -118,6 +121,18 @@ ponen ya `updated` a mano, como ya hacían los cierres y la siembra de eval.
 `selector_rows` y `selector_seconds` en su línea de JSON, visible en
 journalctl. Una racha de `full` no es un fallo del delta: es el proceso
 diciendo que lleva reiniciándose.
+
+Y publica también **cuánto escribió**, que no es lo mismo que cuánto
+repuntuó: `selector_written` (filas que acabaron en un `UPDATE`),
+`selector_unchanged` (idénticas, las que el guard se ahorra),
+`selector_delta_hist` (reparto de `|prio_nueva − prio_vieja|` en seis cajones:
+`le-3`, `le-2`, `le-1`, `le0`, `le+1`, `gt+1`) y `selector_ball` (nodos que
+alcanzó el Dijkstra acotado). Motivo: la noche del 5-ago el selector reescribía
+~5M filas por pasada — 704 `UPDATE`/s medidos en `n_tup_upd` — *con* el guard
+de `priority != prio` puesto, porque las prioridades sí cambian, sólo que por
+micro-derivas del regret y de los votos. El siguiente paso es un épsilon de
+escritura (`|Δ| < ε` no se escribe) y el umbral sale de este histograma sobre
+pasadas reales, no de una corazonada: pasarse por arriba congela la cima.
 
 **Migración 0038** (`Position.updated` indexada, como `AddIndex` en `Meta` y
 no como `db_index` en la columna: lo segundo es un `AlterField`, y en SQLite

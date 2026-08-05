@@ -2513,6 +2513,54 @@ PRIORITY_WRITE_BATCH = 500
 # del grafo (la bola manda en el coste de todas formas).
 SELECTOR_DELTA_MAX_GAP = timedelta(hours=12)
 
+# CUANTO SE ESCRIBE DE VERDAD, Y DE QUE TAMANO ES EL CAMBIO.
+#
+# El guard de ``priority != prio`` parecia bastar para que una pasada tranquila
+# no tocara la tabla, y no basta: la noche del 5 de agosto de 2026 el selector
+# reescribia unos CINCO MILLONES de filas por pasada — 704 UPDATE/s medidos en
+# ``n_tup_upd`` — con el guard puesto.  No es que compare mal; es que las
+# prioridades cambian de verdad, solo que por micro-derivas del regret y de los
+# votos.  Un cambio de una milesima ordena la cola exactamente igual que no
+# cambiarla, y cuesta lo mismo que uno grande: fila nueva en el WAL, entrada
+# nueva en el indice de ``priority`` y contencion con quien este ingiriendo.
+#
+# La salida es un epsilon de escritura (``|delta| < eps`` no se escribe), pero
+# el umbral NO se elige a ojo: demasiado alto congela la cima, demasiado bajo
+# no ahorra nada, y entre esos dos errores no hay forma de distinguir sin ver
+# el reparto.  Asi que antes del epsilon va la MEDIDA — seis cajones
+# logaritmicos, seis comparaciones por fila y ninguna lista nueva — y el umbral
+# se lee del histograma que el servicio publique en unas cuantas pasadas
+# reales.
+#
+# Los cajones son ``|prio_nueva - prio_vieja|``: hasta 1e-3, 1e-2, 1e-1, 1, 10
+# y lo que pase de ahi.  El techo entero de la formula son 67 unidades, asi que
+# el ultimo cajon es "esto no es deriva, es que la posicion cambio".
+_DELTA_BUCKETS = (('le-3', 1e-3), ('le-2', 1e-2), ('le-1', 1e-1),
+                  ('le0', 1.0), ('le+1', 10.0))
+_DELTA_BUCKET_OVERFLOW = 'gt+1'
+
+
+def _new_delta_hist():
+    """Los seis cajones a cero, y SIEMPRE los seis.
+
+    Un cajon ausente y un cajon vacio se leen distinto cuando alguien apile
+    pasadas de journalctl una detras de otra, y aqui el que falte es siempre
+    informacion: "ninguna escritura fue tan pequena" es justo lo que hay que
+    saber para elegir el epsilon.
+    """
+    hist = {name: 0 for name, _edge in _DELTA_BUCKETS}
+    hist[_DELTA_BUCKET_OVERFLOW] = 0
+    return hist
+
+
+def _delta_bucket(size):
+    """En que cajon cae un cambio de ese tamano."""
+    for name, edge in _DELTA_BUCKETS:
+        if size <= edge:
+            return name
+    return _DELTA_BUCKET_OVERFLOW
+
+
 # El estado de la ultima pasada, POR PROCESO, mas una copia del marcador en
 # disco.  El servicio del selector sigue sin persistir nada en la base; el
 # marcador ``at`` va a un fichero en ``ATOMICDB_STATE_DIR`` (en el servidor,
@@ -2525,7 +2573,8 @@ SELECTOR_DELTA_MAX_GAP = timedelta(hours=12)
 # ``ATOMICDB_STATE_DIR`` — tests, desarrollo, el inline de emergencia — todo
 # se comporta como antes: cada proceso lleva su propia ventana contigua.
 _selector_delta_state = {'at': None, 'mode': '', 'rows': 0, 'seconds': 0.0,
-                         'disk_checked': False}
+                         'written': 0, 'unchanged': 0, 'ball': 0,
+                         'hist': _new_delta_hist(), 'disk_checked': False}
 
 
 def _delta_state_path():
@@ -2604,21 +2653,47 @@ def reset_selector_delta_state():
     olvido no seria tal en cuanto el proceso reiniciase.
     """
     _selector_delta_state.update({'at': None, 'mode': '', 'rows': 0,
-                                  'seconds': 0.0, 'disk_checked': False})
+                                  'seconds': 0.0, 'written': 0,
+                                  'unchanged': 0, 'ball': 0,
+                                  'hist': _new_delta_hist(),
+                                  'disk_checked': False})
     _forget_delta_state_on_disk()
 
 
 def selector_pass_report():
-    """Lo que la ultima pasada hizo, para el log del servicio."""
+    """Lo que la ultima pasada hizo, para el log del servicio.
+
+    El histograma sale COPIADO.  Es un diccionario del estado del proceso y
+    quien lo publique va a serializarlo mientras la siguiente pasada puede
+    estar ya contando: prestarle el de dentro seria publicar una foto que se
+    mueve sola.
+    """
     return {'mode': _selector_delta_state['mode'],
             'rows': _selector_delta_state['rows'],
-            'seconds': _selector_delta_state['seconds']}
+            'seconds': _selector_delta_state['seconds'],
+            'written': _selector_delta_state['written'],
+            'unchanged': _selector_delta_state['unchanged'],
+            'ball': _selector_delta_state['ball'],
+            'hist': dict(_selector_delta_state['hist'])}
 
 
-def _record_pass(mode, rows, started, delivered_at=None):
+def _record_pass(mode, rows, started, delivered_at=None, written=0,
+                 unchanged=0, ball=0, hist=None):
+    """Deja anotada la pasada para el log del servicio.
+
+    Los contadores de ESCRITURA llegan en cero por defecto porque el motor
+    legado (v1) no los pasa: no se instrumento ni se va a instrumentar, y un
+    cero suyo no dice "no escribio nada" sino "por aqui no hay medida".  El que
+    corre en el servidor es v2, que es quien los rellena.
+    """
     _selector_delta_state['mode'] = mode
     _selector_delta_state['rows'] = rows
     _selector_delta_state['seconds'] = round(time.monotonic() - started, 3)
+    _selector_delta_state['written'] = written
+    _selector_delta_state['unchanged'] = unchanged
+    _selector_delta_state['ball'] = ball
+    _selector_delta_state['hist'] = (_new_delta_hist() if hist is None
+                                     else hist)
     if delivered_at is not None:
         _selector_delta_state['at'] = delivered_at
         _persist_delta_state(delivered_at)
@@ -2726,6 +2801,14 @@ def refresh_priorities_v2(force=False, top_k=None, delta=None):
     la primera pasada del proceso y la que llega tras un hueco largo son
     completas de todas formas.  El modo sombra (``top_k``) NO usa delta jamas:
     compara cimas de dos motores y una cima a medio reescribir no compara nada.
+
+    Y CADA PASADA DICE CUANTO ESCRIBIO.  ``rows`` cuenta lo repuntuado, que no
+    es lo mismo que lo reescrito: la diferencia entre esos dos numeros es todo
+    lo que el guard se ahorra, y hasta ahora no se veia.  Van al informe la
+    cuenta de escrituras, la de filas identicas y el histograma de tamanos del
+    cambio (§ ``_delta_bucket``), mas el tamano de la bola explorada.  De ahi
+    sale el epsilon de escritura; medir primero es la mitad del trabajo.  El
+    sombra no anota nada de esto — no escribe.
     """
     now = time.monotonic()
     cached = _priority_refresh_cache
@@ -2744,6 +2827,9 @@ def refresh_priorities_v2(force=False, top_k=None, delta=None):
     since = None if collector is not None else _delta_since(delivered_at,
                                                             delta)
     scored = 0
+    written = 0
+    unchanged = 0
+    hist = _new_delta_hist()
     dirty = []
     for (key, eval_cp, backed_eval, expanded, visits, campaign_id, priority,
          reachable) in _priority_rows(since, regret):
@@ -2757,18 +2843,28 @@ def refresh_priorities_v2(force=False, top_k=None, delta=None):
         if collector is not None:
             collector.offer(key, prio)
             continue
-        if priority != prio:
-            dirty.append(Position(key=key, priority=prio))
-            if len(dirty) >= PRIORITY_WRITE_BATCH:
-                Position.objects.bulk_update(dirty, ['priority'])
-                dirty = []
+        if priority == prio:
+            unchanged += 1        # la fila que el guard se ahorra, contada
+            continue
+        written += 1
+        if priority is not None:
+            # Solo las que TENIAN precio entran al histograma: una fila sin
+            # prioridad anterior no tiene tamano de cambio que medir, y meterla
+            # en un cajon cualquiera enturbiaria justo la lectura que decide el
+            # epsilon.
+            hist[_delta_bucket(abs(prio - priority))] += 1
+        dirty.append(Position(key=key, priority=prio))
+        if len(dirty) >= PRIORITY_WRITE_BATCH:
+            Position.objects.bulk_update(dirty, ['priority'])
+            dirty = []
     if collector is not None:
         return collector.as_dict()
     if dirty:
         Position.objects.bulk_update(dirty, ['priority'])
     cached['at'] = now
     _record_pass('delta' if since is not None else 'full', scored, started,
-                 delivered_at=delivered_at)
+                 delivered_at=delivered_at, written=written,
+                 unchanged=unchanged, ball=len(regret), hist=hist)
     return True
 
 

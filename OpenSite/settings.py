@@ -111,6 +111,17 @@ ATOMICDB_INLINE_SELECTOR = os.environ.get(
 # (§ docs/selector-incremental.md).
 ATOMICDB_SELECTOR_V2 = os.environ.get(
     'ATOMICDB_SELECTOR_V2', '').lower() in ('1', 'true', 'yes')
+# Pasadas INCREMENTALES del selector: repuntuar la bola y lo que se movio, en
+# vez del universo UNKNOWN entero.  ENCENDIDO por defecto, al reves que sus
+# vecinos de aqui y a proposito: aquellos estrenan comportamiento y tienen que
+# ganarse el sitio, este no cambia ni un numero — misma formula, mismos
+# precios, mismas lapidas — solo deja de reescribir filas que nadie ha tocado,
+# y es lo que esta desplegado y medido.  La linea existe para poder APAGARLO
+# desde el entorno: cualquier cosa que huela a "no" devuelve la pasada completa
+# con un reinicio y sin desplegar codigo, que es lo unico que se le pide a una
+# salida de emergencia.
+ATOMICDB_SELECTOR_DELTA = os.environ.get(
+    'ATOMICDB_SELECTOR_DELTA', '').lower() not in ('0', 'false', 'no')
 # Directorio de estado del selector (en el servidor, el ``StateDirectory=``
 # de systemd).  Hoy guarda una sola cosa: el marcador de la ultima pasada
 # completada, para que un reinicio del servicio no fuerce una pasada completa

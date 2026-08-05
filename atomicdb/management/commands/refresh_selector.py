@@ -32,6 +32,17 @@ tambien lo es la que llega tras ``SELECTOR_DELTA_MAX_GAP`` sin pasar por aqui.
 Una racha de ``full`` en journalctl no es un fallo del delta: es este proceso
 diciendo que lleva reiniciandose, y eso es lo que hay que mirar.
 
+Y DICE TAMBIEN CUANTO ESCRIBIO, que no es lo mismo que cuanto repuntuo.
+``selector_written`` son las filas que acabaron en un UPDATE,
+``selector_unchanged`` las que salieron identicas y ``selector_delta_hist`` el
+reparto por tamano del cambio en las que si cambiaron.  Estan porque
+``selector_rows`` solo mide lectura: el 5 de agosto de 2026 una pasada
+repuntuaba doce millones y reescribia cinco, y desde fuera las dos cosas se
+veian igual.  Con el histograma delante se elige el epsilon de escritura por
+debajo del cual una fila no merece el WAL que cuesta.  ``selector_ball`` es
+cuantos nodos alcanzo el Dijkstra acotado, que es lo que fija el coste de todo
+lo demas.
+
 WHAT ELSE RIDES THIS TIMER.  Everything that is a bounded scheduling decision
 rather than a request: the ENGINE debt top-up, coverage completion, and — when
 ``ATOMICDB_ADVERSARIAL`` is on — the two adversarial arms (dn repair and F0
@@ -254,6 +265,10 @@ class Command(BaseCommand):
                       'selector_mode': selector['mode'],
                       'selector_rows': selector['rows'],
                       'selector_seconds': selector['seconds'],
+                      'selector_written': selector['written'],
+                      'selector_unchanged': selector['unchanged'],
+                      'selector_delta_hist': selector['hist'],
+                      'selector_ball': selector['ball'],
                       'pool_topped_up': pooled,
                       'debt_enqueued': enqueued, 'coverage_enqueued': covered,
                       'adversarial': bool(adversarial),
