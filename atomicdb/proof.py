@@ -76,13 +76,15 @@ porque no son una fuente de verdad.
 """
 
 import hashlib
+import math
 import time
 
 from django.conf import settings
 from django.db.models import Q
 
 from . import logic, solve_estimate
-from .models import DBEvent, Edge, Position, ProofCampaign, ProofNode
+from .models import (Campaign, DBEvent, Edge, Position, ProofCampaign,
+                     ProofNode)
 
 # 2^62: infinito de la aritmetica de prueba.  Cabe en un BigInteger con sitio
 # de sobra para que sumar varios "infinitos" en Python no desborde antes del
@@ -653,6 +655,20 @@ def root_numbers(campaign):
 DESCENT_MAX_PLIES = 96
 
 
+def _point(counter, salt=''):
+    """Punto uniforme en [0, 1) a partir del contador, por dominios.
+
+    El ``salt`` separa sorteos que comparten contador.  Sin el, "que bucket
+    del repertorio" y "arranco en una campana" saldrian del MISMO byte y
+    quedarian correlacionados: el 35% de las campanas caeria siempre sobre los
+    mismos contadores que el 5% de exploracion, y ninguno de los dos repartos
+    seria el que dice ser.  El dominio vacio conserva el hash historico del
+    reparto 80/15/5, que es lo que hace que esto no cambie ni una cola.
+    """
+    digest = hashlib.sha256(f'{salt}{int(counter)}'.encode()).digest()
+    return int.from_bytes(digest[:8], 'big') / float(1 << 64)
+
+
 def _bucket(counter, policy):
     """Reparto determinista 80/15/5 por hash del contador.
 
@@ -660,13 +676,163 @@ def _bucket(counter, policy):
     exploraciones en rachas.  El hash del contador reparte uniforme y es
     replayable.
     """
-    digest = hashlib.sha256(str(int(counter)).encode()).digest()
-    point = int.from_bytes(digest[:8], 'big') / float(1 << 64)
+    point = _point(counter)
     if point < policy['primary']:
         return 'primary'
     if point < policy['primary'] + policy['backup']:
         return 'backup'
     return 'explore'
+
+
+# ---------------- de donde ARRANCA el descenso (campanas) ----------------
+#
+# EL PROBLEMA, en una linea: con ``ATOMICDB_SELECTOR=pn`` el trabajo lo
+# reparte este descenso, y este descenso no lee ``Position.priority`` — que es
+# donde vive el bono de campana (``ingest.CAMPAIGN_BONUS``).  Una campana
+# ACTIVE con votos ganaba la columna por goleada y no recibia ni una tarea.
+# El principio del propietario es explicito: si se establece una campana, el
+# solver tiene que ir por esos arboles.
+#
+# LA REGLA.  Antes de cada descenso se sortea si arranca en la raiz global o
+# en la raiz de una campana ACTIVE.  Lo demas del descenso NO cambia: primaria
+# pegajosa, reparto 80/15/5, reserva del lote, tope de plies.  La campana
+# decide DONDE se empieza a mirar, no como se prueba.
+#
+# EL TOPE ES LA MITAD IMPORTANTE.  Sin el, tres campanas votadas se llevarian
+# el solver entero y el teorema de la raiz — que es lo que este proyecto
+# prueba — se quedaria sin motor.  Con el, dos de cada tres descensos siguen
+# saliendo de la raiz global pase lo que pase.  El razonamiento entero, con
+# los numeros de la auditoria, en docs/solver-allocation.md.
+CAMPAIGN_DESCENT_SHARE = 0.35
+# ``ln(1+0) = 0``: una campana ACTIVE sin votos pesaria cero y volveria a ser
+# inerte, que es justo el fallo que esto arregla.  Activar es el voto del
+# propietario y vale uno.  PROPOSED y PAUSED siguen valiendo cero descensos:
+# la linea entre "la comunidad pide" y "el propietario concede" no se mueve.
+CAMPAIGN_ACTIVATION_VOTES = 1
+
+
+def campaign_descent_enabled():
+    """Descensos con raiz de campana.  ENCENDIDO, con vuelta atras."""
+    return bool(getattr(settings, 'ATOMICDB_CAMPAIGN_DESCENT', True))
+
+
+def campaign_roots():
+    """``[(Position, peso)]`` de las campanas ACTIVE con raiz abierta.
+
+    El peso es ``ln(1+votos)`` con el suelo de activacion, el mismo logaritmo
+    que ya usaba el bono de la columna.  Una raiz ya cerrada no entra: no hay
+    descenso que hacer por debajo de ella, y el cierre ya la pasa a DONE por
+    el camino de siempre.
+    """
+    if not campaign_descent_enabled():
+        return []
+    rows = Campaign.objects.filter(
+        state=Campaign.CState.ACTIVE,
+        root__status='UNKNOWN').select_related('root').order_by('id')
+    return [(row.root,
+             math.log1p(max(CAMPAIGN_ACTIVATION_VOTES, int(row.votes or 0))))
+            for row in rows]
+
+
+def campaign_start(counter, roots=None):
+    """La raiz donde arranca ESTE descenso, o ``None`` para la raiz global.
+
+    Sorteo determinista por dominio propio (ver ``_point``): el mismo estado
+    produce la misma cola y un replay sigue siendo reproducible.  La fraccion
+    de cada campana es su peso normalizado POR el tope global, asi que la suma
+    de todas no puede pasar de ``CAMPAIGN_DESCENT_SHARE``.
+    """
+    roots = campaign_roots() if roots is None else roots
+    total = sum(weight for _, weight in roots)
+    if not roots or total <= 0:
+        return None
+    point = _point(counter, 'campaign:')
+    edge = 0.0
+    for root, weight in roots:
+        edge += CAMPAIGN_DESCENT_SHARE * weight / total
+        if point < edge:
+            return root
+    return None
+
+
+# ---------------- el clamp de los nodos OR resueltos ----------------
+#
+# En un nodo OR mueve el atacante y le basta UNA jugada buena.  Si ya hay un
+# hijo con el objetivo PROBADO — un cierre, no una eval optimista — el nodo
+# esta probado y sus demas hijos no le deben nada a la prueba.  Medido el
+# 5-ago sobre la base viva: 151 nodos OR en esa situacion con 3.936 hermanos
+# todavia UNKNOWN colgando, que a 8M por tarea son 31,5 G nodos de motor que
+# la prueba no necesita.
+#
+# Es ``_short_mate_clamp`` generalizado a distancia DESCONOCIDA: aquel compra
+# la verificacion de un mate reclamado en vez de la excavacion; este compra
+# una mirada barata a un hermano en vez de un peldano entero.  Mismo par
+# ``(presupuesto, multipv)`` y mismo camino por ``ingest.multipv_for``.
+#
+# NO ES CERO a proposito: un hermano sin ninguna eval es un agujero en el DAG
+# (lo mira el explorador, lo respalda la cascada, lo ordena la tabla de
+# jugadas).  Se le compra una mirada, no el silencio.
+OR_CLAMP_NODES = 250_000
+OR_CLAMP_MULTIPV = 1
+# Tope de padres que se miran por nodo.  El DAG transpone y esto corre dentro
+# del camino HTTP del arriendo: con mas padres que esto, no se abarata nada.
+# Conservador por diseno — dudar cuesta presupuesto, equivocarse cuesta una
+# prueba.
+OR_CLAMP_MAX_PARENTS = 32
+
+
+def or_clamp_enabled():
+    """El presupuesto minimo de hermanos.  ENCENDIDO, con vuelta atras."""
+    return bool(getattr(settings, 'ATOMICDB_OR_CLAMP', True))
+
+
+def _settled_for(goal, parents, proved):
+    """True si NINGUN padre necesita ya este nodo para esta campana.
+
+    Un padre cerrado no influye hacia arriba (la misma razon por la que
+    ``ingest._still_reachable`` pone lapidas).  Un padre OR con un hijo
+    probado esta cerrado PARA LA PRUEBA aunque el DAG no haya llegado todavia
+    a escribirle el cierre.  Cualquier otro padre — y en particular cualquier
+    nodo AND, donde hay que refutar TODAS las respuestas — mantiene vivo al
+    hijo, y basta uno para que no se abarate nada.
+    """
+    for key, fen, status in parents:
+        if status != 'UNKNOWN':
+            continue
+        if is_or_node(fen, goal) and key in proved:
+            continue
+        return False
+    return True
+
+
+def proved_or_clamp(position_key, campaigns=None):
+    """``(nodos, multipv)`` minimos si la prueba ya no necesita este nodo.
+
+    ``None`` significa "aqui no manda esta politica" y el presupuesto sigue
+    siendo el de la escalera.  Se exige que el nodo este resuelto para TODAS
+    las campanas activas: una sola que todavia lo necesite paga su peldano.
+    """
+    if not or_clamp_enabled():
+        return None
+    campaigns = active_campaigns() if campaigns is None else campaigns
+    if not campaigns:
+        return None
+    parent_ids = list(Edge.objects.filter(child_id=position_key)
+                      .values_list('parent_id', flat=True)
+                      .distinct()[:OR_CLAMP_MAX_PARENTS + 1])
+    if not parent_ids or len(parent_ids) > OR_CLAMP_MAX_PARENTS:
+        # Sin padres es la raiz (o un cajetin FEN suelto): nadie puede
+        # declararlo inutil.  Con demasiados, no se mira.
+        return None
+    parents = list(Position.objects.filter(key__in=parent_ids)
+                   .values_list('key', 'fen', 'status'))
+    for campaign in campaigns:
+        proved = set(Edge.objects.filter(
+            parent_id__in=parent_ids, child__status=campaign.goal)
+            .values_list('parent_id', flat=True))
+        if not proved or not _settled_for(campaign.goal, parents, proved):
+            return None
+    return OR_CLAMP_NODES, OR_CLAMP_MULTIPV
 
 
 def _ranked_children(campaign, position, children, child_nodes):
@@ -703,7 +869,8 @@ def _primary_index(ranked, node):
     return 0
 
 
-def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=()):
+def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
+            start=None):
     """Baja desde la raiz hasta la posicion mas demostradora sin resolver.
 
     Devuelve ``(Position, plies)`` o ``(None, plies)`` si la campana no tiene
@@ -714,9 +881,14 @@ def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=()):
     lote de cuatro tareas serian cuatro copias de la misma pregunta — el
     "trabajo duplicado" que la literatura de PNS distribuida evita con virtual
     loss.  Aqui es mas simple: un nodo reservado no se puntua.
+
+    ``start`` es de DONDE se arranca, y por defecto es la raiz de la campana
+    de prueba.  Cualquier otra cosa es la raiz de una campana de la comunidad
+    (§ ``campaign_start``): la prueba, la politica y el objetivo siguen siendo
+    los de ``campaign``, solo cambia el punto de entrada al arbol.
     """
     policy = normalized_policy(campaign)
-    node = campaign.root
+    node = campaign.root if start is None else start
     reserved = set(avoid)
     visited = {node.key}
     plies = 0

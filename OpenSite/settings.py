@@ -156,6 +156,26 @@ ATOMICDB_BREADTH_SWAP = os.environ.get(
 # (los pn de hoja se recalculan en la siguiente pasada de mantenimiento).
 ATOMICDB_SOLVE_GATE = os.environ.get(
     'ATOMICDB_SOLVE_GATE', '').lower() in ('1', 'true', 'yes')
+# Descensos que ARRANCAN en la raiz de una campana ACTIVE (5-ago-2026).  Con
+# el selector en 'pn' el trabajo lo reparte el descenso df-pn, que no lee
+# ``Position.priority`` — donde vivia el unico peso de las campanas — asi que
+# una campana votada ganaba la columna y no recibia ni una tarea.  Como mucho
+# el 35% de los descensos, repartido entre las ACTIVE por ``ln(1+votos)``; el
+# resto del descenso no cambia (§ docs/solver-allocation.md).  ENCENDIDO por
+# defecto, como ``ATOMICDB_SELECTOR_DELTA`` y por lo mismo: no estrena motor,
+# mueve el punto de arranque de una fraccion acotada de los descensos, y
+# apagarlo desde el entorno devuelve la cola de siempre con un reinicio.
+ATOMICDB_CAMPAIGN_DESCENT = os.environ.get(
+    'ATOMICDB_CAMPAIGN_DESCENT', '').lower() not in ('0', 'false', 'no')
+# Presupuesto MINIMO para los hermanos de un hijo ya PROBADO bajo un nodo OR.
+# Generaliza el carve-out del mate corto a distancia desconocida: si el
+# atacante ya tiene una victoria probada en ese nodo, sus demas jugadas no le
+# deben nada a la prueba y no compran el peldano entero de la escalera.  No
+# toca nodos AND, donde hay que refutar TODAS las respuestas.  ENCENDIDO por
+# defecto; apagarlo devuelve la escalera clasica sin residuo, porque esto solo
+# elige un presupuesto y no escribe nada en la base.
+ATOMICDB_OR_CLAMP = os.environ.get(
+    'ATOMICDB_OR_CLAMP', '').lower() not in ('0', 'false', 'no')
 
 INSTALLED_APPS = [
     'atomicdb',

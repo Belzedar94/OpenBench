@@ -3008,6 +3008,15 @@ def top_up_analysis_pool(target=None):
     return len(next_tasks(target - pending))
 
 
+# Marca del descenso que ARRANCO en la raiz de una campana de la comunidad.
+# ``source`` dice como se sirve la tarea (sigue siendo AUTO, sin privilegios);
+# ``arm`` dice quien la pidio, y esa es la mitad visible de "las campanas
+# funcionan": quien vota puede ver su linea en la cola sin creerse un
+# porcentaje.  Los brazos con cupo cuentan cada uno el SUYO, asi que un valor
+# nuevo aqui no le toca el presupuesto a ninguno.
+CAMPAIGN_ARM = 'campaign'
+
+
 def _task_counter():
     """Contador monotono y barato para el reparto blando del repertorio.
 
@@ -3026,10 +3035,25 @@ def _next_tasks_by_proof(n):
     pasada global.  La asignacion blanda del repertorio (80/15/5 por defecto)
     se resuelve con un contador determinista: el mismo estado produce la misma
     cola, y un replay es reproducible.
+
+    LAS CAMPANAS DE LA COMUNIDAD ENTRAN AQUI, y tienen que entrar aqui: este
+    camino no lee ``Position.priority``, que es donde vivia el bono de campana
+    (``CAMPAIGN_BONUS``), asi que con el selector en ``pn`` una campana ACTIVE
+    ganaba la columna y no recibia ni una tarea.  Una fraccion acotada de los
+    descensos ARRANCA en la raiz de una campana (§ ``proof.campaign_start`` y
+    docs/solver-allocation.md); el resto del descenso es el de siempre.  Sin
+    campanas ACTIVE — o con el conmutador apagado — la cola es identica a la
+    de ayer.
+
+    Y EL PRESUPUESTO LO PUEDE BAJAR LA PRUEBA.  Un hermano de un hijo ya
+    PROBADO bajo un nodo OR no le debe nada a la prueba, y comprarle el
+    peldano entero de la escalera es el gasto que el propietario senalo en
+    ``3...Qd4`` (§ ``proof.proved_or_clamp``).
     """
     campaigns = proof.active_campaigns()
     if not campaigns:
         return []
+    roots = proof.campaign_roots()
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
     # Dos presupuestos que no tienen nada que ver: cuantos DESCENSOS se
@@ -3040,8 +3064,10 @@ def _next_tasks_by_proof(n):
     attempt_budget = 4 * max(1, n)
     while len(tasks) < n and attempts < attempt_budget:
         campaign = campaigns[attempts % len(campaigns)]
-        pos, _plies = proof.descend(campaign, counter=base + attempts,
-                                    avoid=seen)
+        counter = base + attempts
+        start = proof.campaign_start(counter, roots)
+        pos, _plies = proof.descend(campaign, counter=counter, avoid=seen,
+                                    start=start)
         attempts += 1
         if pos is None or pos.key in seen:
             continue
@@ -3051,11 +3077,20 @@ def _next_tasks_by_proof(n):
             pos.save(update_fields=['priority'])
             continue
         budget = budget_for(pos)
+        clamp = _short_mate_clamp(pos)
+        or_clamp = proof.proved_or_clamp(pos.key, campaigns)
+        if or_clamp is not None:
+            # El clamp de hermanos gana al carve-out del mate corto, y no es
+            # una preferencia: aquel abarata la VERIFICACION de un nodo que
+            # todavia le importa a la prueba; este dice que a la prueba ya no
+            # le importa el nodo.  Cerrarlo exacto no compra nada.
+            budget, clamp = min(budget, or_clamp[0]), or_clamp
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
+                      'arm': CAMPAIGN_ARM if start is not None else '',
                       'multipv': multipv_for(pos.visits, budget,
-                                             clamp=_short_mate_clamp(pos))})
+                                             clamp=clamp)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
