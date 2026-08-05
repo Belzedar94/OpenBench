@@ -29,7 +29,24 @@ Every position value on the site is in exactly one of four states:
    fresher one. (Open question 1 below challenges this; until resolved,
    this is the rule.)
 4. Backed values are recomputed by the cycle-aware cascade; repetition
-   cycles contribute a draw bound, never a free win.
+   cycles contribute a draw bound, never a free win. Freshness is not left
+   to luck: a periodic global sweep (`recascade_backed`, nightly) drives
+   every backed value to the fixed point of the rules in force, so a node
+   nobody's family has touched in weeks still obeys today's guards.
+5. **A node's `backed_eval` is the minimax of its children's *current*
+   best-known values, and no propagation cut may leave a node standing on
+   a value no child holds any more.** A cut may silence a change upward
+   only for nodes that are *not* standing on what moved; a node whose
+   `backed_move` points at the edge that drifted is recomputed however
+   small the drift, because its value *is* that child's and a drift can
+   flip which sibling wins. Cheapness never buys a number nobody backs.
+
+   What this does **not** promise, stated plainly so nobody reads more into
+   it than is enforced: a sibling the node is *not* standing on may drift
+   under `BACKED_EPSILON_CP` and quietly become the better edge. That
+   leaves the argmax stale by strictly less than the epsilon — a real but
+   bounded error, and the nightly sweep of invariant 4 is what closes it.
+   A cut that could exceed that bound is a bug against this document.
 
 ## Ordering (the rule that was wrong until 2026-08-04)
 

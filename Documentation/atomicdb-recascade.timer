@@ -1,0 +1,15 @@
+# Nightly companion of atomicdb-recascade.service.  04:30 UTC: an hour after
+# atomicdb-backfill-reachable (03:30), so the two never overlap on the same
+# database.  Persistent=true so a sweep missed to a reboot runs on the next
+# boot instead of waiting a full day — a skipped night is a night of relics
+# that nobody would otherwise notice.
+
+[Unit]
+Description=Recascada de valores respaldados cada noche en hora valle
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

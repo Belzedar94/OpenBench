@@ -1430,12 +1430,34 @@ def _backed_stored(row, value, move, plies, quality):
 
 
 def _backed_worth_propagating(row, value, move):
-    """Corte efectivo: sube solo si cambia la DECISION o el valor de verdad.
+    """Corte de RUIDO: ¿despierta este cambio a los padres que NO se apoyan aqui?
 
     Cerca de las hojas el "no cambio nada" casi nunca dispara (las evals
     difieren siempre en algun cp), asi que el corte util es este: la arista
     que respalda el valor sigue siendo la misma y el valor se movio menos de
-    BACKED_EPSILON_CP.
+    BACKED_EPSILON_CP.  Un padre que tiene su ``backed_move`` en OTRO hermano
+    conserva su valor pase lo que pase aqui, salvo que este nodo cruce al
+    hermano en el que si se apoya — y ese cruce, con la deriva por debajo del
+    umbral, es un margen menor que BACKED_EPSILON_CP que la barrida nocturna
+    (``recascade_backed``) cierra.
+
+    LO QUE ESTE CORTE NO DECIDE, y lo decia mal hasta el 2026-08-05: los
+    padres que SI se apoyan en este nodo.  El docstring viejo prometia subir
+    "si cambia la DECISION o el valor de verdad" y era falso tal cual estaba
+    escrito, porque miraba si cambiaba la decision AQUI cuando lo que estaba
+    en juego era la decision del PADRE.  Para un padre apoyado en esta arista
+    no hay ruido que valga: su valor ES el de este nodo, asi que cualquier
+    deriva lo deja pintando un numero que ya no tiene ningun hijo, y encima
+    puede haber cruzado a un hermano suyo sin que nadie lo vuelva a mirar.
+
+    EL CASO EXACTO (nodo ``344f43b90882``, reportado el 2026-08-05): el hijo
+    ``b8d7`` subio de 1265 a 1269 — cuatro centipeones, por debajo del corte —
+    con su arista intacta, asi que no aviso a nadie.  El padre se quedo con
+    ``1265/b8d7`` mientras el hermano ``c6c5`` valia 1268: el minimo real
+    habia cambiado de arista y el padre seguia apoyado en la vieja, mostrando
+    un 1265 que ya no era de nadie.  Siete plies mas arriba el explorador
+    pintaba ese mismo 1265 en la cabecera.  A esos padres los despierta
+    ``_parents_to_wake`` SIEMPRE (§ invariante 5 de docs/value-semantics.md).
     """
     if (row.backed_eval is None) != (value is None):
         return True
@@ -1444,6 +1466,34 @@ def _backed_worth_propagating(row, value, move):
     if row.backed_move != move:
         return True
     return abs(value - row.backed_eval) >= BACKED_EPSILON_CP
+
+
+def _parents_to_wake(propagate, standing):
+    """Padres a recomputar tras cambiar estos nodos.  Dos motivos, UNA consulta.
+
+    * ``propagate``: el cambio paso el corte de ruido, asi que despierta a
+      TODOS sus padres, como siempre.
+    * ``standing``: el cambio es pequeno y solo despierta a los padres que se
+      APOYAN en la arista que lleva hasta el — los que tienen su
+      ``backed_move`` puesto justo ahi.  Para ellos no es ruido: su valor sale
+      de este hijo.
+
+    La consulta es la misma que habia (aristas por ``child_id``), con tres
+    columnas mas; el par ``(parent, move_uci)`` es unico, asi que
+    ``parent__backed_move == move_uci`` identifica exactamente al padre que
+    esta de pie sobre esta arista.
+    """
+    keys = set(propagate) | set(standing)
+    if not keys:
+        return ()
+    wide = set(propagate)
+    parents = set()
+    for parent_id, move_uci, child_id, parent_move in Edge.objects.filter(
+            child_id__in=keys).values_list(
+                'parent_id', 'move_uci', 'child_id', 'parent__backed_move'):
+        if child_id in wide or parent_move == move_uci:
+            parents.add(parent_id)
+    return parents
 
 
 def _backed_children_by_parent(parent_keys):
@@ -1470,6 +1520,12 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     tiene varios padres por nodo y puede cerrar ciclos por transposicion, asi
     que el ascenso lleva contador de visitas por nodo, tope de plies y tope
     global de recomputos.
+
+    A QUIEN DESPIERTA CADA CAMBIO (§ ``_parents_to_wake``): un cambio grande
+    despierta a todos los padres; uno de ruido despierta solo a los que estan
+    APOYADOS en la arista que cambio, porque el valor de esos ES el del hijo y
+    no puede quedarse atras ni un centipeon.  El corte de ruido solo silencia
+    hacia arriba mientras ningun ancestro este de pie sobre lo que se movio.
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
     visits, changed_total, processed, plies = {}, 0, 0, 0
@@ -1485,7 +1541,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # Antes de que nadie compare: el hijo que se justifica pasando por su
         # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
         _draw_cycling_children(children, spines)
-        dirty, propagate, discrepancies = [], [], []
+        dirty, propagate, standing, discrepancies = [], [], [], []
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
@@ -1495,6 +1551,9 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                 continue
             if _backed_worth_propagating(row, value, move):
                 propagate.append(row.key)
+            else:
+                # Ruido: solo lo veran los padres apoyados en esta arista.
+                standing.append(row.key)
             row.backed_eval, row.backed_move = value, move
             row.backed_plies, row.backed_nodes = below, quality
             spines.wrote(row.key, move)     # la cache no se queda vieja
@@ -1503,7 +1562,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)
             changed_total += len(dirty)
         _queue_quality_convergence(discrepancies)
-        if not propagate:
+        if not (propagate or standing):
             break
         if processed >= BACKED_MAX_NODES:
             DBEvent.objects.create(kind='BACKED_GUARD', payload={
@@ -1511,8 +1570,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                 'plies': plies, 'seed_count': len(seed_keys)})
             break
         frontier = []
-        for key in set(Edge.objects.filter(child_id__in=propagate)
-                       .values_list('parent_id', flat=True)):
+        for key in _parents_to_wake(propagate, standing):
             seen = visits.get(key, 0)
             if seen < BACKED_MAX_REVISITS:
                 visits[key] = seen + 1
