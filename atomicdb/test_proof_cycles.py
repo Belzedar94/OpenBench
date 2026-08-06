@@ -116,18 +116,22 @@ class CycleRuleTests(ShuttleFixture):
             self.campaign, [self.a.key], children, node_rows, cache)
         self.assertEqual(cycling, {(self.a.key, 'e8f7')})
 
-    def test_cycling_contribution_is_a_refutation_not_the_loop_number(self):
+    def test_cycling_edge_contributes_a_leaf_estimate_not_the_loop_number(self):
         self._poison()
         children = proof._children_by_parent([self.a.key])[self.a.key]
-        pn, dn, _expanded, selected = proof.compute_numbers(
-            self.campaign, self.a, children, {}, previous='e8f7',
+        rows = proof._node_rows(self.campaign, [self.b.key])
+        # Con el numero envenenado del ciclo, la arista arrastra el dn
+        # saturado del hijo hasta la suma del padre.
+        poisoned = proof.compute_numbers(
+            self.campaign, self.a, children, rows, previous='e8f7')
+        self.assertGreaterEqual(poisoned[1], INF)
+        # Marcada como ciclo, la MISMA arista entra con la estimacion de
+        # hoja: acotada, sin nada del ciclo dentro.
+        clean = proof.compute_numbers(
+            self.campaign, self.a, children, rows, previous='e8f7',
             cycling={(self.a.key, 'e8f7')})
-        # La arista del ciclo vale (INF, 0): el min de pn la ignora, la suma
-        # de dn no la infla, y el primario clavado en ella queda destronado
-        # por la aritmetica de la histeresis de siempre (3*finito < INF).
-        self.assertLess(pn, INF)
-        self.assertLess(dn, INF)
-        self.assertEqual(selected, 'd2d4')
+        self.assertLess(clean[0], INF)
+        self.assertLess(clean[1], INF)
 
     def _refresh_until_fixpoint(self, seeds, cap=16):
         """Pasadas hasta que una no escriba nada; el veneno drena un salto de
@@ -138,31 +142,51 @@ class CycleRuleTests(ShuttleFixture):
         return False
 
     def test_poisoned_shuttle_drains_to_a_fixpoint(self):
-        """El trinquete muere, y cada bando acaba donde le toca.
+        """El trinquete muere y los cuatro nodos acaban en numeros finitos.
 
-        Lo que se arregla es la REALIMENTACION, no el veredicto: los dos
-        nodos OR (mueve el atacante) vuelven a numeros finitos apoyados en su
-        desviacion honesta, y los dos nodos AND — donde la unica respuesta
-        del defensor que no pierde es la repeticion — quedan REFUTADOS
-        (INF, 0), que es exactamente lo que significa poder repetir.  Un
-        ``pn`` infinito no es el sintoma: el sintoma era el ``dn`` creciendo
-        sin tope pasada tras pasada.
+        Lo que se arregla es la REALIMENTACION: la arista que da la vuelta
+        entra con la estimacion de hoja de su hijo, que es acotada y no trae
+        nada del ciclo, asi que las recurrencias dejan de comerse su propio
+        eco.  Ningun nodo se queda saturado.
         """
         self._poison()
         seeds = [self.a.key, self.b.key, self.c.key, self.d.key]
         self.assertTrue(self._refresh_until_fixpoint(seeds),
                         'el trinquete no llego a punto fijo')
-        for node in (self.a, self.c):          # OR: mueve el atacante
+        for node in (self.a, self.b, self.c, self.d):
             pn, dn, _sel = self._numbers(node)
             self.assertLess(pn, INF, node.key)
             self.assertLess(dn, INF, node.key)
-        for node in (self.b, self.d):          # AND: el defensor repite
-            pn, dn, _sel = self._numbers(node)
-            self.assertEqual((pn, dn), (INF, 0), node.key)
         # La desviacion honesta manda: el primario de A ya no es el ciclo.
         self.assertEqual(self._numbers(self.a)[2], 'd2d4')
         # Y el punto fijo es punto fijo: otra pasada no escribe nada.
         self.assertEqual(proof.refresh_proof_numbers(seeds), 0)
+
+    def test_the_rule_is_idempotent_and_never_oscillates(self):
+        """EL TEST QUE FALTABA, y su ausencia costo un despliegue.
+
+        La primera version de esta regla aportaba ``(INF, 0)`` por la arista
+        del ciclo, y eso borra los valores por los que camina el propio
+        detector: la deteccion se apagaba, los numeros volvian y la regla
+        se disparaba otra vez — cinco nodos del corredor de Eclipsia
+        oscilando en cada pasada, en produccion.  Los tests de entonces solo
+        miraban "converge y no crece", que la oscilacion cumplia entre
+        pasadas alternas.
+
+        Aqui se fija la propiedad de verdad: alcanzado el punto fijo,
+        CUALQUIER numero de pasadas mas no escribe ni una fila, y ningun
+        nodo vuelve a un estado que ya habia tenido.
+        """
+        self._poison()
+        seeds = [self.a.key, self.b.key, self.c.key, self.d.key]
+        self.assertTrue(self._refresh_until_fixpoint(seeds))
+        settled = {node.key: self._numbers(node)
+                   for node in (self.a, self.b, self.c, self.d)}
+        for _ in range(8):
+            self.assertEqual(proof.refresh_proof_numbers(seeds), 0)
+            for node in (self.a, self.b, self.c, self.d):
+                self.assertEqual(self._numbers(node), settled[node.key],
+                                 node.key)
 
     def test_the_dn_ratchet_is_dead(self):
         """La regresion exacta del caso: antes de la regla, el dn del nodo
@@ -310,12 +334,16 @@ class RecascadeProofCommandTests(ShuttleFixture):
         call_command('recascade_proof', '--max-passes', '8', stdout=out)
         text = out.getvalue()
         self.assertIn('abiertos saturados antes: imposibles=4', text)
-        self.assertIn('punto fijo', text)
-        # Lo que TIENE que irse es el estado imposible.  El pn que queda es
-        # la refutacion por repeticion de los nodos AND, que es el resultado
-        # correcto y no un residuo (§ CycleRuleTests).
+        # Dos finales legitimos: la pasada no cambia nada (punto fijo) o ya
+        # no queda nada saturado que sembrar, que es el objetivo.
+        self.assertTrue('punto fijo' in text
+                        or 'nada saturado que sembrar' in text, text)
+        # El estado imposible se va y no deja residuo: con la arista del
+        # ciclo entrando como hoja, ningun nodo del corredor se queda
+        # saturado en ninguna de las dos columnas.
         self.assertEqual(proof.saturated_open_count(column='impossible'), 0)
-        self.assertEqual(proof.saturated_open_count(column='pn'), 2)
+        self.assertEqual(proof.saturated_open_count(column='pn'), 0)
+        self.assertEqual(proof.saturated_open_count(column='dn'), 0)
 
     def test_command_with_nothing_to_do_says_so(self):
         out = StringIO()

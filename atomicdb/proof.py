@@ -481,11 +481,33 @@ def sticky_index(best, held, numbers):
 # un estado imposible — dn infinito significa probado, y probado es pn = 0).
 #
 # La regla: una arista cuyo VALOR vuelve al nodo en calculo se esta
-# justificando pasando por el, eso es una REPETICION, una repeticion vale
-# tablas, y unas tablas REFUTAN la proposicion de victoria — PNS es binario a
-# proposito.  La arista aporta ``(pn=INF, dn=0)`` mientras el retorno siga en
-# pie; en cuanto haya progreso real por debajo, el paseo deja de volver y la
-# pasada siguiente vuelve a puntuar la arista con los numeros del hijo.
+# justificando pasando por el.  Ese numero no dice nada sobre lo que cuesta
+# probar o refutar nada — es el eco del propio nodo — asi que la arista entra
+# con la INICIALIZACION DE HOJA de su hijo: la estimacion estatica de
+# siempre, la que se usa para un hijo que todavia no tiene fila de prueba.
+#
+# POR QUE NO ``(INF, 0)``, QUE ES LO QUE ESTO HACIA HASTA EL 6-ago POR LA
+# TARDE.  "Repeticion = tablas = proposicion refutada" es verdad sobre el
+# JUEGO y es lo que hacen los certificados (solve.py) y el respaldo
+# (_draw_cycling_children).  Pero aqui la adjudicacion se PERSISTIA en el
+# nodo, y eso rompe dos cosas a la vez:
+#
+#   * el invariante 6 en su propia letra: la repeticion vive en el espacio de
+#     CAMINOS, nunca en el nodo.  Un ``(INF, 0)`` guardado dice "este nodo
+#     esta refutado" cuando lo unico cierto es "este nodo, POR ESTE CAMINO,
+#     se repite";
+#   * la estabilidad: ``(INF, 0)`` destruye los valores por los que camina el
+#     propio detector.  Medido en vivo sobre el corredor de Eclipsia — cinco
+#     nodos oscilando entre ``(INF, 0)`` y ``(1, 392)`` en cada pasada, once
+#     escrituras por pasada y ``recascade_proof`` sin alcanzar nunca el punto
+#     fijo que es su criterio de parada.
+#
+# La inicializacion de hoja no tiene ninguno de los dos problemas: es
+# acotada (``PROOF_MAX_LEAF``), no depende de ningun numero del ciclo — asi
+# que la realimentacion se corta igual de limpiamente — y no colapsa el
+# nodo, asi que el detector sigue viendo el arbol que veia.  Afirma menos, y
+# afirmar poco es exactamente lo que puede hacer una estimacion de coste que
+# el propio modulo declara que no es fuente de verdad.
 #
 # POR DONDE SE CAMINA, y por que NO por ``selected_child``.  El primer
 # borrador seguia la espina de primarios, como hace el respaldo con
@@ -648,12 +670,13 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None,
     sostenerla contra evidencia nueva retrasaria justo la refutacion que la
     prueba necesita.
 
-    ``cycling`` son las aristas de ESTE nodo cuya espina primaria vuelve a el
-    (§ ``_cycling_edges``): aportan ``(INF, 0)`` — repeticion = tablas = la
-    proposicion refutada en esa arista — en vez del numero que el ciclo se
-    inventa.  La histeresis no necesita caso especial: un primario clavado en
-    un pn=1 falso pasa a valer INF por esta via, y cualquier retador finito
-    lo destrona por la aritmetica de siempre.
+    ``cycling`` son las aristas de ESTE nodo cuyo valor vuelve a el
+    (§ ``_cycling_edges``): entran con la inicializacion de HOJA de su hijo
+    —  la estimacion estatica de siempre — en vez del numero que el ciclo se
+    inventa.  La histeresis no necesita caso especial: un primario que solo
+    era el mejor por el eco del ciclo deja de serlo en cuanto su pn pasa a
+    ser el de una hoja, y el retador lo destrona por la aritmetica de
+    siempre.
     """
     goal = campaign.goal
     exact = terminal_numbers(position.status, goal)
@@ -671,17 +694,31 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None,
 
     numbers, moves = [], []
     for move_uci, child_id, status, eval_cp, fen in children:
-        if (position.key, move_uci) in cycling:
-            numbers.append((PROOF_INFINITY, 0))
-            moves.append(move_uci)
-            continue
         node = child_nodes.get(child_id)
-        if node is not None:
+        cycles = (position.key, move_uci) in cycling
+        if node is not None and not cycles:
             numbers.append((node.pn, node.dn))
         else:
-            numbers.append(leaf_numbers(
+            # Hoja: o el hijo no tiene fila de prueba todavia, o la tiene
+            # pero su numero es el eco de este mismo nodo (§ arriba).  En
+            # los dos casos la estimacion estatica es lo unico que se puede
+            # afirmar sin inventar.
+            pn, dn = leaf_numbers(
                 fen, status, eval_cp, goal,
-                annoyance=shallow_annoyance(fen, eval_cp)))
+                annoyance=shallow_annoyance(fen, eval_cp))
+            if cycles:
+                # Y una repeticion se COBRA lo que cuesta: repitiendo no se
+                # prueba nada, asi que probar POR AQUI es lo mas caro que
+                # puede ser una hoja.  Es una afirmacion sobre el
+                # PRESUPUESTO — que es lo unico que ``pn`` significa — y no
+                # sobre la verdad del nodo, que es lo que un ``INF`` diria.
+                # El tope de hoja lo mantiene acotado: sin esto el descenso
+                # se quedaba en el bucle en cuanto la eval del bucle era
+                # optimista, que es justo el caso de Eclipsia.  ``dn`` no se
+                # toca: refutar una linea que repite no es mas caro por
+                # repetir — basta una respuesta.
+                pn = PROOF_MAX_LEAF
+            numbers.append((pn, dn))
         moves.append(move_uci)
 
     pn, dn = internal_numbers(position.fen, goal, numbers)

@@ -57,14 +57,28 @@ Every position value on the site is in exactly one of four states:
    - *backed*: a child whose spine returns to the parent being evaluated
      contributes a draw, never the number the cycle invents (the
      2026-08-03 rule);
-   - *proof numbers*: an edge whose primary spine returns to the node
-     being computed contributes `(pn=∞, dn=0)` — a draw refutes a win
-     proposition, PNS is binary — for exactly as long as the spine keeps
-     looping. The moment real progress reroutes the spine, the edge is
-     scored from its child's numbers again. Without this rule the sums
-     feed back through the cycle and ratchet to saturation (the Eclipsia
-     shuttle, 2026-08-06: `dn = 2^62` on open nodes, an impossible
-     `(pn=1, dn=∞)` state);
+   - *proof numbers*: an edge whose value walks back into the node being
+     computed contributes its child's **static leaf estimate** instead of
+     the child's stored numbers, because a number that travels the loop is
+     an echo of the node itself and says nothing about the cost of proving
+     anything. Without this the sums feed back through the cycle and
+     ratchet to saturation (the Eclipsia shuttle, 2026-08-06: `dn = 2^62`
+     on open nodes, an impossible `(pn=1, dn=∞)` state).
+
+     This layer deliberately claims **less** than the other two. "A
+     repetition is a draw, and a draw refutes a win" is true of the *game*,
+     and that is what certificates and backed values enforce — but they
+     adjudicate a path they are standing on, while a proof number is
+     persisted on a node and outlives the walk that produced it. Storing
+     `(∞, 0)` there says "this node is refuted" when all that is known is
+     "this node repeats *by this path*", which is invariant 6 read
+     backwards. It is also unstable, and measurably so: `(∞, 0)` erases the
+     values the cycle detector itself walks, so detection flips off, the
+     numbers return, and it fires again — five corridor nodes oscillating
+     between `(∞, 0)` and `(1, 392)` on every pass, with `recascade_proof`
+     never reaching the fixpoint that is its own stop condition (measured
+     live, 2026-08-06). The leaf estimate is bounded, carries nothing from
+     the loop, and leaves the tree the detector reads intact;
    - *explorer*: a displayed line is cut at its first self-crossing, and a
      route can never re-enter a position it already went through — the
      crossing move is disabled, an incoming route that contains a crossing
