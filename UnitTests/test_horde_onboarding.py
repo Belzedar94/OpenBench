@@ -9,7 +9,7 @@ HORDE_ENGINE = 'Horde-Stockfish'
 HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
 CLIENT_REF = 'd0f391b3bf6f465c218156e83702200427fd448c'
-BASELINE_REF = '8e59ad87c33302197facc1a61a542aebf6cc0c9f'
+BASELINE_REF = '0b064616041012eb9a708989d3b6b0a165d5538a'
 
 
 def load_json(path):

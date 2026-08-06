@@ -13,7 +13,7 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "8e59ad87c33302197facc1a61a542aebf6cc0c9f",
+            "base_branch": "0b064616041012eb9a708989d3b6b0a165d5538a",
             "book_name": "HORDE_openings.epd",
             "upload_pgns": "TRUE",
             "win_adj": "None",
