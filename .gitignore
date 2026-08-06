@@ -26,6 +26,10 @@ Media/*
 !Client/*.py
 !Client/cutechess-ob
 !Client/cutechess-ob.exe
+!Client/referees/
+!Client/referees/**
+Client/referees/**/__pycache__/
+Client/referees/**/*.pyc
 
 Media/PGNs/*
 Media/Networks/*

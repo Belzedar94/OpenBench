@@ -1,0 +1,110 @@
+name: Horde referee
+
+on:
+  push:
+    branches:
+      - feature/horde-openbench
+    paths:
+      - ".github/workflows/horde-referee.yml"
+      - "Client/referees/LICHESS_HORDE_V1/**"
+  pull_request:
+    paths:
+      - ".github/workflows/horde-referee.yml"
+      - "Client/referees/LICHESS_HORDE_V1/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUTECHESS_COMMIT: 24d4301152fb92ac442425e083a2658225f80720
+  PATCH_SHA256: 53C14A9567E32AB70B4C9F69DCAC07A18605D24595EC81224BAF09E688DDF41D
+  CORPUS_SHA256: 1F01B4FD3AB6066EFE5A96A2AE4E0DF5074FB99377D7CAAA2ACBA04D453D53CC
+  SOURCE_DATE_EPOCH: 1786036843
+
+jobs:
+  windows-static:
+    name: Windows static referee
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: AndyGrant/cutechess
+          ref: ${{ env.CUTECHESS_COMMIT }}
+          path: cutechess
+          persist-credentials: false
+      - name: Verify and apply the referee patch
+        shell: pwsh
+        run: |
+          $patch = (Resolve-Path "Client/referees/LICHESS_HORDE_V1/0001-Add-Lichess-Horde-referee-contract.patch").Path
+          $actual = (Get-FileHash $patch -Algorithm SHA256).Hash
+          if ($actual -ne $env:PATCH_SHA256) { throw "Referee patch SHA-256 mismatch" }
+          git -C cutechess apply --check $patch
+          git -C cutechess apply $patch
+          $corpus = "cutechess/projects/lib/tests/data/horde_insufficient_material.csv"
+          $actual = (Get-FileHash $corpus -Algorithm SHA256).Hash
+          if ($actual -ne $env:CORPUS_SHA256) { throw "Horde corpus SHA-256 mismatch" }
+      - uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2.31.1
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            git
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-crt
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-headers
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-qt5-static
+            mingw-w64-x86_64-winpthreads
+      - name: Build and test the static referee
+        shell: msys2 {0}
+        run: bash Client/referees/LICHESS_HORDE_V1/build_static_windows.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: horde-referee-windows-x86-64
+          path: horde-referee-artifacts/windows
+          if-no-files-found: error
+
+  linux-static:
+    name: Linux static referee
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: AndyGrant/cutechess
+          ref: ${{ env.CUTECHESS_COMMIT }}
+          path: cutechess
+          persist-credentials: false
+      - name: Verify and apply the referee patch
+        run: |
+          patch=Client/referees/LICHESS_HORDE_V1/0001-Add-Lichess-Horde-referee-contract.patch
+          echo "$PATCH_SHA256  $patch" | sha256sum --check --strict
+          git -C cutechess apply --check "$GITHUB_WORKSPACE/$patch"
+          git -C cutechess apply "$GITHUB_WORKSPACE/$patch"
+          echo "$CORPUS_SHA256  cutechess/projects/lib/tests/data/horde_insufficient_material.csv" \
+            | sha256sum --check --strict
+      - name: Build and test the static referee
+        run: >-
+          docker run --rm --pull=always --platform=linux/amd64
+          -e SOURCE_DATE_EPOCH
+          -v "$GITHUB_WORKSPACE:/work"
+          -w /work
+          alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
+          sh Client/referees/LICHESS_HORDE_V1/build_static_linux.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: horde-referee-linux-x86-64
+          path: horde-referee-artifacts/linux
+          if-no-files-found: error
