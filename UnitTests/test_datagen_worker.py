@@ -429,6 +429,11 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertEqual(summary['reasons'][2], 1)
         self.assertEqual(summary['white_buckets'], [1, 0, 0, 0])
         self.assertEqual(summary['flags'][0], 1)
+        expected_file = horde_file_bytes(manifest, payload)
+        self.assertEqual(
+            summary['file_sha256'], hashlib.sha256(expected_file).hexdigest()
+        )
+        self.assertEqual(summary['file_bytes'], len(expected_file))
 
     def test_horde_bin_v1_validator_rejects_identity_and_setting_drift(self):
         cases = {
@@ -1123,6 +1128,8 @@ class DatagenWorkerTests(unittest.TestCase):
         cfg = config()
         cfg.threads = 30
         captured = {}
+        payload = b'opaque training records'
+        source_identity = hashlib.sha256(payload).hexdigest(), len(payload)
 
         def generate(
             _config, engine, output_path, _log_path, _heartbeat, network_path
@@ -1130,7 +1137,11 @@ class DatagenWorkerTests(unittest.TestCase):
             captured['engine'] = engine
             captured['network'] = network_path
             with open(output_path, 'wb') as output:
-                output.write(b'opaque training records')
+                output.write(payload)
+            return {
+                'file_sha256': source_identity[0],
+                'file_bytes': source_identity[1],
+            }
 
         def upload(_config, path, sha256, byte_count):
             raw = Path(path).read_bytes()
@@ -1155,15 +1166,23 @@ class DatagenWorkerTests(unittest.TestCase):
                      mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe') as build, \
                      mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000) as bench, \
                      mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
+                     mock.patch.object(
+                         worker,
+                         'compress_datagen_output',
+                         wraps=worker.compress_datagen_output,
+                     ) as compress, \
                      mock.patch.object(worker.ServerReporter, 'report_nps'), \
                      mock.patch.object(worker.ServerReporter, 'report_datagen', side_effect=upload):
                     worker.complete_workload(cfg)
             finally:
                 os.chdir(previous)
 
-        self.assertEqual(captured['payload'], b'opaque training records')
+        self.assertEqual(captured['payload'], payload)
         self.assertEqual(captured['engine'], os.path.join('Engines', 'engine.exe'))
         self.assertEqual(captured['network'], os.path.join('Networks', '12345678'))
+        self.assertEqual(
+            compress.call_args.kwargs['expected_source'], source_identity
+        )
         build.assert_called_once()
         self.assertEqual(build.call_args.args[1], 'dev')
         bench.assert_called_once()
@@ -1588,6 +1607,46 @@ class DatagenWorkerTests(unittest.TestCase):
         report.assert_called_once()
         self.assertIn('transient failure', report.call_args.args[1])
         self.assertEqual(cfg.blacklist, [])
+
+    def test_compression_binds_the_validated_source_bytes(self):
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        payload = b'validated Horde dataset bytes'
+        expected = hashlib.sha256(payload).hexdigest(), len(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'chunk.bin')
+            target = Path(directory, 'chunk.bin.bz2')
+            source.write_bytes(payload)
+            observed = worker.compress_datagen_output(
+                str(source),
+                str(target),
+                heartbeat,
+                expected_source=expected,
+            )
+            with bz2.open(target, 'rb') as compressed:
+                restored = compressed.read()
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(restored, payload)
+
+    def test_compression_rejects_source_replaced_after_validation(self):
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        validated = b'validated Horde dataset bytes'
+        expected = hashlib.sha256(validated).hexdigest(), len(validated)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, 'chunk.bin')
+            target = Path(directory, 'chunk.bin.bz2')
+            source.write_bytes(b'replaced after validation')
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'source bytes changed after format validation',
+            ):
+                worker.compress_datagen_output(
+                    str(source),
+                    str(target),
+                    heartbeat,
+                    expected_source=expected,
+                )
+            self.assertFalse(target.exists())
 
     def test_locked_partial_archive_remains_a_transient_failure(self):
         heartbeat = SimpleNamespace(stop_requested=threading.Event())

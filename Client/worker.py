@@ -1832,6 +1832,10 @@ def _open_datagen_regular(path):
         raise
 
 
+def _datagen_stat_identity(value):
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+
 def datagen_file_sha256(path):
     data, before = _open_datagen_regular(path)
 
@@ -1843,10 +1847,10 @@ def datagen_file_sha256(path):
             byte_count += len(block)
         after = os.fstat(data.fileno())
 
-    identity = lambda stat: (
-        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
-    )
-    if identity(before) != identity(after) or byte_count != after.st_size:
+    if (
+        _datagen_stat_identity(before) != _datagen_stat_identity(after)
+        or byte_count != after.st_size
+    ):
         raise OSError('DATAGEN artifact changed while hashing')
     return digest.hexdigest(), byte_count
 
@@ -1872,10 +1876,10 @@ def snapshot_datagen_producer(source_path, snapshot_path):
             target.flush()
             os.fsync(target.fileno())
             after = os.fstat(source.fileno())
-        identity = lambda value: (
-            value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
-        )
-        if identity(before) != identity(after) or byte_count != after.st_size:
+        if (
+            _datagen_stat_identity(before) != _datagen_stat_identity(after)
+            or byte_count != after.st_size
+        ):
             raise OSError('DATAGEN producer changed while snapshotting')
         os.chmod(snapshot_path, 0o700)
         return digest.hexdigest(), byte_count
@@ -1890,17 +1894,47 @@ def snapshot_datagen_producer(source_path, snapshot_path):
         raise
 
 
-def compress_datagen_output(source_path, target_path, heartbeat):
+def compress_datagen_output(
+    source_path, target_path, heartbeat, expected_source=None
+):
     """Compress one output with bounded retries, replacing partial archives."""
 
     for attempt in range(DATAGEN_TRANSFER_RETRIES):
         try:
             if os.path.isfile(target_path):
                 os.remove(target_path)
-            with open(source_path, 'rb') as source:
+            source, before = _open_datagen_regular(source_path)
+            digest = hashlib.sha256()
+            byte_count = 0
+            with source:
                 with bz2.open(target_path, 'wb', compresslevel=9) as target:
-                    shutil.copyfileobj(source, target, length=1024 * 1024)
-            return
+                    while block := source.read(1024 * 1024):
+                        digest.update(block)
+                        byte_count += len(block)
+                        target.write(block)
+                after = os.fstat(source.fileno())
+            if (
+                _datagen_stat_identity(before)
+                != _datagen_stat_identity(after)
+                or byte_count != after.st_size
+            ):
+                raise OSError('DATAGEN source changed while compressing')
+            observed_source = digest.hexdigest(), byte_count
+            if (
+                expected_source is not None
+                and observed_source != expected_source
+            ):
+                raise DatagenConfigurationError(
+                    'DATAGEN source bytes changed after format validation'
+                )
+            return observed_source
+        except DatagenConfigurationError:
+            try:
+                if os.path.isfile(target_path):
+                    os.remove(target_path)
+            except OSError:
+                pass
+            raise
         except Exception as error:
             cleanup_error = None
             try:
@@ -2793,7 +2827,8 @@ def validate_horde_bin_v1_output(config, output_path, producer):
     )
 
     try:
-        with open(output_path, 'rb') as output:
+        output, source_before = _open_datagen_regular(output_path)
+        with output:
             header = output.read(HORDE_BIN_V1_HEADER_SIZE)
             manifest = _horde_bin_v1_manifest(header)
             expected_top_keys = [
@@ -2890,6 +2925,8 @@ def validate_horde_bin_v1_output(config, output_path, producer):
             )
 
             digest = hashlib.sha256()
+            file_digest = hashlib.sha256()
+            file_digest.update(header)
             sides = [0, 0]
             results = [0, 0, 0]
             reasons = [0] * 7
@@ -2905,6 +2942,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                     'payload is truncated',
                 )
                 digest.update(block)
+                file_digest.update(block)
                 for offset in range(0, len(block), HORDE_BIN_V1_RECORD_SIZE):
                     record = block[offset:offset + HORDE_BIN_V1_RECORD_SIZE]
                     side, result, reason, white_count, flags, _ = (
@@ -2926,6 +2964,12 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 not output.read(1),
                 'payload contains trailing bytes',
             )
+            source_after = os.fstat(output.fileno())
+            _horde_bin_v1_require(
+                _datagen_stat_identity(source_before)
+                == _datagen_stat_identity(source_after),
+                'output changed while it was being validated',
+            )
     except DatagenConfigurationError:
         raise
     except (OSError, KeyError, TypeError, ValueError, IndexError, struct.error):
@@ -2941,6 +2985,8 @@ def validate_horde_bin_v1_output(config, output_path, producer):
     return {
         'record_count': record_count,
         'payload_sha256': observed_payload_sha256,
+        'file_sha256': file_digest.hexdigest(),
+        'file_bytes': source_after.st_size,
         'sides': sides,
         'results': results,
         'reasons': reasons,
@@ -3075,6 +3121,7 @@ def run_datagen_command(
                 ','.join(str(value) for value in horde_summary['white_buckets']),
             )
         )
+    return horde_summary
 
 
 def complete_datagen_workload(config):
@@ -3189,17 +3236,32 @@ def complete_datagen_workload(config):
             # tablebase-backed path.
             if tablebase is None:
                 if producer is None:
-                    run_datagen_command(*generator_args)
+                    generation_summary = run_datagen_command(*generator_args)
                 else:
-                    run_datagen_command(*generator_args, producer)
+                    generation_summary = run_datagen_command(
+                        *generator_args, producer
+                    )
             else:
-                run_datagen_command(
+                generation_summary = run_datagen_command(
                     *generator_args,
                     producer=producer,
                     tablebase=tablebase,
                 )
 
-            compress_datagen_output(output_path, compressed_path, heartbeat)
+            expected_source = (
+                None
+                if generation_summary is None
+                else (
+                    generation_summary['file_sha256'],
+                    generation_summary['file_bytes'],
+                )
+            )
+            compress_datagen_output(
+                output_path,
+                compressed_path,
+                heartbeat,
+                expected_source=expected_source,
+            )
             try:
                 sha256, byte_count = datagen_file_sha256(compressed_path)
             except Exception as error:
