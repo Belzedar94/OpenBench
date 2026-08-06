@@ -23,6 +23,70 @@ RUN_ATTEMPT = 2
 
 class HordeRefereeArtifactTests(unittest.TestCase):
 
+    def test_windows_toolchain_lock_is_complete_and_self_consistent(self):
+        lock_path = REFEREE / "windows-toolchain-lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(lock["schema"], 1)
+        self.assertEqual(
+            lock["package_repository"],
+            "https://repo.msys2.org/mingw/mingw64",
+        )
+        self.assertRegex(lock["msys2_base"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertGreater(lock["msys2_base"]["bytes"], 0)
+
+        packages = lock["packages"]
+        names = [package["name"] for package in packages]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertGreaterEqual(len(names), 50)
+        for package in packages:
+            self.assertTrue(
+                package["file"].startswith(
+                    f"{package['name']}-{package['version']}-"
+                )
+            )
+            self.assertRegex(package["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(package["bytes"], 0)
+
+        required = {
+            "mingw-w64-x86_64-binutils",
+            "mingw-w64-x86_64-cmake",
+            "mingw-w64-x86_64-crt",
+            "mingw-w64-x86_64-gcc",
+            "mingw-w64-x86_64-gcc-libs",
+            "mingw-w64-x86_64-headers",
+            "mingw-w64-x86_64-ninja",
+            "mingw-w64-x86_64-openssl",
+            "mingw-w64-x86_64-qt5-static",
+            "mingw-w64-x86_64-winpthreads",
+            "mingw-w64-x86_64-zlib",
+            "mingw-w64-x86_64-zstd",
+        }
+        self.assertTrue(required.issubset(names))
+
+        digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+        windows_manifest = artifact_receipt.load_manifest()["static_build"][
+            "windows"
+        ]
+        self.assertEqual(windows_manifest["lock_sha256"].lower(), digest)
+        self.assertEqual(windows_manifest["package_count"], len(packages))
+        self.assertEqual(
+            windows_manifest["msys2_base_release"],
+            lock["msys2_base"]["release"],
+        )
+        self.assertEqual(windows_manifest["expected_referee_bytes"], 7511040)
+        self.assertRegex(
+            windows_manifest["expected_referee_sha256"], r"^[0-9A-F]{64}$"
+        )
+        build_script = (REFEREE / "build_static_windows.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f'expected_lock_sha256="{digest}"', build_script)
+        self.assertIn(
+            'expected_binary_sha256="'
+            f'{windows_manifest["expected_referee_sha256"].lower()}"',
+            build_script,
+        )
+
     def make_artifact(self, root: Path, platform: str) -> Path:
         artifact_name, binary_name, magic = artifact_receipt.ARTIFACTS[platform]
         artifact_dir = root / artifact_name
@@ -103,6 +167,18 @@ class HordeRefereeArtifactTests(unittest.TestCase):
             with (linux / "cutechess-ob").open("ab") as binary:
                 binary.write(b"tampered")
             with self.assertRaisesRegex(ValueError, "SHA256SUMS mismatch"):
+                install_artifacts.verify_pair(
+                    windows, linux, SOURCE_COMMIT, RUN_ID
+                )
+
+    def test_pair_rejects_toolchain_receipt_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            windows = self.make_artifact(root, "windows")
+            linux = self.make_artifact(root, "linux")
+            with (windows / "toolchain.txt").open("ab") as toolchain:
+                toolchain.write(b"tampered")
+            with self.assertRaisesRegex(ValueError, "toolchain receipt mismatch"):
                 install_artifacts.verify_pair(
                     windows, linux, SOURCE_COMMIT, RUN_ID
                 )

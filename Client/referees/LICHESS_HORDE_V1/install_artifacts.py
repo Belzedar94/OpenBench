@@ -56,6 +56,8 @@ def load_and_verify_receipt(
     }
     if receipt.get("binary") != expected_binary:
         raise ValueError(f"artifact binary receipt mismatch for {platform}")
+    if receipt.get("toolchain") != payload["toolchain"]:
+        raise ValueError(f"artifact toolchain receipt mismatch for {platform}")
     return receipt
 
 

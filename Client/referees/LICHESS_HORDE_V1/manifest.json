@@ -29,6 +29,12 @@
       "qt_commit": "c59ae95d8aed879768fe09e0de04f693724e6319"
     },
     "windows": {
+      "lock_file": "windows-toolchain-lock.json",
+      "lock_sha256": "5074D87A427170D0992A6C6FF1DB2F8BCC7E8FDC951162892B9B9482970A3D43",
+      "package_count": 51,
+      "msys2_base_release": "2026-03-22",
+      "expected_referee_bytes": 7511040,
+      "expected_referee_sha256": "1C0BBAB69E15A277C0B68BF032848B513F706749999CD5F6D09A1FB60F05B8A6",
       "cmake": "4.3.4-1",
       "ninja": "1.13.2-1",
       "gcc": "16.1.0-5",

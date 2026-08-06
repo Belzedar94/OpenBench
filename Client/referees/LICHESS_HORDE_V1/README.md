@@ -24,6 +24,16 @@ The static build scripts fail closed on source, patch, corpus, toolchain, and
 linkage mismatches. Their output is uploaded for inspection and is not deployed
 automatically.
 
+The Windows build starts from the immutable official MSYS2 2026-03-22 base
+archive. `windows-toolchain-lock.json` pins the complete 51-package MINGW64
+closure by filename, byte count, and SHA-256. The bootstrap does not synchronize
+package databases or refresh signing keys, rejects unexpected MINGW64 packages,
+and verifies every archive before the repository-free local package transaction.
+A local verification can reuse already downloaded inputs with `-BaseArchive`
+and `-PackageCache`; those inputs are held to the same hashes.
+After source mtimes are normalized to `SOURCE_DATE_EPOCH`, the Windows build
+must reproduce the byte count and binary SHA-256 recorded in `manifest.json`.
+
 Each platform artifact also contains `artifact-receipt.json`. The two receipts
 must name the same workflow run, attempt, and source commit. Validate them before
 installation with:

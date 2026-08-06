@@ -39,10 +39,11 @@ def verify_payload(artifact_dir: Path, platform: str) -> dict:
         raise ValueError(f"missing referee binary: {binary_path}")
     if not checksum_path.is_file():
         raise ValueError(f"missing referee checksums: {checksum_path}")
-    if not toolchain_path.is_file() or not toolchain_path.read_text(
-        encoding="utf-8", errors="replace"
-    ).strip():
+    if not toolchain_path.is_file():
         raise ValueError(f"missing referee toolchain receipt: {toolchain_path}")
+    toolchain = toolchain_path.read_bytes()
+    if not toolchain.strip():
+        raise ValueError(f"empty referee toolchain receipt: {toolchain_path}")
 
     payload = binary_path.read_bytes()
     digest = sha256(payload)
@@ -59,6 +60,10 @@ def verify_payload(artifact_dir: Path, platform: str) -> dict:
         "binary_name": binary_name,
         "bytes": len(payload),
         "sha256": digest,
+        "toolchain": {
+            "bytes": len(toolchain),
+            "sha256": sha256(toolchain),
+        },
     }
 
 
@@ -89,6 +94,7 @@ def build_receipt(artifact_dir: Path, platform: str, environment: dict) -> dict:
             "sha256": payload["sha256"],
             "bytes": payload["bytes"],
         },
+        "toolchain": payload["toolchain"],
         "referee_commit": manifest["referee"]["commit"],
         "patch_sha256": manifest["referee"]["patch_sha256"].lower(),
         "material_corpus_sha256": manifest["material_corpus"]["sha256"].lower(),
