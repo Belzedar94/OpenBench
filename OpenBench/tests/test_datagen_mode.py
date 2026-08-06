@@ -59,7 +59,7 @@ class MachineIdentityTests(TestCase):
         self.other = User.objects.create_user('other-worker', password='password')
         self.info = {
             'mac_address': 'AABBCCDDEEFF',
-            'client_ver': 41,
+            'client_ver': OpenBench.config.OPENBENCH_CONFIG['client_version'],
             'concurrency': 2,
         }
         self.machine = Machine.objects.create(
@@ -102,7 +102,7 @@ class MachineIdentityTests(TestCase):
             {'error': 'Worker Account Disabled', 'stop': True},
         )
 
-    def test_protocol_v39_worker_is_told_to_upgrade_to_v41(self):
+    def test_protocol_v39_worker_is_told_to_upgrade_to_v44(self):
         self.machine.info = dict(self.machine.info, client_ver=39)
         self.machine.save(update_fields=['info'])
         request = RequestFactory().post(
@@ -114,7 +114,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('41', error)
+        self.assertIn('44', error)
 
 
 class DatagenModeTests(TestCase):
@@ -185,7 +185,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 41,
+            'client_ver': OpenBench.config.OPENBENCH_CONFIG['client_version'],
             'tablebases': {
                 'standard': 0,
                 'atomic': {
@@ -2777,7 +2777,12 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 41},
+                info={
+                    'concurrency': 1,
+                    'client_ver': OpenBench.config.OPENBENCH_CONFIG[
+                        'client_version'
+                    ],
+                },
             ))
 
     def tearDown(self):
