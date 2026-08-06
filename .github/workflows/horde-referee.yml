@@ -67,7 +67,11 @@ jobs:
             mingw-w64-x86_64-winpthreads
       - name: Build and test the static referee
         shell: msys2 {0}
-        run: bash Client/referees/LICHESS_HORDE_V1/build_static_windows.sh
+        run: |
+          bash Client/referees/LICHESS_HORDE_V1/build_static_windows.sh
+          python Client/referees/LICHESS_HORDE_V1/artifact_receipt.py \
+            --platform windows \
+            --artifact-dir horde-referee-artifacts/windows
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: horde-referee-windows-x86-64
@@ -81,6 +85,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Verify the artifact receipt gate
+        run: python3 -m unittest UnitTests.test_horde_referee_artifacts -v
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: AndyGrant/cutechess
@@ -103,6 +109,11 @@ jobs:
           -w /work
           alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
           sh Client/referees/LICHESS_HORDE_V1/build_static_linux.sh
+      - name: Emit the Linux artifact receipt
+        run: >-
+          python3 Client/referees/LICHESS_HORDE_V1/artifact_receipt.py
+          --platform linux
+          --artifact-dir horde-referee-artifacts/linux
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: horde-referee-linux-x86-64

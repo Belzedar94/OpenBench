@@ -23,3 +23,19 @@ commit.
 The static build scripts fail closed on source, patch, corpus, toolchain, and
 linkage mismatches. Their output is uploaded for inspection and is not deployed
 automatically.
+
+Each platform artifact also contains `artifact-receipt.json`. The two receipts
+must name the same workflow run, attempt, and source commit. Validate them before
+installation with:
+
+```text
+python Client/referees/LICHESS_HORDE_V1/install_artifacts.py \
+  --windows <windows-artifact-directory> \
+  --linux <linux-artifact-directory> \
+  --expected-source-commit <40-hex-commit> \
+  --expected-run-id <run-id>
+```
+
+The command is check-only unless `--install` is supplied. Installation occurs
+only after both binaries, checksum files, toolchain records, Horde markers, and
+receipts have passed validation.
