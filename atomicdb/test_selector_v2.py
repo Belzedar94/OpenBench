@@ -36,7 +36,7 @@ from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from . import ingest, logic, views
-from .database import connection
+from .database import atomic, connection
 from .models import Campaign, Edge, Position, ProofCampaign
 from .testing import TestCase, TransactionTestCase
 
@@ -441,6 +441,21 @@ def child_row_missing(key):
     vacia las tablas al terminar y una arista huerfana lo hace tropezar.
     """
     row = Position.objects.get(key=key)
+
+    if connection.vendor == 'postgresql':
+        with atomic():
+            with connection.cursor() as cursor:
+                cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+                cursor.execute(
+                    f'DELETE FROM {Position._meta.db_table} WHERE key = %s',
+                    [key],
+                )
+            try:
+                yield
+            finally:
+                row.save(force_insert=True)
+        return
+
     if not connection.disable_constraint_checking():
         raise RuntimeError('no se pudieron desactivar las claves ajenas')
     try:
