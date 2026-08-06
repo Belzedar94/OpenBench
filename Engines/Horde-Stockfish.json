@@ -3,7 +3,7 @@
     "private": true,
     "nps": 1,
     "source": "https://github.com/Belzedar94/Horde-Stockfish",
-    "variant_contract": "horde",
+    "variant_contract": "LICHESS_HORDE_V1",
 
     "build": {
         "cpuflags": [],

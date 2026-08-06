@@ -29,6 +29,7 @@ import re
 import sys
 
 import OpenBench.utils
+import OpenBench.variant_contract
 
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.datagen import (
@@ -158,21 +159,11 @@ def engine_tablebase_family(engine):
     )
 
 
-def engine_variant_contract(engine):
-
-    return OPENBENCH_CONFIG['engines'][engine].get('variant_contract')
-
-
 def workload_variant_contract(workload):
 
-    dev_contract = engine_variant_contract(workload.dev_engine)
-    base_contract = engine_variant_contract(workload.base_engine)
-    if dev_contract != base_contract:
-        raise ValueError(
-            'Engine variant contracts disagree: %s != %s'
-            % (dev_contract, base_contract)
-        )
-    return dev_contract
+    return OpenBench.variant_contract.persisted_variant_contract(
+        OPENBENCH_CONFIG, workload
+    )
 
 def machine_tablebase_manifest(machine, family):
 
@@ -295,6 +286,7 @@ def compute_resource_distribution(workloads, machine, has_focus):
 def workload_to_dictionary(test, result, machine, datagen_chunk=None):
 
     workload = {}
+    variant_contract = workload_variant_contract(test)
 
     workload['result'] = {
         'id'  : result.id,
@@ -311,7 +303,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'upload_pgns'   : test.upload_pgns,
         'genfens_args'  : test.genfens_args,
         'play_reverses' : test.play_reverses,
-        'variant_contract': workload_variant_contract(test),
+        'variant_contract': variant_contract,
     }
 
     publication_datagen = (
@@ -338,6 +330,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'sha'     : book_config['sha'],
         'raw_sha' : book_config.get('raw_sha'),
         'source'  : book_config['source'],
+        'variant_contract': variant_contract,
     }
 
     workload['test']['dev'] = {
@@ -358,7 +351,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.dev_engine),
-        'variant_contract' : engine_variant_contract(test.dev_engine),
+        'variant_contract' : variant_contract,
     }
     if publication_datagen:
         workload['test']['dev'].update({
@@ -384,7 +377,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.base_engine),
-        'variant_contract' : engine_variant_contract(test.base_engine),
+        'variant_contract' : variant_contract,
     }
 
     if is_generic_datagen(test):

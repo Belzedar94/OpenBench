@@ -115,8 +115,9 @@ class Test(Model):
     upload_pgns = CharField(max_length=16, default='FALSE')
 
     # Opening book settings
-    book_name  = CharField(max_length=32)
-    book_index = IntegerField(default=1)
+    book_name        = CharField(max_length=32)
+    book_index       = IntegerField(default=1)
+    variant_contract = CharField(max_length=64, default='', blank=True)
 
     # Dev Engine, and all of its settings
     dev              = ForeignKey('Engine', PROTECT, related_name='dev')

@@ -3,7 +3,7 @@
 Horde workloads use Cute Chess' native `horde` variant. The client accepts the
 `HORDE` book token and the registered engine names `Horde-Stockfish` and
 `Fairy-Stockfish-Hordetest-Baseline`. New workloads also carry the explicit
-`variant_contract: horde` value from the server to the client. A disagreement
+`variant_contract: LICHESS_HORDE_V1` value from the server to the client. A disagreement
 between the contract, book token, or engine fallback aborts before a game is
 started.
 

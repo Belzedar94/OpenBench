@@ -1,5 +1,6 @@
 {
     "onboarding_ready": false,
+    "variant_contract": "LICHESS_HORDE_V1",
     "sha": "PENDING_TEXT_SHA256",
     "raw_sha": "PENDING_RAW_SHA256",
     "source": "PENDING_PUBLIC_ZIP_URL"

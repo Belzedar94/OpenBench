@@ -3,7 +3,7 @@
     "private": true,
     "nps": 1,
     "source": "https://github.com/Belzedar94/Fairy-Stockfish",
-    "variant_contract": "horde",
+    "variant_contract": "LICHESS_HORDE_V1",
 
     "build": {
         "cpuflags": [],
@@ -22,19 +22,19 @@
             "syzygy_adj": "DISABLED"
         },
         "Foundational VSTC": {
-            "both_options": "UCI_Variant=horde Threads=1 Hash=16",
+            "both_options": "UCI_Variant=hordetest Threads=1 Hash=16",
             "both_time_control": "2.0+0.02",
             "test_max_games": 400,
             "workload_size": 16
         },
         "Foundational STC": {
-            "both_options": "UCI_Variant=horde Threads=1 Hash=32",
+            "both_options": "UCI_Variant=hordetest Threads=1 Hash=32",
             "both_time_control": "10.0+0.1",
             "test_max_games": 300,
             "workload_size": 16
         },
         "Foundational LTC": {
-            "both_options": "UCI_Variant=horde Threads=1 Hash=128",
+            "both_options": "UCI_Variant=hordetest Threads=1 Hash=128",
             "both_time_control": "30.0+0.3",
             "test_max_games": 200,
             "workload_size": 8

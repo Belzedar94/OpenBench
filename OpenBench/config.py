@@ -97,6 +97,11 @@ def load_book_config(book_name):
     assert conf.get('onboarding_ready', True)
     assert type(conf.get('sha')) == str
     assert type(conf.get('source')) == str
+    variant_contract = conf.get('variant_contract')
+    assert variant_contract is None or (
+        type(variant_contract) == str
+        and re.fullmatch(r'[A-Z0-9][A-Z0-9_]{0,63}', variant_contract)
+    )
     if 'raw_sha' in conf:
         assert type(conf['raw_sha']) == str
         assert re.fullmatch(r'[0-9a-fA-F]{64}', conf['raw_sha'])
@@ -161,7 +166,7 @@ def verify_engine_basics(conf):
     variant_contract = conf.get('variant_contract')
     assert variant_contract is None or (
         type(variant_contract) == str
-        and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}', variant_contract)
+        and re.fullmatch(r'[A-Z0-9][A-Z0-9_]{0,63}', variant_contract)
     )
     assert conf.get('tablebase_family', 'standard') in ['standard', 'atomic']
     assert type(conf.get('cutechess_max_concurrency', 0)) == int

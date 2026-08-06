@@ -42,8 +42,9 @@ class HordeOnboardingTests(unittest.TestCase):
     def test_private_engine_contracts_are_native_and_role_separated(self):
         self.assertTrue(self.engine['private'])
         self.assertTrue(self.baseline['private'])
-        self.assertEqual(self.engine['variant_contract'], 'horde')
-        self.assertEqual(self.baseline['variant_contract'], 'horde')
+        self.assertEqual(self.engine['variant_contract'], 'LICHESS_HORDE_V1')
+        self.assertEqual(self.baseline['variant_contract'], 'LICHESS_HORDE_V1')
+        self.assertEqual(self.book['variant_contract'], 'LICHESS_HORDE_V1')
         self.assertEqual(self.engine['build']['cpuflags'], [])
         self.assertEqual(self.baseline['build']['cpuflags'], [])
         self.assertEqual(
@@ -67,7 +68,7 @@ class HordeOnboardingTests(unittest.TestCase):
                 self.assertEqual(specialist['test_max_games'], games)
                 self.assertIn('Threads=1', specialist['both_options'])
                 self.assertIn(hash_option, specialist['both_options'])
-                self.assertIn('UCI_Variant=horde', baseline['both_options'])
+                self.assertIn('UCI_Variant=hordetest', baseline['both_options'])
 
     def test_cross_engine_form_restores_baseline_bench_and_network(self):
         source = (
@@ -75,6 +76,14 @@ class HordeOnboardingTests(unittest.TestCase):
         ).read_text(encoding='utf-8')
         self.assertIn("set_option('base_bench', base_bench);", source)
         self.assertIn("set_option('base_network', base_network);", source)
+
+    def test_variant_contract_has_a_persistent_workload_field(self):
+        model_source = (ROOT / 'OpenBench' / 'models.py').read_text()
+        migration_source = (
+            ROOT / 'OpenBench' / 'migrations' / '0010_test_variant_contract.py'
+        ).read_text()
+        self.assertIn('variant_contract = CharField', model_source)
+        self.assertIn("name='variant_contract'", migration_source)
 
     def test_bundled_cutechess_has_native_horde_on_both_platforms(self):
         expected = {

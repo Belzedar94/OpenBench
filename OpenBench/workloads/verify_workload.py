@@ -46,6 +46,7 @@ import OpenBench.config
 import OpenBench.datagen
 import OpenBench.datagen_publication
 import OpenBench.utils
+import OpenBench.variant_contract
 
 from OpenBench.models import *
 
@@ -90,7 +91,7 @@ def verify_test_creation(errors, request):
         (verify_options        , 'base_options', 'Threads', 'Base Options'),
         (verify_options        , 'base_options', 'Hash', 'Base Options'),
         (verify_time_control   , 'base_time_control', 'Base Time Control'),
-        (verify_matching_variant_contracts, 'dev_engine', 'base_engine'),
+        (verify_matching_variant_contracts, 'dev_engine', 'base_engine', 'book_name'),
 
         # Verify everything about the Test Settings
         (verify_configuration  , 'book_name', 'Book', 'books'),
@@ -137,6 +138,7 @@ def verify_tune_creation(errors, request):
 
         # Verify everything about the Test Settings
         (verify_configuration         , 'book_name', 'Book', 'books'),
+        (verify_engine_book_variant_contract, 'dev_engine', 'book_name'),
         (verify_upload_pgns           , 'upload_pgns', 'Upload PGNs'),
 
         # Verify everything about the General Settings
@@ -181,6 +183,7 @@ def verify_datagen_creation(errors, request):
         (verify_datagen_seed    , 'datagen_base_seed', 'datagen_total_count',
                                   'datagen_positions_per_chunk'),
         (verify_datagen_book   , 'book_name', 'Book', 'books'),
+        (verify_engine_book_variant_contract, 'dev_engine', 'book_name'),
 
         # Verify everything about the General Settings
         (verify_integer        , 'priority', 'Priority'),
@@ -216,17 +219,32 @@ def verify_configuration(errors, request, field, field_name, parent):
     try: assert request.POST[field] in OpenBench.config.OPENBENCH_CONFIG[parent].keys()
     except: errors.append('{0} was not found in the configuration'.format(field_name))
 
-def verify_matching_variant_contracts(errors, request, dev_field, base_field):
+def verify_matching_variant_contracts(errors, request, dev_field, base_field, book_field):
     try:
-        engines = OpenBench.config.OPENBENCH_CONFIG['engines']
-        dev_contract = engines[request.POST[dev_field]].get('variant_contract')
-        base_contract = engines[request.POST[base_field]].get('variant_contract')
-    except (KeyError, TypeError):
-        return  # verify_configuration owns unknown-engine diagnostics
-    if dev_contract != base_contract:
-        errors.append(
-            'Dev and Base engines declare different variant contracts'
+        OpenBench.variant_contract.configured_variant_contract(
+            OpenBench.config.OPENBENCH_CONFIG,
+            request.POST[dev_field],
+            request.POST[base_field],
+            request.POST[book_field],
         )
+    except OpenBench.variant_contract.VariantContractError as error:
+        errors.append(str(error))
+    except (KeyError, TypeError):
+        return  # verify_configuration owns unknown engine/book diagnostics
+
+
+def verify_engine_book_variant_contract(errors, request, engine_field, book_field):
+    try:
+        OpenBench.variant_contract.configured_variant_contract(
+            OpenBench.config.OPENBENCH_CONFIG,
+            request.POST[engine_field],
+            request.POST[engine_field],
+            request.POST[book_field],
+        )
+    except OpenBench.variant_contract.VariantContractError as error:
+        errors.append(str(error))
+    except (KeyError, TypeError):
+        return
 
 
 def verify_datagen_engine_role(errors, request, field):

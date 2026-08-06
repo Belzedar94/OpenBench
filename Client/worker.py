@@ -669,9 +669,9 @@ ENGINE_VARIANTS = {
 }
 
 VARIANT_CONTRACTS = {
+    'LICHESS_HORDE_V1': ('cutechess'      , 'horde'       ),
     'standard'      : ('cutechess'      , 'standard'    ),
     'spell-chess'   : ('uci-pair-runner', 'spell-chess' ),
-    'horde'         : ('cutechess'      , 'horde'       ),
     'shatranj'      : ('cutechess'      , 'shatranj'    ),
     'atomic'        : ('cutechess'      , 'atomic'      ),
     'fischerandom'  : ('cutechess'      , 'fischerandom'),
@@ -706,6 +706,7 @@ def variant_routing(config):
     test = config.workload['test']
     declared = [
         test.get('variant_contract'),
+        test.get('book', {}).get('variant_contract'),
         test['dev'].get('variant_contract'),
         test.get('base', {}).get('variant_contract'),
     ]
@@ -731,6 +732,11 @@ def variant_routing(config):
                 % (contract, inferred[0], inferred[1])
             )
         return explicit
+
+    if inferred == ('cutechess', 'horde'):
+        raise VariantRoutingError(
+            'Horde workloads require variant_contract=LICHESS_HORDE_V1'
+        )
 
     return inferred or ('cutechess', 'standard')
 

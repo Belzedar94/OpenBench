@@ -836,49 +836,64 @@ class DatagenModeTests(TestCase):
         request = SimpleNamespace(POST={
             'dev_engine': 'Horde-Stockfish',
             'base_engine': 'Horde-Baseline',
+            'book_name': 'HORDE_openings.epd',
         })
         configured = {
-            'Horde-Stockfish': {'variant_contract': 'horde'},
-            'Horde-Baseline': {'variant_contract': 'horde'},
+            'Horde-Stockfish': {'variant_contract': 'LICHESS_HORDE_V1'},
+            'Horde-Baseline': {'variant_contract': 'LICHESS_HORDE_V1'},
+        }
+        books = {
+            'HORDE_openings.epd': {'variant_contract': 'LICHESS_HORDE_V1'},
         }
         errors = []
-        with mock.patch.dict(
-            OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False
-        ):
+        with mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False), \
+             mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['books'], books, clear=False):
             verify_workload.verify_matching_variant_contracts(
-                errors, request, 'dev_engine', 'base_engine'
+                errors, request, 'dev_engine', 'base_engine', 'book_name'
             )
         self.assertEqual(errors, [])
 
-        configured['Horde-Baseline']['variant_contract'] = 'atomic'
-        with mock.patch.dict(
-            OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False
-        ):
+        configured['Horde-Baseline']['variant_contract'] = 'ATOMIC_V1'
+        with mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False), \
+             mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['books'], books, clear=False):
             verify_workload.verify_matching_variant_contracts(
-                errors, request, 'dev_engine', 'base_engine'
+                errors, request, 'dev_engine', 'base_engine', 'book_name'
             )
         self.assertIn(
-            'different variant contracts', errors[-1]
+            'variant contracts disagree', errors[-1]
         )
 
     def test_workload_variant_contract_is_propagated_fail_closed(self):
         test = SimpleNamespace(
-            dev_engine='Horde-Stockfish', base_engine='Horde-Baseline'
+            dev_engine='Horde-Stockfish',
+            base_engine='Horde-Baseline',
+            book_name='HORDE_openings.epd',
+            variant_contract='LICHESS_HORDE_V1',
         )
         configured = {
             'engines': {
-                'Horde-Stockfish': {'variant_contract': 'horde'},
-                'Horde-Baseline': {'variant_contract': 'horde'},
-            }
+                'Horde-Stockfish': {'variant_contract': 'LICHESS_HORDE_V1'},
+                'Horde-Baseline': {'variant_contract': 'LICHESS_HORDE_V1'},
+            },
+            'books': {
+                'HORDE_openings.epd': {'variant_contract': 'LICHESS_HORDE_V1'},
+            },
         }
         with mock.patch.object(get_workload, 'OPENBENCH_CONFIG', configured):
             self.assertEqual(
-                get_workload.workload_variant_contract(test), 'horde'
+                get_workload.workload_variant_contract(test), 'LICHESS_HORDE_V1'
             )
             configured['engines']['Horde-Baseline'][
                 'variant_contract'
-            ] = 'atomic'
+            ] = 'ATOMIC_V1'
             with self.assertRaisesRegex(ValueError, 'contracts disagree'):
+                get_workload.workload_variant_contract(test)
+
+            configured['engines']['Horde-Baseline'][
+                'variant_contract'
+            ] = 'LICHESS_HORDE_V1'
+            test.variant_contract = ''
+            with self.assertRaisesRegex(ValueError, 'not persisted'):
                 get_workload.workload_variant_contract(test)
 
     def test_scheduler_assigns_seed_count_and_renews_stale_work(self):

@@ -63,6 +63,7 @@ def routing_config(
     }
     if variant_contract is not None:
         test["variant_contract"] = variant_contract
+        test["book"]["variant_contract"] = variant_contract
         test["dev"]["variant_contract"] = variant_contract
         test["base"]["variant_contract"] = variant_contract
     return SimpleNamespace(workload={"test": test})
@@ -76,8 +77,10 @@ class HordeVariantRoutingTests(unittest.TestCase):
             dev_engine="Horde-Stockfish",
             base_engine="Fairy-Stockfish-Hordetest-Baseline",
         )
-        self.assertEqual(worker.variant_routing(config), ("cutechess", "horde"))
-        self.assertIn("-variant horde", worker.Cutechess.basic_settings(config))
+        with self.assertRaisesRegex(
+            worker.VariantRoutingError, "require variant_contract"
+        ):
+            worker.variant_routing(config)
 
     def test_both_horde_engine_names_route_without_a_book_token(self):
         for engine in (
@@ -88,16 +91,17 @@ class HordeVariantRoutingTests(unittest.TestCase):
                 config = routing_config(
                     "None", dev_engine=engine, base_engine=engine
                 )
-                self.assertEqual(
-                    worker.variant_routing(config), ("cutechess", "horde")
-                )
+                with self.assertRaisesRegex(
+                    worker.VariantRoutingError, "require variant_contract"
+                ):
+                    worker.variant_routing(config)
 
     def test_explicit_horde_contract_routes_without_name_inference(self):
         config = routing_config(
             "openings.epd",
             dev_engine="PrivateDev",
             base_engine="PrivateBase",
-            variant_contract="horde",
+            variant_contract="LICHESS_HORDE_V1",
         )
         self.assertEqual(worker.variant_routing(config), ("cutechess", "horde"))
 
@@ -106,7 +110,7 @@ class HordeVariantRoutingTests(unittest.TestCase):
             "ATOMIC_openings.epd",
             dev_engine="Horde-Stockfish",
             base_engine="Fairy-Stockfish-Hordetest-Baseline",
-            variant_contract="horde",
+            variant_contract="LICHESS_HORDE_V1",
         )
         with self.assertRaisesRegex(
             worker.VariantRoutingError, "conflicts with inferred route"
@@ -115,8 +119,8 @@ class HordeVariantRoutingTests(unittest.TestCase):
 
     def test_conflicting_side_contracts_are_rejected(self):
         config = routing_config("HORDE_openings.epd")
-        config.workload["test"]["dev"]["variant_contract"] = "horde"
-        config.workload["test"]["base"]["variant_contract"] = "atomic"
+        config.workload["test"]["dev"]["variant_contract"] = "LICHESS_HORDE_V1"
+        config.workload["test"]["base"]["variant_contract"] = "ATOMIC_V1"
         with self.assertRaisesRegex(
             worker.VariantRoutingError, "conflicting variant contracts"
         ):
