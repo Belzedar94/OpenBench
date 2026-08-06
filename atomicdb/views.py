@@ -193,6 +193,26 @@ class PlayRouteConflict(PlayRouteError):
     status_code = 409
 
 
+class PlayRouteLoop(PlayRouteError):
+    """A route crosses a position it already went through: a repetition.
+
+    Las repeticiones estan DESACTIVADAS en la navegacion (decision del
+    propietario, 6-ago; invariante 6 de docs/value-semantics.md), asi que una
+    ruta entrante que reentra no es un 400: todo hasta el cruce es una ruta
+    perfectamente legal, y el saneo es TRUNCAR ahi.  La excepcion lleva lo
+    necesario para aterrizar — la clave de la posicion anterior al cruce y
+    los ucis hasta ella — y quien no la trate especialmente hereda el catch
+    de ``PlayRouteError`` de siempre, que degrada a "sin ruta" y nunca a un
+    bucle.
+    """
+
+    status_code = 302
+
+    def __init__(self, message, end_key, ucis):
+        super().__init__(message)
+        self.end_key, self.ucis = end_key, ucis
+
+
 def _auth(request):
     """Credenciales de worker: usuario correcto Y cuenta habilitada.
 
@@ -1637,6 +1657,7 @@ def _validated_play_route(raw, target_key):
     # sabe hacerlo — se cae al camino de siempre, ply a ply, que es el que
     # sabe DECIR cual fallo y por que.
     sans = _batched_sans(fen, ucis)
+    seen_keys = {prefix_keys[0]}
     for index, uci in enumerate(ucis):
         if sans is None:
             if uci not in logic.legal_moves(fen):
@@ -1650,6 +1671,15 @@ def _validated_play_route(raw, target_key):
             raise PlayRouteError(
                 'move path could not be replayed under Atomic rules') from exc
         child_key = logic.key_of(fen)
+        if child_key in seen_keys:
+            # Reentrada: la ruta vuelve a una posicion por la que ya paso.
+            # Repeticiones desactivadas (§ PlayRouteLoop): se trunca en el
+            # PRIMER cruce — la jugada que cierra el bucle y todo lo que
+            # venga detras se caen — y el llamante aterriza en la posicion
+            # anterior al cruce con la historia limpia hasta ahi.
+            raise PlayRouteLoop('move path repeats a position',
+                                prefix_keys[index], ucis[:index])
+        seen_keys.add(child_key)
         prefix_keys.append(child_key)
         line.append({
             'uci': uci, 'san': san, 'key': child_key, 'white': white,
@@ -1697,6 +1727,13 @@ def goto(request, key, uci):
         raw_play = None
     try:
         route = _validated_play_route(raw_play, key)
+    except PlayRouteLoop as exc:
+        # Ruta entrante con reentrada: aterriza en el primer cruce, truncada
+        # (§ PlayRouteLoop).  La jugada pedida se pierde a proposito — venia
+        # montada sobre una historia que ya no existe.
+        response = redirect(_explore_url(exc.end_key, exc.ucis))
+        response['Cache-Control'] = 'no-store'
+        return response
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if route is None:
@@ -1716,6 +1753,20 @@ def goto(request, key, uci):
     )
     if uci not in logic.legal_moves(pos.fen):
         return redirect(_explore_url(key, active_ucis, current_anchor))
+    route_keys = _route_prefix_keys(top, line, active_ucis)
+    if route_keys is not None:
+        looped = logic.key_of(logic.apply_move(pos.fen, uci))
+        if looped in route_keys:
+            # REPETICION: la jugada vuelve a una posicion de la propia linea.
+            # No se navega (propietario, 6-ago; invariante 6): se aterriza en
+            # AQUELLA posicion con su historia — rebobinar, no reentrar — y
+            # sin efectos: ni arista nueva ni lapida revivida, cero
+            # escrituras.  Es la guardia del servidor detras del bloqueo de
+            # la tabla: un enlace viejo o construido a mano acaba aqui.
+            at = route_keys.index(looped)
+            response = redirect(_explore_url(looped, active_ucis[:at]))
+            response['Cache-Control'] = 'no-store'
+            return response
     # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
     # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
     # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
@@ -2497,6 +2548,10 @@ def _proof_health(now):
             round(100.0 * snapshot.frontier_dn_thin
                   / snapshot.frontier_and_nodes, 1)
             if snapshot.frontier_and_nodes else 0.0),
+        # Los abiertos saturados que el frente NO mira, contados aparte
+        # (§ proof.saturated_open_count): cero es la salud, y cualquier otra
+        # cifra es un ciclo realimentado o un cierre que la cascada debe.
+        'frontier_saturated': snapshot.frontier_saturated,
         'dn_repair_floor': ingest.DN_REPAIR_FLOOR,
         'human_close_h': _human_seconds(snapshot.human_close_median_seconds),
         'human_close_samples': snapshot.human_close_samples,
@@ -4229,6 +4284,84 @@ def _queued_children(moves):
             .values('position_id').distinct().count())
 
 
+def _arrow_move(moves, pos):
+    """La jugada de la flecha del tablero: el TOP no bloqueado de la tabla.
+
+    Mismo contrato que tenia el inline de ``explore`` — la primera fila con
+    valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
+    fila bloqueada por repeticion no puede ser la recomendacion, y si el
+    ``best_move`` almacenado es justo la jugada bloqueada, la flecha calla en
+    vez de contradecir al bloqueo.
+    """
+    blocked = {m['uci'] for m in moves if m.get('blocked')}
+    for move in moves:
+        if move.get('blocked'):
+            continue
+        if move.get('score') is not None or move.get('mate') is not None:
+            return move['uci']
+        break
+    return None if pos.best_move in blocked else pos.best_move
+
+
+def _pv_cut_at_repetition(pos, line):
+    """La linea tal y como se ENSEÑA: cortada en su primer cruce consigo
+    misma (invariante 6 de docs/value-semantics.md).
+
+    El motor tiene derecho a UNA vuelta gratis dentro de su PV — la primera
+    reentrada a la raiz de su busqueda no puntua tablas por la regla
+    ``repetition < ply``, y el caso Eclipsia (6-ago) es literalmente eso:
+    ocho plies de lanzadera de alfil y despues el plan de verdad.  Enseñar
+    esa vuelta como "mejor linea" es enseñar una repeticion como si fuera
+    progreso.  El corte INCLUYE la jugada que cierra el bucle — asi el chip
+    de repeticion de al lado es verificable a ojo: la ultima jugada mostrada
+    vuelve a una posicion por la que la linea ya paso — y tira lo de detras,
+    que no es continuacion de esta linea sino la linea de la posicion
+    repetida otra vez.
+
+    Solo RENDER: el JSON almacenado no se toca (ni la verificacion de PV ni
+    la siembra leen esta copia).  Una PV que no se deja replicar — jugada
+    ilegal, tokens rotos — se enseña tal cual: este corte adjudica
+    repeticiones, no legalidad.
+    """
+    pv = line.get('pv')
+    if not isinstance(pv, list) or len(pv) < 4:
+        # Un ciclo necesita 4 plies como minimo (cada bando ha de deshacer
+        # lo suyo); por debajo no hay nada que caminar.
+        return line
+    seen = {pos.key}
+    fen = pos.fen
+    for index, uci in enumerate(pv):
+        if not isinstance(uci, str):
+            return line
+        try:
+            fen = logic.apply_move(fen, uci)
+        except Exception:
+            return line
+        key = logic.key_of(fen)
+        if key in seen:
+            kept = pv[:index + 1]
+            shown = dict(line, pv=kept, pv_repetition=True)
+            raw = line.get('raw')
+            if isinstance(raw, str) and ' pv ' in raw:
+                shown['raw'] = raw.split(' pv ')[0] + ' pv ' + ' '.join(kept)
+            return shown
+        seen.add(key)
+    return line
+
+
+def _analysis_lines_for_display(pos):
+    """Las lineas de ``last_analysis`` listas para la plantilla.
+
+    Una copia por linea cuando hay corte y la misma referencia cuando no:
+    cero escrituras, y el ``last_analysis`` del modelo queda intacto para
+    todos los consumidores que RAZONAN con el (verificacion, siembra,
+    distancia de mate reclamada).
+    """
+    return [_pv_cut_at_repetition(pos, line)
+            for line in (pos.last_analysis or [])
+            if isinstance(line, dict)]
+
+
 def _moves_summary(moves):
     """De que esta hecha la tabla de abajo, en una linea de cabecera.
 
@@ -4299,6 +4432,13 @@ def explore(request, key):
     raw_play = request.GET.get('play')
     try:
         explicit_route = _validated_play_route(raw_play, pos.key)
+    except PlayRouteLoop as exc:
+        # La ruta trae una reentrada: se aterriza en el primer cruce con la
+        # historia truncada ahi (§ PlayRouteLoop).  Un enlace viejo con un
+        # bucle dentro deja de poder reproducirlo.
+        response = redirect(_explore_url(exc.end_key, exc.ucis))
+        response['Cache-Control'] = 'no-store'
+        return response
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if explicit_route is None:
@@ -4334,7 +4474,26 @@ def explore(request, key):
     if community is not None:
         current_opening = _opening_for_template(community)
 
+    # REPETICIONES DESACTIVADAS (propietario, 6-ago; invariante 6): una
+    # jugada cuyo hijo ya esta EN LA LINEA ACTUAL no se puede navegar.  La
+    # linea actual son las claves de la ruta activa — explicita o el linaje
+    # canonico replayable, que es exactamente lo que la miga de pan enseña y
+    # lo que ``goto`` extiende.  Sin ruta activa no hay linea, y sin linea no
+    # hay repeticion que bloquear: cada pagina suelta empieza de cero.
+    route_keys = _route_prefix_keys(top, line, active_ucis)
+    blocked_keys = None if route_keys is None else set(route_keys)
+
     for move in moves:
+        if blocked_keys is not None and move['key'] in blocked_keys:
+            # La fila se queda — status, eval, pn/dn siguen contando — pero
+            # sin enlace ninguno: ni navegar ni saltar al origen.  El chip
+            # de la plantilla dice por que.
+            move['blocked'] = True
+            move['url'] = None
+            move['backed_url'] = None
+            move['enters_opening'] = None
+            continue
+        move['blocked'] = False
         child_route, child_anchor = _child_navigation_state(
             active_ucis, current_opening_match, route_ply,
             move['key'], move['uci'],
@@ -4354,16 +4513,23 @@ def explore(request, key):
     # — sino jugadas que todavia no son un nodo.  Pincharlas las crea.
     offtree_ucis = [uci for uci in legal_ucis if uci not in known]
     offtree_keys = _child_keys(pos, offtree_ucis)
-    offtree = [
-        {
+    offtree = []
+    for uci in offtree_ucis:
+        if blocked_keys is not None and offtree_keys[uci] in blocked_keys:
+            # Pinchar una jugada asi CREARIA la arista del bucle: bloqueada
+            # igual que sus hermanas materializadas.
+            offtree.append(
+                {'uci': uci, 'blocked': True, 'url': None,
+                 'enters_opening': None})
+            continue
+        offtree.append({
             'uci': uci,
+            'blocked': False,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
             'enters_opening': _exact_child_opening(
                 offtree_keys[uci], current_opening, names=community_map),
-        }
-        for uci in offtree_ucis
-    ]
+        })
     numbered = _numbered_line(
         top,
         line,
@@ -4379,13 +4545,25 @@ def explore(request, key):
             if current_anchor else ''
         )
     )
+    # El tablero obedece el mismo bloqueo que la tabla: una jugada que
+    # reentra en la linea no es clicable ni desde las casillas.  ``moves``
+    # trae la clave de todo hijo materializado y ``offtree_keys`` la del
+    # resto, asi que esto no cuesta ni una consulta.
+    if blocked_keys is None:
+        playable_ucis = legal_ucis
+    else:
+        child_key_by_uci = {m['uci']: m['key'] for m in moves}
+        child_key_by_uci.update(offtree_keys)
+        playable_ucis = [
+            uci for uci in legal_ucis
+            if child_key_by_uci.get(uci) not in blocked_keys]
     legal_move_links = [
         {
             'uci': uci,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
         }
-        for uci in legal_ucis
+        for uci in playable_ucis
     ]
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
@@ -4418,6 +4596,11 @@ def explore(request, key):
         # entonces la plantilla no pinta ni el hueco (§ live_request.context).
         **live_request.context(pos),
         'pos': pos, 'moves': moves, 'parents': parents,
+        # Las lineas del motor listas para ENSEÑAR: cortadas en su primer
+        # cruce consigo mismas (§ _analysis_lines_for_display).  El JSON
+        # almacenado no se toca; quien razona con la PV entera la sigue
+        # leyendo del modelo.
+        'analysis_lines': _analysis_lines_for_display(pos),
         # La historia del conocimiento de este nodo, arriba y en claro: que se
         # busco AQUI y de que esta hecha la tabla de abajo.  Las dos frases las
         # compone el servidor, como la linea de peticion viva, para que lo que
@@ -4427,7 +4610,9 @@ def explore(request, key):
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
-        'board_key': pos.key, 'legal_ucis': legal_ucis,
+        # El tablero recibe SOLO lo navegable: las jugadas bloqueadas por
+        # repeticion no existen para el click (§ blocked_keys, arriba).
+        'board_key': pos.key, 'legal_ucis': playable_ucis,
         'legal_move_links': legal_move_links,
         'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
@@ -4444,11 +4629,10 @@ def explore(request, key):
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
         # moverse JUNTAS o el tablero contradice a su propia columna (bug
         # reportado 29-jul; misma leccion de la fuente unica de verdad).
+        # Y nunca a una fila BLOQUEADA por repeticion: recomendar lo que no
+        # se puede pinchar es contradecir el bloqueo con la flecha.
         'best_move': (None if pos.closure == 'TERMINAL'
-                      else (moves[0]['uci']
-                            if moves and (moves[0].get('score') is not None
-                                          or moves[0].get('mate') is not None)
-                            else pos.best_move)),
+                      else _arrow_move(moves, pos)),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,

@@ -120,6 +120,13 @@ SELECTED_CHILD_HYSTERESIS = 3
 PROOF_MAX_PLIES = 64
 PROOF_MAX_REVISITS = 2
 PROOF_MAX_NODES = 50_000
+# TOPE DEL PASEO QUE BUSCA LA REPETICION (§ _cycling_edges).  El mismo tope de
+# cordura que ``ingest.BACKED_CYCLE_MAX_PLIES`` y por la misma razon: una
+# espina mas larga que esto se deja pasar SIN reclamar ciclo, que es el error
+# seguro — equivocarse hacia "no hay ciclo" deja unos numeros que ordenan
+# peor, equivocarse hacia "hay ciclo" refutaria una arista sana.  No se
+# importa de ``ingest`` porque ``ingest`` importa este modulo.
+PROOF_CYCLE_MAX_PLIES = 32
 
 # Bandas de eval en perspectiva del ATACANTE: (umbral, peso pn, peso dn).
 # Monotonas por construccion — cuanto mejor va el atacante, mas barato parece
@@ -460,7 +467,137 @@ def sticky_index(best, held, numbers):
     return held
 
 
-def compute_numbers(campaign, position, children, child_nodes, previous=None):
+# ---------------- repeticion: la arista que vuelve a su propio nodo ---------
+#
+# EL MISMO DEFECTO QUE EL RESPALDO, EN LA OTRA COLUMNA (invariante 6 de
+# docs/value-semantics.md).  El grafo es un DAG con ciclos de verdad, y las
+# recurrencias pn/dn suman sobre TODAS las aristas: un dn puede salir de X,
+# dar la vuelta por la lanzadera y volver a entrar en la suma de X como si
+# fuera esfuerzo nuevo.  Como los ``ProofNode`` PERSISTEN entre pasadas, cada
+# refresco relee lo que la pasada anterior escribio y la realimentacion es un
+# trinquete multiplicativo: con dos caminos de reentrada el dn se DUPLICA por
+# pasada, y en unas decenas de pasadas esta clavado en ``PROOF_INFINITY``
+# (caso Eclipsia, 6-ago: seis nodos UNSOLVED con dn = 2^62 exacto y pn = 1,
+# un estado imposible — dn infinito significa probado, y probado es pn = 0).
+#
+# La regla es la gemela de ``ingest._draw_cycling_children``: una arista cuya
+# espina de PRIMARIOS (``selected_child`` a ``selected_child``) vuelve al
+# nodo en calculo se esta justificando pasando por el, y eso es una
+# REPETICION.  Una repeticion vale tablas, y unas tablas REFUTAN la
+# proposicion de victoria — PNS es binario a proposito — asi que la arista
+# aporta ``(pn=INF, dn=0)`` mientras la espina siga dando la vuelta.  No es
+# un veredicto: en cuanto el hijo apunte su primario a otra parte (progreso
+# real, o la histeresis destronada por el INF), la pasada siguiente vuelve a
+# puntuar la arista con los numeros del hijo.  Los pn/dn no son fuente de
+# verdad y esta regla tampoco: ordena mejor, no prueba nada.
+
+
+class _PrimarySpines:
+    """Lo que el paseo de repeticion de la PRUEBA recuerda en UNA pasada.
+
+    ``steps`` son hechos del grafo (una arista lleva siempre al mismo hijo;
+    el status del hijo no lo toca esta pasada).  ``spines`` es el
+    ``selected_child`` VIGENTE de cada nodo leido o escrito, y el bucle de
+    niveles llama a ``wrote`` con cada fila que actualiza — la unica pieza
+    mutable de la cache se entera de su propio cambio en vez de quedarse
+    vieja.  Misma forma que ``ingest._SpineCache`` y por las mismas razones.
+    """
+
+    __slots__ = ('steps', 'spines')
+
+    def __init__(self):
+        self.steps = {}      # (nodo, jugada) -> (hijo, status del hijo)
+        self.spines = {}     # nodo -> selected_child vigente
+
+    def wrote(self, key, move):
+        self.spines[key] = move
+
+
+def _resolve_primary_steps(campaign, cache, walks):
+    """Dos consultas para los pasos del nivel que la cache no sabe.
+
+    La arista y el status viajan juntos; el primario del hijo es del
+    ``ProofNode`` de ESTA campana, que es la unica diferencia de fondo con el
+    gemelo del respaldo (alli la espina vive en ``Position.backed_move``).
+    """
+    unknown = [(node, move) for _p, _m, node, move, _s in walks
+               if (node, move) not in cache.steps]
+    if not unknown:
+        return
+    children = set()
+    for parent_id, move_uci, child_id, status in (
+            Edge.objects.filter(
+                parent_id__in={node for node, _m in unknown},
+                move_uci__in={move for _n, move in unknown})
+            .values_list('parent_id', 'move_uci', 'child_id',
+                         'child__status')):
+        cache.steps[(parent_id, move_uci)] = (child_id, status)
+        children.add(child_id)
+    missing = children - set(cache.spines)
+    if missing:
+        found = dict(ProofNode.objects.filter(
+            campaign=campaign, position_id__in=missing).values_list(
+            'position_id', 'selected_child'))
+        for child_id in missing:
+            cache.spines[child_id] = found.get(child_id)
+
+
+def _cycling_edges(campaign, parents, children_by_parent, node_rows, cache):
+    """``{(padre, jugada)}`` cuyas espinas primarias vuelven al propio padre.
+
+    Camina la espina del hijo buscando al padre que lo esta evaluando; si
+    aparece, la arista es una repeticion y aporta ``(INF, 0)`` en
+    ``compute_numbers``.  Paradas, todas ellas "no hay ciclo": la espina se
+    acaba (hijo sin ``ProofNode`` o sin primario), la arista del primario ya
+    no existe, la espina llega a un nodo CERRADO (debajo de un cierre el
+    valor es verdad, no prestamo), se cierra sobre si misma sin pasar por el
+    padre (ese ciclo es problema de OTRO padre, que lo vera cuando le
+    toque), o se agota el tope.  Un ply del paseo cuesta dos consultas para
+    TODOS los caminantes del nivel, no una por hijo.
+    """
+    walks = []
+    for parent_key in parents:
+        for move_uci, child_id, status, _eval_cp, _fen in (
+                children_by_parent.get(parent_key) or ()):
+            if status != 'UNKNOWN':
+                continue          # bajo un cierre no hay espina que prestar
+            if child_id in cache.spines:
+                spine = cache.spines[child_id]
+            else:
+                node = node_rows.get(child_id)
+                spine = None if node is None else node.selected_child
+                cache.spines[child_id] = spine
+            if not spine:
+                continue          # sin primario no hay ciclo que buscar
+            walks.append([parent_key, move_uci, child_id, spine,
+                          {child_id}])
+    cycling = set()
+    for _ in range(PROOF_CYCLE_MAX_PLIES):
+        if not walks:
+            break
+        _resolve_primary_steps(campaign, cache, walks)
+        alive = []
+        for walk in walks:
+            parent_key, move0, node, move, seen = walk
+            step = cache.steps.get((node, move))
+            if step is None:
+                continue                    # arista perdida: no hay ciclo
+            below, status = step
+            if below == parent_key:
+                cycling.add((parent_key, move0))
+                continue
+            spine = cache.spines.get(below)
+            if below in seen or not spine or status != 'UNKNOWN':
+                continue
+            seen.add(below)
+            walk[2], walk[3] = below, spine
+            alive.append(walk)
+        walks = alive
+    return cycling
+
+
+def compute_numbers(campaign, position, children, child_nodes, previous=None,
+                    cycling=frozenset()):
     """(pn, dn, expanded_in_proof, selected_child) de un nodo.
 
     ``children`` es la lista de aristas materializadas; ``child_nodes`` el
@@ -473,6 +610,13 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
     AND no lo es: ahi el primario es la defensa mas dura de refutar, y
     sostenerla contra evidencia nueva retrasaria justo la refutacion que la
     prueba necesita.
+
+    ``cycling`` son las aristas de ESTE nodo cuya espina primaria vuelve a el
+    (§ ``_cycling_edges``): aportan ``(INF, 0)`` — repeticion = tablas = la
+    proposicion refutada en esa arista — en vez del numero que el ciclo se
+    inventa.  La histeresis no necesita caso especial: un primario clavado en
+    un pn=1 falso pasa a valer INF por esta via, y cualquier retador finito
+    lo destrona por la aritmetica de siempre.
     """
     goal = campaign.goal
     exact = terminal_numbers(position.status, goal)
@@ -490,6 +634,10 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
 
     numbers, moves = [], []
     for move_uci, child_id, status, eval_cp, fen in children:
+        if (position.key, move_uci) in cycling:
+            numbers.append((PROOF_INFINITY, 0))
+            moves.append(move_uci)
+            continue
         node = child_nodes.get(child_id)
         if node is not None:
             numbers.append((node.pn, node.dn))
@@ -535,6 +683,7 @@ def _refresh_campaign(campaign, seeds, max_plies):
     frontier = list(seeds)
     visits, processed, plies, written = {}, 0, 0, 0
     guard_reason = None
+    spines = _PrimarySpines()   # memoria del paseo de repeticion, por pasada
     while frontier and plies < max_plies:
         plies += 1
         positions = list(Position.objects.filter(key__in=frontier).only(
@@ -546,6 +695,12 @@ def _refresh_campaign(campaign, seeds, max_plies):
         child_keys = {child_id for rows in children.values()
                       for _, child_id, _, _, _ in rows}
         existing = _node_rows(campaign, set(keys) | child_keys)
+        # Antes de que nadie sume: la arista que se justifica pasando por su
+        # propio nodo entra a las recurrencias como REFUTADA, no con el
+        # numero del ciclo (§ _cycling_edges, invariante 6).
+        for node_key, node in existing.items():
+            spines.spines.setdefault(node_key, node.selected_child)
+        cycling = _cycling_edges(campaign, keys, children, existing, spines)
         create, update, propagate = [], [], []
         for row in positions:
             processed += 1
@@ -555,7 +710,9 @@ def _refresh_campaign(campaign, seeds, max_plies):
             node = existing.get(row.key)
             pn, dn, expanded, selected = compute_numbers(
                 campaign, row, children.get(row.key, ()), existing,
-                previous=None if node is None else node.selected_child)
+                previous=None if node is None else node.selected_child,
+                cycling=cycling)
+            spines.wrote(row.key, selected)    # la cache no se queda vieja
             if node is None:
                 create.append(ProofNode(
                     campaign=campaign, position_id=row.key, pn=pn, dn=dn,
@@ -1001,6 +1158,26 @@ def frontier_and_rows(campaign, limit=PROOF_FRONTIER_SCAN):
             if not is_or_node(row[1], campaign.goal)]
 
 
+def saturated_open_count(campaign=None):
+    """Nodos ABIERTOS con pn o dn saturados: el sintoma visible del ciclo.
+
+    Un ``UNKNOWN`` con un numero en ``PROOF_INFINITY`` es un estado que las
+    recurrencias sanas no producen (dn infinito significa probado, y probado
+    es pn = 0): o es el trinquete de un ciclo (§ invariante 6) o un cierre
+    que la cascada aun no escribio.  El frente los excluye con razon — no hay
+    esfuerzo que estimar en un numero saturado — pero hasta el 6-ago los
+    excluia EN SILENCIO, y 534 nodos rotos desaparecieron de la mediana, del
+    frente mas demostrador y del brazo de reparacion de dn sin que ningun
+    panel los contara.  Este contador es ese "aparte": la poblacion entera,
+    sin tocar la mediana.
+    """
+    rows = ProofNode.objects.filter(position__status='UNKNOWN').filter(
+        Q(pn__gte=PROOF_INFINITY) | Q(dn__gte=PROOF_INFINITY))
+    if campaign is not None:
+        rows = rows.filter(campaign=campaign)
+    return rows.count()
+
+
 def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
     """Salud del frente AND: cuantos son, su ``dn`` MEDIANO y cuantos finos.
 
@@ -1014,15 +1191,22 @@ def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
     ``floor`` es el suelo de reparacion vigente (``ingest.DN_REPAIR_FLOOR``);
     se pasa y no se importa para que la constante viva en UN solo sitio, que
     es donde esta el brazo que la usa.
+
+    ``saturated`` viaja con las tres cifras del frente porque es su
+    contrapartida (§ ``saturated_open_count``): los abiertos que el frente NO
+    mira, contados aparte para que no desaparezcan en silencio.
     """
+    saturated = saturated_open_count(campaign)
     dns = sorted(row[3] for row in frontier_and_rows(campaign, limit=limit))
     if not dns:
-        return {'and_nodes': 0, 'dn_median': 0, 'thin': 0}
+        return {'and_nodes': 0, 'dn_median': 0, 'thin': 0,
+                'saturated': saturated}
     middle = len(dns) // 2
     median = (dns[middle] if len(dns) % 2
               else (dns[middle - 1] + dns[middle]) // 2)
     return {'and_nodes': len(dns), 'dn_median': int(median),
-            'thin': sum(1 for value in dns if value <= floor)}
+            'thin': sum(1 for value in dns if value <= floor),
+            'saturated': saturated}
 
 
 def frontier_dn_headline(floor):

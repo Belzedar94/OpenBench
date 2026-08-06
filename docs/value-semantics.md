@@ -47,6 +47,33 @@ Every position value on the site is in exactly one of four states:
    leaves the argmax stale by strictly less than the epsilon — a real but
    bounded error, and the nightly sweep of invariant 4 is what closes it.
    A cut that could exceed that bound is a bug against this document.
+6. **Position identity erases the counters, so repetition lives in path
+   space, never on a node.** Deduplication canonicalises every FEN to
+   `0 1`; the graph therefore *cannot* say "this position occurred twice"
+   — only a walk can. Every layer that walks values owes the same
+   adjudication at the point of crossing, because a value that justifies
+   itself by passing through its own consumer is a repetition and a
+   repetition is worth a draw:
+   - *backed*: a child whose spine returns to the parent being evaluated
+     contributes a draw, never the number the cycle invents (the
+     2026-08-03 rule);
+   - *proof numbers*: an edge whose primary spine returns to the node
+     being computed contributes `(pn=∞, dn=0)` — a draw refutes a win
+     proposition, PNS is binary — for exactly as long as the spine keeps
+     looping. The moment real progress reroutes the spine, the edge is
+     scored from its child's numbers again. Without this rule the sums
+     feed back through the cycle and ratchet to saturation (the Eclipsia
+     shuttle, 2026-08-06: `dn = 2^62` on open nodes, an impossible
+     `(pn=1, dn=∞)` state);
+   - *explorer*: a displayed line is cut at its first self-crossing, and a
+     route can never re-enter a position it already went through — the
+     crossing move is disabled, an incoming route that contains a crossing
+     is truncated there. Repetitions are switched off, not merely
+     labelled (owner decision, 2026-08-06).
+
+   Open nodes whose pn/dn sit at saturation are *not* frontier (there is
+   no effort left to estimate in a saturated number) but they never leave
+   the books silently: the health panel counts them apart.
 
 ## Ordering (the rule that was wrong until 2026-08-04)
 
@@ -73,6 +100,10 @@ partition anything.
 - Header keeps one summary line (`X searched · Y from lines only · Z
   queued`) and the rare header chip for a node whose *own* displayed eval
   is itself a claim.
+- Repetitions never render as navigable play (invariant 6): a stored PV is
+  shown only up to its first self-crossing, with the established
+  `repetition` chip explaining the cut, and a move that would re-enter the
+  current line renders as a disabled row wearing the same chip.
 
 ## Open questions (seeking the community's preference)
 
