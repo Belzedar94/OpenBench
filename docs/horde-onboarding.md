@@ -79,10 +79,12 @@ following assigned identities:
 - kingless-White and single-Black-king piece constraints, castling and
   en-passant state, move encodings, results and terminal reasons.
 
-Any mismatch aborts the chunk before it can enter the bzip2 or upload path.
-The server's v41 lease and receipt remain the outer transport and publication
-contract; the embedded manifest independently authenticates the uncompressed
-training payload.
+Any validation mismatch aborts the chunk before compression. The compressor
+then hashes the exact bytes streamed into bzip2 and requires their SHA-256 and
+length to match the validated file; replacement or in-place drift removes the
+partial archive and aborts before upload. The server's v41 lease and receipt
+remain the outer transport and publication contract; the embedded manifest
+independently authenticates the uncompressed training payload.
 
 The first preset is exactly two chunks of 250,000 records with campaign
 `horde-v1-run6b-canary-20260806`, workload
