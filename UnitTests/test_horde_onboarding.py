@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HORDE_ENGINE = 'Horde-Stockfish'
 HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
-CLIENT_REF = '32143bd83dcb65b2e33ae2e2a52afc7b0b0d1cb1'
+CLIENT_REF = 'd0f391b3bf6f465c218156e83702200427fd448c'
 
 
 def load_json(path):
