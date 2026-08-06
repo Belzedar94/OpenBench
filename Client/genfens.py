@@ -76,19 +76,35 @@ def genfens_seed(config, N_per_thread, thread_index):
 
 def genfens_command_builder(binary, network, private, N, book, extra_args, seed):
 
-    command = ['./%s' % (binary)]
+    genfens = 'genfens %d seed %d book %s %s' % (N, seed, book, extra_args)
 
-    if network and private:
-        command += ['setoption name EvalFile value %s' % (network)]
+    # Preserve the established command-line contract for public engines. A
+    # private UCI engine must receive setup and generation as separate stdin
+    # commands; argv concatenation turns them into one malformed command.
+    if not private:
+        return (['./%s' % (binary), genfens, 'quit'], None)
 
-    command += ['genfens %d seed %d book %s %s' % (N, seed, book, extra_args), 'quit']
+    lines = []
+    if network:
+        lines.append('setoption name EvalFile value %s' % (network))
+    lines.extend(['isready', genfens, 'quit'])
 
-    return command
+    return (['./%s' % (binary)], ('\n'.join(lines) + '\n').encode('utf-8'))
 
-def genfens_single_threaded(command, queue):
+def genfens_single_threaded(invocation, queue):
 
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        command, command_input = invocation
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if command_input else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        if command_input:
+            process.stdin.write(command_input)
+            process.stdin.close()
 
         for line in iter(process.stdout.readline, b''):
             if line.decode('utf-8').startswith('info string genfens '):
