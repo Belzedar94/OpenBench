@@ -23,7 +23,9 @@ OpenBench worker stdout contract honored here (see docs in repo):
 CLI: accepts the cutechess flag set the worker builds (-repeat -recover
 -variant -concurrency -games -resign -draw -engine ... -openings ... -srand
 -pgnout ...) plus -each, and ignores with a stderr warning whatever does not
-apply. UCI option names may contain spaces because the worker passes a real
+apply. Adding shadow=true to -resign or -draw records the first virtual
+adjudication, continues the game, and stores the comparison with the final
+result. UCI option names may contain spaces because the worker passes a real
 argv list to the runner.
 
 Example (local smoke):
@@ -381,6 +383,9 @@ class Outcome:
         self.restart = restart          # engines must be rebooted after game
         self.moves = []                 # [(uci, comment_str)]
         self.plies = 0
+        self.shadow_enabled = False
+        self.shadow = None               # {result, ply, kind} or None
+        self.shadow_inversion = False
 
 
 def _fen_fields(fen):
@@ -420,6 +425,7 @@ def play_game(white, black, fen, cfg):
     resign_cnt = {white: 0, black: 0}
     draw_cnt = 0
     adj_streak, adj_leader = 0, 0
+    shadow = None
     moves = []
     record = []
     stm0, _ = _fen_fields(fen)
@@ -428,7 +434,18 @@ def play_game(white, black, fen, cfg):
         out = Outcome(result, reason, termination, restart)
         out.moves = record
         out.plies = len(record)
+        out.shadow_enabled = cfg.shadow_adjudication
+        out.shadow = shadow
+        out.shadow_inversion = bool(shadow and shadow["result"] != result)
         return out
+
+    def shadow_or_finish(result, reason, kind):
+        nonlocal shadow
+        if not cfg.shadow_adjudication:
+            return finish(result, reason, "adjudication")
+        if shadow is None:
+            shadow = {"result": result, "ply": len(record), "kind": kind}
+        return None
 
     def side_of(eng):
         return "White" if eng is white else "Black"
@@ -530,9 +547,13 @@ def play_game(white, black, fen, cfg):
                 resign_cnt[eng] += 1
                 if resign_cnt[eng] >= cfg.resign["movecount"]:
                     winner = black if stm_is_white else white
-                    return finish("0-1" if stm_is_white else "1-0",
-                                  "%s wins by adjudication" % side_of(winner),
-                                  "adjudication")
+                    outcome = shadow_or_finish(
+                        "0-1" if stm_is_white else "1-0",
+                        "%s wins by adjudication" % side_of(winner),
+                        "resign",
+                    )
+                    if outcome:
+                        return outcome
 
         # ---- draw adjudication (cutechess -draw movenumber=N movecount=M
         # score=S: after move N, both sides within +/-S for M moves each)
@@ -546,8 +567,11 @@ def play_game(white, black, fen, cfg):
             # (plyCount >= 2*movenumber), not the FEN fullmove counter
             if (draw_cnt >= 2 * cfg.draw["movecount"]
                     and ply + 1 >= 2 * cfg.draw["movenumber"]):
-                return finish("1/2-1/2", "Draw by adjudication",
-                              "adjudication")
+                outcome = shadow_or_finish(
+                    "1/2-1/2", "Draw by adjudication", "draw"
+                )
+                if outcome:
+                    return outcome
 
         # ---- optional symmetric adjudication (local probes): both engines
         # agree on a |score| >= adj_cp leader for adj_plies consecutive plies
@@ -557,10 +581,14 @@ def play_game(white, black, fen, cfg):
             adj_leader = side
             if adj_streak >= cfg.adj_plies or (
                     abs(score) >= MATE_ISH and adj_streak >= 2):
-                return finish("1-0" if adj_leader > 0 else "0-1",
-                              "%s wins by adjudication"
-                              % ("White" if adj_leader > 0 else "Black"),
-                              "adjudication")
+                outcome = shadow_or_finish(
+                    "1-0" if adj_leader > 0 else "0-1",
+                    "%s wins by adjudication"
+                    % ("White" if adj_leader > 0 else "Black"),
+                    "symmetric",
+                )
+                if outcome:
+                    return outcome
         elif cfg.adj_cp:
             adj_streak, adj_leader = 0, 0
 
@@ -596,6 +624,21 @@ def write_pgn(
     ]
     if outcome.termination != "normal":
         headers.append(("Termination", outcome.termination))
+    if outcome.shadow_enabled:
+        if outcome.shadow:
+            headers.append((
+                "ShadowAdjudication",
+                "%s at ply %d by %s" % (
+                    outcome.shadow["result"],
+                    outcome.shadow["ply"],
+                    outcome.shadow["kind"],
+                ),
+            ))
+        else:
+            headers.append(("ShadowAdjudication", "none"))
+        headers.append((
+            "ShadowInversion", "true" if outcome.shadow_inversion else "false"
+        ))
 
     tokens = []
     ply = 0 if stm0 == "w" else 1
@@ -685,6 +728,7 @@ def parse_cli(argv):
     cfg.pgnout = None
     cfg.resign = None
     cfg.draw = None
+    cfg.shadow_adjudication = False
     cfg.max_plies = 900
     cfg.stall_draw_cp = 800
     cfg.adj_cp = 0
@@ -709,10 +753,12 @@ def parse_cli(argv):
             elif flag == "-resign":
                 cfg.resign = {"movecount": int(d.get("movecount", 3)),
                               "score": int(d.get("score", 400))}
+                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
             elif flag == "-draw":
                 cfg.draw = {"movenumber": int(d.get("movenumber", 40)),
                             "movecount": int(d.get("movecount", 8)),
                             "score": int(d.get("score", 10))}
+                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
             elif flag == "-sprt":
                 warn("-sprt ignored (the server computes SPRT from batches)")
             continue
@@ -867,19 +913,23 @@ def main():
         jobs.put(p)
 
     lock = threading.Lock()
-    tally = {"w": 0, "l": 0, "d": 0, "n": 0}
+    tally = {"w": 0, "l": 0, "d": 0, "n": 0,
+             "shadow": 0, "inversions": 0}
     pair_scores = {}   # pair -> {game_in_pair: dev_score 0/1/2}
     penta = [0, 0, 0, 0, 0]
     res_lookup = {"0-1": 0, "1/2-1/2": 1, "1-0": 2}
     tc_label = "%s / %s" % (dev.tc.label, base.tc.label) \
         if dev.tc.label != base.tc.label else dev.tc.label
 
-    def account(game_no, result):
+    def account(game_no, outcome):
         """Update dev-POV tallies and pentanomial under the lock."""
+        result = outcome.result
         odd = game_no % 2 == 1
         dev_score = res_lookup[result] if odd else 2 - res_lookup[result]
         tally["n"] += 1
         tally["w" if dev_score == 2 else "d" if dev_score == 1 else "l"] += 1
+        tally["shadow"] += bool(outcome.shadow)
+        tally["inversions"] += outcome.shadow_inversion
         p = (game_no - 1) // 2
         slot = pair_scores.setdefault(p, {})
         slot[game_no] = dev_score
@@ -941,11 +991,22 @@ def main():
                         "%s disconnects"
                         % ("White" if culprit_white else "Black"),
                         "abandoned", restart=True)
+                    outcome.shadow_enabled = cfg.shadow_adjudication
+                display_reason = outcome.reason
+                if outcome.shadow_enabled:
+                    if outcome.shadow:
+                        display_reason += (
+                            "; shadow %s at ply %d by %s; inversion=%d"
+                            % (outcome.shadow["result"], outcome.shadow["ply"],
+                               outcome.shadow["kind"], outcome.shadow_inversion)
+                        )
+                    else:
+                        display_reason += "; shadow none; inversion=0"
                 emit("Finished game %d (%s vs %s): %s {%s}"
                      % (g, wspec.name, bspec.name, outcome.result,
-                        outcome.reason))
+                        display_reason))
                 with lock:
-                    account(g, outcome.result)
+                    account(g, outcome)
                     w, l, d, n = (tally["w"], tally["l"], tally["d"],
                                   tally["n"])
                 emit("Score of %s vs %s: %d - %d - %d  [%.3f] %d"
@@ -994,9 +1055,10 @@ def main():
 
     elo, los = elo_stats(tally["w"], tally["l"], tally["d"])
     emit("Finished match: %s vs %s: %d - %d - %d penta [%d,%d,%d,%d,%d] "
-         "elo %+.1f los %.1f%%"
+         "elo %+.1f los %.1f%% shadow %d inversions %d"
          % (dev.name, base.name, tally["w"], tally["l"], tally["d"],
-            penta[0], penta[1], penta[2], penta[3], penta[4], elo, los))
+            penta[0], penta[1], penta[2], penta[3], penta[4], elo, los,
+            tally["shadow"], tally["inversions"]))
     sys.stdout.close()
     sys.exit(0)
 

@@ -76,7 +76,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 41 # Client version to send to the Server
+CLIENT_VERSION   = 44 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -979,6 +979,13 @@ class PGNHelper:
 
     @staticmethod
     def get_error_reason(sliced_headers):
+
+        shadow_inversion = PGNHelper.get_pgn_header(
+            sliced_headers, 'ShadowInversion'
+        )
+
+        if shadow_inversion == 'true':
+            return 'Shadow Adjudication Inversion'
 
         reason = PGNHelper.get_pgn_header(sliced_headers, 'Termination')
 

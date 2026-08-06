@@ -519,6 +519,18 @@ def game_distribution(test, machine):
     if machine.info['physical_cores'] < worker_threads and dev_threads != base_threads:
         worker_threads = worker_threads // 2
 
+    # An engine may deliberately use only part of a worker without changing
+    # the worker's registered concurrency. This keeps low-priority or
+    # validation workloads bounded while other engines retain full capacity.
+    configured_worker_limits = [
+        OPENBENCH_CONFIG['engines'][engine].get('worker_max_concurrency', 0)
+        for engine in [test.dev_engine, test.base_engine]
+    ]
+    configured_worker_limits = [limit for limit in configured_worker_limits if limit]
+    if configured_worker_limits:
+        worker_threads = min(worker_threads, min(configured_worker_limits))
+        worker_sockets = min(worker_sockets, worker_threads)
+
     # Ignore sockets for concurrent cutechess, when playing with more than one thread
     if max(dev_threads, base_threads) > 1:
         worker_sockets = 1

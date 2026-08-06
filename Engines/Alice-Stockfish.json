@@ -2,6 +2,7 @@
     "private": false,
     "nps": 50000,
     "source": "https://github.com/Belzedar94/Alice-Stockfish",
+    "worker_max_concurrency": 8,
     "cutechess_max_concurrency": 2,
     "cutechess_launch_stagger_ms": 500,
 
@@ -14,7 +15,7 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "5b89c5944c9d6627121257f474a1674c18f2f5db",
+            "base_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
             "both_bench": 162582,
             "both_network": "alice_run2rl_e40_l09.nnue",
             "book_name": "ALICE_openings.epd",
@@ -43,12 +44,42 @@
             "both_options": "Threads=1 Hash=128 \"Use NNUE=true\"",
             "both_time_control": "30.0+0.3",
             "workload_size": 8
+        },
+
+        "VSTC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=16 \"Use NNUE=true\"",
+            "both_time_control": "2.0+0.02",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
+        },
+
+        "STC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=32 \"Use NNUE=true\"",
+            "both_time_control": "10.0+0.1",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
+        },
+
+        "LTC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=128 \"Use NNUE=true\"",
+            "both_time_control": "30.0+0.3",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
         }
     },
 
     "tune_presets": {
         "default": {
-            "dev_branch": "5b89c5944c9d6627121257f474a1674c18f2f5db",
+            "dev_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
             "dev_bench": 162582,
             "dev_network": "alice_run2rl_e40_l09.nnue",
             "book_name": "ALICE_openings.epd",

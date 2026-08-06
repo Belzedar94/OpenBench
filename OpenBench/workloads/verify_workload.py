@@ -233,13 +233,19 @@ def verify_time_control(errors, request, field, field_name):
 def verify_win_adj(errors, request, field):
     try:
         if (content := request.POST[field]) == 'None': return
-        assert re.match('movecount=[0-9]+ score=[0-9]+', content)
+        assert re.fullmatch(
+            r'movecount=[0-9]+ score=[0-9]+(?: shadow=true)?', content
+        )
     except: errors.append('Invalid Win Adjudication Setting. Try "None"?')
 
 def verify_draw_adj(errors, request, field):
     try:
         if (content := request.POST[field]) == 'None': return
-        assert re.match('movenumber=[0-9]+ movecount=[0-9]+ score=[0-9]+', content)
+        assert re.fullmatch(
+            r'movenumber=[0-9]+ movecount=[0-9]+ score=[0-9]+'
+            r'(?: shadow=true)?',
+            content,
+        )
     except: errors.append('Invalid Draw Adjudication Setting. Try "None"?')
 
 def verify_github_repo(errors, request, field):
