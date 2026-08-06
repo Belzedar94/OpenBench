@@ -43,7 +43,7 @@ class AtomicOnboardingTests(unittest.TestCase):
     def test_engines_and_books_are_registered(self):
         self.assertEqual(
             self.general["client_repo_ref"],
-            "175b59a2c468ff4b88fc961a448bdda06f4e633e",
+            "949fa367d0d2b636ed72c0243f441245ad4fcd1e",
         )
         self.assertIn("Atomic-Stockfish", self.general["engines"])
         self.assertIn("Fairy-Stockfish-Atomic-Baseline", self.general["engines"])
@@ -88,7 +88,7 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.assertEqual(defaults["base_branch"], "main")
         self.assertEqual(defaults["both_bench"], 338376)
         self.assertEqual(defaults["both_network"], NETWORK)
-        self.assertEqual(defaults["test_bounds"], "[1.00, 6.00]")
+        self.assertEqual(defaults["test_bounds"], "[1.00, 4.00]")
         self.assertEqual(defaults["win_adj"], "movecount=4 score=800")
         self.assertEqual(defaults["draw_adj"], "movenumber=40 movecount=8 score=10")
 
