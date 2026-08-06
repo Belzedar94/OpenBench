@@ -137,19 +137,44 @@ class CycleRuleTests(ShuttleFixture):
                 return True
         return False
 
-    def test_poisoned_shuttle_drains_to_finite_fixpoint(self):
+    def test_poisoned_shuttle_drains_to_a_fixpoint(self):
+        """El trinquete muere, y cada bando acaba donde le toca.
+
+        Lo que se arregla es la REALIMENTACION, no el veredicto: los dos
+        nodos OR (mueve el atacante) vuelven a numeros finitos apoyados en su
+        desviacion honesta, y los dos nodos AND — donde la unica respuesta
+        del defensor que no pierde es la repeticion — quedan REFUTADOS
+        (INF, 0), que es exactamente lo que significa poder repetir.  Un
+        ``pn`` infinito no es el sintoma: el sintoma era el ``dn`` creciendo
+        sin tope pasada tras pasada.
+        """
         self._poison()
         seeds = [self.a.key, self.b.key, self.c.key, self.d.key]
         self.assertTrue(self._refresh_until_fixpoint(seeds),
                         'el trinquete no llego a punto fijo')
-        for node in (self.a, self.b, self.c, self.d):
+        for node in (self.a, self.c):          # OR: mueve el atacante
             pn, dn, _sel = self._numbers(node)
             self.assertLess(pn, INF, node.key)
             self.assertLess(dn, INF, node.key)
+        for node in (self.b, self.d):          # AND: el defensor repite
+            pn, dn, _sel = self._numbers(node)
+            self.assertEqual((pn, dn), (INF, 0), node.key)
         # La desviacion honesta manda: el primario de A ya no es el ciclo.
         self.assertEqual(self._numbers(self.a)[2], 'd2d4')
         # Y el punto fijo es punto fijo: otra pasada no escribe nada.
         self.assertEqual(proof.refresh_proof_numbers(seeds), 0)
+
+    def test_the_dn_ratchet_is_dead(self):
+        """La regresion exacta del caso: antes de la regla, el dn del nodo
+        de entrada crecia en CADA pasada (+48 medido en esta misma fixture) y
+        no paraba hasta saturar.  Ahora se queda quieto."""
+        self._poison()
+        seeds = [self.a.key, self.b.key, self.c.key, self.d.key]
+        self._refresh_until_fixpoint(seeds)
+        before = self._numbers(self.a)[1]
+        for _ in range(6):
+            proof.refresh_proof_numbers(seeds)
+        self.assertEqual(self._numbers(self.a)[1], before)
 
     def test_fresh_component_does_not_ratchet(self):
         """La regresion del caso: sin veneno previo, el componente converge y
@@ -174,6 +199,11 @@ class CycleRuleTests(ShuttleFixture):
         chain = [_pos(f'CAP-{i}', 'b' if i % 2 == 0 else 'w')
                  for i in range(proof.PROOF_CYCLE_MAX_PLIES + 2)]
         _edge(parent, chain[0], 'a1a2')
+        # El padre tiene fila, como en produccion: sin un valor previo
+        # persistido no hay nada que pueda volver a entrar en si mismo.
+        ProofNode.objects.create(
+            campaign=self.campaign, position_id=parent.key, pn=1, dn=1,
+            selected_child='a1a2')
         ProofNode.objects.create(
             campaign=self.campaign, position_id=chain[0].key, pn=1, dn=1,
             selected_child='b1b2')
@@ -197,6 +227,9 @@ class CycleRuleTests(ShuttleFixture):
         chain = [_pos(f'SHORT-{i}', 'b' if i % 2 == 0 else 'w')
                  for i in range(4)]
         _edge(parent, chain[0], 'a1a2')
+        ProofNode.objects.create(
+            campaign=self.campaign, position_id=parent.key, pn=1, dn=1,
+            selected_child='a1a2')
         ProofNode.objects.create(
             campaign=self.campaign, position_id=chain[0].key, pn=1, dn=1,
             selected_child='b1b2')
@@ -228,9 +261,26 @@ class SaturationVisibilityTests(ShuttleFixture):
             pn=0, dn=INF)
         self.assertEqual(proof.saturated_open_count(self.campaign), 4)
 
-    def test_frontier_stats_carry_the_saturated_count(self):
+    def test_the_two_columns_are_counted_separately(self):
+        """dn saturado en un abierto es imposible (el sintoma); pn saturado
+        es corriente y honesto.  Sumarlos seria llorar por la regla nueva."""
+        self._poison()          # los cuatro llevan dn = INF, pn = 1
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='dn'), 4)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='pn'), 0)
+        ProofNode.objects.filter(
+            campaign=self.campaign, position_id=self.b.key).update(
+            pn=INF, dn=0)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='dn'), 3)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='pn'), 1)
+
+    def test_frontier_stats_carry_the_alarming_count(self):
         self._poison()
         stats = proof.frontier_dn_stats(self.campaign, floor=2)
+        # La cifra publicada es la que alarma: el dn imposible.
         self.assertEqual(stats['saturated'], 4)
         # Y los saturados siguen FUERA de la mediana, como siempre.
         self.assertEqual(stats['and_nodes'], 0)
@@ -238,19 +288,18 @@ class SaturationVisibilityTests(ShuttleFixture):
 
 class RecascadeProofCommandTests(ShuttleFixture):
 
-    def test_command_drains_the_poison_and_reports_a_fixpoint(self):
+    def test_command_drains_the_dn_ratchet_and_reports_both_columns(self):
         self._poison()
         out = StringIO()
         call_command('recascade_proof', '--max-passes', '8', stdout=out)
         text = out.getvalue()
-        self.assertIn('abiertos saturados antes: 4', text)
-        # Dos finales legitimos: nada cambio (punto fijo) o nada saturado
-        # quedo que sembrar — el objetivo del comando es lo segundo, y el
-        # residuo de asentamiento lo absorbe el trafico normal.
-        self.assertTrue('punto fijo' in text
-                        or 'nada saturado que sembrar' in text, text)
-        self.assertIn('abiertos saturados despues: 0', text)
-        self.assertEqual(proof.saturated_open_count(), 0)
+        self.assertIn('abiertos saturados antes: dn=4', text)
+        self.assertIn('punto fijo', text)
+        # Lo que TIENE que irse es el dn imposible.  El pn que queda es la
+        # refutacion por repeticion de los nodos AND, que es el resultado
+        # correcto y no un residuo (§ CycleRuleTests).
+        self.assertEqual(proof.saturated_open_count(column='dn'), 0)
+        self.assertEqual(proof.saturated_open_count(column='pn'), 2)
 
     def test_command_with_nothing_to_do_says_so(self):
         out = StringIO()

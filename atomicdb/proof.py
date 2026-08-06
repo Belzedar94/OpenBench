@@ -1196,21 +1196,36 @@ def frontier_and_rows(campaign, limit=PROOF_FRONTIER_SCAN):
             if not is_or_node(row[1], campaign.goal)]
 
 
-def saturated_open_count(campaign=None):
-    """Nodos ABIERTOS con pn o dn saturados: el sintoma visible del ciclo.
+def saturated_open_count(campaign=None, column=None):
+    """Nodos ABIERTOS con pn o dn saturados, contados aparte del frente.
 
-    Un ``UNKNOWN`` con un numero en ``PROOF_INFINITY`` es un estado que las
-    recurrencias sanas no producen (dn infinito significa probado, y probado
-    es pn = 0): o es el trinquete de un ciclo (§ invariante 6) o un cierre
-    que la cascada aun no escribio.  El frente los excluye con razon — no hay
-    esfuerzo que estimar en un numero saturado — pero hasta el 6-ago los
-    excluia EN SILENCIO, y 534 nodos rotos desaparecieron de la mediana, del
-    frente mas demostrador y del brazo de reparacion de dn sin que ningun
-    panel los contara.  Este contador es ese "aparte": la poblacion entera,
-    sin tocar la mediana.
+    El frente los excluye con razon — no hay esfuerzo que estimar en un
+    numero saturado — pero hasta el 6-ago los excluia EN SILENCIO, y 534
+    nodos con dn saturado desaparecieron de la mediana, del frente mas
+    demostrador y del brazo de reparacion de dn sin que ningun panel los
+    contara.  Este contador es ese "aparte".
+
+    LAS DOS COLUMNAS NO SIGNIFICAN LO MISMO y por eso se pueden pedir
+    sueltas:
+
+    * ``dn`` saturado en un nodo ABIERTO es IMPOSIBLE para las recurrencias
+      sanas — dn infinito significa probado, y probado es pn = 0 — asi que
+      es el sintoma: o el trinquete de un ciclo (§ invariante 6) o un cierre
+      que la cascada todavia debe.  Esta es la cifra que alarma.
+    * ``pn`` saturado es corriente y honesto: dice "por aqui no se prueba el
+      objetivo", que es lo que vale un nodo con todas sus continuaciones
+      refutadas — incluida la refutacion POR REPETICION que introduce el
+      invariante 6.  Contarlo como avería seria llorar por la regla nueva
+      haciendo su trabajo.
     """
-    rows = ProofNode.objects.filter(position__status='UNKNOWN').filter(
-        Q(pn__gte=PROOF_INFINITY) | Q(dn__gte=PROOF_INFINITY))
+    rows = ProofNode.objects.filter(position__status='UNKNOWN')
+    if column == 'dn':
+        rows = rows.filter(dn__gte=PROOF_INFINITY)
+    elif column == 'pn':
+        rows = rows.filter(pn__gte=PROOF_INFINITY)
+    else:
+        rows = rows.filter(
+            Q(pn__gte=PROOF_INFINITY) | Q(dn__gte=PROOF_INFINITY))
     if campaign is not None:
         rows = rows.filter(campaign=campaign)
     return rows.count()
@@ -1232,9 +1247,11 @@ def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
 
     ``saturated`` viaja con las tres cifras del frente porque es su
     contrapartida (§ ``saturated_open_count``): los abiertos que el frente NO
-    mira, contados aparte para que no desaparezcan en silencio.
+    mira, contados aparte para que no desaparezcan en silencio.  Se da la
+    cifra que ALARMA — el ``dn`` imposible — y no la suma de las dos, que
+    estaria dominada por los ``pn`` honestos.
     """
-    saturated = saturated_open_count(campaign)
+    saturated = saturated_open_count(campaign, column='dn')
     dns = sorted(row[3] for row in frontier_and_rows(campaign, limit=limit))
     if not dns:
         return {'and_nodes': 0, 'dn_median': 0, 'thin': 0,
