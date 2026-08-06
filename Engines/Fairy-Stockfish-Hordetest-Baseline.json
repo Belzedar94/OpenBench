@@ -2,7 +2,7 @@
     "onboarding_ready": false,
     "private": true,
     "nps": 1,
-    "source": "https://github.com/Belzedar94/Fairy-Stockfish",
+    "source": "https://github.com/Belzedar94/Horde-Stockfish",
     "variant_contract": "LICHESS_HORDE_V1",
 
     "build": {
@@ -13,7 +13,7 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "master",
+            "base_branch": "8e59ad87c33302197facc1a61a542aebf6cc0c9f",
             "book_name": "HORDE_openings.epd",
             "upload_pgns": "TRUE",
             "win_adj": "None",

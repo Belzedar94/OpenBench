@@ -9,6 +9,7 @@ HORDE_ENGINE = 'Horde-Stockfish'
 HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
 CLIENT_REF = 'd0f391b3bf6f465c218156e83702200427fd448c'
+BASELINE_REF = '8e59ad87c33302197facc1a61a542aebf6cc0c9f'
 
 
 def load_json(path):
@@ -52,6 +53,14 @@ class HordeOnboardingTests(unittest.TestCase):
         )
         self.assertEqual(
             self.baseline['build']['artifact_roles'], ['play']
+        )
+        self.assertEqual(
+            self.baseline['source'],
+            'https://github.com/Belzedar94/Horde-Stockfish',
+        )
+        self.assertEqual(
+            self.baseline['test_presets']['default']['base_branch'],
+            BASELINE_REF,
         )
 
     def test_foundational_presets_are_fixed_games_at_three_time_controls(self):
