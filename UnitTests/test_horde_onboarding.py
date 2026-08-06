@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,8 @@ HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
 CLIENT_REF = 'd0f391b3bf6f465c218156e83702200427fd448c'
 BASELINE_REF = '0b064616041012eb9a708989d3b6b0a165d5538a'
+BOOK_ARTIFACT_REF = 'cd0560081f6433b58a8aa8d0c3fd4a91e969f1dd'
+BOOK_SHA256 = '93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958'
 
 
 def load_json(path):
@@ -35,10 +38,30 @@ class HordeOnboardingTests(unittest.TestCase):
         self.assertNotIn(HORDE_BOOK, self.general['books'])
         self.assertFalse(self.engine['onboarding_ready'])
         self.assertFalse(self.baseline['onboarding_ready'])
-        self.assertFalse(self.book['onboarding_ready'])
-        self.assertTrue(self.book['sha'].startswith('PENDING_'))
-        self.assertTrue(self.book['raw_sha'].startswith('PENDING_'))
-        self.assertTrue(self.book['source'].startswith('PENDING_'))
+        self.assertTrue(self.book['onboarding_ready'])
+        self.assertEqual(self.book['sha'], BOOK_SHA256)
+        self.assertEqual(self.book['raw_sha'], BOOK_SHA256)
+        self.assertEqual(
+            self.book['source'],
+            'https://raw.githubusercontent.com/Belzedar94/OpenBench/'
+            + BOOK_ARTIFACT_REF
+            + '/Books/HORDE_openings.epd.zip',
+        )
+
+    def test_horde_book_archive_is_exact_and_single_file(self):
+        archive = ROOT / 'Books' / 'HORDE_openings.epd.zip'
+        self.assertEqual(
+            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            '556b8bd549dc22797238268f9737c6a1f074a82f4cae2f4d62005ffbac6ccd18',
+        )
+        with zipfile.ZipFile(archive) as container:
+            self.assertEqual(container.namelist(), ['HORDE_openings.epd'])
+            payload = container.read('HORDE_openings.epd')
+        self.assertEqual(len(payload), 196008)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), BOOK_SHA256)
+        lines = payload.decode('ascii').splitlines()
+        self.assertEqual(len(lines), 2486)
+        self.assertEqual(len(set(lines)), 1431)
 
     def test_private_engine_contracts_are_native_and_role_separated(self):
         self.assertTrue(self.engine['private'])
