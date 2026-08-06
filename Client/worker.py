@@ -76,7 +76,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 41 # Client version to send to the Server
+CLIENT_VERSION   = 44 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -649,6 +649,7 @@ class ServerReporter:
 
 VARIANTS = {
     'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'HORDE'    : ('cutechess'      , 'horde'       ),
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
     'FRC'      : ('cutechess'      , 'fischerandom'),
@@ -661,8 +662,19 @@ VARIANTS = {
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
+    'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
+    'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
+}
+
+VARIANT_CONTRACTS = {
+    'standard'      : ('cutechess'      , 'standard'    ),
+    'spell-chess'   : ('uci-pair-runner', 'spell-chess' ),
+    'horde'         : ('cutechess'      , 'horde'       ),
+    'shatranj'      : ('cutechess'      , 'shatranj'    ),
+    'atomic'        : ('cutechess'      , 'atomic'      ),
+    'fischerandom'  : ('cutechess'      , 'fischerandom'),
 }
 
 # Pair-runner script distributed alongside worker.py, inside Client/. The
@@ -670,22 +682,57 @@ ENGINE_VARIANTS = {
 # name is always resolvable here.
 UCI_PAIR_RUNNER = 'uci_pair_runner.py'
 
-def variant_routing(config):
 
-    # Returns (runner, variant_id), inferred from the Opening Book name
+class VariantRoutingError(RuntimeError):
+    pass
+
+
+def inferred_variant_routing(config):
+
     book_name = config.workload['test']['book']['name'].upper()
 
-    for token, (runner, variant_id) in VARIANTS.items():
+    for token, route in VARIANTS.items():
         if token in book_name:
-            return (runner, variant_id)
+            return route
 
-    # No token in the book name (e.g. DATAGEN's book='None'): fall back to
-    # the dev engine's registered variant
     dev_engine = config.workload['test']['dev']['engine'].upper()
-    if dev_engine in ENGINE_VARIANTS:
-        return ENGINE_VARIANTS[dev_engine]
+    return ENGINE_VARIANTS.get(dev_engine)
 
-    return ('cutechess', 'standard')
+def variant_routing(config):
+
+    # New servers propagate one explicit semantic contract and duplicate it on
+    # both engine records for diagnostics. Reject disagreement instead of ever
+    # letting a Horde workload fall through to orthodox arbitration.
+    test = config.workload['test']
+    declared = [
+        test.get('variant_contract'),
+        test['dev'].get('variant_contract'),
+        test.get('base', {}).get('variant_contract'),
+    ]
+    declared = {value for value in declared if value is not None}
+
+    if len(declared) > 1:
+        raise VariantRoutingError(
+            'Workload carries conflicting variant contracts: %s'
+            % ', '.join(sorted(declared))
+        )
+
+    inferred = inferred_variant_routing(config)
+    if declared:
+        contract = next(iter(declared))
+        if contract not in VARIANT_CONTRACTS:
+            raise VariantRoutingError(
+                'Unsupported variant contract: %s' % contract
+            )
+        explicit = VARIANT_CONTRACTS[contract]
+        if inferred is not None and inferred != explicit:
+            raise VariantRoutingError(
+                'Variant contract %s conflicts with inferred route %s/%s'
+                % (contract, inferred[0], inferred[1])
+            )
+        return explicit
+
+    return inferred or ('cutechess', 'standard')
 
 def runner_base_command(config):
 
@@ -2826,12 +2873,6 @@ def safe_download_engine(config, branch, net_path):
     )
     build_role = 'datagen' if generic_datagen else 'play'
 
-    if generic_datagen and private:
-        raise DatagenConfigurationError(
-            'Generic DATAGEN does not support private engine artifacts: '
-            'their artifact metadata has no play/data-generator role'
-        )
-
     bin_name = engine_binary_name(
         engine, commit_sha, net_path, private, build_role
     )
@@ -2839,9 +2880,25 @@ def safe_download_engine(config, branch, net_path):
 
     if private:
 
+        artifact_roles = config.workload['test'][branch]['build'].get(
+            'artifact_roles', ['play']
+        )
+        if build_role not in artifact_roles:
+            raise DatagenConfigurationError(
+                'Private engine %s does not publish a %s artifact role'
+                % (engine, build_role)
+            )
+
         try:
             return download_private_engine(
-                engine, branch_name, source, out_path, config.cpu_name, config.cpu_flags)
+                engine,
+                branch_name,
+                source,
+                out_path,
+                config.cpu_name,
+                config.cpu_flags,
+                build_role,
+            )
 
         except OpenBenchMissingArtifactException as error:
             ServerReporter.report_missing_artifact(config, branch, error.name, error.logs)

@@ -41,22 +41,94 @@ class FakeProcess:
         return self.returncode
 
 
-def routing_config(book, dev_stagger_ms=0, base_stagger_ms=0):
-    return SimpleNamespace(
-        workload={
-            "test": {
-                "book": {"name": book},
-                "dev": {
-                    "engine": "Atomic-Stockfish",
-                    "cutechess_launch_stagger_ms": dev_stagger_ms,
-                },
-                "base": {
-                    "engine": "Fairy-Stockfish-Atomic-Baseline",
-                    "cutechess_launch_stagger_ms": base_stagger_ms,
-                },
-            }
-        }
-    )
+def routing_config(
+    book,
+    dev_stagger_ms=0,
+    base_stagger_ms=0,
+    dev_engine="Atomic-Stockfish",
+    base_engine="Fairy-Stockfish-Atomic-Baseline",
+    variant_contract=None,
+):
+    test = {
+        "type": "TEST",
+        "book": {"name": book},
+        "dev": {
+            "engine": dev_engine,
+            "cutechess_launch_stagger_ms": dev_stagger_ms,
+        },
+        "base": {
+            "engine": base_engine,
+            "cutechess_launch_stagger_ms": base_stagger_ms,
+        },
+    }
+    if variant_contract is not None:
+        test["variant_contract"] = variant_contract
+        test["dev"]["variant_contract"] = variant_contract
+        test["base"]["variant_contract"] = variant_contract
+    return SimpleNamespace(workload={"test": test})
+
+
+class HordeVariantRoutingTests(unittest.TestCase):
+
+    def test_horde_book_routes_to_native_cutechess(self):
+        config = routing_config(
+            "HORDE_openings.epd",
+            dev_engine="Horde-Stockfish",
+            base_engine="Fairy-Stockfish-Hordetest-Baseline",
+        )
+        self.assertEqual(worker.variant_routing(config), ("cutechess", "horde"))
+        self.assertIn("-variant horde", worker.Cutechess.basic_settings(config))
+
+    def test_both_horde_engine_names_route_without_a_book_token(self):
+        for engine in (
+            "Horde-Stockfish",
+            "Fairy-Stockfish-Hordetest-Baseline",
+        ):
+            with self.subTest(engine=engine):
+                config = routing_config(
+                    "None", dev_engine=engine, base_engine=engine
+                )
+                self.assertEqual(
+                    worker.variant_routing(config), ("cutechess", "horde")
+                )
+
+    def test_explicit_horde_contract_routes_without_name_inference(self):
+        config = routing_config(
+            "openings.epd",
+            dev_engine="PrivateDev",
+            base_engine="PrivateBase",
+            variant_contract="horde",
+        )
+        self.assertEqual(worker.variant_routing(config), ("cutechess", "horde"))
+
+    def test_horde_contract_rejects_an_atomic_book(self):
+        config = routing_config(
+            "ATOMIC_openings.epd",
+            dev_engine="Horde-Stockfish",
+            base_engine="Fairy-Stockfish-Hordetest-Baseline",
+            variant_contract="horde",
+        )
+        with self.assertRaisesRegex(
+            worker.VariantRoutingError, "conflicts with inferred route"
+        ):
+            worker.variant_routing(config)
+
+    def test_conflicting_side_contracts_are_rejected(self):
+        config = routing_config("HORDE_openings.epd")
+        config.workload["test"]["dev"]["variant_contract"] = "horde"
+        config.workload["test"]["base"]["variant_contract"] = "atomic"
+        with self.assertRaisesRegex(
+            worker.VariantRoutingError, "conflicting variant contracts"
+        ):
+            worker.variant_routing(config)
+
+    def test_unknown_workload_preserves_standard_fallback(self):
+        config = routing_config(
+            "openings.epd", dev_engine="UnknownDev", base_engine="UnknownBase"
+        )
+        self.assertEqual(
+            worker.variant_routing(config), ("cutechess", "standard")
+        )
 
 
 class CutechessLaunchStaggerTests(unittest.TestCase):

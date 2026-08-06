@@ -157,6 +157,23 @@ def engine_tablebase_family(engine):
         'tablebase_family', 'standard'
     )
 
+
+def engine_variant_contract(engine):
+
+    return OPENBENCH_CONFIG['engines'][engine].get('variant_contract')
+
+
+def workload_variant_contract(workload):
+
+    dev_contract = engine_variant_contract(workload.dev_engine)
+    base_contract = engine_variant_contract(workload.base_engine)
+    if dev_contract != base_contract:
+        raise ValueError(
+            'Engine variant contracts disagree: %s != %s'
+            % (dev_contract, base_contract)
+        )
+    return dev_contract
+
 def machine_tablebase_manifest(machine, family):
 
     capability = machine.info.get('tablebases', {}).get(family, {})
@@ -294,6 +311,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'upload_pgns'   : test.upload_pgns,
         'genfens_args'  : test.genfens_args,
         'play_reverses' : test.play_reverses,
+        'variant_contract': workload_variant_contract(test),
     }
 
     publication_datagen = (
@@ -340,6 +358,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.dev_engine),
+        'variant_contract' : engine_variant_contract(test.dev_engine),
     }
     if publication_datagen:
         workload['test']['dev'].update({
@@ -365,6 +384,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.base_engine),
+        'variant_contract' : engine_variant_contract(test.base_engine),
     }
 
     if is_generic_datagen(test):

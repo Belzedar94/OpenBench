@@ -196,10 +196,21 @@ function retain_specific_options(engine, preset, workload_type) {
 
     set_option('base_options', base_options);
 
-    // Retain the base engine's original base_branch, instead of leeting the dev engine override
+    // Retain the base engine's immutable identity fields instead of letting a
+    // dev ``both_*`` preset overwrite a cross-engine baseline.
 
     if (settings.hasOwnProperty('base_branch'))
         set_option('base_branch', settings['base_branch']);
+
+    const base_bench = settings.hasOwnProperty('base_bench')
+        ? settings['base_bench'] : settings['both_bench'];
+    if (base_bench !== undefined)
+        set_option('base_bench', base_bench);
+
+    const base_network = settings.hasOwnProperty('base_network')
+        ? settings['base_network'] : settings['both_network'];
+    if (base_network !== undefined)
+        set_option('base_network', base_network);
 }
 
 

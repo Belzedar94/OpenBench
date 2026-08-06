@@ -192,10 +192,56 @@ def makefile_command(
 
     return command
 
-def select_best_artifact(options, cpu_name, cpu_flags):
+PRIVATE_ARTIFACT_ROLES = {'play', 'datagen'}
+
+
+def private_artifact_role(name):
+    suffix = name.rsplit('-', 1)[-1].lower()
+    return suffix if suffix in PRIVATE_ARTIFACT_ROLES else None
+
+
+def private_artifact_dimensions(name):
+    parts = name.lower().split('-')
+    if private_artifact_role(name):
+        parts = parts[:-1]
+    if len(parts) < 4:
+        return None
+    return parts[-3], parts[-2], parts[-1]
+
+
+def select_best_artifact(options, cpu_name, cpu_flags, build_role='play'):
+
+    if build_role not in PRIVATE_ARTIFACT_ROLES:
+        raise ValueError('Unsupported private artifact role: %s' % build_role)
+
+    original_logs = list(options.values())
+
+    # Role-tagged workflows use a final ``-play`` or ``-datagen`` component.
+    # DATAGEN never falls back to a legacy untagged binary. Once a workflow has
+    # adopted role tags, play is also fail-closed so a partial matrix cannot
+    # silently select an executable built for the wrong purpose.
+    has_explicit_roles = any(private_artifact_role(name) for name in options)
+    if build_role == 'datagen' or has_explicit_roles:
+        options = {
+            name: artifact for name, artifact in options.items()
+            if private_artifact_role(name) == build_role
+        }
+
+    if not options:
+        raise OpenBenchMissingArtifactException(
+            'private-%s-artifact' % build_role, original_logs
+        )
 
     # Step 1. Filter down to our operating system only
-    artifacts = [x for x in options.keys() if x.split('-')[1] == platform.system().lower()]
+    artifacts = [
+        name for name in options
+        if private_artifact_dimensions(name)
+        and private_artifact_dimensions(name)[0] == platform.system().lower()
+    ]
+    if not artifacts:
+        raise OpenBenchMissingArtifactException(
+            'private-%s-artifact' % build_role, list(options.values())
+        )
 
     # Pick betwen various Vector instruction sets that might apply
     has_ssse3  =                all(x in cpu_flags for x in ['SSSE3'])
@@ -213,8 +259,13 @@ def select_best_artifact(options, cpu_name, cpu_flags):
 
     # Step 2. Filter everything but the best Vector instruction set that was available
     for boolean, identifier in selection:
-        if boolean and identifier in [x.split('-')[2] for x in artifacts]:
-            artifacts = [x for x in artifacts if x.split('-')[2] == identifier]
+        if boolean and identifier in [
+            private_artifact_dimensions(x)[1] for x in artifacts
+        ]:
+            artifacts = [
+                x for x in artifacts
+                if private_artifact_dimensions(x)[1] == identifier
+            ]
             break
 
     # Identify any Ryzen or AMD chip, excluding the 7B12
@@ -231,8 +282,13 @@ def select_best_artifact(options, cpu_name, cpu_flags):
 
     # Step 3. Filter everything but the best bitop instruction set that was available
     for boolean, identifier in selection:
-        if boolean and identifier in [x.split('-')[3] for x in artifacts]:
-            artifacts = [x for x in artifacts if x.split('-')[3] == identifier]
+        if boolean and identifier in [
+            private_artifact_dimensions(x)[2] for x in artifacts
+        ]:
+            artifacts = [
+                x for x in artifacts
+                if private_artifact_dimensions(x)[2] == identifier
+            ]
             break
 
     return options[artifacts[0]]
@@ -389,7 +445,9 @@ def download_public_engine(
     message = 'Error during compilation. The logs have been sent to the server'
     raise OpenBenchBuildFailedException(message, comp_output)
 
-def download_private_engine(engine, branch, source, out_path, cpu_name, cpu_flags):
+def download_private_engine(
+    engine, branch, source, out_path, cpu_name, cpu_flags, build_role='play'
+):
 
     # Check to see if we already have the binary
     if check_for_engine_binary(out_path):
@@ -400,7 +458,7 @@ def download_private_engine(engine, branch, source, out_path, cpu_name, cpu_flag
     headers   = read_git_credentials(engine)
     artifacts = requests.get(url=source, headers=headers).json()['artifacts']
     options   = { artifact['name'] : artifact for artifact in artifacts }
-    best      = select_best_artifact(options, cpu_name, cpu_flags)
+    best      = select_best_artifact(options, cpu_name, cpu_flags, build_role)
 
     # Work with temp files and directories until finished extracting
     with tempfile.TemporaryDirectory() as temp_dir:

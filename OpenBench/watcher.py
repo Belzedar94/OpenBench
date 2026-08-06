@@ -40,16 +40,23 @@ class ArtifactWatcher(threading.Thread):
 
         base_has = test.base.source.endswith('artifacts')
         base_has = test.base.source.endswith('.zip') or base_has
+        build_role = 'datagen' if test.is_generic_datagen() else 'play'
 
         if not dev_has: # Check for new Artifacts for Dev
             dev_headers = read_git_credentials(test.dev_engine)
-            data = [test.dev.source, test.dev_engine, dev_headers, test.dev.sha]
+            data = [
+                test.dev.source, test.dev_engine, dev_headers, test.dev.sha,
+                build_role,
+            ]
             test.dev.source, dev_has = fetch_artifact_url(*data)
             test.dev.save()
 
         if not base_has: # Check for new Artifacts for Base
             base_headers = read_git_credentials(test.base_engine)
-            data = [test.base.source, test.base_engine, base_headers, test.base.sha]
+            data = [
+                test.base.source, test.base_engine, base_headers, test.base.sha,
+                build_role,
+            ]
             test.base.source, base_has = fetch_artifact_url(*data)
             test.base.save()
 

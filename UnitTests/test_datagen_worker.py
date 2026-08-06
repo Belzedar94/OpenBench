@@ -1558,21 +1558,77 @@ class DatagenWorkerTests(unittest.TestCase):
             worker.safe_run_benchmarks(cfg, 'dev', 'engine.exe', None)
             self.assertEqual(run.call_args.args[3], 30)
 
-    def test_private_generic_datagen_is_rejected_before_artifact_selection(self):
+    def test_private_generic_datagen_selects_explicit_datagen_artifact_role(self):
         cfg = config()
         cfg.workload['test']['dev']['private'] = True
+        cfg.workload['test']['dev']['build'] = {
+            'artifact_roles': ['play', 'datagen']
+        }
+        with mock.patch.object(
+            worker, 'download_private_engine', return_value='engine.exe'
+        ) as download:
+            result = worker.safe_download_engine(
+                cfg, 'dev', os.path.join('Networks', '12345678')
+            )
+
+        self.assertEqual(result, 'engine.exe')
+        self.assertEqual(download.call_args.args[-1], 'datagen')
+        self.assertTrue(download.call_args.args[3].endswith('-DATAGEN'))
+
+    def test_private_generic_datagen_rejects_play_only_engine(self):
+        cfg = config()
+        cfg.workload['test']['dev']['private'] = True
+        cfg.workload['test']['dev']['build'] = {'artifact_roles': ['play']}
         with mock.patch.object(
             worker, 'download_private_engine', return_value='engine.exe'
         ) as download:
             with self.assertRaisesRegex(
                 worker.DatagenConfigurationError,
-                'does not support private engine artifacts',
+                'does not publish a datagen artifact role',
             ):
                 worker.safe_download_engine(
                     cfg, 'dev', os.path.join('Networks', '12345678')
                 )
 
         download.assert_not_called()
+
+    def test_private_artifact_selection_never_crosses_roles(self):
+        artifacts = {
+            'horde-stockfish-linux-avx2-pext-play': {'name': 'play'},
+            'horde-stockfish-linux-avx2-pext-datagen': {'name': 'datagen'},
+        }
+        flags = ['SSSE3', 'SSE41', 'SSE42', 'AVX', 'AVX2', 'FMA', 'BMI2']
+        with mock.patch.object(
+            worker.client_utils.platform, 'system', return_value='Linux'
+        ):
+            play = worker.select_best_artifact(
+                artifacts, 'Intel CPU', flags, 'play'
+            )
+            datagen = worker.select_best_artifact(
+                artifacts, 'Intel CPU', flags, 'datagen'
+            )
+
+        self.assertEqual(play['name'], 'play')
+        self.assertEqual(datagen['name'], 'datagen')
+
+    def test_private_datagen_rejects_legacy_untagged_artifact(self):
+        artifacts = {
+            'horde-stockfish-linux-avx2-pext': {'name': 'legacy'},
+        }
+        flags = ['SSSE3', 'SSE41', 'SSE42', 'AVX', 'AVX2', 'FMA', 'BMI2']
+        with mock.patch.object(
+            worker.client_utils.platform, 'system', return_value='Linux'
+        ):
+            self.assertEqual(
+                worker.select_best_artifact(
+                    artifacts, 'Intel CPU', flags, 'play'
+                )['name'],
+                'legacy',
+            )
+            with self.assertRaises(worker.OpenBenchMissingArtifactException):
+                worker.select_best_artifact(
+                    artifacts, 'Intel CPU', flags, 'datagen'
+                )
 
 
 if __name__ == '__main__':

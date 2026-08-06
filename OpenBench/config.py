@@ -91,6 +91,10 @@ def load_book_config(book_name):
     with open(os.path.join(PROJECT_PATH, 'Books', '%s.json' % (book_name))) as fin:
         conf = json.load(fin)
 
+    # Draft manifests may live in-tree before their immutable release receipt
+    # exists, but adding one to Config/config.json must fail closed.
+    assert type(conf.get('onboarding_ready', True)) == bool
+    assert conf.get('onboarding_ready', True)
     assert type(conf.get('sha')) == str
     assert type(conf.get('source')) == str
     if 'raw_sha' in conf:
@@ -105,6 +109,10 @@ def load_engine_config(engine_name):
         with open(os.path.join(PROJECT_PATH, 'Engines', '%s.json' % (engine_name))) as fin:
             conf = json.load(fin)
 
+        # Engine scaffolds remain inert until branches, benches, NPS, artifacts,
+        # and any required credentials have concrete receipts.
+        assert type(conf.get('onboarding_ready', True)) == bool
+        assert conf.get('onboarding_ready', True)
         verify_engine_basics(conf)
         verify_engine_build(engine_name, conf)
 
@@ -150,6 +158,11 @@ def verify_engine_basics(conf):
     assert type(conf.get('nps')) == int and conf['nps'] > 0
     assert type(conf.get('source')) == str
     assert type(conf.get('build')) == dict
+    variant_contract = conf.get('variant_contract')
+    assert variant_contract is None or (
+        type(variant_contract) == str
+        and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}', variant_contract)
+    )
     assert conf.get('tablebase_family', 'standard') in ['standard', 'atomic']
     assert type(conf.get('cutechess_max_concurrency', 0)) == int
     assert 0 <= conf.get('cutechess_max_concurrency', 0) <= 1024
@@ -165,6 +178,14 @@ def verify_engine_build(engine_name, conf):
 
     assert type(conf['build'].get('systems')) == list
     assert all(type(x) == str for x in conf['build']['systems'])
+
+    artifact_roles = conf['build'].get('artifact_roles', ['play'])
+    assert type(artifact_roles) == list
+    assert artifact_roles
+    assert len(artifact_roles) == len(set(artifact_roles))
+    assert all(role in ['play', 'datagen'] for role in artifact_roles)
+    if conf['private']:
+        assert 'play' in artifact_roles
 
     if conf['private']: # Private engines require a PAT
         fname = 'credentials.%s' % (engine_name.replace(' ', '').lower())

@@ -783,19 +783,103 @@ class DatagenModeTests(TestCase):
             'workload_type = current_workload_type(workload_type);', source
         )
 
-    def test_private_engine_is_rejected_for_generic_datagen(self):
+    def test_private_engine_requires_explicit_datagen_artifact_role(self):
         request = SimpleNamespace(POST={'dev_engine': 'PrivateEngine'})
         errors = []
-        private = {'PrivateEngine': {'private': True}}
+        private = {
+            'PrivateEngine': {
+                'private': True,
+                'build': {'artifact_roles': ['play']},
+            }
+        }
         with mock.patch.dict(
             OpenBench.config.OPENBENCH_CONFIG['engines'], private, clear=False
         ):
-            verify_workload.verify_public_datagen_engine(
+            verify_workload.verify_datagen_engine_role(
                 errors, request, 'dev_engine'
             )
 
         self.assertEqual(len(errors), 1)
-        self.assertIn('only public engines', errors[0])
+        self.assertIn('explicit datagen artifact role', errors[0])
+
+        private['PrivateEngine']['build']['artifact_roles'].append('datagen')
+        errors = []
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['engines'], private, clear=False
+        ):
+            verify_workload.verify_datagen_engine_role(
+                errors, request, 'dev_engine'
+            )
+        self.assertEqual(errors, [])
+
+    def test_private_artifact_role_discovery_is_fail_closed(self):
+        legacy = [{'name': 'horde-linux-avx2-pext'}]
+        tagged = [
+            {'name': 'horde-linux-avx2-pext-play'},
+            {'name': 'horde-linux-avx2-pext-datagen'},
+        ]
+
+        self.assertTrue(
+            verify_workload.artifacts_support_role(legacy, 'play')
+        )
+        self.assertFalse(
+            verify_workload.artifacts_support_role(legacy, 'datagen')
+        )
+        self.assertTrue(
+            verify_workload.artifacts_support_role(tagged, 'play')
+        )
+        self.assertTrue(
+            verify_workload.artifacts_support_role(tagged, 'datagen')
+        )
+
+    def test_cross_engine_variant_contract_must_match(self):
+        request = SimpleNamespace(POST={
+            'dev_engine': 'Horde-Stockfish',
+            'base_engine': 'Horde-Baseline',
+        })
+        configured = {
+            'Horde-Stockfish': {'variant_contract': 'horde'},
+            'Horde-Baseline': {'variant_contract': 'horde'},
+        }
+        errors = []
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False
+        ):
+            verify_workload.verify_matching_variant_contracts(
+                errors, request, 'dev_engine', 'base_engine'
+            )
+        self.assertEqual(errors, [])
+
+        configured['Horde-Baseline']['variant_contract'] = 'atomic'
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False
+        ):
+            verify_workload.verify_matching_variant_contracts(
+                errors, request, 'dev_engine', 'base_engine'
+            )
+        self.assertIn(
+            'different variant contracts', errors[-1]
+        )
+
+    def test_workload_variant_contract_is_propagated_fail_closed(self):
+        test = SimpleNamespace(
+            dev_engine='Horde-Stockfish', base_engine='Horde-Baseline'
+        )
+        configured = {
+            'engines': {
+                'Horde-Stockfish': {'variant_contract': 'horde'},
+                'Horde-Baseline': {'variant_contract': 'horde'},
+            }
+        }
+        with mock.patch.object(get_workload, 'OPENBENCH_CONFIG', configured):
+            self.assertEqual(
+                get_workload.workload_variant_contract(test), 'horde'
+            )
+            configured['engines']['Horde-Baseline'][
+                'variant_contract'
+            ] = 'atomic'
+            with self.assertRaisesRegex(ValueError, 'contracts disagree'):
+                get_workload.workload_variant_contract(test)
 
     def test_scheduler_assigns_seed_count_and_renews_stale_work(self):
         test = self.make_test(total=5, per_chunk=2)
