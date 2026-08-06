@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import threading
@@ -259,7 +260,292 @@ def publication_config(tablebase=False):
     return cfg, network_bytes
 
 
+def horde_publication_config():
+    cfg, _ = publication_config()
+    test = cfg.workload['test']
+    data = test['datagen']
+    publication = data['publication_contract']
+    command = (
+        'horde_generate_training_data threads {THREADS} hash 512 '
+        'network {NETWORK} network_sha256 {NETWORK_SHA256} '
+        'producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} '
+        'book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 6 '
+        'nodes 0 random_move_min_ply 1 random_move_max_ply 20 '
+        'random_move_count 8 random_multi_pv 4 random_multi_pv_diff 200 '
+        'write_min_ply 5 write_max_ply 400 max_game_ply 512 '
+        'set_recommended_uci_options'
+    )
+    book_sha256 = worker.HORDE_OPENING_BOOK_SHA256.lower()
+    book_source = 'https://example.test/HORDE_openings.epd.zip'
+
+    test['variant_contract'] = worker.HORDE_DATAGEN_VARIANT_CONTRACT
+    test['dev'].update({
+        'engine': 'Horde-Stockfish',
+        'network': worker.HORDE_RUN6B_SHA256[:8],
+        'netname': 'hordetest_run6b_e37_l06.nnue',
+    })
+    test['book'] = {
+        'name': 'HORDE_openings.epd',
+        'sha': book_sha256,
+        'raw_sha': book_sha256,
+        'source': book_source,
+    }
+    data.update({
+        'command': command,
+        'total_count': 1,
+        'positions_per_chunk': 1,
+        'base_seed': 103,
+        'chunk_idx': 0,
+        'chunk_count': 1,
+        'seed': 103,
+        'producer_artifact_required': True,
+    })
+    publication.update({
+        'campaign_id': 'horde-v1-run6b-canary-20260806',
+        'external_workload_id': 'horde-v1-run6b-g0-canary',
+        'role': 'g0-canary',
+        'cohort': 'run6b-d6',
+    })
+    publication['engine']['name'] = test['dev']['engine']
+    publication['network'] = {
+        'name': test['dev']['netname'],
+        'openbench_id': test['dev']['network'],
+        'sha256': worker.HORDE_RUN6B_SHA256.lower(),
+        'bytes': 1088416,
+    }
+    publication['book'] = {
+        'kind': 'file',
+        'name': test['book']['name'],
+        'source': book_source,
+        'text_sha256': book_sha256,
+        'raw_sha256': book_sha256,
+    }
+    publication['generation'].update({
+        'command': command,
+        'command_sha256': hashlib.sha256(command.encode()).hexdigest(),
+        'total_count': data['total_count'],
+        'positions_per_chunk': data['positions_per_chunk'],
+        'base_seed': data['base_seed'],
+    })
+    publication['producer']['required'] = True
+    data['publication_contract_sha256'] = hashlib.sha256(json.dumps(
+        publication,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode()).hexdigest()
+    data['environment_lease']['publication_contract_sha256'] = data[
+        'publication_contract_sha256'
+    ]
+    data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+        data['environment_lease'], sort_keys=True, separators=(',', ':')
+    ).encode()).hexdigest()
+    producer = {
+        'sha256': 'c' * 64,
+        'bytes': 123,
+        'commit': test['dev']['sha'],
+    }
+    return cfg, producer
+
+
+def horde_record():
+    record = bytearray(worker.HORDE_BIN_V1_RECORD_SIZE)
+    record[0] = 0x5B  # Black king a1, White queen b1.
+    record[32] = 1
+    record[34] = 64
+    record[35] = 1
+    struct.pack_into('<HHhHHbB', record, 36, 0, 1, 23, 1, 1, 1, 2)
+    return bytes(record)
+
+
+def horde_manifest(cfg, producer, payload):
+    test = cfg.workload['test']
+    data = test['datagen']
+    generation = {
+        'requested_records': data['chunk_count'],
+        'seed': str(data['seed']),
+        'threads': cfg.threads,
+    }
+    generation.update(worker.HORDE_BIN_V1_GENERATION)
+    return {
+        'schema': 'HORDE_BIN_V1',
+        'schema_sha256': worker.HORDE_BIN_V1_SCHEMA_SHA256,
+        'format_version': worker.HORDE_BIN_V1_VERSION,
+        'header_bytes': worker.HORDE_BIN_V1_HEADER_SIZE,
+        'record_bytes': worker.HORDE_BIN_V1_RECORD_SIZE,
+        'record_count': data['chunk_count'],
+        'byte_order': 'little',
+        'source_commit': test['dev']['sha'],
+        'source_dirty': False,
+        'network': {
+            'schema': 'HORDETEST_HP_LEGACY_V1',
+            'sha256': worker.HORDE_RUN6B_SHA256,
+        },
+        'book_sha256': worker.HORDE_OPENING_BOOK_SHA256,
+        'producer_sha256': producer['sha256'].upper(),
+        'payload_sha256': hashlib.sha256(payload).hexdigest().upper(),
+        'generation': generation,
+    }
+
+
+def horde_file_bytes(manifest, payload):
+    encoded = json.dumps(
+        manifest,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode()
+    header = bytearray(worker.HORDE_BIN_V1_HEADER_SIZE)
+    header[:8] = worker.HORDE_BIN_V1_MAGIC
+    struct.pack_into(
+        '<HHI',
+        header,
+        8,
+        worker.HORDE_BIN_V1_VERSION,
+        worker.HORDE_BIN_V1_HEADER_SIZE,
+        len(encoded),
+    )
+    header[16:16 + len(encoded)] = encoded
+    return bytes(header) + payload
+
+
 class DatagenWorkerTests(unittest.TestCase):
+
+    def test_horde_bin_v1_validator_accepts_bound_output(self):
+        cfg, producer = horde_publication_config()
+        payload = horde_record()
+        manifest = horde_manifest(cfg, producer, payload)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            summary = worker.validate_horde_bin_v1_output(
+                cfg, str(output), producer
+            )
+
+        self.assertEqual(summary['record_count'], 1)
+        self.assertEqual(summary['sides'], [0, 1])
+        self.assertEqual(summary['results'], [0, 0, 1])
+        self.assertEqual(summary['reasons'][2], 1)
+        self.assertEqual(summary['white_buckets'], [1, 0, 0, 0])
+        self.assertEqual(summary['flags'][0], 1)
+
+    def test_horde_bin_v1_validator_rejects_identity_and_setting_drift(self):
+        cases = {
+            'dirty source': (
+                lambda document: document.update(source_dirty=True),
+                'source identity',
+            ),
+            'network': (
+                lambda document: document['network'].update(sha256='0' * 64),
+                'network identity',
+            ),
+            'network shape': (
+                lambda document: document.update(network=[]),
+                'network identity',
+            ),
+            'book': (
+                lambda document: document.update(book_sha256='0' * 64),
+                'book or producer',
+            ),
+            'producer': (
+                lambda document: document.update(producer_sha256='0' * 64),
+                'book or producer',
+            ),
+            'seed': (
+                lambda document: document['generation'].update(seed='104'),
+                'seed or thread',
+            ),
+            'depth': (
+                lambda document: document['generation'].update(depth=7),
+                'generation setting depth',
+            ),
+            'record count type': (
+                lambda document: document.update(record_count=True),
+                'record count',
+            ),
+            'generation shape': (
+                lambda document: document.update(generation=[]),
+                'generation manifest',
+            ),
+        }
+        for name, (mutate, message) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                cfg, producer = horde_publication_config()
+                payload = horde_record()
+                manifest = horde_manifest(cfg, producer, payload)
+                mutate(manifest)
+                output = Path(directory, 'chunk.bin')
+                output.write_bytes(horde_file_bytes(manifest, payload))
+                with self.assertRaisesRegex(
+                    worker.DatagenConfigurationError, message
+                ):
+                    worker.validate_horde_bin_v1_output(
+                        cfg, str(output), producer
+                    )
+
+    def test_horde_bin_v1_validator_rejects_payload_and_position_corruption(self):
+        cfg, producer = horde_publication_config()
+        payload = horde_record()
+        manifest = horde_manifest(cfg, producer, payload)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            corrupt = bytearray(payload)
+            corrupt[0] = 0xFB
+            output.write_bytes(horde_file_bytes(manifest, bytes(corrupt)))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError, 'reserved piece code'
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
+
+            manifest = horde_manifest(cfg, producer, payload)
+            manifest['payload_sha256'] = '0' * 64
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError, 'payload SHA-256 mismatch'
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
+
+    def test_horde_run_command_rejects_output_before_compression(self):
+        cfg, producer = horde_publication_config()
+        heartbeat = SimpleNamespace(stop_requested=threading.Event())
+        process = SimpleNamespace(
+            stdin=SimpleNamespace(
+                write=mock.Mock(), flush=mock.Mock(), close=mock.Mock()
+            ),
+            poll=mock.Mock(return_value=0),
+            returncode=0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            log = Path(directory, 'engine.log')
+            output.write_bytes(b'not-horde-bin-v1')
+            with mock.patch.object(
+                worker, 'render_datagen_command', return_value='generate'
+            ), mock.patch.object(
+                worker, 'Popen', return_value=process
+            ), self.assertRaisesRegex(
+                worker.DatagenConfigurationError, 'header is truncated'
+            ):
+                worker.run_datagen_command(
+                    cfg,
+                    'generator.exe',
+                    str(output),
+                    str(log),
+                    heartbeat,
+                    producer=producer,
+                )
+
+    def test_non_horde_output_is_not_interpreted_as_horde_bin_v1(self):
+        self.assertIsNone(
+            worker.validate_horde_bin_v1_output(
+                config(), 'missing.bin', None
+            )
+        )
 
     def test_v41_worker_validates_contract_lease_and_full_network_before_launch(self):
         cfg, network_bytes = publication_config()

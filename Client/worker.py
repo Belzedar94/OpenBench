@@ -36,6 +36,7 @@ import re
 import requests
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -92,6 +93,35 @@ DATAGEN_TRANSFER_RETRIES = 6
 DATAGEN_TRANSFER_RETRY_DELAY = 45
 ATOMIC_DATAGEN_TABLEBASE_MIN = 3
 ATOMIC_DATAGEN_TABLEBASE_MAX = 6
+HORDE_DATAGEN_VARIANT_CONTRACT = 'LICHESS_HORDE_V1'
+HORDE_BIN_V1_MAGIC = b'HORDEBIN'
+HORDE_BIN_V1_VERSION = 1
+HORDE_BIN_V1_HEADER_SIZE = 2048
+HORDE_BIN_V1_RECORD_SIZE = 48
+HORDE_BIN_V1_SCHEMA_SHA256 = (
+    'B46ADE18AB8954A6AB232593484273E50C12B51550A938763A7A7D94DCCB63E4'
+)
+HORDE_RUN6B_SHA256 = (
+    'B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7'
+)
+HORDE_OPENING_BOOK_SHA256 = (
+    '93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958'
+)
+HORDE_OPENING_BOOK_POSITIONS = 2486
+HORDE_BIN_V1_GENERATION = {
+    'hash_mb': 512,
+    'depth': 6,
+    'nodes': 0,
+    'random_move_min_ply': 1,
+    'random_move_max_ply': 20,
+    'random_move_count': 8,
+    'random_multi_pv': 4,
+    'random_multi_pv_diff': 200,
+    'write_min_ply': 5,
+    'write_max_ply': 400,
+    'max_game_ply': 512,
+    'opening_count': HORDE_OPENING_BOOK_POSITIONS,
+}
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -2424,6 +2454,501 @@ def revalidate_datagen_tablebase_inventory(config, tablebase):
         )
 
 
+def _horde_bin_v1_require(condition, message):
+    if not condition:
+        raise DatagenConfigurationError('HORDE_BIN_V1 ' + message)
+
+
+def _horde_bin_v1_json_object(pairs):
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError('duplicate JSON key')
+        document[key] = value
+    return document
+
+
+def _horde_bin_v1_manifest(header):
+    _horde_bin_v1_require(
+        len(header) == HORDE_BIN_V1_HEADER_SIZE,
+        'header is truncated',
+    )
+    _horde_bin_v1_require(
+        header[:8] == HORDE_BIN_V1_MAGIC,
+        'file magic is invalid',
+    )
+    version, header_size, manifest_length = struct.unpack_from('<HHI', header, 8)
+    _horde_bin_v1_require(
+        version == HORDE_BIN_V1_VERSION,
+        'format version is unsupported',
+    )
+    _horde_bin_v1_require(
+        header_size == HORDE_BIN_V1_HEADER_SIZE,
+        'header size is invalid',
+    )
+    _horde_bin_v1_require(
+        0 < manifest_length <= HORDE_BIN_V1_HEADER_SIZE - 16,
+        'manifest length is invalid',
+    )
+    manifest_end = 16 + manifest_length
+    raw_manifest = header[16:manifest_end]
+    try:
+        manifest = json.loads(
+            raw_manifest.decode('utf-8'),
+            object_pairs_hook=_horde_bin_v1_json_object,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError('non-finite JSON number')
+            ),
+        )
+        canonical = json.dumps(
+            manifest,
+            separators=(',', ':'),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode('utf-8')
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise DatagenConfigurationError(
+            'HORDE_BIN_V1 manifest is not canonical UTF-8 JSON'
+        ) from None
+    _horde_bin_v1_require(
+        isinstance(manifest, dict) and raw_manifest == canonical,
+        'manifest is not canonical compact JSON',
+    )
+    _horde_bin_v1_require(
+        not any(header[manifest_end:]),
+        'reserved header bytes are not zero',
+    )
+    return manifest
+
+
+def _horde_bin_v1_piece_color(piece):
+    if 1 <= piece <= 5:
+        return 0
+    if 6 <= piece <= 11:
+        return 1
+    return None
+
+
+def _horde_bin_v1_validate_move(raw, board, side, ep_square, label, index):
+    prefix = 'record %d %s' % (index, label)
+    _horde_bin_v1_require(raw not in (0, 65), prefix + ' is none or null')
+    from_square = (raw >> 6) & 63
+    to_square = raw & 63
+    move_type = (raw >> 14) & 3
+    promotion_bits = (raw >> 12) & 3
+    piece = board[from_square]
+    destination = board[to_square]
+    _horde_bin_v1_require(
+        from_square != to_square,
+        prefix + ' has identical origin and destination',
+    )
+    _horde_bin_v1_require(
+        _horde_bin_v1_piece_color(piece) == side,
+        prefix + ' origin has the wrong color',
+    )
+    if move_type != 3:
+        _horde_bin_v1_require(
+            _horde_bin_v1_piece_color(destination) != side,
+            prefix + ' destination contains a friendly piece',
+        )
+    if move_type != 1:
+        _horde_bin_v1_require(
+            promotion_bits == 0,
+            prefix + ' has promotion bits on a non-promotion move',
+        )
+
+    from_rank = from_square // 8
+    to_rank = to_square // 8
+    from_file = from_square % 8
+    to_file = to_square % 8
+    if move_type == 0:
+        _horde_bin_v1_require(
+            not (piece == 1 and to_rank == 7)
+            and not (piece == 6 and to_rank == 0),
+            prefix + ' reaches the promotion rank without promotion',
+        )
+    elif move_type == 1:
+        _horde_bin_v1_require(
+            piece in (1, 6),
+            prefix + ' promotes a non-pawn',
+        )
+        _horde_bin_v1_require(
+            (piece == 1 and to_rank == 7)
+            or (piece == 6 and to_rank == 0),
+            prefix + ' does not reach the promotion rank',
+        )
+    elif move_type == 2:
+        _horde_bin_v1_require(
+            piece in (1, 6) and destination == 0,
+            prefix + ' is not a physical en-passant move',
+        )
+        _horde_bin_v1_require(
+            to_square == ep_square
+            and abs(to_file - from_file) == 1
+            and (
+                (piece == 1 and to_rank == from_rank + 1)
+                or (piece == 6 and to_rank == from_rank - 1)
+            ),
+            prefix + ' does not match the en-passant state',
+        )
+    else:
+        _horde_bin_v1_require(
+            side == 1
+            and piece == 11
+            and destination == 9
+            and from_square == 60
+            and to_square in (56, 63),
+            prefix + ' is not a registered Black castling move',
+        )
+    return move_type, destination
+
+
+def _horde_bin_v1_validate_record(record, index):
+    _horde_bin_v1_require(
+        len(record) == HORDE_BIN_V1_RECORD_SIZE,
+        'record %d is truncated' % index,
+    )
+    board = []
+    for value in record[:32]:
+        board.extend((value & 0x0F, value >> 4))
+    _horde_bin_v1_require(
+        all(piece <= 11 for piece in board),
+        'record %d contains a reserved piece code' % index,
+    )
+    white_count = sum(1 for piece in board if 1 <= piece <= 5)
+    black_count = sum(1 for piece in board if 6 <= piece <= 11)
+    _horde_bin_v1_require(
+        1 <= white_count <= 36,
+        'record %d has an invalid White piece count' % index,
+    )
+    _horde_bin_v1_require(
+        1 <= black_count <= 16 and white_count + black_count <= 52,
+        'record %d has an invalid total piece count' % index,
+    )
+    _horde_bin_v1_require(
+        board.count(11) == 1,
+        'record %d does not have exactly one Black king' % index,
+    )
+    for square, piece in enumerate(board):
+        rank = square // 8
+        _horde_bin_v1_require(
+            not (piece == 1 and rank == 7),
+            'record %d has a White pawn on rank 8' % index,
+        )
+        _horde_bin_v1_require(
+            not (piece == 6 and rank in (0, 7)),
+            'record %d has a Black pawn on rank 1 or 8' % index,
+        )
+
+    side, castling, ep_square, flags = record[32:36]
+    _horde_bin_v1_require(
+        side in (0, 1),
+        'record %d has an invalid side to move' % index,
+    )
+    _horde_bin_v1_require(
+        castling & ~0x03 == 0,
+        'record %d has reserved castling bits' % index,
+    )
+    _horde_bin_v1_require(
+        flags & 0x80 == 0,
+        'record %d has reserved sample flags' % index,
+    )
+    if castling:
+        _horde_bin_v1_require(
+            board[60] == 11,
+            'record %d has castling rights without a king on e8' % index,
+        )
+        _horde_bin_v1_require(
+            not (castling & 1) or board[63] == 9,
+            'record %d has kingside rights without a rook on h8' % index,
+        )
+        _horde_bin_v1_require(
+            not (castling & 2) or board[56] == 9,
+            'record %d has queenside rights without a rook on a8' % index,
+        )
+
+    _horde_bin_v1_require(
+        ep_square <= 64,
+        'record %d has an invalid en-passant square' % index,
+    )
+    if ep_square != 64:
+        ep_rank = ep_square // 8
+        ep_file = ep_square % 8
+        if side == 0:
+            expected_rank = 5
+            captured_square = ep_square - 8
+            attacker_offsets = (-9, -7)
+            attacker = 1
+            captured = 6
+        else:
+            expected_rank = 2
+            captured_square = ep_square + 8
+            attacker_offsets = (7, 9)
+            attacker = 6
+            captured = 1
+        _horde_bin_v1_require(
+            ep_rank == expected_rank and board[captured_square] == captured,
+            'record %d has an impossible en-passant target' % index,
+        )
+        attackers = []
+        for offset in attacker_offsets:
+            square = ep_square + offset
+            if 0 <= square < 64 and abs(square % 8 - ep_file) == 1:
+                attackers.append(square)
+        _horde_bin_v1_require(
+            any(board[square] == attacker for square in attackers),
+            'record %d has no pawn that can use the en-passant target' % index,
+        )
+
+    _, _, score, best_move, played_move, result, reason = struct.unpack_from(
+        '<HHhHHbB', record, 36
+    )
+    _horde_bin_v1_require(
+        result in (-1, 0, 1),
+        'record %d has an invalid result' % index,
+    )
+    _horde_bin_v1_require(
+        reason in range(1, 7),
+        'record %d has an invalid outcome reason' % index,
+    )
+    _horde_bin_v1_require(
+        (reason in (1, 2) and result in (-1, 1))
+        or (reason in (3, 4, 5, 6) and result == 0),
+        'record %d result contradicts its outcome reason' % index,
+    )
+    best_type, best_destination = _horde_bin_v1_validate_move(
+        best_move, board, side, ep_square, 'best move', index
+    )
+    _horde_bin_v1_validate_move(
+        played_move, board, side, ep_square, 'played move', index
+    )
+    expected_capture = (
+        best_type == 2
+        or (
+            best_type != 3
+            and _horde_bin_v1_piece_color(best_destination) == 1 - side
+        )
+    )
+    _horde_bin_v1_require(
+        bool(flags & 1) == expected_capture,
+        'record %d capture flag contradicts the best move' % index,
+    )
+    _horde_bin_v1_require(
+        bool(flags & (1 << 2)) == (best_type == 1)
+        and bool(flags & (1 << 3)) == (best_type == 2)
+        and bool(flags & (1 << 4)) == (best_type == 3),
+        'record %d special-move flags contradict the best move' % index,
+    )
+    _horde_bin_v1_require(
+        bool(flags & (1 << 5)) == (played_move != best_move),
+        'record %d best-versus-played flag is invalid' % index,
+    )
+    return side, result, reason, white_count, flags, score
+
+
+def validate_horde_bin_v1_output(config, output_path, producer):
+    test = config.workload['test']
+    if test.get('variant_contract') != HORDE_DATAGEN_VARIANT_CONTRACT:
+        return None
+
+    data = test['datagen']
+    publication = datagen_publication_contract(config)
+    _horde_bin_v1_require(
+        publication is not None and data.get('publication_protocol') == 41,
+        'requires a frozen DATAGEN publication contract',
+    )
+    _horde_bin_v1_require(
+        data.get('tablebase_required') is False
+        and not data.get('teacher_mode'),
+        'does not support tablebases or teacher mode',
+    )
+    _horde_bin_v1_require(
+        isinstance(producer, dict),
+        'requires an authenticated producer artifact',
+    )
+
+    source_commit = str(test['dev'].get('sha', '')).lower()
+    producer_commit = str(producer.get('commit', '')).lower()
+    producer_sha256 = str(producer.get('sha256', '')).upper()
+    network_sha256 = str(publication['network'].get('sha256', '')).upper()
+    book_sha256 = str(publication['book'].get('raw_sha256', '')).upper()
+    _horde_bin_v1_require(
+        re.fullmatch(r'[0-9a-f]{40}', source_commit)
+        and producer_commit == source_commit,
+        'producer commit does not match the assigned source commit',
+    )
+    _horde_bin_v1_require(
+        re.fullmatch(r'[0-9A-F]{64}', producer_sha256)
+        and type(producer.get('bytes')) is int
+        and producer['bytes'] > 0,
+        'producer artifact identity is malformed',
+    )
+    _horde_bin_v1_require(
+        network_sha256 == HORDE_RUN6B_SHA256,
+        'network is not the registered Run 6B artifact',
+    )
+    _horde_bin_v1_require(
+        book_sha256 == HORDE_OPENING_BOOK_SHA256,
+        'opening book is not the registered Horde artifact',
+    )
+
+    try:
+        with open(output_path, 'rb') as output:
+            header = output.read(HORDE_BIN_V1_HEADER_SIZE)
+            manifest = _horde_bin_v1_manifest(header)
+            expected_top_keys = [
+                'schema', 'schema_sha256', 'format_version', 'header_bytes',
+                'record_bytes', 'record_count', 'byte_order', 'source_commit',
+                'source_dirty', 'network', 'book_sha256', 'producer_sha256',
+                'payload_sha256', 'generation',
+            ]
+            _horde_bin_v1_require(
+                list(manifest) == expected_top_keys,
+                'manifest fields are incomplete or out of order',
+            )
+            _horde_bin_v1_require(
+                manifest['schema'] == 'HORDE_BIN_V1'
+                and manifest['schema_sha256'] == HORDE_BIN_V1_SCHEMA_SHA256
+                and manifest['format_version'] == HORDE_BIN_V1_VERSION
+                and type(manifest['format_version']) is int
+                and manifest['header_bytes'] == HORDE_BIN_V1_HEADER_SIZE
+                and type(manifest['header_bytes']) is int
+                and manifest['record_bytes'] == HORDE_BIN_V1_RECORD_SIZE
+                and type(manifest['record_bytes']) is int
+                and manifest['byte_order'] == 'little',
+                'manifest format identity is invalid',
+            )
+            _horde_bin_v1_require(
+                manifest['source_commit'] == source_commit
+                and manifest['source_dirty'] is False,
+                'source identity is not the assigned clean commit',
+            )
+            _horde_bin_v1_require(
+                isinstance(manifest['network'], dict)
+                and list(manifest['network']) == ['schema', 'sha256']
+                and manifest['network']['schema'] == 'HORDETEST_HP_LEGACY_V1'
+                and manifest['network']['sha256'] == network_sha256,
+                'network identity is invalid',
+            )
+            _horde_bin_v1_require(
+                manifest['book_sha256'] == book_sha256
+                and manifest['producer_sha256'] == producer_sha256,
+                'book or producer identity is invalid',
+            )
+
+            generation = manifest['generation']
+            expected_generation_keys = [
+                'requested_records', 'seed', 'threads', 'hash_mb', 'depth',
+                'nodes', 'random_move_min_ply', 'random_move_max_ply',
+                'random_move_count', 'random_multi_pv',
+                'random_multi_pv_diff', 'write_min_ply', 'write_max_ply',
+                'max_game_ply', 'opening_count',
+            ]
+            _horde_bin_v1_require(
+                isinstance(generation, dict)
+                and list(generation) == expected_generation_keys,
+                'generation manifest is incomplete or out of order',
+            )
+            record_count = data.get('chunk_count')
+            _horde_bin_v1_require(
+                type(record_count) is int
+                and record_count > 0
+                and type(manifest['record_count']) is int
+                and manifest['record_count'] == record_count
+                and type(generation['requested_records']) is int
+                and generation['requested_records'] == record_count,
+                'record count does not match the assigned chunk',
+            )
+            _horde_bin_v1_require(
+                isinstance(generation['seed'], str)
+                and generation['seed'] == str(data.get('seed'))
+                and type(generation['threads']) is int
+                and type(config.threads) is int
+                and generation['threads'] == config.threads
+                and config.threads > 0,
+                'seed or thread count does not match the assigned chunk',
+            )
+            for field, expected in HORDE_BIN_V1_GENERATION.items():
+                _horde_bin_v1_require(
+                    generation.get(field) == expected
+                    and type(generation.get(field)) is int,
+                    'generation setting %s is invalid' % field,
+                )
+
+            expected_size = (
+                HORDE_BIN_V1_HEADER_SIZE
+                + record_count * HORDE_BIN_V1_RECORD_SIZE
+            )
+            _horde_bin_v1_require(
+                os.fstat(output.fileno()).st_size == expected_size,
+                'file length does not match the declared record count',
+            )
+            payload_sha256 = str(manifest['payload_sha256'])
+            _horde_bin_v1_require(
+                re.fullmatch(r'[0-9A-F]{64}', payload_sha256),
+                'payload SHA-256 is malformed',
+            )
+
+            digest = hashlib.sha256()
+            sides = [0, 0]
+            results = [0, 0, 0]
+            reasons = [0] * 7
+            white_buckets = [0, 0, 0, 0]
+            flags_seen = [0] * 7
+            records_per_block = 4096
+            index = 0
+            while index < record_count:
+                block_records = min(records_per_block, record_count - index)
+                block = output.read(block_records * HORDE_BIN_V1_RECORD_SIZE)
+                _horde_bin_v1_require(
+                    len(block) == block_records * HORDE_BIN_V1_RECORD_SIZE,
+                    'payload is truncated',
+                )
+                digest.update(block)
+                for offset in range(0, len(block), HORDE_BIN_V1_RECORD_SIZE):
+                    record = block[offset:offset + HORDE_BIN_V1_RECORD_SIZE]
+                    side, result, reason, white_count, flags, _ = (
+                        _horde_bin_v1_validate_record(record, index)
+                    )
+                    sides[side] += 1
+                    results[result + 1] += 1
+                    reasons[reason] += 1
+                    bucket = (
+                        0 if white_count <= 4 else
+                        1 if white_count <= 12 else
+                        2 if white_count <= 24 else 3
+                    )
+                    white_buckets[bucket] += 1
+                    for bit in range(7):
+                        flags_seen[bit] += bool(flags & (1 << bit))
+                    index += 1
+            _horde_bin_v1_require(
+                not output.read(1),
+                'payload contains trailing bytes',
+            )
+    except DatagenConfigurationError:
+        raise
+    except (OSError, KeyError, TypeError, ValueError, IndexError, struct.error):
+        raise DatagenConfigurationError(
+            'HORDE_BIN_V1 output is malformed or cannot be read'
+        ) from None
+
+    observed_payload_sha256 = digest.hexdigest().upper()
+    _horde_bin_v1_require(
+        observed_payload_sha256 == payload_sha256,
+        'payload SHA-256 mismatch',
+    )
+    return {
+        'record_count': record_count,
+        'payload_sha256': observed_payload_sha256,
+        'sides': sides,
+        'results': results,
+        'reasons': reasons,
+        'white_buckets': white_buckets,
+        'flags': flags_seen,
+    }
+
+
 def render_datagen_command(
     config, output_path, network_path=None, producer=None, tablebase=None
 ):
@@ -2534,6 +3059,22 @@ def run_datagen_command(
         raise RuntimeError('DATAGEN engine exited with code %d' % process.returncode)
     if not os.path.isfile(output_path):
         raise RuntimeError('DATAGEN command completed without creating {OUT}')
+    horde_summary = validate_horde_bin_v1_output(
+        config, output_path, producer
+    )
+    if horde_summary is not None:
+        print(
+            'HORDE_BIN_V1 accepted: records=%d payload_sha256=%s '
+            'sides=%d/%d outcomes=%s white_buckets=%s'
+            % (
+                horde_summary['record_count'],
+                horde_summary['payload_sha256'],
+                horde_summary['sides'][0],
+                horde_summary['sides'][1],
+                ','.join(str(value) for value in horde_summary['reasons'][1:]),
+                ','.join(str(value) for value in horde_summary['white_buckets']),
+            )
+        )
 
 
 def complete_datagen_workload(config):

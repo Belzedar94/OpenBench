@@ -11,6 +11,7 @@ HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
 CLIENT_REF = 'd0f391b3bf6f465c218156e83702200427fd448c'
 BASELINE_REF = '0b064616041012eb9a708989d3b6b0a165d5538a'
+DATAGEN_REF = '212b67e7c5600b4067bfa9314f6c519a5ac4607d'
 BOOK_ARTIFACT_REF = 'cd0560081f6433b58a8aa8d0c3fd4a91e969f1dd'
 BOOK_SHA256 = '93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958'
 
@@ -101,6 +102,52 @@ class HordeOnboardingTests(unittest.TestCase):
                 self.assertIn('Threads=1', specialist['both_options'])
                 self.assertIn(hash_option, specialist['both_options'])
                 self.assertIn('UCI_Variant=hordetest', baseline['both_options'])
+
+    def test_horde_datagen_canary_is_frozen_without_atomic_filters(self):
+        preset = self.engine['datagen_presets']['default']
+        command = preset['datagen_command']
+        self.assertEqual(preset['dev_branch'], DATAGEN_REF)
+        self.assertEqual(preset['both_bench'], 440088)
+        self.assertEqual(
+            preset['both_network'], 'hordetest_run6b_e37_l06.nnue'
+        )
+        self.assertEqual(preset['book_name'], HORDE_BOOK)
+        self.assertEqual(preset['datagen_total_count'], 500000)
+        self.assertEqual(preset['datagen_positions_per_chunk'], 250000)
+        self.assertEqual(preset['datagen_base_seed'], 202608060000000)
+        self.assertEqual(preset['datagen_publication_protocol'], '41')
+        self.assertEqual(
+            preset['datagen_campaign_id'],
+            'horde-v1-run6b-canary-20260806',
+        )
+        self.assertEqual(
+            preset['datagen_external_workload_id'],
+            'horde-v1-run6b-g0-canary',
+        )
+        self.assertEqual(preset['datagen_role'], 'g0-canary')
+        self.assertEqual(preset['datagen_cohort'], 'run6b-d6')
+        self.assertNotIn('priority', preset)
+        for placeholder in (
+            '{THREADS}',
+            '{NETWORK}',
+            '{NETWORK_SHA256}',
+            '{PRODUCER_SHA256}',
+            '{COUNT}',
+            '{SEED}',
+            '{BOOK}',
+            '{BOOK_SHA256}',
+            '{OUT}',
+        ):
+            self.assertIn(placeholder, command)
+        for atomic_setting in (
+            'filter_captures',
+            'filter_checks',
+            'filter_promotions',
+            'adjudicate_draws_by_insufficient_material',
+            'teacher_mode',
+            'syzygy',
+        ):
+            self.assertNotIn(atomic_setting, command.lower())
 
     def test_cross_engine_form_restores_baseline_bench_and_network(self):
         source = (
