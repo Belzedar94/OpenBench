@@ -85,15 +85,35 @@ class ShuttleFixture(TestCase):
 
 class CycleRuleTests(ShuttleFixture):
 
-    def test_cycling_edge_is_detected_along_primary_spines(self):
+    def test_cycling_edge_is_detected_along_value_carriers(self):
         self._poison()
-        cache = proof._PrimarySpines()
+        cache = proof._CarrierCache()
         node_rows = proof._node_rows(
             self.campaign, [self.a.key, self.b.key, self.c.key, self.d.key])
         children = proof._children_by_parent([self.a.key])
         cycling = proof._cycling_edges(
             self.campaign, [self.a.key], children, node_rows, cache)
-        # B -> C -> D -> A: la espina del hijo vuelve al padre evaluado.
+        # B -> C -> D -> A: el valor del hijo vuelve al padre que lo evalua.
+        self.assertEqual(cycling, {(self.a.key, 'e8f7')})
+
+    def test_the_walk_follows_values_not_the_sticky_primary(self):
+        """Por que el paseo NO sigue a ``selected_child``: la histeresis puede
+        dejar al primario clavado FUERA del ciclo mientras la suma sigue
+        dando la vuelta.  Con los primarios apuntando a las salidas honestas,
+        la arista del ciclo tiene que seguir detectandose."""
+        self._poison()
+        ProofNode.objects.filter(
+            campaign=self.campaign, position_id=self.a.key).update(
+            selected_child='d2d4')
+        ProofNode.objects.filter(
+            campaign=self.campaign, position_id=self.c.key).update(
+            selected_child='a2a3')
+        cache = proof._CarrierCache()
+        node_rows = proof._node_rows(
+            self.campaign, [self.a.key, self.b.key, self.c.key, self.d.key])
+        children = proof._children_by_parent([self.a.key])
+        cycling = proof._cycling_edges(
+            self.campaign, [self.a.key], children, node_rows, cache)
         self.assertEqual(cycling, {(self.a.key, 'e8f7')})
 
     def test_cycling_contribution_is_a_refutation_not_the_loop_number(self):
@@ -148,8 +168,8 @@ class CycleRuleTests(ShuttleFixture):
             self.assertLess(self._numbers(node)[1], INF, node.key)
 
     def test_long_cycles_beyond_the_cap_claim_nothing(self):
-        """Equivocarse hacia "no hay ciclo" es el error seguro: una espina
-        mas larga que el tope se deja pasar sin refutar la arista."""
+        """Equivocarse hacia "no hay ciclo" es el error seguro: un ciclo mas
+        largo que el tope se deja pasar sin refutar la arista."""
         parent = _pos('CAP-P', 'w', expanded=True)
         chain = [_pos(f'CAP-{i}', 'b' if i % 2 == 0 else 'w')
                  for i in range(proof.PROOF_CYCLE_MAX_PLIES + 2)]
@@ -159,17 +179,39 @@ class CycleRuleTests(ShuttleFixture):
             selected_child='b1b2')
         for i in range(len(chain) - 1):
             _edge(chain[i], chain[i + 1], 'b1b2')
-            if i + 1 < len(chain):
-                ProofNode.objects.create(
-                    campaign=self.campaign, position_id=chain[i + 1].key,
-                    pn=1, dn=1, selected_child='b1b2')
+            ProofNode.objects.create(
+                campaign=self.campaign, position_id=chain[i + 1].key,
+                pn=1, dn=1, selected_child='b1b2')
         _edge(chain[-1], parent, 'b1b2')
-        cache = proof._PrimarySpines()
+        cache = proof._CarrierCache()
         node_rows = proof._node_rows(self.campaign, [chain[0].key])
         children = proof._children_by_parent([parent.key])
         cycling = proof._cycling_edges(
             self.campaign, [parent.key], children, node_rows, cache)
         self.assertEqual(cycling, set())
+
+    def test_a_cycle_within_the_cap_is_claimed(self):
+        """La otra mitad del tope: el mismo montaje, con el ciclo corto,
+        SI se corta — asi el test de arriba mide el tope y no un bug."""
+        parent = _pos('SHORT-P', 'w', expanded=True)
+        chain = [_pos(f'SHORT-{i}', 'b' if i % 2 == 0 else 'w')
+                 for i in range(4)]
+        _edge(parent, chain[0], 'a1a2')
+        ProofNode.objects.create(
+            campaign=self.campaign, position_id=chain[0].key, pn=1, dn=1,
+            selected_child='b1b2')
+        for i in range(len(chain) - 1):
+            _edge(chain[i], chain[i + 1], 'b1b2')
+            ProofNode.objects.create(
+                campaign=self.campaign, position_id=chain[i + 1].key,
+                pn=1, dn=1, selected_child='b1b2')
+        _edge(chain[-1], parent, 'b1b2')
+        cache = proof._CarrierCache()
+        node_rows = proof._node_rows(self.campaign, [chain[0].key])
+        children = proof._children_by_parent([parent.key])
+        cycling = proof._cycling_edges(
+            self.campaign, [parent.key], children, node_rows, cache)
+        self.assertEqual(cycling, {(parent.key, 'a1a2')})
 
 
 class SaturationVisibilityTests(ShuttleFixture):

@@ -480,117 +480,154 @@ def sticky_index(best, held, numbers):
 # (caso Eclipsia, 6-ago: seis nodos UNSOLVED con dn = 2^62 exacto y pn = 1,
 # un estado imposible — dn infinito significa probado, y probado es pn = 0).
 #
-# La regla es la gemela de ``ingest._draw_cycling_children``: una arista cuya
-# espina de PRIMARIOS (``selected_child`` a ``selected_child``) vuelve al
-# nodo en calculo se esta justificando pasando por el, y eso es una
-# REPETICION.  Una repeticion vale tablas, y unas tablas REFUTAN la
-# proposicion de victoria — PNS es binario a proposito — asi que la arista
-# aporta ``(pn=INF, dn=0)`` mientras la espina siga dando la vuelta.  No es
-# un veredicto: en cuanto el hijo apunte su primario a otra parte (progreso
-# real, o la histeresis destronada por el INF), la pasada siguiente vuelve a
-# puntuar la arista con los numeros del hijo.  Los pn/dn no son fuente de
-# verdad y esta regla tampoco: ordena mejor, no prueba nada.
+# La regla: una arista cuyo VALOR vuelve al nodo en calculo se esta
+# justificando pasando por el, eso es una REPETICION, una repeticion vale
+# tablas, y unas tablas REFUTAN la proposicion de victoria — PNS es binario a
+# proposito.  La arista aporta ``(pn=INF, dn=0)`` mientras el retorno siga en
+# pie; en cuanto haya progreso real por debajo, el paseo deja de volver y la
+# pasada siguiente vuelve a puntuar la arista con los numeros del hijo.
+#
+# POR DONDE SE CAMINA, y por que NO por ``selected_child``.  El primer
+# borrador seguia la espina de primarios, como hace el respaldo con
+# ``backed_move`` — y el respaldo puede, porque su negamax toma el valor de
+# UN hijo.  Las recurrencias de prueba SUMAN: la realimentacion fluye por
+# donde fluyen los numeros, no por donde apunta el primario, y la histeresis
+# puede dejar al primario clavado FUERA del ciclo mientras la suma sigue
+# dando la vuelta (medido en la fixture de test_proof_cycles: +48 de dn por
+# pasada con los primarios quietos).  Asi que el paseo sigue a los
+# PORTADORES del valor vigente: en un nodo AND el ``min`` de dn viene de su
+# argmin, y en un nodo OR la suma la domina su sumando mayor — y dualmente
+# para pn.  Ese es exactamente el camino por el que un numero puede volver a
+# entrar en si mismo, que es lo unico que este paseo pregunta.
+#
+# Los pn/dn no son fuente de verdad y esta regla tampoco: ordena mejor, no
+# prueba nada.  Un corte que no dispara deja numeros que ordenan peor; uno
+# que dispara de mas refutaria una arista sana, y por eso todas las paradas
+# dudosas — tope, hijo sin numeros, ciclo ajeno — paran SIN reclamar.
 
 
-class _PrimarySpines:
-    """Lo que el paseo de repeticion de la PRUEBA recuerda en UNA pasada.
+class _CarrierCache:
+    """Lo que el paseo de portadores recuerda durante UNA pasada.
 
-    ``steps`` son hechos del grafo (una arista lleva siempre al mismo hijo;
-    el status del hijo no lo toca esta pasada).  ``spines`` es el
-    ``selected_child`` VIGENTE de cada nodo leido o escrito, y el bucle de
-    niveles llama a ``wrote`` con cada fila que actualiza — la unica pieza
-    mutable de la cache se entera de su propio cambio en vez de quedarse
-    vieja.  Misma forma que ``ingest._SpineCache`` y por las mismas razones.
+    ``children`` son hechos del grafo por nodo visitado: a donde llevan sus
+    aristas, con status y fen del hijo.  ``numbers`` es el (pn, dn) VIGENTE
+    de cada ``ProofNode`` leido o escrito; el bucle de niveles llama a
+    ``wrote`` con cada fila que actualiza, para que un paseo posterior de la
+    misma pasada vea el numero nuevo y no el que acaba de morir.
     """
 
-    __slots__ = ('steps', 'spines')
+    __slots__ = ('children', 'numbers')
 
     def __init__(self):
-        self.steps = {}      # (nodo, jugada) -> (hijo, status del hijo)
-        self.spines = {}     # nodo -> selected_child vigente
+        self.children = {}   # nodo -> ((child_id, status, fen), ...)
+        self.numbers = {}    # nodo -> (pn, dn) del ProofNode, o None
 
-    def wrote(self, key, move):
-        self.spines[key] = move
+    def wrote(self, key, pn, dn):
+        self.numbers[key] = (pn, dn)
 
 
-def _resolve_primary_steps(campaign, cache, walks):
-    """Dos consultas para los pasos del nivel que la cache no sabe.
-
-    La arista y el status viajan juntos; el primario del hijo es del
-    ``ProofNode`` de ESTA campana, que es la unica diferencia de fondo con el
-    gemelo del respaldo (alli la espina vive en ``Position.backed_move``).
-    """
-    unknown = [(node, move) for _p, _m, node, move, _s in walks
-               if (node, move) not in cache.steps]
+def _resolve_carrier_steps(campaign, cache, cursors):
+    """Dos consultas para los cursores del nivel que la cache no conoce."""
+    unknown = [node for node in cursors if node not in cache.children]
     if not unknown:
         return
-    children = set()
-    for parent_id, move_uci, child_id, status in (
-            Edge.objects.filter(
-                parent_id__in={node for node, _m in unknown},
-                move_uci__in={move for _n, move in unknown})
-            .values_list('parent_id', 'move_uci', 'child_id',
-                         'child__status')):
-        cache.steps[(parent_id, move_uci)] = (child_id, status)
-        children.add(child_id)
-    missing = children - set(cache.spines)
-    if missing:
-        found = dict(ProofNode.objects.filter(
-            campaign=campaign, position_id__in=missing).values_list(
-            'position_id', 'selected_child'))
-        for child_id in missing:
-            cache.spines[child_id] = found.get(child_id)
+    by_node = {node: [] for node in unknown}
+    fresh = set()
+    for parent_id, child_id, status, fen in (
+            Edge.objects.filter(parent_id__in=unknown)
+            .order_by('id')
+            .values_list('parent_id', 'child_id', 'child__status',
+                         'child__fen')):
+        by_node[parent_id].append((child_id, status, fen))
+        if child_id not in cache.numbers:
+            fresh.add(child_id)
+    for node, rows in by_node.items():
+        cache.children[node] = tuple(rows)
+    if fresh:
+        found = {key: (pn, dn) for key, pn, dn in ProofNode.objects.filter(
+            campaign=campaign, position_id__in=fresh).values_list(
+            'position_id', 'pn', 'dn')}
+        for child_id in fresh:
+            cache.numbers.setdefault(child_id, found.get(child_id))
+
+
+def _carrier_next(goal, cache, node, fen, want_dn):
+    """El hijo que PORTA el valor de ``node``, o ``None`` si nadie lo porta.
+
+    Solo un hijo ABIERTO y con ``ProofNode`` puede portar realimentacion: un
+    cierre vale su verdad y una hoja sin fila vale su inicializacion, y ni la
+    una ni la otra dependen de nadie.  Empates: el primero en orden de
+    arista, el mismo desempate determinista del resto del modulo.
+    """
+    best_key, best_value = None, None
+    or_node = is_or_node(fen, goal)
+    for child_id, status, _child_fen in cache.children.get(node, ()):
+        if status != 'UNKNOWN':
+            continue
+        numbers = cache.numbers.get(child_id)
+        if numbers is None:
+            continue
+        value = numbers[1] if want_dn else numbers[0]
+        if best_value is None:
+            best_key, best_value = child_id, value
+            continue
+        if want_dn:
+            # dn: en OR es una suma (manda el sumando mayor), en AND un min.
+            better = value > best_value if or_node else value < best_value
+        else:
+            # pn: en OR es un min, en AND una suma (manda el sumando mayor).
+            better = value < best_value if or_node else value > best_value
+        if better:
+            best_key, best_value = child_id, value
+    return best_key
 
 
 def _cycling_edges(campaign, parents, children_by_parent, node_rows, cache):
-    """``{(padre, jugada)}`` cuyas espinas primarias vuelven al propio padre.
+    """``{(padre, jugada)}`` cuyos valores vuelven al propio padre.
 
-    Camina la espina del hijo buscando al padre que lo esta evaluando; si
-    aparece, la arista es una repeticion y aporta ``(INF, 0)`` en
-    ``compute_numbers``.  Paradas, todas ellas "no hay ciclo": la espina se
-    acaba (hijo sin ``ProofNode`` o sin primario), la arista del primario ya
-    no existe, la espina llega a un nodo CERRADO (debajo de un cierre el
-    valor es verdad, no prestamo), se cierra sobre si misma sin pasar por el
-    padre (ese ciclo es problema de OTRO padre, que lo vera cuando le
-    toque), o se agota el tope.  Un ply del paseo cuesta dos consultas para
-    TODOS los caminantes del nivel, no una por hijo.
+    Dos paseos por arista — el portador de dn y el de pn — porque las dos
+    recurrencias realimentan por caminos duales; basta que uno vuelva.
+    Paradas, todas ellas "no hay ciclo": ningun hijo abierto con numeros que
+    portar, ciclo que se cierra sin pasar por el padre (problema de OTRO
+    padre, que lo vera cuando le toque) y el tope de plies.
     """
     walks = []
     for parent_key in parents:
-        for move_uci, child_id, status, _eval_cp, _fen in (
+        for move_uci, child_id, status, _eval_cp, fen in (
                 children_by_parent.get(parent_key) or ()):
             if status != 'UNKNOWN':
-                continue          # bajo un cierre no hay espina que prestar
-            if child_id in cache.spines:
-                spine = cache.spines[child_id]
-            else:
-                node = node_rows.get(child_id)
-                spine = None if node is None else node.selected_child
-                cache.spines[child_id] = spine
-            if not spine:
-                continue          # sin primario no hay ciclo que buscar
-            walks.append([parent_key, move_uci, child_id, spine,
-                          {child_id}])
+                continue      # bajo un cierre no hay valor prestado que rodar
+            if node_rows.get(child_id) is None \
+                    and cache.numbers.get(child_id) is None:
+                continue      # sin fila de prueba no hay numero que volver
+            for want_dn in (True, False):
+                walks.append([parent_key, move_uci, child_id, fen, want_dn,
+                              {child_id}])
     cycling = set()
     for _ in range(PROOF_CYCLE_MAX_PLIES):
         if not walks:
             break
-        _resolve_primary_steps(campaign, cache, walks)
+        _resolve_carrier_steps(campaign, cache,
+                               {walk[2] for walk in walks})
         alive = []
         for walk in walks:
-            parent_key, move0, node, move, seen = walk
-            step = cache.steps.get((node, move))
-            if step is None:
-                continue                    # arista perdida: no hay ciclo
-            below, status = step
+            parent_key, move0, node, fen, want_dn, seen = walk
+            if (parent_key, move0) in cycling:
+                continue      # el otro paseo de la arista ya la corto
+            below = _carrier_next(campaign.goal, cache, node, fen, want_dn)
+            if below is None:
+                continue
             if below == parent_key:
                 cycling.add((parent_key, move0))
                 continue
-            spine = cache.spines.get(below)
-            if below in seen or not spine or status != 'UNKNOWN':
+            if below in seen:
+                continue
+            step = next((row for row in cache.children.get(node, ())
+                         if row[0] == below), None)
+            if step is None:
                 continue
             seen.add(below)
-            walk[2], walk[3] = below, spine
+            walk[2], walk[3] = below, step[2]
             alive.append(walk)
         walks = alive
     return cycling
@@ -683,7 +720,7 @@ def _refresh_campaign(campaign, seeds, max_plies):
     frontier = list(seeds)
     visits, processed, plies, written = {}, 0, 0, 0
     guard_reason = None
-    spines = _PrimarySpines()   # memoria del paseo de repeticion, por pasada
+    carriers = _CarrierCache()  # memoria del paseo de repeticion, por pasada
     while frontier and plies < max_plies:
         plies += 1
         positions = list(Position.objects.filter(key__in=frontier).only(
@@ -697,10 +734,11 @@ def _refresh_campaign(campaign, seeds, max_plies):
         existing = _node_rows(campaign, set(keys) | child_keys)
         # Antes de que nadie sume: la arista que se justifica pasando por su
         # propio nodo entra a las recurrencias como REFUTADA, no con el
-        # numero del ciclo (§ _cycling_edges, invariante 6).
+        # numero del ciclo (§ _cycling_edges, invariante 6).  Las filas que ya
+        # estan en la mano siembran la cache: el paseo no vuelve a pedirlas.
         for node_key, node in existing.items():
-            spines.spines.setdefault(node_key, node.selected_child)
-        cycling = _cycling_edges(campaign, keys, children, existing, spines)
+            carriers.numbers.setdefault(node_key, (node.pn, node.dn))
+        cycling = _cycling_edges(campaign, keys, children, existing, carriers)
         create, update, propagate = [], [], []
         for row in positions:
             processed += 1
@@ -712,7 +750,7 @@ def _refresh_campaign(campaign, seeds, max_plies):
                 campaign, row, children.get(row.key, ()), existing,
                 previous=None if node is None else node.selected_child,
                 cycling=cycling)
-            spines.wrote(row.key, selected)    # la cache no se queda vieja
+            carriers.wrote(row.key, pn, dn)    # la cache no se queda vieja
             if node is None:
                 create.append(ProofNode(
                     campaign=campaign, position_id=row.key, pn=pn, dn=dn,
