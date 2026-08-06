@@ -3246,10 +3246,12 @@ def api_query(request):
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
     stm_white = pos.fen.split()[1] == 'w'
-    # ``score`` es el mejor conocimiento actual (respaldado por el subarbol);
-    # ``point`` conserva la eval puntual cruda de esta misma posicion.
-    known = ingest.best_known_eval(pos) if pos.status == 'UNKNOWN' \
-        else pos.eval_cp
+    # ``score`` es el mejor conocimiento actual (status probado > respaldado >
+    # eval puntual), el MISMO helper que titula la cabecera del explore y la
+    # fila del padre: un nodo decidido puntuaba aqui su eval cruda de antes
+    # del cierre, y era el ultimo sitio donde un mismo nodo titulaba dos
+    # numeros segun la vista.  ``point`` conserva la eval puntual cruda.
+    known = ingest.best_known_eval(pos)
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)

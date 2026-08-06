@@ -58,6 +58,14 @@ partition anything.
 
 ## Rendering
 
+- **What a node headlines is its best-known value** — proven status >
+  backed > point eval, the one precedence of `best_known_eval`, on every
+  surface that quotes the number: the explore header, the node's row in
+  its parent's table, the query API `score`, the map inspector. The raw
+  point eval never headlines while something better is known; it survives
+  as own-search context (tooltips, the API `point` field). One node, one
+  number. (Owner decision 2026-08-06, after a header quoted a 640M-node
+  own eval over the 2.13G-backed value its own table stood on.)
 - SEARCHED / BACKED values: plain text, as always.
 - LINE-CLAIM / STALE-CLAIM values: same cell, muted and italic, with the
   full story in the tooltip (which line, which pass era, and that nothing
