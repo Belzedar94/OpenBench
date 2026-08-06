@@ -25,6 +25,7 @@
         "shatranj_unbalanced.epd",
         "shatranj_unbalanced2.epd",
         "spell_openings.epd",
+        "ALICE_openings.epd",
         "ATOMIC_openings.epd",
         "ATOMIC_syzygy_6man.epd",
         "ATOMIC_V3_1B_opening_train.epd",
@@ -41,6 +42,7 @@
     "engines": [
         "Spell-Stockfish",
         "Atomic-Stockfish",
+        "Alice-Stockfish",
         "Fairy-Stockfish-Atomic-Baseline"
     ]
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UCI pair-game runner for variants cutechess-cli cannot arbitrate (spell-chess).
+"""UCI pair-game runner for variants that cutechess-cli cannot arbitrate.
 
 Drop-in stand-in for cutechess-ob inside an OpenBench worker, and a local match
 runner. The runner NEVER arbitrates rules itself: engines are trusted, and game
@@ -51,7 +51,7 @@ from datetime import datetime
 
 MATE_ISH = 25000                       # forced win in internal cp units
 NONE_MOVES = ("(none)", "0000", "none")
-# permissive: spell-chess gated moves look like 'f@e4,d2d4' (with promotion
+# Permissive: gated moves look like 'f@e4,d2d4' (with promotion
 # 'f@e4,e7e8q' reaches 10 chars); only reject clearly malformed bestmoves so
 # we never false-positive an 'illegal move'
 MOVE_RE = re.compile(r"^[A-Za-z0-9@+=,\-]{2,12}$")
@@ -384,7 +384,7 @@ class Outcome:
 
 
 def _fen_fields(fen):
-    # spell FENs carry a '{...}' state token between board and stm, so scan
+    # Some variant FENs carry extra state tokens between board and stm, so scan
     # for the side-to-move field instead of trusting a fixed position
     t = fen.split()
     stm = next((tok for tok in t[1:] if tok in ("w", "b")), "w")
@@ -503,9 +503,8 @@ def play_game(white, black, fen, cfg):
 
         score = info["cp"]  # mover POV, mates folded to +/-MATE_ISH
 
-        # ---- spell-chess terminal: no legal move. Losing terminals (king
-        # captured / stalled while attacked) carry a huge negative root score;
-        # a quiet stall (score ~ 0) is a draw.
+        # ---- variant terminal: no legal move. Losing terminals carry a huge
+        # negative root score; a quiet stall (score ~ 0) is a draw.
         if best in NONE_MOVES:
             if score is not None and abs(score) < cfg.stall_draw_cp:
                 return finish("1/2-1/2", "Draw by stalemate")
@@ -576,7 +575,9 @@ def play_game(white, black, fen, cfg):
 _pgn_lock = threading.Lock()
 
 
-def write_pgn(path, game_no, white_name, black_name, fen, outcome, tc_label):
+def write_pgn(
+    path, game_no, white_name, black_name, fen, outcome, tc_label, variant
+):
     stm0, _ = _fen_fields(fen)
     headers = [
         ("Event", "uci_pair_runner"),
@@ -588,7 +589,7 @@ def write_pgn(path, game_no, white_name, black_name, fen, outcome, tc_label):
         ("Result", outcome.result),
         ("SetUp", "1"),
         ("FEN", fen),
-        ("Variant", "spell-chess"),
+        ("Variant", variant),
         ("TimeControl", tc_label),
         ("PlyCount", str(outcome.plies)),
         ("GameEndTime", datetime.now().strftime("%Y-%m-%dT%H:%M:%S")),
@@ -751,7 +752,7 @@ def parse_cli(argv):
             elif flag == "--fixed-budget":
                 cfg.fixed_budget_s = float(val)
             elif flag in IGNORED:
-                warn("%s %s ignored (not applicable to spell-chess)"
+                warn("%s %s ignored (not applicable to this runner)"
                      % (flag, val))
             continue
         # unknown flag: warn, skip it and its non-flag tail
@@ -953,7 +954,7 @@ def main():
                 if cfg.pgnout:
                     try:
                         write_pgn(cfg.pgnout, g, wspec.name, bspec.name,
-                                  fen, outcome, tc_label)
+                                  fen, outcome, tc_label, cfg.variant)
                     except OSError as exc:
                         warn("pgn write failed: %s" % exc)
                 if outcome.restart:

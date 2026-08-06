@@ -649,6 +649,7 @@ class ServerReporter:
 
 VARIANTS = {
     'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'ALICE'    : ('uci-pair-runner', 'alice'       ),
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
     'FRC'      : ('cutechess'      , 'fischerandom'),
@@ -661,6 +662,7 @@ VARIANTS = {
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
+    'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
 }
