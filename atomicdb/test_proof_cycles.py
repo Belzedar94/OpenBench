@@ -261,26 +261,42 @@ class SaturationVisibilityTests(ShuttleFixture):
             pn=0, dn=INF)
         self.assertEqual(proof.saturated_open_count(self.campaign), 4)
 
-    def test_the_two_columns_are_counted_separately(self):
-        """dn saturado en un abierto es imposible (el sintoma); pn saturado
-        es corriente y honesto.  Sumarlos seria llorar por la regla nueva."""
+    def test_the_columns_are_counted_separately(self):
+        """Tres poblaciones distintas, y solo una es una averia."""
         self._poison()          # los cuatro llevan dn = INF, pn = 1
         self.assertEqual(
             proof.saturated_open_count(self.campaign, column='dn'), 4)
         self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='impossible'), 4)
+        self.assertEqual(
             proof.saturated_open_count(self.campaign, column='pn'), 0)
+        # Refutado por repeticion: pn saturado, dn a cero.  Ni imposible ni
+        # averia — es la regla nueva haciendo su trabajo.
         ProofNode.objects.filter(
             campaign=self.campaign, position_id=self.b.key).update(
             pn=INF, dn=0)
         self.assertEqual(
-            proof.saturated_open_count(self.campaign, column='dn'), 3)
-        self.assertEqual(
             proof.saturated_open_count(self.campaign, column='pn'), 1)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='impossible'), 3)
 
-    def test_frontier_stats_carry_the_alarming_count(self):
+    def test_a_proved_node_awaiting_its_closure_is_not_an_anomaly(self):
+        """El caso que domina la base viva: ``pn = 0`` con ``dn`` saturado es
+        la firma LEGITIMA de un nodo probado al que la cascada le debe el
+        cierre (517 de 517 medidos el 6-ago).  Cuenta como dn saturado y NO
+        como imposible, que es lo que publica la portada."""
+        ProofNode.objects.create(
+            campaign=self.campaign, position_id=self.c.key,
+            pn=0, dn=INF, expanded_in_proof=True)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='dn'), 1)
+        self.assertEqual(
+            proof.saturated_open_count(self.campaign, column='impossible'), 0)
+
+    def test_frontier_stats_carry_the_impossible_count(self):
         self._poison()
         stats = proof.frontier_dn_stats(self.campaign, floor=2)
-        # La cifra publicada es la que alarma: el dn imposible.
+        # La cifra publicada es la imposible, no la saturacion a secas.
         self.assertEqual(stats['saturated'], 4)
         # Y los saturados siguen FUERA de la mediana, como siempre.
         self.assertEqual(stats['and_nodes'], 0)
@@ -288,17 +304,17 @@ class SaturationVisibilityTests(ShuttleFixture):
 
 class RecascadeProofCommandTests(ShuttleFixture):
 
-    def test_command_drains_the_dn_ratchet_and_reports_both_columns(self):
+    def test_command_drains_the_ratchet_and_reports_the_three_columns(self):
         self._poison()
         out = StringIO()
         call_command('recascade_proof', '--max-passes', '8', stdout=out)
         text = out.getvalue()
-        self.assertIn('abiertos saturados antes: dn=4', text)
+        self.assertIn('abiertos saturados antes: imposibles=4', text)
         self.assertIn('punto fijo', text)
-        # Lo que TIENE que irse es el dn imposible.  El pn que queda es la
-        # refutacion por repeticion de los nodos AND, que es el resultado
+        # Lo que TIENE que irse es el estado imposible.  El pn que queda es
+        # la refutacion por repeticion de los nodos AND, que es el resultado
         # correcto y no un residuo (§ CycleRuleTests).
-        self.assertEqual(proof.saturated_open_count(column='dn'), 0)
+        self.assertEqual(proof.saturated_open_count(column='impossible'), 0)
         self.assertEqual(proof.saturated_open_count(column='pn'), 2)
 
     def test_command_with_nothing_to_do_says_so(self):

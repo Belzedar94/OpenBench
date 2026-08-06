@@ -73,8 +73,8 @@
       sit at or below dn {{ dn_repair_floor }} — one unanswered question from
       falling over
       · <b>{{ frontier_saturated }}</b> open node{{ frontier_saturated|pluralize }}
-      <span title="UNSOLVED positions whose proof numbers sit at saturation — the visible symptom of a value that fed back through a repetition cycle. They are rightly outside the frontier stats, and this counter is what keeps them from vanishing in silence; recascade_proof drains the ones a cycle inflated.">stuck
-      at ∞</span>{% endif %}
+      <span title="UNSOLVED positions with an impossible pair of proof numbers: a saturated disproof number next to a finite proof number. Sane recurrences cannot produce it — a saturated dn means proved, and proved means pn = 0 — so it is the fingerprint of a value that fed back through a repetition cycle. Zero is the healthy reading; recascade_proof drains it. Saturation on its own is NOT counted here: it is usually a proved node still owed its closure, or a line honestly refuted.">on
+      impossible numbers</span>{% endif %}
     {% if has_human_close %}· positions a visitor asked for close in
       <b>{{ human_close_h }}</b> (median of {{ human_close_samples }}){% endif %}
     · measured at {{ proof_health_at|date:"Y-m-d H:i" }} UTC

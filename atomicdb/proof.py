@@ -1205,24 +1205,35 @@ def saturated_open_count(campaign=None, column=None):
     demostrador y del brazo de reparacion de dn sin que ningun panel los
     contara.  Este contador es ese "aparte".
 
-    LAS DOS COLUMNAS NO SIGNIFICAN LO MISMO y por eso se pueden pedir
-    sueltas:
+    NINGUNA SATURACION SUELTA SIGNIFICA AVERIA, y esto hay que leerlo antes
+    de poner una cifra en una portada.  Medido sobre la base viva el 6-ago,
+    despues del barrido de re-baseline:
 
-    * ``dn`` saturado en un nodo ABIERTO es IMPOSIBLE para las recurrencias
-      sanas — dn infinito significa probado, y probado es pn = 0 — asi que
-      es el sintoma: o el trinquete de un ciclo (§ invariante 6) o un cierre
-      que la cascada todavia debe.  Esta es la cifra que alarma.
-    * ``pn`` saturado es corriente y honesto: dice "por aqui no se prueba el
-      objetivo", que es lo que vale un nodo con todas sus continuaciones
-      refutadas — incluida la refutacion POR REPETICION que introduce el
-      invariante 6.  Contarlo como avería seria llorar por la regla nueva
-      haciendo su trabajo.
+    * ``pn`` saturado (1.168 nodos) es corriente y honesto: dice "por aqui no
+      se prueba el objetivo", que es lo que vale un nodo con todas sus
+      continuaciones refutadas — incluida la refutacion POR REPETICION que
+      introduce el invariante 6.  Contarlo como averia seria llorar por la
+      regla nueva haciendo su trabajo.
+    * ``dn`` saturado (517 nodos) resulto ser, EN SU TOTALIDAD, la firma
+      legitima de un nodo PROBADO al que la cascada todavia le debe el
+      cierre: los 517 llevan ``pn = 0``, y 334 tienen un hijo WHITE_WIN
+      colgando, que por la recurrencia de un nodo OR da exactamente
+      ``(0, INF)``.  Publicar esa cifra como alarma seria publicar el
+      backlog de la cascada con otro nombre.
+    * ``impossible`` — ``dn`` saturado con ``pn`` FINITO y mayor que cero —
+      es el unico estado que las recurrencias sanas no pueden producir: dn
+      infinito significa probado y probado es pn = 0.  Es la firma exacta
+      del trinquete de Eclipsia (pn=1, dn=2^62) y es la que vigila la
+      portada.  Tras el barrido: CERO en toda la base.
     """
     rows = ProofNode.objects.filter(position__status='UNKNOWN')
     if column == 'dn':
         rows = rows.filter(dn__gte=PROOF_INFINITY)
     elif column == 'pn':
         rows = rows.filter(pn__gte=PROOF_INFINITY)
+    elif column == 'impossible':
+        rows = rows.filter(dn__gte=PROOF_INFINITY, pn__gt=0,
+                           pn__lt=PROOF_INFINITY)
     else:
         rows = rows.filter(
             Q(pn__gte=PROOF_INFINITY) | Q(dn__gte=PROOF_INFINITY))
@@ -1247,11 +1258,11 @@ def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
 
     ``saturated`` viaja con las tres cifras del frente porque es su
     contrapartida (§ ``saturated_open_count``): los abiertos que el frente NO
-    mira, contados aparte para que no desaparezcan en silencio.  Se da la
-    cifra que ALARMA — el ``dn`` imposible — y no la suma de las dos, que
-    estaria dominada por los ``pn`` honestos.
+    mira, contados aparte para que no desaparezcan en silencio.  Es la cifra
+    IMPOSIBLE — dn saturado con pn finito — y no la saturacion a secas, que
+    esta dominada por cierres pendientes y refutaciones honestas.
     """
-    saturated = saturated_open_count(campaign, column='dn')
+    saturated = saturated_open_count(campaign, column='impossible')
     dns = sorted(row[3] for row in frontier_and_rows(campaign, limit=limit))
     if not dns:
         return {'and_nodes': 0, 'dn_median': 0, 'thin': 0,

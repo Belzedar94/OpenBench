@@ -58,16 +58,17 @@ class Command(BaseCommand):
             'position_id', flat=True).distinct())
 
     def _census(self):
-        return (proof.saturated_open_count(column='dn'),
+        return (proof.saturated_open_count(column='impossible'),
+                proof.saturated_open_count(column='dn'),
                 proof.saturated_open_count(column='pn'))
 
     def handle(self, *args, **opts):
         chunk, cap = opts['chunk'], opts['max_passes']
         explicit = opts['keys'] or None
-        before_dn, before_pn = self._census()
+        before = self._census()
         self.stdout.write(
-            'abiertos saturados antes: dn=%d (el sintoma) pn=%d (honesto)'
-            % (before_dn, before_pn))
+            'abiertos saturados antes: imposibles=%d (el sintoma) '
+            'dn=%d (cierres pendientes) pn=%d (refutados)' % before)
         for n in range(1, cap + 1):
             seeds = explicit if explicit is not None else \
                 self._saturated_keys()
@@ -79,11 +80,11 @@ class Command(BaseCommand):
             for start in range(0, len(seeds), chunk):
                 written += proof.refresh_proof_numbers(
                     seeds[start:start + chunk])
-            now_dn, now_pn = self._census()
+            now = self._census()
             self.stdout.write(
                 'pasada %d: %d semillas, %d filas escritas, '
-                'quedan dn=%d pn=%d' % (n, len(seeds), written,
-                                        now_dn, now_pn))
+                'quedan imposibles=%d dn=%d pn=%d'
+                % ((n, len(seeds), written) + now))
             if written == 0:
                 self.stdout.write(self.style.SUCCESS(
                     'punto fijo en la pasada %d' % n))
@@ -91,7 +92,9 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING(
                 'tope de pasadas (%d) sin punto fijo' % cap))
-        after_dn, after_pn = self._census()
+        after = self._census()
         self.stdout.write(
-            'abiertos saturados despues: dn=%d (antes %d) pn=%d (antes %d)'
-            % (after_dn, before_dn, after_pn, before_pn))
+            'abiertos saturados despues: imposibles=%d (antes %d) '
+            'dn=%d (antes %d) pn=%d (antes %d)'
+            % (after[0], before[0], after[1], before[1],
+               after[2], before[2]))
