@@ -217,14 +217,21 @@ class QueueTests(TestCase):
             self.assertIn(line, body)
 
     def test_the_waiting_row_says_how_much_queue_is_ahead(self):
-        # Dos peticiones nombradas antes que la suya: su sitio es el tercero.
+        """CONTRATO CAMBIADO (7-ago, reparto justo): UNA por delante, no dos.
+
+        Bob pidio dos y alice una despues.  En el FIFO por id que habia hasta
+        hoy, alice era la tercera y la pagina decia "2 requests ahead".  Con
+        el reparto ponderado, la SEGUNDA de bob espera a que alice haya
+        cobrado la suya, asi que por delante solo tiene una — y esa es la
+        cifra que hay que pintar, porque es la que va a pasar."""
         _task(self.auto, source=AnalysisTask.Source.USER, requested_by='bob')
         _task(self.theirs, source=AnalysisTask.Source.USER, requested_by='bob')
         _task(self.mine, source=AnalysisTask.Source.USER, requested_by='alice')
 
         body = self._body()
 
-        self.assertIn('2 requests ahead', body)
+        self.assertIn('1 request ahead', body)
+        self.assertNotIn('2 requests ahead', body)
 
     def test_an_empty_queue_says_so_without_pretending(self):
         _ping('box-atomicdb', 'alice')

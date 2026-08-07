@@ -13,8 +13,8 @@ from datetime import timedelta
 from django.test import Client
 from django.utils import timezone
 
-from . import contributors, ingest, logic
-from .models import AnalysisTask, Edge, Position
+from . import contributors, ingest, live_request, logic, views
+from .models import AnalysisTask, Edge, Position, WorkerPing
 from .testing import TestCase, worker_account
 
 
@@ -371,3 +371,314 @@ class AheadCountTruthTests(UserBandFifoTests):
 
         self.assertEqual([task.id for task in pending], [waiting.id])
         self.assertEqual(pending[0].ahead, 1)
+
+
+class _QueueHarness(TestCase):
+    """Utillaje comun.  Sin tests propios a proposito: heredarlos haria que
+    la racha de 1.562 filas se montase una vez por subclase."""
+
+    RUNG = 128_000_000
+
+    def setUp(self):
+        worker_account('w', 'p')
+        self.client = Client()
+
+    def _positions(self, count, offset=0):
+        rows = [Position(key=f'{index + offset:064d}', fen=logic.start_fen(),
+                         status='UNKNOWN', expanded=False)
+                for index in range(count)]
+        Position.objects.bulk_create(rows, batch_size=1000)
+        return rows
+
+    def _queue(self, owner, budgets, offset=0):
+        """Encola ``budgets`` a nombre de ``owner``, en ese orden."""
+        positions = self._positions(len(budgets), offset=offset)
+        tasks = [AnalysisTask(position=position, generation=0,
+                              budget_nodes=budget,
+                              source=AnalysisTask.Source.USER,
+                              requested_by=owner, state='PENDING')
+                 for position, budget in zip(positions, budgets)]
+        return AnalysisTask.objects.bulk_create(tasks, batch_size=1000)
+
+    def _lease(self, machine, username='w'):
+        return self.client.post('/atomicdb/api/lease', {
+            'username': username, 'password': 'p', 'machine': machine,
+            'worker_build': '2026072203', 'lease_session': machine,
+        }).json()['tasks']
+
+    def _serve_order(self, count):
+        """Los ``count`` primeros ids que la cola entrega DE VERDAD."""
+        served = []
+        for index in range(count):
+            tasks = self._lease(f'drain{index}')
+            if not tasks:
+                break
+            served.append(tasks[0]['id'])
+        return served
+
+
+class FairShareTests(_QueueHarness):
+    """Reparto justo ponderado por coste: el ultimo escalon ya no es FIFO.
+
+    La racha del 6-ago a las 18:00 UTC — 1.562 peticiones de una cuenta en una
+    hora, sobre un pool de nueve procesos — dejaba al siguiente en llegar
+    detras de las 1.562, pidiese lo que pidiese.  Con la suma de nodos que ese
+    mismo peticionario ya tiene por delante, el primero de cada uno empata a
+    cero y cobra por ``id``; el segundo espera a que los demas hayan cobrado
+    el suyo.
+    """
+
+    def test_the_first_request_of_each_account_precedes_every_second_one(self):
+        first_a, second_a = self._queue('a', [self.RUNG] * 2)
+        first_b, second_b = self._queue('b', [self.RUNG] * 2, offset=100)
+
+        self.assertEqual(self._serve_order(4),
+                         [first_a.id, first_b.id, second_a.id, second_b.id])
+
+    def test_a_ten_billion_request_yields_its_turn_to_the_cheap_ones(self):
+        """Ponderado por NODOS: 10B cuesta 78 veces lo que 128M, y cede 78."""
+        deep = self._queue('heavy', [10_000_000_000] * 2)
+        light = self._queue('light', [self.RUNG] * 80, offset=100)
+
+        served = self._serve_order(81)
+
+        # El primero de cada uno empata a cero y desempata el id; a partir de
+        # ahi el de 10B no vuelve hasta que el barato ha gastado sus 10B.
+        self.assertEqual(served[0], deep[0].id)
+        self.assertEqual(served[1], light[0].id)
+        self.assertEqual(served[2:80], [task.id for task in light[1:79]])
+        self.assertEqual(served[80], deep[1].id)
+
+    def test_the_burst_of_the_sixth_of_august_no_longer_blocks_a_newcomer(self):
+        """RECIBO: 1.562 de una cuenta, y detras UNA de un recien llegado."""
+        burst = self._queue('soothdest', [self.RUNG] * 1562)
+        newcomer, = self._queue('newcomer', [self.RUNG], offset=2000)
+
+        # ANTES (FIFO puro por id): las 1.562 por delante, una a una.
+        fifo_ahead = AnalysisTask.objects.filter(
+            state='PENDING', source=AnalysisTask.Source.USER,
+            id__lt=newcomer.id).count()
+        self.assertEqual(fifo_ahead, 1562)
+
+        # DESPUES: solo la PRIMERA de la racha cobra antes.
+        self.assertEqual(live_request.queue_ahead(newcomer), 1)
+        self.assertEqual(self._serve_order(2), [burst[0].id, newcomer.id])
+
+    def test_within_one_account_the_order_of_arrival_is_untouched(self):
+        mine = self._queue('solo', [self.RUNG] * 5)
+
+        self.assertEqual(self._serve_order(5), [task.id for task in mine])
+
+    def test_the_estimator_agrees_with_the_order_actually_served(self):
+        """TRAMPA B: si el orden y la cifra divergen, que lo cace el CI.
+
+        El sitio le decia a un humano "1.500 por delante" con cuatro de
+        verdad porque el estimador seguia contando en FIFO.  Aqui se pide la
+        cifra ANTES de servir y se compara con el sitio real.
+
+        Sin llegar al peldano de 10B a proposito: el estimador NO modela el
+        tope de arriendos profundos — es una condicion del momento del
+        reparto, no un sitio en la cola — y meterlo aqui seria pedirle que
+        acierte algo que dice explicitamente que no promete."""
+        self._queue('a', [self.RUNG, 2_000_000_000, self.RUNG])
+        self._queue('b', [2_000_000_000, self.RUNG], offset=100)
+        self._queue('c', [self.RUNG] * 4, offset=200)
+        pending = list(AnalysisTask.objects.filter(state='PENDING'))
+        estimated = {task.id: live_request.queue_ahead(task)
+                     for task in pending}
+
+        served = self._serve_order(len(pending))
+
+        self.assertEqual(len(served), len(pending))
+        self.assertEqual([estimated[task_id] for task_id in served],
+                         list(range(len(served))))
+
+
+class AnonymousBucketTests(_QueueHarness):
+    """La marea sin login es UN cubo: no se la puede distinguir, asi que se
+    la reparte como a una cuenta sola.  La promocion por inanicion sigue."""
+
+    def test_the_anonymous_flood_is_shared_out_as_a_single_account(self):
+        flood = self._queue('', [self.RUNG] * 6)
+        named = self._queue('quasa', [self.RUNG] * 2, offset=100)
+
+        # El estrato nombrado va primero entero; dentro del cubo anonimo el
+        # reparto no reordena nada, porque todas son del mismo cubo.
+        self.assertEqual(self._serve_order(4),
+                         [named[0].id, named[1].id, flood[0].id, flood[1].id])
+
+    def test_a_starved_anonymous_click_still_reaches_the_front(self):
+        flood = self._queue('', [self.RUNG] * 3)
+        AnalysisTask.objects.filter(pk=flood[0].pk).update(
+            created=timezone.now() - timedelta(hours=30))
+        named = self._queue('quasa', [self.RUNG] * 2, offset=100)
+
+        # La promocionada entra en el estrato nombrado y su id la pone
+        # delante; el reparto no se lo impide, porque en su cubo es la
+        # primera y lleva cero nodos por delante.
+        self.assertEqual(self._serve_order(3),
+                         [flood[0].id, named[0].id, named[1].id])
+
+    def test_the_starved_tier_never_inherits_the_deficit_of_the_fresh_one(self):
+        """Las promocionadas son SIEMPRE el prefijo por id del cubo anonimo.
+
+        La promocion es por edad y el id crece con la edad, asi que una fila
+        fresca nunca queda por delante de una promocionada dentro del mismo
+        cubo — y por tanto nunca puede inflarle la suma.
+
+        Con el peldano de 2B, no el de 10B: aqui se mide el reparto, y el tope
+        de arriendos profundos (que tiene sus propios tests) se llevaria la
+        segunda promocionada por delante y taparia lo que se quiere ver."""
+        flood = self._queue('', [2_000_000_000] * 2 + [self.RUNG] * 3)
+        for task in flood[:2]:
+            AnalysisTask.objects.filter(pk=task.pk).update(
+                created=timezone.now() - timedelta(hours=30))
+        named = self._queue('quasa', [self.RUNG], offset=100)
+
+        served = self._serve_order(3)
+
+        # La primera promocionada lleva cero nodos delante y empata con la
+        # nombrada; la segunda arrastra los 10B de la primera y espera.
+        self.assertEqual(served[:2], [flood[0].id, named[0].id])
+        self.assertEqual(served[2], flood[1].id)
+
+
+class DeepLeaseCapTests(_QueueHarness):
+    """Tope de tareas del peldano mas alto ARRENDADAS a la vez por cuenta.
+
+    Lo que el reparto justo no puede arreglar: un arriendo de media hora no se
+    expropia.  Medido el 7-ago a las 10:21 UTC — soothdest con 9 de los 10
+    arriendos vivos, tres de ellos de 10B."""
+
+    DEEP = 10_000_000_000
+
+    def _pool(self, slots, prefix='slot', last_seen=None):
+        """Un pool vivo de ``slots`` procesos, que es lo que fija el cupo.
+
+        Los slots se llaman como las maquinas desde las que luego se arrienda:
+        ``_touch_worker`` refresca esas mismas filas en vez de anadir otras, y
+        el pool medido es el que dice el test y no el doble.  ``last_seen`` es
+        ``auto_now``, asi que envejecer un slot es un UPDATE, no un save."""
+        names = [f'{prefix}{index}' for index in range(slots)]
+        for name in names:
+            WorkerPing.objects.get_or_create(
+                machine=name, user='w',
+                defaults={'threads': 8, 'hash_mb': 256, 'os': 'linux'})
+        if last_seen is not None:
+            WorkerPing.objects.filter(machine__in=names).update(
+                last_seen=last_seen)
+        return names
+
+    def _held(self, owner, count, budget):
+        """``count`` tareas de ``owner`` YA arrendadas y vivas."""
+        tasks = self._queue(owner, [budget] * count, offset=900)
+        now = timezone.now()
+        AnalysisTask.objects.filter(id__in=[t.id for t in tasks]).update(
+            state='LEASED', machine='held', leased_at=now,
+            lease_heartbeat_at=now, lease_token='t', attempts=1)
+        return tasks
+
+    def _drain(self, count, slots):
+        """Sirve ``count`` tareas reusando SIEMPRE los mismos slots.
+
+        Cada arriendo suelta la identidad de maquina en cuanto se le entrega:
+        la tarea sigue ARRENDADA — y por tanto sigue pesando en el reparto —
+        pero el slot vuelve a estar libre para pedir la siguiente.  Sin esto
+        haria falta una maquina nueva por arriendo, y cada maquina nueva
+        agranda el pool vivo y con el el propio cupo que se esta midiendo."""
+        served = []
+        for index in range(count):
+            tasks = self._lease(slots[index % len(slots)])
+            if not tasks:
+                break
+            served.append(tasks[0]['id'])
+            AnalysisTask.objects.filter(id=tasks[0]['id']).update(
+                machine=f'busy{index}')
+        return served
+
+    def _straddle(self):
+        """Cola en la que la tarea profunda de ``heavy`` cae EXACTAMENTE en el
+        puesto 16, con trabajo de otro por delante y por detras.
+
+        ``heavy`` ya tiene tres arriendos de 10B, o sea 30B de deuda, asi que
+        su cuarta profunda entra a la altura de la decimosexta de ``other``
+        (15 x 2B = 30B) y gana el desempate por id.  Es el unico sitio donde
+        el tope se puede VER: mas atras el reparto ya lo frenaba solo, y mas
+        adelante no hay con quien repartir y la segunda pasada lo suelta."""
+        self._held('heavy', 3, self.DEEP)
+        deep, = self._queue('heavy', [self.DEEP], offset=950)
+        other = self._queue('other', [2_000_000_000] * 20, offset=100)
+        return deep, other
+
+    def test_one_account_cannot_hold_more_deep_leases_than_its_share(self):
+        slots = self._pool(9)              # 9 // 3 = 3
+        deep, other = self._straddle()
+
+        served = self._drain(16, slots)
+
+        self.assertEqual(views.deep_lease_cap(), 3)
+        # El puesto 16 le tocaba a la profunda de heavy y se lo cede.
+        self.assertNotIn(deep.id, served)
+        self.assertEqual(served[15], other[15].id)
+        self.assertEqual(AnalysisTask.objects.filter(
+            state='LEASED', requested_by='heavy',
+            budget_nodes__gte=self.DEEP).count(), 3)
+
+    def test_without_the_cap_that_same_slot_would_have_gone_deep(self):
+        """El contraste que hace honesto al test de arriba."""
+        slots = self._pool(90)             # 90 // 3 = 30, muy por encima
+        deep, _other = self._straddle()
+
+        served = self._drain(16, slots[:9])
+
+        self.assertEqual(served[15], deep.id)
+
+    def test_the_rest_are_served_as_soon_as_a_deep_lease_frees_up(self):
+        slots = self._pool(9)
+        deep, _other = self._straddle()
+        self._drain(16, slots)
+        self.assertNotIn(deep.id, AnalysisTask.objects.filter(
+            state='LEASED').values_list('id', flat=True))
+
+        # Uno de los tres profundos entrega: el cupo deja sitio y la que
+        # esperaba entra en el siguiente arriendo.
+        AnalysisTask.objects.filter(
+            state='LEASED', requested_by='heavy',
+            budget_nodes__gte=self.DEEP).order_by('id').first().delete()
+
+        self.assertEqual(self._drain(1, slots), [deep.id])
+
+    def test_no_slot_is_left_idle_when_only_deep_work_remains(self):
+        """RECIBO: el tope ordena, nunca apaga hierro donado."""
+        self._pool(9)
+        self._queue('heavy', [self.DEEP] * 20)
+
+        served = [self._lease(f'slot{index}') for index in range(9)]
+
+        self.assertTrue(all(tasks for tasks in served),
+                        'un slot se quedo sin tarea habiendo cola')
+        self.assertEqual(AnalysisTask.objects.filter(state='LEASED').count(), 9)
+
+    def test_the_cap_follows_the_pool_and_never_drops_below_one(self):
+        self._pool(2)
+        self.assertEqual(views.deep_lease_cap(), 1)
+        WorkerPing.objects.all().delete()
+        self._pool(90)
+        self.assertEqual(views.deep_lease_cap(), 30)
+
+    def test_a_dead_slot_does_not_widen_anybody_quota(self):
+        self._pool(9, prefix='gone',
+                   last_seen=timezone.now() - timedelta(minutes=10))
+        self._pool(3)
+
+        self.assertEqual(views.deep_lease_cap(), 1)
+
+    def test_the_cheap_rungs_are_not_capped(self):
+        self._pool(9)
+        self._queue('busy', [2_000_000_000] * 20)
+
+        for index in range(9):
+            self._lease(f'slot{index}')
+
+        self.assertEqual(AnalysisTask.objects.filter(
+            state='LEASED', requested_by='busy').count(), 9)

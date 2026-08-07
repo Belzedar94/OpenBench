@@ -28,8 +28,8 @@ deliberadamente NO lleva cache de pagina (§ urls): es personal.
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 from django.core.cache import cache
-from django.db.models import Count, IntegerField, OuterRef, Subquery, Sum
-from django.db.models.functions import Coalesce, TruncDate
+from django.db.models import Count, Sum
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.utils.timesince import timesince
 
@@ -295,22 +295,17 @@ def _queue_rows(username):
     otra seccion y otra pregunta.
     """
     mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
-    # Cuantas peticiones del estrato NOMBRADO cobran antes que esta.  Mismo
-    # orden que ``choose_pending``, leido del mismo sitio (``named_tier``:
-    # un nombre o un dia de espera), y solo lo SERVEABLE — una PENDING sobre
-    # una posicion ya cerrada no la sirve nadie, y ponerla aqui era pintarle a
-    # su autor una cola por delante que no existe.  Toda fila de ``mine`` es
-    # nombrada (esto es un perfil), asi que su estrato es siempre este.  Una
-    # sola sentencia: la subconsulta correlacionada evita un COUNT por fila,
-    # que es justo el N+1 que esta pagina no puede pagar.
-    ahead = Coalesce(Subquery(
-        AnalysisTask.objects
-        .filter(state=PENDING, source=USER, id__lt=OuterRef('id'))
-        .filter(live_request.SERVEABLE).filter(live_request.named_tier())
-        .order_by().values('source').annotate(c=Count('id')).values('c')[:1],
-        output_field=IntegerField()), 0)
-    pending = list(mine.filter(state=PENDING).annotate(ahead=ahead)
-                   .order_by('id')[:QUEUE_ROWS + 1])
+    # Cuantas peticiones cobran antes que esta.  Mismo orden que
+    # ``choose_pending``, leido del mismo sitio: desde el reparto justo del
+    # 7-ago el sitio en la cola ya no es "cuantas hay con id menor", asi que
+    # contarlo aqui a mano volveria a mentirle a quien mira su propio perfil.
+    # Una sola sentencia para las veinte filas (``queue_ahead_map`` ordena la
+    # banda una vez), que es lo que evita el N+1 que esta pagina no puede
+    # pagar.
+    pending = list(mine.filter(state=PENDING).order_by('id')[:QUEUE_ROWS + 1])
+    places = live_request.queue_ahead_map(pending)
+    for task in pending:
+        task.ahead = places.get(task.id)
     leased = list(mine.filter(state=LEASED)
                   .order_by('-leased_at', '-id')[:QUEUE_ROWS])
     done = list(mine.filter(state=COMPLETED)
