@@ -57,6 +57,25 @@ After those receipts exist, replace every pending value, set
 `Config/config.json`, and run the configuration and onboarding test suites
 before restarting the server.
 
+## V1 activation receipt
+
+The V1 play configuration is frozen to Horde-Stockfish
+`bce34feb0602c2640a8659a34f954fbee8f1a9e1` with bench `315576` and
+1,488,566 measured single-thread NPS. The Hordetest baseline is frozen to
+`fd044be239564a489056e358d157a4064f0b01a0` with bench `130284` and
+527,465 measured single-thread NPS. Their Windows and Linux private artifact
+workflows completed successfully as runs `31172522698` and `31172522714`.
+
+The dedicated DATAGEN producer is frozen separately to
+`f176a518166b7c27632a211127148c8e361b3844` with bench `440088`; its four
+role-separated artifact jobs completed successfully in run `31174361886`.
+The installed Windows and Linux Horde referees come from reproducible workflow
+run `31168366529` and match the hashes pinned in the referee manifest. Every V1
+workload uses Run 6B SHA-256
+`B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7` and
+the opening payload SHA-256
+`93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958`.
+
 ## Private artifact roles
 
 Private artifact workflows must declare the executable role in the final

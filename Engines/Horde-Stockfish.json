@@ -1,7 +1,7 @@
 {
-    "onboarding_ready": false,
+    "onboarding_ready": true,
     "private": true,
-    "nps": 1,
+    "nps": 1488566,
     "source": "https://github.com/Belzedar94/Horde-Stockfish",
     "variant_contract": "LICHESS_HORDE_V1",
 
@@ -13,13 +13,22 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "main",
+            "base_branch": "bce34feb0602c2640a8659a34f954fbee8f1a9e1",
+            "both_bench": 315576,
+            "both_network": "hordetest_run6b_e37_l06.nnue",
             "book_name": "HORDE_openings.epd",
+            "test_bounds": "[1.00, 6.00]",
+            "test_confidence": "[0.05, 0.05]",
             "upload_pgns": "TRUE",
             "win_adj": "None",
             "draw_adj": "None",
             "syzygy_wdl": "DISABLED",
             "syzygy_adj": "DISABLED"
+        },
+        "STC": {
+            "both_options": "Threads=1 Hash=32",
+            "both_time_control": "8.0+0.08",
+            "workload_size": 32
         },
         "Foundational VSTC": {
             "both_options": "Threads=1 Hash=16",
@@ -49,7 +58,7 @@
         "default": {
             "both_bench": 440088,
             "both_network": "hordetest_run6b_e37_l06.nnue",
-            "dev_branch": "212b67e7c5600b4067bfa9314f6c519a5ac4607d",
+            "dev_branch": "f176a518166b7c27632a211127148c8e361b3844",
             "book_name": "HORDE_openings.epd",
             "datagen_command": "horde_generate_training_data threads {THREADS} hash 512 network {NETWORK} network_sha256 {NETWORK_SHA256} producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 6 nodes 0 random_move_min_ply 1 random_move_max_ply 20 random_move_count 8 random_multi_pv 4 random_multi_pv_diff 200 write_min_ply 5 write_max_ply 400 max_game_ply 512 set_recommended_uci_options",
             "datagen_total_count": 500000,

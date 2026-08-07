@@ -36,13 +36,16 @@
         "ATOMIC_V3_1B_midgame_test.epd",
         "ATOMIC_V3_1B_endgame_train.epd",
         "ATOMIC_V3_1B_endgame_val.epd",
-        "ATOMIC_V3_1B_endgame_test.epd"
+        "ATOMIC_V3_1B_endgame_test.epd",
+        "HORDE_openings.epd"
     ],
 
     "engines": [
         "Spell-Stockfish",
         "Atomic-Stockfish",
         "Alice-Stockfish",
-        "Fairy-Stockfish-Atomic-Baseline"
+        "Fairy-Stockfish-Atomic-Baseline",
+        "Horde-Stockfish",
+        "Fairy-Stockfish-Hordetest-Baseline"
     ]
 }
