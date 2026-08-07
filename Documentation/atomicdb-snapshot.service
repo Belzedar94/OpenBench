@@ -1,0 +1,52 @@
+# AtomicDB — calentador de las cifras compartidas de la portada.
+#
+# Copia esto y su .timer a /etc/systemd/system/, y luego:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-snapshot.timer
+#     journalctl -u atomicdb-snapshot.service -f
+#
+# QUE CALIENTA.  Las cinco entradas compartidas que lee la portada: los tres
+# agregados del arbol, la atribucion de cierres, la actividad, el progreso de
+# campanas y la flota.  Ninguna lleva visitante en la clave, asi que la
+# aprovecha todo el mundo — con cookie o sin ella.
+#
+# QUE NO CALIENTA, Y NO ES UN OLVIDO.  La cache de PAGINA de /atomicdb/ varia
+# por ``Cookie`` y el token CSRF es distinto en cada visitante, asi que cada
+# uno tiene SU clave de pagina (comprobado: la parte de cabeceras de la clave
+# es el md5 del ``Cookie`` entero).  Un calentador que pidiera la portada con
+# su propio tarro de cookies escribiria una entrada que no lee nadie.  El
+# alcance de este servicio es la ruta publica y solo la capa compartida.
+#
+# POR QUE EXISTE.  Medir esas cinco cuesta 23 s contra la base real (7-ago:
+# 14,4 s el barrido de Position, 6,8 s la atribucion).  Aqui se gastan con
+# Nice=10 y peso de CPU y de E/S bajos, compitiendo de perdedor contra la
+# ingesta; en una peticion se gastarian con un visitante esperando.
+#
+# NO ES UNA DEPENDENCIA DE NADA.  Si falla o no corre, la portada se sigue
+# sirviendo: § metrics.shared_snapshot entrega la cifra vieja en el acto y la
+# renueva en un hilo de fondo.  Lo unico que se pierde es frescura.  Por eso
+# el comando sale con codigo 0 aunque una medida reviente, y por eso ningun
+# otro servicio lleva Requires= de este.
+
+[Unit]
+Description=AtomicDB portada snapshot refresher
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u manage.py warm_public_snapshot
+# Muy por encima de lo que tarda (20-33 s medidos) para que una tormenta de
+# ingesta no lo mate a medias, y muy por debajo del periodo del timer.
+TimeoutStartSec=180
+# Pierde contra cualquier cosa que tenga a alguien esperando.
+Nice=10
+CPUWeight=25
+IOWeight=25
