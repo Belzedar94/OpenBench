@@ -45,7 +45,6 @@
         "Atomic-Stockfish",
         "Alice-Stockfish",
         "Fairy-Stockfish-Atomic-Baseline",
-        "Horde-Stockfish",
-        "Fairy-Stockfish-Hordetest-Baseline"
+        "Horde-Stockfish"
     ]
 }

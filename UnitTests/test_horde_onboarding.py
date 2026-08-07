@@ -35,12 +35,12 @@ class HordeOnboardingTests(unittest.TestCase):
         self.assertEqual(self.general['client_version'], 44)
         self.assertRegex(self.general['client_repo_ref'], r'^[0-9a-f]{40}$')
 
-    def test_completed_onboarding_is_schedulable(self):
+    def test_specialist_onboarding_is_schedulable(self):
         self.assertIn(HORDE_ENGINE, self.general['engines'])
-        self.assertIn(HORDE_BASELINE, self.general['engines'])
+        self.assertNotIn(HORDE_BASELINE, self.general['engines'])
         self.assertIn(HORDE_BOOK, self.general['books'])
         self.assertTrue(self.engine['onboarding_ready'])
-        self.assertTrue(self.baseline['onboarding_ready'])
+        self.assertFalse(self.baseline['onboarding_ready'])
         self.assertTrue(self.book['onboarding_ready'])
         self.assertEqual(self.book['sha'], BOOK_SHA256)
         self.assertEqual(self.book['raw_sha'], BOOK_SHA256)
