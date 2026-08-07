@@ -20,9 +20,12 @@ cinco filas de cada columna reproducen la forma exacta de la portada real.
 """
 
 from datetime import timedelta
+from io import StringIO
+from unittest import mock
 
 from django.conf import settings
 from django.core.cache import cache
+from django.core.management import call_command
 from django.db import connections
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -40,6 +43,28 @@ CACHE_FOR_TESTS = {
         'LOCATION': 'atomicdb-home-performance-tests',
     },
 }
+
+
+class _Deferred:
+    """El ejecutor de los tests: apunta la medida de fondo y no la corre.
+
+    Modela exactamente lo que hace el hilo de verdad — el lector se lleva su
+    cifra ANTES de que la medida empiece — sin depender de un ``join`` ni de
+    un ``sleep``, y deja contar cuantas se lanzaron, que es la mitad de lo que
+    hay que demostrar.  Mismo utensilio que § test_stale_page_cache.
+    """
+
+    def __init__(self):
+        self.jobs = []
+
+    def __call__(self, work, name):
+        self.jobs.append(work)
+
+    def run_all(self):
+        pending, self.jobs = self.jobs, []
+        for work in pending:
+            work()
+        return len(pending)
 
 # PRESUPUESTO DE CONSULTAS de una portada con la cache compartida caliente,
 # que es el caso de CADA visitante en produccion (la cache de pagina varia por
@@ -306,9 +331,9 @@ class ActivityCounterTests(TestCase):
 
     Lo que se prueba es el CONTRATO de la cache, no la cache de Django: que un
     acierto no consulte, que un fallo mida de verdad, que una entrada vencida
-    se vuelva a medir, y que una entrada vencida CON alguien ya midiendo se
-    sirva tal cual en vez de hacer esperar a nadie.  Ese ultimo es el unico
-    que distingue esta maquinaria de un ``cache.get``/``set``.
+    SE SIRVA EN EL ACTO mientras se remide por detras, y que la remedida la
+    lance uno solo.  Eso ultimo es lo que distingue esta maquinaria de un
+    ``cache.get``/``set``.
     """
 
     def setUp(self):
@@ -316,6 +341,11 @@ class ActivityCounterTests(TestCase):
         metrics.reset_public_snapshot()
         self.now = timezone.now()
         populate_home(self.now)
+        self.refreshes = _Deferred()
+        patch = mock.patch.object(metrics, 'REVALIDATE_EXECUTOR',
+                                  self.refreshes)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def _counted(self, work):
         connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
@@ -346,8 +376,14 @@ class ActivityCounterTests(TestCase):
 
         self.assertEqual(queries, 0)
 
-    def test_a_stale_entry_is_measured_again(self):
-        """Vencida la frescura, el siguiente lector la renueva y ve lo nuevo."""
+    def test_a_stale_entry_is_served_without_making_anyone_wait(self):
+        """Vencida la frescura, el lector se lleva LA VIEJA y no consulta nada.
+
+        Este es el cambio entero, y el numero que lo justifica esta medido
+        contra la base real (7-ago): remedir esto en la peticion son 14,4 s de
+        barrido de ``Position`` mas 6,8 s de atribucion.  Antes los pagaba el
+        primero que llegase pasados los 90 s; ahora no los paga nadie.
+        """
         metrics.refresh_public_snapshot(now=self.now)
         AnalysisTask.objects.create(
             position_id=logic.key_of(logic.start_fen()), generation=500,
@@ -356,11 +392,60 @@ class ActivityCounterTests(TestCase):
         stale = self.now + timedelta(seconds=metrics.PUBLIC_FRESH_SECONDS + 1)
 
         before = metrics.activity_totals(now=self.now)
-        after = metrics.activity_totals(now=stale)
+        after, queries = self._counted(
+            lambda: metrics.activity_totals(now=stale))
 
+        self.assertEqual(queries, 0)
+        self.assertEqual(after['analyses'], before['analyses'])
+        self.assertEqual(after['measured_at'], self.now)
+
+    def test_the_measure_it_launched_publishes_the_new_numbers(self):
+        """Y la cifra nueva queda publicada para el siguiente, sin peticion."""
+        metrics.refresh_public_snapshot(now=self.now)
+        AnalysisTask.objects.create(
+            position_id=logic.key_of(logic.start_fen()), generation=500,
+            budget_nodes=1, state=AnalysisTask.TState.COMPLETED,
+            completed=self.now, nodes_searched=4_321)
+        stale = self.now + timedelta(seconds=metrics.PUBLIC_FRESH_SECONDS + 1)
+        before = metrics.activity_totals(now=self.now)
+
+        metrics.activity_totals(now=stale)
+        self.assertEqual(self.refreshes.run_all(), 1)
+
+        after = metrics.activity_totals(now=stale)
         self.assertEqual(after['analyses'], before['analyses'] + 1)
         self.assertEqual(after['nodes_24h'], 4_321)
-        self.assertEqual(after['measured_at'], stale)
+
+    def test_the_staleness_launches_exactly_one_measure(self):
+        """Cinco lectores que la encuentran vieja mandan a medir UNA vez."""
+        metrics.refresh_public_snapshot(now=self.now)
+        stale = self.now + timedelta(seconds=metrics.PUBLIC_FRESH_SECONDS + 1)
+
+        for _ in range(5):
+            metrics.activity_totals(now=stale)
+
+        self.assertEqual(len(self.refreshes.jobs), 1)
+
+    def test_a_measure_that_explodes_releases_the_turn(self):
+        """Si revienta se anota y se suelta el cerrojo: lo reintenta el proximo.
+
+        Un calentador que se atasca seria peor que no tenerlo: la entrada se
+        quedaria vieja para siempre sin que nadie volviera a intentarlo.
+        """
+        metrics.refresh_public_snapshot(now=self.now)
+        stale = self.now + timedelta(seconds=metrics.PUBLIC_FRESH_SECONDS + 1)
+
+        def boom(_now):
+            raise RuntimeError('la base dijo que no')
+
+        with mock.patch.object(metrics, '_measure_activity', boom):
+            metrics.activity_totals(now=stale)
+            with self.assertLogs('atomicdb.metrics', level='ERROR'):
+                self.refreshes.run_all()
+
+        self.assertIsNone(cache.get(metrics.PUBLIC_ACTIVITY_KEY + '.lock'))
+        metrics.activity_totals(now=stale)
+        self.assertEqual(len(self.refreshes.jobs), 1)
 
     def test_a_stale_entry_is_served_while_one_reader_refreshes(self):
         """Vieja + cerrojo cogido = se sirve lo viejo, sin esperar ni medir."""
@@ -485,6 +570,11 @@ class FleetSnapshotTests(TestCase):
         AnalysisTask.objects.filter(machine='box0').update(
             state=AnalysisTask.TState.COMPLETED, completed=self.now,
             nodes_searched=1_000)
+        self.refreshes = _Deferred()
+        patch = mock.patch.object(metrics, 'REVALIDATE_EXECUTOR',
+                                  self.refreshes)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_the_service_publishes_it(self):
         """Publicado desde fuera, ninguna visita lo mide."""
@@ -511,7 +601,13 @@ class FleetSnapshotTests(TestCase):
         self.assertEqual(len(captured.captured_queries), 0)
         self.assertEqual(snapshot['measured_at'], self.now)
 
-    def test_a_stale_entry_is_measured_again(self):
+    def test_a_stale_entry_is_remeasured_behind_the_reader(self):
+        """El lector se lleva la vieja; la nueva la publica el hilo de fondo.
+
+        La flota es el agregado mas caro que llego a estar dentro de una
+        peticion, asi que es justo el que no puede volver a medirse con
+        alguien esperando.
+        """
         metrics.refresh_public_snapshot(now=self.now)
         stale = self.now + timedelta(seconds=contributors.FLEET_CACHE_SECONDS
                                      + 1)
@@ -519,6 +615,9 @@ class FleetSnapshotTests(TestCase):
             nodes_searched=2_000)
 
         self.assertEqual(contributors.fleet(now=self.now)['nodes_all'], 1_000)
+        self.assertEqual(contributors.fleet(now=stale)['nodes_all'], 1_000)
+
+        self.assertEqual(self.refreshes.run_all(), 1)
         self.assertEqual(contributors.fleet(now=stale)['nodes_all'], 2_000)
 
     def test_resetting_the_cache_also_drops_the_lock(self):
@@ -529,6 +628,50 @@ class FleetSnapshotTests(TestCase):
         contributors.reset_cache()
 
         self.assertIsNone(cache.get(contributors.FLEET_CACHE_KEY + '.lock'))
+
+
+@override_settings(CACHES=CACHE_FOR_TESTS)
+class WarmCommandTests(TestCase):
+    """El calentador: lo que publica, y que no pueda tumbar nada.
+
+    Calienta la capa COMPARTIDA y solo esa.  La cache de pagina de la portada
+    varia por ``Cookie`` y el token CSRF es uno por visitante, asi que no hay
+    una entrada de pagina que calentar para todos; el alcance esta escrito en
+    la ayuda del comando y en la unidad de systemd.
+    """
+
+    def setUp(self):
+        cache.clear()
+        metrics.reset_public_snapshot()
+        self.now = timezone.now()
+        populate_home(self.now)
+
+    def test_it_publishes_what_the_page_reads(self):
+        call_command('warm_public_snapshot', '--quiet')
+
+        connection = connections[settings.ATOMICDB_DATABASE_ALIAS]
+        with CaptureQueriesContext(connection) as captured:
+            totals = metrics.tree_totals(now=self.now)
+            metrics.activity_totals(now=self.now)
+
+        self.assertEqual(len(captured.captured_queries), 0)
+        self.assertEqual(totals['total'], Position.objects.count())
+
+    def test_a_measure_that_explodes_does_not_fail_the_unit(self):
+        """Un calentador que revienta se queja y sale con 0.
+
+        Es una optimizacion, no una dependencia: si marcase el arranque como
+        fallido, un contador que no se puede medir se convertiria en una
+        alarma de despliegue.
+        """
+        def boom(_now):
+            raise RuntimeError('la base dijo que no')
+
+        with mock.patch.object(metrics, '_measure_tree_totals', boom):
+            errors = StringIO()
+            call_command('warm_public_snapshot', stderr=errors)
+
+        self.assertIn('no se pudo republicar', errors.getvalue())
 
 
 @override_settings(CACHES=CACHE_FOR_TESTS)

@@ -21,10 +21,11 @@ Lo que SI es identico en los dos sitios, y por eso vive aqui, son dos cosas:
   solo esta para que nada se quede eternamente.  Mismo reparto que
   § metrics.PUBLIC_FRESH_SECONDS contra PUBLIC_TTL_SECONDS.
 
-LA DIFERENCIA CON § metrics, que es la que importa.  Alli el que coge el
-cerrojo recalcula SINCRONO y paga la espera; aqui no la paga nadie, porque lo
-que se recalcula puede tardar veinte segundos y el que llega no tiene por que
-enterarse.
+LO QUE ERA DISTINTO EN § metrics, Y YA NO.  Alli el que cogia el cerrojo
+recalculaba SINCRONO y pagaba la espera — veinte segundos de barrido para el
+primero que llegara con la entrada vencida.  Desde el 7-ago usa este mismo
+hilo y esa asimetria se acabo: los tres pisos (pagina, datos por posicion y
+contadores compartidos) sirven lo viejo al instante y renuevan por detras.
 """
 
 import logging
