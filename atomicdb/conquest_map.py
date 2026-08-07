@@ -383,6 +383,7 @@ def _normalise_position(row):
             'key': row['key'],
             'fen': row['fen'],
             'eval_cp': row.get('eval_cp'),
+            'backed_eval': row.get('backed_eval'),
             'status': row.get('status', 'UNKNOWN'),
             'closure': row.get('closure'),
             'proof': row.get('proof'),
@@ -395,12 +396,13 @@ def _normalise_position(row):
             'expanded': bool(row.get('expanded', False)),
         }
     (
-        key, fen, eval_cp, status, closure, proof, best_move,
+        key, fen, eval_cp, backed_eval, status, closure, proof, best_move,
         depth_invested, nodes_invested, time_invested, visits, priority,
         expanded,
     ) = row
     return {
-        'key': key, 'fen': fen, 'eval_cp': eval_cp, 'status': status,
+        'key': key, 'fen': fen, 'eval_cp': eval_cp,
+        'backed_eval': backed_eval, 'status': status,
         'closure': closure, 'proof': proof, 'best_move': best_move,
         'depth_invested': int(depth_invested or 0),
         'nodes_invested': int(nodes_invested or 0),
@@ -423,10 +425,11 @@ def _validate_position(position):
         raise SnapshotError('invalid database closure')
     if position['proof'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
         raise SnapshotError('invalid database proof')
-    if (position['eval_cp'] is not None
-            and (isinstance(position['eval_cp'], bool)
-                 or not isinstance(position['eval_cp'], int))):
-        raise SnapshotError('invalid database evaluation')
+    for eval_field in ('eval_cp', 'backed_eval'):
+        if (position[eval_field] is not None
+                and (isinstance(position[eval_field], bool)
+                     or not isinstance(position[eval_field], int))):
+            raise SnapshotError('invalid database evaluation')
     counters = (
         position['depth_invested'], position['nodes_invested'],
         position['visits'],
@@ -633,6 +636,12 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
         elif state == 'PENDING':
             task_counts[position_key][1] += 1
 
+    # El titular de eval del inspector, con la MISMA precedencia que titula
+    # la cabecera del explore y la fila del padre (status probado > backed >
+    # eval puntual).  Solo el campo de display: el regret del mapa
+    # (``_position_utility``) sigue midiendo con la eval cruda.
+    from .ingest import known_eval_of
+
     nodes = {}
     for key in sorted(reachable, key=lambda item: (depth[item], item)):
         position = positions[key]
@@ -652,7 +661,8 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
             's': position['status'],
             'c': position['closure'],
             'p': position['proof'],
-            'e': position['eval_cp'],
+            'e': known_eval_of(position['status'], position['backed_eval'],
+                               position['eval_cp']),
             'b': position['best_move'],
             'd': depth[key],
             'r': parent_key,
@@ -717,9 +727,9 @@ def build_snapshot_from_database(prior_snapshot=None, generated_at=None):
     from .models import AnalysisTask, Edge, Position
 
     position_rows = list(Position.objects.values_list(
-        'key', 'fen', 'eval_cp', 'status', 'closure', 'proof', 'best_move',
-        'depth_invested', 'nodes_invested', 'time_invested', 'visits',
-        'priority', 'expanded',
+        'key', 'fen', 'eval_cp', 'backed_eval', 'status', 'closure', 'proof',
+        'best_move', 'depth_invested', 'nodes_invested', 'time_invested',
+        'visits', 'priority', 'expanded',
     ))
     edge_rows = list(Edge.objects.values_list(
         'parent_id', 'child_id', 'move_uci',

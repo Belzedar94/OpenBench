@@ -149,7 +149,10 @@ class ProofSelectorAttemptCapTests(TestCase):
         cap = 4 * wanted
         calls = {'n': 0}
 
-        def descend(campaign, counter=0, avoid=()):
+        # El doble acepta lo que acepte el descenso de verdad (``start`` entro
+        # con los descensos de campana): un doble con firma propia convierte
+        # cualquier parametro nuevo en un fallo de ESTE test, que no va de eso.
+        def descend(campaign, counter=0, avoid=(), **kwargs):
             calls['n'] += 1
             if calls['n'] > cap + 4:
                 raise AssertionError(

@@ -118,6 +118,7 @@ def _snapshot_values(observed_at):
         'frontier_and_nodes': frontier.get('and_nodes', 0),
         'frontier_dn_median': frontier.get('dn_median', 0),
         'frontier_dn_thin': frontier.get('thin', 0),
+        'frontier_saturated': frontier.get('saturated', 0),
         'closures_user': attributed['USER'],
         'closures_fill': attributed['FILL'],
         'closures_auto': attributed['AUTO'],

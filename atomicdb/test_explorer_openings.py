@@ -31,10 +31,42 @@ class ExplorerOpeningRouteTests(TestCase):
 
     @staticmethod
     def _long_villager_route(plies):
-        moves = ['g1f3', 'd7d6']
-        cycle = ['f3g1', 'b8c6', 'g1f3', 'c6b8']
+        """Ruta larga en la Villager Defense, SIN pasar dos veces por nada.
+
+        Esta ayudante construia la longitud con un vaiven de caballos
+        (``f3g1 b8c6 g1f3 c6b8``), que es una ruta que reentra en sus propias
+        posiciones una y otra vez.  Desde el 6-ago eso no existe en el
+        explorador: una ruta no puede reentrar (invariante 6 de
+        docs/value-semantics.md), asi que el vaiven ya no es una ruta larga —
+        es una ruta de tres plies y un cruce.
+
+        Lo que estos tests miden es el desbordamiento del tope de rejuego y
+        el ancla firmada que lo sustituye, y eso necesita LONGITUD, no
+        repeticion.  Se camina en profundidad: de cada posicion, la primera
+        jugada en orden estable que lleve a una clave nunca vista y no deje
+        la linea sin continuacion.  Las dos primeras son las de siempre, para
+        que la ficha de apertura siga siendo la Villager Defense.
+        """
+        fen = logic.start_fen()
+        seen = {logic.key_of(fen)}
+        moves = []
+        for uci in ('g1f3', 'd7d6'):
+            fen = logic.apply_move(fen, uci)
+            seen.add(logic.key_of(fen))
+            moves.append(uci)
         while len(moves) < plies:
-            moves.extend(cycle)
+            for uci in sorted(logic.legal_moves(fen)):
+                nxt = logic.apply_move(fen, uci)
+                key = logic.key_of(nxt)
+                if key in seen or not logic.legal_moves(nxt):
+                    continue
+                fen = nxt
+                seen.add(key)
+                moves.append(uci)
+                break
+            else:
+                raise AssertionError(
+                    f'sin continuacion nueva en el ply {len(moves)}')
         return moves[:plies]
 
     def test_valid_play_route_is_replayed_and_propagated(self):
@@ -176,9 +208,13 @@ class ExplorerOpeningRouteTests(TestCase):
         inherited = self.client.get(overflow['Location'])
         self.assertEqual(inherited.status_code, 200)
         self.assertIsNone(inherited.context['active_play'])
+        # La apertura viaja HEREDADA desde el ply 2 y no vuelve a coincidir:
+        # una ruta que no reentra cruza la posicion catalogada UNA vez.  (El
+        # vaiven de antes la volvia a pisar cada cuatro plies, y de ahi
+        # salian el 62 y el 66 que este test comprobaba.)
         self.assertEqual(
             inherited.context['opening']['name'], 'Villager Defense')
-        self.assertEqual(inherited.context['opening']['matched_ply'], 62)
+        self.assertEqual(inherited.context['opening']['matched_ply'], 2)
         self.assertFalse(inherited.context['opening']['exact'])
         board_play = inherited.context['board_play']
         self.assertTrue(
@@ -189,17 +225,27 @@ class ExplorerOpeningRouteTests(TestCase):
             f'/atomicdb/goto/{child.key}/{route[65]}/',
             {'play': board_play},
         )
-        exact = self.client.get(replacement['Location'])
+        deeper = self.client.get(replacement['Location'])
 
-        self.assertEqual(exact.status_code, 200)
-        self.assertEqual(exact.context['opening']['name'], 'Villager Defense')
-        self.assertEqual(exact.context['opening']['matched_ply'], 66)
-        self.assertTrue(exact.context['opening']['exact'])
+        # Y el ancla sigue nombrando la apertura un ply mas alla del tope,
+        # que es lo que este test existe para medir.
+        self.assertEqual(deeper.status_code, 200)
+        self.assertIsNone(deeper.context['active_play'])
+        self.assertEqual(deeper.context['opening']['name'],
+                         'Villager Defense')
+        self.assertEqual(deeper.context['opening']['matched_ply'], 2)
 
     def test_signed_anchor_beats_short_transposed_canonical_route(self):
         route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 2)
+        # Se materializa DOS plies mas alla del tope y se arranca en el 64:
+        # el test mira la tabla de jugadas de la posicion de aterrizaje, y
+        # con una ruta que no reentra esa posicion es nueva — solo tiene
+        # hijos si la linea sigue conectada por debajo.  (Con el vaiven de
+        # antes los tenia "gratis", porque aterrizaba en una posicion que el
+        # propio prefijo ya habia creado.)
         current = self._materialize(
-            route[:views.PLAY_ROUTE_MAX_PLIES], connect=True)[-1]
+            route[:views.PLAY_ROUTE_MAX_PLIES + 2],
+            connect=True)[views.PLAY_ROUTE_MAX_PLIES]
 
         overflow = self.client.get(
             f'/atomicdb/goto/{current.key}/{route[64]}/',
@@ -211,7 +257,7 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertIsNone(inherited.context['active_play'])
         self.assertEqual(
             inherited.context['opening']['name'], 'Villager Defense')
-        self.assertEqual(inherited.context['opening']['matched_ply'], 62)
+        self.assertEqual(inherited.context['opening']['matched_ply'], 2)
         self.assertFalse(inherited.context['opening']['exact'])
         self.assertTrue(inherited.context['moves'])
         for move in inherited.context['moves']:
@@ -251,7 +297,7 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertIsNone(child.context['active_play'])
         self.assertEqual(
             child.context['opening']['name'], 'Villager Defense')
-        self.assertEqual(child.context['opening']['matched_ply'], 66)
+        self.assertEqual(child.context['opening']['matched_ply'], 2)
 
     def test_opening_anchor_tampering_and_target_reuse_fail_closed(self):
         route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 1)

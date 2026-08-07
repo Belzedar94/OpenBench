@@ -269,7 +269,13 @@ class BackedPropagationCostTests(TestCase):
         grand.refresh_from_db()
         self.assertIsNotNone(grand.backed_eval)
 
-    def test_sub_epsilon_drift_does_not_climb(self):
+    def test_sub_epsilon_drift_still_reaches_whoever_stands_on_it(self):
+        # Este test afirmaba lo contrario hasta el 2026-08-05 — que el ruido
+        # tampoco subia a un ancestro APOYADO en lo que se movio — y lo que
+        # estaba fijando era el bug: ``grand`` se quedaba en -300 mientras su
+        # unica arista valia -304, o sea pintando un numero que ya no tenia
+        # ningun hijo.  El corte de ruido sigue existiendo, pero para los
+        # padres que miran a OTRA arista (test de mas abajo).
         grand = _pos('EG', 'w', expanded=True)
         parent = _pos('EP', 'b', expanded=True)
         leaf = _pos('EL', 'w', eval_cp=-300, nodes_invested=1_000)
@@ -283,13 +289,106 @@ class BackedPropagationCostTests(TestCase):
         leaf.save(update_fields=['eval_cp'])
         ingest.backup_backed_evals([parent.key])
         grand.refresh_from_db()
-        self.assertEqual(grand.backed_eval, -300)   # no subio
+        self.assertEqual(grand.backed_eval, -304)   # su valor ES el del hijo
 
         leaf.eval_cp = -420          # cambio de verdad
         leaf.save(update_fields=['eval_cp'])
         ingest.backup_backed_evals([parent.key])
         grand.refresh_from_db()
         self.assertEqual(grand.backed_eval, -420)
+
+    def test_noise_under_a_move_nobody_stands_on_still_does_not_climb(self):
+        # El corte de ruido, en el dominio que le queda: el padre elige b8d7
+        # (1265) y el hermano a7a6 (2000) no compite ni de lejos.  Que a7a6
+        # derive cuatro centipeones no puede cambiar el minimo del padre, asi
+        # que el ascenso se para en seco.
+        parent = _pos('NP', 'b', expanded=True)
+        chosen = _pos('NC', 'w', eval_cp=1265, nodes_invested=2_000)
+        idle = _pos('NI', 'w', expanded=True)
+        leaf = _pos('NL', 'b', eval_cp=2_000, nodes_invested=2_000)
+        _edge(parent, chosen, 'b8d7')
+        _edge(parent, idle, 'a7a6')
+        _edge(idle, leaf, 'd2d4')
+        ingest.backup_backed_evals([idle.key])
+        parent.refresh_from_db()
+        self.assertEqual(parent.backed_move, 'b8d7')
+
+        leaf.eval_cp = 2_004
+        leaf.save(update_fields=['eval_cp'])
+        # Cuatro sentencias y se acabo: posiciones, aristas+hijos,
+        # bulk_update, y la de padres — que no encuentra a nadie de pie sobre
+        # esta arista y deja la frontera vacia.
+        with self.assertNumQueries(4, using=settings.ATOMICDB_DATABASE_ALIAS):
+            ingest.backup_backed_evals([idle.key])
+        parent.refresh_from_db()
+        self.assertEqual(parent.backed_eval, 1265)
+        self.assertEqual(parent.backed_move, 'b8d7')
+
+
+class BackedArgmaxDriftTests(TestCase):
+    """Una deriva de RUIDO que le cambia la arista ganadora al padre.
+
+    Reporte del propietario (2026-08-05).  Nodo ``344f43b90882``, negras
+    mueven: respaldaba ``1265`` por ``b8d7`` mientras ``b8d7`` ya valia 1269 y
+    el hermano ``c6c5`` valia 1268.  El minimo real habia cambiado de arista y
+    nadie lo miro, porque la subida de ``b8d7`` fue de cuatro centipeones —
+    por debajo de ``BACKED_EPSILON_CP`` — y el corte de ruido la silencio.  El
+    1265 huerfano viajaba siete plies hacia arriba: el explorador lo pintaba
+    en la cabecera de ``70e481e9...`` como si fuera la linea principal.
+    """
+
+    def test_a_drift_that_flips_the_parents_edge_is_never_silenced(self):
+        grand = _pos('DG', 'w', expanded=True)
+        parent = _pos('DP', 'b', expanded=True)      # negras: minimiza
+        chosen = _pos('DB8D7', 'w', expanded=True)
+        rival = _pos('DC6C5', 'w', eval_cp=1268, nodes_invested=2_000)
+        leaf = _pos('DL', 'b', eval_cp=1265, nodes_invested=2_000)
+        _edge(grand, parent, 'd1g4')
+        _edge(parent, chosen, 'b8d7')
+        _edge(parent, rival, 'c6c5')
+        _edge(chosen, leaf, 'd2d4')
+
+        ingest.backup_backed_evals([chosen.key])
+        parent.refresh_from_db()
+        self.assertEqual((parent.backed_eval, parent.backed_move),
+                         (1265, 'b8d7'))
+        grand.refresh_from_db()
+        self.assertEqual(grand.backed_eval, 1265)
+
+        # b8d7 sube CUATRO centipeones: mismo arista, por debajo del corte.
+        # Pero el padre esta de pie justo ahi, y c6c5 acaba de adelantarlo.
+        leaf.eval_cp = 1269
+        leaf.save(update_fields=['eval_cp'])
+        ingest.backup_backed_evals([chosen.key])
+
+        chosen.refresh_from_db()
+        self.assertEqual(chosen.backed_eval, 1269)
+        parent.refresh_from_db()
+        self.assertEqual((parent.backed_eval, parent.backed_move),
+                         (1268, 'c6c5'))
+
+    def test_the_correction_climbs_to_the_ancestors_that_showed_it(self):
+        # Lo que hacia grave al bug no era el nodo, era el viaje: el numero
+        # huerfano lo pintaba un ancestro muy por encima.  Arreglado el padre,
+        # la correccion tiene que llegar hasta arriba.
+        grand = _pos('CG', 'w', expanded=True)
+        parent = _pos('CP', 'b', expanded=True)
+        chosen = _pos('CB', 'w', expanded=True)
+        rival = _pos('CR', 'w', eval_cp=1268, nodes_invested=2_000)
+        leaf = _pos('CL', 'b', eval_cp=1265, nodes_invested=2_000)
+        _edge(grand, parent, 'd1g4')
+        _edge(parent, chosen, 'b8d7')
+        _edge(parent, rival, 'c6c5')
+        _edge(chosen, leaf, 'd2d4')
+        ingest.backup_backed_evals([chosen.key])
+
+        leaf.eval_cp = 1269
+        leaf.save(update_fields=['eval_cp'])
+        ingest.backup_backed_evals([chosen.key])
+
+        grand.refresh_from_db()
+        self.assertEqual((grand.backed_eval, grand.backed_move),
+                         (1268, 'd1g4'))
 
 
 class BackedDisplayTests(TestCase):

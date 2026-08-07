@@ -27,7 +27,7 @@ from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
                live_request, logic, metrics, notifications, openings, proof,
-               solve, solve_estimate)
+               revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -94,24 +94,61 @@ LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
 # queries — recomputing a line to the root that had not changed since the
 # previous click and almost never does.
 #
-# So it is cached, and the TTL is the ONLY invalidation.  That is a choice,
-# not a shortcut: a new edge can only ever make a breadcrumb SHORTER, never
-# wrong, and nobody navigating a 96-ply line needs to see that improvement
-# within the same minute.  Anything stronger — cross-process events, an
-# invalidation protocol — is still infrastructure this does not need.  Two
-# minutes is the blast radius if this is ever wrong.
+# So it is cached, and age is the ONLY invalidation.  That is a choice, not a
+# shortcut: A NEW EDGE CAN ONLY EVER MAKE A BREADCRUMB SHORTER, NEVER WRONG.
+# The walk returns the minimum-ply line to the root; discovering a new
+# transposition can only lower that minimum, so an older entry shows a line
+# that is still legal, still reaches the same position, and is at worst
+# longer than the best one known right now.  Nobody navigating a 96-ply line
+# needs to see that improvement within the same minute.  Anything stronger —
+# cross-process events, an invalidation protocol — is still infrastructure
+# this does not need.
 #
 # WHAT CHANGED WITH THE SHARED CACHE.  The store is Redis now, so the five
 # gunicorn workers no longer keep five independent copies — they keep one,
 # which is the point, and it also means RESTARTING THE WEB NO LONGER CLEARS
 # IT.  The emergency lever moved with the store: ``redis-cli -n 1 FLUSHDB``,
 # or bumping the version below, which orphans every old entry at once.
-# Nothing else about the reasoning above changes, and the TTL stays where it
-# was: a longer one would be a separate decision with its own argument.
+#
+# WHAT CHANGED WITH STALE-WHILE-REVALIDATE, AND IT IS THE INVARIANT TO READ
+# CAREFULLY.  ``LINEAGE_CACHE_SECONDS`` IS NO LONGER THE TIMEOUT THAT REACHES
+# THE BACKEND.  It is the FRESHNESS THRESHOLD over a much longer hard life
+# (``LINEAGE_CACHE_TTL_SECONDS``, which is what Redis actually gets).
+# Crossing the threshold does NOT remove the entry: it keeps being served,
+# right away, and exactly ONE reader renews it in the background
+# (§ revalidate).  The reason is measured: with the timeout reaching the
+# backend, the entry evaporated and the next render paid the whole walk — 267
+# events of 10-26s in seven hours, p50 15,1s, p90 27,3s, with gaps of 86-111s
+# between them, which is precisely the rate at which this was expiring.  The
+# slow queries inside those spikes were the walk's ``atomicdb_edge`` joins.
+#
+# THE PRICE, SAID PLAINLY.  A breadcrumb could already be 120s old; now it
+# can be 120s PLUS however long the walk that renews it takes — sub-second
+# when the box is quiet, up to ~26s in the worst measured case, which is
+# exactly the case this fixes.  A few seconds on top of the two minutes that
+# were already being given away, and what is given away is not correctness:
+# by the argument above, an older line does not lie, it is at worst longer
+# than the best one currently known.
 LINEAGE_CACHE_SECONDS = 120
+# Cuanto puede tener una entrada y seguir sirviendose mientras se renueva.
+# Diez minutos es el tope de un fallo EN CADENA de refrescos, no la edad
+# esperada: la esperada es la de arriba, porque el refresco sale disparado en
+# el mismo instante en que se sirve lo viejo.  Pasado el tope se recalcula
+# sincrono, que es preferible a afirmar un linaje de hace media hora.
+LINEAGE_STALE_SECONDS = 600
+# Vida DURA de la entrada en Redis, muy por encima del tope de edad, para que
+# quien decida sea la guarda de arriba y no la expiracion del backend (mismo
+# reparto que § metrics: PUBLIC_FRESH_SECONDS contra PUBLIC_TTL_SECONDS).
+LINEAGE_CACHE_TTL_SECONDS = 3600
+# El cerrojo del refresco dura mas que el peor paseo medido (27,3 s en p90) y
+# mucho menos que el tope de edad: un worker que muera a mitad del refresco no
+# puede dejar una entrada sin quien la renueve mas de un minuto.
+LINEAGE_REFRESH_LOCK_SECONDS = 60
 # Bump when the cached payload shape changes, so a deploy cannot read an old
 # entry with new code.  ``0`` seconds above disables the cache outright.
-LINEAGE_CACHE_VERSION = 1
+# v2: las entradas van FECHADAS (``{'stored_at': ..., 'payload': ...}``), que
+# es lo que permite preguntarles la edad en vez de solo si siguen ahi.
+LINEAGE_CACHE_VERSION = 2
 # Las claves de los hijos SIN arista de una posicion (§ ``_child_keys``).  Es
 # lo unico cacheado de esta pagina que no puede quedarse obsoleto — el mapa
 # (FEN del padre, jugada) -> clave del hijo no depende de nada que cambie — asi
@@ -191,6 +228,26 @@ class PlayRouteConflict(PlayRouteError):
     """A legal route does not identify the requested AtomicDB position."""
 
     status_code = 409
+
+
+class PlayRouteLoop(PlayRouteError):
+    """A route crosses a position it already went through: a repetition.
+
+    Las repeticiones estan DESACTIVADAS en la navegacion (decision del
+    propietario, 6-ago; invariante 6 de docs/value-semantics.md), asi que una
+    ruta entrante que reentra no es un 400: todo hasta el cruce es una ruta
+    perfectamente legal, y el saneo es TRUNCAR ahi.  La excepcion lleva lo
+    necesario para aterrizar — la clave de la posicion anterior al cruce y
+    los ucis hasta ella — y quien no la trate especialmente hereda el catch
+    de ``PlayRouteError`` de siempre, que degrada a "sin ruta" y nunca a un
+    bucle.
+    """
+
+    status_code = 302
+
+    def __init__(self, message, end_key, ucis):
+        super().__init__(message)
+        self.end_key, self.ucis = end_key, ucis
 
 
 def _auth(request):
@@ -1637,6 +1694,7 @@ def _validated_play_route(raw, target_key):
     # sabe hacerlo — se cae al camino de siempre, ply a ply, que es el que
     # sabe DECIR cual fallo y por que.
     sans = _batched_sans(fen, ucis)
+    seen_keys = {prefix_keys[0]}
     for index, uci in enumerate(ucis):
         if sans is None:
             if uci not in logic.legal_moves(fen):
@@ -1650,6 +1708,15 @@ def _validated_play_route(raw, target_key):
             raise PlayRouteError(
                 'move path could not be replayed under Atomic rules') from exc
         child_key = logic.key_of(fen)
+        if child_key in seen_keys:
+            # Reentrada: la ruta vuelve a una posicion por la que ya paso.
+            # Repeticiones desactivadas (§ PlayRouteLoop): se trunca en el
+            # PRIMER cruce — la jugada que cierra el bucle y todo lo que
+            # venga detras se caen — y el llamante aterriza en la posicion
+            # anterior al cruce con la historia limpia hasta ahi.
+            raise PlayRouteLoop('move path repeats a position',
+                                prefix_keys[index], ucis[:index])
+        seen_keys.add(child_key)
         prefix_keys.append(child_key)
         line.append({
             'uci': uci, 'san': san, 'key': child_key, 'white': white,
@@ -1697,6 +1764,13 @@ def goto(request, key, uci):
         raw_play = None
     try:
         route = _validated_play_route(raw_play, key)
+    except PlayRouteLoop as exc:
+        # Ruta entrante con reentrada: aterriza en el primer cruce, truncada
+        # (§ PlayRouteLoop).  La jugada pedida se pierde a proposito — venia
+        # montada sobre una historia que ya no existe.
+        response = redirect(_explore_url(exc.end_key, exc.ucis))
+        response['Cache-Control'] = 'no-store'
+        return response
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if route is None:
@@ -1716,6 +1790,20 @@ def goto(request, key, uci):
     )
     if uci not in logic.legal_moves(pos.fen):
         return redirect(_explore_url(key, active_ucis, current_anchor))
+    route_keys = _route_prefix_keys(top, line, active_ucis)
+    if route_keys is not None:
+        looped = logic.key_of(logic.apply_move(pos.fen, uci))
+        if looped in route_keys:
+            # REPETICION: la jugada vuelve a una posicion de la propia linea.
+            # No se navega (propietario, 6-ago; invariante 6): se aterriza en
+            # AQUELLA posicion con su historia — rebobinar, no reentrar — y
+            # sin efectos: ni arista nueva ni lapida revivida, cero
+            # escrituras.  Es la guardia del servidor detras del bloqueo de
+            # la tabla: un enlace viejo o construido a mano acaba aqui.
+            at = route_keys.index(looped)
+            response = redirect(_explore_url(looped, active_ucis[:at]))
+            response['Cache-Control'] = 'no-store'
+            return response
     # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
     # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
     # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
@@ -2162,42 +2250,43 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     rows, proof numbers — stays uncached and is read fresh on every render.
     Only the line BACK to the root, which is what actually costs the queries,
     is served from here.
+
+    AL VENCER LA FRESCURA NO SE PASEA EN LA PETICION.  Se sirve la entrada
+    vieja tal cual y el paseo se va a un hilo (§ revalidate): esta funcion es
+    la que estaba debajo de los picos de 10-26 s, porque el que llegaba justo
+    al caducar pagaba hasta 96 plies de joins de ``atomicdb_edge`` compitiendo
+    con los lotes de ``UPDATE ... reachable=true`` y con el autovacuum de la
+    misma tabla.  Ahora eso lo paga un hilo al que nadie espera.
     """
     keys = list(dict.fromkeys(key for key in keys if key))
     if not keys:
         return {}
     budget = min(max_plies, LINEAGE_SEARCH_MAX_PLIES)
-    ttl = LINEAGE_CACHE_SECONDS
-    if ttl <= 0:
+    if LINEAGE_CACHE_SECONDS <= 0:
         return _walk_lines_to_root(keys, max_plies=max_plies)
 
-    cache_keys = {key: _lineage_cache_key(key, budget) for key in keys}
-    stored = cache.get_many(list(cache_keys.values()))
-    resolved, misses = {}, []
-    for key in keys:
-        payload = stored.get(cache_keys[key])
-        if payload is None:
-            misses.append(key)
-        else:
-            resolved[key] = _lineage_from_payload(payload)
+    def compute(wanted):
+        # Las claves que el paseo NO devuelve son posiciones que AtomicDB
+        # todavia no tiene, y no guardarlas es deliberado: `goto` materializa
+        # posiciones, y un "no existe tal nodo" de dos minutos seria un
+        # explorador roto en el clic siguiente a sembrar una.
+        return {key: _lineage_payload(top, line)
+                for key, (top, line) in _walk_lines_to_root(
+                    wanted, max_plies=max_plies).items()}
 
-    if misses:
-        fresh = {}
-        for key, (top, line) in _walk_lines_to_root(
-                misses, max_plies=max_plies).items():
-            payload = _lineage_payload(top, line)
-            fresh[cache_keys[key]] = payload
-            # Round-trip even on the miss, so a hit and a miss are the same
-            # object shape.
-            resolved[key] = _lineage_from_payload(payload)
-        if fresh:
-            # Keys the walk did not return are positions AtomicDB does not
-            # have yet.  Not caching that absence is deliberate: `goto`
-            # materialises positions, and a two-minute "no such node" would
-            # be a broken explorer on the click right after seeding one.
-            cache.set_many(fresh, ttl)
+    payloads = revalidate.resolve_many(
+        {key: _lineage_cache_key(key, budget) for key in keys},
+        compute,
+        fresh_seconds=LINEAGE_CACHE_SECONDS,
+        stale_seconds=LINEAGE_STALE_SECONDS,
+        ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
+        lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
+        name='atomicdb-lineage-refresh')
 
-    return {key: resolved[key] for key in keys if key in resolved}
+    # Se reconstruye desde el payload TAMBIEN en el fallo, para que un acierto
+    # y un fallo sean la misma forma de objeto.
+    return {key: _lineage_from_payload(payloads[key])
+            for key in keys if key in payloads}
 
 
 def _line_labels_many(keys, preview_plies=10):
@@ -2241,9 +2330,13 @@ def _route_labels_many(pairs, preview_plies=10):
 
     El resultado es una funcion PURA de (ruta, destino, presupuesto) mas la
     pregunta "siguen materializados todos los prefijos", asi que se cachea con
-    el mismo TTL y el mismo argumento que el linaje (§ LINEAGE_CACHE_SECONDS):
-    el arbol solo crece, una ruta valida no deja de serlo, y nadie mirando una
-    cola necesita ver dos minutos antes que una ruta empezo a existir.
+    los mismos numeros y el mismo argumento que el linaje
+    (§ LINEAGE_CACHE_SECONDS): el arbol solo crece, una ruta valida no deja de
+    serlo, y nadie mirando una cola necesita ver dos minutos antes que una
+    ruta empezo a existir.  Y por lo mismo hereda el mismo trato al vencer:
+    la etiqueta vieja se sirve en el acto y se rehace por detras, porque
+    rejugar la linea con pyffish es la otra mitad de lo que hacia esperar a
+    quien llegaba con la entrada recien caducada.
 
     Lo que NO se cachea es el fallo.  Una ruta que hoy no llega puede llegar
     en cuanto ``goto`` materialice el prefijo que le falta, y guardar esa
@@ -2255,28 +2348,29 @@ def _route_labels_many(pairs, preview_plies=10):
               if route and key]
     if not wanted:
         return {}
-    ttl = LINEAGE_CACHE_SECONDS
-    if ttl <= 0:
+    if LINEAGE_CACHE_SECONDS <= 0:
         return {pair: labels for pair in wanted
                 if (labels := _walk_route_labels(*pair, preview_plies))}
 
-    cache_keys = {pair: _route_label_cache_key(*pair, preview_plies)
-                  for pair in wanted}
-    stored = cache.get_many(list(cache_keys.values()))
-    labels, fresh = {}, {}
-    for pair in wanted:
-        payload = stored.get(cache_keys[pair])
-        if payload is None:
-            computed = _walk_route_labels(*pair, preview_plies)
-            if computed is None:
-                continue
-            fresh[cache_keys[pair]] = list(computed)
-            labels[pair] = computed
-        else:
-            labels[pair] = tuple(payload)
-    if fresh:
-        cache.set_many(fresh, ttl)
-    return labels
+    def compute(needed):
+        computed = {}
+        for pair in needed:
+            labels = _walk_route_labels(*pair, preview_plies)
+            if labels is not None:
+                computed[pair] = list(labels)
+        return computed
+
+    payloads = revalidate.resolve_many(
+        {pair: _route_label_cache_key(*pair, preview_plies)
+         for pair in wanted},
+        compute,
+        fresh_seconds=LINEAGE_CACHE_SECONDS,
+        stale_seconds=LINEAGE_STALE_SECONDS,
+        ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
+        lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
+        name='atomicdb-routelabel-refresh')
+    return {pair: tuple(payloads[pair]) for pair in wanted
+            if pair in payloads}
 
 
 def _walk_route_labels(route, target_key, preview_plies):
@@ -2497,6 +2591,10 @@ def _proof_health(now):
             round(100.0 * snapshot.frontier_dn_thin
                   / snapshot.frontier_and_nodes, 1)
             if snapshot.frontier_and_nodes else 0.0),
+        # Los abiertos saturados que el frente NO mira, contados aparte
+        # (§ proof.saturated_open_count): cero es la salud, y cualquier otra
+        # cifra es un ciclo realimentado o un cierre que la cascada debe.
+        'frontier_saturated': snapshot.frontier_saturated,
         'dn_repair_floor': ingest.DN_REPAIR_FLOOR,
         'human_close_h': _human_seconds(snapshot.human_close_median_seconds),
         'human_close_samples': snapshot.human_close_samples,
@@ -3246,10 +3344,12 @@ def api_query(request):
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
     stm_white = pos.fen.split()[1] == 'w'
-    # ``score`` es el mejor conocimiento actual (respaldado por el subarbol);
-    # ``point`` conserva la eval puntual cruda de esta misma posicion.
-    known = ingest.best_known_eval(pos) if pos.status == 'UNKNOWN' \
-        else pos.eval_cp
+    # ``score`` es el mejor conocimiento actual (status probado > respaldado >
+    # eval puntual), el MISMO helper que titula la cabecera del explore y la
+    # fila del padre: un nodo decidido puntuaba aqui su eval cruda de antes
+    # del cierre, y era el ultimo sitio donde un mismo nodo titulaba dos
+    # numeros segun la vista.  ``point`` conserva la eval puntual cruda.
+    known = ingest.best_known_eval(pos)
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
@@ -4227,6 +4327,84 @@ def _queued_children(moves):
             .values('position_id').distinct().count())
 
 
+def _arrow_move(moves, pos):
+    """La jugada de la flecha del tablero: el TOP no bloqueado de la tabla.
+
+    Mismo contrato que tenia el inline de ``explore`` — la primera fila con
+    valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
+    fila bloqueada por repeticion no puede ser la recomendacion, y si el
+    ``best_move`` almacenado es justo la jugada bloqueada, la flecha calla en
+    vez de contradecir al bloqueo.
+    """
+    blocked = {m['uci'] for m in moves if m.get('blocked')}
+    for move in moves:
+        if move.get('blocked'):
+            continue
+        if move.get('score') is not None or move.get('mate') is not None:
+            return move['uci']
+        break
+    return None if pos.best_move in blocked else pos.best_move
+
+
+def _pv_cut_at_repetition(pos, line):
+    """La linea tal y como se ENSEÑA: cortada en su primer cruce consigo
+    misma (invariante 6 de docs/value-semantics.md).
+
+    El motor tiene derecho a UNA vuelta gratis dentro de su PV — la primera
+    reentrada a la raiz de su busqueda no puntua tablas por la regla
+    ``repetition < ply``, y el caso Eclipsia (6-ago) es literalmente eso:
+    ocho plies de lanzadera de alfil y despues el plan de verdad.  Enseñar
+    esa vuelta como "mejor linea" es enseñar una repeticion como si fuera
+    progreso.  El corte INCLUYE la jugada que cierra el bucle — asi el chip
+    de repeticion de al lado es verificable a ojo: la ultima jugada mostrada
+    vuelve a una posicion por la que la linea ya paso — y tira lo de detras,
+    que no es continuacion de esta linea sino la linea de la posicion
+    repetida otra vez.
+
+    Solo RENDER: el JSON almacenado no se toca (ni la verificacion de PV ni
+    la siembra leen esta copia).  Una PV que no se deja replicar — jugada
+    ilegal, tokens rotos — se enseña tal cual: este corte adjudica
+    repeticiones, no legalidad.
+    """
+    pv = line.get('pv')
+    if not isinstance(pv, list) or len(pv) < 4:
+        # Un ciclo necesita 4 plies como minimo (cada bando ha de deshacer
+        # lo suyo); por debajo no hay nada que caminar.
+        return line
+    seen = {pos.key}
+    fen = pos.fen
+    for index, uci in enumerate(pv):
+        if not isinstance(uci, str):
+            return line
+        try:
+            fen = logic.apply_move(fen, uci)
+        except Exception:
+            return line
+        key = logic.key_of(fen)
+        if key in seen:
+            kept = pv[:index + 1]
+            shown = dict(line, pv=kept, pv_repetition=True)
+            raw = line.get('raw')
+            if isinstance(raw, str) and ' pv ' in raw:
+                shown['raw'] = raw.split(' pv ')[0] + ' pv ' + ' '.join(kept)
+            return shown
+        seen.add(key)
+    return line
+
+
+def _analysis_lines_for_display(pos):
+    """Las lineas de ``last_analysis`` listas para la plantilla.
+
+    Una copia por linea cuando hay corte y la misma referencia cuando no:
+    cero escrituras, y el ``last_analysis`` del modelo queda intacto para
+    todos los consumidores que RAZONAN con el (verificacion, siembra,
+    distancia de mate reclamada).
+    """
+    return [_pv_cut_at_repetition(pos, line)
+            for line in (pos.last_analysis or [])
+            if isinstance(line, dict)]
+
+
 def _moves_summary(moves):
     """De que esta hecha la tabla de abajo, en una linea de cabecera.
 
@@ -4297,6 +4475,13 @@ def explore(request, key):
     raw_play = request.GET.get('play')
     try:
         explicit_route = _validated_play_route(raw_play, pos.key)
+    except PlayRouteLoop as exc:
+        # La ruta trae una reentrada: se aterriza en el primer cruce con la
+        # historia truncada ahi (§ PlayRouteLoop).  Un enlace viejo con un
+        # bucle dentro deja de poder reproducirlo.
+        response = redirect(_explore_url(exc.end_key, exc.ucis))
+        response['Cache-Control'] = 'no-store'
+        return response
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if explicit_route is None:
@@ -4332,7 +4517,26 @@ def explore(request, key):
     if community is not None:
         current_opening = _opening_for_template(community)
 
+    # REPETICIONES DESACTIVADAS (propietario, 6-ago; invariante 6): una
+    # jugada cuyo hijo ya esta EN LA LINEA ACTUAL no se puede navegar.  La
+    # linea actual son las claves de la ruta activa — explicita o el linaje
+    # canonico replayable, que es exactamente lo que la miga de pan enseña y
+    # lo que ``goto`` extiende.  Sin ruta activa no hay linea, y sin linea no
+    # hay repeticion que bloquear: cada pagina suelta empieza de cero.
+    route_keys = _route_prefix_keys(top, line, active_ucis)
+    blocked_keys = None if route_keys is None else set(route_keys)
+
     for move in moves:
+        if blocked_keys is not None and move['key'] in blocked_keys:
+            # La fila se queda — status, eval, pn/dn siguen contando — pero
+            # sin enlace ninguno: ni navegar ni saltar al origen.  El chip
+            # de la plantilla dice por que.
+            move['blocked'] = True
+            move['url'] = None
+            move['backed_url'] = None
+            move['enters_opening'] = None
+            continue
+        move['blocked'] = False
         child_route, child_anchor = _child_navigation_state(
             active_ucis, current_opening_match, route_ply,
             move['key'], move['uci'],
@@ -4352,16 +4556,23 @@ def explore(request, key):
     # — sino jugadas que todavia no son un nodo.  Pincharlas las crea.
     offtree_ucis = [uci for uci in legal_ucis if uci not in known]
     offtree_keys = _child_keys(pos, offtree_ucis)
-    offtree = [
-        {
+    offtree = []
+    for uci in offtree_ucis:
+        if blocked_keys is not None and offtree_keys[uci] in blocked_keys:
+            # Pinchar una jugada asi CREARIA la arista del bucle: bloqueada
+            # igual que sus hermanas materializadas.
+            offtree.append(
+                {'uci': uci, 'blocked': True, 'url': None,
+                 'enters_opening': None})
+            continue
+        offtree.append({
             'uci': uci,
+            'blocked': False,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
             'enters_opening': _exact_child_opening(
                 offtree_keys[uci], current_opening, names=community_map),
-        }
-        for uci in offtree_ucis
-    ]
+        })
     numbered = _numbered_line(
         top,
         line,
@@ -4377,13 +4588,25 @@ def explore(request, key):
             if current_anchor else ''
         )
     )
+    # El tablero obedece el mismo bloqueo que la tabla: una jugada que
+    # reentra en la linea no es clicable ni desde las casillas.  ``moves``
+    # trae la clave de todo hijo materializado y ``offtree_keys`` la del
+    # resto, asi que esto no cuesta ni una consulta.
+    if blocked_keys is None:
+        playable_ucis = legal_ucis
+    else:
+        child_key_by_uci = {m['uci']: m['key'] for m in moves}
+        child_key_by_uci.update(offtree_keys)
+        playable_ucis = [
+            uci for uci in legal_ucis
+            if child_key_by_uci.get(uci) not in blocked_keys]
     legal_move_links = [
         {
             'uci': uci,
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
         }
-        for uci in legal_ucis
+        for uci in playable_ucis
     ]
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
@@ -4416,6 +4639,11 @@ def explore(request, key):
         # entonces la plantilla no pinta ni el hueco (§ live_request.context).
         **live_request.context(pos),
         'pos': pos, 'moves': moves, 'parents': parents,
+        # Las lineas del motor listas para ENSEÑAR: cortadas en su primer
+        # cruce consigo mismas (§ _analysis_lines_for_display).  El JSON
+        # almacenado no se toca; quien razona con la PV entera la sigue
+        # leyendo del modelo.
+        'analysis_lines': _analysis_lines_for_display(pos),
         # La historia del conocimiento de este nodo, arriba y en claro: que se
         # busco AQUI y de que esta hecha la tabla de abajo.  Las dos frases las
         # compone el servidor, como la linea de peticion viva, para que lo que
@@ -4425,7 +4653,9 @@ def explore(request, key):
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
-        'board_key': pos.key, 'legal_ucis': legal_ucis,
+        # El tablero recibe SOLO lo navegable: las jugadas bloqueadas por
+        # repeticion no existen para el click (§ blocked_keys, arriba).
+        'board_key': pos.key, 'legal_ucis': playable_ucis,
         'legal_move_links': legal_move_links,
         'board_fen': pos.fen, 'board_turn': 'white' if stm_white else 'black',
         'board': _ctx_board(pos.fen),
@@ -4442,11 +4672,10 @@ def explore(request, key):
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
         # moverse JUNTAS o el tablero contradice a su propia columna (bug
         # reportado 29-jul; misma leccion de la fuente unica de verdad).
+        # Y nunca a una fila BLOQUEADA por repeticion: recomendar lo que no
+        # se puede pinchar es contradecir el bloqueo con la flecha.
         'best_move': (None if pos.closure == 'TERMINAL'
-                      else (moves[0]['uci']
-                            if moves and (moves[0].get('score') is not None
-                                          or moves[0].get('mate') is not None)
-                            else pos.best_move)),
+                      else _arrow_move(moves, pos)),
         'stm': 'White' if stm_white else 'Black',
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,

@@ -1,0 +1,59 @@
+# AtomicDB backed-value recascade — nightly sweep, example systemd unit.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-recascade.timer
+#     tail -f /var/log/atomicdb-recascade.log
+#
+# WHY IT EXISTS — invariant 4 of docs/value-semantics.md, which promises that
+# freshness is not left to luck.  Two things leave backed values behind, and
+# neither of them heals on its own:
+#
+#   * RELICS.  Every hardening of the guards in ``_backed_for`` (directional,
+#     quality, the proof-authority cut) fixes the computation GOING FORWARD;
+#     the ``backed_eval`` rows already written under the old rules stay as
+#     they are until something touches their family again.  That is the
+#     Wolfram case of 2026-07-30: an anchor node whose own eval was 671 still
+#     showed the 9994 that a walked spine had pushed into it before the guard
+#     existed.
+#
+#   * SUB-EPSILON ARGMAX DRIFT.  The synchronous cascade guarantees that no
+#     node stands on a value none of its children hold (invariant 5), but a
+#     sibling the node is NOT standing on may drift under BACKED_EPSILON_CP
+#     and quietly become the better edge.  That leaves the chosen edge stale
+#     by strictly less than the epsilon.  Bounded, but real, and only a full
+#     recomputation finds it.
+#
+# Passes over every node that has edges, in chunks, until a pass changes
+# nothing (fixed point) or the pass cap runs out.  Idempotent and safe to run
+# LIVE against the serving database: recomputing a backed value that is
+# already right writes nothing (the ``_backed_stored`` cut), and the churn of
+# concurrent ingest only adds work that the next pass absorbs.  The selector
+# does NOT need to be stopped for it.
+#
+# --chunk 2000 is the command default and it is the right one here: the
+# ascent shares a 50 000-node budget (BACKED_MAX_NODES) with the seeds, so a
+# fat chunk spends the whole budget on level one and trips the node-budget
+# guard before it has climbed anywhere.  Two thousand seeds leave 48 000 for
+# the climb.
+#
+# Scheduled AFTER atomicdb-backfill-reachable (03:30) so the two nightly
+# maintenance jobs never share the database, and both land in the dead hours.
+
+[Unit]
+Description=AtomicDB recascada nocturna de valores respaldados (frescura del invariante 4)
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+MemoryMax=6G
+CPUWeight=25
+IOWeight=25
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+WorkingDirectory=/opt/openbench
+ExecStart=/opt/openbench/.venv/bin/python3 -u manage.py recascade_backed --chunk 2000
+StandardOutput=append:/var/log/atomicdb-recascade.log
+StandardError=append:/var/log/atomicdb-recascade.log
