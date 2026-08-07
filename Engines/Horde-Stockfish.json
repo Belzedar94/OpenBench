@@ -14,7 +14,7 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "bce34feb0602c2640a8659a34f954fbee8f1a9e1",
+            "base_branch": "cee98c4d2f41295378c9cc02a9fb5153ae956d73",
             "both_bench": 315576,
             "both_network": "hordetest_run6b_e37_l06.nnue",
             "book_name": "HORDE_openings.epd",
