@@ -16,6 +16,29 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DESTINATION = HERE.parents[1]
 
 
+def verify_reproducible_lock(manifest: dict, platform: str, payload: dict) -> None:
+    """Anchor the payload to the in-tree hash, not only to its own receipt.
+
+    Everything else in the artifact -- the binary, ``SHA256SUMS``,
+    ``toolchain.txt`` and ``artifact-receipt.json`` -- is produced by the same
+    job, so checking them against each other proves only internal consistency.
+    ``manifest.json`` is the one value that is reviewed and committed, so a
+    build that does not reproduce it must never be installed.
+    """
+    locked = manifest["static_build"][platform]
+    expected_sha256 = locked.get("expected_referee_sha256")
+    expected_bytes = locked.get("expected_referee_bytes")
+    if not expected_sha256 or not expected_bytes:
+        raise ValueError(
+            f"manifest.json records no reproducible binary lock for {platform}; "
+            "record expected_referee_sha256/expected_referee_bytes first"
+        )
+    if payload["sha256"].lower() != str(expected_sha256).lower():
+        raise ValueError(f"referee binary does not match the {platform} hash lock")
+    if payload["bytes"] != expected_bytes:
+        raise ValueError(f"referee binary does not match the {platform} size lock")
+
+
 def load_and_verify_receipt(
     artifact_dir: Path,
     platform: str,
@@ -28,6 +51,7 @@ def load_and_verify_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     manifest = load_manifest()
     payload = verify_payload(artifact_dir, platform)
+    verify_reproducible_lock(manifest, platform, payload)
     artifact_name, binary_name, _ = ARTIFACTS[platform]
 
     exact = {

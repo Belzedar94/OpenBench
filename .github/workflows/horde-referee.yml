@@ -84,6 +84,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # The gate now also covers the worker-side referee check, and importing
+      # Client/worker.py pulls the client runtime dependencies.
+      - name: Install the client runtime dependencies
+        run: python3 -m pip install --quiet -r Client/requirements.txt
       - name: Verify the artifact receipt gate
         run: python3 -m unittest UnitTests.test_horde_referee_artifacts -v
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -101,13 +105,27 @@ jobs:
           echo "$CORPUS_SHA256  cutechess/projects/lib/tests/data/horde_insufficient_material.csv" \
             | sha256sum --check --strict
       - name: Build and test the static referee
+        # The build needs root inside the container (``apk add``), but every
+        # file it leaves in the bind mount must end up owned by the runner.
+        # Without HOST_UID/HOST_GID the container creates
+        # ``horde-referee-artifacts/linux`` as root and the receipt step, which
+        # runs on the host as ``runner``, dies with EACCES -- so no Linux
+        # artifact was ever produced and the documented install procedure,
+        # which requires the Windows/Linux pair from one run, was impossible.
         run: >-
           docker run --rm --pull=always --platform=linux/amd64
           -e SOURCE_DATE_EPOCH
+          -e HOST_UID="$(id -u)"
+          -e HOST_GID="$(id -g)"
           -v "$GITHUB_WORKSPACE:/work"
           -w /work
           alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
           sh Client/referees/LICHESS_HORDE_V1/build_static_linux.sh
+      - name: Confirm the Linux artifact is writable by the runner
+        run: |
+          test -w horde-referee-artifacts/linux
+          test -w horde-referee-artifacts/linux/cutechess-ob
+          ls -ln horde-referee-artifacts/linux
       - name: Emit the Linux artifact receipt
         run: >-
           python3 Client/referees/LICHESS_HORDE_V1/artifact_receipt.py

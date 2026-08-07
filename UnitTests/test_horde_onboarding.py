@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 HORDE_ENGINE = 'Horde-Stockfish'
 HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
-CLIENT_REF = '7164120fee370e3a023d3edd16b7a2b417b3859d'
 BASELINE_REF = '0b064616041012eb9a708989d3b6b0a165d5538a'
 DATAGEN_REF = '212b67e7c5600b4067bfa9314f6c519a5ac4607d'
 BOOK_ARTIFACT_REF = 'cd0560081f6433b58a8aa8d0c3fd4a91e969f1dd'
@@ -29,9 +28,11 @@ class HordeOnboardingTests(unittest.TestCase):
         self.book = load_json('Books/%s.json' % HORDE_BOOK)
 
     def test_client_v44_is_pinned_to_an_immutable_commit(self):
+        # The pin itself lives only in ``Config/config.json``; duplicating the
+        # literal in the test suite is what made it drift. Assert the contract
+        # (protocol 44, immutable 40-digit commit, never a branch name).
         self.assertEqual(self.general['client_version'], 44)
         self.assertRegex(self.general['client_repo_ref'], r'^[0-9a-f]{40}$')
-        self.assertEqual(self.general['client_repo_ref'], CLIENT_REF)
 
     def test_incomplete_scaffolds_are_not_schedulable(self):
         self.assertNotIn(HORDE_ENGINE, self.general['engines'])

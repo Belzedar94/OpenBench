@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [spell-runner]
+  # A busy repository sometimes drops the ``pull_request`` trigger for a branch
+  # that is pushed repeatedly, which leaves a PR with no test evidence at all.
+  # Being able to demand the suite on a given ref makes "green CI" verifiable
+  # instead of hopeful.
+  workflow_dispatch:
 
 jobs:
   # Keep the established PostgreSQL/default-database job as the compatibility
@@ -40,7 +45,20 @@ jobs:
       - run: python -c "import cpuinfo, psutil, requests"
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
-      - run: python -m unittest UnitTests.test_datagen_worker -v
+      # The onboarding suites assert the registered engines, books and the
+      # client pin. They are cheap and they are the ones that catch a config
+      # value drifting away from the tree, so they must not be optional.
+      - run: >-
+          python -m unittest -v
+          UnitTests.test_atomic_onboarding
+          UnitTests.test_bench
+          UnitTests.test_client_update
+          UnitTests.test_datagen_worker
+          UnitTests.test_genfens
+          UnitTests.test_horde_onboarding
+          UnitTests.test_horde_referee_artifacts
+          UnitTests.test_pgn_util
+          UnitTests.test_runner_startup
       - run: python manage.py test atomicdb --verbosity 2
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py check

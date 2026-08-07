@@ -46,6 +46,12 @@ def get_workload(request, machine):
     if not (test := select_workload(request, machine)):
         return {}
 
+    # Resolve the semantic contract before anything is written. It is the only
+    # part of serialization that can reject a workload, and doing it after the
+    # Result/Machine writes left an orphan Result plus a bound machine behind
+    # every 500 while the client retried.
+    variant_contract = workload_variant_contract(test)
+
     chunk = claim_chunk(test, machine) if is_generic_datagen(test) else None
     if is_generic_datagen(test) and chunk is None:
         return {}
@@ -58,7 +64,11 @@ def get_workload(request, machine):
     machine.mnps = machine.dev_mnps = machine.base_mnps = 0.00
     machine.save(); result.save()
 
-    return { 'workload' : workload_to_dictionary(test, result, machine, chunk) }
+    return {
+        'workload' : workload_to_dictionary(
+            test, result, machine, chunk, variant_contract
+        )
+    }
 
 def select_workload(request, machine):
 
@@ -283,10 +293,16 @@ def compute_resource_distribution(workloads, machine, has_focus):
 
     return worker_dist, engine_freq
 
-def workload_to_dictionary(test, result, machine, datagen_chunk=None):
+def workload_to_dictionary(
+    test, result, machine, datagen_chunk=None, variant_contract=None
+):
 
     workload = {}
-    variant_contract = workload_variant_contract(test)
+    # ``get_workload`` resolves this before any write so a rejected contract
+    # cannot leave state behind; callers that do not (tests, tooling) still get
+    # the same fail-closed check here.
+    if variant_contract is None:
+        variant_contract = workload_variant_contract(test)
 
     workload['result'] = {
         'id'  : result.id,

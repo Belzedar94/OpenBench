@@ -26,6 +26,31 @@ Activation requires all of the following receipts:
    Horde-Stockfish.
 7. A network receipt for each side, including an identical full SHA-256 when a
    same-network comparison is claimed.
+8. The verified `LICHESS_HORDE_V1` referee installed on **every** worker that
+   may receive Horde work, and its SHA-256 recorded in
+   `Client/referees/LICHESS_HORDE_V1/manifest.json` for both platforms.
+
+Receipt 8 is the blocking one, and it is not optional bookkeeping. A stock
+`cutechess-ob` answers to `-variant horde` and will arbitrate a game with
+non-Lichess semantics and upload the result as if it counted. Client 44
+therefore hashes the referee before launching any workload whose
+`variant_contract` is `LICHESS_HORDE_V1` and refuses the workload unless it
+matches the recorded build (`worker.REFEREE_PINS`, kept equal to the manifest
+by `UnitTests/test_horde_referee_artifacts`). A platform whose reproducible
+build has not been recorded yet is refused exactly like a mismatch, so
+registering the engines before receipt 8 produces refused workloads and a
+server-side event -- never silently mis-arbitrated games.
+
+Install the referee with the pair produced by one `Horde referee` workflow run:
+
+```text
+python Client/referees/LICHESS_HORDE_V1/install_artifacts.py \
+  --windows <windows-artifact-directory> \
+  --linux <linux-artifact-directory> \
+  --expected-source-commit <40-hex-commit> \
+  --expected-run-id <run-id> \
+  --install
+```
 
 After those receipts exist, replace every pending value, set
 `onboarding_ready` to `true`, add both engines and the book to

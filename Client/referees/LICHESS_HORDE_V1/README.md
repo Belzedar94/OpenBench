@@ -35,8 +35,18 @@ After source mtimes are normalized to `SOURCE_DATE_EPOCH`, the Windows build
 must reproduce the byte count and binary SHA-256 recorded in `manifest.json`.
 
 Each platform artifact also contains `artifact-receipt.json`. The two receipts
-must name the same workflow run, attempt, and source commit. Validate them before
-installation with:
+must name the same workflow run, attempt, and source commit. Because every file
+in an artifact is produced by the same job, that check alone only proves
+internal consistency, so installation additionally requires the binary to
+reproduce the `expected_referee_sha256` and `expected_referee_bytes` recorded in
+`manifest.json` -- the one value that is reviewed and committed. A platform
+whose lock has not been recorded yet cannot be installed at all.
+
+The worker enforces the same hashes at run time: `worker.REFEREE_PINS` mirrors
+this manifest and a `LICHESS_HORDE_V1` workload is refused unless the
+`cutechess-ob` about to arbitrate it hashes to the recorded build.
+
+Validate the pair before installation with:
 
 ```text
 python Client/referees/LICHESS_HORDE_V1/install_artifacts.py \
