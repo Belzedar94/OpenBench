@@ -212,6 +212,27 @@ gradual worker-v41 restart, and a one-chunk smoke test. Do not use `--fake` for
 application and backup for rollback. Migration `0009` is the empty merge node
 that joins the production profile-default branch with the v41 DATAGEN branch.
 
+## Cómo se reparte la cola de análisis (desde 2026-08-07)
+
+- **Reparto justo ponderado por coste, no orden de llegada.** Dentro de la banda
+  de peticiones humanas, cada tarea pendiente se ordena por los **nodos que ese
+  mismo peticionario ya tiene por delante** (esperando o corriendo), así que la
+  primera petición de cada cuenta cobra antes que la segunda de cualquier otra
+  y una de 10B cede el turno ante las ~78 de 128M que cuestan lo mismo; una
+  ráfaga de mil quinientas se sigue sirviendo entera, solo que intercalada.
+  Encima de ese escalón no ha cambiado nada: banda de usuario antes que lo
+  automático, afinidad del contribuidor con sus propias peticiones, y nombrados
+  antes que anónimos con promoción tras 24h de espera.
+- **Tope de tareas de 10B arrendadas a la vez por cuenta**: un tercio del pool
+  vivo, con suelo de uno (hoy 9-10 procesos → 3). Se aplica al repartir, no al
+  pedir: se aceptan todas las peticiones y las que sobran esperan turno. Si al
+  respetarlo no quedara nada que dar, se reparte sin él — el tope ordena, nunca
+  deja un slot parado. Los tres números viven en `atomicdb/views.py`
+  (`DEEP_TASK_NODES`, `DEEP_LEASES_POOL_SHARE`, `DEEP_LEASES_FLOOR`).
+- El orden real y la cifra de "peticiones por delante" que ve el usuario salen
+  de la **misma** función (`atomicdb/live_request.py`, `service_order`), y un
+  test del CI lo fija: si divergen, no lo descubre un usuario en Discord.
+
 ## Caché compartida (Redis) de la web
 
 La portada de AtomicDB y el explorador cachean cosas caras y públicas: la

@@ -62,6 +62,34 @@ LEGACY_MAX_BUDGET = 128_000_000
 # que la cola es suya.  32 deja sitio de sobra a una maquina grande de verdad
 # y sigue impidiendo que una sola vacie la cola.
 LEASES_PER_MACHINE = 32
+# Cuantas tareas del peldano MAS ALTO puede tener ARRENDADAS a la vez una
+# misma cuenta.  Es lo unico que el reparto justo no puede arreglar solo: un
+# arriendo no se expropia, y una tarea de 10B ocupa su slot media hora
+# (5,45M nodos/s medidos el 7-ago), setenta y ocho veces lo que ocupa una de
+# 128M.  Con los nueve procesos que sostienen el pool, una cuenta que coja los
+# nueve con tareas de 10B deja al siguiente que llegue esperando media hora
+# aunque el orden sea impecable — es lo que se midio el 7-ago a las 10:21 UTC:
+# soothdest con 9 de los 10 arriendos vivos, tres de ellos de 10B.
+#
+# NO ES UN NUMERO FIJO: es una FRACCION del pool vivo, con suelo de uno.  Fijo
+# en 3 protege bien los nueve procesos de hoy y estrangularia una flota de
+# noventa (una cuenta no podria comprar mas del 3% de la capacidad en trabajo
+# profundo, que es justo el trabajo que vale); una fraccion sigue al pool sin
+# que nadie tenga que acordarse de subirla.  Un tercio deja siempre dos
+# tercios rotando cada veintitres segundos, que es lo que hace que el recien
+# llegado entre en segundos.  Hoy: 10 procesos vivos // 3 = 3, que es
+# exactamente el numero al ojo.
+#
+# El suelo de uno importa: sin el, un pool de dos procesos prohibiria el
+# peldano mas alto a TODO el mundo.  Y el tope solo ordena, nunca deja hierro
+# parado: si al respetarlo no queda nada que dar, ``api_lease`` repite el
+# reparto sin el (§ ``choose_pending``, segunda pasada).
+DEEP_TASK_NODES = ingest.REQUEST_BUDGET_LADDER[-1]
+DEEP_LEASES_POOL_SHARE = 3
+DEEP_LEASES_FLOOR = 1
+# Cuantos ids de la cola ya ordenada se bloquean de una vez.  Mismo tamano que
+# el ``chunk_size`` con el que esto se recorria cuando era un solo cursor.
+LEASE_SCAN_CHUNK = 64
 MAX_REPORTED_NPS = 1_000_000_000_000
 # Techo global de peticiones humanas esperando (PENDING, source USER, sobre
 # posiciones aun sin resolver). Estuvo abierto de par en par desde el 27-jul
@@ -350,6 +378,68 @@ def _machine_at_lease_cap(machine):
     return held >= LEASES_PER_MACHINE
 
 
+def deep_lease_cap():
+    """Cuantos arriendos del peldano mas alto puede tener una cuenta a la vez.
+
+    Un tercio del pool VIVO, con suelo de uno.  "Vivo" se lee de donde ya lo
+    lee la portada (``metrics.LIVE_SECONDS``): un slot que lleva tres minutos
+    sin dar senales no esta sosteniendo la cola de nadie y no debe agrandar el
+    cupo de nadie.
+    """
+    live = WorkerPing.objects.filter(
+        last_seen__gte=timezone.now() - timedelta(
+            seconds=metrics.LIVE_SECONDS)).count()
+    return max(DEEP_LEASES_FLOOR, live // DEEP_LEASES_POOL_SHARE)
+
+
+def _deep_capped_requesters():
+    """Las cuentas que ya han llenado su cupo de arriendos profundos.
+
+    Se cuenta DESPUES de reciclar los caducados, en la misma transaccion que
+    ``_machine_at_lease_cap``: un arriendo muerto no ocupa cupo.  Solo la
+    banda USER — AUTO y FILL no llegan al peldano de 10B (su escalera se para
+    en 2B) y ademas ya van los ultimos por ``-source``.
+
+    Los anonimos comparten ``requested_by`` vacio y por tanto CUBO: no se les
+    puede distinguir, asi que la unica regla que se puede sostener es tratar
+    la marea como una sola cuenta.  Es la misma decision que toma el reparto
+    justo, y por el mismo motivo.
+    """
+    cap = deep_lease_cap()
+    held = (AnalysisTask.objects
+            .filter(state='LEASED', source=AnalysisTask.Source.USER,
+                    budget_nodes__gte=DEEP_TASK_NODES)
+            .values('requested_by').annotate(held=Count('id')))
+    return frozenset(row['requested_by'] for row in held
+                     if row['held'] >= cap)
+
+
+def _locked_in_order(ordered):
+    """Recorre ``ordered`` devolviendo las filas YA bloqueadas, en ese orden.
+
+    El paso uno (``ordered``) calcula el sitio de cada tarea con una funcion
+    de ventana y NO lleva candados, porque PostgreSQL no admite las dos cosas
+    a la vez.  El paso dos los pone, por lotes de ``LEASE_SCAN_CHUNK`` ids y
+    con el mismo ``skip_locked`` de siempre: lo que otro worker tenga cogido
+    se cae del lote y se sigue por lo siguiente.
+
+    Se barre la cola ENTERA, por lotes, y no un prefijo: la razon es la de
+    siempre — un worker sin tablas no debe quedarse sin tarea porque las
+    primeras de la cola sean todas de tablas.  En la practica el primer lote
+    resuelve casi siempre en la primera fila; los demas son el camino raro.
+    """
+    order = list(ordered.values_list('id', flat=True))
+    for start in range(0, len(order), LEASE_SCAN_CHUNK):
+        chunk = order[start:start + LEASE_SCAN_CHUNK]
+        rows = {task.id: task for task in AnalysisTask.objects
+                .select_for_update(skip_locked=True).select_related('position')
+                .filter(id__in=chunk, state='PENDING')}
+        for task_id in chunk:
+            task = rows.get(task_id)
+            if task is not None:
+                yield task
+
+
 @csrf_exempt
 def api_lease(request):
     user = _auth(request)
@@ -409,13 +499,15 @@ def api_lease(request):
                         leased_at__gte=stale))
             .order_by('leased_at', 'id').first())
 
-        def choose_pending():
+        def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
             # non-TB worker must not receive a TB task merely because several
             # TB positions happen to be ahead of the first compatible task.
             first = None
             supports_tb = request.POST.get('tb') == '1'
-            # Dentro de la banda USER el orden es FIFO puro (id de creacion).
+            capped = (_deep_capped_requesters() if honour_deep_cap
+                      else frozenset())
+            # Dentro de la banda USER la prioridad de POSICION no manda.
             # Un click es un click: ordenar a los humanos por la prioridad de
             # la POSICION hacia que una linea profunda y perdedora (prioridad
             # muy negativa) esperase detras de cada click fresco de cualquier
@@ -429,8 +521,8 @@ def api_lease(request):
             # Afinidad worker-peticionario: dentro de la banda USER, las
             # peticiones de la MISMA cuenta que corre este worker van
             # primero (quien pone hierro cobra el suyo antes); entre ellas
-            # y entre las ajenas, el FIFO de siempre.  AUTO/FILL ni se
-            # enteran: own vale 0 en toda la banda.
+            # y entre las ajenas, el reparto justo de mas abajo.  AUTO/FILL ni
+            # se enteran: own vale 0 en toda la banda.
             own_first = Case(
                 When(source=AnalysisTask.Source.USER,
                      requested_by=user.username, then=Value(1)),
@@ -440,7 +532,7 @@ def api_lease(request):
             # un humano identificado que pide UNA posicion no debe esperar
             # detras de dos mil de esas (Lesha, 31-jul: sus requests en el
             # puesto ~1400 del FIFO, horas de cola).  Dentro de cada estrato
-            # el FIFO de siempre; AUTO/FILL ni se enteran.
+            # reparte el escalon de mas abajo; AUTO/FILL ni se enteran.
             #
             # ...Y una espera larga vale por un nombre.  El estrato ordenaba
             # el trafico del dia, pero sin caducidad no ordena: mata de hambre.
@@ -448,21 +540,65 @@ def api_lease(request):
             # de mas de 72h mientras la cola servia sin parar — mientras entre
             # UNA nombrada al dia, lo anonimo no llega jamas al frente.
             # Pasado ``STARVED_AFTER`` la fila entra en el estrato nombrado, y
-            # ahi su id la pone delante de todo lo fresco: vuelve al FIFO.  La
+            # ahi vuelve a competir de tu a tu con lo nombrado fresco.  La
             # regla es la MISMA que cuentan las dos cifras de "cuanta cola
             # tengo delante", y por eso se lee de un solo sitio.
-            named_first = Case(
-                When(Q(source=AnalysisTask.Source.USER)
-                     & live_request.named_tier(), then=Value(1)),
-                default=Value(0), output_field=IntegerField())
-            queryset = (AnalysisTask.objects
-                .select_for_update(skip_locked=True)
-                .select_related('position').filter(state='PENDING')
+            named_first = live_request.named_first_rank(band_only=True)
+            # ...y por ultimo el REPARTO JUSTO, que sustituye al FIFO puro por
+            # id: los nodos que ese mismo peticionario ya tiene por delante en
+            # su propia cola (§ ``live_request.fair_share``).  El ``id`` se
+            # queda de desempate estable, que es lo que hace que dentro de una
+            # sola cuenta el orden siga siendo el de llegada.
+            #
+            # LOS TRES ESCALONES DE ARRIBA NO SE TOCAN, y la prioridad de
+            # posicion tampoco pierde nada: fuera de la banda USER la clave
+            # del reparto vale cero en todas las filas, asi que dentro de
+            # AUTO y de FILL sigue mandando ``-queue_rank`` y este escalon no
+            # tiene ni voz.  Donde reparte es donde se pidio que repartiese.
+            #
+            # DOS PASOS, Y NO POR GUSTO.  PostgreSQL rechaza ``FOR UPDATE``
+            # junto a una funcion de ventana ("FOR UPDATE is not allowed with
+            # window functions"), asi que el orden se calcula en una lectura
+            # sin candados y los candados se ponen despues, por lotes, sobre
+            # ids ya ordenados.  La alternativa sin ventana — una subconsulta
+            # correlacionada que sume el prefijo por fila — cabe en una sola
+            # sentencia pero es O(n^2) sobre las pendientes: medido en
+            # PostgreSQL 16 con las 2.825 filas de la racha del 6-ago, 2.549 ms
+            # contra los 22,6 ms de hoy.  Asi son 28,9 ms.
+            #
+            # La carrera que abren los dos pasos se cierra sola: el lote se
+            # vuelve a filtrar por ``state='PENDING'`` YA bajo candado, asi que
+            # una fila que otro worker arrendo entre medias no se puede
+            # arrendar dos veces — se cae del lote y se sigue por la siguiente,
+            # exactamente igual que cuando ``skip_locked`` se la saltaba.
+            # Entran tambien las ARRENDADAS, y hacen falta: son la mitad de lo
+            # que un peticionario tiene en el sistema, y sin ellas la suma se
+            # vacia en cuanto su primera tarea sale a un worker — la racha
+            # recuperaria los nueve slots de inmediato.  No se pueden quitar
+            # con un WHERE porque una ventana no ve lo que el WHERE ya tiro;
+            # se caen solas al bloquear el lote, que solo mira PENDING.
+            ordered = (AnalysisTask.objects.filter(live_request.CHARGED)
+                # Una PENDING sobre una posicion CERRADA no la sirve nadie: se
+                # descartaba mas abajo, fila a fila, y ahora se descarta en
+                # SQL.  Ademas de barrer menos, es lo que hace que las sumas
+                # del reparto sean LAS MISMAS que cuenta el estimador.
+                .filter(live_request.SERVEABLE)
                 .annotate(queue_rank=human_rank, own_first=own_first,
-                          named_first=named_first)
-                .order_by('-source', '-own_first', '-named_first',
-                          '-queue_rank', 'id'))
-            for candidate in queryset.iterator(chunk_size=64):
+                          named_first=named_first))
+            # Los dos escalones del medio se leen de ``live_request`` — son
+            # LOS MISMOS objetos que usa el estimador, no una copia parecida.
+            #
+            # ``-queue_rank`` baja aqui, detras del reparto, y el orden que
+            # sale es EL MISMO: dentro de la banda USER vale 0.0 en todas las
+            # filas, asi que da igual donde este; fuera de ella ``named_first``
+            # y ``fair_ahead`` valen 0 en todas, asi que sigue siendo el unico
+            # que decide.  Ponerlo al final es lo que permite compartir los de
+            # en medio literalmente.
+            ordered = (live_request.fair_share(ordered)
+                       .order_by('-source', '-own_first',
+                                 *live_request.SERVICE_KEYS,
+                                 '-queue_rank', 'id'))
+            for candidate in _locked_in_order(ordered):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
                 # generation commits, and never runs if that visit solved the
@@ -478,6 +614,16 @@ def api_lease(request):
                 if (not supports_lease_token
                         and (candidate.attempts > 0
                              or candidate.budget_nodes > LEGACY_MAX_BUDGET)):
+                    continue
+                # El cupo de arriendos profundos.  No rechaza la peticion —
+                # se acepto al pedirla y sigue en la cola — sino que la deja
+                # pasar de turno mientras su autor tenga ocupado el pool con
+                # otras tantas.  Se salta la fila y se SIGUE barriendo, que es
+                # lo que convierte el tope en un reordenamiento y no en un
+                # slot parado.
+                if (candidate.budget_nodes >= DEEP_TASK_NODES
+                        and candidate.source == AnalysisTask.Source.USER
+                        and candidate.requested_by in capped):
                     continue
                 if first is None:
                     first = candidate
@@ -533,6 +679,15 @@ def api_lease(request):
                 if chosen is None:
                     ingest.next_tasks(TASK_REFILL_COUNT)
                     chosen = choose_pending()
+                if chosen is None:
+                    # NADA que dar respetando el cupo de arriendos profundos.
+                    # Un slot parado es peor que un adelantamiento: el tope
+                    # existe para repartir el pool cuando hay con quien
+                    # repartirlo, no para dejar hierro donado sin trabajo
+                    # mientras hay cola.  Sin esta pasada, una cuenta con
+                    # veinte tareas de 10B y el resto de la cola vacia
+                    # apagaria seis de los nueve procesos.
+                    chosen = choose_pending(honour_deep_cap=False)
                 if chosen is not None:
                     batch = [chosen]
         if not replayed:
@@ -1345,7 +1500,7 @@ def _user_queue_ahead(pos):
     """Cuantas tareas USER PENDING cobran antes que la de esta posicion.
 
     El mismo orden que ``choose_pending`` (nombradas por delante de las
-    anonimas, FIFO dentro de cada estrato), sin el matiz own-first porque
+    anonimas, reparto justo dentro de cada estrato), sin own-first porque
     depende de que worker pregunte.  Es transparencia, no contrato: la cifra
     que ve el humano es "cuanta cola tengo delante", que era exactamente lo
     que el boton de espera no decia (Lesha, 31-jul: horas de espera con cara

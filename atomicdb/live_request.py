@@ -46,7 +46,8 @@ nadie la pidio y nadie la esta esperando.
 
 from datetime import timedelta
 
-from django.db.models import Count, Q
+from django.db.models import (BigIntegerField, Case, F, IntegerField, Q, Sum,
+                              Value, When, Window)
 from django.utils import timezone
 
 from .ingest import notification_deserved
@@ -71,6 +72,13 @@ STARVED_AFTER = timedelta(hours=24)
 # el cierre tampoco se queda ahi (§ ingest._emit_closure_events).  Una LAPIDA
 # si es serveable — ``choose_pending`` no mira la prioridad — asi que cuenta.
 SERVEABLE = Q(position__status='UNKNOWN')
+# Lo que a un peticionario le CUENTA como cola propia: lo que espera Y lo que
+# ya esta corriendo.  Sin la parte arrendada el reparto justo no reparte nada:
+# en cuanto la primera de una racha sale a un worker deja de sumar, la segunda
+# vuelve a valer cero nodos y la racha se lleva los nueve slots otra vez.  Lo
+# COMPLETADO no cuenta a proposito: si contase, la deuda no dejaria de crecer y
+# quien mas ha usado el proyecto acabaria detras de todo el mundo para siempre.
+CHARGED = Q(state__in=(PENDING, LEASED))
 # Cuanto silencio invalida una PROMESA de tiempo.  Tres intervalos de heartbeat
 # del worker (60s, § Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS) y
 # exactamente la ventana con la que los medidores de la portada deciden si una
@@ -109,34 +117,147 @@ def named_tier(now=None):
             | Q(created__lt=(now or timezone.now()) - STARVED_AFTER))
 
 
+def fair_share(queryset):
+    """Anota ``fair_ahead``: los NODOS que ese MISMO peticionario ya tiene
+    encolados por delante de cada fila.
+
+    QUE ES.  Deficit round-robin ponderado por coste, y es el ultimo escalon
+    del orden de servicio: el primero que llega de cada cuenta lleva cero
+    nodos delante, asi que la PRIMERA peticion de cualquiera cobra antes que
+    la SEGUNDA de cualquier otro, y como lo que se acumula son nodos y no
+    filas, una de 10B cede el turno sola frente a setenta y ocho de 128M — que
+    es exactamente lo que cuestan.  Nadie pierde acceso y nadie tiene cupo:
+    las mil quinientas de una racha se siguen sirviendo, intercaladas.
+
+    POR QUE EXISTE.  El 6-ago a las 18:00 UTC una cuenta encolo 1.562
+    peticiones en una hora sobre un pool de nueve procesos.  El ultimo escalon
+    era FIFO por ``id``, asi que el siguiente en llegar — pidiese lo que
+    pidiese — esperaba detras de las 1.562.  "The queue is completely
+    paralized", y era verdad.
+
+    LA SUMA EXCLUYE LA PROPIA FILA.  Incluirla ordenaria por hora de FIN
+    virtual y una primera peticion de 10B saldria detras de las primeras de
+    todo el mundo por el mero hecho de ser cara; excluyendola se ordena por
+    hora de INICIO virtual, todos los primeros empatan a cero y el ``id``
+    los desempata.  Un click es un click, tambien el caro.  Django 4.2 no
+    admite ``ROWS ... 1 PRECEDING`` (``RowRange`` rechaza un limite
+    negativo), asi que se toma el marco inclusivo y se resta lo propio.
+
+    LA PARTICION LLEVA ``source``: sin el, la marea anonima de la banda USER
+    (``requested_by`` vacio) compartiria cubo con AUTO y FILL, que tambien lo
+    tienen vacio, y las sumas de una banda envenenarian el orden de la otra.
+    Fuera de la banda USER la clave vale cero a proposito — dentro de AUTO y
+    FILL manda la prioridad de POSICION, que es la que calcula el selector, y
+    este escalon no debe tener ni voz ahi.
+
+    EL QUERYSET QUE ENTRA TIENE QUE LLEVAR ``CHARGED``, no solo lo pendiente:
+    una ventana solo ve las filas que sobreviven al WHERE, asi que filtrar
+    aqui lo arrendado seria descontarlo de la suma.  Las filas arrendadas
+    salen ordenadas junto a las demas y quien llama las descarta despues —
+    ``choose_pending`` porque su lote solo bloquea PENDING, ``queue_ahead``
+    porque solo cuenta PENDING.
+    """
+    return (queryset
+            .annotate(_fair_cumulative=Window(
+                expression=Sum('budget_nodes'),
+                partition_by=[F('source'), F('requested_by')],
+                order_by=F('id').asc()))
+            .annotate(fair_ahead=Case(
+                When(source=USER,
+                     then=F('_fair_cumulative') - F('budget_nodes')),
+                default=Value(0), output_field=BigIntegerField())))
+
+
+# Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
+# en un solo sitio.  Cuando eran dos consultas parecidas escritas aparte, el
+# dia que cambio una la otra empezo a mentirle a un humano que estaba
+# esperando.  Lo que cada lado pone alrededor es lo unico que difiere:
+# ``views.choose_pending`` antepone ``-source`` y su own-first (que depende de
+# que worker pregunte, y por eso el estimador no puede tenerlo) y cierra con la
+# prioridad de POSICION; ``queue_ahead`` cierra con el ``id`` y ya.
+SERVICE_KEYS = ('-named_first', 'fair_ahead')
+
+
+def named_first_rank(now=None, band_only=False):
+    """1 en el estrato nombrado, 0 en la marea anonima fresca.
+
+    ``band_only`` acota la regla a la banda USER, y quien ordene la cola
+    ENTERA lo necesita: ``named_tier`` tambien mira la edad, asi que sin el
+    una tarea del selector de hace mas de un dia cobraria el 1 y se colaria
+    por delante de la prioridad de posicion de sus companeras.  El estimador
+    no lo usa porque ya trabaja sobre la banda sola.
+    """
+    condition = named_tier(now)
+    if band_only:
+        condition = Q(source=USER) & condition
+    return Case(When(condition, then=Value(1)), default=Value(0),
+                output_field=IntegerField())
+
+
+def service_order(queryset, now=None):
+    """La banda USER en ORDEN DE SERVICIO.  Devuelve el queryset ordenado.
+
+    Solo vale para la banda USER: fuera de ella el orden lleva ademas
+    ``-source`` y la prioridad de posicion, que aqui no pintan nada.
+    """
+    return (fair_share(queryset).annotate(named_first=named_first_rank(now))
+            .order_by(*SERVICE_KEYS, 'id'))
+
+
 def queue_ahead(task):
     """Cuantas peticiones de visitante cobran antes que ``task``, o ``None``.
 
-    El mismo orden que ``choose_pending`` (estrato nombrado por delante de la
-    marea anonima fresca, FIFO dentro de cada estrato), sin el matiz own-first
-    porque depende de que worker pregunte.  Es transparencia, no contrato.
+    El mismo orden que ``choose_pending``, leido del mismo sitio
+    (``service_order``), sin el matiz own-first porque depende de que worker
+    pregunte.  Es transparencia, no contrato.
 
     Solo cuenta lo que de verdad puede cobrar antes: una PENDING sobre una
     posicion ya cerrada no la sirve nadie, y sumarla era decirle a quien acaba
     de pedir que tiene por delante una cola que no existe.
 
-    UNA sola sentencia: los tres recuentos que hacen falta salen del mismo
-    barrido con ``filter=`` encima, porque esto ya no lo llama solo el recibo
-    de un click — lo llama tambien el explorador, en cada render con una
-    peticion esperando.
+    UNA sola sentencia, y solo viajan los ``id``: el reparto justo es una suma
+    con ventana, que ordena la banda entera de una pasada pero no se puede
+    contar con un ``filter`` encima.  Buscar el sitio propio en la lista es
+    trabajo de Python sobre una lista de enteros, que al lado de la
+    ordenacion no se nota.
+
+    El tope de arriendos profundos (``views.DEEP_TASK_NODES``) NO entra aqui:
+    es una condicion del momento del reparto, no un sitio en la cola, y quien
+    lo tiene puesto ya esta contado delante.  La cifra puede quedarse larga
+    por eso, nunca corta, que es el lado por el que esta linea puede errar.
     """
-    if task is None or task.state != PENDING or task.source != USER:
+    if task is None:
         return None
-    now = timezone.now()
-    named = named_tier(now)
-    rows = (AnalysisTask.objects.filter(state=PENDING, source=USER)
-            .filter(SERVEABLE).aggregate(
-                named=Count('id', filter=named),
-                named_before=Count('id', filter=named & Q(id__lt=task.id)),
-                anon_before=Count('id', filter=~named & Q(id__lt=task.id))))
-    if task.requested_by or task.created < now - STARVED_AFTER:
-        return rows['named_before']
-    return rows['named'] + rows['anon_before']
+    return queue_ahead_map([task]).get(task.id)
+
+
+def queue_ahead_map(tasks):
+    """``{id: cuantas peticiones cobran antes}`` para varias, UNA consulta.
+
+    El perfil de una cuenta pinta hasta veinte filas de su cola.  Preguntar el
+    sitio de cada una por separado seria ordenar la banda entera veinte veces,
+    que es justo el N+1 que esa pagina no puede pagar: se ordena una vez y de
+    esa pasada salen todos los sitios.
+
+    Una tarea que no este en la banda servible no sale en el mapa — no tiene
+    sitio en la cola porque no la va a servir nadie — y quien pregunte recibe
+    ``None`` en vez de un numero inventado.
+    """
+    wanted = {task.id for task in tasks
+              if task.state == PENDING and task.source == USER}
+    if not wanted:
+        return {}
+    band = (AnalysisTask.objects.filter(source=USER)
+            .filter(CHARGED).filter(SERVEABLE))
+    places, ahead = {}, 0
+    for task_id, state in service_order(band).values_list('id', 'state'):
+        if task_id in wanted:
+            places[task_id] = ahead
+        # Lo que ya esta corriendo pesa en el reparto pero no es COLA: quien
+        # espera quiere saber cuantas PETICIONES le faltan por delante, y la
+        # que tiene un worker encima ya no esta esperando a nadie.
+        ahead += state == PENDING
+    return places
 
 
 def _live_task(pos):
