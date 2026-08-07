@@ -668,13 +668,26 @@ ENGINE_VARIANTS = {
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
 }
 
+# Only contracts the Server can actually emit belong here. OpenBench/config.py
+# constrains the stored value to ``[A-Z0-9][A-Z0-9_]{0,63}`` and
+# OpenBench/variant_contract.py only knows LICHESS_HORDE_V1, so lowercase
+# entries were unreachable and advertised a contract vocabulary that does not
+# exist. Anything else must fail closed through the check below.
 VARIANT_CONTRACTS = {
-    'LICHESS_HORDE_V1': ('cutechess'      , 'horde'       ),
-    'standard'      : ('cutechess'      , 'standard'    ),
-    'spell-chess'   : ('uci-pair-runner', 'spell-chess' ),
-    'shatranj'      : ('cutechess'      , 'shatranj'    ),
-    'atomic'        : ('cutechess'      , 'atomic'      ),
-    'fischerandom'  : ('cutechess'      , 'fischerandom'),
+    'LICHESS_HORDE_V1': ('cutechess', 'horde'),
+}
+
+# Contracts whose arbitration semantics are not what a stock cutechess build
+# implements, mapped to the referee hash that *is* allowed to arbitrate them.
+# The values are the reproducible-build locks recorded in
+# Client/referees/<contract>/manifest.json; UnitTests/test_horde_referee_artifacts
+# fails if the two ever disagree. ``None`` means "no reproducible build has been
+# recorded for this platform yet", which is refused exactly like a mismatch.
+REFEREE_PINS = {
+    'LICHESS_HORDE_V1': {
+        'Windows': '1C0BBAB69E15A277C0B68BF032848B513F706749999CD5F6D09A1FB60F05B8A6',
+        'Linux'  : None,
+    },
 }
 
 # Pair-runner script distributed alongside worker.py, inside Client/. The
@@ -698,7 +711,7 @@ def inferred_variant_routing(config):
     dev_engine = config.workload['test']['dev']['engine'].upper()
     return ENGINE_VARIANTS.get(dev_engine)
 
-def variant_routing(config):
+def declared_variant_contract(config):
 
     # New servers propagate one explicit semantic contract and duplicate it on
     # both engine records for diagnostics. Reject disagreement instead of ever
@@ -718,9 +731,13 @@ def variant_routing(config):
             % ', '.join(sorted(declared))
         )
 
+    return next(iter(declared)) if declared else None
+
+def variant_routing(config):
+
+    contract = declared_variant_contract(config)
     inferred = inferred_variant_routing(config)
-    if declared:
-        contract = next(iter(declared))
+    if contract is not None:
         if contract not in VARIANT_CONTRACTS:
             raise VariantRoutingError(
                 'Unsupported variant contract: %s' % contract
@@ -740,6 +757,65 @@ def variant_routing(config):
 
     return inferred or ('cutechess', 'standard')
 
+
+_REFEREE_DIGESTS = {}
+
+
+def referee_sha256(path):
+
+    # Rehash only when the file identity changes; a workload launches several
+    # cutechess copies and the binary is ~7MB.
+    stamp = os.stat(path)
+    key = (path, stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
+    if key not in _REFEREE_DIGESTS:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as binary:
+            while block := binary.read(1024 * 1024):
+                digest.update(block)
+        _REFEREE_DIGESTS.clear()
+        _REFEREE_DIGESTS[key] = digest.hexdigest().upper()
+    return _REFEREE_DIGESTS[key]
+
+
+def verify_referee_binary(config, path):
+
+    # A contract only reaches this check when its arbitration semantics differ
+    # from what a stock cutechess-ob implements. The stock binary answers to
+    # ``-variant horde`` and would happily arbitrate with the wrong rules and
+    # upload the games as if they counted, so refusing the workload is the
+    # only safe outcome when the referee is not the reviewed build.
+    contract = declared_variant_contract(config)
+    pins = REFEREE_PINS.get(contract)
+    if pins is None:
+        return
+
+    expected = pins.get(platform.system())
+    if expected is None:
+        raise VariantRoutingError(
+            'Contract %s has no recorded referee build for %s; refusing to '
+            'arbitrate with an unverified binary'
+            % (contract, platform.system())
+        )
+
+    try:
+        observed = referee_sha256(path)
+    except OSError as error:
+        raise VariantRoutingError(
+            'Contract %s requires referee %s, which cannot be read: %s'
+            % (contract, os.path.basename(path), error)
+        ) from None
+
+    if observed != expected.upper():
+        raise VariantRoutingError(
+            'Contract %s requires the %s referee with sha256 %s, but %s has '
+            'sha256 %s. Install the verified artifact with '
+            'Client/referees/%s/install_artifacts.py before running this '
+            'workload.'
+            % (contract, platform.system(), expected.upper(),
+               os.path.basename(path), observed, contract)
+        )
+
+
 def runner_base_command(config):
 
     # Everything cutechess arbitrates natively keeps the original binary
@@ -747,6 +823,7 @@ def runner_base_command(config):
     if runner == 'cutechess':
         binary = ['cutechess-ob.exe', 'cutechess-ob'][IS_LINUX]
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), binary)
+        verify_referee_binary(config, path)
         return '"%s"' % path
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
@@ -3189,6 +3266,27 @@ def run_openbench_worker(client_args):
 
         except BadVersionException:
             raise BadVersionException()
+
+        except VariantRoutingError as error:
+            # A contract this worker cannot honour is deterministic: retrying
+            # only re-claims the same workload forever while the Server never
+            # learns why no games arrive. Tell the Server and stop asking for
+            # this workload, so the operator sees a real event instead of a
+            # silent zombie.
+            traceback.print_exc()
+            try:
+                workload = config.workload or {}
+                test_id = workload.get('test', {}).get('id')
+                if test_id is not None and test_id not in config.blacklist:
+                    config.blacklist.append(test_id)
+                ServerReporter.report_engine_error(
+                    config, 'Variant contract refused: %s' % error
+                )
+            except BadVersionException:
+                raise
+            except Exception:
+                traceback.print_exc()
+            time.sleep(TIMEOUT_ERROR)
 
         except Exception:
             traceback.print_exc()
