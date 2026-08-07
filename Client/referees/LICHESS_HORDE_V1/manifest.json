@@ -26,7 +26,21 @@
     "linux": {
       "container": "alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f",
       "qt_repository": "https://github.com/qt/qt5",
-      "qt_commit": "c59ae95d8aed879768fe09e0de04f693724e6319"
+      "qt_commit": "c59ae95d8aed879768fe09e0de04f693724e6319",
+      "packages": {
+        "cmake": "3.31.7-r1",
+        "file": "5.46-r2",
+        "g++": "14.2.0-r6",
+        "git": "2.49.1-r0",
+        "linux-headers": "6.14.2-r0",
+        "make": "4.4.1-r3",
+        "mesa-dev": "25.1.9-r0",
+        "perl": "5.40.4-r0",
+        "python3": "3.12.13-r0",
+        "samurai": "1.2-r7"
+      },
+      "expected_referee_bytes": null,
+      "expected_referee_sha256": null
     },
     "windows": {
       "lock_file": "windows-toolchain-lock.json",
