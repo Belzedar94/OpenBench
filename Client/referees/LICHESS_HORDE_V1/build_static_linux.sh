@@ -18,6 +18,12 @@ if [ -e "$build_root" ]; then
     exit 1
 fi
 
+# Qt's resource compiler records input mtimes, and every workflow run gets a
+# fresh checkout with fresh timestamps. Normalize them exactly like the Windows
+# build does, otherwise the binary can never reproduce a recorded hash.
+find "$source_dir" -type f ! -path "$source_dir/.git/*" \
+    -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+
 # Pin the requested toolchain by exact version. ``alpine:3.22.1`` is pinned by
 # digest but its package repository keeps moving, so an unpinned ``apk add``
 # silently changed the compiler between builds and made the recorded binary
