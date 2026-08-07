@@ -3,7 +3,7 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
-from . import views
+from . import page_cache, views
 from .conquest_map import map_api
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
@@ -53,7 +53,19 @@ from .conquest_map import map_api
 #   * todo el protocolo de workers (``lease``/``heartbeat``/``submit``).
 #   * ``api/map/v1``: ya negocia su propio ETag sobre un snapshot publicado y
 #     no toca la base viva.
-_home_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.home)))
+#
+# LA PORTADA NO USA ``cache_page``, USA EL MISMO CACHE CON UN RELEVO.  Los 15
+# s son los de siempre y las claves son las de Django; lo que cambia es QUIEN
+# PAGA cuando vencen.  Con ``cache_page`` pelado el siguiente visitante
+# recalculaba la pagina entera, y bajo las rafagas de analisis ese recalculo
+# medido tardaba entre 10 y 26 s — el monitor externo corta a los 30 y por eso
+# veia ``http=000`` varias veces por noche.  Ahora se le sirve la copia
+# caducada al instante y el recalculo se va a un hilo, uno solo para toda la
+# flota (§ page_cache).  El orden de los decoradores no se mueve ni un
+# milimetro: ``csrf_protect`` sigue POR DENTRO, y por la misma razon de
+# siempre.
+_home_cached = page_cache.stale_while_revalidate(
+    vary_on_cookie(csrf_protect(views.home)))
 _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
 
