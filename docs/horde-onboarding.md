@@ -1,36 +1,34 @@
 # Horde engine onboarding
 
 Horde workloads use Cute Chess' native `horde` variant. The client accepts the
-`HORDE` book token and the registered engine names `Horde-Stockfish` and
-`Fairy-Stockfish-Hordetest-Baseline`. New workloads also carry the explicit
+`HORDE` book token and the registered engine name `Horde-Stockfish`. New
+workloads also carry the explicit
 `variant_contract: LICHESS_HORDE_V1` value from the server to the client. A disagreement
 between the contract, book token, or engine fallback aborts before a game is
 started.
 
-## Inert scaffolds
+## Activation boundary
 
-The two engine descriptors and `HORDE_openings.epd` manifest are deliberately
-checked in with `onboarding_ready: false` and are not listed in
-`Config/config.json`. This prevents an unmeasured NPS, an unfrozen branch or
-bench, or a placeholder book identity from becoming schedulable.
+Only `Horde-Stockfish` and `HORDE_openings.epd` are schedulable. The historical
+Fairy-Stockfish Hordetest descriptor remains checked in for reproducibility,
+but keeps `onboarding_ready: false` and is absent from `Config/config.json`.
+Search experiments use Horde-Stockfish on both sides and isolate one code or
+option change per workload.
 
 Activation requires all of the following receipts:
 
 1. A frozen Horde-Stockfish commit and deterministic bench.
-2. A frozen Fairy-Stockfish Horde baseline commit and deterministic bench.
-3. Measured single-thread NPS for each engine on the reference worker.
-4. A public ZIP containing exactly `HORDE_openings.epd`, with both normalized
+2. Measured single-thread NPS on the reference worker.
+3. A public ZIP containing exactly `HORDE_openings.epd`, with both normalized
    text SHA-256 and raw-byte SHA-256 recorded in the book manifest.
-5. Private-engine credentials installed out of band on the server and worker.
-6. Successful play artifacts for both engines and a DATAGEN artifact for
-   Horde-Stockfish.
-7. A network receipt for each side, including an identical full SHA-256 when a
-   same-network comparison is claimed.
-8. The verified `LICHESS_HORDE_V1` referee installed on **every** worker that
+4. Private-engine credentials installed out of band on the server and worker.
+5. Successful play and DATAGEN artifacts for Horde-Stockfish.
+6. A Run 6B network receipt shared by both sides of each self-comparison.
+7. The verified `LICHESS_HORDE_V1` referee installed on **every** worker that
    may receive Horde work, and its SHA-256 recorded in
    `Client/referees/LICHESS_HORDE_V1/manifest.json` for both platforms.
 
-Receipt 8 is the blocking one, and it is not optional bookkeeping. A stock
+Receipt 7 is the blocking one, and it is not optional bookkeeping. A stock
 `cutechess-ob` answers to `-variant horde` and will arbitrate a game with
 non-Lichess semantics and upload the result as if it counted. Client 44
 therefore hashes the referee before launching any workload whose
@@ -52,19 +50,23 @@ python Client/referees/LICHESS_HORDE_V1/install_artifacts.py \
   --install
 ```
 
-After those receipts exist, replace every pending value, set
-`onboarding_ready` to `true`, add both engines and the book to
+After those receipts exist, replace every pending value, set the specialist's
+`onboarding_ready` to `true`, add `Horde-Stockfish` and the book to
 `Config/config.json`, and run the configuration and onboarding test suites
-before restarting the server.
+before restarting the server. The historical Fairy-Stockfish Hordetest
+descriptor remains inert: search experiments compare one Horde-Stockfish
+revision against another Horde-Stockfish revision with identical network and
+runtime settings.
 
 ## V1 activation receipt
 
-The V1 play configuration is frozen to Horde-Stockfish
+The schedulable V1 play configuration is frozen to Horde-Stockfish
 `bce34feb0602c2640a8659a34f954fbee8f1a9e1` with bench `315576` and
 1,488,566 measured single-thread NPS. The Hordetest baseline is frozen to
 `fd044be239564a489056e358d157a4064f0b01a0` with bench `130284` and
-527,465 measured single-thread NPS. Their Windows and Linux private artifact
-workflows completed successfully as runs `31172522698` and `31172522714`.
+527,465 measured single-thread NPS, but that historical engine is not registered
+for workloads. Horde-Stockfish's Windows and Linux private artifact workflow
+completed successfully as run `31172522698`.
 
 The dedicated DATAGEN producer is frozen separately to
 `f176a518166b7c27632a211127148c8e361b3844` with bench `440088`; its four
