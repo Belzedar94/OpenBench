@@ -80,6 +80,43 @@ An engine opts in through `build.artifact_roles`. Play-only engines declare
 play artifact. Legacy untagged artifacts remain accepted only for play when a
 workflow has no explicit role tags at all.
 
+## Horde dataset boundary
+
+Horde-Stockfish DATAGEN uses the dedicated producer commit
+`212b67e7c5600b4067bfa9314f6c519a5ac4607d`. The playing executable does not
+expose generation commands. The role-specific producer writes
+`HORDE_BIN_V1`, whose frozen schema SHA-256 is
+`B46ADE18AB8954A6AB232593484273E50C12B51550A938763A7A7D94DCCB63E4`.
+Records contain physical Horde positions, so White pawns remain `P`; the
+legacy `H` identity is introduced only by the Run 6B evaluator boundary.
+
+Client 44 validates every uncompressed Horde chunk before compression or
+upload. It requires publication protocol 41 and binds the file to all of the
+following assigned identities:
+
+- the clean 40-digit source commit and authenticated producer executable;
+- Run 6B SHA-256
+  `B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7`;
+- the raw Horde opening-book SHA-256
+  `93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958`;
+- chunk count, seed, thread count, depth, hash, exploration and write bounds;
+- fixed header and record framing, canonical manifest JSON and payload hash;
+- kingless-White and single-Black-king piece constraints, castling and
+  en-passant state, move encodings, results and terminal reasons.
+
+Any validation mismatch aborts the chunk before compression. The compressor
+then hashes the exact bytes streamed into bzip2 and requires their SHA-256 and
+length to match the validated file; replacement or in-place drift removes the
+partial archive and aborts before upload. The server's v41 lease and receipt
+remain the outer transport and publication contract; the embedded manifest
+independently authenticates the uncompressed training payload.
+
+The first preset is exactly two chunks of 250,000 records with campaign
+`horde-v1-run6b-canary-20260806`, workload
+`horde-v1-run6b-g0-canary`, role `g0-canary` and cohort `run6b-d6`. Priority is
+intentionally not stored in the preset: calculate it from live Spell and
+Atomic workloads immediately before creating the canary.
+
 ## Scheduling and first gates
 
 Horde priority must be computed immediately before creation:
