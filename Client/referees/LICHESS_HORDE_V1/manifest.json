@@ -1,0 +1,66 @@
+{
+  "contract": "LICHESS_HORDE_V1",
+  "client_version": 44,
+  "referee": {
+    "repository": "https://github.com/AndyGrant/cutechess",
+    "commit": "24d4301152fb92ac442425e083a2658225f80720",
+    "patch": "0001-Add-Lichess-Horde-referee-contract.patch",
+    "patch_sha256": "53C14A9567E32AB70B4C9F69DCAC07A18605D24595EC81224BAF09E688DDF41D",
+    "patch_source_commit": "12fe19fb52646b48e626690a744c0cb2f177177c"
+  },
+  "rules": {
+    "repository": "https://github.com/lichess-org/scalachess",
+    "commit": "d5d47c16f65a005ca68e19bab702b02f66dd888c"
+  },
+  "material_corpus": {
+    "rows": 21996,
+    "sha256": "1F01B4FD3AB6066EFE5A96A2AE4E0DF5074FB99377D7CAAA2ACBA04D453D53CC",
+    "source": "test-kit/src/test/resources/horde_insufficient_material.csv"
+  },
+  "static_build": {
+    "source_date_epoch": 1786036843,
+    "reference_builder": {
+      "repository": "https://github.com/ppigazzini/static-cutechess-cli",
+      "commit": "002fa504d8615b6f2e5c254de901db39453cbd02"
+    },
+    "linux": {
+      "container": "alpine:3.22.1@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f",
+      "qt_repository": "https://github.com/qt/qt5",
+      "qt_commit": "c59ae95d8aed879768fe09e0de04f693724e6319",
+      "packages": {
+        "cmake": "3.31.7-r1",
+        "file": "5.46-r2",
+        "g++": "14.2.0-r6",
+        "git": "2.49.1-r0",
+        "linux-headers": "6.14.2-r0",
+        "make": "4.4.1-r3",
+        "mesa-dev": "25.1.9-r0",
+        "perl": "5.40.4-r0",
+        "python3": "3.12.13-r0",
+        "samurai": "1.2-r7"
+      },
+      "expected_referee_bytes": 7649848,
+      "expected_referee_sha256": "38F757CE9A735189E89305E5590320D0AE161C74092D1851E2049FFF212C4485"
+    },
+    "windows": {
+      "lock_file": "windows-toolchain-lock.json",
+      "lock_sha256": "5074D87A427170D0992A6C6FF1DB2F8BCC7E8FDC951162892B9B9482970A3D43",
+      "package_count": 51,
+      "msys2_base_release": "2026-03-22",
+      "expected_referee_bytes": 7511040,
+      "expected_referee_sha256": "1C0BBAB69E15A277C0B68BF032848B513F706749999CD5F6D09A1FB60F05B8A6",
+      "cmake": "4.3.4-1",
+      "ninja": "1.13.2-1",
+      "gcc": "16.1.0-5",
+      "crt": "14.0.0.r179.g24aaa6147-1",
+      "headers": "14.0.0.r179.g24aaa6147-1",
+      "winpthreads": "14.0.0.r179.g24aaa6147-1",
+      "qt5_static": "5.15.19-1"
+    }
+  },
+  "validation": {
+    "horde_cases": 35,
+    "auxiliary_test_executables": 8,
+    "required_failures": 0
+  }
+}

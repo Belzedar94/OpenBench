@@ -29,6 +29,7 @@ import re
 import sys
 
 import OpenBench.utils
+import OpenBench.variant_contract
 
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.datagen import (
@@ -45,6 +46,12 @@ def get_workload(request, machine):
     if not (test := select_workload(request, machine)):
         return {}
 
+    # Resolve the semantic contract before anything is written. It is the only
+    # part of serialization that can reject a workload, and doing it after the
+    # Result/Machine writes left an orphan Result plus a bound machine behind
+    # every 500 while the client retried.
+    variant_contract = workload_variant_contract(test)
+
     chunk = claim_chunk(test, machine) if is_generic_datagen(test) else None
     if is_generic_datagen(test) and chunk is None:
         return {}
@@ -57,7 +64,11 @@ def get_workload(request, machine):
     machine.mnps = machine.dev_mnps = machine.base_mnps = 0.00
     machine.save(); result.save()
 
-    return { 'workload' : workload_to_dictionary(test, result, machine, chunk) }
+    return {
+        'workload' : workload_to_dictionary(
+            test, result, machine, chunk, variant_contract
+        )
+    }
 
 def select_workload(request, machine):
 
@@ -155,6 +166,13 @@ def engine_tablebase_family(engine):
 
     return OPENBENCH_CONFIG['engines'][engine].get(
         'tablebase_family', 'standard'
+    )
+
+
+def workload_variant_contract(workload):
+
+    return OpenBench.variant_contract.persisted_variant_contract(
+        OPENBENCH_CONFIG, workload
     )
 
 def machine_tablebase_manifest(machine, family):
@@ -275,9 +293,16 @@ def compute_resource_distribution(workloads, machine, has_focus):
 
     return worker_dist, engine_freq
 
-def workload_to_dictionary(test, result, machine, datagen_chunk=None):
+def workload_to_dictionary(
+    test, result, machine, datagen_chunk=None, variant_contract=None
+):
 
     workload = {}
+    # ``get_workload`` resolves this before any write so a rejected contract
+    # cannot leave state behind; callers that do not (tests, tooling) still get
+    # the same fail-closed check here.
+    if variant_contract is None:
+        variant_contract = workload_variant_contract(test)
 
     workload['result'] = {
         'id'  : result.id,
@@ -294,6 +319,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'upload_pgns'   : test.upload_pgns,
         'genfens_args'  : test.genfens_args,
         'play_reverses' : test.play_reverses,
+        'variant_contract': variant_contract,
     }
 
     publication_datagen = (
@@ -320,6 +346,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
         'sha'     : book_config['sha'],
         'raw_sha' : book_config.get('raw_sha'),
         'source'  : book_config['source'],
+        'variant_contract': variant_contract,
     }
 
     workload['test']['dev'] = {
@@ -340,6 +367,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.dev_engine),
+        'variant_contract' : variant_contract,
     }
     if publication_datagen:
         workload['test']['dev'].update({
@@ -365,6 +393,7 @@ def workload_to_dictionary(test, result, machine, datagen_chunk=None):
             'cutechess_launch_stagger_ms', 0
         ),
         'tablebase_family' : engine_tablebase_family(test.base_engine),
+        'variant_contract' : variant_contract,
     }
 
     if is_generic_datagen(test):

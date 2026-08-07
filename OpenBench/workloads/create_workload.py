@@ -34,6 +34,7 @@ import math
 import OpenBench.utils
 import OpenBench.views
 import OpenBench.datagen_publication
+import OpenBench.variant_contract
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -140,6 +141,10 @@ def create_new_test(request):
     test.base_network      = request.POST['base_network']
     test.base_time_control = OpenBench.utils.TimeControl.parse(request.POST['base_time_control'])
 
+    test.variant_contract = OpenBench.variant_contract.configured_variant_contract(
+        OPENBENCH_CONFIG, test.dev_engine, test.base_engine, test.book_name
+    ) or ''
+
     test.workload_size     = int(request.POST['workload_size'])
     test.priority          = int(request.POST['priority'])
     test.throughput        = int(request.POST['throughput'])
@@ -197,6 +202,10 @@ def create_new_tune(request):
     test.dev_options      = test.base_options      = request.POST['dev_options']
     test.dev_network      = test.base_network      = request.POST['dev_network']
     test.dev_time_control = test.base_time_control = OpenBench.utils.TimeControl.parse(request.POST['dev_time_control'])
+
+    test.variant_contract = OpenBench.variant_contract.configured_variant_contract(
+        OPENBENCH_CONFIG, test.dev_engine, test.base_engine, test.book_name
+    ) or ''
 
     test.workload_size    = int(request.POST['spsa_pairs_per'])
     test.priority         = int(request.POST['priority'])
@@ -290,6 +299,9 @@ def create_new_datagen(request):
             test.dev_options = test.base_options = request.POST.get('dev_options', '')
             test.dev_network = test.base_network = request.POST.get('dev_network', '')
             test.dev_time_control = test.base_time_control = ''
+            test.variant_contract = OpenBench.variant_contract.configured_variant_contract(
+                OPENBENCH_CONFIG, test.dev_engine, test.base_engine, test.book_name
+            ) or ''
 
             test.datagen_command = request.POST['datagen_command'].strip()
             test.datagen_total_count = int(request.POST['datagen_total_count'])

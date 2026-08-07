@@ -74,16 +74,29 @@ def single_core_bench(binary, network, private, outqueue):
 
     # Basic command for Public engines
     cmd = ['./%s' % (binary), 'bench']
+    bench_input = None
 
-    # Adjust to handle setting Networks in Private engines
+    # Private UCI engines receive the network and bench commands over stdin.
+    # Passing each command as a process argument makes Stockfish concatenate
+    # them into one malformed setoption line.
     if network and private:
-        option = 'setoption name EvalFile value %s' % (network)
-        cmd = ['./%s' % (binary), option, 'bench', 'quit']
+        cmd = ['./%s' % (binary)]
+        bench_input = (
+            'uci\n'
+            'setoption name EvalFile value %s\n'
+            'isready\n'
+            'bench\n'
+            'quit\n'
+        ) % network
+        bench_input = bench_input.encode('utf-8')
 
     try: # Launch the bench and wait for results
         stdout, stderr = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        ).communicate()
+            cmd,
+            stdin=subprocess.PIPE if bench_input else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        ).communicate(input=bench_input)
         outqueue.put(parse_stream_output(stdout))
 
     except: # Signal an error with (None, None)

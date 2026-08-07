@@ -46,6 +46,7 @@ import OpenBench.config
 import OpenBench.datagen
 import OpenBench.datagen_publication
 import OpenBench.utils
+import OpenBench.variant_contract
 
 from OpenBench.models import *
 
@@ -68,7 +69,7 @@ def verify_workload(request, workload_type):
 
     if workload_type == 'DATAGEN':
         verify_datagen_creation(errors, request)
-        engine = collect_github_info(errors, request, 'dev')
+        engine = collect_github_info(errors, request, 'dev', 'datagen')
         return errors, engine
 
 def verify_test_creation(errors, request):
@@ -90,6 +91,7 @@ def verify_test_creation(errors, request):
         (verify_options        , 'base_options', 'Threads', 'Base Options'),
         (verify_options        , 'base_options', 'Hash', 'Base Options'),
         (verify_time_control   , 'base_time_control', 'Base Time Control'),
+        (verify_matching_variant_contracts, 'dev_engine', 'base_engine', 'book_name'),
 
         # Verify everything about the Test Settings
         (verify_configuration  , 'book_name', 'Book', 'books'),
@@ -136,6 +138,7 @@ def verify_tune_creation(errors, request):
 
         # Verify everything about the Test Settings
         (verify_configuration         , 'book_name', 'Book', 'books'),
+        (verify_engine_book_variant_contract, 'dev_engine', 'book_name'),
         (verify_upload_pgns           , 'upload_pgns', 'Upload PGNs'),
 
         # Verify everything about the General Settings
@@ -170,7 +173,7 @@ def verify_datagen_creation(errors, request):
 
         # DATAGEN builds and verifies one engine branch.
         (verify_configuration  , 'dev_engine', 'Engine', 'engines'),
-        (verify_public_datagen_engine, 'dev_engine'),
+        (verify_datagen_engine_role, 'dev_engine'),
         (verify_github_repo    , 'dev_repo'),
         (verify_network        , 'dev_network', 'Network', 'dev_engine'),
 
@@ -180,6 +183,7 @@ def verify_datagen_creation(errors, request):
         (verify_datagen_seed    , 'datagen_base_seed', 'datagen_total_count',
                                   'datagen_positions_per_chunk'),
         (verify_datagen_book   , 'book_name', 'Book', 'books'),
+        (verify_engine_book_variant_contract, 'dev_engine', 'book_name'),
 
         # Verify everything about the General Settings
         (verify_integer        , 'priority', 'Priority'),
@@ -215,15 +219,45 @@ def verify_configuration(errors, request, field, field_name, parent):
     try: assert request.POST[field] in OpenBench.config.OPENBENCH_CONFIG[parent].keys()
     except: errors.append('{0} was not found in the configuration'.format(field_name))
 
-def verify_public_datagen_engine(errors, request, field):
+def verify_matching_variant_contracts(errors, request, dev_field, base_field, book_field):
     try:
-        private = OpenBench.config.OPENBENCH_CONFIG['engines'][request.POST[field]]['private']
+        OpenBench.variant_contract.configured_variant_contract(
+            OpenBench.config.OPENBENCH_CONFIG,
+            request.POST[dev_field],
+            request.POST[base_field],
+            request.POST[book_field],
+        )
+    except OpenBench.variant_contract.VariantContractError as error:
+        errors.append(str(error))
+    except (KeyError, TypeError):
+        return  # verify_configuration owns unknown engine/book diagnostics
+
+
+def verify_engine_book_variant_contract(errors, request, engine_field, book_field):
+    try:
+        OpenBench.variant_contract.configured_variant_contract(
+            OpenBench.config.OPENBENCH_CONFIG,
+            request.POST[engine_field],
+            request.POST[engine_field],
+            request.POST[book_field],
+        )
+    except OpenBench.variant_contract.VariantContractError as error:
+        errors.append(str(error))
+    except (KeyError, TypeError):
+        return
+
+
+def verify_datagen_engine_role(errors, request, field):
+    try:
+        engine = OpenBench.config.OPENBENCH_CONFIG['engines'][request.POST[field]]
     except (KeyError, TypeError):
         return  # verify_configuration owns unknown-engine diagnostics
-    if private:
+    if engine['private'] and 'datagen' not in engine['build'].get(
+        'artifact_roles', ['play']
+    ):
         errors.append(
-            'Generic DATAGEN currently supports only public engines; private '
-            'artifacts do not declare a play or data-generator role'
+            'Private DATAGEN requires an engine with an explicit datagen '
+            'artifact role'
         )
 
 def verify_time_control(errors, request, field, field_name):
@@ -487,7 +521,7 @@ def verify_datagen_seed(errors, request, seed_field, total_field, chunk_field):
         errors.append('Datagen base seed must remain within signed 64-bit range for all chunks')
 
 
-def collect_github_info(errors, request, field):
+def collect_github_info(errors, request, field, build_role='play'):
 
     # Get branch name / commit sha / tag, and the API path for it
     branch = request.POST['{0}_branch'.format(field)]
@@ -567,7 +601,9 @@ def collect_github_info(errors, request, field):
     ## [B] These should contain combinations for windows/linux, avx2/avx512, popcnt/pext
     ## [C] If those artifacts are not found, we flag the test as awaiting, and try later.
 
-    url, has_all = fetch_artifact_url(base, engine, headers, data['sha'])
+    url, has_all = fetch_artifact_url(
+        base, engine, headers, data['sha'], build_role
+    )
     return (url, branch, data['sha'], bench), has_all
 
 def requests_illegal_fork(request, field):
@@ -592,7 +628,23 @@ def determine_bench(request, field, message):
         return int(benches[-1].replace(',', ''))
     except: return None
 
-def fetch_artifact_url(base, engine, headers, sha):
+PRIVATE_ARTIFACT_ROLES = {'play', 'datagen'}
+
+
+def private_artifact_role(name):
+    suffix = name.rsplit('-', 1)[-1].lower()
+    return suffix if suffix in PRIVATE_ARTIFACT_ROLES else None
+
+
+def artifacts_support_role(artifacts, build_role):
+    roles = [private_artifact_role(artifact['name']) for artifact in artifacts]
+    explicit = [role for role in roles if role is not None]
+    if build_role == 'datagen' or explicit:
+        return build_role in explicit
+    return build_role == 'play'
+
+
+def fetch_artifact_url(base, engine, headers, sha, build_role='play'):
 
     try:
         # Fetch the run id for the openbench workflow for this comment
@@ -612,6 +664,7 @@ def fetch_artifact_url(base, engine, headers, sha):
         assert not any(job['conclusion'] != 'success' for job in jobs)
         assert not any(artifact['expired'] for artifact in artifacts)
         assert len(artifacts) >= len(jobs)
+        assert artifacts_support_role(artifacts, build_role)
 
         # Only set the url if we have everything we need
         return (url, True)

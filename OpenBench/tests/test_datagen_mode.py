@@ -59,7 +59,7 @@ class MachineIdentityTests(TestCase):
         self.other = User.objects.create_user('other-worker', password='password')
         self.info = {
             'mac_address': 'AABBCCDDEEFF',
-            'client_ver': 41,
+            'client_ver': OpenBench.config.OPENBENCH_CONFIG['client_version'],
             'concurrency': 2,
         }
         self.machine = Machine.objects.create(
@@ -102,7 +102,7 @@ class MachineIdentityTests(TestCase):
             {'error': 'Worker Account Disabled', 'stop': True},
         )
 
-    def test_protocol_v39_worker_is_told_to_upgrade_to_v41(self):
+    def test_protocol_v39_worker_is_told_to_upgrade_to_v44(self):
         self.machine.info = dict(self.machine.info, client_ver=39)
         self.machine.save(update_fields=['info'])
         request = RequestFactory().post(
@@ -114,7 +114,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('41', error)
+        self.assertIn('44', error)
 
 
 class DatagenModeTests(TestCase):
@@ -185,7 +185,7 @@ class DatagenModeTests(TestCase):
             'physical_cores': 2,
             'sockets': 1,
             'focus': [],
-            'client_ver': 41,
+            'client_ver': OpenBench.config.OPENBENCH_CONFIG['client_version'],
             'tablebases': {
                 'standard': 0,
                 'atomic': {
@@ -783,19 +783,118 @@ class DatagenModeTests(TestCase):
             'workload_type = current_workload_type(workload_type);', source
         )
 
-    def test_private_engine_is_rejected_for_generic_datagen(self):
+    def test_private_engine_requires_explicit_datagen_artifact_role(self):
         request = SimpleNamespace(POST={'dev_engine': 'PrivateEngine'})
         errors = []
-        private = {'PrivateEngine': {'private': True}}
+        private = {
+            'PrivateEngine': {
+                'private': True,
+                'build': {'artifact_roles': ['play']},
+            }
+        }
         with mock.patch.dict(
             OpenBench.config.OPENBENCH_CONFIG['engines'], private, clear=False
         ):
-            verify_workload.verify_public_datagen_engine(
+            verify_workload.verify_datagen_engine_role(
                 errors, request, 'dev_engine'
             )
 
         self.assertEqual(len(errors), 1)
-        self.assertIn('only public engines', errors[0])
+        self.assertIn('explicit datagen artifact role', errors[0])
+
+        private['PrivateEngine']['build']['artifact_roles'].append('datagen')
+        errors = []
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['engines'], private, clear=False
+        ):
+            verify_workload.verify_datagen_engine_role(
+                errors, request, 'dev_engine'
+            )
+        self.assertEqual(errors, [])
+
+    def test_private_artifact_role_discovery_is_fail_closed(self):
+        legacy = [{'name': 'horde-linux-avx2-pext'}]
+        tagged = [
+            {'name': 'horde-linux-avx2-pext-play'},
+            {'name': 'horde-linux-avx2-pext-datagen'},
+        ]
+
+        self.assertTrue(
+            verify_workload.artifacts_support_role(legacy, 'play')
+        )
+        self.assertFalse(
+            verify_workload.artifacts_support_role(legacy, 'datagen')
+        )
+        self.assertTrue(
+            verify_workload.artifacts_support_role(tagged, 'play')
+        )
+        self.assertTrue(
+            verify_workload.artifacts_support_role(tagged, 'datagen')
+        )
+
+    def test_cross_engine_variant_contract_must_match(self):
+        request = SimpleNamespace(POST={
+            'dev_engine': 'Horde-Stockfish',
+            'base_engine': 'Horde-Baseline',
+            'book_name': 'HORDE_openings.epd',
+        })
+        configured = {
+            'Horde-Stockfish': {'variant_contract': 'LICHESS_HORDE_V1'},
+            'Horde-Baseline': {'variant_contract': 'LICHESS_HORDE_V1'},
+        }
+        books = {
+            'HORDE_openings.epd': {'variant_contract': 'LICHESS_HORDE_V1'},
+        }
+        errors = []
+        with mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False), \
+             mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['books'], books, clear=False):
+            verify_workload.verify_matching_variant_contracts(
+                errors, request, 'dev_engine', 'base_engine', 'book_name'
+            )
+        self.assertEqual(errors, [])
+
+        configured['Horde-Baseline']['variant_contract'] = 'ATOMIC_V1'
+        with mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['engines'], configured, clear=False), \
+             mock.patch.dict(OpenBench.config.OPENBENCH_CONFIG['books'], books, clear=False):
+            verify_workload.verify_matching_variant_contracts(
+                errors, request, 'dev_engine', 'base_engine', 'book_name'
+            )
+        self.assertIn(
+            'variant contracts disagree', errors[-1]
+        )
+
+    def test_workload_variant_contract_is_propagated_fail_closed(self):
+        test = SimpleNamespace(
+            dev_engine='Horde-Stockfish',
+            base_engine='Horde-Baseline',
+            book_name='HORDE_openings.epd',
+            variant_contract='LICHESS_HORDE_V1',
+        )
+        configured = {
+            'engines': {
+                'Horde-Stockfish': {'variant_contract': 'LICHESS_HORDE_V1'},
+                'Horde-Baseline': {'variant_contract': 'LICHESS_HORDE_V1'},
+            },
+            'books': {
+                'HORDE_openings.epd': {'variant_contract': 'LICHESS_HORDE_V1'},
+            },
+        }
+        with mock.patch.object(get_workload, 'OPENBENCH_CONFIG', configured):
+            self.assertEqual(
+                get_workload.workload_variant_contract(test), 'LICHESS_HORDE_V1'
+            )
+            configured['engines']['Horde-Baseline'][
+                'variant_contract'
+            ] = 'ATOMIC_V1'
+            with self.assertRaisesRegex(ValueError, 'contracts disagree'):
+                get_workload.workload_variant_contract(test)
+
+            configured['engines']['Horde-Baseline'][
+                'variant_contract'
+            ] = 'LICHESS_HORDE_V1'
+            test.variant_contract = ''
+            with self.assertRaisesRegex(ValueError, 'not persisted'):
+                get_workload.workload_variant_contract(test)
 
     def test_scheduler_assigns_seed_count_and_renews_stale_work(self):
         test = self.make_test(total=5, per_chunk=2)
@@ -2693,7 +2792,12 @@ class DatagenClaimConcurrencyTests(TransactionTestCase):
             self.machines.append(Machine.objects.create(
                 user=worker,
                 secret='secret-%d' % idx,
-                info={'concurrency': 1, 'client_ver': 41},
+                info={
+                    'concurrency': 1,
+                    'client_ver': OpenBench.config.OPENBENCH_CONFIG[
+                        'client_version'
+                    ],
+                },
             ))
 
     def tearDown(self):

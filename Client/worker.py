@@ -650,6 +650,7 @@ class ServerReporter:
 VARIANTS = {
     'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
     'ALICE'    : ('uci-pair-runner', 'alice'       ),
+    'HORDE'    : ('cutechess'      , 'horde'       ),
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
     'FRC'      : ('cutechess'      , 'fischerandom'),
@@ -663,8 +664,32 @@ VARIANTS = {
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
+    'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
+    'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
+}
+
+# Only contracts the Server can actually emit belong here. OpenBench/config.py
+# constrains the stored value to ``[A-Z0-9][A-Z0-9_]{0,63}`` and
+# OpenBench/variant_contract.py only knows LICHESS_HORDE_V1, so lowercase
+# entries were unreachable and advertised a contract vocabulary that does not
+# exist. Anything else must fail closed through the check below.
+VARIANT_CONTRACTS = {
+    'LICHESS_HORDE_V1': ('cutechess', 'horde'),
+}
+
+# Contracts whose arbitration semantics are not what a stock cutechess build
+# implements, mapped to the referee hash that *is* allowed to arbitrate them.
+# The values are the reproducible-build locks recorded in
+# Client/referees/<contract>/manifest.json; UnitTests/test_horde_referee_artifacts
+# fails if the two ever disagree. ``None`` means "no reproducible build has been
+# recorded for this platform yet", which is refused exactly like a mismatch.
+REFEREE_PINS = {
+    'LICHESS_HORDE_V1': {
+        'Windows': '1C0BBAB69E15A277C0B68BF032848B513F706749999CD5F6D09A1FB60F05B8A6',
+        'Linux'  : '38F757CE9A735189E89305E5590320D0AE161C74092D1851E2049FFF212C4485',
+    },
 }
 
 # Pair-runner script distributed alongside worker.py, inside Client/. The
@@ -672,22 +697,126 @@ ENGINE_VARIANTS = {
 # name is always resolvable here.
 UCI_PAIR_RUNNER = 'uci_pair_runner.py'
 
-def variant_routing(config):
 
-    # Returns (runner, variant_id), inferred from the Opening Book name
+class VariantRoutingError(RuntimeError):
+    pass
+
+
+def inferred_variant_routing(config):
+
     book_name = config.workload['test']['book']['name'].upper()
 
-    for token, (runner, variant_id) in VARIANTS.items():
+    for token, route in VARIANTS.items():
         if token in book_name:
-            return (runner, variant_id)
+            return route
 
-    # No token in the book name (e.g. DATAGEN's book='None'): fall back to
-    # the dev engine's registered variant
     dev_engine = config.workload['test']['dev']['engine'].upper()
-    if dev_engine in ENGINE_VARIANTS:
-        return ENGINE_VARIANTS[dev_engine]
+    return ENGINE_VARIANTS.get(dev_engine)
 
-    return ('cutechess', 'standard')
+def declared_variant_contract(config):
+
+    # New servers propagate one explicit semantic contract and duplicate it on
+    # both engine records for diagnostics. Reject disagreement instead of ever
+    # letting a Horde workload fall through to orthodox arbitration.
+    test = config.workload['test']
+    declared = [
+        test.get('variant_contract'),
+        test.get('book', {}).get('variant_contract'),
+        test['dev'].get('variant_contract'),
+        test.get('base', {}).get('variant_contract'),
+    ]
+    declared = {value for value in declared if value is not None}
+
+    if len(declared) > 1:
+        raise VariantRoutingError(
+            'Workload carries conflicting variant contracts: %s'
+            % ', '.join(sorted(declared))
+        )
+
+    return next(iter(declared)) if declared else None
+
+def variant_routing(config):
+
+    contract = declared_variant_contract(config)
+    inferred = inferred_variant_routing(config)
+    if contract is not None:
+        if contract not in VARIANT_CONTRACTS:
+            raise VariantRoutingError(
+                'Unsupported variant contract: %s' % contract
+            )
+        explicit = VARIANT_CONTRACTS[contract]
+        if inferred is not None and inferred != explicit:
+            raise VariantRoutingError(
+                'Variant contract %s conflicts with inferred route %s/%s'
+                % (contract, inferred[0], inferred[1])
+            )
+        return explicit
+
+    if inferred == ('cutechess', 'horde'):
+        raise VariantRoutingError(
+            'Horde workloads require variant_contract=LICHESS_HORDE_V1'
+        )
+
+    return inferred or ('cutechess', 'standard')
+
+
+_REFEREE_DIGESTS = {}
+
+
+def referee_sha256(path):
+
+    # Rehash only when the file identity changes; a workload launches several
+    # cutechess copies and the binary is ~7MB.
+    stamp = os.stat(path)
+    key = (path, stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
+    if key not in _REFEREE_DIGESTS:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as binary:
+            while block := binary.read(1024 * 1024):
+                digest.update(block)
+        _REFEREE_DIGESTS.clear()
+        _REFEREE_DIGESTS[key] = digest.hexdigest().upper()
+    return _REFEREE_DIGESTS[key]
+
+
+def verify_referee_binary(config, path):
+
+    # A contract only reaches this check when its arbitration semantics differ
+    # from what a stock cutechess-ob implements. The stock binary answers to
+    # ``-variant horde`` and would happily arbitrate with the wrong rules and
+    # upload the games as if they counted, so refusing the workload is the
+    # only safe outcome when the referee is not the reviewed build.
+    contract = declared_variant_contract(config)
+    pins = REFEREE_PINS.get(contract)
+    if pins is None:
+        return
+
+    expected = pins.get(platform.system())
+    if expected is None:
+        raise VariantRoutingError(
+            'Contract %s has no recorded referee build for %s; refusing to '
+            'arbitrate with an unverified binary'
+            % (contract, platform.system())
+        )
+
+    try:
+        observed = referee_sha256(path)
+    except OSError as error:
+        raise VariantRoutingError(
+            'Contract %s requires referee %s, which cannot be read: %s'
+            % (contract, os.path.basename(path), error)
+        ) from None
+
+    if observed != expected.upper():
+        raise VariantRoutingError(
+            'Contract %s requires the %s referee with sha256 %s, but %s has '
+            'sha256 %s. Install the verified artifact with '
+            'Client/referees/%s/install_artifacts.py before running this '
+            'workload.'
+            % (contract, platform.system(), expected.upper(),
+               os.path.basename(path), observed, contract)
+        )
+
 
 def runner_base_command(config):
 
@@ -696,6 +825,7 @@ def runner_base_command(config):
     if runner == 'cutechess':
         binary = ['cutechess-ob.exe', 'cutechess-ob'][IS_LINUX]
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), binary)
+        verify_referee_binary(config, path)
         return '"%s"' % path
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
@@ -3121,12 +3251,6 @@ def safe_download_engine(config, branch, net_path):
     )
     build_role = 'datagen' if generic_datagen else 'play'
 
-    if generic_datagen and private:
-        raise DatagenConfigurationError(
-            'Generic DATAGEN does not support private engine artifacts: '
-            'their artifact metadata has no play/data-generator role'
-        )
-
     bin_name = engine_binary_name(
         engine, commit_sha, net_path, private, build_role
     )
@@ -3134,9 +3258,25 @@ def safe_download_engine(config, branch, net_path):
 
     if private:
 
+        artifact_roles = config.workload['test'][branch]['build'].get(
+            'artifact_roles', ['play']
+        )
+        if build_role not in artifact_roles:
+            raise DatagenConfigurationError(
+                'Private engine %s does not publish a %s artifact role'
+                % (engine, build_role)
+            )
+
         try:
             return download_private_engine(
-                engine, branch_name, source, out_path, config.cpu_name, config.cpu_flags)
+                engine,
+                branch_name,
+                source,
+                out_path,
+                config.cpu_name,
+                config.cpu_flags,
+                build_role,
+            )
 
         except OpenBenchMissingArtifactException as error:
             ServerReporter.report_missing_artifact(config, branch, error.name, error.logs)
@@ -3421,6 +3561,27 @@ def run_openbench_worker(client_args):
 
         except BadVersionException:
             raise BadVersionException()
+
+        except VariantRoutingError as error:
+            # A contract this worker cannot honour is deterministic: retrying
+            # only re-claims the same workload forever while the Server never
+            # learns why no games arrive. Tell the Server and stop asking for
+            # this workload, so the operator sees a real event instead of a
+            # silent zombie.
+            traceback.print_exc()
+            try:
+                workload = config.workload or {}
+                test_id = workload.get('test', {}).get('id')
+                if test_id is not None and test_id not in config.blacklist:
+                    config.blacklist.append(test_id)
+                ServerReporter.report_engine_error(
+                    config, 'Variant contract refused: %s' % error
+                )
+            except BadVersionException:
+                raise
+            except Exception:
+                traceback.print_exc()
+            time.sleep(TIMEOUT_ERROR)
 
         except Exception:
             traceback.print_exc()

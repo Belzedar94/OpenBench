@@ -1,0 +1,7 @@
+Client/referees/LICHESS_HORDE_V1/*.patch binary
+Client/referees/LICHESS_HORDE_V1/*.json text eol=lf
+Client/referees/LICHESS_HORDE_V1/*.ps1 text eol=lf
+Client/referees/LICHESS_HORDE_V1/*.py text eol=lf
+Client/referees/LICHESS_HORDE_V1/*.sh text eol=lf
+.github/workflows/horde-referee.yml text eol=lf
+UnitTests/test_horde_referee_artifacts.py text eol=lf

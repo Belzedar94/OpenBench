@@ -1,0 +1,7 @@
+{
+    "onboarding_ready": true,
+    "variant_contract": "LICHESS_HORDE_V1",
+    "sha": "93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958",
+    "raw_sha": "93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958",
+    "source": "https://raw.githubusercontent.com/Belzedar94/OpenBench/cd0560081f6433b58a8aa8d0c3fd4a91e969f1dd/Books/HORDE_openings.epd.zip"
+}
