@@ -25,8 +25,10 @@ CLI: accepts the cutechess flag set the worker builds (-repeat -recover
 -pgnout ...) plus -each, and ignores with a stderr warning whatever does not
 apply. Adding shadow=true to -resign or -draw records the first virtual
 adjudication, continues the game, and stores the comparison with the final
-result. UCI option names may contain spaces because the worker passes a real
-argv list to the runner.
+result; it is accepted only for the variants in SHADOW_VARIANTS, and any other
+variant is refused at startup instead of playing an unadjudicated batch. UCI
+option names may contain spaces because the worker passes a real argv list to
+the runner.
 
 Example (local smoke):
   python tools/uci_pair_runner.py -repeat -recover -variant standard \
@@ -944,8 +946,33 @@ def _kv_dict(tokens, strict=False):
     return d
 
 
+# Shadow adjudication does not merely annotate a result: it turns every
+# adjudication into a virtual one, plays the game on, and then refuses to
+# score any game whose real result contradicts the virtual one. Deciding what
+# a contradiction means needs the evidence contract -- the alice_result
+# terminal records, the outcome classes, the pair JSONL -- and only alice has
+# it. Any other variant would get the "drop the game" half without the
+# "prove the game" half, which quietly removes games from a batch.
+SHADOW_VARIANTS = frozenset({"alice"})
+
+
 class Config:
-    pass
+    """Parsed command line.
+
+    shadow_adjudication is DERIVED, never assigned. A caller can ask for it
+    (shadow_requested), but it only becomes true for a variant that owns the
+    evidence machinery, so no future consumer can be handed a config with
+    shadow armed on a variant that cannot audit it. parse_cli() additionally
+    rejects the combination outright, so the mistake is a startup error rather
+    than a silently different match.
+    """
+
+    variant = "standard"
+    shadow_requested = False
+
+    @property
+    def shadow_adjudication(self):
+        return self.shadow_requested and self.variant in SHADOW_VARIANTS
 
 
 def parse_cli(argv):
@@ -962,7 +989,7 @@ def parse_cli(argv):
     cfg.pgnout = None
     cfg.resign = None
     cfg.draw = None
-    cfg.shadow_adjudication = False
+    cfg.shadow_requested = False
     cfg.max_plies = 900
     cfg.stall_draw_cp = 800
     cfg.adj_cp = 0
@@ -992,12 +1019,12 @@ def parse_cli(argv):
             elif flag == "-resign":
                 cfg.resign = {"movecount": int(d.get("movecount", 3)),
                               "score": int(d.get("score", 400))}
-                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
+                cfg.shadow_requested |= d.get("shadow", "false").lower() == "true"
             elif flag == "-draw":
                 cfg.draw = {"movenumber": int(d.get("movenumber", 40)),
                             "movecount": int(d.get("movecount", 8)),
                             "score": int(d.get("score", 10))}
-                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
+                cfg.shadow_requested |= d.get("shadow", "false").lower() == "true"
             elif flag == "-sprt":
                 warn("-sprt ignored (the server computes SPRT from batches)")
             continue
@@ -1070,6 +1097,25 @@ def parse_cli(argv):
     if fmt != "epd":
         raise SystemExit("uci_pair_runner: only format=epd books are "
                          "supported (got %s)" % fmt)
+
+    # Checked here, after every flag has been seen, so that -variant may come
+    # before or after -resign/-draw on the command line. Failing to start is
+    # the point: a runner that accepted this would play the whole batch with
+    # adjudication disabled and then drop, without a 'Finished game' line,
+    # every game whose real result disagreed with the virtual one -- games the
+    # worker would never know it was owed.
+    if cfg.shadow_requested and cfg.variant not in SHADOW_VARIANTS:
+        raise SystemExit(
+            "uci_pair_runner: shadow=true on -resign/-draw is only supported "
+            "for -variant %s, but this test is -variant %s. Shadow "
+            "adjudication stops adjudicating, plays every game to its natural "
+            "end, and then discards any game whose result contradicts the "
+            "adjudication it would have made -- which needs the evidence "
+            "records only %s emits. Remove shadow=true from the win_adj / "
+            "draw_adj settings of this test."
+            % ("/".join(sorted(SHADOW_VARIANTS)), cfg.variant,
+               "/".join(sorted(SHADOW_VARIANTS)))
+        )
 
     if acceptance_requested:
         repeated = [
