@@ -162,6 +162,7 @@ class AliceOnboardingTests(unittest.TestCase):
 
     def test_shadow_flag_is_parsed_from_adjudication_settings(self):
         cfg = uci_pair_runner.parse_cli([
+            "-variant", "alice",
             "-engine", "cmd=dev", "name=Alice-dev", "depth=1",
             "-engine", "cmd=base", "name=Alice-base", "depth=1",
             "-openings", "file=alice.epd", "format=epd",
