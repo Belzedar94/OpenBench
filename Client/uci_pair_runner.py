@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UCI pair-game runner for variants cutechess-cli cannot arbitrate (spell-chess).
+"""UCI pair-game runner for variants that cutechess-cli cannot arbitrate.
 
 Drop-in stand-in for cutechess-ob inside an OpenBench worker, and a local match
 runner. The runner NEVER arbitrates rules itself: engines are trusted, and game
@@ -23,7 +23,9 @@ OpenBench worker stdout contract honored here (see docs in repo):
 CLI: accepts the cutechess flag set the worker builds (-repeat -recover
 -variant -concurrency -games -resign -draw -engine ... -openings ... -srand
 -pgnout ...) plus -each, and ignores with a stderr warning whatever does not
-apply. UCI option names may contain spaces because the worker passes a real
+apply. Adding shadow=true to -resign or -draw records the first virtual
+adjudication, continues the game, and stores the comparison with the final
+result. UCI option names may contain spaces because the worker passes a real
 argv list to the runner.
 
 Example (local smoke):
@@ -38,6 +40,8 @@ Example (local smoke):
 """
 
 import atexit
+import hashlib
+import json
 import math
 import os
 import queue
@@ -51,10 +55,14 @@ from datetime import datetime
 
 MATE_ISH = 25000                       # forced win in internal cp units
 NONE_MOVES = ("(none)", "0000", "none")
-# permissive: spell-chess gated moves look like 'f@e4,d2d4' (with promotion
+# Permissive: gated moves look like 'f@e4,d2d4' (with promotion
 # 'f@e4,e7e8q' reaches 10 chars); only reject clearly malformed bestmoves so
 # we never false-positive an 'illegal move'
 MOVE_RE = re.compile(r"^[A-Za-z0-9@+=,\-]{2,12}$")
+ALICE_RESULT_RE = re.compile(
+    r"^info string alice_result result=(1-0|0-1|1/2-1/2) "
+    r"reason=(checkmate|stalemate|rule_draw)$"
+)
 
 _out_lock = threading.Lock()
 
@@ -117,6 +125,10 @@ class EngineDied(RuntimeError):
 
 
 class EngineStalled(RuntimeError):
+    pass
+
+
+class EngineProtocol(RuntimeError):
     pass
 
 
@@ -197,7 +209,7 @@ class EngineSpec:
         self.tc = None          # TimeControl
 
     @classmethod
-    def from_settings(cls, s, index):
+    def from_settings(cls, s, index, strict=False):
         spec = cls()
         d = s.get("dir", ".")
         cmd = s.get("cmd")
@@ -212,6 +224,10 @@ class EngineSpec:
         spec.cwd = os.path.abspath(d)
         proto = s.get("proto", "uci")
         if proto != "uci":
+            if strict:
+                raise SystemExit(
+                    "uci_pair_runner: acceptance mode requires proto=uci"
+                )
             warn("engine %d: proto=%s unsupported, only uci; proceeding as uci"
                  % (index, proto))
         raw = s.get("name") or os.path.basename(cmd)
@@ -244,10 +260,10 @@ class Engine:
         threading.Thread(target=self._pump, daemon=True).start()
         try:
             self.send("uci")
-            self.read_until("uciok", timeout=60)
+            self.uci_lines = self.read_until("uciok", timeout=60)
             for k, v in spec.options.items():
                 self.send("setoption name %s value %s" % (k, v))
-            self.sync()
+            self.option_lines = self.sync()
         except Exception:
             self.quit()  # a half-booted engine must not outlive its ctor
             raise
@@ -293,13 +309,13 @@ class Engine:
 
     def sync(self):
         self.send("isready")
-        self.read_until("readyok", timeout=60)
+        return self.read_until("readyok", timeout=60)
 
     def new_game(self):
         self.send("ucinewgame")
         self.sync()
 
-    def search(self, pos_cmd, go_cmd, budget_s, stall_grace):
+    def search(self, pos_cmd, go_cmd, budget_s, stall_grace, strict=False):
         """Run one search. Returns (bestmove, info, elapsed_ms).
 
         info: cp (mover POV, mates folded to +/-MATE_ISH), raw_mate (or None),
@@ -311,7 +327,7 @@ class Engine:
         self.send(go_cmd)
         stopped_at = None
         info = {"cp": None, "raw_mate": None, "depth": 0, "seldepth": 0,
-                "nodes": 0}
+                "nodes": 0, "terminal": None}
         while True:
             now = time.monotonic()
             if stopped_at is None:
@@ -337,7 +353,22 @@ class Engine:
             if self.debug:
                 warn("<- %s: %s" % (self.name, line))
             parts = line.split()
-            if line.startswith("info") and "score" in parts:
+            if line.startswith("info string alice_result"):
+                match = ALICE_RESULT_RE.fullmatch(line)
+                if not match:
+                    if strict:
+                        raise EngineProtocol(
+                            "%s: malformed alice_result record: %s"
+                            % (self.name, line)
+                        )
+                    continue
+                terminal = {"result": match.group(1), "reason": match.group(2)}
+                if strict and info["terminal"] not in (None, terminal):
+                    raise EngineProtocol(
+                        "%s: contradictory alice_result records" % self.name
+                    )
+                info["terminal"] = terminal
+            elif line.startswith("info") and "score" in parts:
                 try:
                     i = parts.index("score")
                     kind, val = parts[i + 1], int(parts[i + 2])
@@ -353,6 +384,8 @@ class Engine:
                 except (ValueError, IndexError):
                     pass
             elif line.startswith("bestmove"):
+                if strict and len(parts) < 2:
+                    raise EngineProtocol("%s: bestmove has no move token" % self.name)
                 elapsed_ms = (time.monotonic() - t0) * 1000.0
                 best = parts[1] if len(parts) > 1 else "(none)"
                 return best, info, elapsed_ms
@@ -381,10 +414,29 @@ class Outcome:
         self.restart = restart          # engines must be rebooted after game
         self.moves = []                 # [(uci, comment_str)]
         self.plies = 0
+        self.shadow_enabled = False
+        self.shadow = None               # {result, ply, kind} or None
+        self.shadow_inversion = False
+        self.outcome_class = "SCORABLE_NATURAL"
+        self.failure_code = ""
+        self.failure_stage = ""
+        self.offending_move = ""
+        self.root_fen = ""
+
+
+def shadow_audit_failure(outcome):
+    if outcome.outcome_class not in ("SCORABLE_NATURAL", "SCORABLE_CLOCK"):
+        return "%s %s" % (
+            outcome.outcome_class,
+            outcome.failure_code or "unspecified",
+        )
+    if outcome.shadow_inversion:
+        return "SHADOW_INVERSION shadow-inversion"
+    return None
 
 
 def _fen_fields(fen):
-    # spell FENs carry a '{...}' state token between board and stm, so scan
+    # Some variant FENs carry extra state tokens between board and stm, so scan
     # for the side-to-move field instead of trusting a fixed position
     t = fen.split()
     stm = next((tok for tok in t[1:] if tok in ("w", "b")), "w")
@@ -420,22 +472,63 @@ def play_game(white, black, fen, cfg):
     resign_cnt = {white: 0, black: 0}
     draw_cnt = 0
     adj_streak, adj_leader = 0, 0
+    shadow = None
     moves = []
     record = []
     stm0, _ = _fen_fields(fen)
+    acceptance = bool(getattr(cfg, "acceptance_mode", False))
+    strict_alice_evidence = acceptance or (
+        getattr(cfg, "variant", "") == "alice"
+        and bool(getattr(cfg, "shadow_adjudication", False))
+    )
 
-    def finish(result, reason, termination="normal", restart=False):
+    def finish(
+        result,
+        reason,
+        termination="normal",
+        restart=False,
+        outcome_class="SCORABLE_NATURAL",
+        failure_code="",
+        failure_stage="",
+        offending_move="",
+    ):
         out = Outcome(result, reason, termination, restart)
         out.moves = record
         out.plies = len(record)
+        out.shadow_enabled = cfg.shadow_adjudication
+        out.shadow = shadow
+        out.shadow_inversion = bool(shadow and shadow["result"] != result)
+        out.outcome_class = outcome_class
+        out.failure_code = failure_code
+        out.failure_stage = failure_stage
+        out.offending_move = offending_move
+        out.root_fen = fen
         return out
+
+    def shadow_or_finish(result, reason, kind):
+        nonlocal shadow
+        if not cfg.shadow_adjudication:
+            return finish(result, reason, "adjudication")
+        if shadow is None:
+            shadow = {"result": result, "ply": len(record), "kind": kind}
+        return None
 
     def side_of(eng):
         return "White" if eng is white else "Black"
 
-    def loses(eng, reason, termination, restart=False):
+    def loses(
+        eng,
+        reason,
+        termination,
+        restart=False,
+        outcome_class="SCORABLE_NATURAL",
+        failure_code="",
+        failure_stage="",
+        offending_move="",
+    ):
         return finish("0-1" if eng is white else "1-0",
-                      reason, termination, restart)
+                      reason, termination, restart, outcome_class,
+                      failure_code, failure_stage, offending_move)
 
     for ply in range(cfg.max_plies):
         stm_is_white = (ply % 2 == 0) == (stm0 == "w")
@@ -472,16 +565,33 @@ def play_game(white, black, fen, cfg):
             budget_s = cfg.fixed_budget_s
 
         try:
-            best, info, elapsed_ms = eng.search(
-                pos_cmd, go_cmd, budget_s, cfg.stall_grace_s)
+            if strict_alice_evidence:
+                best, info, elapsed_ms = eng.search(
+                    pos_cmd, go_cmd, budget_s, cfg.stall_grace_s, True)
+            else:
+                best, info, elapsed_ms = eng.search(
+                    pos_cmd, go_cmd, budget_s, cfg.stall_grace_s)
         except EngineStalled as exc:
             warn(str(exc))
             return loses(eng, "%s's connection stalls" % side_of(eng),
-                         "stalled connection", restart=True)
+                         "stalled connection", restart=True,
+                         outcome_class="OPERATIONAL_ABORT",
+                         failure_code="engine-stalled",
+                         failure_stage="search")
         except EngineDied as exc:
             warn(str(exc))
             return loses(eng, "%s disconnects" % side_of(eng),
-                         "abandoned", restart=True)
+                         "abandoned", restart=True,
+                         outcome_class="OPERATIONAL_ABORT",
+                         failure_code="engine-died",
+                         failure_stage="search")
+        except EngineProtocol as exc:
+            warn(str(exc))
+            return loses(eng, "%s protocol failure" % side_of(eng),
+                         "abandoned", restart=True,
+                         outcome_class="PROTOCOL_ABORT",
+                         failure_code="engine-protocol",
+                         failure_stage="search")
 
         # ---- clock accounting / time forfeit (cutechess semantics:
         #      elapsed beyond remaining+timemargin is a loss on time)
@@ -489,7 +599,8 @@ def play_game(white, black, fen, cfg):
             clk["time"] -= elapsed_ms
             if clk["time"] < -tc.margin_ms:
                 return loses(eng, "%s loses on time" % side_of(eng),
-                             "time forfeit")
+                             "time forfeit",
+                             outcome_class="SCORABLE_CLOCK")
             clk["time"] += tc.inc_ms
             if tc.moves:
                 clk["moves_left"] -= 1
@@ -499,23 +610,83 @@ def play_game(white, black, fen, cfg):
         elif tc.kind == TimeControl.ST:
             if elapsed_ms > tc.st_ms + tc.margin_ms:
                 return loses(eng, "%s loses on time" % side_of(eng),
-                             "time forfeit")
+                             "time forfeit",
+                             outcome_class="SCORABLE_CLOCK")
 
         score = info["cp"]  # mover POV, mates folded to +/-MATE_ISH
 
-        # ---- spell-chess terminal: no legal move. Losing terminals (king
-        # captured / stalled while attacked) carry a huge negative root score;
-        # a quiet stall (score ~ 0) is a draw.
+        # ---- variant terminal: no legal move. Losing terminals carry a huge
+        # negative root score; a quiet stall (score ~ 0) is a draw.
         if best in NONE_MOVES:
+            if strict_alice_evidence:
+                terminal = info.get("terminal")
+                if not terminal:
+                    return loses(
+                        eng,
+                        "%s returns an ambiguous terminal" % side_of(eng),
+                        "abandoned",
+                        outcome_class="PROTOCOL_ABORT",
+                        failure_code="missing-terminal-record",
+                        failure_stage="terminal",
+                        offending_move=best,
+                    )
+                expected_mate = "0-1" if stm_is_white else "1-0"
+                if terminal["reason"] == "checkmate":
+                    if terminal["result"] != expected_mate:
+                        return loses(
+                            eng,
+                            "%s returns a contradictory mate result" % side_of(eng),
+                            "abandoned",
+                            outcome_class="PROTOCOL_ABORT",
+                            failure_code="contradictory-terminal-record",
+                            failure_stage="terminal",
+                            offending_move=best,
+                        )
+                    winner = black if stm_is_white else white
+                    return finish(
+                        terminal["result"], "%s mates" % side_of(winner)
+                    )
+                if terminal["result"] != "1/2-1/2":
+                    return loses(
+                        eng,
+                        "%s returns a contradictory draw result" % side_of(eng),
+                        "abandoned",
+                        outcome_class="PROTOCOL_ABORT",
+                        failure_code="contradictory-terminal-record",
+                        failure_stage="terminal",
+                        offending_move=best,
+                    )
+                reason = (
+                    "Draw by stalemate"
+                    if terminal["reason"] == "stalemate"
+                    else "Draw by rule"
+                )
+                return finish("1/2-1/2", reason)
             if score is not None and abs(score) < cfg.stall_draw_cp:
                 return finish("1/2-1/2", "Draw by stalemate")
             winner = black if stm_is_white else white
             return finish("0-1" if stm_is_white else "1-0",
                           "%s mates" % side_of(winner))
 
+        if strict_alice_evidence and info.get("terminal"):
+            return loses(
+                eng,
+                "%s returns a move after a terminal record" % side_of(eng),
+                "abandoned",
+                outcome_class="PROTOCOL_ABORT",
+                failure_code="move-after-terminal-record",
+                failure_stage="terminal",
+                offending_move=best,
+            )
+
         if not MOVE_RE.match(best):
             return loses(eng, "%s makes an illegal move: %s"
-                         % (side_of(eng), best), "illegal move")
+                         % (side_of(eng), best), "illegal move",
+                         outcome_class=("PROTOCOL_ABORT" if strict_alice_evidence
+                                         else "SCORABLE_NATURAL"),
+                         failure_code=("malformed-bestmove" if strict_alice_evidence else ""),
+                         failure_stage=("bestmove" if strict_alice_evidence else ""),
+                         offending_move=best)
 
         moves.append(best)
         record.append((best, _fmt_comment(info, elapsed_ms)))
@@ -531,9 +702,13 @@ def play_game(white, black, fen, cfg):
                 resign_cnt[eng] += 1
                 if resign_cnt[eng] >= cfg.resign["movecount"]:
                     winner = black if stm_is_white else white
-                    return finish("0-1" if stm_is_white else "1-0",
-                                  "%s wins by adjudication" % side_of(winner),
-                                  "adjudication")
+                    outcome = shadow_or_finish(
+                        "0-1" if stm_is_white else "1-0",
+                        "%s wins by adjudication" % side_of(winner),
+                        "resign",
+                    )
+                    if outcome:
+                        return outcome
 
         # ---- draw adjudication (cutechess -draw movenumber=N movecount=M
         # score=S: after move N, both sides within +/-S for M moves each)
@@ -547,8 +722,11 @@ def play_game(white, black, fen, cfg):
             # (plyCount >= 2*movenumber), not the FEN fullmove counter
             if (draw_cnt >= 2 * cfg.draw["movecount"]
                     and ply + 1 >= 2 * cfg.draw["movenumber"]):
-                return finish("1/2-1/2", "Draw by adjudication",
-                              "adjudication")
+                outcome = shadow_or_finish(
+                    "1/2-1/2", "Draw by adjudication", "draw"
+                )
+                if outcome:
+                    return outcome
 
         # ---- optional symmetric adjudication (local probes): both engines
         # agree on a |score| >= adj_cp leader for adj_plies consecutive plies
@@ -558,13 +736,26 @@ def play_game(white, black, fen, cfg):
             adj_leader = side
             if adj_streak >= cfg.adj_plies or (
                     abs(score) >= MATE_ISH and adj_streak >= 2):
-                return finish("1-0" if adj_leader > 0 else "0-1",
-                              "%s wins by adjudication"
-                              % ("White" if adj_leader > 0 else "Black"),
-                              "adjudication")
+                outcome = shadow_or_finish(
+                    "1-0" if adj_leader > 0 else "0-1",
+                    "%s wins by adjudication"
+                    % ("White" if adj_leader > 0 else "Black"),
+                    "symmetric",
+                )
+                if outcome:
+                    return outcome
         elif cfg.adj_cp:
             adj_streak, adj_leader = 0, 0
 
+    if strict_alice_evidence:
+        return finish(
+            "1/2-1/2",
+            "Pair aborted at the safety ply limit",
+            "abandoned",
+            outcome_class="POLICY_ABORT",
+            failure_code="safety-ply-limit",
+            failure_stage="game-loop",
+        )
     return finish("1/2-1/2", "Draw by adjudication: max game length",
                   "adjudication")
 
@@ -576,7 +767,10 @@ def play_game(white, black, fen, cfg):
 _pgn_lock = threading.Lock()
 
 
-def write_pgn(path, game_no, white_name, black_name, fen, outcome, tc_label):
+def write_pgn(
+    path, game_no, white_name, black_name, fen, outcome, tc_label, variant,
+    durable=False,
+):
     stm0, _ = _fen_fields(fen)
     headers = [
         ("Event", "uci_pair_runner"),
@@ -588,13 +782,35 @@ def write_pgn(path, game_no, white_name, black_name, fen, outcome, tc_label):
         ("Result", outcome.result),
         ("SetUp", "1"),
         ("FEN", fen),
-        ("Variant", "spell-chess"),
+        ("Variant", variant),
         ("TimeControl", tc_label),
         ("PlyCount", str(outcome.plies)),
         ("GameEndTime", datetime.now().strftime("%Y-%m-%dT%H:%M:%S")),
     ]
     if outcome.termination != "normal":
         headers.append(("Termination", outcome.termination))
+    if outcome.outcome_class not in ("SCORABLE_NATURAL", "SCORABLE_CLOCK"):
+        headers.extend([
+            ("OutcomeClass", outcome.outcome_class),
+            ("FailureCode", outcome.failure_code),
+            ("FailureStage", outcome.failure_stage),
+            ("OffendingMove", outcome.offending_move),
+        ])
+    if outcome.shadow_enabled:
+        if outcome.shadow:
+            headers.append((
+                "ShadowAdjudication",
+                "%s at ply %d by %s" % (
+                    outcome.shadow["result"],
+                    outcome.shadow["ply"],
+                    outcome.shadow["kind"],
+                ),
+            ))
+        else:
+            headers.append(("ShadowAdjudication", "none"))
+        headers.append((
+            "ShadowInversion", "true" if outcome.shadow_inversion else "false"
+        ))
 
     tokens = []
     ply = 0 if stm0 == "w" else 1
@@ -629,6 +845,59 @@ def write_pgn(path, game_no, white_name, black_name, fen, outcome, tc_label):
                   newline="\n") as f:
             f.write(block)
             f.flush()
+            if durable:
+                os.fsync(f.fileno())
+
+
+def _canonical_json_bytes(value):
+    return (json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ) + "\n").encode("ascii")
+
+
+def write_machine_pair(path, pair_ordinal, games):
+    ordered = [games[index] for index in sorted(games)]
+    core = {
+        "schema": "alice-pair-result-v1",
+        "ordinal": pair_ordinal,
+        "game_classes": [item["outcome"].outcome_class for item in ordered],
+        "game_scores": [
+            item["dev_score"] / 2.0
+            if item["outcome"].outcome_class
+            in ("SCORABLE_NATURAL", "SCORABLE_CLOCK")
+            else None
+            for item in ordered
+        ],
+        "games": [
+            {
+                "game_number": item["game_no"],
+                "result": item["outcome"].result,
+                "outcome_class": item["outcome"].outcome_class,
+                "reason": item["outcome"].reason,
+                "termination": item["outcome"].termination,
+                "failure_code": item["outcome"].failure_code,
+                "failure_stage": item["outcome"].failure_stage,
+                "offending_move": item["outcome"].offending_move,
+                "final_valid_position": {
+                    "root_fen": item["outcome"].root_fen,
+                    "moves": [move for move, _comment in item["outcome"].moves],
+                },
+            }
+            for item in ordered
+        ],
+    }
+    core_hash = hashlib.sha256(_canonical_json_bytes(core)).hexdigest()
+    record = dict(core)
+    record["evidence_sha256"] = core_hash
+    payload = _canonical_json_bytes(record)
+    with open(path, "ab") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
 
 
 # --------------------------------------------------------------------------
@@ -640,8 +909,10 @@ ONE_ARG_FLAGS = {"-variant", "-concurrency", "-games", "-rounds", "-srand",
                  "-pgnout", "-event", "-site", "-tb", "-tbpieces",
                  "-ratinginterval", "-tournament", "-maxmoves",
                  "--seed", "--max-plies", "--stall-draw-cp", "--adj-cp",
-                 "--adj-plies", "--stall-grace", "--fixed-budget"}
-ZERO_ARG_FLAGS = {"-repeat", "-recover", "-wait", "--debug", "-debug"}
+                 "--adj-plies", "--stall-grace", "--fixed-budget",
+                 "--result-jsonl", "--pair-ordinal"}
+ZERO_ARG_FLAGS = {"-repeat", "-recover", "-wait", "--debug", "-debug",
+                  "--acceptance-mode"}
 IGNORED = {"-tb", "-tbpieces", "-event", "-site", "-ratinginterval",
            "-tournament", "-rounds", "-wait", "-sprt", "-maxmoves"}
 
@@ -656,10 +927,16 @@ def _collect_kv(argv, i):
     return toks, i
 
 
-def _kv_dict(tokens):
+def _kv_dict(tokens, strict=False):
     d = {"options": {}}
+    seen = set()
     for tok in tokens:
         k, v = tok.split("=", 1)
+        if strict and k in seen:
+            raise SystemExit(
+                "uci_pair_runner: duplicate acceptance setting %s" % k
+            )
+        seen.add(k)
         if k.startswith("option."):
             d["options"][k[len("option."):]] = v
         else:
@@ -672,6 +949,7 @@ class Config:
 
 
 def parse_cli(argv):
+    acceptance_requested = "--acceptance-mode" in argv
     cfg = Config()
     cfg.engines_raw = []
     cfg.each_raw = {"options": {}}
@@ -684,6 +962,7 @@ def parse_cli(argv):
     cfg.pgnout = None
     cfg.resign = None
     cfg.draw = None
+    cfg.shadow_adjudication = False
     cfg.max_plies = 900
     cfg.stall_draw_cp = 800
     cfg.adj_cp = 0
@@ -691,13 +970,18 @@ def parse_cli(argv):
     cfg.stall_grace_s = 10.0
     cfg.fixed_budget_s = 600.0
     cfg.debug = False
+    cfg.acceptance_mode = acceptance_requested
+    cfg.result_jsonl = None
+    cfg.pair_ordinal = 0
+    occurrences = {}
 
     i = 0
     while i < len(argv):
         flag = argv[i]
+        occurrences[flag] = occurrences.get(flag, 0) + 1
         if flag in KV_FLAGS:
             toks, i = _collect_kv(argv, i)
-            d = _kv_dict(toks)
+            d = _kv_dict(toks, strict=acceptance_requested)
             if flag == "-engine":
                 cfg.engines_raw.append(d)
             elif flag == "-each":
@@ -708,10 +992,12 @@ def parse_cli(argv):
             elif flag == "-resign":
                 cfg.resign = {"movecount": int(d.get("movecount", 3)),
                               "score": int(d.get("score", 400))}
+                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
             elif flag == "-draw":
                 cfg.draw = {"movenumber": int(d.get("movenumber", 40)),
                             "movecount": int(d.get("movecount", 8)),
                             "score": int(d.get("score", 10))}
+                cfg.shadow_adjudication |= d.get("shadow", "false").lower() == "true"
             elif flag == "-sprt":
                 warn("-sprt ignored (the server computes SPRT from batches)")
             continue
@@ -720,6 +1006,8 @@ def parse_cli(argv):
                 cfg.repeat = True
             elif flag in ("--debug", "-debug"):
                 cfg.debug = True
+            elif flag == "--acceptance-mode":
+                cfg.acceptance_mode = True
             # -recover: always-on behavior; -wait: ignored
             i += 1
             continue
@@ -750,11 +1038,24 @@ def parse_cli(argv):
                 cfg.stall_grace_s = float(val)
             elif flag == "--fixed-budget":
                 cfg.fixed_budget_s = float(val)
+            elif flag == "--result-jsonl":
+                cfg.result_jsonl = val
+            elif flag == "--pair-ordinal":
+                cfg.pair_ordinal = int(val)
             elif flag in IGNORED:
-                warn("%s %s ignored (not applicable to spell-chess)"
+                if acceptance_requested:
+                    raise SystemExit(
+                        "uci_pair_runner: %s is forbidden in acceptance mode"
+                        % flag
+                    )
+                warn("%s %s ignored (not applicable to this runner)"
                      % (flag, val))
             continue
         # unknown flag: warn, skip it and its non-flag tail
+        if acceptance_requested:
+            raise SystemExit(
+                "uci_pair_runner: unknown acceptance flag %s" % flag
+            )
         warn("unknown flag %s ignored" % flag)
         i += 1
         while i < len(argv) and not argv[i].startswith("-"):
@@ -770,22 +1071,92 @@ def parse_cli(argv):
         raise SystemExit("uci_pair_runner: only format=epd books are "
                          "supported (got %s)" % fmt)
 
+    if acceptance_requested:
+        repeated = [
+            flag
+            for flag, count in occurrences.items()
+            if count > 1 and flag != "-engine"
+        ]
+        if repeated:
+            raise SystemExit(
+                "uci_pair_runner: duplicate acceptance flags: %s"
+                % ", ".join(sorted(repeated))
+            )
+        if cfg.variant != "alice":
+            raise SystemExit(
+                "uci_pair_runner: acceptance mode requires -variant alice"
+            )
+        if cfg.games != 2 or not cfg.repeat or cfg.concurrency != 1:
+            raise SystemExit(
+                "uci_pair_runner: acceptance mode requires -games 2, "
+                "-repeat, and -concurrency 1"
+            )
+        if cfg.resign or cfg.draw or cfg.adj_cp:
+            raise SystemExit(
+                "uci_pair_runner: score adjudication is forbidden in acceptance mode"
+            )
+        if not cfg.pgnout or not cfg.result_jsonl:
+            raise SystemExit(
+                "uci_pair_runner: acceptance mode requires -pgnout and --result-jsonl"
+            )
+        forbidden_flags = {
+            "--stall-draw-cp",
+            "--adj-plies",
+            "-recover",
+        }
+        used_forbidden = forbidden_flags.intersection(occurrences)
+        if used_forbidden:
+            raise SystemExit(
+                "uci_pair_runner: forbidden acceptance flags: %s"
+                % ", ".join(sorted(used_forbidden))
+            )
+
     # merge -each defaults under each -engine block (engine wins)
     specs = []
     for idx, raw in enumerate(cfg.engines_raw, 1):
+        if acceptance_requested and set(cfg.each_raw["options"]).intersection(
+            raw.get("options", {})
+        ):
+            raise SystemExit(
+                "uci_pair_runner: duplicate -each and -engine UCI options "
+                "are forbidden in acceptance mode"
+            )
         merged = dict(cfg.each_raw)
         merged["options"] = dict(cfg.each_raw["options"])
         merged["options"].update(raw.get("options", {}))
         for k, v in raw.items():
             if k != "options":
                 merged[k] = v
-        specs.append(EngineSpec.from_settings(merged, idx))
+        specs.append(EngineSpec.from_settings(merged, idx, acceptance_requested))
     # non-standard -variant: forward to the engines as UCI_Variant (engines
     # that do not expose the option just ignore the setoption). An explicit
     # option.UCI_Variant from the command line wins.
     if cfg.variant != "standard":
         for spec in specs:
-            spec.options.setdefault("UCI_Variant", cfg.variant)
+            if (
+                acceptance_requested
+                and "UCI_Variant" in spec.options
+                and spec.options["UCI_Variant"] != "alice"
+            ):
+                raise SystemExit(
+                    "uci_pair_runner: acceptance UCI_Variant must be alice"
+                )
+            if not acceptance_requested:
+                spec.options.setdefault("UCI_Variant", cfg.variant)
+    if acceptance_requested:
+        for spec in specs:
+            if spec.options.get("Threads") != "1":
+                raise SystemExit(
+                    "uci_pair_runner: acceptance mode requires Threads=1"
+                )
+            if spec.options.get("Hash") != "512":
+                raise SystemExit(
+                    "uci_pair_runner: acceptance mode requires Hash=512"
+                )
+            if spec.tc.margin_ms != 0:
+                raise SystemExit(
+                    "uci_pair_runner: acceptance mode requires timemargin=0"
+                )
     cfg.specs = specs
     if specs[0].name == specs[1].name:
         specs[1].name += "-2"
@@ -796,9 +1167,9 @@ def parse_cli(argv):
 # book
 
 
-def load_book(path):
+def load_book(path, strict=False):
     fens = []
-    with open(path, encoding="utf-8-sig", errors="replace") as f:
+    with open(path, encoding="utf-8-sig", errors="strict" if strict else "replace") as f:
         for line in f:
             line = line.split(";")[0].strip()  # drop EPD opcodes if any
             if line and not line.startswith("#"):
@@ -845,7 +1216,7 @@ def main():
     cfg = parse_cli(sys.argv[1:])
     dev, base = cfg.specs  # first -engine = dev, plays White in odd games
 
-    book = load_book(cfg.openings["file"])
+    book = load_book(cfg.openings["file"], strict=cfg.acceptance_mode)
     order = cfg.openings.get("order", "sequential")
     start = max(1, int(cfg.openings.get("start", "1") or 1))
     seed = cfg.srand if cfg.srand is not None else random.randrange(1 << 30)
@@ -859,31 +1230,49 @@ def main():
 
     if cfg.pgnout:
         os.makedirs(os.path.dirname(cfg.pgnout) or ".", exist_ok=True)
-        open(cfg.pgnout, "a").close()  # must exist even with zero errors
+        open(cfg.pgnout, "x" if cfg.acceptance_mode else "a").close()
+    if cfg.result_jsonl:
+        os.makedirs(os.path.dirname(cfg.result_jsonl) or ".", exist_ok=True)
+        open(cfg.result_jsonl, "xb").close()
 
     jobs = queue.Queue()
     for p in range(pairs):
         jobs.put(p)
 
     lock = threading.Lock()
-    tally = {"w": 0, "l": 0, "d": 0, "n": 0}
+    tally = {"w": 0, "l": 0, "d": 0, "n": 0,
+             "shadow": 0, "inversions": 0}
+    shadow_invalid_pairs = set()
     pair_scores = {}   # pair -> {game_in_pair: dev_score 0/1/2}
+    pair_outcomes = {} # pair -> {game_in_pair: machine evidence inputs}
     penta = [0, 0, 0, 0, 0]
     res_lookup = {"0-1": 0, "1/2-1/2": 1, "1-0": 2}
     tc_label = "%s / %s" % (dev.tc.label, base.tc.label) \
         if dev.tc.label != base.tc.label else dev.tc.label
 
-    def account(game_no, result):
+    def account(game_no, outcome):
         """Update dev-POV tallies and pentanomial under the lock."""
+        result = outcome.result
         odd = game_no % 2 == 1
         dev_score = res_lookup[result] if odd else 2 - res_lookup[result]
         tally["n"] += 1
         tally["w" if dev_score == 2 else "d" if dev_score == 1 else "l"] += 1
+        tally["shadow"] += bool(outcome.shadow)
+        tally["inversions"] += outcome.shadow_inversion
         p = (game_no - 1) // 2
         slot = pair_scores.setdefault(p, {})
         slot[game_no] = dev_score
+        evidence_slot = pair_outcomes.setdefault(p, {})
+        evidence_slot[game_no] = {
+            "game_no": game_no,
+            "dev_score": dev_score,
+            "outcome": outcome,
+        }
         if len(slot) == 2:
             penta[sum(slot.values())] += 1
+        if cfg.result_jsonl and len(evidence_slot) == 2:
+            write_machine_pair(cfg.result_jsonl, cfg.pair_ordinal + p,
+                               evidence_slot)
 
     def worker():
         holder = {"engines": None}  # (dev Engine, base Engine) or None
@@ -940,20 +1329,60 @@ def main():
                         "%s disconnects"
                         % ("White" if culprit_white else "Black"),
                         "abandoned", restart=True)
-                emit("Finished game %d (%s vs %s): %s {%s}"
-                     % (g, wspec.name, bspec.name, outcome.result,
-                        outcome.reason))
-                with lock:
-                    account(g, outcome.result)
-                    w, l, d, n = (tally["w"], tally["l"], tally["d"],
-                                  tally["n"])
-                emit("Score of %s vs %s: %d - %d - %d  [%.3f] %d"
-                     % (dev.name, base.name, w, l, d,
-                        (w + d / 2) / max(n, 1), n))
-                if cfg.pgnout:
+                    outcome.shadow_enabled = cfg.shadow_adjudication
+                    outcome.outcome_class = "OPERATIONAL_ABORT"
+                    outcome.failure_code = "engine-boot-failure"
+                    outcome.failure_stage = "startup"
+                    outcome.root_fen = fen
+                display_reason = outcome.reason
+                if outcome.shadow_enabled:
+                    if outcome.shadow:
+                        display_reason += (
+                            "; shadow %s at ply %d by %s; inversion=%d"
+                            % (outcome.shadow["result"], outcome.shadow["ply"],
+                               outcome.shadow["kind"], outcome.shadow_inversion)
+                        )
+                    else:
+                        display_reason += "; shadow none; inversion=0"
+                pgn_written = False
+                if cfg.pgnout and (cfg.acceptance_mode or cfg.shadow_adjudication):
                     try:
                         write_pgn(cfg.pgnout, g, wspec.name, bspec.name,
-                                  fen, outcome, tc_label)
+                                  fen, outcome, tc_label, cfg.variant,
+                                  durable=True)
+                        pgn_written = True
+                    except OSError as exc:
+                        warn("pgn write failed: %s" % exc)
+                        outcome.outcome_class = "EVIDENCE_ABORT"
+                        outcome.failure_code = "pgn-write-failure"
+                        outcome.failure_stage = "evidence"
+                shadow_failure = (
+                    shadow_audit_failure(outcome)
+                    if cfg.shadow_adjudication
+                    else None
+                )
+                if shadow_failure:
+                    with lock:
+                        shadow_invalid_pairs.add((g - 1) // 2)
+                    emit(
+                        "Alice shadow audit invalid game %d pair %d: %s"
+                        % (g, (g + 1) // 2, shadow_failure)
+                    )
+                else:
+                    emit("Finished game %d (%s vs %s): %s {%s}"
+                         % (g, wspec.name, bspec.name, outcome.result,
+                            display_reason))
+                    with lock:
+                        account(g, outcome)
+                        w, l, d, n = (tally["w"], tally["l"], tally["d"],
+                                      tally["n"])
+                    emit("Score of %s vs %s: %d - %d - %d  [%.3f] %d"
+                         % (dev.name, base.name, w, l, d,
+                            (w + d / 2) / max(n, 1), n))
+                if cfg.pgnout and not pgn_written:
+                    try:
+                        write_pgn(cfg.pgnout, g, wspec.name, bspec.name,
+                                  fen, outcome, tc_label, cfg.variant)
                     except OSError as exc:
                         warn("pgn write failed: %s" % exc)
                 if outcome.restart:
@@ -993,9 +1422,15 @@ def main():
 
     elo, los = elo_stats(tally["w"], tally["l"], tally["d"])
     emit("Finished match: %s vs %s: %d - %d - %d penta [%d,%d,%d,%d,%d] "
-         "elo %+.1f los %.1f%%"
+         "elo %+.1f los %.1f%% shadow %d inversions %d"
          % (dev.name, base.name, tally["w"], tally["l"], tally["d"],
-            penta[0], penta[1], penta[2], penta[3], penta[4], elo, los))
+            penta[0], penta[1], penta[2], penta[3], penta[4], elo, los,
+            tally["shadow"], tally["inversions"]))
+    if shadow_invalid_pairs:
+        emit("Alice shadow audit invalid: %d anomalous pair(s)"
+             % len(shadow_invalid_pairs))
+        sys.stdout.close()
+        sys.exit(3)
     sys.stdout.close()
     sys.exit(0)
 

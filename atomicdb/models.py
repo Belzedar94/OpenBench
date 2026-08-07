@@ -872,6 +872,11 @@ class ProgressSnapshot(models.Model):
     frontier_and_nodes = models.BigIntegerField(default=0)
     frontier_dn_median = models.BigIntegerField(default=0)
     frontier_dn_thin = models.BigIntegerField(default=0)
+    # Abiertos con pn/dn SATURADOS (§ proof.saturated_open_count): los que el
+    # frente excluye con razon y que hasta el 6-ago desaparecian de las
+    # metricas en silencio.  Se guarda por lo mismo que la mediana: la
+    # poblacion se reescribe en el sitio y sin foto no hay "antes".
+    frontier_saturated = models.BigIntegerField(default=0)
 
     # --- cierres por PROCEDENCIA, acumulados desde el despliegue ---
     #

@@ -546,10 +546,14 @@
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
       nodes {{ nodes_h }} · {{ time_str }}</p>
-    {% if pos.last_analysis %}
+    {% if analysis_lines %}
     <details>
       <summary>raw engine output (last analysis)</summary>
-      <div class="raw">{% for ln in pos.last_analysis %}{% ifchanged ln.prior_pass %}{% if ln.prior_pass %}<div class="rawline rawdivider">— earlier wider pass —</div>{% endif %}{% endifchanged %}<div class="rawline{% if ln.prior_pass %} rawprior{% endif %}">{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}</div>{% endfor %}</div>
+      {% comment %}Las lineas llegan ya CORTADAS en su primer cruce consigo
+      mismas (§ views._analysis_lines_for_display, invariante 6): una PV que
+      da la vuelta no se enseña como progreso, y el chip — el mismo de
+      siempre — dice donde y por que se corto.{% endcomment %}
+      <div class="raw">{% for ln in analysis_lines %}{% ifchanged ln.prior_pass %}{% if ln.prior_pass %}<div class="rawline rawdivider">— earlier wider pass —</div>{% endif %}{% endifchanged %}<div class="rawline{% if ln.prior_pass %} rawprior{% endif %}">{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}{% if ln.pv_repetition %} <span class="backed-mark" title="line cut here — its last shown move returns to a position this line already went through; a repetition is worth a draw, not progress, and what followed was this position's own line over again">repetition</span>{% endif %}</div>{% endfor %}</div>
     </details>
     {% endif %}  </div>
 
@@ -562,9 +566,16 @@
       {% for m in moves %}
       <tr>
         <td><span class="chip {{ m.css }}"></span></td>
-        <td><a href="{{ m.url }}"{% if m.enters_opening %}
+        {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
+        conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
+        vuelve a una posicion que ya esta en la linea actual y las
+        repeticiones estan desactivadas (invariante 6, decision del
+        propietario 6-ago).  El chip es el de siempre.{% endcomment %}
+        <td>{% if m.blocked %}<strong>{{ m.uci }}</strong> <span class="backed-mark"
+          title="repetition — this move returns to a position already on this line; repetitions are disabled, land on that position through the line above instead">repetition</span>
+          {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
           title="Enters {{ m.enters_opening }}"{% endif %}><strong>{{ m.uci }}</strong></a>
-          {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}</td>
+          {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
@@ -597,9 +608,11 @@
       {% for u in offtree %}
       <tr>
         <td><span class="chip cold"></span></td>
-        <td><a href="{{ u.url }}"{% if u.enters_opening %}
+        <td>{% if u.blocked %}<strong>{{ u.uci }}</strong> <span class="backed-mark"
+          title="repetition — this move returns to a position already on this line; repetitions are disabled">repetition</span>
+          {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
           title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
-          {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}</td>
+          {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim">-</span></td>
         <td class="dim proofnums"></td>

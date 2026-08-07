@@ -1,0 +1,97 @@
+{
+    "private": false,
+    "nps": 50000,
+    "source": "https://github.com/Belzedar94/Alice-Stockfish",
+    "worker_max_concurrency": 8,
+    "cutechess_max_concurrency": 2,
+    "cutechess_launch_stagger_ms": 500,
+
+    "build": {
+        "path": "src",
+        "compilers": ["g++"],
+        "cpuflags": [],
+        "systems": ["Windows", "Linux"]
+    },
+
+    "test_presets": {
+        "default": {
+            "base_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
+            "both_bench": 162582,
+            "both_network": "alice_run2rl_e40_l09.nnue",
+            "book_name": "ALICE_openings.epd",
+            "test_bounds": "[1.00, 6.00]",
+            "test_confidence": "[0.05, 0.05]",
+            "win_adj": "movecount=4 score=800",
+            "draw_adj": "movenumber=40 movecount=8 score=10",
+            "priority": -10,
+            "syzygy_wdl": "DISABLED",
+            "syzygy_adj": "DISABLED"
+        },
+
+        "VSTC": {
+            "both_options": "Threads=1 Hash=16 \"Use NNUE=true\"",
+            "both_time_control": "2.0+0.02",
+            "workload_size": 64
+        },
+
+        "STC": {
+            "both_options": "Threads=1 Hash=32 \"Use NNUE=true\"",
+            "both_time_control": "10.0+0.1",
+            "workload_size": 32
+        },
+
+        "LTC": {
+            "both_options": "Threads=1 Hash=128 \"Use NNUE=true\"",
+            "both_time_control": "30.0+0.3",
+            "workload_size": 8
+        },
+
+        "VSTC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=16 \"Use NNUE=true\"",
+            "both_time_control": "2.0+0.02",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
+        },
+
+        "STC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=32 \"Use NNUE=true\"",
+            "both_time_control": "10.0+0.1",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
+        },
+
+        "LTC Adjudication Audit": {
+            "both_options": "Threads=1 Hash=128 \"Use NNUE=true\"",
+            "both_time_control": "30.0+0.3",
+            "test_max_games": 400,
+            "upload_pgns": "VERBOSE",
+            "workload_size": 1,
+            "win_adj": "movecount=4 score=800 shadow=true",
+            "draw_adj": "movenumber=40 movecount=8 score=10 shadow=true"
+        }
+    },
+
+    "tune_presets": {
+        "default": {
+            "dev_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
+            "dev_bench": 162582,
+            "dev_network": "alice_run2rl_e40_l09.nnue",
+            "book_name": "ALICE_openings.epd",
+            "win_adj": "movecount=4 score=800",
+            "draw_adj": "movenumber=40 movecount=8 score=10",
+            "priority": -10,
+            "syzygy_wdl": "DISABLED",
+            "syzygy_adj": "DISABLED"
+        }
+    },
+
+    "datagen_presets": {
+        "default": {}
+    }
+}

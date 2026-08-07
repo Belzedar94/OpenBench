@@ -519,6 +519,7 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
                 base,
                 tablebase_family='atomic',
                 tablebase_manifest_sha256='a' * 64,
+                worker_max_concurrency=8,
                 cutechess_max_concurrency=8,
                 cutechess_launch_stagger_ms=1500,
             )
@@ -532,6 +533,7 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
                 dict(base, tablebase_manifest_sha256='not-a-sha')
             )
         for field, invalid_values in [
+            ('worker_max_concurrency', [False, -1, 1025, 1.5, '8']),
             ('cutechess_max_concurrency', [False, -1, 1025, 1.5, '8']),
             ('cutechess_launch_stagger_ms', [False, -1, 60001, 1.5, '1500']),
         ]:
@@ -566,6 +568,43 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn('DISABLED', errors[0])
 
+    def test_shadow_adjudication_has_an_exact_server_contract(self):
+        request = SimpleNamespace(POST={
+            'win_adj': 'movecount=4 score=800 shadow=true',
+            'draw_adj': 'movenumber=40 movecount=8 score=10 shadow=true',
+        })
+        errors = []
+        verify_workload.verify_win_adj(errors, request, 'win_adj')
+        verify_workload.verify_draw_adj(errors, request, 'draw_adj')
+        self.assertEqual(errors, [])
+
+        request.POST['win_adj'] += ' ignored=true'
+        request.POST['draw_adj'] += ' ignored=true'
+        verify_workload.verify_win_adj(errors, request, 'win_adj')
+        verify_workload.verify_draw_adj(errors, request, 'draw_adj')
+        self.assertEqual(len(errors), 2)
+
+    def test_shadow_inversion_is_reported_as_an_audit_error(self):
+        self.assertEqual(
+            worker.PGNHelper.get_error_reason([
+                '[Variant "alice"]',
+                '[ShadowAdjudication "0-1 at ply 8 by resign"]',
+                '[ShadowInversion "true"]',
+            ]),
+            'Shadow Adjudication Inversion',
+        )
+
+    def test_audit_evidence_never_relabels_another_variant(self):
+        self.assertEqual(
+            worker.PGNHelper.get_error_reason([
+                '[Variant "spell-chess"]',
+                '[OutcomeClass "OPERATIONAL_ABORT"]',
+                '[FailureCode "engine-stalled"]',
+                '[Termination "stalled connection"]',
+            ]),
+            'Stalled',
+        )
+
 
 class AtomicConcurrencyDistributionTests(unittest.TestCase):
 
@@ -574,6 +613,10 @@ class AtomicConcurrencyDistributionTests(unittest.TestCase):
         configured = {
             'engines': {
                 'Atomic-Stockfish': {'cutechess_max_concurrency': 8},
+                'Alice-Stockfish': {
+                    'worker_max_concurrency': 8,
+                    'cutechess_max_concurrency': 2,
+                },
                 'Spell-Stockfish': {},
             }
         }
@@ -597,6 +640,16 @@ class AtomicConcurrencyDistributionTests(unittest.TestCase):
             get_workload, 'OPENBENCH_CONFIG', configured
         ):
             return get_workload.game_distribution(test, machine)
+
+    def test_an_unregistered_engine_still_distributes(self):
+        # getWorkload serves every machine, so an engine missing from
+        # config.json must not raise and take the whole fleet's work with it.
+        distribution = self.distribution('Retired-Engine', 'Spell-Stockfish')
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['concurrency-per'],
+            24,
+        )
 
     def test_atomic_concurrency_is_split_without_losing_threads_or_games(self):
         distribution = self.distribution(
@@ -635,6 +688,29 @@ class AtomicConcurrencyDistributionTests(unittest.TestCase):
                 'concurrency-per': 24,
                 'games-per-cutechess': 48,
             },
+        )
+
+    def test_alice_audit_uses_exactly_eight_pairs_per_assignment(self):
+        distribution = self.distribution(
+            'Alice-Stockfish', 'Alice-Stockfish'
+        )
+        self.assertEqual(
+            distribution,
+            {
+                'cutechess-count': 4,
+                'concurrency-per': 2,
+                'games-per-cutechess': 4,
+            },
+        )
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['concurrency-per'],
+            8,
+        )
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['games-per-cutechess'],
+            16,
         )
 
     def test_multiple_spsa_distribution_is_unchanged(self):

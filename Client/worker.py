@@ -649,6 +649,7 @@ class ServerReporter:
 
 VARIANTS = {
     'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'ALICE'    : ('uci-pair-runner', 'alice'       ),
     'HORDE'    : ('cutechess'      , 'horde'       ),
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
@@ -662,6 +663,7 @@ VARIANTS = {
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
+    'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
     'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
@@ -1107,6 +1109,34 @@ class PGNHelper:
 
     @staticmethod
     def get_error_reason(sliced_headers):
+
+        # Only Alice games carry audit evidence. Every variant shares the
+        # pair runner, so a spell-chess engine that dies or stalls also
+        # reaches an OperationalAbort outcome and writes these headers.
+        # Reading them unconditionally would rename long-standing Spell
+        # crash reports, so gate on the variant the runner recorded.
+        variant = PGNHelper.get_pgn_header(sliced_headers, 'Variant')
+
+        if variant == 'alice':
+
+            outcome_class = PGNHelper.get_pgn_header(
+                sliced_headers, 'OutcomeClass'
+            )
+            if outcome_class:
+                failure_code = PGNHelper.get_pgn_header(
+                    sliced_headers, 'FailureCode'
+                )
+                return 'Alice %s: %s' % (
+                    outcome_class,
+                    failure_code or 'unspecified',
+                )
+
+            shadow_inversion = PGNHelper.get_pgn_header(
+                sliced_headers, 'ShadowInversion'
+            )
+
+            if shadow_inversion == 'true':
+                return 'Shadow Adjudication Inversion'
 
         reason = PGNHelper.get_pgn_header(sliced_headers, 'Termination')
 
@@ -2816,6 +2846,261 @@ def complete_datagen_workload(config):
             print('[Note] DATAGEN log cleanup deferred: %s' % error)
 
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                          MEMORY-CAPPED CONCURRENCY                          #
+#                                                                             #
+# CPU and RAM do not scale together, and -T only speaks for the CPU. Without  #
+# ponder only the side to move is searching, so a game costs about one core:  #
+# that is why -T can sensibly equal the thread count. But BOTH engines stay   #
+# resident for the whole game, so the same game costs TWO engines' worth of   #
+# memory. A number that is right for the processor can be fatal for the RAM.  #
+#                                                                             #
+# It was fatal on 2026-08-01. A 32 GB machine reporting -T 24 was told to run #
+# 24 concurrent games: 48 engine processes, each carrying an 88 MB evaluation #
+# network expanded into its own private copy, 385 MB apiece, 18.5 GB in all.  #
+# The engines died throwing std::bad_alloc, some unable to reserve even 16 MB #
+# for a transposition table. Whichever process lost the race for memory died  #
+# and forfeited its game -- and since the second one launched was usually the #
+# BASE, the dev collected 883 wins by default against 313. Every Spell test   #
+# on that machine scored 55%-80% for the dev, including patches that were     #
+# losing everywhere else, while its Atomic tests sat at a clean 50% because   #
+# that engine's network is half the size and fitted.                          #
+#                                                                             #
+# So the Server keeps deciding the number, and the worker is allowed only to  #
+# LOWER it. It can never raise it, so it cannot disturb the scheduling; and   #
+# only the worker can know what else is running on somebody's desktop.        #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+ENGINE_MEMORY_CACHE = {}
+
+def measure_engine_memory_mb(engine_name, options, budget_seconds=12.0):
+
+    ## What ONE instance of this engine actually costs, measured by running it.
+    ##
+    ## Measured rather than estimated on purpose. The footprint is dominated by
+    ## the evaluation network, and a table of constants would be wrong the first
+    ## time somebody trains a bigger one. The binary always knows; we ask it.
+    ##
+    ## Returns None when the engine cannot be measured, so the caller falls back
+    ## to a rough estimate rather than to no limit at all.
+
+    key = (engine_name, options)
+    if key in ENGINE_MEMORY_CACHE:
+        return ENGINE_MEMORY_CACHE[key]
+
+    # Engines resolve their EvalFile relative to their own directory
+    engine_dir  = os.path.abspath('Engines')
+    engine_path = os.path.join(engine_dir, engine_name)
+    if not os.path.isfile(engine_path):
+        return None
+
+    commands = ['uci']
+    for token in options.split():
+        if '=' in token:
+            name, _, value = token.partition('=')
+            commands.append('setoption name %s value %s' % (name, value))
+    # The network is only paid for once something asks for an evaluation, and
+    # the accumulator stacks keep growing with the ply reached -- so ask for a
+    # search of a realistic LENGTH rather than a shallow fixed depth, or the
+    # figure comes back well under what a real game will demand.
+    commands += ['isready', 'position startpos', 'go movetime 4000']
+
+    proc = None
+    try:
+        proc = Popen(
+            [engine_path], cwd=engine_dir, stdin=PIPE,
+            stdout=open(os.devnull, 'w'), stderr=STDOUT,
+            universal_newlines=True)
+        proc.stdin.write('\n'.join(commands) + '\n')
+        proc.stdin.flush()
+
+        # Poll memory instead of parsing stdout: no blocking read can hang
+        # the worker, and the peak is what has to fit, not the end. On
+        # Windows the honest figure is the COMMIT charge (pagefile), not the
+        # resident size: this engine commits a 256 MiB move arena it barely
+        # touches, so RSS said 392 MB while the commit charge was 658 --
+        # and the commit charge is the number allocations die against.
+        watcher  = psutil.Process(proc.pid)
+        deadline = time.time() + budget_seconds
+        peak = 0
+        while time.time() < deadline and proc.poll() is None:
+            try:
+                info = watcher.memory_info()
+                used = getattr(info, 'pagefile', 0) or info.rss
+                used //= (1024 ** 2)
+            except (psutil.Error, OSError):
+                break
+            peak = max(peak, used)
+            time.sleep(0.25)
+        # Sampled for the whole window on purpose. An earlier version stopped
+        # as soon as the figure stopped climbing and caught the engines mid
+        # load: it reported 280 MB for an engine that really needs 385, and
+        # 274 for one that really needs 213 -- near-identical numbers for
+        # engines that differ by 80%, which is the signature of measuring the
+        # network being read rather than the network being resident.
+
+    except (OSError, ValueError):
+        peak = 0
+
+    finally:
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:               # noqa: BLE001 - measurement only
+                pass
+
+    if not peak:
+        return None
+
+    ENGINE_MEMORY_CACHE[key] = peak
+    return peak
+
+
+def estimate_engine_memory_mb(engine_name, options):
+
+    ## Fallback when the engine could not be run: the binary carries its own
+    ## network, so its size on disk is the one honest signal available. The
+    ## multiplier is deliberately generous -- guessing low is what crashes.
+
+    try:
+        binary_mb = os.path.getsize(os.path.join('Engines', engine_name))
+        binary_mb //= (1024 ** 2)
+    except OSError:
+        return None
+
+    hash_mb = 0
+    for token in options.split():
+        name, _, value = token.partition('=')
+        if name.lower() == 'hash':
+            try: hash_mb = int(value)
+            except ValueError: pass
+
+    # Measured on two engines whose networks differ by 80%: the resident size
+    # minus the hash came to 3.9x the binary for one and 3.6x for the other.
+    # Four is the round number just above both.
+    return 4 * binary_mb + hash_mb
+
+
+def engine_memory_mb(config, branch, engine_name):
+
+    ## The larger of what the engine showed us and what its binary implies.
+    ##
+    ## Not belt-and-braces: Windows trims a process's working set when memory
+    ## runs short, so the measurement reads LOW exactly when memory is tight.
+    ## Trusting it alone would raise the cap under pressure and make the
+    ## pressure worse. Measured idle, one engine here reports 385 MB; measured
+    ## again with the box already full of engines, the same binary reports 306.
+    ## The estimate does not move, so it holds the floor.
+
+    options  = config.workload['test'][branch]['options']
+    measured = measure_engine_memory_mb(engine_name, options)
+    estimate = estimate_engine_memory_mb(engine_name, options)
+
+    if measured and estimate:
+        return max(measured, estimate)
+    return measured or estimate
+
+
+def available_commit_mb():
+
+    ## How much more memory Windows will actually let anyone COMMIT: the
+    ## pagefile-backed limit, not physical RAM. psutil has no portable name
+    ## for this, so ask the kernel directly. None on any failure or any
+    ## platform where the concept does not apply -- the caller treats None
+    ## as "no extra information", never as zero.
+
+    if os.name != 'nt':
+        return None
+
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ('dwLength'               , ctypes.c_uint32),
+                ('dwMemoryLoad'           , ctypes.c_uint32),
+                ('ullTotalPhys'           , ctypes.c_uint64),
+                ('ullAvailPhys'           , ctypes.c_uint64),
+                ('ullTotalPageFile'       , ctypes.c_uint64),
+                ('ullAvailPageFile'       , ctypes.c_uint64),
+                ('ullTotalVirtual'        , ctypes.c_uint64),
+                ('ullAvailVirtual'        , ctypes.c_uint64),
+                ('ullAvailExtendedVirtual', ctypes.c_uint64),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.ullAvailPageFile) // (1024 ** 2)
+
+    except Exception:                       # noqa: BLE001 - never block work
+        return None
+
+
+def memory_capped_concurrency(config, dev_name, base_name,
+                              cutechess_cnt, concurrency_per):
+
+    ## Lower the Server's number until the engines actually fit in this
+    ## machine's memory. Never raises it. Returns it untouched if anything
+    ## about the measurement fails: a broken cap must not stop the worker.
+
+    try:
+        dev_mb  = engine_memory_mb(config, 'dev' , dev_name )
+        base_mb = engine_memory_mb(config, 'base', base_name)
+        if not dev_mb or not base_mb:
+            return concurrency_per
+
+        # One game holds both engines resident for its whole duration
+        per_game_mb = dev_mb + base_mb
+
+        # This is somebody's desktop, not a server: leave them their machine.
+        #
+        # A third of installed RAM is the standing ceiling, and free memory
+        # only ever pulls it DOWN. Sizing off free memory alone is unstable in
+        # the one direction that matters: the check runs while the previous
+        # workload is still winding down, so the worker sees the hole its own
+        # engines are making and throttles itself for it. The last floor stops
+        # a momentarily busy desktop from cutting the worker to nothing.
+        available_mb = psutil.virtual_memory().available // (1024 ** 2)
+        budget_mb    = min(config.ram_total_mb * 2 // 5,
+                           max(available_mb - 2048, config.ram_total_mb // 6))
+
+        # Physical RAM is not what Windows enforces. Allocations die against
+        # the COMMIT limit (RAM + pagefile), and the two can disagree wildly:
+        # measured on the reference machine, 9.5 GB of physical memory free
+        # with 0.1 GB of commit left, and every engine aborting on bad_alloc.
+        # The crash rate tracked concurrency exactly (0% at 24 engines, 71%
+        # at 48) while this cap, sized off physical memory, said everything
+        # fit. So the commit headroom clamps the budget too; the per-game
+        # floor keeps a busy desktop from cutting the worker to zero.
+        commit_mb = available_commit_mb()
+        if commit_mb is not None:
+            budget_mb = min(budget_mb, max(commit_mb - 2048, per_game_mb))
+
+        total_games = cutechess_cnt * concurrency_per
+        allowed     = max(1, budget_mb // per_game_mb)
+        if total_games <= allowed:
+            return concurrency_per
+
+        capped = max(1, allowed // max(1, cutechess_cnt))
+        capped = min(concurrency_per, capped)
+
+        print('[Note] Memory cap: %d -> %d concurrent games per copy'
+              % (concurrency_per, capped))
+        print('[Note]   %s needs %d MB, %s needs %d MB, %d MB per game'
+              % (dev_name, dev_mb, base_name, base_mb, per_game_mb))
+        print('[Note]   budget %d MB of %d MB total (%d MB free, %s MB commit)'
+              % (budget_mb, config.ram_total_mb, available_mb,
+                 commit_mb if commit_mb is not None else '?'))
+        return capped
+
+    except Exception as error:              # noqa: BLE001 - never block work
+        print('[Note] Memory cap skipped: %s' % (error))
+        return concurrency_per
+
+
 def complete_workload(config):
 
     if config.workload['test']['type'] == 'DATAGEN' and config.workload['test'].get('datagen'):
@@ -2860,6 +3145,16 @@ def complete_workload(config):
     cutechess_cnt   = config.workload['distribution']['cutechess-count']
     concurrency_per = config.workload['distribution']['concurrency-per']
     games_per       = config.workload['distribution']['games-per-cutechess']
+
+    # ... but only this machine knows whether they fit in its memory.
+    #
+    # Write it back into the workload and not just into the local: the flags
+    # actually handed to Cutechess are built by concurrency_settings(), which
+    # reads this dictionary again. Capping only the local would print a number
+    # the games never used.
+    config.workload['distribution']['concurrency-per'] = memory_capped_concurrency(
+        config, dev_name, base_name, cutechess_cnt, concurrency_per)
+    concurrency_per = config.workload['distribution']['concurrency-per']
 
     print () # Record this information
     print ('%d cutechess copies' % (cutechess_cnt))
