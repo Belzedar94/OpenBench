@@ -1,7 +1,26 @@
 #!/bin/bash
+#
+# Usage: Scripts/deploy.sh [--restart-selector]
+#
 set -euo pipefail
 
 cd /opt/openbench
+
+RESTART_SELECTOR=0
+[ "${1:-}" = "--restart-selector" ] && RESTART_SELECTOR=1
+
+# The reset below is unconditional and silent, so anything edited straight on
+# the host dies here without a trace. It has already been aimed at a live
+# 162-line edit of Engines/Spell-Stockfish.json. Refuse instead, and show what
+# would have been destroyed.
+if ! git diff --quiet HEAD -- ; then
+    echo "ABORTA: hay ediciones locales en ficheros versionados." >&2
+    echo "El reset --hard de abajo las destruiria sin avisar. Canonizalas en" >&2
+    echo "la rama (o descartalas a mano) y vuelve a lanzar:" >&2
+    echo >&2
+    git status --porcelain -uno >&2
+    exit 1
+fi
 
 git fetch origin spell-runner
 git reset --hard origin/spell-runner
@@ -9,6 +28,13 @@ git reset --hard origin/spell-runner
 PYTHON=./.venv/bin/python
 
 ./.venv/bin/pip -q install -r req-linux.txt 2>/dev/null || true
+
+# systemd hands this env to the services, but an ssh session has none of it,
+# and the alias check below is what turns that into a refusal rather than a
+# silent deploy against the wrong database.
+if [ -r /etc/openbench/atomicdb-pg.env ]; then
+    set -a && . /etc/openbench/atomicdb-pg.env && set +a
+fi
 
 # The alias NAME says where AtomicDB lives; the ENGINE says which protocol
 # applies.  The SQLite cutover verifiers below only make sense (and only
@@ -73,8 +99,24 @@ fi
 
 "$PYTHON" manage.py collectstatic --no-input | tail -1
 
+# Published to the web root for the AtomicDB solvers to fetch.
+cp /opt/openbench/Client/atomicdb_worker.py /var/www/atomicdb-engines/
+
 # Restart only after both databases have passed their migration gates.
 systemctl restart openbench
+# The ingest units run this same tree; leaving them up means half the host
+# serves the previous commit.
+systemctl restart atomicdb-ingest atomicdb-ingest2 atomicdb-ingest3 \
+    atomicdb-ingest4 atomicdb-ingest5
+
+if [[ "$RESTART_SELECTOR" == "1" ]]; then
+    systemctl restart atomicdb-selector
+else
+    echo "AVISO: atomicdb-selector sigue con el codigo anterior."
+    echo "       Un pase suyo dura mas de una hora y el restart lo tira;"
+    echo "       relanza con --restart-selector cuando pueda perderse."
+fi
+
 sleep 2
 curl --fail --silent --show-error --output /dev/null \
     --write-out "deploy OK: %{http_code}\n" \

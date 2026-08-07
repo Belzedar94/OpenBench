@@ -130,7 +130,7 @@ debe apuntar la variable a una ruta vacía para “inicializarla”.
      --compare-active-schema
    ```
 
-7. Ejecutar `/opt/openbench/deploy.sh`. Si detecta el alias `atomicdb`, el
+7. Ejecutar `/opt/openbench/Scripts/deploy.sh`. Si detecta el alias `atomicdb`, el
    script autentica primero destino y shadow sin escribir; después migra
    `default` (incluido el schema shadow AtomicDB), verifica, migra `atomicdb` y
    exige historia/esquema idénticos antes de `collectstatic` y del restart.
@@ -243,11 +243,20 @@ de la petición podía publicar en ellas.
 
 - **Deploy de un comando**: `/opt/openbench` es clon git de
   github.com/Belzedar94/OpenBench (rama spell-runner). Publicar = merge a esa
-  rama en GitHub + `ssh root@167.233.35.111 /opt/openbench/deploy.sh`
-  (fetch+reset+pip+migraciones verificadas+restart+health-check). En modo split
-  el deploy autentica una DB ya inicializada antes de migrarla y vuelve a
-  verificarla antes del restart; nunca crea el destino. Copias de los scripts
-  del server en `Scripts/deploy.sh` y `Scripts/archive_manifest.py`.
+  rama en GitHub + `ssh root@167.233.35.111 /opt/openbench/Scripts/deploy.sh`
+  (guarda de árbol sucio+fetch+reset+pip+migraciones verificadas+restart+
+  health-check). En modo split el deploy autentica una DB ya inicializada antes
+  de migrarla y vuelve a verificarla antes del restart; nunca crea el destino.
+  **El script vive SOLO en `Scripts/deploy.sh`**: hasta el 7-ago había además un
+  `/opt/openbench/deploy.sh` escrito a mano y sin versionar que lo tapaba y que
+  migraba únicamente la base `default` — a esa copia degradada apuntaba este
+  runbook. Si vuelve a aparecer un script en la raíz, es una regresión: bórralo.
+- **El deploy aborta si el árbol del server tiene ediciones locales.** El
+  `reset --hard` las destruiría en silencio, así que hay que canonizarlas en la
+  rama antes (o descartarlas a mano). El script imprime cuáles son.
+- **El selector no se reinicia por defecto**: un pase suyo pasa de la hora y el
+  restart lo tira. Usa `Scripts/deploy.sh --restart-selector` cuando el cambio
+  le afecte y el pase pueda perderse.
 - **Archivado automático**: tarea de Windows "OpenBench-Archive-Pull" (cada
   hora) ejecuta `Scripts/archive_pull.py` en la torre: descarga los chunks
   COMPLETED a `F:\OpenBench\archive\datagen\<test>\`, verifica sha256 contra
