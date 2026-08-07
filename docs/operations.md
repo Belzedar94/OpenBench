@@ -230,9 +230,25 @@ de la petición podía publicar en ellas.
   registra en WARNING (`cache: Redis unavailable during ...`). El sitio no se
   cae por Redis; solo pierde el compartir.
 - **Quién publica los contadores**: `refresh_selector --loop`, al final de
-  cada pasada. Su JSON trae `public_counters_published: 2`. Si ese servicio
-  está parado, la web los mide ella misma (un proceso cada 90 s, con
-  cerrojo), así que sigue funcionando más lenta y no rota.
+  cada pasada (su JSON trae `public_counters_published: 5`), y el calentador
+  de abajo cada 5 min. Una pasada del selector dura **más de una hora**, así
+  que él solo no basta y hace tiempo que no basta.
+- **Calentador de la portada** (`atomicdb-snapshot.timer` →
+  `manage.py warm_public_snapshot`, cada 5 min): republica las **cinco
+  entradas compartidas** que lee la portada — los agregados del árbol, la
+  atribución de cierres, la actividad, el progreso de campañas y la flota —
+  fuera de la petición. Medirlas cuesta 23 s contra la base real (14,4 s el
+  barrido de `Position`; 6,8 s la atribución), y de ahí venían los 11-16 s
+  que veía la sonda externa. **Sólo calienta la capa compartida**: la entrada
+  de página de `/atomicdb/` varía por `Cookie` y el token CSRF es uno por
+  visitante, así que cada visitante tiene su propia clave de página y no hay
+  ninguna común que calentar; las de los usuarios con sesión, menos aún.
+  **Para apagarlo**: `systemctl disable --now atomicdb-snapshot.timer`. No es
+  una dependencia de nada — la portada se sigue sirviendo, porque una entrada
+  vencida se entrega en el acto y se renueva en un hilo de fondo
+  (§ `metrics.shared_snapshot`); lo único que se pierde al apagarlo es que la
+  cifra sea reciente. Para volver:
+  `systemctl enable --now atomicdb-snapshot.timer`.
 - **Palanca de emergencia**: `redis-cli -n 1 FLUSHDB`. Un `systemctl restart
   openbench` ya **no** vacía estas cachés — antes sí, porque vivían dentro
   de los workers.

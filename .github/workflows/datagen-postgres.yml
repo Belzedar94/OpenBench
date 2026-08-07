@@ -45,23 +45,29 @@ jobs:
       - run: python -c "import cpuinfo, psutil, requests"
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
-      # The onboarding suites assert the registered engines, books and the
-      # client pin. They are cheap and they are the ones that catch a config
-      # value drifting away from the tree, so they must not be optional.
-      - run: >-
-          python -m unittest -v
-          UnitTests.test_atomic_onboarding
-          UnitTests.test_bench
-          UnitTests.test_client_update
-          UnitTests.test_datagen_worker
-          UnitTests.test_genfens
-          UnitTests.test_horde_onboarding
-          UnitTests.test_horde_referee_artifacts
-          UnitTests.test_pgn_util
-          UnitTests.test_runner_startup
+      # Client tests moved to the client-unittests job: they were listed after
+      # the Django suites here, so a red Django run meant they never executed.
       - run: python manage.py test atomicdb --verbosity 2
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py check
+
+  # The client half of the repo, on its own job. Two reasons it is not a step
+  # in datagen-postgres: it needs neither PostgreSQL nor Django, and sharing a
+  # job with the server suites meant a failure there hid whether the client
+  # tests even ran. Discovery rather than a hand-listed module, so every
+  # test_*.py in UnitTests/ is covered and a new file does not have to be
+  # remembered here.
+  client-unittests:
+    name: Client UnitTests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r Client/requirements.txt
+      - run: python -m unittest discover -s UnitTests -t UnitTests -v
 
   atomicdb-split-sqlite:
     name: AtomicDB staged SQLite split
