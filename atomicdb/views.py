@@ -550,13 +550,11 @@ def api_lease(request):
             # queda de desempate estable, que es lo que hace que dentro de una
             # sola cuenta el orden siga siendo el de llegada.
             #
-            # POR QUE VA DESPUES DE ``-queue_rank`` Y NO ANTES.  Los tres
-            # escalones de arriba no se tocan, y el cuarto tampoco: dentro de
-            # la banda USER ``queue_rank`` vale 0.0 en todas las filas, asi
-            # que ahi el sitio da igual; fuera de ella es la prioridad de
-            # POSICION que calcula el selector, y colar el reparto por delante
-            # se la comeria.  Aqui abajo no puede desordenar AUTO ni FILL:
-            # para ellos la clave vale cero.
+            # LOS TRES ESCALONES DE ARRIBA NO SE TOCAN, y la prioridad de
+            # posicion tampoco pierde nada: fuera de la banda USER la clave
+            # del reparto vale cero en todas las filas, asi que dentro de
+            # AUTO y de FILL sigue mandando ``-queue_rank`` y este escalon no
+            # tiene ni voz.  Donde reparte es donde se pidio que repartiese.
             #
             # DOS PASOS, Y NO POR GUSTO.  PostgreSQL rechaza ``FOR UPDATE``
             # junto a una funcion de ventana ("FOR UPDATE is not allowed with
