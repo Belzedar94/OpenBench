@@ -43,7 +43,7 @@ class AtomicOnboardingTests(unittest.TestCase):
     def test_engines_and_books_are_registered(self):
         self.assertEqual(
             self.general["client_repo_ref"],
-            "3b711d64652f518c4a29ca6506c068173465e903",
+            "2e48cf0a0a9a2b056be12aa395e56fb1e0e0728c",
         )
         self.assertIn("Atomic-Stockfish", self.general["engines"])
         self.assertIn("Fairy-Stockfish-Atomic-Baseline", self.general["engines"])
