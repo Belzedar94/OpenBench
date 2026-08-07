@@ -39,8 +39,8 @@
         "python3": "3.12.13-r0",
         "samurai": "1.2-r7"
       },
-      "expected_referee_bytes": null,
-      "expected_referee_sha256": null
+      "expected_referee_bytes": 7649848,
+      "expected_referee_sha256": "38F757CE9A735189E89305E5590320D0AE161C74092D1851E2049FFF212C4485"
     },
     "windows": {
       "lock_file": "windows-toolchain-lock.json",
