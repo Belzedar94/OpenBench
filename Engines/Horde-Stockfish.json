@@ -1,14 +1,15 @@
 {
     "onboarding_ready": true,
-    "private": true,
+    "private": false,
     "nps": 1488566,
     "source": "https://github.com/Belzedar94/Horde-Stockfish",
     "variant_contract": "LICHESS_HORDE_V1",
 
     "build": {
+        "path": "src",
+        "compilers": ["g++"],
         "cpuflags": [],
-        "systems": ["Windows", "Linux"],
-        "artifact_roles": ["play", "datagen"]
+        "systems": ["Windows", "Linux"]
     },
 
     "test_presets": {

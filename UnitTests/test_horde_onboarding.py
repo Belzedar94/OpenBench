@@ -66,17 +66,16 @@ class HordeOnboardingTests(unittest.TestCase):
         self.assertEqual(len(lines), 2486)
         self.assertEqual(len(set(lines)), 1431)
 
-    def test_private_engine_contracts_are_native_and_role_separated(self):
-        self.assertTrue(self.engine['private'])
+    def test_engine_contracts_are_native_and_role_separated(self):
+        self.assertFalse(self.engine['private'])
         self.assertTrue(self.baseline['private'])
         self.assertEqual(self.engine['variant_contract'], 'LICHESS_HORDE_V1')
         self.assertEqual(self.baseline['variant_contract'], 'LICHESS_HORDE_V1')
         self.assertEqual(self.book['variant_contract'], 'LICHESS_HORDE_V1')
         self.assertEqual(self.engine['build']['cpuflags'], [])
         self.assertEqual(self.baseline['build']['cpuflags'], [])
-        self.assertEqual(
-            self.engine['build']['artifact_roles'], ['play', 'datagen']
-        )
+        self.assertEqual(self.engine['build']['path'], 'src')
+        self.assertEqual(self.engine['build']['compilers'], ['g++'])
         self.assertEqual(
             self.baseline['build']['artifact_roles'], ['play']
         )
