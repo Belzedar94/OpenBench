@@ -69,6 +69,46 @@ jobs:
       - run: pip install -r Client/requirements.txt
       - run: python -m unittest discover -s UnitTests -t UnitTests -v
 
+  # Workers do not run the Client/ in this tree: they download the commit named
+  # by client_repo_ref and run that one. Whenever the two disagree, the repo
+  # says one thing and the fleet does another -- which is how a memory cap
+  # lived only on an unmerged branch, and how a Horde activation nearly shipped
+  # engines whose referee the pinned client did not carry.
+  #
+  # The invariant is tree equality, not commit identity: the pin may name any
+  # commit, as long as its Client/ is byte-for-byte the Client/ being merged.
+  # A pull request that touches Client/ therefore has to move the pin to its
+  # own head, and that same pin keeps passing after the merge.
+  client-pin-matches-tree:
+    name: Client pin matches the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The pinned commit must carry this exact Client/
+        run: |
+          pin=$(python -c "import json; print(json.load(open('Config/config.json'))['client_repo_ref'])")
+          if ! git cat-file -e "$pin^{commit}" 2>/dev/null; then
+              echo "client_repo_ref $pin is not a commit in this repository." >&2
+              echo "Workers resolve it through the archive URL; an unreachable" >&2
+              echo "pin leaves the whole fleet unable to update." >&2
+              exit 1
+          fi
+          here=$(git rev-parse HEAD:Client)
+          there=$(git rev-parse "$pin:Client")
+          echo "pin      $pin"
+          echo "Client/  here=$here  pinned=$there"
+          if [ "$here" != "$there" ]; then
+              echo >&2
+              echo "The pinned client is not this client." >&2
+              git diff --stat "$pin" HEAD -- Client/ >&2
+              echo >&2
+              echo "Point client_repo_ref at a commit carrying this Client/" >&2
+              echo "(usually this branch's own head)." >&2
+              exit 1
+          fi
+
   atomicdb-split-sqlite:
     name: AtomicDB staged SQLite split
     runs-on: ubuntu-latest
