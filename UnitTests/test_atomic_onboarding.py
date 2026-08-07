@@ -41,10 +41,11 @@ class AtomicOnboardingTests(unittest.TestCase):
         self.syzygy_book = load_json("Books/ATOMIC_syzygy_6man.epd.json")
 
     def test_engines_and_books_are_registered(self):
-        self.assertEqual(
-            self.general["client_repo_ref"],
-            "d0f391b3bf6f465c218156e83702200427fd448c",
-        )
+        # ``Config/config.json`` is the only source of truth for the client
+        # pin. Asserting a literal here duplicated the value in three places
+        # and drifted every time one of them moved, so only the *shape* is
+        # checked: an immutable 40-digit commit, never a branch name.
+        self.assertRegex(self.general["client_repo_ref"], r"^[0-9a-f]{40}$")
         self.assertIn("Atomic-Stockfish", self.general["engines"])
         self.assertIn("Fairy-Stockfish-Atomic-Baseline", self.general["engines"])
         self.assertIn("ATOMIC_openings.epd", self.general["books"])
