@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -50,7 +51,7 @@ class ScriptedEngine:
         )
         self.searches = iter(searches)
 
-    def search(self, _position, _go, _budget, _grace):
+    def search(self, _position, _go, _budget, _grace, *_strict):
         return next(self.searches)
 
 
@@ -242,6 +243,224 @@ class AliceOnboardingTests(unittest.TestCase):
             pgn = path.read_text(encoding="ascii")
         self.assertIn('[ShadowAdjudication "0-1 at ply 1 by resign"]', pgn)
         self.assertIn('[ShadowInversion "true"]', pgn)
+
+    def acceptance_args(self, directory):
+        return [
+            "--acceptance-mode",
+            "-repeat",
+            "-variant", "alice",
+            "-concurrency", "1",
+            "-games", "2",
+            "-engine", "cmd=dev", "name=Alice-dev", "proto=uci",
+            "tc=2+0.02", "timemargin=0", "option.Threads=1",
+            "option.Hash=512",
+            "-engine", "cmd=base", "name=Alice-base", "proto=uci",
+            "tc=2+0.02", "timemargin=0", "option.Threads=1",
+            "option.Hash=512",
+            "-openings", "file=alice.epd", "format=epd",
+            "-pgnout", str(Path(directory) / "games.pgn"),
+            "--result-jsonl", str(Path(directory) / "pair.jsonl"),
+            "--pair-ordinal", "17",
+        ]
+
+    def test_acceptance_cli_is_exact_and_rejects_policy_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = uci_pair_runner.parse_cli(self.acceptance_args(directory))
+            self.assertTrue(cfg.acceptance_mode)
+            self.assertEqual(cfg.variant, "alice")
+            self.assertEqual(cfg.games, 2)
+            self.assertEqual(cfg.concurrency, 1)
+            self.assertEqual(cfg.pair_ordinal, 17)
+            for spec in cfg.specs:
+                self.assertEqual(spec.options["Threads"], "1")
+                self.assertEqual(spec.options["Hash"], "512")
+                self.assertNotIn("UCI_Variant", spec.options)
+
+            invalid_suffixes = [
+                ["--unknown-setting", "value"],
+                ["-resign", "movecount=4", "score=800"],
+                ["--stall-draw-cp", "800"],
+            ]
+            for suffix in invalid_suffixes:
+                with self.subTest(suffix=suffix), self.assertRaises(SystemExit):
+                    uci_pair_runner.parse_cli(
+                        self.acceptance_args(directory) + suffix
+                    )
+
+    def test_acceptance_terminal_record_is_authoritative(self):
+        white = ScriptedEngine("Alice-dev", [
+            (
+                "(none)",
+                {
+                    "cp": -uci_pair_runner.MATE_ISH,
+                    "raw_mate": -1,
+                    "depth": 1,
+                    "seldepth": 1,
+                    "nodes": 1,
+                    "terminal": {"result": "0-1", "reason": "checkmate"},
+                },
+                1.0,
+            ),
+        ])
+        black = ScriptedEngine("Alice-base", [])
+        cfg = SimpleNamespace(
+            acceptance_mode=True,
+            max_plies=8,
+            fixed_budget_s=1.0,
+            stall_grace_s=1.0,
+            stall_draw_cp=800,
+            resign=None,
+            draw=None,
+            adj_cp=0,
+            adj_plies=4,
+            shadow_adjudication=False,
+        )
+        outcome = uci_pair_runner.play_game(
+            white,
+            black,
+            "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+            cfg,
+        )
+        self.assertEqual(outcome.result, "0-1")
+        self.assertEqual(outcome.outcome_class, "SCORABLE_NATURAL")
+        self.assertEqual(outcome.reason, "Black mates")
+
+    def test_acceptance_ambiguous_terminal_is_not_scorable(self):
+        white = ScriptedEngine("Alice-dev", [
+            (
+                "(none)",
+                {
+                    "cp": 0,
+                    "raw_mate": None,
+                    "depth": 1,
+                    "seldepth": 1,
+                    "nodes": 1,
+                    "terminal": None,
+                },
+                1.0,
+            ),
+        ])
+        black = ScriptedEngine("Alice-base", [])
+        cfg = SimpleNamespace(
+            acceptance_mode=True,
+            max_plies=8,
+            fixed_budget_s=1.0,
+            stall_grace_s=1.0,
+            stall_draw_cp=800,
+            resign=None,
+            draw=None,
+            adj_cp=0,
+            adj_plies=4,
+            shadow_adjudication=False,
+        )
+        outcome = uci_pair_runner.play_game(
+            white,
+            black,
+            "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+            cfg,
+        )
+        self.assertEqual(outcome.outcome_class, "PROTOCOL_ABORT")
+        self.assertEqual(outcome.failure_code, "missing-terminal-record")
+
+    def test_alice_shadow_audit_uses_the_strict_terminal_protocol(self):
+        white = ScriptedEngine("Alice-dev", [
+            (
+                "(none)",
+                {
+                    "cp": 0,
+                    "raw_mate": None,
+                    "depth": 1,
+                    "seldepth": 1,
+                    "nodes": 1,
+                    "terminal": None,
+                },
+                1.0,
+            ),
+        ])
+        black = ScriptedEngine("Alice-base", [])
+        cfg = SimpleNamespace(
+            acceptance_mode=False,
+            variant="alice",
+            max_plies=8,
+            fixed_budget_s=1.0,
+            stall_grace_s=1.0,
+            stall_draw_cp=800,
+            resign=None,
+            draw=None,
+            adj_cp=0,
+            adj_plies=4,
+            shadow_adjudication=True,
+        )
+        outcome = uci_pair_runner.play_game(
+            white,
+            black,
+            "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+            cfg,
+        )
+        self.assertEqual(outcome.outcome_class, "PROTOCOL_ABORT")
+        self.assertEqual(
+            uci_pair_runner.shadow_audit_failure(outcome),
+            "PROTOCOL_ABORT missing-terminal-record",
+        )
+
+    def test_shadow_inversion_or_abort_invalidates_the_pair(self):
+        clean = uci_pair_runner.Outcome("1/2-1/2", "Draw by rule")
+        self.assertIsNone(uci_pair_runner.shadow_audit_failure(clean))
+        clean.shadow_inversion = True
+        self.assertEqual(
+            uci_pair_runner.shadow_audit_failure(clean),
+            "SHADOW_INVERSION shadow-inversion",
+        )
+        failed = uci_pair_runner.Outcome("0-1", "White disconnects")
+        failed.outcome_class = "OPERATIONAL_ABORT"
+        failed.failure_code = "engine-died"
+        self.assertEqual(
+            uci_pair_runner.shadow_audit_failure(failed),
+            "OPERATIONAL_ABORT engine-died",
+        )
+
+    def test_pgn_error_reports_the_machine_failure_class(self):
+        headers = [
+            '[OutcomeClass "PROTOCOL_ABORT"]',
+            '[FailureCode "missing-terminal-record"]',
+            '[Termination "abandoned"]',
+        ]
+        self.assertEqual(
+            worker.PGNHelper.get_error_reason(headers),
+            "Alice PROTOCOL_ABORT: missing-terminal-record",
+        )
+
+    def test_machine_pair_excludes_an_anomalous_complete_pair(self):
+        natural = uci_pair_runner.Outcome("1/2-1/2", "Draw by rule")
+        natural.root_fen = "8/8/8/8/8/8/4k3/4K3 w - - 0 1"
+        failed = uci_pair_runner.Outcome(
+            "0-1", "White disconnects", "abandoned", restart=True
+        )
+        failed.root_fen = natural.root_fen
+        failed.outcome_class = "OPERATIONAL_ABORT"
+        failed.failure_code = "engine-died"
+        failed.failure_stage = "search"
+        games = {
+            1: {"game_no": 1, "dev_score": 0, "outcome": failed},
+            2: {"game_no": 2, "dev_score": 1, "outcome": natural},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pair.jsonl"
+            path.touch()
+            uci_pair_runner.write_machine_pair(path, 23, games)
+            record = json.loads(path.read_text(encoding="ascii"))
+        evidence_sha = record.pop("evidence_sha256")
+        self.assertEqual(
+            evidence_sha,
+            hashlib.sha256(uci_pair_runner._canonical_json_bytes(record)).hexdigest(),
+        )
+        self.assertEqual(record["ordinal"], 23)
+        self.assertEqual(
+            record["game_classes"],
+            ["OPERATIONAL_ABORT", "SCORABLE_NATURAL"],
+        )
+        self.assertEqual(record["game_scores"], [None, 0.5])
+        self.assertNotEqual(record["game_scores"], [0.0, 0.5])
 
 
 if __name__ == "__main__":

@@ -980,6 +980,18 @@ class PGNHelper:
     @staticmethod
     def get_error_reason(sliced_headers):
 
+        outcome_class = PGNHelper.get_pgn_header(
+            sliced_headers, 'OutcomeClass'
+        )
+        if outcome_class:
+            failure_code = PGNHelper.get_pgn_header(
+                sliced_headers, 'FailureCode'
+            )
+            return 'Alice %s: %s' % (
+                outcome_class,
+                failure_code or 'unspecified',
+            )
+
         shadow_inversion = PGNHelper.get_pgn_header(
             sliced_headers, 'ShadowInversion'
         )
