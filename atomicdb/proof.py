@@ -120,6 +120,13 @@ SELECTED_CHILD_HYSTERESIS = 3
 PROOF_MAX_PLIES = 64
 PROOF_MAX_REVISITS = 2
 PROOF_MAX_NODES = 50_000
+# TOPE DEL PASEO QUE BUSCA LA REPETICION (§ _cycling_edges).  El mismo tope de
+# cordura que ``ingest.BACKED_CYCLE_MAX_PLIES`` y por la misma razon: una
+# espina mas larga que esto se deja pasar SIN reclamar ciclo, que es el error
+# seguro — equivocarse hacia "no hay ciclo" deja unos numeros que ordenan
+# peor, equivocarse hacia "hay ciclo" refutaria una arista sana.  No se
+# importa de ``ingest`` porque ``ingest`` importa este modulo.
+PROOF_CYCLE_MAX_PLIES = 32
 
 # Bandas de eval en perspectiva del ATACANTE: (umbral, peso pn, peso dn).
 # Monotonas por construccion — cuanto mejor va el atacante, mas barato parece
@@ -460,7 +467,196 @@ def sticky_index(best, held, numbers):
     return held
 
 
-def compute_numbers(campaign, position, children, child_nodes, previous=None):
+# ---------------- repeticion: la arista que vuelve a su propio nodo ---------
+#
+# EL MISMO DEFECTO QUE EL RESPALDO, EN LA OTRA COLUMNA (invariante 6 de
+# docs/value-semantics.md).  El grafo es un DAG con ciclos de verdad, y las
+# recurrencias pn/dn suman sobre TODAS las aristas: un dn puede salir de X,
+# dar la vuelta por la lanzadera y volver a entrar en la suma de X como si
+# fuera esfuerzo nuevo.  Como los ``ProofNode`` PERSISTEN entre pasadas, cada
+# refresco relee lo que la pasada anterior escribio y la realimentacion es un
+# trinquete multiplicativo: con dos caminos de reentrada el dn se DUPLICA por
+# pasada, y en unas decenas de pasadas esta clavado en ``PROOF_INFINITY``
+# (caso Eclipsia, 6-ago: seis nodos UNSOLVED con dn = 2^62 exacto y pn = 1,
+# un estado imposible — dn infinito significa probado, y probado es pn = 0).
+#
+# La regla: una arista cuyo VALOR vuelve al nodo en calculo se esta
+# justificando pasando por el.  Ese numero no dice nada sobre lo que cuesta
+# probar o refutar nada — es el eco del propio nodo — asi que la arista entra
+# con la INICIALIZACION DE HOJA de su hijo: la estimacion estatica de
+# siempre, la que se usa para un hijo que todavia no tiene fila de prueba.
+#
+# POR QUE NO ``(INF, 0)``, QUE ES LO QUE ESTO HACIA HASTA EL 6-ago POR LA
+# TARDE.  "Repeticion = tablas = proposicion refutada" es verdad sobre el
+# JUEGO y es lo que hacen los certificados (solve.py) y el respaldo
+# (_draw_cycling_children).  Pero aqui la adjudicacion se PERSISTIA en el
+# nodo, y eso rompe dos cosas a la vez:
+#
+#   * el invariante 6 en su propia letra: la repeticion vive en el espacio de
+#     CAMINOS, nunca en el nodo.  Un ``(INF, 0)`` guardado dice "este nodo
+#     esta refutado" cuando lo unico cierto es "este nodo, POR ESTE CAMINO,
+#     se repite";
+#   * la estabilidad: ``(INF, 0)`` destruye los valores por los que camina el
+#     propio detector.  Medido en vivo sobre el corredor de Eclipsia — cinco
+#     nodos oscilando entre ``(INF, 0)`` y ``(1, 392)`` en cada pasada, once
+#     escrituras por pasada y ``recascade_proof`` sin alcanzar nunca el punto
+#     fijo que es su criterio de parada.
+#
+# La inicializacion de hoja no tiene ninguno de los dos problemas: es
+# acotada (``PROOF_MAX_LEAF``), no depende de ningun numero del ciclo — asi
+# que la realimentacion se corta igual de limpiamente — y no colapsa el
+# nodo, asi que el detector sigue viendo el arbol que veia.  Afirma menos, y
+# afirmar poco es exactamente lo que puede hacer una estimacion de coste que
+# el propio modulo declara que no es fuente de verdad.
+#
+# POR DONDE SE CAMINA, y por que NO por ``selected_child``.  El primer
+# borrador seguia la espina de primarios, como hace el respaldo con
+# ``backed_move`` — y el respaldo puede, porque su negamax toma el valor de
+# UN hijo.  Las recurrencias de prueba SUMAN: la realimentacion fluye por
+# donde fluyen los numeros, no por donde apunta el primario, y la histeresis
+# puede dejar al primario clavado FUERA del ciclo mientras la suma sigue
+# dando la vuelta (medido en la fixture de test_proof_cycles: +48 de dn por
+# pasada con los primarios quietos).  Asi que el paseo sigue a los
+# PORTADORES del valor vigente: en un nodo AND el ``min`` de dn viene de su
+# argmin, y en un nodo OR la suma la domina su sumando mayor — y dualmente
+# para pn.  Ese es exactamente el camino por el que un numero puede volver a
+# entrar en si mismo, que es lo unico que este paseo pregunta.
+#
+# Los pn/dn no son fuente de verdad y esta regla tampoco: ordena mejor, no
+# prueba nada.  Un corte que no dispara deja numeros que ordenan peor; uno
+# que dispara de mas refutaria una arista sana, y por eso todas las paradas
+# dudosas — tope, hijo sin numeros, ciclo ajeno — paran SIN reclamar.
+
+
+class _CarrierCache:
+    """Lo que el paseo de portadores recuerda durante UNA pasada.
+
+    ``children`` son hechos del grafo por nodo visitado: a donde llevan sus
+    aristas, con status y fen del hijo.  ``numbers`` es el (pn, dn) VIGENTE
+    de cada ``ProofNode`` leido o escrito; el bucle de niveles llama a
+    ``wrote`` con cada fila que actualiza, para que un paseo posterior de la
+    misma pasada vea el numero nuevo y no el que acaba de morir.
+    """
+
+    __slots__ = ('children', 'numbers')
+
+    def __init__(self):
+        self.children = {}   # nodo -> ((child_id, status, fen), ...)
+        self.numbers = {}    # nodo -> (pn, dn) del ProofNode, o None
+
+    def wrote(self, key, pn, dn):
+        self.numbers[key] = (pn, dn)
+
+
+def _resolve_carrier_steps(campaign, cache, cursors):
+    """Dos consultas para los cursores del nivel que la cache no conoce."""
+    unknown = [node for node in cursors if node not in cache.children]
+    if not unknown:
+        return
+    by_node = {node: [] for node in unknown}
+    fresh = set()
+    for parent_id, child_id, status, fen in (
+            Edge.objects.filter(parent_id__in=unknown)
+            .order_by('id')
+            .values_list('parent_id', 'child_id', 'child__status',
+                         'child__fen')):
+        by_node[parent_id].append((child_id, status, fen))
+        if child_id not in cache.numbers:
+            fresh.add(child_id)
+    for node, rows in by_node.items():
+        cache.children[node] = tuple(rows)
+    if fresh:
+        found = {key: (pn, dn) for key, pn, dn in ProofNode.objects.filter(
+            campaign=campaign, position_id__in=fresh).values_list(
+            'position_id', 'pn', 'dn')}
+        for child_id in fresh:
+            cache.numbers.setdefault(child_id, found.get(child_id))
+
+
+def _carrier_next(goal, cache, node, fen, want_dn):
+    """El hijo que PORTA el valor de ``node``, o ``None`` si nadie lo porta.
+
+    Solo un hijo ABIERTO y con ``ProofNode`` puede portar realimentacion: un
+    cierre vale su verdad y una hoja sin fila vale su inicializacion, y ni la
+    una ni la otra dependen de nadie.  Empates: el primero en orden de
+    arista, el mismo desempate determinista del resto del modulo.
+    """
+    best_key, best_value = None, None
+    or_node = is_or_node(fen, goal)
+    for child_id, status, _child_fen in cache.children.get(node, ()):
+        if status != 'UNKNOWN':
+            continue
+        numbers = cache.numbers.get(child_id)
+        if numbers is None:
+            continue
+        value = numbers[1] if want_dn else numbers[0]
+        if best_value is None:
+            best_key, best_value = child_id, value
+            continue
+        if want_dn:
+            # dn: en OR es una suma (manda el sumando mayor), en AND un min.
+            better = value > best_value if or_node else value < best_value
+        else:
+            # pn: en OR es un min, en AND una suma (manda el sumando mayor).
+            better = value < best_value if or_node else value > best_value
+        if better:
+            best_key, best_value = child_id, value
+    return best_key
+
+
+def _cycling_edges(campaign, parents, children_by_parent, node_rows, cache):
+    """``{(padre, jugada)}`` cuyos valores vuelven al propio padre.
+
+    Dos paseos por arista — el portador de dn y el de pn — porque las dos
+    recurrencias realimentan por caminos duales; basta que uno vuelva.
+    Paradas, todas ellas "no hay ciclo": ningun hijo abierto con numeros que
+    portar, ciclo que se cierra sin pasar por el padre (problema de OTRO
+    padre, que lo vera cuando le toque) y el tope de plies.
+    """
+    walks = []
+    for parent_key in parents:
+        for move_uci, child_id, status, _eval_cp, fen in (
+                children_by_parent.get(parent_key) or ()):
+            if status != 'UNKNOWN':
+                continue      # bajo un cierre no hay valor prestado que rodar
+            if node_rows.get(child_id) is None \
+                    and cache.numbers.get(child_id) is None:
+                continue      # sin fila de prueba no hay numero que volver
+            for want_dn in (True, False):
+                walks.append([parent_key, move_uci, child_id, fen, want_dn,
+                              {child_id}])
+    cycling = set()
+    for _ in range(PROOF_CYCLE_MAX_PLIES):
+        if not walks:
+            break
+        _resolve_carrier_steps(campaign, cache,
+                               {walk[2] for walk in walks})
+        alive = []
+        for walk in walks:
+            parent_key, move0, node, fen, want_dn, seen = walk
+            if (parent_key, move0) in cycling:
+                continue      # el otro paseo de la arista ya la corto
+            below = _carrier_next(campaign.goal, cache, node, fen, want_dn)
+            if below is None:
+                continue
+            if below == parent_key:
+                cycling.add((parent_key, move0))
+                continue
+            if below in seen:
+                continue
+            step = next((row for row in cache.children.get(node, ())
+                         if row[0] == below), None)
+            if step is None:
+                continue
+            seen.add(below)
+            walk[2], walk[3] = below, step[2]
+            alive.append(walk)
+        walks = alive
+    return cycling
+
+
+def compute_numbers(campaign, position, children, child_nodes, previous=None,
+                    cycling=frozenset()):
     """(pn, dn, expanded_in_proof, selected_child) de un nodo.
 
     ``children`` es la lista de aristas materializadas; ``child_nodes`` el
@@ -473,6 +669,14 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
     AND no lo es: ahi el primario es la defensa mas dura de refutar, y
     sostenerla contra evidencia nueva retrasaria justo la refutacion que la
     prueba necesita.
+
+    ``cycling`` son las aristas de ESTE nodo cuyo valor vuelve a el
+    (§ ``_cycling_edges``): entran con la inicializacion de HOJA de su hijo
+    —  la estimacion estatica de siempre — en vez del numero que el ciclo se
+    inventa.  La histeresis no necesita caso especial: un primario que solo
+    era el mejor por el eco del ciclo deja de serlo en cuanto su pn pasa a
+    ser el de una hoja, y el retador lo destrona por la aritmetica de
+    siempre.
     """
     goal = campaign.goal
     exact = terminal_numbers(position.status, goal)
@@ -491,12 +695,30 @@ def compute_numbers(campaign, position, children, child_nodes, previous=None):
     numbers, moves = [], []
     for move_uci, child_id, status, eval_cp, fen in children:
         node = child_nodes.get(child_id)
-        if node is not None:
+        cycles = (position.key, move_uci) in cycling
+        if node is not None and not cycles:
             numbers.append((node.pn, node.dn))
         else:
-            numbers.append(leaf_numbers(
+            # Hoja: o el hijo no tiene fila de prueba todavia, o la tiene
+            # pero su numero es el eco de este mismo nodo (§ arriba).  En
+            # los dos casos la estimacion estatica es lo unico que se puede
+            # afirmar sin inventar.
+            pn, dn = leaf_numbers(
                 fen, status, eval_cp, goal,
-                annoyance=shallow_annoyance(fen, eval_cp)))
+                annoyance=shallow_annoyance(fen, eval_cp))
+            if cycles:
+                # Y una repeticion se COBRA lo que cuesta: repitiendo no se
+                # prueba nada, asi que probar POR AQUI es lo mas caro que
+                # puede ser una hoja.  Es una afirmacion sobre el
+                # PRESUPUESTO — que es lo unico que ``pn`` significa — y no
+                # sobre la verdad del nodo, que es lo que un ``INF`` diria.
+                # El tope de hoja lo mantiene acotado: sin esto el descenso
+                # se quedaba en el bucle en cuanto la eval del bucle era
+                # optimista, que es justo el caso de Eclipsia.  ``dn`` no se
+                # toca: refutar una linea que repite no es mas caro por
+                # repetir — basta una respuesta.
+                pn = PROOF_MAX_LEAF
+            numbers.append((pn, dn))
         moves.append(move_uci)
 
     pn, dn = internal_numbers(position.fen, goal, numbers)
@@ -535,6 +757,7 @@ def _refresh_campaign(campaign, seeds, max_plies):
     frontier = list(seeds)
     visits, processed, plies, written = {}, 0, 0, 0
     guard_reason = None
+    carriers = _CarrierCache()  # memoria del paseo de repeticion, por pasada
     while frontier and plies < max_plies:
         plies += 1
         positions = list(Position.objects.filter(key__in=frontier).only(
@@ -546,6 +769,13 @@ def _refresh_campaign(campaign, seeds, max_plies):
         child_keys = {child_id for rows in children.values()
                       for _, child_id, _, _, _ in rows}
         existing = _node_rows(campaign, set(keys) | child_keys)
+        # Antes de que nadie sume: la arista que se justifica pasando por su
+        # propio nodo entra a las recurrencias como REFUTADA, no con el
+        # numero del ciclo (§ _cycling_edges, invariante 6).  Las filas que ya
+        # estan en la mano siembran la cache: el paseo no vuelve a pedirlas.
+        for node_key, node in existing.items():
+            carriers.numbers.setdefault(node_key, (node.pn, node.dn))
+        cycling = _cycling_edges(campaign, keys, children, existing, carriers)
         create, update, propagate = [], [], []
         for row in positions:
             processed += 1
@@ -555,7 +785,9 @@ def _refresh_campaign(campaign, seeds, max_plies):
             node = existing.get(row.key)
             pn, dn, expanded, selected = compute_numbers(
                 campaign, row, children.get(row.key, ()), existing,
-                previous=None if node is None else node.selected_child)
+                previous=None if node is None else node.selected_child,
+                cycling=cycling)
+            carriers.wrote(row.key, pn, dn)    # la cache no se queda vieja
             if node is None:
                 create.append(ProofNode(
                     campaign=campaign, position_id=row.key, pn=pn, dn=dn,
@@ -1001,6 +1233,52 @@ def frontier_and_rows(campaign, limit=PROOF_FRONTIER_SCAN):
             if not is_or_node(row[1], campaign.goal)]
 
 
+def saturated_open_count(campaign=None, column=None):
+    """Nodos ABIERTOS con pn o dn saturados, contados aparte del frente.
+
+    El frente los excluye con razon — no hay esfuerzo que estimar en un
+    numero saturado — pero hasta el 6-ago los excluia EN SILENCIO, y 534
+    nodos con dn saturado desaparecieron de la mediana, del frente mas
+    demostrador y del brazo de reparacion de dn sin que ningun panel los
+    contara.  Este contador es ese "aparte".
+
+    NINGUNA SATURACION SUELTA SIGNIFICA AVERIA, y esto hay que leerlo antes
+    de poner una cifra en una portada.  Medido sobre la base viva el 6-ago,
+    despues del barrido de re-baseline:
+
+    * ``pn`` saturado (1.168 nodos) es corriente y honesto: dice "por aqui no
+      se prueba el objetivo", que es lo que vale un nodo con todas sus
+      continuaciones refutadas — incluida la refutacion POR REPETICION que
+      introduce el invariante 6.  Contarlo como averia seria llorar por la
+      regla nueva haciendo su trabajo.
+    * ``dn`` saturado (517 nodos) resulto ser, EN SU TOTALIDAD, la firma
+      legitima de un nodo PROBADO al que la cascada todavia le debe el
+      cierre: los 517 llevan ``pn = 0``, y 334 tienen un hijo WHITE_WIN
+      colgando, que por la recurrencia de un nodo OR da exactamente
+      ``(0, INF)``.  Publicar esa cifra como alarma seria publicar el
+      backlog de la cascada con otro nombre.
+    * ``impossible`` — ``dn`` saturado con ``pn`` FINITO y mayor que cero —
+      es el unico estado que las recurrencias sanas no pueden producir: dn
+      infinito significa probado y probado es pn = 0.  Es la firma exacta
+      del trinquete de Eclipsia (pn=1, dn=2^62) y es la que vigila la
+      portada.  Tras el barrido: CERO en toda la base.
+    """
+    rows = ProofNode.objects.filter(position__status='UNKNOWN')
+    if column == 'dn':
+        rows = rows.filter(dn__gte=PROOF_INFINITY)
+    elif column == 'pn':
+        rows = rows.filter(pn__gte=PROOF_INFINITY)
+    elif column == 'impossible':
+        rows = rows.filter(dn__gte=PROOF_INFINITY, pn__gt=0,
+                           pn__lt=PROOF_INFINITY)
+    else:
+        rows = rows.filter(
+            Q(pn__gte=PROOF_INFINITY) | Q(dn__gte=PROOF_INFINITY))
+    if campaign is not None:
+        rows = rows.filter(campaign=campaign)
+    return rows.count()
+
+
 def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
     """Salud del frente AND: cuantos son, su ``dn`` MEDIANO y cuantos finos.
 
@@ -1014,15 +1292,24 @@ def frontier_dn_stats(campaign, floor, limit=PROOF_FRONTIER_SCAN):
     ``floor`` es el suelo de reparacion vigente (``ingest.DN_REPAIR_FLOOR``);
     se pasa y no se importa para que la constante viva en UN solo sitio, que
     es donde esta el brazo que la usa.
+
+    ``saturated`` viaja con las tres cifras del frente porque es su
+    contrapartida (§ ``saturated_open_count``): los abiertos que el frente NO
+    mira, contados aparte para que no desaparezcan en silencio.  Es la cifra
+    IMPOSIBLE — dn saturado con pn finito — y no la saturacion a secas, que
+    esta dominada por cierres pendientes y refutaciones honestas.
     """
+    saturated = saturated_open_count(campaign, column='impossible')
     dns = sorted(row[3] for row in frontier_and_rows(campaign, limit=limit))
     if not dns:
-        return {'and_nodes': 0, 'dn_median': 0, 'thin': 0}
+        return {'and_nodes': 0, 'dn_median': 0, 'thin': 0,
+                'saturated': saturated}
     middle = len(dns) // 2
     median = (dns[middle] if len(dns) % 2
               else (dns[middle - 1] + dns[middle]) // 2)
     return {'and_nodes': len(dns), 'dn_median': int(median),
-            'thin': sum(1 for value in dns if value <= floor)}
+            'thin': sum(1 for value in dns if value <= floor),
+            'saturated': saturated}
 
 
 def frontier_dn_headline(floor):

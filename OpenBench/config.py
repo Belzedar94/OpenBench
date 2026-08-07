@@ -169,6 +169,8 @@ def verify_engine_basics(conf):
         and re.fullmatch(r'[A-Z0-9][A-Z0-9_]{0,63}', variant_contract)
     )
     assert conf.get('tablebase_family', 'standard') in ['standard', 'atomic']
+    assert type(conf.get('worker_max_concurrency', 0)) == int
+    assert 0 <= conf.get('worker_max_concurrency', 0) <= 1024
     assert type(conf.get('cutechess_max_concurrency', 0)) == int
     assert 0 <= conf.get('cutechess_max_concurrency', 0) <= 1024
     assert type(conf.get('cutechess_launch_stagger_ms', 0)) == int
