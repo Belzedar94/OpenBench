@@ -421,6 +421,7 @@ class AliceOnboardingTests(unittest.TestCase):
 
     def test_pgn_error_reports_the_machine_failure_class(self):
         headers = [
+            '[Variant "alice"]',
             '[OutcomeClass "PROTOCOL_ABORT"]',
             '[FailureCode "missing-terminal-record"]',
             '[Termination "abandoned"]',
@@ -428,6 +429,35 @@ class AliceOnboardingTests(unittest.TestCase):
         self.assertEqual(
             worker.PGNHelper.get_error_reason(headers),
             "Alice PROTOCOL_ABORT: missing-terminal-record",
+        )
+
+    def test_other_variants_keep_their_plain_termination_reasons(self):
+        # spell-chess shares the pair runner, so an engine that dies also
+        # produces an OperationalAbort outcome and these headers. Its error
+        # reports must stay exactly what the server has always received.
+        for termination, expected in [
+            ("abandoned", "Disconnect"),
+            ("stalled connection", "Stalled"),
+            ("illegal move", "Illegal Move"),
+        ]:
+            headers = [
+                '[Variant "spell-chess"]',
+                '[OutcomeClass "OPERATIONAL_ABORT"]',
+                '[FailureCode "engine-died"]',
+                '[Termination "%s"]' % termination,
+            ]
+            self.assertEqual(
+                worker.PGNHelper.get_error_reason(headers), expected
+            )
+
+    def test_other_variants_ignore_a_shadow_inversion_header(self):
+        headers = [
+            '[Variant "spell-chess"]',
+            '[ShadowInversion "true"]',
+            '[Termination "abandoned"]',
+        ]
+        self.assertEqual(
+            worker.PGNHelper.get_error_reason(headers), "Disconnect"
         )
 
     def test_machine_pair_excludes_an_anomalous_complete_pair(self):

@@ -980,24 +980,33 @@ class PGNHelper:
     @staticmethod
     def get_error_reason(sliced_headers):
 
-        outcome_class = PGNHelper.get_pgn_header(
-            sliced_headers, 'OutcomeClass'
-        )
-        if outcome_class:
-            failure_code = PGNHelper.get_pgn_header(
-                sliced_headers, 'FailureCode'
+        # Only Alice games carry audit evidence. Every variant shares the
+        # pair runner, so a spell-chess engine that dies or stalls also
+        # reaches an OperationalAbort outcome and writes these headers.
+        # Reading them unconditionally would rename long-standing Spell
+        # crash reports, so gate on the variant the runner recorded.
+        variant = PGNHelper.get_pgn_header(sliced_headers, 'Variant')
+
+        if variant == 'alice':
+
+            outcome_class = PGNHelper.get_pgn_header(
+                sliced_headers, 'OutcomeClass'
             )
-            return 'Alice %s: %s' % (
-                outcome_class,
-                failure_code or 'unspecified',
+            if outcome_class:
+                failure_code = PGNHelper.get_pgn_header(
+                    sliced_headers, 'FailureCode'
+                )
+                return 'Alice %s: %s' % (
+                    outcome_class,
+                    failure_code or 'unspecified',
+                )
+
+            shadow_inversion = PGNHelper.get_pgn_header(
+                sliced_headers, 'ShadowInversion'
             )
 
-        shadow_inversion = PGNHelper.get_pgn_header(
-            sliced_headers, 'ShadowInversion'
-        )
-
-        if shadow_inversion == 'true':
-            return 'Shadow Adjudication Inversion'
+            if shadow_inversion == 'true':
+                return 'Shadow Adjudication Inversion'
 
         reason = PGNHelper.get_pgn_header(sliced_headers, 'Termination')
 

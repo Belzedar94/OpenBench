@@ -587,10 +587,22 @@ class AtomicSyzygyConfigurationTests(unittest.TestCase):
     def test_shadow_inversion_is_reported_as_an_audit_error(self):
         self.assertEqual(
             worker.PGNHelper.get_error_reason([
+                '[Variant "alice"]',
                 '[ShadowAdjudication "0-1 at ply 8 by resign"]',
                 '[ShadowInversion "true"]',
             ]),
             'Shadow Adjudication Inversion',
+        )
+
+    def test_audit_evidence_never_relabels_another_variant(self):
+        self.assertEqual(
+            worker.PGNHelper.get_error_reason([
+                '[Variant "spell-chess"]',
+                '[OutcomeClass "OPERATIONAL_ABORT"]',
+                '[FailureCode "engine-stalled"]',
+                '[Termination "stalled connection"]',
+            ]),
+            'Stalled',
         )
 
 
@@ -628,6 +640,16 @@ class AtomicConcurrencyDistributionTests(unittest.TestCase):
             get_workload, 'OPENBENCH_CONFIG', configured
         ):
             return get_workload.game_distribution(test, machine)
+
+    def test_an_unregistered_engine_still_distributes(self):
+        # getWorkload serves every machine, so an engine missing from
+        # config.json must not raise and take the whole fleet's work with it.
+        distribution = self.distribution('Retired-Engine', 'Spell-Stockfish')
+        self.assertEqual(
+            distribution['cutechess-count']
+            * distribution['concurrency-per'],
+            24,
+        )
 
     def test_atomic_concurrency_is_split_without_losing_threads_or_games(self):
         distribution = self.distribution(
