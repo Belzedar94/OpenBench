@@ -9,8 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 HORDE_ENGINE = 'Horde-Stockfish'
 HORDE_BASELINE = 'Fairy-Stockfish-Hordetest-Baseline'
 HORDE_BOOK = 'HORDE_openings.epd'
-BASELINE_REF = '0b064616041012eb9a708989d3b6b0a165d5538a'
-DATAGEN_REF = '212b67e7c5600b4067bfa9314f6c519a5ac4607d'
+PLAY_REF = 'bce34feb0602c2640a8659a34f954fbee8f1a9e1'
+BASELINE_REF = 'fd044be239564a489056e358d157a4064f0b01a0'
+DATAGEN_REF = 'f176a518166b7c27632a211127148c8e361b3844'
 BOOK_ARTIFACT_REF = 'cd0560081f6433b58a8aa8d0c3fd4a91e969f1dd'
 BOOK_SHA256 = '93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958'
 
@@ -34,12 +35,12 @@ class HordeOnboardingTests(unittest.TestCase):
         self.assertEqual(self.general['client_version'], 44)
         self.assertRegex(self.general['client_repo_ref'], r'^[0-9a-f]{40}$')
 
-    def test_incomplete_scaffolds_are_not_schedulable(self):
-        self.assertNotIn(HORDE_ENGINE, self.general['engines'])
-        self.assertNotIn(HORDE_BASELINE, self.general['engines'])
-        self.assertNotIn(HORDE_BOOK, self.general['books'])
-        self.assertFalse(self.engine['onboarding_ready'])
-        self.assertFalse(self.baseline['onboarding_ready'])
+    def test_completed_onboarding_is_schedulable(self):
+        self.assertIn(HORDE_ENGINE, self.general['engines'])
+        self.assertIn(HORDE_BASELINE, self.general['engines'])
+        self.assertIn(HORDE_BOOK, self.general['books'])
+        self.assertTrue(self.engine['onboarding_ready'])
+        self.assertTrue(self.baseline['onboarding_ready'])
         self.assertTrue(self.book['onboarding_ready'])
         self.assertEqual(self.book['sha'], BOOK_SHA256)
         self.assertEqual(self.book['raw_sha'], BOOK_SHA256)
@@ -87,6 +88,17 @@ class HordeOnboardingTests(unittest.TestCase):
             self.baseline['test_presets']['default']['base_branch'],
             BASELINE_REF,
         )
+        self.assertEqual(
+            self.engine['test_presets']['default']['base_branch'], PLAY_REF
+        )
+        self.assertEqual(
+            self.engine['test_presets']['default']['both_bench'], 315576
+        )
+        self.assertEqual(
+            self.baseline['test_presets']['default']['both_bench'], 130284
+        )
+        self.assertEqual(self.engine['nps'], 1488566)
+        self.assertEqual(self.baseline['nps'], 527465)
 
     def test_foundational_presets_are_fixed_games_at_three_time_controls(self):
         expected = {
@@ -168,11 +180,11 @@ class HordeOnboardingTests(unittest.TestCase):
     def test_bundled_cutechess_has_native_horde_on_both_platforms(self):
         expected = {
             'cutechess-ob.exe': (
-                '4ea492b8e6459e3150f41b5d5a6e9cf472b3d58556d9807373ab85812fcda21f',
+                '1c0bbab69e15a277c0b68bf032848b513f706749999cd5f6d09a1fb60f05b8a6',
                 b'MZ',
             ),
             'cutechess-ob': (
-                'dd79fdb0905961b901fb6b2302c9387fae0f67df77278e494e079f3f9c02e825',
+                '38f757ce9a735189e89305e5590320d0ae161c74092d1851e2049fff212c4485',
                 b'\x7fELF',
             ),
         }
