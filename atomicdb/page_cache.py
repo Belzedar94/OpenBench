@@ -46,7 +46,6 @@ entrada de la que sale varia por cookie igual que antes.
 
 import io
 import logging
-import threading
 import time
 from functools import wraps
 from importlib import import_module
@@ -55,10 +54,11 @@ from django.conf import settings
 from django.contrib.auth import get_user
 from django.core.cache import cache
 from django.core.handlers.wsgi import WSGIRequest
-from django.db import connections
 from django.utils.cache import (get_cache_key, has_vary_header,
                                 learn_cache_key, patch_response_headers)
 from django.utils.functional import SimpleLazyObject
+
+from . import revalidate
 
 logger = logging.getLogger(__name__)
 
@@ -106,31 +106,12 @@ def _now():
     return time.time()
 
 
-def _executor(work, name):
-    """Lanza el refresco y CIERRA LO QUE ABRA.
-
-    El hilo tiene sus propias conexiones (Django las guarda por hilo) y nadie
-    va a cerrarlas por el: sin esto, cada refresco dejaria una conexion de
-    Postgres colgando hasta que el proceso muriera.  Va en el ejecutor y no
-    en el trabajo porque es responsabilidad de QUIEN abre el hilo — los tests
-    sustituyen el ejecutor y corren el trabajo en el hilo de la prueba, donde
-    cerrar la conexion seria cerrar la transaccion del test.
-    """
-    def run():
-        try:
-            work()
-        except Exception:               # noqa: BLE001 - ver ``_refresh``
-            logger.exception('atomicdb: page refresh thread died')
-        finally:
-            connections.close_all()
-
-    thread = threading.Thread(target=run, name=name, daemon=True)
-    thread.start()
-    # Se devuelve para que la prueba de integracion pueda ESPERARLO.  Nadie
-    # en la ruta de la peticion lo mira: esperarlo aqui seria deshacer el
-    # cambio entero.
-    return thread
-
+# El hilo que refresca y cierra las conexiones que abre vive en § revalidate:
+# la cache de linaje necesita EL MISMO hilo con la misma responsabilidad, y un
+# invariante que se puede violar en un sitio y no en el otro no es un
+# invariante.  El nombre local se conserva porque es el punto de sustitucion
+# de los tests de este modulo, y patchearlo aqui no debe tocar al de datos.
+_executor = revalidate.background
 
 # Punto de sustitucion de los tests: lo unico que separa "en segundo plano"
 # de "ahora mismo" es esta funcion.

@@ -27,7 +27,7 @@ from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
                live_request, logic, metrics, notifications, openings, proof,
-               solve, solve_estimate)
+               revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
@@ -94,24 +94,61 @@ LINEAGE_SEARCH_MAX_EDGE_ROWS = 4096
 # queries — recomputing a line to the root that had not changed since the
 # previous click and almost never does.
 #
-# So it is cached, and the TTL is the ONLY invalidation.  That is a choice,
-# not a shortcut: a new edge can only ever make a breadcrumb SHORTER, never
-# wrong, and nobody navigating a 96-ply line needs to see that improvement
-# within the same minute.  Anything stronger — cross-process events, an
-# invalidation protocol — is still infrastructure this does not need.  Two
-# minutes is the blast radius if this is ever wrong.
+# So it is cached, and age is the ONLY invalidation.  That is a choice, not a
+# shortcut: A NEW EDGE CAN ONLY EVER MAKE A BREADCRUMB SHORTER, NEVER WRONG.
+# The walk returns the minimum-ply line to the root; discovering a new
+# transposition can only lower that minimum, so an older entry shows a line
+# that is still legal, still reaches the same position, and is at worst
+# longer than the best one known right now.  Nobody navigating a 96-ply line
+# needs to see that improvement within the same minute.  Anything stronger —
+# cross-process events, an invalidation protocol — is still infrastructure
+# this does not need.
 #
 # WHAT CHANGED WITH THE SHARED CACHE.  The store is Redis now, so the five
 # gunicorn workers no longer keep five independent copies — they keep one,
 # which is the point, and it also means RESTARTING THE WEB NO LONGER CLEARS
 # IT.  The emergency lever moved with the store: ``redis-cli -n 1 FLUSHDB``,
 # or bumping the version below, which orphans every old entry at once.
-# Nothing else about the reasoning above changes, and the TTL stays where it
-# was: a longer one would be a separate decision with its own argument.
+#
+# WHAT CHANGED WITH STALE-WHILE-REVALIDATE, AND IT IS THE INVARIANT TO READ
+# CAREFULLY.  ``LINEAGE_CACHE_SECONDS`` IS NO LONGER THE TIMEOUT THAT REACHES
+# THE BACKEND.  It is the FRESHNESS THRESHOLD over a much longer hard life
+# (``LINEAGE_CACHE_TTL_SECONDS``, which is what Redis actually gets).
+# Crossing the threshold does NOT remove the entry: it keeps being served,
+# right away, and exactly ONE reader renews it in the background
+# (§ revalidate).  The reason is measured: with the timeout reaching the
+# backend, the entry evaporated and the next render paid the whole walk — 267
+# events of 10-26s in seven hours, p50 15,1s, p90 27,3s, with gaps of 86-111s
+# between them, which is precisely the rate at which this was expiring.  The
+# slow queries inside those spikes were the walk's ``atomicdb_edge`` joins.
+#
+# THE PRICE, SAID PLAINLY.  A breadcrumb could already be 120s old; now it
+# can be 120s PLUS however long the walk that renews it takes — sub-second
+# when the box is quiet, up to ~26s in the worst measured case, which is
+# exactly the case this fixes.  A few seconds on top of the two minutes that
+# were already being given away, and what is given away is not correctness:
+# by the argument above, an older line does not lie, it is at worst longer
+# than the best one currently known.
 LINEAGE_CACHE_SECONDS = 120
+# Cuanto puede tener una entrada y seguir sirviendose mientras se renueva.
+# Diez minutos es el tope de un fallo EN CADENA de refrescos, no la edad
+# esperada: la esperada es la de arriba, porque el refresco sale disparado en
+# el mismo instante en que se sirve lo viejo.  Pasado el tope se recalcula
+# sincrono, que es preferible a afirmar un linaje de hace media hora.
+LINEAGE_STALE_SECONDS = 600
+# Vida DURA de la entrada en Redis, muy por encima del tope de edad, para que
+# quien decida sea la guarda de arriba y no la expiracion del backend (mismo
+# reparto que § metrics: PUBLIC_FRESH_SECONDS contra PUBLIC_TTL_SECONDS).
+LINEAGE_CACHE_TTL_SECONDS = 3600
+# El cerrojo del refresco dura mas que el peor paseo medido (27,3 s en p90) y
+# mucho menos que el tope de edad: un worker que muera a mitad del refresco no
+# puede dejar una entrada sin quien la renueve mas de un minuto.
+LINEAGE_REFRESH_LOCK_SECONDS = 60
 # Bump when the cached payload shape changes, so a deploy cannot read an old
 # entry with new code.  ``0`` seconds above disables the cache outright.
-LINEAGE_CACHE_VERSION = 1
+# v2: las entradas van FECHADAS (``{'stored_at': ..., 'payload': ...}``), que
+# es lo que permite preguntarles la edad en vez de solo si siguen ahi.
+LINEAGE_CACHE_VERSION = 2
 # Las claves de los hijos SIN arista de una posicion (§ ``_child_keys``).  Es
 # lo unico cacheado de esta pagina que no puede quedarse obsoleto — el mapa
 # (FEN del padre, jugada) -> clave del hijo no depende de nada que cambie — asi
@@ -2213,42 +2250,43 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     rows, proof numbers — stays uncached and is read fresh on every render.
     Only the line BACK to the root, which is what actually costs the queries,
     is served from here.
+
+    AL VENCER LA FRESCURA NO SE PASEA EN LA PETICION.  Se sirve la entrada
+    vieja tal cual y el paseo se va a un hilo (§ revalidate): esta funcion es
+    la que estaba debajo de los picos de 10-26 s, porque el que llegaba justo
+    al caducar pagaba hasta 96 plies de joins de ``atomicdb_edge`` compitiendo
+    con los lotes de ``UPDATE ... reachable=true`` y con el autovacuum de la
+    misma tabla.  Ahora eso lo paga un hilo al que nadie espera.
     """
     keys = list(dict.fromkeys(key for key in keys if key))
     if not keys:
         return {}
     budget = min(max_plies, LINEAGE_SEARCH_MAX_PLIES)
-    ttl = LINEAGE_CACHE_SECONDS
-    if ttl <= 0:
+    if LINEAGE_CACHE_SECONDS <= 0:
         return _walk_lines_to_root(keys, max_plies=max_plies)
 
-    cache_keys = {key: _lineage_cache_key(key, budget) for key in keys}
-    stored = cache.get_many(list(cache_keys.values()))
-    resolved, misses = {}, []
-    for key in keys:
-        payload = stored.get(cache_keys[key])
-        if payload is None:
-            misses.append(key)
-        else:
-            resolved[key] = _lineage_from_payload(payload)
+    def compute(wanted):
+        # Las claves que el paseo NO devuelve son posiciones que AtomicDB
+        # todavia no tiene, y no guardarlas es deliberado: `goto` materializa
+        # posiciones, y un "no existe tal nodo" de dos minutos seria un
+        # explorador roto en el clic siguiente a sembrar una.
+        return {key: _lineage_payload(top, line)
+                for key, (top, line) in _walk_lines_to_root(
+                    wanted, max_plies=max_plies).items()}
 
-    if misses:
-        fresh = {}
-        for key, (top, line) in _walk_lines_to_root(
-                misses, max_plies=max_plies).items():
-            payload = _lineage_payload(top, line)
-            fresh[cache_keys[key]] = payload
-            # Round-trip even on the miss, so a hit and a miss are the same
-            # object shape.
-            resolved[key] = _lineage_from_payload(payload)
-        if fresh:
-            # Keys the walk did not return are positions AtomicDB does not
-            # have yet.  Not caching that absence is deliberate: `goto`
-            # materialises positions, and a two-minute "no such node" would
-            # be a broken explorer on the click right after seeding one.
-            cache.set_many(fresh, ttl)
+    payloads = revalidate.resolve_many(
+        {key: _lineage_cache_key(key, budget) for key in keys},
+        compute,
+        fresh_seconds=LINEAGE_CACHE_SECONDS,
+        stale_seconds=LINEAGE_STALE_SECONDS,
+        ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
+        lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
+        name='atomicdb-lineage-refresh')
 
-    return {key: resolved[key] for key in keys if key in resolved}
+    # Se reconstruye desde el payload TAMBIEN en el fallo, para que un acierto
+    # y un fallo sean la misma forma de objeto.
+    return {key: _lineage_from_payload(payloads[key])
+            for key in keys if key in payloads}
 
 
 def _line_labels_many(keys, preview_plies=10):
@@ -2292,9 +2330,13 @@ def _route_labels_many(pairs, preview_plies=10):
 
     El resultado es una funcion PURA de (ruta, destino, presupuesto) mas la
     pregunta "siguen materializados todos los prefijos", asi que se cachea con
-    el mismo TTL y el mismo argumento que el linaje (§ LINEAGE_CACHE_SECONDS):
-    el arbol solo crece, una ruta valida no deja de serlo, y nadie mirando una
-    cola necesita ver dos minutos antes que una ruta empezo a existir.
+    los mismos numeros y el mismo argumento que el linaje
+    (§ LINEAGE_CACHE_SECONDS): el arbol solo crece, una ruta valida no deja de
+    serlo, y nadie mirando una cola necesita ver dos minutos antes que una
+    ruta empezo a existir.  Y por lo mismo hereda el mismo trato al vencer:
+    la etiqueta vieja se sirve en el acto y se rehace por detras, porque
+    rejugar la linea con pyffish es la otra mitad de lo que hacia esperar a
+    quien llegaba con la entrada recien caducada.
 
     Lo que NO se cachea es el fallo.  Una ruta que hoy no llega puede llegar
     en cuanto ``goto`` materialice el prefijo que le falta, y guardar esa
@@ -2306,28 +2348,29 @@ def _route_labels_many(pairs, preview_plies=10):
               if route and key]
     if not wanted:
         return {}
-    ttl = LINEAGE_CACHE_SECONDS
-    if ttl <= 0:
+    if LINEAGE_CACHE_SECONDS <= 0:
         return {pair: labels for pair in wanted
                 if (labels := _walk_route_labels(*pair, preview_plies))}
 
-    cache_keys = {pair: _route_label_cache_key(*pair, preview_plies)
-                  for pair in wanted}
-    stored = cache.get_many(list(cache_keys.values()))
-    labels, fresh = {}, {}
-    for pair in wanted:
-        payload = stored.get(cache_keys[pair])
-        if payload is None:
-            computed = _walk_route_labels(*pair, preview_plies)
-            if computed is None:
-                continue
-            fresh[cache_keys[pair]] = list(computed)
-            labels[pair] = computed
-        else:
-            labels[pair] = tuple(payload)
-    if fresh:
-        cache.set_many(fresh, ttl)
-    return labels
+    def compute(needed):
+        computed = {}
+        for pair in needed:
+            labels = _walk_route_labels(*pair, preview_plies)
+            if labels is not None:
+                computed[pair] = list(labels)
+        return computed
+
+    payloads = revalidate.resolve_many(
+        {pair: _route_label_cache_key(*pair, preview_plies)
+         for pair in wanted},
+        compute,
+        fresh_seconds=LINEAGE_CACHE_SECONDS,
+        stale_seconds=LINEAGE_STALE_SECONDS,
+        ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
+        lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
+        name='atomicdb-routelabel-refresh')
+    return {pair: tuple(payloads[pair]) for pair in wanted
+            if pair in payloads}
 
 
 def _walk_route_labels(route, target_key, preview_plies):
