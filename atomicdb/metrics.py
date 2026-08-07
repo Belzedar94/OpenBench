@@ -9,11 +9,19 @@ from django.core.cache import cache
 from django.db.models import Count, Min, Q, Sum
 from django.utils import timezone
 
+from . import revalidate
 from .models import (AnalysisTask, Campaign, DBEvent, Position,
                      ProgressSnapshot, RequestLog, WorkerPing)
 
 
 logger = logging.getLogger(__name__)
+
+# El hilo que renueva y CIERRA LO QUE ABRE vive en § revalidate, que es de
+# donde lo saca tambien § page_cache: un invariante que se puede violar en un
+# sitio y no en el otro no es un invariante.  Es ademas el punto de
+# sustitucion de los tests — lo unico que separa "por detras" de "ahora
+# mismo" es esta funcion.
+REVALIDATE_EXECUTOR = revalidate.background
 
 LIVE_SECONDS = 180
 RATE_MINUTES = 10
@@ -193,8 +201,14 @@ PUBLIC_ACTIVITY_KEY = 'atomicdb.public-activity.v1'
 # ``nodes_invested`` de cada una.  Mismo trato que el resto: publico, derivado
 # y de nadie.
 CAMPAIGN_PROGRESS_KEY = 'atomicdb.campaign-progress.v1'
-# Por encima del paso del selector (60 s) a proposito: mientras ese servicio
-# viva, la entrada nunca llega a envejecer y ninguna visita recalcula nada.
+# Se escogio por encima del paso del selector (60 s) contando con que ese
+# servicio la renovara antes de envejecer.  YA NO LO HACE: una pasada del
+# selector dura mas de una hora (medido: 3.618 s y 4.724 s los dias 7-ago), y
+# publica una vez por pasada, no cada minuto.  El timer de § Documentation/
+# atomicdb-snapshot la republica cada 5 min, que es MAS que estos 90 s: la
+# entrada pasa vieja la mayor parte del ciclo.  Eso ya no le cuesta una
+# espera a nadie — vieja se sirve y se renueva por detras — pero el numero
+# se queda en 90 porque sigue siendo lo que decide cuando SE MIDE otra vez.
 PUBLIC_FRESH_SECONDS = 90
 # Vida DURA de la entrada.  Muy por encima de la frescura: entre las dos hay
 # una ventana en la que se sirve un valor viejo mientras alguien lo renueva,
@@ -212,10 +226,27 @@ def shared_snapshot(key, *, build, seed=None, required=False, now=None,
                     ttl=PUBLIC_TTL_SECONDS):
     """Una entrada compartida, cara de calcular y barata de leer.
 
-    Fresca: se sirve.  Vieja: se sirve igual y UN solo proceso la renueva
-    (``cache.add`` como cerrojo).  Ausente: la calcula quien coja el cerrojo,
-    y quien no lo coja se lleva ``seed()`` — un valor de respaldo honesto en
-    vez de una espera.
+    Fresca: se sirve.  Vieja: SE SIRVE IGUAL, en el acto, y UN solo proceso la
+    renueva POR DETRAS (``cache.add`` como cerrojo).  Ausente: la calcula
+    quien coja el cerrojo, y quien no lo coja se lleva ``seed()`` — un valor
+    de respaldo honesto en vez de una espera.
+
+    QUE CAMBIO Y POR QUE.  La renovacion de "vieja" la hacia el propio lector,
+    SINCRONA, y por eso la portada tenia dos precios muy distintos: 0,3 s
+    cuando la entrada estaba fresca y el barrido entero para el primero que
+    llegara pasados los 90 s.  Medido el 7-ago sobre la base real, ese barrido
+    son 14,4 s de ``_measure_tree_totals`` mas 6,8 s de ``_measure_attribution``
+    — 21 s que pagaba un visitante elegido por el azar de haber llegado el
+    primero.  Con trafico esporadico ese azar cae seguido: entre visita y
+    visita pasan mas de 90 s casi siempre.
+
+    Lo que NO cambia es cuan vieja puede ser la cifra que se sirve.  El tope
+    lo pone la vida dura (``ttl``), igual que antes, y ya era alcanzable: un
+    lector que se encontraba el cerrojo cogido se llevaba la entrada vieja
+    tal cual, sin mirar cuanto lo era.  Lo unico que cambia es QUIEN espera, y
+    la respuesta ahora es nadie.  Es el mismo trato que § page_cache le da a
+    la pagina, y § revalidate ya senalaba este modulo como el sitio donde
+    seguia pagandolo el que llegaba.
 
     ``required`` es la diferencia entre las dos cosas que se guardan aqui.
     Los contadores TIENEN que salir con un numero: si no hay entrada, ni
@@ -235,8 +266,15 @@ def shared_snapshot(key, *, build, seed=None, required=False, now=None,
     entry = cache.get(key)
     if entry is not None:
         age = (now - entry['measured_at']).total_seconds()
-        if age < fresh_seconds:
-            return entry
+        if age >= fresh_seconds:
+            # Vieja pero SERVIBLE: se sirve tal cual y se renueva por detras.
+            # Antes la renovaba el propio lector, sincrona, y por eso la
+            # portada tenia dos precios: 0,3 s casi siempre y el barrido
+            # entero para el primero que llegaba pasados los 90 s.
+            _revalidate(key, build=build, ttl=ttl)
+        return entry
+    # AUSENTE es otra cosa: no hay nada que servir, asi que aqui si se mide en
+    # la peticion.  Lo acota la vida dura (``ttl``), no esta guarda.
     if cache.add(key + '.lock', 1, PUBLIC_LOCK_SECONDS):
         try:
             return refresh_shared(key, build=build, now=now, ttl=ttl)
@@ -246,12 +284,35 @@ def shared_snapshot(key, *, build, seed=None, required=False, now=None,
             logger.exception('atomicdb: could not refresh %s', key)
         finally:
             cache.delete(key + '.lock')
-    if entry is not None:
-        return entry
     seeded = None if seed is None else seed(now)
     if seeded is not None or not required:
         return seeded
     return refresh_shared(key, build=build, now=now, ttl=ttl)
+
+
+def _revalidate(key, *, build, ttl):
+    """Pide el turno y, si lo consigue, deja la medida lanzada por detras.
+
+    Devuelve si la lanzo, que es lo unico que los tests necesitan saber para
+    comprobar que mide UNO.  El cerrojo es el de siempre y con la misma vida,
+    asi que un proceso que muera a media medida no bloquea mas de un ciclo.
+    """
+    lock = key + '.lock'
+    if not cache.add(lock, 1, PUBLIC_LOCK_SECONDS):
+        return False
+
+    def work():
+        try:
+            refresh_shared(key, build=build, ttl=ttl)
+        except Exception:                # noqa: BLE001
+            # Nadie la espera: se anota, se suelta el cerrojo y lo reintenta
+            # el siguiente lector que la encuentre vieja.
+            logger.exception('atomicdb: could not refresh %s', key)
+        finally:
+            cache.delete(lock)
+
+    REVALIDATE_EXECUTOR(work, 'atomicdb-snapshot-refresh')
+    return True
 
 
 def refresh_shared(key, *, build, now=None, ttl=PUBLIC_TTL_SECONDS):

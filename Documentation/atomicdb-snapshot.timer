@@ -1,0 +1,32 @@
+# Companero de atomicdb-snapshot.service.
+#
+# CADA CINCO MINUTOS, y no menos.  El ciclo del selector publicaba estas
+# cifras al inicio y al final de cada pasada, y cuando una pasada duraba
+# minutos eso bastaba; hoy dura mas de una hora (medido el 7-ago: 3.618 s y
+# 4.724 s), asi que entre publicacion y publicacion la entrada se quedaba
+# vieja o llegaba a caducar del todo.
+#
+# POR QUE NO MAS A MENUDO.  Seria lo natural si el objetivo fuera que la
+# entrada no envejezca NUNCA por encima de PUBLIC_FRESH_SECONDS (90 s): haria
+# falta un periodo por debajo de 60 s, porque la medida misma tarda 20-33 s.
+# Pero eso multiplica por cinco un barrido de 14,4 s sobre una tabla de 2,5 GB
+# que ya compite con las rafagas de ingesta y con su propio autovacuum — del
+# 7% del tiempo al 35% — y no hace falta: desde que § metrics.shared_snapshot
+# renueva por detras, que la entrada este vieja no le cuesta la espera a
+# nadie.  Este timer no esta para que la cifra nunca envejezca, sino para que
+# nunca llegue a FALTAR, que es el unico caso que todavia se mide en la
+# peticion.  Cinco minutos sobran para eso: la vida dura es de una hora.
+#
+# Sin Persistent=: una republicacion perdida por un reinicio no hay que
+# recuperarla, la siguiente llega en cinco minutos.
+
+[Unit]
+Description=AtomicDB portada snapshot cada 5 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
