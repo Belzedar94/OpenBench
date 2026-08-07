@@ -76,7 +76,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 41 # Client version to send to the Server
+CLIENT_VERSION   = 44 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -649,6 +649,7 @@ class ServerReporter:
 
 VARIANTS = {
     'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'ALICE'    : ('uci-pair-runner', 'alice'       ),
     'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
     'ATOMIC'   : ('cutechess'      , 'atomic'      ),
     'FRC'      : ('cutechess'      , 'fischerandom'),
@@ -661,6 +662,7 @@ VARIANTS = {
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
+    'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
 }
@@ -977,6 +979,34 @@ class PGNHelper:
 
     @staticmethod
     def get_error_reason(sliced_headers):
+
+        # Only Alice games carry audit evidence. Every variant shares the
+        # pair runner, so a spell-chess engine that dies or stalls also
+        # reaches an OperationalAbort outcome and writes these headers.
+        # Reading them unconditionally would rename long-standing Spell
+        # crash reports, so gate on the variant the runner recorded.
+        variant = PGNHelper.get_pgn_header(sliced_headers, 'Variant')
+
+        if variant == 'alice':
+
+            outcome_class = PGNHelper.get_pgn_header(
+                sliced_headers, 'OutcomeClass'
+            )
+            if outcome_class:
+                failure_code = PGNHelper.get_pgn_header(
+                    sliced_headers, 'FailureCode'
+                )
+                return 'Alice %s: %s' % (
+                    outcome_class,
+                    failure_code or 'unspecified',
+                )
+
+            shadow_inversion = PGNHelper.get_pgn_header(
+                sliced_headers, 'ShadowInversion'
+            )
+
+            if shadow_inversion == 'true':
+                return 'Shadow Adjudication Inversion'
 
         reason = PGNHelper.get_pgn_header(sliced_headers, 'Termination')
 
