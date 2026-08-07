@@ -9,7 +9,7 @@
 - **Crear tests**: vía web (login → Create Test / Create Tune / Create Datagen) o POST a `/scripts/` con action=CREATE_TEST como siempre, contra la URL nueva.
 - **Datagen distribuido**: contrato del motor y checklist de adopción por variante (Atomic incluido) en `openbench-spell/docs/datagen-mode.md`. El binario del motor debe exponer un comando datagen (referencia: src/datagen.cpp de Spell-Stockfish).
 - **Disco del server (40GB)**: los chunks de datagen completados se descargan a la torre y se PURGAN del server tras cada merge. Datasets archivados (p.ej. Atomic #68, 5GB) viven solo en la torre.
-- **Cambios en el server**: editar en el repo local openbench-spell (torre), probar en el clon dev (:8001), y desplegar delta por scp + `systemctl restart openbench` (llave SSH: scratchpad sesión 90548ab1; server /opt/openbench en 178.104.66.19).
+- **Cambios en el server**: editar en el repo local openbench-spell (torre), probar en el clon dev (:8001), y desplegar delta por scp + `systemctl restart openbench` (llave SSH: scratchpad sesión 90548ab1; server /opt/openbench en 167.233.35.111, `spellbench2`).
 
 ## Regla fail-closed: producción frente a local
 
@@ -243,7 +243,7 @@ de la petición podía publicar en ellas.
 
 - **Deploy de un comando**: `/opt/openbench` es clon git de
   github.com/Belzedar94/OpenBench (rama spell-runner). Publicar = merge a esa
-  rama en GitHub + `ssh root@178.104.66.19 /opt/openbench/deploy.sh`
+  rama en GitHub + `ssh root@167.233.35.111 /opt/openbench/deploy.sh`
   (fetch+reset+pip+migraciones verificadas+restart+health-check). En modo split
   el deploy autentica una DB ya inicializada antes de migrarla y vuelve a
   verificarla antes del restart; nunca crea el destino. Copias de los scripts
