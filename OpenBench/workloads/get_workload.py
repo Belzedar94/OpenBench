@@ -522,8 +522,12 @@ def game_distribution(test, machine):
     # An engine may deliberately use only part of a worker without changing
     # the worker's registered concurrency. This keeps low-priority or
     # validation workloads bounded while other engines retain full capacity.
+    # An engine that has been unregistered from config.json must not break
+    # distribution for the whole fleet: this runs inside the getWorkload
+    # request, so a KeyError here would fail every machine asking for work,
+    # not just the test that named the missing engine.
     configured_worker_limits = [
-        OPENBENCH_CONFIG['engines'][engine].get('worker_max_concurrency', 0)
+        OPENBENCH_CONFIG['engines'].get(engine, {}).get('worker_max_concurrency', 0)
         for engine in [test.dev_engine, test.base_engine]
     ]
     configured_worker_limits = [limit for limit in configured_worker_limits if limit]
@@ -555,7 +559,7 @@ def game_distribution(test, machine):
     copies_per_socket = 1
     if not is_multiple_spsa:
         configured_limits = [
-            OPENBENCH_CONFIG['engines'][engine].get(
+            OPENBENCH_CONFIG['engines'].get(engine, {}).get(
                 'cutechess_max_concurrency', 0
             )
             for engine in [test.dev_engine, test.base_engine]
