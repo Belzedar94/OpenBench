@@ -219,6 +219,55 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
    Usa cuatro tests `GAMES` fijos de 2.000 partidas (STC/LTC × NNUE on/off), según
    `docs/atomic-syzygy-openbench.md`; no usa SPRT ni un protocolo especial.
 
+## 5c. Qué hacer cuando master avanza (rebases y mantenimiento de la cola)
+
+Un SPRT mide **dev contra la base con la que se creó**, no contra el master de
+ahora. Cuando un parche pasa STC+LTC y entra en master, el resto de tests en
+vuelo NO quedan invalidados por ese mero hecho.
+
+1. **Rebasar SOLO si se solapan.** La pregunta es si el parche recién mergeado
+   y el test en vuelo tocan el mismo camino de código. Si son ortogonales
+   (uno va en la eval y otro en el árbitro de tablas, pongamos), el veredicto
+   del test sigue siendo válido y **se deja correr**: rebasar sin motivo tira
+   miles de partidas ya jugadas y no compra nada.
+2. **Si se solapan, se relanza contra el master nuevo.** Dos parches que
+   podan el mismo nodo pueden ganar por separado y no sumar nada juntos —
+   incluso restar. Ahí el resultado viejo no dice lo que hace falta saber, que
+   es si el segundo aporta ENCIMA del primero. Se para el test, se rebasa la
+   rama sobre master y se relanza desde cero.
+3. **El caso peor es el que ya pasó**: un test que pasó pero cuya rama es
+   anterior a un merge que se solapa. Antes de mergearlo, re-verificar contra
+   el master nuevo, al menos a LTC. Mergear dos ganancias medidas contra la
+   misma base vieja es la forma clásica de que el acumulado no aparezca luego
+   en el test de progresión.
+4. **Duda razonable = rebasar.** El coste de relanzar es partidas; el coste de
+   mergear una ganancia que no existe es un motor que no mejora y semanas
+   buscando por qué.
+
+**Checklist de merge** (lo que hay que mirar SIEMPRE, con los incidentes que
+lo motivaron):
+
+- **El `Bench: <N>` del commit tiene que ser el de verdad.** El servidor lo
+  compara y rechaza el test con `Wrong Bench` antes de jugar una sola partida.
+  Es un guarda, no una molestia: una firma mal declarada significa que el
+  binario probado no es el commit registrado.
+- **Fuera el andamiaje antes de mergear.** Los ganchos `TUNE` de una campaña
+  SPSA exponen cada parámetro como opción UCI, y la lista de opciones UCI es
+  API pública que ve cualquier GUI. En Atomic se colaron trece durante
+  diecinueve commits porque viajaron de polizón en un merge de linaje, y lo
+  reportó un usuario. Al retirarlos se CONGELAN los valores vivos: revertir el
+  commit de los ganchos habría devuelto valores ya tuneados y debilitado el
+  motor en silencio.
+- **Mergear un linaje no es mergear un diff mínimo.** Cuando se trae una rama
+  larga, comparar además la SUPERFICIE (salida de `uci`, flags de build,
+  ficheros nuevos), no solo que los tests pasen: los tests verdes no ven una
+  opción UCI que no debería existir.
+
+**Lo que NO se toca**: las prioridades de los tests las pone el propietario.
+Cortan (el nivel más alto se lleva el 100% de las máquinas que casan), así que
+subirse a 300 no es un ajuste fino, es decidir en qué trabaja la flota entera.
+Si el orden parece mal, se dice con los números delante y se espera.
+
 ## 6. Gotchas que ya mordieron (no reaprender por las malas)
 
 - **sha de libro en modo texto**, no binario (§4.5).
