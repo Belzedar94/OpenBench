@@ -207,6 +207,12 @@ def eligible_board(board: chess.variant.HordeBoard) -> bool:
     )
 
 
+def valid_candidate_count(count: int) -> bool:
+    """Candidate pools are bounded and exactly balanced by side to move."""
+
+    return 2 <= count <= 100_000 and count % 2 == 0
+
+
 def generate(
     engine: Path,
     network: Path,
@@ -384,8 +390,8 @@ def main() -> int:
     parser.add_argument("--prefix-share", type=float, default=0.01)
     args = parser.parse_args()
 
-    if not 1 <= args.count <= 100_000:
-        parser.error("--count must be between 1 and 100000")
+    if not valid_candidate_count(args.count):
+        parser.error("--count must be an even number between 2 and 100000")
     if not 1 <= args.nodes <= 10_000_000:
         parser.error("--nodes must be between 1 and 10000000")
     if not 2 <= args.multipv <= 16:

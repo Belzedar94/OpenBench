@@ -6,10 +6,17 @@ from Scripts.generate_horde_book_candidates import (
     draw_u64,
     parse_root_move,
     select_complete_frame,
+    valid_candidate_count,
 )
 
 
 class HordeBookCandidateTests(unittest.TestCase):
+    def test_candidate_count_requires_exact_side_balance(self):
+        for count in (2, 256, 100_000):
+            self.assertTrue(valid_candidate_count(count))
+        for count in (0, 1, 3, 100_001):
+            self.assertFalse(valid_candidate_count(count))
+
     def test_parses_cp_and_mate_root_moves(self):
         cp = parse_root_move(
             "info depth 8 seldepth 10 multipv 2 score cp -17 nodes 100 pv a2a4 a7a6"
