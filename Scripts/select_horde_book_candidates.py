@@ -229,7 +229,26 @@ def load_evaluation_screen(
         raise ValueError(f"{directory}: evaluation-screen trace record count mismatch")
 
     scores: dict[str, int] = {}
+    seen: set[str] = set()
     for record in records:
+        key = str(record["canonical_fen"])
+        if key in seen:
+            raise ValueError(f"{directory}: duplicate evaluation-screen position")
+        seen.add(key)
+
+        reason = str(record.get("reason", "accepted"))
+        if reason != "accepted":
+            if reason not in {
+                "incomplete_multipv",
+                "large_absolute_score",
+                "mate_score",
+                "wide_top_two_gap",
+            }:
+                raise ValueError(
+                    f"{directory}: unknown evaluation-screen rejection reason"
+                )
+            continue
+
         roots = record.get("roots")
         if not isinstance(roots, list) or not roots:
             raise ValueError(f"{directory}: evaluation-screen record has no root score")
@@ -242,9 +261,6 @@ def load_evaluation_screen(
             raise ValueError(f"{directory}: evaluation-screen record has invalid FEN")
         score = int(best["score"])
         white_score = score if fields[1] == "w" else -score
-        key = str(record["canonical_fen"])
-        if key in scores:
-            raise ValueError(f"{directory}: duplicate evaluation-screen position")
         scores[key] = white_score
 
     manifest["_manifest_path"] = str(manifest_path.resolve())
@@ -272,7 +288,9 @@ def generate(
 
     source_manifest, source_records = load_pool(source)
     gap_selected = select_by_gap(source_records, max_gap)
+    gap_filtered_out = len(source_records) - len(gap_selected)
     screen_manifest: dict[str, object] | None = None
+    evaluation_screen_filtered_out = 0
     if evaluation_screen is not None:
         screen_manifest, screen_scores = load_evaluation_screen(
             evaluation_screen,
@@ -284,7 +302,8 @@ def generate(
         for record in gap_selected:
             key = str(record["canonical_fen"])
             if key not in screen_scores:
-                raise ValueError(f"{evaluation_screen}: missing evaluation for {key}")
+                evaluation_screen_filtered_out += 1
+                continue
             scored = dict(record)
             scored["selection_white_eval"] = screen_scores[key]
             scored_records.append(scored)
@@ -374,7 +393,8 @@ def generate(
         },
         "counts": {
             "input_records": len(source_records),
-            "gap_filtered_out": len(source_records) - len(gap_selected),
+            "gap_filtered_out": gap_filtered_out,
+            "evaluation_screen_filtered_out": evaluation_screen_filtered_out,
             "white_eval_filtered_out": len(gap_selected) - len(eval_selected),
             "heldout_positions_excluded": excluded_count,
             "operational_duplicates_removed": duplicate_count,
