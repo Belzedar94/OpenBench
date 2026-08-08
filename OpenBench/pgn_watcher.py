@@ -28,22 +28,25 @@ import traceback
 from OpenBench.models import PGN
 
 from django.db import transaction
-from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 
 class PGNWatcher(threading.Thread):
 
     def process_pgn(self, pgn):
 
-        tar_path = FileSystemStorage('Media/PGNs').path('%d.pgn.tar' % (pgn.test_id))
-        pgn_path = FileSystemStorage().path(pgn.filename())
+        storage = FileSystemStorage()
+        tar_path = storage.path(os.path.join('PGNs', '%d.pgn.tar' % (pgn.test_id)))
+        pgn_path = storage.path(pgn.filename())
+
+        # Fail before creating an empty archive when the upload is missing.
+        if not os.path.isfile(pgn_path):
+            raise FileNotFoundError(pgn_path)
 
         with transaction.atomic():
 
             # Ensure Media/PGNs exists
             dir_name = os.path.dirname(tar_path)
-            if not os.path.exists(dir_name):
-                os.makedirs(dir_name)
+            os.makedirs(dir_name, exist_ok=True)
 
             # First PGN will create the initial .tar file
             mode = 'a' if os.path.exists(tar_path) else 'w'
@@ -51,9 +54,9 @@ class PGNWatcher(threading.Thread):
                 tar.add(pgn_path, arcname=pgn.filename())
 
             # Delete the raw .pgn.bz2 file, and don't process it again
-            FileSystemStorage().delete(pgn.filename())
+            storage.delete(pgn.filename())
             pgn.processed = True
-            pgn.save()
+            pgn.save(update_fields=['processed'])
 
     def run(self):
         while True:
