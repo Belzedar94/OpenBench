@@ -1,0 +1,90 @@
+{
+  "schema": "HORDE_OPENING_BOOK_V3_RECEIPT_V1",
+  "status": "openbench_strength_book",
+  "candidate": {
+    "records": 1500,
+    "white_to_move": 750,
+    "black_to_move": 750,
+    "prefix_families": 49,
+    "max_prefix_count": 75,
+    "payload_bytes": 117653,
+    "payload_sha256": "e09630e8a0a7d28028e2b02131e82a176dd2d8b18634d671f93e230f9d14f304",
+    "archive_member": "HORDE_openings_v3.epd",
+    "archive_bytes": 21568,
+    "archive_sha256": "050ce8da10907d59cee8fcc879f692e2a1a8daf66d85fc31d2ae68ac1f020b4c",
+    "trace_sha256": "c9856dca4c6d1c19c38a221e3e144cf5977798348e081919cdd707c4a092f019",
+    "selection_manifest_sha256": "188c2c14360986a917793303c9252004acdf29b50bf0d8df6850299a609230e7",
+    "source_manifest_sha256": "7292512a2c7dabfa1a7787b9cbf090015438f4c7e7a883a03c93d71b4fe5dd37",
+    "deep_screen_manifest_sha256": "9f21b3cfc65c7d7932771dde5b6519106b3f2b26e7aef17fdd4f14ae8307bbc0",
+    "engine_sha256": "f276f1abb1dfbb491986cc256d8476cc19eeff2145e472eba1543ca7cf5f7dd1",
+    "network_sha256": "b71108587968ac544eb2e62c2333feca880da5aca52866787f1402163444adf7"
+  },
+  "generation": {
+    "shards": 128,
+    "records_per_shard": 256,
+    "generated_records": 32768,
+    "merged_records": 17784,
+    "merged_white_to_move": 8892,
+    "merged_black_to_move": 8892,
+    "canonical_duplicates_removed": 14286,
+    "root_move_policy": "distinct",
+    "candidate_gap": 0,
+    "nodes": 1000,
+    "multipv": 4,
+    "min_ply": 8,
+    "max_ply": 24
+  },
+  "selection": {
+    "source_records": 17784,
+    "deep_nodes": 20000,
+    "deep_multipv": 2,
+    "min_white_eval_cp": 80,
+    "max_white_eval_cp": 200,
+    "max_records": 1500,
+    "heldout_positions_excluded": 81,
+    "white_eval_filtered_out": 10587,
+    "operational_duplicates_removed": 8,
+    "balance_trimmed": 730,
+    "size_trimmed": 4878,
+    "prefix_cap": 75,
+    "ordering": "sha256_stable_position_v1"
+  },
+  "audit": {
+    "settings": {
+      "variant": "horde",
+      "strong_nodes": 50000,
+      "weak_nodes": 40000,
+      "threads": 1,
+      "hash_mib": 32,
+      "seed": 20262201,
+      "valid_games": 80,
+      "valid_pairs": 40
+    },
+    "referee_sha256": "1c0bbab69e15a277c0b68bf032848b513f706749999cd5f6d09a1fb60f05b8a6",
+    "pgn_sha256": "8d5be2c3c590c033ca5d28db8acf450444f5fb984e87c77d5a1ba5f7a306f6d6",
+    "log_sha256": "299dbe1698901f3f396d34f74240e4b38bee21f26792d1d058106c4256f6db1d",
+    "manifest_sha256": "69887227ca3312b2426f6f305d243359ae902fffdab7e559ac7d35259db42899",
+    "pentanomial": [9, 1, 24, 1, 5],
+    "assignment_decisive_rate": 0.4,
+    "middle_pair_rate": 0.6,
+    "squared_pair_displacement": 0.3625,
+    "black_black_rate": 0.55,
+    "black_win_rate": 0.7375,
+    "white_win_rate": 0.2375,
+    "draw_rate": 0.025,
+    "abnormal_terminations": 0
+  },
+  "capacity": {
+    "pairs_before_first_wrap": 1500,
+    "games_before_first_wrap": 3000,
+    "capacity_without_wrap_at_3000_games": true,
+    "capacity_without_wrap_at_10000_games": false
+  },
+  "gates": {
+    "complete_unique_pair_audit": true,
+    "exact_side_to_move_balance": true,
+    "deterministic_size_cap": true,
+    "immutable_artifact_name": true,
+    "authorized_for_openbench_use": true
+  }
+}

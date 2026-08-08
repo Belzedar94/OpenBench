@@ -91,7 +91,7 @@ def generate(
             handle.write(json.dumps(trace, sort_keys=True) + "\n")
 
     manifest = {
-        "schema": "HORDE_BOOK_MULTIPV_SCREEN_V1",
+        "schema": "HORDE_BOOK_MULTIPV_SCREEN_V2",
         "source": str(source.resolve()),
         "source_sha256": sha256_file(source),
         "engine": str(engine.resolve()),
@@ -100,6 +100,8 @@ def generate(
         "network_sha256": sha256_file(network),
         "python": platform.python_version(),
         "settings": {
+            "threads": 1,
+            "hash_mib": 16,
             "nodes": nodes,
             "multipv": multipv,
             "max_gap": max_gap,
