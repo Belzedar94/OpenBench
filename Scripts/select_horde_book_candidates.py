@@ -129,6 +129,33 @@ def operationally_unique_and_balanced(
     return selected, duplicate_count, balance_trimmed
 
 
+def cap_balanced_records(
+    records: list[dict[str, object]], max_records: int
+) -> list[dict[str, object]]:
+    """Keep a deterministic, side-balanced prefix of an ordered record pool."""
+
+    if max_records < 2 or max_records % 2:
+        raise ValueError("max_records must be a positive even number")
+    if len(records) <= max_records:
+        return records
+
+    per_side = max_records // 2
+    side_counts: Counter[str] = Counter()
+    selected: list[dict[str, object]] = []
+    for record in records:
+        side = str(record.get("side_to_move", ""))
+        if side not in {"white", "black"}:
+            raise ValueError("candidate record has invalid side_to_move")
+        if side_counts[side] >= per_side:
+            continue
+        selected.append(record)
+        side_counts[side] += 1
+
+    if side_counts["white"] != per_side or side_counts["black"] != per_side:
+        raise ValueError("candidate pool cannot satisfy the balanced record cap")
+    return selected
+
+
 def exclude_positions(
     records: list[dict[str, object]], excluded_keys: set[str]
 ) -> tuple[list[dict[str, object]], int]:
@@ -233,6 +260,7 @@ def generate(
     min_white_eval: int | None = None,
     max_white_eval: int | None = None,
     evaluation_screen: Path | None = None,
+    max_records: int | None = None,
 ) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     epd_path = output_dir / "candidates.epd"
@@ -280,6 +308,15 @@ def generate(
         balanced, prefix_share
     )
     balance_trimmed = initial_balance_trimmed + extra_balance_trimmed
+    size_trimmed = 0
+    if max_records is not None:
+        capped = cap_balanced_records(selected, max_records)
+        size_trimmed = len(selected) - len(capped)
+        selected, extra_prefix_trimmed, extra_balance_trimmed, prefix_cap = (
+            enforce_prefix_cap(capped, prefix_share)
+        )
+        prefix_trimmed += extra_prefix_trimmed
+        balance_trimmed += extra_balance_trimmed
     side_counts = Counter(str(record["side_to_move"]) for record in selected)
     prefix_counts = Counter(str(record["prefix_family"]) for record in selected)
 
@@ -304,6 +341,7 @@ def generate(
         "recipe": source_manifest["recipe"],
         "selection": {
             "max_gap": max_gap,
+            "max_records": max_records,
             "min_white_eval": min_white_eval,
             "max_white_eval": max_white_eval,
             "operational_dedup_key": "board_side_castling",
@@ -340,6 +378,7 @@ def generate(
             "white_eval_filtered_out": len(gap_selected) - len(eval_selected),
             "heldout_positions_excluded": excluded_count,
             "operational_duplicates_removed": duplicate_count,
+            "size_trimmed": size_trimmed,
             "prefix_trimmed": prefix_trimmed,
             "balance_trimmed": balance_trimmed,
             "records": len(selected),
@@ -368,10 +407,15 @@ def main() -> int:
     parser.add_argument("--min-white-eval", type=int)
     parser.add_argument("--max-white-eval", type=int)
     parser.add_argument("--evaluation-screen", type=Path)
+    parser.add_argument("--max-records", type=int)
     parser.add_argument("--exclude-pgn", type=Path, action="append", default=[])
     args = parser.parse_args()
     if (args.min_white_eval is None) != (args.max_white_eval is None):
         parser.error("--min-white-eval and --max-white-eval must be supplied together")
+    if args.max_records is not None and (
+        args.max_records < 2 or args.max_records % 2
+    ):
+        parser.error("--max-records must be a positive even number")
     manifest = generate(
         args.source,
         args.output_dir,
@@ -380,6 +424,7 @@ def main() -> int:
         args.min_white_eval,
         args.max_white_eval,
         args.evaluation_screen,
+        args.max_records,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
