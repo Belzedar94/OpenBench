@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict, deque
 import hashlib
 import json
+import math
 from pathlib import Path
 
 if __package__:
@@ -130,9 +131,11 @@ def operationally_unique_and_balanced(
 
 
 def cap_balanced_records(
-    records: list[dict[str, object]], max_records: int
+    records: list[dict[str, object]],
+    max_records: int,
+    prefix_share: float | None = None,
 ) -> list[dict[str, object]]:
-    """Keep a deterministic, side-balanced prefix of an ordered record pool."""
+    """Keep a deterministic balanced subset, optionally under a prefix cap."""
 
     if max_records < 2 or max_records % 2:
         raise ValueError("max_records must be a positive even number")
@@ -140,6 +143,91 @@ def cap_balanced_records(
         return records
 
     per_side = max_records // 2
+    if prefix_share is not None:
+        if not 0.0 < prefix_share <= 1.0:
+            raise ValueError("prefix_share must be in (0, 1]")
+
+        prefix_cap = max(1, math.ceil(max_records * prefix_share))
+        availability: Counter[tuple[str, str]] = Counter(
+            (
+                str(record.get("side_to_move", "")),
+                str(record.get("prefix_family", "")),
+            )
+            for record in records
+        )
+        if any(side not in {"white", "black"} for side, _ in availability):
+            raise ValueError("candidate record has invalid side_to_move")
+
+        source, sink = "source", "sink"
+        adjacency: defaultdict[str, list[str]] = defaultdict(list)
+        residual: defaultdict[tuple[str, str], int] = defaultdict(int)
+
+        def add_edge(left: str, right: str, capacity: int) -> None:
+            adjacency[left].append(right)
+            adjacency[right].append(left)
+            residual[(left, right)] = capacity
+
+        for side in ("white", "black"):
+            add_edge(source, f"side:{side}", per_side)
+        families = sorted({family for _, family in availability})
+        for side in ("white", "black"):
+            for family in families:
+                count = availability[(side, family)]
+                if count:
+                    add_edge(f"side:{side}", f"family:{family}", count)
+        for family in families:
+            add_edge(f"family:{family}", sink, prefix_cap)
+
+        flow = 0
+        while True:
+            parent: dict[str, str | None] = {source: None}
+            queue = deque([source])
+            while queue and sink not in parent:
+                left = queue.popleft()
+                for right in adjacency[left]:
+                    if right not in parent and residual[(left, right)] > 0:
+                        parent[right] = left
+                        queue.append(right)
+            if sink not in parent:
+                break
+            amount = max_records
+            node = sink
+            while parent[node] is not None:
+                previous = parent[node]
+                amount = min(amount, residual[(previous, node)])
+                node = previous
+            node = sink
+            while parent[node] is not None:
+                previous = parent[node]
+                residual[(previous, node)] -= amount
+                residual[(node, previous)] += amount
+                node = previous
+            flow += amount
+
+        if flow != max_records:
+            raise ValueError(
+                "candidate pool cannot satisfy the balanced prefix-family cap"
+            )
+
+        quotas = {
+            (side, family): residual[(f"family:{family}", f"side:{side}")]
+            for side in ("white", "black")
+            for family in families
+        }
+        selected: list[dict[str, object]] = []
+        for record in records:
+            key = (
+                str(record.get("side_to_move", "")),
+                str(record.get("prefix_family", "")),
+            )
+            if quotas.get(key, 0) <= 0:
+                continue
+            selected.append(record)
+            quotas[key] -= 1
+        if len(selected) != max_records:
+            raise AssertionError("prefix-aware cap did not consume its quotas")
+        return selected
+
     side_counts: Counter[str] = Counter()
     selected: list[dict[str, object]] = []
     for record in records:
@@ -323,18 +411,17 @@ def generate(
     )
 
     prefix_share = float(source_manifest["recipe"]["prefix_share"])
-    selected, prefix_trimmed, extra_balance_trimmed, prefix_cap = enforce_prefix_cap(
-        balanced, prefix_share
-    )
-    balance_trimmed = initial_balance_trimmed + extra_balance_trimmed
+    prefix_trimmed = 0
+    balance_trimmed = initial_balance_trimmed
     size_trimmed = 0
-    if max_records is not None:
-        capped = cap_balanced_records(selected, max_records)
-        size_trimmed = len(selected) - len(capped)
-        selected, extra_prefix_trimmed, extra_balance_trimmed, prefix_cap = (
-            enforce_prefix_cap(capped, prefix_share)
+    if max_records is not None and len(balanced) > max_records:
+        selected = cap_balanced_records(balanced, max_records, prefix_share)
+        size_trimmed = len(balanced) - len(selected)
+        prefix_cap = max(1, math.ceil(len(selected) * prefix_share))
+    else:
+        selected, prefix_trimmed, extra_balance_trimmed, prefix_cap = (
+            enforce_prefix_cap(balanced, prefix_share)
         )
-        prefix_trimmed += extra_prefix_trimmed
         balance_trimmed += extra_balance_trimmed
     side_counts = Counter(str(record["side_to_move"]) for record in selected)
     prefix_counts = Counter(str(record["prefix_family"]) for record in selected)
