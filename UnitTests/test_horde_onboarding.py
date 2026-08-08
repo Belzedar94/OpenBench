@@ -56,6 +56,7 @@ class HordeOnboardingTests(unittest.TestCase):
             + '/Books/HORDE_openings.epd.zip',
         )
         self.assertTrue(self.book_v2['onboarding_ready'])
+        self.assertFalse(self.book_v2['datagen_enabled'])
         self.assertEqual(self.book_v2['sha'], BOOK_V2_SHA256)
         self.assertEqual(self.book_v2['raw_sha'], BOOK_V2_SHA256)
         self.assertEqual(

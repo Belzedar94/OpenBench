@@ -24,6 +24,7 @@ class Game:
     black: str
     result: str
     fen: str
+    termination: str
 
 
 def iter_headers(path: Path) -> Iterator[dict[str, str]]:
@@ -73,6 +74,7 @@ def read_games(paths: Iterable[Path]) -> list[Game]:
                     black=headers["Black"],
                     result=headers["Result"],
                     fen=headers["FEN"],
+                    termination=headers.get("Termination", "").strip(),
                 )
             )
 
@@ -197,6 +199,16 @@ def analyze(
     side_pair_scores: dict[str, list[float]] = defaultdict(list)
     side_color_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
     result_counts = Counter(game.result for game in games)
+    termination_counts = Counter(game.termination or "normal" for game in games)
+    abnormal_games = [
+        {
+            "source": game.source,
+            "ordinal": game.ordinal,
+            "termination": game.termination,
+        }
+        for game in games
+        if game.termination.casefold() not in {"", "normal"}
+    ]
     fen_counts = Counter()
     fen_pair_scores: dict[str, list[float]] = defaultdict(list)
     pair_scores: list[float] = []
@@ -245,6 +257,9 @@ def analyze(
         "complete_pairs": pair_count,
         "incomplete_games": len(incomplete),
         "game_results": dict(sorted(result_counts.items())),
+        "terminations": dict(sorted(termination_counts.items())),
+        "abnormal_terminations": len(abnormal_games),
+        "abnormal_games": abnormal_games,
         "color_rates": {
             "black_win": black_wins / len(games),
             "white_win": white_wins / len(games),

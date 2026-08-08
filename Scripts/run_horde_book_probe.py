@@ -86,6 +86,7 @@ def valid_probe(returncode: int, analysis: dict[str, object], expected_games: in
         returncode == 0
         and analysis["games"] == expected_games
         and analysis["incomplete_games"] == 0
+        and analysis["abnormal_terminations"] == 0
         and analysis["complete_pairs"] * 2 == expected_games
     )
 

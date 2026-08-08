@@ -95,6 +95,7 @@ def load_book_config(book_name):
     # exists, but adding one to Config/config.json must fail closed.
     assert type(conf.get('onboarding_ready', True)) == bool
     assert conf.get('onboarding_ready', True)
+    assert type(conf.get('datagen_enabled', True)) == bool
     assert type(conf.get('sha')) == str
     assert type(conf.get('source')) == str
     variant_contract = conf.get('variant_contract')

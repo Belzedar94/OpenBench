@@ -1,5 +1,6 @@
 {
     "onboarding_ready": true,
+    "datagen_enabled": false,
     "variant_contract": "LICHESS_HORDE_V1",
     "sha": "05753975c2baf80e0908988186113d2b72c7eb781b9ff628a7e1d6e945d4ff99",
     "raw_sha": "05753975c2baf80e0908988186113d2b72c7eb781b9ff628a7e1d6e945d4ff99",

@@ -5,13 +5,15 @@ import unittest
 from Scripts import analyze_horde_book_pairs as MODULE
 
 
-def game(round_number, white, black, result, fen):
+def game(round_number, white, black, result, fen, termination=None):
+    termination_tag = "" if termination is None else f'[Termination "{termination}"]\n'
     return f'''[Event "?"]
 [Round "{round_number}"]
 [White "{white}"]
 [Black "{black}"]
 [Result "{result}"]
 [FEN "{fen}"]
+{termination_tag}
 
 1... a6 {{0.00 1/1 1 1}} *
 
@@ -85,6 +87,21 @@ class HordeBookPairTests(unittest.TestCase):
             path.write_text(pgn, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "different openings"):
                 MODULE.analyze([path])
+
+    def test_reports_recovered_time_forfeits(self):
+        fen = "8/8/8/8/8/8/P7/4k3 b - - 0 1"
+        pgn = game(
+            1, "engine-dev", "engine-base", "0-1", fen, "time forfeit"
+        ) + game(2, "engine-base", "engine-dev", "0-1", fen)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.pgn"
+            path.write_text(pgn, encoding="utf-8")
+            payload = MODULE.analyze([path])
+
+        self.assertEqual(payload["abnormal_terminations"], 1)
+        self.assertEqual(payload["terminations"], {"normal": 1, "time forfeit": 1})
+        self.assertEqual(payload["abnormal_games"][0]["termination"], "time forfeit")
 
 
 if __name__ == "__main__":

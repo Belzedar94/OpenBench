@@ -832,6 +832,29 @@ class DatagenModeTests(TestCase):
             verify_workload.artifacts_support_role(tagged, 'datagen')
         )
 
+    def test_datagen_rejects_a_gameplay_only_book_before_scheduling(self):
+        request = SimpleNamespace(POST={'book_name': 'gameplay-only.epd'})
+        books = {
+            'gameplay-only.epd': {'datagen_enabled': False},
+            'training.epd': {},
+        }
+
+        with mock.patch.dict(
+            OpenBench.config.OPENBENCH_CONFIG['books'], books, clear=True
+        ):
+            errors = []
+            verify_workload.verify_datagen_book(
+                errors, request, 'book_name', 'Book', 'books'
+            )
+            self.assertEqual(errors, ['Book is not enabled for DATAGEN'])
+
+            request.POST['book_name'] = 'training.epd'
+            errors = []
+            verify_workload.verify_datagen_book(
+                errors, request, 'book_name', 'Book', 'books'
+            )
+            self.assertEqual(errors, [])
+
     def test_cross_engine_variant_contract_must_match(self):
         request = SimpleNamespace(POST={
             'dev_engine': 'Horde-Stockfish',

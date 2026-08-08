@@ -401,9 +401,14 @@ def verify_datagen_reverse(errors, request, field):
 
 def verify_datagen_book(errors, request, field, field_name, parent):
     try:
-        valid = ['NONE'] + list(OpenBench.config.OPENBENCH_CONFIG[parent].keys())
-        assert request.POST[field] in valid
-    except: errors.append('{0} was neither NONE nor found in the configuration'.format(field_name))
+        selected = request.POST[field]
+        if selected == 'NONE':
+            return
+        configured = OpenBench.config.OPENBENCH_CONFIG[parent][selected]
+        if not configured.get('datagen_enabled', True):
+            errors.append('{0} is not enabled for DATAGEN'.format(field_name))
+    except Exception:
+        errors.append('{0} was neither NONE nor found in the configuration'.format(field_name))
 
 def verify_datagen_template(errors, request, field):
 
