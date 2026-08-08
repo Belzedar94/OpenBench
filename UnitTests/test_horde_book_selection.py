@@ -187,6 +187,27 @@ class HordeBookSelectionTests(unittest.TestCase):
         self.assertEqual(forward[1], 1)
         self.assertEqual(forward[2], 0)
 
+    def test_caps_an_ordered_pool_without_losing_side_balance(self):
+        records = [
+            {**record(f"white-{index}", 0, side="white"), "ordinal": index}
+            for index in range(3)
+        ] + [
+            {**record(f"black-{index}", 0, side="black"), "ordinal": index}
+            for index in range(3)
+        ]
+        selected = MODULE.cap_balanced_records(records, 4)
+        self.assertEqual(
+            [(entry["side_to_move"], entry["ordinal"]) for entry in selected],
+            [("white", 0), ("white", 1), ("black", 0), ("black", 1)],
+        )
+
+    def test_record_cap_requires_a_positive_even_limit(self):
+        records = [record("white", 0, side="white"), record("black", 0, side="black")]
+        for invalid in (0, 1, 3):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "positive even"):
+                    MODULE.cap_balanced_records(records, invalid)
+
 
 if __name__ == "__main__":
     unittest.main()
