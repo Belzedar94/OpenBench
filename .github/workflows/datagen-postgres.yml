@@ -66,7 +66,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r Client/requirements.txt
+      - run: pip install -r Client/requirements.txt python-chess==1.999
       - run: python -m unittest discover -s UnitTests -t UnitTests -v
 
   # Workers do not run the Client/ in this tree: they download the commit named
