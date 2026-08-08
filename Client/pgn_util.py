@@ -57,6 +57,7 @@ def pgn_strip_headers(headers, compact):
         'TimeControl', # Useful to extract statistics
         'Variant',     # Useful to account for FRC/DFRC
         'ScaleFactor', # Useful to extract statistics
+        'Termination', # Required for post-run crash and timeloss audits
     ]
 
     if not compact: # Useful to reconstruct time events
