@@ -6,11 +6,13 @@ from Scripts import run_horde_book_probe as MODULE
 
 class HordeBookProbeTests(unittest.TestCase):
     def test_command_keeps_paths_as_single_arguments(self):
+        engine = Path("C:/Engine Dir/stockfish.exe")
+        book = Path("C:/Books/horde.epd")
         command = MODULE.build_command(
             referee=Path("C:/Program Files/cutechess.exe"),
-            engine=Path("C:/Engine Dir/stockfish.exe"),
+            engine=engine,
             network=Path("C:/Nets/run6b.nnue"),
-            book=Path("C:/Books/horde.epd"),
+            book=book,
             pgn=Path("C:/Output/games.pgn"),
             label="probe label",
             seed=7,
@@ -19,8 +21,8 @@ class HordeBookProbeTests(unittest.TestCase):
             weak_nodes=40_000,
             concurrency=2,
         )
-        self.assertIn("cmd=C:\\Engine Dir\\stockfish.exe", command)
-        self.assertIn("file=C:\\Books\\horde.epd", command)
+        self.assertIn(f"cmd={engine.resolve()}", command)
+        self.assertIn(f"file={book.resolve()}", command)
         self.assertIn("probe label", command)
 
     def test_validation_requires_exact_complete_pairs(self):
