@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from pathlib import Path
 import tempfile
 import unittest
@@ -217,6 +218,59 @@ class HordeBookSelectionTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "positive even"):
                     MODULE.cap_balanced_records(records, invalid)
+
+    def test_record_cap_fills_target_under_global_prefix_quota(self):
+        records = (
+            [
+                {
+                    **record(f"white-hot-{index}", 0, side="white"),
+                    "prefix_family": "hot",
+                }
+                for index in range(2)
+            ]
+            + [
+                {
+                    **record("white-cold", 0, side="white"),
+                    "prefix_family": "cold",
+                }
+            ]
+            + [
+                {
+                    **record(f"black-hot-{index}", 0, side="black"),
+                    "prefix_family": "hot",
+                }
+                for index in range(2)
+            ]
+            + [
+                {
+                    **record("black-cool", 0, side="black"),
+                    "prefix_family": "cool",
+                }
+            ]
+        )
+
+        selected = MODULE.cap_balanced_records(records, 4, 0.5)
+        self.assertEqual(len(selected), 4)
+        self.assertEqual(
+            Counter(entry["side_to_move"] for entry in selected),
+            {"white": 2, "black": 2},
+        )
+        self.assertLessEqual(
+            max(Counter(entry["prefix_family"] for entry in selected).values()),
+            2,
+        )
+
+    def test_record_cap_rejects_impossible_prefix_quota(self):
+        records = [
+            {
+                **record(f"{side}-{index}", 0, side=side),
+                "prefix_family": "only",
+            }
+            for side in ("white", "black")
+            for index in range(3)
+        ]
+        with self.assertRaisesRegex(ValueError, "prefix-family cap"):
+            MODULE.cap_balanced_records(records, 4, 0.5)
 
 
 if __name__ == "__main__":
