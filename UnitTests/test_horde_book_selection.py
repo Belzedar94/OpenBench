@@ -70,7 +70,17 @@ class HordeBookSelectionTests(unittest.TestCase):
                     {
                         "fen": canonical + " 1",
                         "canonical_fen": canonical,
+                        "reason": "accepted",
                         "roots": [{"score": -123, "score_kind": "cp"}],
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "fen": "8/8/8/8/8/8/8/8 w - - 0 1",
+                        "canonical_fen": "8/8/8/8/8/8/8/8 w - - 0",
+                        "reason": "mate_score",
+                        "roots": [{"score": 4, "score_kind": "mate"}],
                     }
                 )
                 + "\n",
@@ -82,7 +92,7 @@ class HordeBookSelectionTests(unittest.TestCase):
                 "engine_sha256": "engine-hash",
                 "network_sha256": "network-hash",
                 "settings": MODULE.V3_EVALUATION_SCREEN_SETTINGS,
-                "counts": {"canonical_sources": 1},
+                "counts": {"canonical_sources": 2},
                 "outputs": {
                     "traces": {
                         "path": trace.name,
