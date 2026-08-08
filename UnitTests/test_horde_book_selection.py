@@ -77,8 +77,11 @@ class HordeBookSelectionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             manifest = {
-                "schema": "HORDE_BOOK_MULTIPV_SCREEN_V1",
+                "schema": "HORDE_BOOK_MULTIPV_SCREEN_V2",
                 "source_sha256": "source-hash",
+                "engine_sha256": "engine-hash",
+                "network_sha256": "network-hash",
+                "settings": MODULE.V3_EVALUATION_SCREEN_SETTINGS,
                 "counts": {"canonical_sources": 1},
                 "outputs": {
                     "traces": {
@@ -90,11 +93,40 @@ class HordeBookSelectionTests(unittest.TestCase):
             (directory / "manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8"
             )
-            _, scores = MODULE.load_evaluation_screen(directory, "source-hash")
+            _, scores = MODULE.load_evaluation_screen(
+                directory, "source-hash", "engine-hash", "network-hash"
+            )
             self.assertEqual(scores, {canonical: 123})
 
             with self.assertRaisesRegex(ValueError, "source hash mismatch"):
-                MODULE.load_evaluation_screen(directory, "different-source")
+                MODULE.load_evaluation_screen(
+                    directory,
+                    "different-source",
+                    "engine-hash",
+                    "network-hash",
+                )
+
+            with self.assertRaisesRegex(ValueError, "engine hash mismatch"):
+                MODULE.load_evaluation_screen(
+                    directory, "source-hash", "other-engine", "network-hash"
+                )
+
+            with self.assertRaisesRegex(ValueError, "network hash mismatch"):
+                MODULE.load_evaluation_screen(
+                    directory, "source-hash", "engine-hash", "other-network"
+                )
+
+            manifest["settings"] = {
+                **MODULE.V3_EVALUATION_SCREEN_SETTINGS,
+                "nodes": 19_999,
+            }
+            (directory / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "settings mismatch"):
+                MODULE.load_evaluation_screen(
+                    directory, "source-hash", "engine-hash", "network-hash"
+                )
 
     def test_rejects_invalid_white_evaluation_records(self):
         with self.assertRaisesRegex(ValueError, "min_eval"):
@@ -127,6 +159,33 @@ class HordeBookSelectionTests(unittest.TestCase):
         selected, excluded = MODULE.exclude_positions(records, {key})
         self.assertEqual(selected, [])
         self.assertEqual(excluded, 2)
+
+    def test_operational_dedup_is_input_order_independent(self):
+        records = [
+            {
+                **record("same", 0, side="white"),
+                "fen": "same/8/8/8/8/8/8/8 w - h6 0 1",
+                "prefix_family": "white-a",
+            },
+            {
+                **record("same", 0, side="white"),
+                "canonical_fen": "same/8/8/8/8/8/8/8 w - h6 4",
+                "fen": "same/8/8/8/8/8/8/8 w - h6 4 9",
+                "prefix_family": "white-b",
+            },
+            {
+                **record("black", 0, side="black"),
+                "canonical_fen": "black/8/8/8/8/8/8/8 b - - 0",
+                "fen": "black/8/8/8/8/8/8/8 b - - 0 1",
+                "prefix_family": "black-a",
+            },
+        ]
+        forward = MODULE.operationally_unique_and_balanced(records)
+        reverse = MODULE.operationally_unique_and_balanced(list(reversed(records)))
+        self.assertEqual(forward, reverse)
+        self.assertEqual(len(forward[0]), 2)
+        self.assertEqual(forward[1], 1)
+        self.assertEqual(forward[2], 0)
 
 
 if __name__ == "__main__":
