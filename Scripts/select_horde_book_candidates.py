@@ -40,6 +40,30 @@ def select_by_gap(
     return selected
 
 
+def white_relative_eval(record: dict[str, object]) -> int:
+    if "selection_white_eval" in record:
+        return int(record["selection_white_eval"])
+    if "best_score" not in record:
+        raise ValueError("candidate record is missing best_score")
+    side_to_move = str(record.get("side_to_move", ""))
+    if side_to_move not in {"white", "black"}:
+        raise ValueError("candidate record has invalid side_to_move")
+    score = int(record["best_score"])
+    return score if side_to_move == "white" else -score
+
+
+def select_by_white_eval(
+    records: list[dict[str, object]], min_eval: int, max_eval: int
+) -> list[dict[str, object]]:
+    if min_eval > max_eval:
+        raise ValueError("min_eval must not exceed max_eval")
+    return [
+        record
+        for record in records
+        if min_eval <= white_relative_eval(record) <= max_eval
+    ]
+
+
 def position_key(fen: str) -> str:
     """Match positions after referee normalization of EP and move clocks."""
 
@@ -94,8 +118,56 @@ def load_pool(directory: Path) -> tuple[dict[str, object], list[dict[str, object
     return manifest, records
 
 
+def load_evaluation_screen(
+    directory: Path, expected_source_sha256: str
+) -> tuple[dict[str, object], dict[str, int]]:
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema") != "HORDE_BOOK_MULTIPV_SCREEN_V1":
+        raise ValueError(f"{directory}: unsupported evaluation-screen schema")
+    if manifest.get("source_sha256") != expected_source_sha256:
+        raise ValueError(f"{directory}: evaluation-screen source hash mismatch")
+
+    trace_path = directory / str(manifest["outputs"]["traces"]["path"])
+    if sha256_file(trace_path) != manifest["outputs"]["traces"]["sha256"]:
+        raise ValueError(f"{directory}: evaluation-screen trace hash mismatch")
+
+    records = read_jsonl(trace_path)
+    if len(records) != manifest["counts"]["canonical_sources"]:
+        raise ValueError(f"{directory}: evaluation-screen trace record count mismatch")
+
+    scores: dict[str, int] = {}
+    for record in records:
+        roots = record.get("roots")
+        if not isinstance(roots, list) or not roots:
+            raise ValueError(f"{directory}: evaluation-screen record has no root score")
+        best = roots[0]
+        if not isinstance(best, dict) or best.get("score_kind") != "cp":
+            raise ValueError(f"{directory}: evaluation-screen record has a non-cp score")
+        fen = str(record["fen"])
+        fields = fen.split()
+        if len(fields) != 6 or fields[1] not in {"w", "b"}:
+            raise ValueError(f"{directory}: evaluation-screen record has invalid FEN")
+        score = int(best["score"])
+        white_score = score if fields[1] == "w" else -score
+        key = str(record["canonical_fen"])
+        if key in scores:
+            raise ValueError(f"{directory}: duplicate evaluation-screen position")
+        scores[key] = white_score
+
+    manifest["_manifest_path"] = str(manifest_path.resolve())
+    manifest["_manifest_sha256"] = sha256_file(manifest_path)
+    return manifest, scores
+
+
 def generate(
-    source: Path, output_dir: Path, max_gap: int, exclude_pgns: list[Path] | None = None
+    source: Path,
+    output_dir: Path,
+    max_gap: int,
+    exclude_pgns: list[Path] | None = None,
+    min_white_eval: int | None = None,
+    max_white_eval: int | None = None,
+    evaluation_screen: Path | None = None,
 ) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     epd_path = output_dir / "candidates.epd"
@@ -107,9 +179,30 @@ def generate(
 
     source_manifest, source_records = load_pool(source)
     gap_selected = select_by_gap(source_records, max_gap)
+    screen_manifest: dict[str, object] | None = None
+    if evaluation_screen is not None:
+        screen_manifest, screen_scores = load_evaluation_screen(
+            evaluation_screen, str(source_manifest["outputs"]["epd"]["sha256"])
+        )
+        scored_records: list[dict[str, object]] = []
+        for record in gap_selected:
+            key = str(record["canonical_fen"])
+            if key not in screen_scores:
+                raise ValueError(f"{evaluation_screen}: missing evaluation for {key}")
+            scored = dict(record)
+            scored["selection_white_eval"] = screen_scores[key]
+            scored_records.append(scored)
+        gap_selected = scored_records
+    if (min_white_eval is None) != (max_white_eval is None):
+        raise ValueError("white evaluation bounds must be supplied together")
+    eval_selected = (
+        select_by_white_eval(gap_selected, min_white_eval, max_white_eval)
+        if min_white_eval is not None and max_white_eval is not None
+        else gap_selected
+    )
     exclusion_paths = exclude_pgns or []
     excluded_keys = read_exclusion_pgns(exclusion_paths)
-    heldout_selected, excluded_count = exclude_positions(gap_selected, excluded_keys)
+    heldout_selected, excluded_count = exclude_positions(eval_selected, excluded_keys)
     balanced, duplicate_count = balanced_unique(heldout_selected)
     initial_balance_trimmed = len(heldout_selected) - duplicate_count - len(balanced)
 
@@ -142,6 +235,20 @@ def generate(
         "recipe": source_manifest["recipe"],
         "selection": {
             "max_gap": max_gap,
+            "min_white_eval": min_white_eval,
+            "max_white_eval": max_white_eval,
+            "evaluation_screen": (
+                {
+                    "directory": str(evaluation_screen.resolve()),
+                    "manifest": screen_manifest["_manifest_path"],
+                    "manifest_sha256": screen_manifest["_manifest_sha256"],
+                    "engine_sha256": screen_manifest["engine_sha256"],
+                    "network_sha256": screen_manifest["network_sha256"],
+                    "settings": screen_manifest["settings"],
+                }
+                if evaluation_screen is not None and screen_manifest is not None
+                else None
+            ),
             "excluded_pgns": [
                 {
                     "path": str(path.resolve()),
@@ -159,6 +266,7 @@ def generate(
         "counts": {
             "input_records": len(source_records),
             "gap_filtered_out": len(source_records) - len(gap_selected),
+            "white_eval_filtered_out": len(gap_selected) - len(eval_selected),
             "heldout_positions_excluded": excluded_count,
             "canonical_duplicates_removed": duplicate_count,
             "prefix_trimmed": prefix_trimmed,
@@ -186,9 +294,22 @@ def main() -> int:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-gap", type=int, required=True)
+    parser.add_argument("--min-white-eval", type=int)
+    parser.add_argument("--max-white-eval", type=int)
+    parser.add_argument("--evaluation-screen", type=Path)
     parser.add_argument("--exclude-pgn", type=Path, action="append", default=[])
     args = parser.parse_args()
-    manifest = generate(args.source, args.output_dir, args.max_gap, args.exclude_pgn)
+    if (args.min_white_eval is None) != (args.max_white_eval is None):
+        parser.error("--min-white-eval and --max-white-eval must be supplied together")
+    manifest = generate(
+        args.source,
+        args.output_dir,
+        args.max_gap,
+        args.exclude_pgn,
+        args.min_white_eval,
+        args.max_white_eval,
+        args.evaluation_screen,
+    )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
 
