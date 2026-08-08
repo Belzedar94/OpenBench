@@ -5,21 +5,31 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 
 if __package__:
     from .analyze_horde_book_pairs import pair_games, read_games
     from .generate_horde_book_candidates import sha256_file
-    from .merge_horde_book_shards import balanced_unique, enforce_prefix_cap, read_jsonl
+    from .merge_horde_book_shards import enforce_prefix_cap, read_jsonl
 else:
     from analyze_horde_book_pairs import pair_games, read_games  # type: ignore
     from generate_horde_book_candidates import sha256_file  # type: ignore
     from merge_horde_book_shards import (  # type: ignore
-        balanced_unique,
         enforce_prefix_cap,
         read_jsonl,
     )
+
+
+V3_EVALUATION_SCREEN_SETTINGS = {
+    "threads": 1,
+    "hash_mib": 16,
+    "nodes": 20_000,
+    "multipv": 2,
+    "max_gap": 100_000,
+    "max_abs_score": 100_000,
+}
 
 
 def select_by_gap(
@@ -73,6 +83,52 @@ def position_key(fen: str) -> str:
     return " ".join(fields[:3])
 
 
+def deterministic_record_key(record: dict[str, object]) -> str:
+    """Order candidates independently of shard, seed, and input order."""
+
+    stable_identity = {
+        "position_key": position_key(str(record["canonical_fen"])),
+        "canonical_fen": str(record["canonical_fen"]),
+        "fen": str(record["fen"]),
+        "prefix_family": str(record["prefix_family"]),
+        "side_to_move": str(record["side_to_move"]),
+    }
+    payload = json.dumps(stable_identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def operationally_unique_and_balanced(
+    records: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], int, int]:
+    """Deduplicate on the referee key, then balance in frozen hash order."""
+
+    ordered = sorted(records, key=deterministic_record_key)
+    unique: list[dict[str, object]] = []
+    seen: set[str] = set()
+    duplicate_count = 0
+    for record in ordered:
+        key = position_key(str(record["canonical_fen"]))
+        if key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(key)
+        unique.append(record)
+
+    by_side = {
+        side: [record for record in unique if record["side_to_move"] == side]
+        for side in ("white", "black")
+    }
+    target = min(len(by_side["white"]), len(by_side["black"]))
+    keep_ids = {
+        id(record)
+        for side in ("white", "black")
+        for record in by_side[side][:target]
+    }
+    selected = [record for record in unique if id(record) in keep_ids]
+    balance_trimmed = len(unique) - len(selected)
+    return selected, duplicate_count, balance_trimmed
+
+
 def exclude_positions(
     records: list[dict[str, object]], excluded_keys: set[str]
 ) -> tuple[list[dict[str, object]], int]:
@@ -119,14 +175,23 @@ def load_pool(directory: Path) -> tuple[dict[str, object], list[dict[str, object
 
 
 def load_evaluation_screen(
-    directory: Path, expected_source_sha256: str
+    directory: Path,
+    expected_source_sha256: str,
+    expected_engine_sha256: str,
+    expected_network_sha256: str,
 ) -> tuple[dict[str, object], dict[str, int]]:
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema") != "HORDE_BOOK_MULTIPV_SCREEN_V1":
+    if manifest.get("schema") != "HORDE_BOOK_MULTIPV_SCREEN_V2":
         raise ValueError(f"{directory}: unsupported evaluation-screen schema")
     if manifest.get("source_sha256") != expected_source_sha256:
         raise ValueError(f"{directory}: evaluation-screen source hash mismatch")
+    if manifest.get("engine_sha256") != expected_engine_sha256:
+        raise ValueError(f"{directory}: evaluation-screen engine hash mismatch")
+    if manifest.get("network_sha256") != expected_network_sha256:
+        raise ValueError(f"{directory}: evaluation-screen network hash mismatch")
+    if manifest.get("settings") != V3_EVALUATION_SCREEN_SETTINGS:
+        raise ValueError(f"{directory}: evaluation-screen settings mismatch")
 
     trace_path = directory / str(manifest["outputs"]["traces"]["path"])
     if sha256_file(trace_path) != manifest["outputs"]["traces"]["sha256"]:
@@ -182,7 +247,10 @@ def generate(
     screen_manifest: dict[str, object] | None = None
     if evaluation_screen is not None:
         screen_manifest, screen_scores = load_evaluation_screen(
-            evaluation_screen, str(source_manifest["outputs"]["epd"]["sha256"])
+            evaluation_screen,
+            str(source_manifest["outputs"]["epd"]["sha256"]),
+            str(source_manifest["engine_sha256"]),
+            str(source_manifest["network_sha256"]),
         )
         scored_records: list[dict[str, object]] = []
         for record in gap_selected:
@@ -203,8 +271,9 @@ def generate(
     exclusion_paths = exclude_pgns or []
     excluded_keys = read_exclusion_pgns(exclusion_paths)
     heldout_selected, excluded_count = exclude_positions(eval_selected, excluded_keys)
-    balanced, duplicate_count = balanced_unique(heldout_selected)
-    initial_balance_trimmed = len(heldout_selected) - duplicate_count - len(balanced)
+    balanced, duplicate_count, initial_balance_trimmed = (
+        operationally_unique_and_balanced(heldout_selected)
+    )
 
     prefix_share = float(source_manifest["recipe"]["prefix_share"])
     selected, prefix_trimmed, extra_balance_trimmed, prefix_cap = enforce_prefix_cap(
@@ -229,7 +298,7 @@ def generate(
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     manifest = {
-        "schema": "HORDE_BOOK_CANDIDATE_SELECTION_V1",
+        "schema": "HORDE_BOOK_CANDIDATE_SELECTION_V2",
         "engine_sha256": source_manifest["engine_sha256"],
         "network_sha256": source_manifest["network_sha256"],
         "recipe": source_manifest["recipe"],
@@ -237,6 +306,8 @@ def generate(
             "max_gap": max_gap,
             "min_white_eval": min_white_eval,
             "max_white_eval": max_white_eval,
+            "operational_dedup_key": "board_side_castling",
+            "ordering": "sha256_stable_position_v1",
             "evaluation_screen": (
                 {
                     "directory": str(evaluation_screen.resolve()),
@@ -268,7 +339,7 @@ def generate(
             "gap_filtered_out": len(source_records) - len(gap_selected),
             "white_eval_filtered_out": len(gap_selected) - len(eval_selected),
             "heldout_positions_excluded": excluded_count,
-            "canonical_duplicates_removed": duplicate_count,
+            "operational_duplicates_removed": duplicate_count,
             "prefix_trimmed": prefix_trimmed,
             "balance_trimmed": balance_trimmed,
             "records": len(selected),
