@@ -277,7 +277,9 @@ A production replacement requires all of the following:
   favorable probe setting;
 - a fresh archive descriptor, payload hash, source receipt, and unit-test pass.
 
-The V1 archive remains the production book until these gates pass.
+The V2 payload passes these gates. It is registered as the separate supported
+book `HORDE_openings_v2.epd`; the V1 key remains available so an active workload
+can never change opening bytes in the middle of a test.
 
 `Scripts/run_horde_book_probe.py` is the canonical local probe runner. It keeps
 the referee in the foreground, streams and hashes its complete log, hashes every
