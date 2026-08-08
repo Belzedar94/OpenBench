@@ -1,0 +1,118 @@
+{
+  "schema": "HORDE_OPENING_BOOK_V2_RECEIPT_V1",
+  "candidate": {
+    "records": 5608,
+    "white_to_move": 2804,
+    "black_to_move": 2804,
+    "prefix_families": 75,
+    "payload_bytes": 436111,
+    "payload_sha256": "05753975c2baf80e0908988186113d2b72c7eb781b9ff628a7e1d6e945d4ff99",
+    "archive_member": "HORDE_openings_v2.epd",
+    "archive_bytes": 78670,
+    "archive_sha256": "dc085a2f4385713ee360446ffc2a067a37905bbb3de4e2ee2acf9a7d26b86253",
+    "trace_sha256": "30cb89e5920d067f83a3e50a6e1f290d4aee2af62e447d9aa2c78623afdbc774",
+    "merge_manifest_sha256": "832d3c2a6260b01e266575e4dcf7a3b816b67eadebeeaff2eee0bf43920d500b",
+    "engine_sha256": "4d2f611a859bd78cc72275f60749f1ce2a1dab16398b4a255bd47a3c4609cf76",
+    "network_sha256": "b71108587968ac544eb2e62c2333feca880da5aca52866787f1402163444adf7",
+    "generation_seeds": {
+      "first": 20261001,
+      "last": 20261032,
+      "count": 32
+    },
+    "recipe": {
+      "nodes": 1000,
+      "multipv": 4,
+      "root_move_policy": "distinct",
+      "best_move_weight": 0.75,
+      "score_cap": 50,
+      "candidate_gap": 0,
+      "min_ply": 8,
+      "max_ply": 24,
+      "prefix_share": 0.05
+    }
+  },
+  "audit": {
+    "settings": {
+      "variant": "horde",
+      "strong_nodes": 50000,
+      "weak_nodes": 40000,
+      "threads": 1,
+      "hash_mib": 32,
+      "concurrency": 4,
+      "games_per_shard": 80,
+      "shards": 5
+    },
+    "referee_sha256": "1c0bbab69e15a277c0b68bf032848c513f706749999cd5f6d09a1fb60f05b8a6",
+    "shards": [
+      {
+        "seed": 20261041,
+        "manifest_sha256": "b55e8f2cb3dc563073507dc9d22d68b1fd6a00a3515f3e726ecc4342c6215be0",
+        "pgn_sha256": "08d6413b692710f0297a284d26ba4f48e73b24e104b8ca57b5104cd2524124ea",
+        "book_sha256": "05753975c2baf80e0908988186113d2b72c7eb781b9ff628a7e1d6e945d4ff99",
+        "pentanomial": [4, 0, 31, 1, 4]
+      },
+      {
+        "seed": 20261042,
+        "manifest_sha256": "11ecd3e3ea397b16ae372179c302213b00ac256b9708c57e1b186c051baee451",
+        "pgn_sha256": "f7c93777c02e85bdb828ddf5db2411a46ca47125ebb05cbf0deaf88a399cbbd0",
+        "book_sha256": "060d805a6d76a538410086107cc473ccf2dfba515812f586f3a7694bb4371108",
+        "pentanomial": [2, 1, 34, 0, 3]
+      },
+      {
+        "seed": 20261043,
+        "manifest_sha256": "d7fa3effd9e2fbd26b51318c77412a7dbce44a2909f50f0dca9429a55eba4a60",
+        "pgn_sha256": "d7020bd596d7eb4c662a08700ee87a2411b22dac1d0037bdc667acfee81068f1",
+        "book_sha256": "02521a54a246ece77b028c34904f88097a4bc75e26f8b237f90bb0ad27a2d332",
+        "pentanomial": [1, 0, 34, 1, 4]
+      },
+      {
+        "seed": 20261044,
+        "manifest_sha256": "eca8c4bc75f8b3cd6c0059d48d6f3b10d5bc04a28c58e60d76ba7873275a303d",
+        "pgn_sha256": "c7be153a0ccc3bc1671cd5101101d06193a075362105e44b68476b311b36ae6d",
+        "book_sha256": "89ef40cd266f5f5e95d204736ad322e7a0b4cc410e48c75e078cd038a090eb8a",
+        "pentanomial": [6, 1, 25, 1, 7]
+      },
+      {
+        "seed": 20261045,
+        "manifest_sha256": "427e102603ef9d2fca7f6acc2a4fb8af30334ca3a200eb2f9483c6c3b851077c",
+        "pgn_sha256": "90910465dfd53e636a8e5a271ade976c65b63fb4fc6bb579f6a16a4d1b9274f2",
+        "book_sha256": "b28c2b00d778241dabe43e70f482b1ff55f7a784639c1160420c84402330d750",
+        "pentanomial": [2, 0, 35, 0, 3]
+      }
+    ],
+    "combined": {
+      "analysis_sha256": "988bb263f460910a9b1f111f240549e535585a6b0a34b5d2f171ba489a988801",
+      "games": 400,
+      "complete_pairs": 200,
+      "incomplete_games": 0,
+      "unique_openings": 200,
+      "max_opening_reuse": 1,
+      "pentanomial": [15, 2, 159, 3, 21],
+      "assignment_decisive_rate": 0.205,
+      "squared_pair_displacement": 0.18625,
+      "black_black_rate": 0.72,
+      "black_win_rate": 0.82,
+      "white_win_rate": 0.1675,
+      "draw_rate": 0.0125
+    }
+  },
+  "v1_reference": {
+    "payload_sha256": "93e97b27d5df054b8a649b8be92a0a8b058384dae35bad142f9a610896eb6958",
+    "analysis_sha256": "3e11780594185216a32c015f78229fabd57bf6f28f4709ac8fd628540b2e9630",
+    "games": 400,
+    "complete_pairs": 200,
+    "unique_openings": 184,
+    "pentanomial": [7, 1, 177, 5, 10],
+    "assignment_decisive_rate": 0.115,
+    "squared_pair_displacement": 0.0925,
+    "black_black_rate": 0.88,
+    "black_win_rate": 0.9325
+  },
+  "gates": {
+    "capacity_without_wrap_at_10000_games": true,
+    "complete_disjoint_audit": true,
+    "higher_assignment_decisive_rate": true,
+    "higher_squared_pair_displacement": true,
+    "lower_black_black_rate": true
+  }
+}
