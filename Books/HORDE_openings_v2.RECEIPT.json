@@ -42,7 +42,7 @@
       "games_per_shard": 80,
       "shards": 5
     },
-    "referee_sha256": "1c0bbab69e15a277c0b68bf032848c513f706749999cd5f6d09a1fb60f05b8a6",
+    "referee_sha256": "1c0bbab69e15a277c0b68bf032848b513f706749999cd5f6d09a1fb60f05b8a6",
     "shards": [
       {
         "seed": 20261041,
