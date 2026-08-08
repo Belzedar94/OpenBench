@@ -37,7 +37,9 @@
         "ATOMIC_V3_1B_endgame_train.epd",
         "ATOMIC_V3_1B_endgame_val.epd",
         "ATOMIC_V3_1B_endgame_test.epd",
-        "HORDE_openings.epd"
+        "HORDE_openings.epd",
+        "HORDE_openings_v2.epd",
+        "HORDE_openings_v3_interim.epd"
     ],
 
     "engines": [

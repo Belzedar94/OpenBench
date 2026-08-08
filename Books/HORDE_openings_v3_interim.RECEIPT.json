@@ -1,0 +1,73 @@
+{
+  "schema": "HORDE_OPENING_BOOK_V3_INTERIM_RECEIPT_V1",
+  "status": "interim_openbench_strength_book",
+  "candidate": {
+    "records": 1508,
+    "white_to_move": 754,
+    "black_to_move": 754,
+    "prefix_families": 67,
+    "max_prefix_count": 76,
+    "payload_bytes": 117921,
+    "payload_sha256": "39f113beb9fda02531a614e0cd766893cb89cb0706df81c58f4a1637ee0fc814",
+    "archive_member": "HORDE_openings_v3_interim.epd",
+    "archive_bytes": 21185,
+    "archive_sha256": "19bcbcdd8e99af52c9e10e4762ff2196aa555680b8524c26f3d179b059407706",
+    "trace_sha256": "0bf9b99cbed863ed3ff3d25e07bc0bff40e545bb43d601055b4223130e69574c",
+    "source_manifest_sha256": "832d3c2a6260b01e266575e4dcf7a3b816b67eadebeeaff2eee0bf43920d500b",
+    "deep_screen_manifest_sha256": "9e582051644036b3691c83777f818e6e5bc6706957f639f5fb868332fdfd9677",
+    "source_engine_sha256": "4d2f611a859bd78cc72275f60749f1ce2a1dab16398b4a255bd47a3c4609cf76",
+    "deep_screen_engine_sha256": "f276f1abb1dfbb491986cc256d8476cc19eeff2145e472eba1543ca7cf5f7dd1",
+    "network_sha256": "b71108587968ac544eb2e62c2333feca880da5aca52866787f1402163444adf7"
+  },
+  "selection": {
+    "source_records": 5608,
+    "source_root_move_policy": "distinct",
+    "source_max_gap_cp": 0,
+    "deep_nodes": 20000,
+    "deep_multipv": 2,
+    "min_white_eval_cp": 80,
+    "max_white_eval_cp": 200,
+    "heldout_positions_excluded": 203,
+    "balance_trimmed": 298,
+    "prefix_trimmed": 298
+  },
+  "audit": {
+    "settings": {
+      "variant": "horde",
+      "strong_nodes": 50000,
+      "weak_nodes": 40000,
+      "threads": 1,
+      "hash_mib": 32,
+      "valid_games": 80,
+      "valid_pairs": 40
+    },
+    "referee_sha256": "1c0bbab69e15a277c0b68bf032848b513f706749999cd5f6d09a1fb60f05b8a6",
+    "valid_pgn_sha256": [
+      "80e469d8a9edb047fb261a750ae1b2eff44faadbc54e245e08946de8dce76035",
+      "03cfc10899057988a7687f35a3025f329c586e3ecdebb15c0e979115527ac66e",
+      "12aaa1be26ff6a761c0a5d65ffb2e1d78e9a6403dc9b09d1f18f0526a0754b78"
+    ],
+    "combined_analysis_sha256": "1a64754225088dca547958003c008534854141bbb9c23fc3e1b3c8c580307d47",
+    "pentanomial": [5, 0, 27, 3, 5],
+    "assignment_decisive_rate": 0.325,
+    "squared_pair_displacement": 0.26875,
+    "black_black_rate": 0.675,
+    "black_win_rate": 0.825,
+    "white_win_rate": 0.1375,
+    "draw_rate": 0.0375,
+    "abnormal_terminations": 0
+  },
+  "capacity": {
+    "pairs_before_first_wrap": 1508,
+    "games_before_first_wrap": 3016,
+    "capacity_without_wrap_at_3000_games": true,
+    "capacity_without_wrap_at_10000_games": false
+  },
+  "gates": {
+    "complete_disjoint_audit": true,
+    "exact_side_to_move_balance": true,
+    "immutable_artifact_name": true,
+    "full_capacity_v3": false,
+    "authorized_for_interim_openbench_use": true
+  }
+}
