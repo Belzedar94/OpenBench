@@ -1895,6 +1895,48 @@ def _play_route_error_response(exc):
     return response
 
 
+def _deepest_materialized_landing(raw):
+    """El prefijo materializado mas largo de una ruta ``play`` legal, o None.
+
+    Para enlaces cuya posicion — o cuyos prefijos — AtomicDB aun no ha
+    materializado: el PGN pegado ES una linea legal, y la respuesta util no
+    es un 404 ni una pagina de error sino aterrizar donde el arbol llega de
+    verdad, con la historia truncada ahi ("it should just build a tree from
+    the pgn" — comunidad, 7-ago).  Construir de verdad seria dejar que un
+    GET materializara rutas a base de nombrarlas, y esa puerta sigue cerrada
+    a proposito (§ _validated_play_route); desde el aterrizaje, cada /goto/
+    ya crea un nodo por click, que es la tasa de siempre.
+
+    Devuelve ``(key, ucis_truncados)`` o ``None`` si la ruta no es una linea
+    Atomic legal desde la posicion inicial.  La posicion inicial esta
+    siempre materializada, asi que una ruta legal siempre aterriza.
+    """
+    if not raw or len(raw) > PLAY_ROUTE_MAX_CHARS:
+        return None
+    ucis = raw.split(',')
+    if len(ucis) > PLAY_ROUTE_MAX_PLIES or any(
+            not PLAY_UCI_RE.fullmatch(uci) for uci in ucis):
+        return None
+    fen = logic.start_fen()
+    prefix_keys = [logic.key_of(fen)]
+    for uci in ucis:
+        if uci not in logic.legal_moves(fen):
+            return None
+        try:
+            fen = logic.apply_move(fen, uci)
+        except Exception:
+            return None
+        prefix_keys.append(logic.key_of(fen))
+    known = set(Position.objects.filter(key__in=prefix_keys)
+                .values_list('key', flat=True))
+    depth = 0
+    for index, key in enumerate(prefix_keys):
+        if key not in known:
+            break
+        depth = index
+    return prefix_keys[depth], ucis[:depth]
+
+
 def _canonical_route(pos):
     """Fallback lineage plus a replayable route when startpos was reached."""
     top, line = _line_to_root(pos)
@@ -4619,6 +4661,16 @@ def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
     except Position.DoesNotExist:
+        # Un PGN legal hacia territorio sin materializar no es un enlace
+        # roto: se aterriza en el prefijo mas profundo que el arbol conoce,
+        # con la historia truncada ahi, y desde alli cada /goto/ construye
+        # (§ _deepest_materialized_landing).
+        landing = _deepest_materialized_landing(request.GET.get('play'))
+        if landing is not None:
+            at_key, at_ucis = landing
+            response = redirect(_explore_url(at_key, at_ucis))
+            response['Cache-Control'] = 'no-store'
+            return response
         return render(request, 'atomicdb/missing.html', status=404)
     if request.user.is_authenticated:
         # Leida = VISITADA: lo que apaga un aviso es llegar a su posicion —
@@ -4637,6 +4689,21 @@ def explore(request, key):
         response = redirect(_explore_url(exc.end_key, exc.ucis))
         response['Cache-Control'] = 'no-store'
         return response
+    except PlayRouteConflict as exc:
+        # La posicion EXISTE pero la ruta pincha en un prefijo sin
+        # materializar: mismo trato que arriba — aterrizar donde el arbol
+        # llega, no una pagina de error sobre un PGN perfectamente legal.
+        # El conflicto "la ruta no llega a esta posicion" con todo
+        # materializado se queda con su error explicito: ahi el enlace SI
+        # esta roto, y decirlo es mejor que enmascararlo.
+        landing = _deepest_materialized_landing(raw_play)
+        if landing is not None and len(landing[1]) < len(
+                (raw_play or '').split(',')):
+            at_key, at_ucis = landing
+            response = redirect(_explore_url(at_key, at_ucis))
+            response['Cache-Control'] = 'no-store'
+            return response
+        return _play_route_error_response(exc)
     except PlayRouteError as exc:
         return _play_route_error_response(exc)
     if explicit_route is None:

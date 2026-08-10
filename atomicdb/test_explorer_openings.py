@@ -90,9 +90,14 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertTrue(response.context['opening']['exact'])
         self.assertContains(response, 'data-play="g1f3,f7f6,b1c3"')
 
-    def test_route_with_missing_intermediate_position_fails_closed(self):
+    def test_route_with_missing_intermediate_lands_on_deepest_prefix(self):
+        # Antes esto era un 409 "not fully materialized".  Desde el 8-ago
+        # (reporte de comunidad: "it should just build a tree from the pgn")
+        # un PGN legal cuyo prefijo el arbol no conoce ATERRIZA en el punto
+        # mas profundo materializado, con la historia truncada ahi.  Sigue
+        # sin materializarse nada: la ruta se trunca, no se acepta.
         ucis = ['g1f3', 'f7f6', 'b1c3']
-        ingest.get_or_create_position(logic.start_fen())
+        root = ingest.get_or_create_position(logic.start_fen())
         fen = logic.start_fen()
         for uci in ucis:
             fen = logic.apply_move(fen, uci)
@@ -103,10 +108,10 @@ class ExplorerOpeningRouteTests(TestCase):
             {'play': ','.join(ucis)},
         )
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Cache-Control'], 'no-store')
-        self.assertContains(
-            response, 'not fully materialized', status_code=409)
+        self.assertIn(root.key, response['Location'])
+        self.assertNotIn('b1c3', response['Location'])
 
     def test_route_target_mismatch_returns_conflict_without_fallback(self):
         ucis = ['g1f3', 'f7f6', 'b1c3']
