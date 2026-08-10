@@ -97,6 +97,27 @@
             "draw_adj": "None",
             "syzygy_wdl": "DISABLED",
             "syzygy_adj": "DISABLED"
+        },
+        "V2 Rank8 1M Validation Candidate": {
+            "both_bench": 440088,
+            "both_network": "hordetest_run6b_e37_l06.nnue",
+            "dev_branch": "491e522718c2a0748d52d825f5c1fb0ce7d6c162",
+            "book_name": "HORDE_openings_v3_validation.epd",
+            "datagen_command": "horde_generate_training_data threads {THREADS} hash 16 network {NETWORK} network_sha256 {NETWORK_SHA256} producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 4 nodes 0 random_move_min_ply 4 random_move_max_ply 16 random_move_count 4 random_multi_pv 4 random_multi_pv_diff 100 write_min_ply 5 write_max_ply 200 max_game_ply 300 set_recommended_uci_options",
+            "datagen_total_count": 1000000,
+            "datagen_positions_per_chunk": 250000,
+            "datagen_base_seed": 202608100200000,
+            "datagen_publication_protocol": "41",
+            "datagen_campaign_id": "horde-v2-rank8-scale-20260810",
+            "datagen_external_workload_id": "validation-candidate-1m",
+            "datagen_role": "validation-candidate",
+            "datagen_cohort": "run6b-d4-v3-split",
+            "throughput": 1000,
+            "workload_size": 1,
+            "win_adj": "None",
+            "draw_adj": "None",
+            "syzygy_wdl": "DISABLED",
+            "syzygy_adj": "DISABLED"
         }
     }
 }
