@@ -98,15 +98,24 @@ class UnexploredButtonTests(TestCase):
         self.assertEqual(AnalysisTask.objects.filter(
             source=AnalysisTask.Source.USER).count(), blanks)
 
-    def test_a_reply_that_already_has_a_value_is_left_alone(self):
-        informed = Edge.objects.filter(parent=self.root).first().child
-        informed.eval_cp = 30
-        informed.save()
+    def test_a_seeded_value_no_longer_exempts_a_reply(self):
+        # Una eval sembrada por la linea del padre no es una medida: desde
+        # el 8-ago (peticion de comunidad) el boton la recompra.  Lo que si
+        # exime es busqueda propia de verdad.
+        seeded = Edge.objects.filter(parent=self.root).first().child
+        seeded.eval_cp = 30
+        seeded.save()
+        measured = list(Edge.objects.filter(parent=self.root))[1].child
+        measured.eval_cp = 25
+        measured.nodes_invested = 128_000_000
+        measured.save()
 
         self.client.post(f'/atomicdb/request-unexplored/{self.root.key}/')
 
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=seeded).exists())
         self.assertFalse(AnalysisTask.objects.filter(
-            position=informed).exists())
+            position=measured).exists())
 
     def test_a_backed_reply_counts_as_known(self):
         backed = Edge.objects.filter(parent=self.root).first().child
@@ -169,9 +178,12 @@ class UnexploredButtonTests(TestCase):
         self.assertEqual(response.json()['status'], 'already-solved')
 
     def test_a_fully_explored_position_says_so(self):
+        # Explorada de verdad: cada respuesta con busqueda PROPIA.  Una
+        # siembra ya no basta (§ is_unexplored, 8-ago).
         for edge in Edge.objects.filter(parent=self.root):
             child = edge.child
             child.eval_cp = 10
+            child.nodes_invested = 128_000_000
             child.save()
 
         response = self.client.post(
@@ -190,9 +202,12 @@ class UnexploredButtonTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_the_button_is_absent_once_nothing_is_unexplored(self):
+        # Mismo criterio nuevo que el conteo: solo la busqueda propia apaga
+        # el boton; una siembra lo deja encendido a proposito.
         for edge in Edge.objects.filter(parent=self.root):
             child = edge.child
             child.eval_cp = 10
+            child.nodes_invested = 128_000_000
             child.save()
 
         body = self.client.get(

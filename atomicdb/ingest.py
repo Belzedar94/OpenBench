@@ -3723,7 +3723,8 @@ def _uncertainty_expand(keys):
         if abs(row.eval_cp - row.backed_eval) <= UNCERTAINTY_GAP:
             continue
         queued = enqueue_unexplored_children(
-            row, cap=2, source=AnalysisTask.Source.AUTO)
+            row, cap=2, source=AnalysisTask.Source.AUTO,
+            children=unjudged_children(row))
         if queued:
             queued_total += queued
             DBEvent.objects.create(kind='UNCERTAINTY_EXPAND', payload={
@@ -4271,15 +4272,19 @@ DN_REPAIR_SEED_NODES = COVERAGE_SEED_NODES
 def _dn_repair_replies(parent, replies):
     """Las replicas sin mirar de un nodo AND, en el orden que no tenemos.
 
-    ``unexplored_children`` es exactamente el predicado que hace falta — ni
-    status, ni respaldo, ni eval propia — y devuelve en orden de movegen.  No
-    hay nada mejor: una replica que el motor hubiera rankeado en su MultiPV
-    tendria ``eval_cp`` sembrada por ``ingest_analysis`` y por tanto NO estaria
-    en esta lista.  Las que quedan son las que ninguna busqueda menciono, asi
-    que el orden de movegen es honesto (es el mismo argumento que
-    ``FRONTIER_BLIND_WIDTH``) y ademas reproducible bajo replay.
+    ``unjudged_children`` es exactamente el predicado que hace falta — ni
+    status, ni respaldo, ni eval de ninguna procedencia — y devuelve en
+    orden de movegen.  No hay nada mejor: una replica que el motor hubiera
+    rankeado en su MultiPV tendria ``eval_cp`` sembrada por
+    ``ingest_analysis`` y por tanto NO estaria en esta lista.  Las que
+    quedan son las que ninguna busqueda menciono, asi que el orden de
+    movegen es honesto (es el mismo argumento que ``FRONTIER_BLIND_WIDTH``)
+    y ademas reproducible bajo replay.  (No ``unexplored_children``: desde
+    que el boton humano recompra siembras, ese predicado incluye replicas
+    que el MultiPV ya ranqueo, y este brazo automatico las daria por
+    huerfanas y las compraria en bucle.)
     """
-    return unexplored_children(parent)[:max(0, int(replies))]
+    return unjudged_children(parent)[:max(0, int(replies))]
 
 
 def enqueue_dn_repair(cap=DN_REPAIR_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
@@ -4523,9 +4528,32 @@ def unexplored_children(pos):
             if is_unexplored(edge.child)]
 
 
+def is_unjudged(child):
+    """Sin JUICIO de ninguna clase: ni status, ni eval de ninguna
+    procedencia, ni respaldo.
+
+    Es el criterio de los brazos AUTOMATICOS (§ dn-repair, § expansion por
+    incertidumbre), y es deliberadamente MAS estrecho que ``is_unexplored``:
+    una eval sembrada por el MultiPV del padre ya es una senal que esos
+    brazos saben leer, y comprarle motor seria gasto que no descubre nada.
+    El boton HUMANO si la recompra (§ is_unexplored), porque alli lo que se
+    pide es la medida que la siembra no es.
+    """
+    return (child.status == 'UNKNOWN' and child.eval_cp is None
+            and child.backed_eval is None)
+
+
+def unjudged_children(pos):
+    """Los hijos materializados de ``pos`` sin juicio de ninguna clase."""
+    return [edge.child for edge in
+            Edge.objects.filter(parent=pos).select_related('child')
+            .order_by('id')
+            if is_unjudged(edge.child)]
+
+
 def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
                                 source=AnalysisTask.Source.USER,
-                                requested_by='', route=''):
+                                requested_by='', route='', children=None):
     """Encola las jugadas sin mirar de ``pos``. Devuelve cuantas se encolaron.
 
     Es ``enqueue_coverage_completion`` sin su guarda de unilateralidad: alli
@@ -4537,13 +4565,18 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
     hija viaja con ``ruta + su jugada`` para que el aviso de vuelta cuente la
     linea en el orden del autor (el click masivo era el unico camino USER que
     perdia la ruta, y sus avisos salian en el linaje canonico).
+
+    ``children`` deja al llamante elegir OTRO predicado — los brazos
+    automaticos pasan ``unjudged_children`` porque una siembra ya les da
+    senal; el boton humano usa el default y recompra la siembra a proposito.
     """
     edges_by_child = {}
     if route:
         edges_by_child = {e.child_id: e.move_uci
                           for e in Edge.objects.filter(parent=pos)}
     queued = 0
-    for child in unexplored_children(pos):
+    for child in (unexplored_children(pos) if children is None
+                  else children):
         if queued >= cap:
             break
         clamp = _short_mate_clamp(child)

@@ -19,7 +19,7 @@ semantics exercised are the stored ones, not a re-implementation.
 from unittest import mock
 
 from . import conquest_map, ingest, logic, views
-from .models import Edge, Position
+from .models import AnalysisTask, Edge, Position
 from .testing import TestCase
 
 
@@ -103,11 +103,12 @@ class HeadlineValueTests(TestCase):
         self.assertEqual(payload['score'], 30)
         self.assertEqual(payload['point'], 30)
 
-    def test_a_backed_value_the_quality_guard_blocked_never_headlines(self):
-        """The inverse of the report: 8M of support claiming better than a
-        10B own search.  The write-time guard keeps the own value as the
-        stored backed value, so the headline stands on the own eval — the
-        block is bought out by quality convergence, never displayed away."""
+    def test_a_weakly_supported_displacement_headlines_coherently(self):
+        """8M of support claiming better than a 10B own search.  Since
+        8-ago the ratio no longer vetoes: the value displaces at once and
+        every surface quotes the SAME number — which is the invariant this
+        test actually guards — while quality convergence buys the depth
+        that will confirm or refute it."""
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)
         Position.objects.filter(key=parent.key).update(
@@ -119,14 +120,16 @@ class HeadlineValueTests(TestCase):
         ingest.backup_backed_evals([parent.key])
 
         parent.refresh_from_db()
-        self.assertEqual(parent.backed_eval, 369)    # guard held the line
-        self.assertIsNone(parent.backed_move)
+        self.assertEqual(parent.backed_eval, 416)    # displaced, not vetoed
+        self.assertEqual(parent.backed_move, 'd2d4')
 
         body = self._explore(parent).content.decode()
-        self.assertIn('best line +369cp', body)
-        self.assertNotIn('best line +416cp', body)
+        self.assertIn('best line +416cp', body)
+        self.assertNotIn('best line +369cp', body)
 
-        self.assertEqual(self._api(parent)['score'], 369)
+        self.assertEqual(self._api(parent)['score'], 416)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=child, source=AnalysisTask.Source.FILL).exists())
 
     def test_one_node_quotes_one_number_on_every_surface(self):
         """Header, parent row, API and map inspector: the same best-known

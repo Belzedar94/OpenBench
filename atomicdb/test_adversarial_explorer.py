@@ -368,7 +368,7 @@ class DnRepairTests(TestCase):
             ProofNode.objects.filter(campaign=_campaign(),
                                      position=node).update(dn=1)
 
-        with patch.object(ingest, 'unexplored_children',
+        with patch.object(ingest, 'unjudged_children',
                           return_value=[]) as looked:
             ingest.enqueue_dn_repair(max_nodes=1)
 
