@@ -1362,7 +1362,7 @@ def _pv_verify_message(queued, detail):
         if covered:
             after = f', after {san}' if san else ''
             said = (f'{where.capitalize()} was already verified '
-                    f'{_human_plies(covered)} down — queued {nodes} nodes '
+                    f'{_human_plies(covered)} down; queued {nodes} nodes '
                     f'below that{after}')
         else:
             after = f', starting after {san}' if san else ''
@@ -1374,7 +1374,7 @@ def _pv_verify_message(queued, detail):
     if in_flight:
         what = ('1 position on it is' if in_flight == 1
                 else f'{in_flight} positions on it are')
-        return f'{where.capitalize()} is already queued — {what} still in ' \
+        return f'{where.capitalize()} is already queued; {what} still in ' \
                'flight.'
     tried = detail.get('lines_tried') or 0
     if not tried:
@@ -1384,7 +1384,7 @@ def _pv_verify_message(queued, detail):
         # Aqui no se nombra un candidato sino CUANTOS se caminaron, asi que la
         # cifra es ``lines_tried`` y no el numero del que se compro.
         scope = 'line 1' if tried == 1 else f'the top {tried} lines'
-        return ('Everything this button can verify is already analysed — '
+        return ('Everything this button can verify is already analysed: '
                 f'{scope} covered {_human_plies(covered)} down.')
     return ('The stored line no longer applies here, so there was nothing '
             'to verify.')
@@ -2878,7 +2878,7 @@ def _claim_note(line_no):
     """
     if line_no:
         return (f"from engine line {line_no} of this node's current analysis"
-                ' — no direct search of the resulting position yet')
+                '; no direct search of the resulting position yet')
     return ('seeded by an earlier pass (passes seed their top moves over '
             'time); no direct search yet')
 

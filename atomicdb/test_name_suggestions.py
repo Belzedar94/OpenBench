@@ -388,7 +388,6 @@ class ModerationFlowTests(TestCase):
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
         self.assertIn('Belfast Gambit', body)
         self.assertIn('Community name', body)
-        self.assertIn('approved by boss', body)
 
     def test_an_approved_name_labels_the_parent_edge(self):
         self._decide('approve')
@@ -530,7 +529,7 @@ class EditModerationTests(TestCase):
         reading = _reading(Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode())
 
-        self.assertIn(f'The audited catalogue still reads “{CATALOGUED_NAME}”',
+        self.assertIn(f'Previously “{CATALOGUED_NAME}”',
                       reading)
 
     def test_the_static_catalogue_itself_is_untouched(self):

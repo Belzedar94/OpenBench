@@ -9,7 +9,7 @@
     {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
 {% else %}
-<div class="crumb">{% if line_from_root %}root position{% else %}&hellip; lineage unavailable{% endif %}</div>
+<div class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</div>
 {% endif %}
 {% if parents|length > 1 %}
 <div class="crumb">transpositions from:
@@ -26,12 +26,8 @@
     {{ opening.reference_line_san }}</p>
   {% endif %}
   {% if opening.catalog_name %}
-  <p class="opening-reference dim">Corrected by a visitor, approved by
-    {{ opening.approved_by }}. The audited catalogue still reads
-    &ldquo;{{ opening.catalog_name }}&rdquo; and is never rewritten.</p>
-  {% elif opening.community %}
-  <p class="opening-reference dim">Suggested by a visitor, approved by
-    {{ opening.approved_by }}. Not part of the audited catalogue.</p>
+  <p class="opening-reference dim">Previously
+    &ldquo;{{ opening.catalog_name }}&rdquo;.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -98,12 +94,12 @@
         UNSOLVED · {{ stm }} to move{% if eval_stm_str %} · best line {{ eval_stm_str }}{% if eval_backed %}<{% if backed_source_url %}a{% else %}span{% endif %}
           class="backed-mark{% if eval_backed_light %} light{% endif %}"{% if backed_source_url %}
           href="{{ backed_source_url }}"
-          aria-label="{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }} — jump to the source of this value, {{ eval_backed_plies }} ply(s) below"{% endif %}
-          title="{% if eval_backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} ply(s) below{% endif %}{% if backed_source_url %} — click to jump to the position this value comes from{% endif %}{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</{% if backed_source_url %}a{% else %}span{% endif %}>{% elif eval_walked %}<span
+          aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"{% endif %}
+          title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}{% if backed_source_url %}. Click to jump to the position this value comes from{% endif %}{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</{% if backed_source_url %}a{% else %}span{% endif %}>{% elif eval_walked %}<span
           class="backed-mark light"
-          title="this value came down a line the engine reported somewhere else — nothing has searched this position itself yet, so it is a claim, not a verdict">walked</span>{% endif %}{% endif %}{% if backed_repetition %} <span
+          title="this value came down a line the engine reported somewhere else. Nothing has searched this position itself yet: a claim, not a verdict">walked</span>{% endif %}{% endif %}{% if backed_repetition %} <span
           class="backed-mark"
-          title="the line that carries this value returns to a position it has already been through — a repetition, which is worth a draw, not a verdict">repetition</span>{% endif %}
+          title="the line that carries this value returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}
       {% else %}
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}
       {% endif %}
@@ -121,7 +117,7 @@
     decir de donde viene lo de abajo.  Siguen siendo dos frases con dos
     tooltips propios — cada una explica lo suyo — separadas por una raya para
     que el ``·`` de dentro del resumen no compita con el de fuera.{% endcomment %}
-    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} — {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
+    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} &middot; {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
@@ -131,9 +127,9 @@
       etiqueta de la tabla, que es la misma poblacion contada por el mismo
       predicado (§ ingest.is_unexplored).{% endcomment %}
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
-        title="Queues one engine search for each move still marked unexplored in the table below — the replies carrying no value of any kind yet">Analyse the {{ unexplored_count }} unanalysed move{{ unexplored_count|pluralize }}</button>{% endif %}
+        title="Queues one engine search for each move in the table that no engine has searched yet">Analyse the {{ unexplored_count }} unanalysed move{{ unexplored_count|pluralize }}</button>{% endif %}
       {% if pv_verify_plies %}<button class="reqbtn" id="pvbtn"
-        title="walks down this line and queues engine analysis where it is still missing — past whatever is already verified, and on to the next line when this one is covered end to end">Verify PV</button>{% endif %}
+        title="Walks down this line and queues engine analysis where it is still missing. Skips what is already verified, and moves to the next line when this one is covered end to end">Verify PV</button>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
@@ -234,7 +230,7 @@
           // ~97% de las veces), y la profundidad vuelve sola si los hijos
           // contradicen la linea (witness-refuted). Wolfram leyo el texto
           // viejo como un fallo — con razon.
-          return 'Bought breadth instead — queued '
+          return 'Went wide instead: queued '
                  + plural(Number(d.children_queued) || 0, 'reply', 'replies')
                  + ' below'
                  + (plies ? ' (' + plural(plies, 'ply', 'plies')
@@ -243,11 +239,11 @@
         }
         const seen = Number(d.children_exhausted) || 0;
         if (!plies && !seen) {
-          return 'Frontier saturated — nothing left to buy below this position';
+          return 'Frontier saturated: nothing left to request below this position';
         }
-        return 'Frontier saturated — walked ' + plural(plies, 'ply', 'plies')
+        return 'Frontier saturated: walked ' + plural(plies, 'ply', 'plies')
                + ' past ' + plural(seen, 'reply', 'replies')
-               + ' already at full depth, nothing left to buy';
+               + ' already at full depth, nothing left to request';
       }
       function showCascade() {
         if (!below) { return; }
@@ -464,7 +460,7 @@
                   // click, FILL or the selector got there first): truthful,
                   // and the results are simply still in flight.
                   allbtn.textContent = 'All ' + data.candidates
-                                       + ' already queued — results pending';
+                                       + ' already queued; results pending';
                 } else {
                   allbtn.textContent = 'Queued ' + n + ' analys'
                                        + (n === 1 ? 'is' : 'es');
@@ -553,7 +549,7 @@
       mismas (§ views._analysis_lines_for_display, invariante 6): una PV que
       da la vuelta no se enseña como progreso, y el chip — el mismo de
       siempre — dice donde y por que se corto.{% endcomment %}
-      <div class="raw">{% for ln in analysis_lines %}{% ifchanged ln.prior_pass %}{% if ln.prior_pass %}<div class="rawline rawdivider">— earlier wider pass —</div>{% endif %}{% endifchanged %}<div class="rawline{% if ln.prior_pass %} rawprior{% endif %}">{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}{% if ln.pv_repetition %} <span class="backed-mark" title="line cut here — its last shown move returns to a position this line already went through; a repetition is worth a draw, not progress, and what followed was this position's own line over again">repetition</span>{% endif %}</div>{% endfor %}</div>
+      <div class="raw">{% for ln in analysis_lines %}{% ifchanged ln.prior_pass %}{% if ln.prior_pass %}<div class="rawline rawdivider">· earlier wider pass ·</div>{% endif %}{% endifchanged %}<div class="rawline{% if ln.prior_pass %} rawprior{% endif %}">{% if ln.raw %}{{ ln.raw }}{% else %}info multipv {{ forloop.counter }} score {% if ln.mate is not None %}mate {{ ln.mate }}{% else %}cp {{ ln.eval_cp }}{% endif %} pv {{ ln.pv|join:" " }}{% endif %}{% if ln.pv_repetition %} <span class="backed-mark" title="line cut at a repetition: its last shown move returns to a position this line already went through. A repetition is worth a draw, not progress">repetition</span>{% endif %}</div>{% endfor %}</div>
     </details>
     {% endif %}  </div>
 
@@ -572,7 +568,7 @@
         repeticiones estan desactivadas (invariante 6, decision del
         propietario 6-ago).  El chip es el de siempre.{% endcomment %}
         <td>{% if m.blocked %}<strong>{{ m.uci }}</strong> <span class="backed-mark"
-          title="repetition — this move returns to a position already on this line; repetitions are disabled, land on that position through the line above instead">repetition</span>
+          title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
           title="Enters {{ m.enters_opening }}"{% endif %}><strong>{{ m.uci }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
@@ -599,8 +595,8 @@
             title="{{ m.claim }}">{{ m.score }}</em>{% else %}{{ m.score }}{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
-            aria-label="{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }} — jump to the source of this value, {{ m.backed_plies }} ply(s) below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked — no engine search supports it yet; the alternatives on this path are unexplored and verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} ply(s) below{% endif %}{% if m.backed_url %} — click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
@@ -609,7 +605,7 @@
       <tr>
         <td><span class="chip cold"></span></td>
         <td>{% if u.blocked %}<strong>{{ u.uci }}</strong> <span class="backed-mark"
-          title="repetition — this move returns to a position already on this line; repetitions are disabled">repetition</span>
+          title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
           title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>

@@ -1440,7 +1440,7 @@ class MilestoneLineTests(TestCase):
         self.assertEqual(preview, '… Nf6')
         self.assertEqual(full, '… Nf6')
         self.assertEqual((orphan_preview, orphan_full), ('…', '…'))
-        self.assertContains(orphan_page, 'lineage unavailable')
+        self.assertContains(orphan_page, 'move order unknown')
         self.assertFalse(orphan_page.context['line_from_root'])
         self.assertEqual(resolved_top.key, top.key)
         self.assertEqual(_numbered_line(resolved_top, line), [{

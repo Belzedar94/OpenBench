@@ -539,7 +539,7 @@ class PvVerifyEndpointTests(TestCase):
         self.assertEqual(response.json(), {
             'status': 'nothing-to-do', 'queued': 0, 'line': 1,
             'from_tree': False, 'plies': 4, 'covered_plies': 0,
-            'message': 'Line 1 is already queued — 4 positions on it are '
+            'message': 'Line 1 is already queued; 4 positions on it are '
                        'still in flight.'})
 
     def test_the_receipt_names_the_line_the_plies_and_what_it_bought(self):
@@ -569,7 +569,7 @@ class PvVerifyEndpointTests(TestCase):
 
         self.assertEqual((data['line'], data['covered_plies']), (1, 1))
         self.assertEqual(data['message'],
-                         'Line 1 was already verified 1 ply down — queued '
+                         'Line 1 was already verified 1 ply down; queued '
                          '128.0M nodes below that, after ...c5.')
 
     def test_with_nothing_to_verify_the_receipt_says_that_much(self):
@@ -582,7 +582,7 @@ class PvVerifyEndpointTests(TestCase):
         self.assertEqual(data['status'], 'nothing-to-do')
         self.assertEqual(data['message'],
                          'Everything this button can verify is already '
-                         'analysed — line 1 covered 1 ply down.')
+                         'analysed: line 1 covered 1 ply down.')
 
     def test_a_logged_in_visitor_keeps_the_affinity(self):
         from .testing import worker_account

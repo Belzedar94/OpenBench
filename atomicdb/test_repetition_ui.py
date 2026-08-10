@@ -64,7 +64,7 @@ class BlockedMoveTests(KnightLoopFixture):
         self.assertTrue(row['blocked'])
         self.assertIsNone(row['url'])
         self.assertIsNone(row['backed_url'])
-        self.assertContains(response, 'repetitions are disabled')
+        self.assertContains(response, 'Repetitions are disabled')
         # El tablero obedece el mismo bloqueo: la jugada no es clicable.
         self.assertNotIn('f6g8', response.context['legal_ucis'])
         self.assertNotIn('f6g8', [m['uci'] for m in
@@ -155,7 +155,7 @@ class PvCutTests(KnightLoopFixture):
             shown[0]['raw'],
             'info depth 10 seldepth 12 multipv 1 score cp 500 nodes 9 '
             'pv f6g8 g1f3 g8f6 f3g1')
-        self.assertContains(response, 'line cut here')
+        self.assertContains(response, 'line cut at a repetition')
 
     def test_lines_without_a_crossing_are_untouched(self):
         response = self._explore(self.p3.key)

@@ -707,7 +707,7 @@ class DescentRequestApiTests(TestCase):
         response = self.client.get(f'/atomicdb/explore/{pos.key}/')
 
         self.assertContains(response, 'Frontier saturated')
-        self.assertContains(response, 'nothing left to buy')
+        self.assertContains(response, 'nothing left to request')
         self.assertContains(response, 'children_exhausted')
 
     def test_the_outcome_has_a_place_to_be_read_beside_the_button(self):
@@ -807,7 +807,7 @@ class ExpansionRequestApiTests(TestCase):
         # El texto del swap dice lo que PASA (se compro anchura y la
         # profundidad vuelve sola si los hijos discrepan), no "budget
         # exhausted" — que Wolfram leyo como un fallo, con razon.
-        self.assertContains(response, 'Bought breadth instead')
+        self.assertContains(response, 'Went wide instead')
         self.assertContains(response, 'children_queued')
 
     def test_an_expansion_says_where_the_work_landed(self):
