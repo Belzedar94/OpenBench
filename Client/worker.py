@@ -108,6 +108,12 @@ HORDE_OPENING_BOOK_SHA256 = (
     '93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958'
 )
 HORDE_OPENING_BOOK_POSITIONS = 2486
+HORDE_V3_TRAIN_BOOK_SHA256 = (
+    '1DC2DD829962CD29FA98CAFC1B0613AC2FCAAFF088B65977E10AAEAF76E96A55'
+)
+HORDE_V3_VALIDATION_BOOK_SHA256 = (
+    '81FD618F879F04D732D462713BCB75BC6F157C9B4CD9E4D6829D3169DAD0BF4A'
+)
 HORDE_BIN_V1_GENERATION = {
     'hash_mb': 512,
     'depth': 6,
@@ -121,6 +127,30 @@ HORDE_BIN_V1_GENERATION = {
     'write_max_ply': 400,
     'max_game_ply': 512,
     'opening_count': HORDE_OPENING_BOOK_POSITIONS,
+}
+HORDE_BIN_V1_RANK8_GENERATION = {
+    'hash_mb': 16,
+    'depth': 4,
+    'nodes': 0,
+    'random_move_min_ply': 4,
+    'random_move_max_ply': 16,
+    'random_move_count': 4,
+    'random_multi_pv': 4,
+    'random_multi_pv_diff': 100,
+    'write_min_ply': 5,
+    'write_max_ply': 200,
+    'max_game_ply': 300,
+}
+HORDE_BIN_V1_REGISTERED_GENERATIONS = {
+    HORDE_OPENING_BOOK_SHA256: HORDE_BIN_V1_GENERATION,
+    HORDE_V3_TRAIN_BOOK_SHA256: {
+        **HORDE_BIN_V1_RANK8_GENERATION,
+        'opening_count': 1203,
+    },
+    HORDE_V3_VALIDATION_BOOK_SHA256: {
+        **HORDE_BIN_V1_RANK8_GENERATION,
+        'opening_count': 297,
+    },
 }
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
@@ -2928,9 +2958,12 @@ def validate_horde_bin_v1_output(config, output_path, producer):
         network_sha256 == HORDE_RUN6B_SHA256,
         'network is not the registered Run 6B artifact',
     )
+    registered_generation = HORDE_BIN_V1_REGISTERED_GENERATIONS.get(
+        book_sha256
+    )
     _horde_bin_v1_require(
-        book_sha256 == HORDE_OPENING_BOOK_SHA256,
-        'opening book is not the registered Horde artifact',
+        registered_generation is not None,
+        'opening book is not a registered Horde artifact',
     )
 
     try:
@@ -3010,7 +3043,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 and config.threads > 0,
                 'seed or thread count does not match the assigned chunk',
             )
-            for field, expected in HORDE_BIN_V1_GENERATION.items():
+            for field, expected in registered_generation.items():
                 _horde_bin_v1_require(
                     generation.get(field) == expected
                     and type(generation.get(field)) is int,

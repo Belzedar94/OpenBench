@@ -260,23 +260,45 @@ def publication_config(tablebase=False):
     return cfg, network_bytes
 
 
-def horde_publication_config():
+def horde_publication_config(
+    book_name='HORDE_openings.epd',
+    book_sha256=None,
+    registered_generation=None,
+):
     cfg, _ = publication_config()
     test = cfg.workload['test']
     data = test['datagen']
     publication = data['publication_contract']
+    book_sha256 = (
+        book_sha256 or worker.HORDE_OPENING_BOOK_SHA256
+    ).lower()
+    registered_generation = dict(
+        registered_generation or worker.HORDE_BIN_V1_GENERATION
+    )
     command = (
-        'horde_generate_training_data threads {THREADS} hash 512 '
+        'horde_generate_training_data threads {THREADS} hash %d '
         'network {NETWORK} network_sha256 {NETWORK_SHA256} '
         'producer_sha256 {PRODUCER_SHA256} count {COUNT} seed {SEED} '
-        'book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth 6 '
-        'nodes 0 random_move_min_ply 1 random_move_max_ply 20 '
-        'random_move_count 8 random_multi_pv 4 random_multi_pv_diff 200 '
-        'write_min_ply 5 write_max_ply 400 max_game_ply 512 '
+        'book {BOOK} book_sha256 {BOOK_SHA256} out {OUT} depth %d '
+        'nodes %d random_move_min_ply %d random_move_max_ply %d '
+        'random_move_count %d random_multi_pv %d random_multi_pv_diff %d '
+        'write_min_ply %d write_max_ply %d max_game_ply %d '
         'set_recommended_uci_options'
+        % (
+            registered_generation['hash_mb'],
+            registered_generation['depth'],
+            registered_generation['nodes'],
+            registered_generation['random_move_min_ply'],
+            registered_generation['random_move_max_ply'],
+            registered_generation['random_move_count'],
+            registered_generation['random_multi_pv'],
+            registered_generation['random_multi_pv_diff'],
+            registered_generation['write_min_ply'],
+            registered_generation['write_max_ply'],
+            registered_generation['max_game_ply'],
+        )
     )
-    book_sha256 = worker.HORDE_OPENING_BOOK_SHA256.lower()
-    book_source = 'https://example.test/HORDE_openings.epd.zip'
+    book_source = 'https://example.test/%s.zip' % book_name
 
     test['variant_contract'] = worker.HORDE_DATAGEN_VARIANT_CONTRACT
     test['dev'].update({
@@ -285,7 +307,7 @@ def horde_publication_config():
         'netname': 'hordetest_run6b_e37_l06.nnue',
     })
     test['book'] = {
-        'name': 'HORDE_openings.epd',
+        'name': book_name,
         'sha': book_sha256,
         'raw_sha': book_sha256,
         'source': book_source,
@@ -367,7 +389,12 @@ def horde_manifest(cfg, producer, payload):
         'seed': str(data['seed']),
         'threads': cfg.threads,
     }
-    generation.update(worker.HORDE_BIN_V1_GENERATION)
+    book_sha256 = data['publication_contract']['book'][
+        'raw_sha256'
+    ].upper()
+    generation.update(
+        worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256]
+    )
     return {
         'schema': 'HORDE_BIN_V1',
         'schema_sha256': worker.HORDE_BIN_V1_SCHEMA_SHA256,
@@ -382,7 +409,7 @@ def horde_manifest(cfg, producer, payload):
             'schema': 'HORDETEST_HP_LEGACY_V1',
             'sha256': worker.HORDE_RUN6B_SHA256,
         },
-        'book_sha256': worker.HORDE_OPENING_BOOK_SHA256,
+        'book_sha256': book_sha256,
         'producer_sha256': producer['sha256'].upper(),
         'payload_sha256': hashlib.sha256(payload).hexdigest().upper(),
         'generation': generation,
@@ -434,6 +461,78 @@ class DatagenWorkerTests(unittest.TestCase):
             summary['file_sha256'], hashlib.sha256(expected_file).hexdigest()
         )
         self.assertEqual(summary['file_bytes'], len(expected_file))
+
+    def test_horde_bin_v1_validator_accepts_registered_rank8_contracts(self):
+        cases = [
+            (
+                'HORDE_openings_v3_train.epd',
+                worker.HORDE_V3_TRAIN_BOOK_SHA256,
+            ),
+            (
+                'HORDE_openings_v3_validation.epd',
+                worker.HORDE_V3_VALIDATION_BOOK_SHA256,
+            ),
+        ]
+        for book_name, book_sha256 in cases:
+            with (
+                self.subTest(book=book_name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                generation = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
+                    book_sha256
+                ]
+                cfg, producer = horde_publication_config(
+                    book_name, book_sha256, generation
+                )
+                payload = horde_record()
+                manifest = horde_manifest(cfg, producer, payload)
+                output = Path(directory, 'chunk.bin')
+                output.write_bytes(horde_file_bytes(manifest, payload))
+
+                summary = worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
+
+                self.assertEqual(summary['record_count'], 1)
+                self.assertEqual(
+                    manifest['generation']['opening_count'],
+                    generation['opening_count'],
+                )
+
+    def test_horde_bin_v1_validator_rejects_unregistered_book_contract(self):
+        generation = {
+            **worker.HORDE_BIN_V1_RANK8_GENERATION,
+            'opening_count': 1,
+        }
+        cfg, producer = horde_publication_config(
+            'HORDE_unregistered.epd', '0' * 64, generation
+        )
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'registered Horde artifact'
+        ):
+            worker.validate_horde_bin_v1_output(
+                cfg, 'missing.bin', producer
+            )
+
+    def test_horde_bin_v1_validator_rejects_rank8_contract_drift(self):
+        book_sha256 = worker.HORDE_V3_TRAIN_BOOK_SHA256
+        generation = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256]
+        cfg, producer = horde_publication_config(
+            'HORDE_openings_v3_train.epd', book_sha256, generation
+        )
+        payload = horde_record()
+        manifest = horde_manifest(cfg, producer, payload)
+        manifest['generation']['opening_count'] = 297
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'generation setting opening_count',
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
 
     def test_horde_bin_v1_validator_rejects_identity_and_setting_drift(self):
         cases = {

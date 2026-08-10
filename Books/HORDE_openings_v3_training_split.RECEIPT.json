@@ -1,0 +1,47 @@
+{
+  "schema": "HORDE_OPENING_BOOK_V3_TRAINING_SPLIT_RECEIPT_V1",
+  "status": "openbench_datagen_books",
+  "source": {
+    "name": "HORDE_openings_v3.epd",
+    "records": 1500,
+    "canonical_groups": 1500,
+    "bytes": 117653,
+    "payload_sha256": "e09630e8a0a7d28028e2b02131e82a176dd2d8b18634d671f93e230f9d14f304",
+    "archive_sha256": "050ce8da10907d59cee8fcc879f692e2a1a8daf66d85fc31d2ae68ac1f020b4c"
+  },
+  "assignment": {
+    "canonicalization": "horizontal_reflection_first_four_fen_fields_v1",
+    "hash": "sha256",
+    "integer": "first_eight_digest_bytes_unsigned_big_endian",
+    "modulus": 5,
+    "validation_residue": 0
+  },
+  "train": {
+    "name": "HORDE_openings_v3_train.epd",
+    "records": 1203,
+    "bytes": 94267,
+    "payload_sha256": "1dc2dd829962cd29fa98cafc1b0613ac2fcaaff088b65977e10aaeaf76e96a55",
+    "archive_bytes": 17598,
+    "archive_sha256": "acfc4516726045451bac6200f70d7cc5435e34536ccd3cdad01e0a0ae665c3f4"
+  },
+  "validation": {
+    "name": "HORDE_openings_v3_validation.epd",
+    "records": 297,
+    "bytes": 23386,
+    "payload_sha256": "81fd618f879f04d732d462713bcb75bc6f157c9b4cd9e4d6829d3169dad0bf4a",
+    "archive_bytes": 4972,
+    "archive_sha256": "6f46bf5ec74cf5144deb91e31d54bce45401f7fb55ded257012924be717d4823"
+  },
+  "gates": {
+    "complete_partition": true,
+    "disjoint_canonical_groups": true,
+    "disjoint_position_keys": true,
+    "unique_source_records": 1500,
+    "unique_train_records": 1203,
+    "unique_validation_records": 297,
+    "train_validation_intersection": 0,
+    "union_equals_source": true,
+    "deterministic_archives": true,
+    "authorized_for_openbench_datagen": true
+  }
+}
