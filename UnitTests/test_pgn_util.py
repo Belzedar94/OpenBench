@@ -3,12 +3,13 @@
 import os
 import sys
 import re
+import unittest
 
 # Needed to include from ../Client/*.py
 PARENT = os.path.join(os.path.dirname(__file__), os.path.pardir)
 sys.path.append(os.path.abspath(os.path.join(PARENT, 'Client')))
 
-from pgn_util import pgn_iterator, pgn_strip_movelist
+from pgn_util import pgn_iterator, pgn_strip_headers, pgn_strip_movelist
 from pgn_util import REGEX_COMMENT_COMPACT, REGEX_COMMENT_VERBOSE
 
 def verify_stripped_move_list(move_list, compact):
@@ -18,6 +19,26 @@ def verify_stripped_move_list(move_list, compact):
 
     for move, comment in re.findall(r'([a-zA-Z0-9+=#-]+)\s\{([^}]*)\}', move_list):
         assert comment in special_comments or comment_regex.match(comment)
+
+
+class PgnHeaderTests(unittest.TestCase):
+
+    def test_termination_survives_compact_and_verbose_uploads(self):
+        headers = {
+            'Event': '?',
+            'Site': '?',
+            'Date': '2026.08.09',
+            'Round': '1',
+            'White': 'dev',
+            'Black': 'base',
+            'Result': '0-1',
+            'Termination': 'time forfeit',
+        }
+
+        for compact in (True, False):
+            with self.subTest(compact=compact):
+                stripped = pgn_strip_headers(headers, compact)
+                self.assertIn('[Termination "time forfeit"]', stripped)
 
 if __name__ == '__main__':
     for example_pgn in [ 'example1.pgn', 'example2.pgn', 'example3.pgn', ]:
