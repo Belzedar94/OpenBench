@@ -323,7 +323,7 @@ def _install_worker_update(server, script_path=None):
     All errors are fail-open: the currently running, known-good worker remains
     in memory and callers may continue processing tasks.
     """
-    script = Path(script_path or os.path.abspath(__file__))
+    script = Path(script_path or __file__).resolve()
     try:
         candidate = _download_worker(server)
         remote_build = _worker_build(candidate)
@@ -373,7 +373,7 @@ def _restart_updated_worker(script_path=None):
     for manual recovery. Automatic rollback here would race with another
     process that already restarted successfully from the shared script.
     """
-    script = Path(script_path or os.path.abspath(__file__))
+    script = Path(script_path or __file__).resolve()
     try:
         os.execv(sys.executable,
                  [sys.executable, str(script), *sys.argv[1:]])
@@ -617,7 +617,7 @@ def parse_syzygy_manifest(payload):
         # A name is a leaf, always. No directories, no traversal, no drives.
         if (name in ('.', '..') or '/' in name or '\\' in name
                 or name.startswith('.') or ':' in name
-                or os.path.basename(name) != name):
+                or Path(name).name != name):
             raise SyzygyManifestError(f'unsafe file name {name!r}')
         if name in seen:
             raise SyzygyManifestError(f'duplicate file name {name!r}')
@@ -806,11 +806,13 @@ def _fetch_verified(server, entry, dest):
     import os
     import stat
 
+    dest = Path(dest)
+
     def _ok():
         with open(dest, 'rb') as f:
             return hashlib.sha256(f.read()).hexdigest() == entry['sha256']
 
-    if not (os.path.exists(dest) and _ok()):
+    if not (dest.exists() and _ok()):
         print(f"downloading {entry['file']} ({entry['size_mb']} MB)...",
               flush=True)
         r = requests.get(server + '/atomicdb/engines/' + entry['file'],
@@ -827,7 +829,6 @@ def _fetch_verified(server, entry, dest):
 def provision_engine(server):
     """Descarga el motor de referencia (y su red NNUE si el binario no la
     lleva embebida), todo sha256-verificado."""
-    import os
     import platform
 
     key = f'{platform.system().lower()}-{platform.machine().lower()}'
@@ -839,15 +840,17 @@ def provision_engine(server):
         sys.exit(f'no prebuilt engine for {key}: pass --engine with your own '
                  f'build (prebuilts: {", ".join(sorted(man["binaries"]))})')
     b = man['binaries'][key]
-    os.makedirs('Engines', exist_ok=True)
-    dest = os.path.join('Engines', b['file'])
+    Path('Engines').mkdir(exist_ok=True)
+    dest = Path('Engines') / b['file']
     _fetch_verified(server, b, dest)
     if b.get('needs_net') and 'net' in man:
         # la red va al cwd del worker: el default EvalFile del motor la
         # resuelve desde ahi
         _fetch_verified(server, man['net'], man['net']['file'])
     print(f'engine ready: {dest}', flush=True)
-    return dest
+    # str en el contrato: quien llama lo pasa a subprocess y telemetria tal
+    # cual llevaba anos recibiendolo; pathlib es de puertas adentro.
+    return str(dest)
 
 
 def _file_sha256(path):
@@ -876,10 +879,9 @@ def _net_sha256(engine_path):
     y junto al binario.  Una red embebida en el binario ya queda cubierta por
     el sha del propio ejecutable.
     """
-    import glob
-    candidates = sorted(glob.glob('*.nnue'))
-    directory = os.path.dirname(os.path.abspath(engine_path))
-    candidates += sorted(glob.glob(os.path.join(directory, '*.nnue')))
+    candidates = sorted(Path('.').glob('*.nnue'))
+    directory = Path(engine_path).resolve().parent
+    candidates += sorted(directory.glob('*.nnue'))
     for candidate in candidates:
         digest = _file_sha256(candidate)
         if digest:
