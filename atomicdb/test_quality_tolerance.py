@@ -1,4 +1,4 @@
-"""The fourth mechanism of the Wolfram symptom: the quality guard's strictness.
+"""The quality tolerance: once a veto's threshold, now a purchase trigger.
 
 Node after 1.Nf3 f6 2.Nc3 Nh6 3.g4 c6.  Its d2d4 row showed 416 [BACKED]; its
 own header stayed at 369.  Forensics: the node had 128,111,808 nodes of its
@@ -6,8 +6,15 @@ own and the child's backing carried 128,007,926 — a 0.08% difference, the same
 search for all practical purposes — and the quality guard blocked a
 mover-favourable displacement over it.
 
-That guard exists so an 8M search cannot overwrite what a 10B one backed.  It
-was never meant to arbitrate between two runs of the same size.
+Since 8-ago-2026 (owner's call, Wolfram's rationale: "there is no reason
+whatsoever to be pessimistic in eval propagation cause solver should have
+independent notion of PN/DN") the ratio no longer vetoes anything: any
+favourable value with real engine support displaces at once.  What the
+tolerance now decides is whether the displacement also BUYS the child the
+depth that would confirm it — under the tolerance it does, at or above it
+there is no discrepancy left to resolve.  The only veto that remains is
+against literally zero engine support (a visitor-walked band), which is the
+28-jul case and lives in test_backed_eval.
 """
 
 from . import ingest, logic
@@ -49,16 +56,18 @@ class QualityToleranceTests(TestCase):
         self.assertEqual(parent.backed_eval, 416)
         self.assertEqual(parent.backed_move, 'd2d4')
 
-    def test_a_genuinely_shallow_child_still_cannot_overwrite(self):
-        """8M against 10B: the case the guard was built for."""
-        parent, _child = self._wolfram(child_quality=8_000_000,
-                                       own_quality=10_000_000_000)
+    def test_a_genuinely_shallow_child_displaces_and_buys(self):
+        """8M against 10B: displaces now, and buys the depth to confirm."""
+        parent, child = self._wolfram(child_quality=8_000_000,
+                                      own_quality=10_000_000_000)
 
         ingest.backup_backed_evals([parent.key])
 
         parent.refresh_from_db()
-        self.assertEqual(parent.backed_eval, 369)
-        self.assertIsNone(parent.backed_move)
+        self.assertEqual(parent.backed_eval, 416)
+        self.assertEqual(parent.backed_move, 'd2d4')
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=child, source=AnalysisTask.Source.FILL).exists())
 
     def test_exactly_at_the_tolerance_qualifies(self):
         parent, _child = self._wolfram(child_quality=50_000_000,
@@ -67,12 +76,14 @@ class QualityToleranceTests(TestCase):
         parent.refresh_from_db()
         self.assertEqual(parent.backed_eval, 416)
 
-    def test_just_under_the_tolerance_does_not(self):
-        parent, _child = self._wolfram(child_quality=49_000_000,
-                                       own_quality=100_000_000)
+    def test_just_under_the_tolerance_displaces_and_buys(self):
+        parent, child = self._wolfram(child_quality=49_000_000,
+                                      own_quality=100_000_000)
         ingest.backup_backed_evals([parent.key])
         parent.refresh_from_db()
-        self.assertEqual(parent.backed_eval, 369)
+        self.assertEqual(parent.backed_eval, 416)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=child, source=AnalysisTask.Source.FILL).exists())
 
     def test_the_directional_guard_is_untouched_at_any_quality(self):
         """A worse-for-the-mover value never displaces, however well funded."""
@@ -92,7 +103,7 @@ class QualityToleranceTests(TestCase):
 
 class QualityConvergenceTests(TestCase):
 
-    def test_a_legitimate_block_buys_the_child_the_missing_depth(self):
+    def test_a_weak_displacement_buys_the_child_the_missing_depth(self):
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)
         parent.eval_cp = 369
@@ -107,11 +118,11 @@ class QualityConvergenceTests(TestCase):
         ingest.backup_backed_evals([parent.key])
 
         parent.refresh_from_db()
-        self.assertEqual(parent.backed_eval, 369)     # correctly blocked
+        self.assertEqual(parent.backed_eval, 416)     # displaces at once...
         task = AnalysisTask.objects.get(position=child)
         self.assertEqual(task.source, AnalysisTask.Source.FILL)
         self.assertGreaterEqual(task.budget_nodes, 2_000_000_000)
-        self.assertTrue(DBEvent.objects.filter(
+        self.assertTrue(DBEvent.objects.filter(         # ...and still buys
             kind='QUALITY_CONVERGENCE').exists())
 
     def test_a_displacement_buys_nothing(self):

@@ -177,8 +177,11 @@ class BackedGuardTests(TestCase):
         p.refresh_from_db()
         self.assertEqual(p.backed_eval, -50)
 
-    def test_shallow_child_cannot_override_a_deeper_search(self):
-        # 128M no pisa lo que respaldo un 10B en el mismo subarbol.
+    def test_shallow_child_displaces_at_once_and_buys_convergence(self):
+        # 128M favorable contra 10B propios: desde el 8-ago (propietario,
+        # racional de Wolfram) el ratio ya no veta — el valor se propaga YA
+        # y la profundidad que falta se compra, en vez de esconder la
+        # discrepancia detras de la cabecera vieja.
         p = _pos('QP', 'w', expanded=True, eval_cp=100,
                  nodes_invested=10_000_000_000)
         shallow = _pos('QSHALLOW', 'b', eval_cp=900,
@@ -190,13 +193,9 @@ class BackedGuardTests(TestCase):
         ingest.backup_backed_evals([p.key])
 
         p.refresh_from_db()
-        self.assertEqual(p.backed_eval, 100)
-
-        shallow.nodes_invested = 10_000_000_000
-        shallow.save(update_fields=['nodes_invested'])
-        ingest.backup_backed_evals([p.key])
-        p.refresh_from_db()
         self.assertEqual(p.backed_eval, 900)
+        self.assertTrue(AnalysisTask.objects.filter(
+            position=shallow, source=AnalysisTask.Source.FILL).exists())
 
     def test_solved_children_enter_with_their_truth_value(self):
         # Un hijo probado entra con mate/tablas, nunca con una eval.
@@ -1023,17 +1022,14 @@ class BackedIngestTests(TestCase):
         self.assertTrue(AnalysisTask.objects.filter(
             position=walked, source=AnalysisTask.Source.FILL).exists())
 
-    def test_a_new_analysis_of_the_child_retests_the_blocked_parent(self):
+    def test_a_shallow_pass_displaces_and_the_delivery_confirms_it(self):
         """The purchase's delivery route, end to end through submit.
 
-        A blocked parent stores a self-echo and the echo never changes, so
-        propagation from below never reached it again: the convergence
-        purchase analysed the child, the child's backed value stayed put
-        (value unchanged, no propagation), and the parent stayed blocked on
-        stale quality forever.  The apply now seeds the analysed position's
-        PARENTS too, because a fresh analysis changes ``nodes_invested``
-        even when it changes nothing else — and that is precisely what the
-        parents' quality guards are waiting on.
+        Since 8-ago the shallow favourable pass displaces the parent at
+        once (no more self-echo); what the convergence purchase delivers is
+        CONFIRMATION at real depth.  The apply still seeds the analysed
+        position's parents, because a fresh analysis changes
+        ``nodes_invested`` even when it changes nothing else.
         """
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)
@@ -1044,20 +1040,22 @@ class BackedIngestTests(TestCase):
         ingest.expand(child)
 
         # A shallow pass over the child: informative, mover-favourable at
-        # the parent (416 > 369 for White), but 8M against 2B — blocked.
+        # the parent (416 > 369 for White), 8M against 2B — displaces NOW.
         ingest.ingest_analysis(child.key, self._lines(
             child, [416] * 5), 8_000_000)
         parent.refresh_from_db()
-        self.assertEqual(parent.backed_eval, 369)   # the self-echo
-        self.assertIsNone(parent.backed_move)
+        self.assertEqual(parent.backed_eval, 416)
+        self.assertEqual(parent.backed_move, edge.move_uci)
 
-        # The convergence purchase lands: same values, real depth.
+        # The convergence purchase lands: same values, real depth — the
+        # value stands, now with the support that confirms it.
         ingest.ingest_analysis(child.key, self._lines(
             child, [416] * 5), 2_000_000_000)
 
         parent.refresh_from_db()
         self.assertEqual(parent.backed_eval, 416)
         self.assertEqual(parent.backed_move, edge.move_uci)
+        self.assertGreaterEqual(parent.backed_nodes, 2_000_000_000)
 
     def test_partially_expanded_lineage_still_backs_up(self):
         """El hueco real que dejaba la cascada heredada.

@@ -1294,16 +1294,50 @@ def coverage_is_partial(row, children):
     return not (bool(row.expanded) and len(informed) == len(children))
 
 
-def _backed_for(row, children, discrepancies=None):
+def _showcase_bound(last_analysis):
+    """La cota del escaparate multipv de un nodo, o ``None``.
+
+    Si el ultimo analisis emitio DOS o mas lineas vigentes, el motor afirmo
+    algo sobre TODOS los demas movimientos: ninguno es mejor para el que
+    mueve que la peor linea del escaparate.  Ese numero acota a los hijos
+    sin informacion — materializados o no — con el soporte de la busqueda
+    que lo emitio (Wolfram, 8-ago: "if engine runs in multipv 5 then all
+    other moves are not better than 5 in multipv, for backing purposes").
+
+    Con UNA sola linea vigente no hay cota: el PV1 es la eval propia del
+    nodo, y usarla acotaria los desconocidos con el numero que el respaldo
+    intenta refinar — el clavado de siempre con otro nombre.  Una linea
+    vigente sin ``eval_cp`` (mate crudo) tampoco acota: la cota es un
+    centipeon o no es.
+
+    Recibe la LISTA, no la fila: la cascada carga sus filas con ``only()``
+    y leer ``last_analysis`` fila a fila seria un N+1 sobre miles de nodos;
+    el llamante lo trae aparte, una consulta por nivel y solo para las
+    filas con huecos (§ backup_backed_evals).
+    """
+    showcase = [ln for ln in (last_analysis or [])
+                if isinstance(ln, dict) and not ln.get('prior_pass')]
+    if len(showcase) < 2:
+        return None
+    worst = showcase[-1].get('eval_cp')
+    return worst if isinstance(worst, int) else None
+
+
+def _backed_for(row, children, discrepancies=None, bound=None):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
     no aportan nada llevan ``value=None``).
 
     ``discrepancies``, si se pasa, recoge los casos en los que un hijo
-    reclamaba un valor MEJOR para el que mueve y la guarda de calidad lo
-    bloqueo de verdad (soporte por debajo de la tolerancia).  El llamante los
-    convierte en trabajo: ver ``_queue_quality_convergence``.
+    reclama un valor mejor para el que mueve con soporte por debajo de la
+    tolerancia.  Ya no se bloquean (§ abajo), pero siguen siendo preguntas
+    abiertas y el llamante las convierte en trabajo: ver
+    ``_queue_quality_convergence``.
+
+    ``bound`` es la cota del escaparate multipv del PROPIO nodo
+    (§ ``_showcase_bound``); el llamante la trae porque esta funcion no
+    debe tocar la base de datos.
     """
     exact = _status_eval(row.status)
     if exact is not None:
@@ -1312,6 +1346,21 @@ def _backed_for(row, children, discrepancies=None):
     informed = [c for c in children if c.value is not None]
     if not informed:
         return None, None, 0, 0
+    # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago).  Los hijos sin
+    # informacion entran al negamax como UN pseudo-hijo con el valor de la
+    # cota del escaparate: es el mejor caso posible de lo desconocido segun
+    # el propio motor, asi que el max/min sobre ``informed`` vuelve a ser el
+    # minimax de verdad sobre la informacion disponible y las guardas de
+    # cobertura parcial dejan de aplicar.  Es lo que baja el +1051 de la
+    # cabecera al +589 del unico hijo mirado (caso Eclipsia, 8-ago) en
+    # cuanto el escaparate afirma que el resto no compite.  Solo entra con
+    # al menos un hijo REAL informado: una cota sin testigo no respalda nada.
+    bounded = False
+    if bound is not None and (len(informed) < len(children)
+                              or coverage_is_partial(row, children)):
+        informed.append(_ChildValue(None, bound,
+                                    row.nodes_invested or 0, 0))
+        bounded = True
     stm_white = row.fen.split()[1] == 'w'
     # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
     # (menos plies), luego el orden de movegen, para que el resultado sea
@@ -1320,25 +1369,44 @@ def _backed_for(row, children, discrepancies=None):
         informed,
         key=lambda c: (c.value, c.quality, -c.plies) if stm_white
         else (c.value, -c.quality, c.plies))
-    complete = not coverage_is_partial(row, children)
+    complete = bounded or not coverage_is_partial(row, children)
+    own = row.eval_cp
+    own_quality = row.nodes_invested or 0
+    if (own is not None and best.quality <= 0
+            and (bounded or not complete)
+            and _better_for_mover(best.value, own, stm_white)):
+        # EL UNICO VETO DE CALIDAD QUE QUEDA: un valor favorable sin UN SOLO
+        # nodo de motor detras — la banda de una linea CAMINADA por un
+        # visitante — no desplaza una medida real.  Es el caso 28-jul que
+        # pintaba 9994 BACKED sobre territorio sin un analisis, y una cota
+        # de escaparate tampoco lo santifica: la cota acota lo que el motor
+        # NO miro, no convierte en medida lo que nadie midio.  Se compra el
+        # motor que falta y sera el quien lo diga.
+        if discrepancies is not None:
+            discrepancies.append((best.move, row.key, own_quality))
+        return own, None, 0, own_quality
     if not complete:
-        own = row.eval_cp
-        own_quality = row.nodes_invested or 0
         if own is not None:
-            # GUARDA DIRECCIONAL (intacta): con cobertura parcial el valor
-            # solo se mueve en la direccion que favorece al que mueve.
-            favourable = _better_for_mover(best.value, own, stm_white)
-            # GUARDA DE CALIDAD, ahora con tolerancia.
-            outweighed = best.quality < own_quality * BACKED_QUALITY_TOLERANCE
-            if not favourable or outweighed:
-                if favourable and outweighed and discrepancies is not None:
-                    # El hijo dice algo mejor y no tiene con que sostenerlo.
-                    # Eso no es ruido que ignorar: es una pregunta abierta, y
-                    # la respuesta se compra.
-                    discrepancies.append((best.move, row.key, own_quality))
+            # GUARDA DIRECCIONAL (intacta): con cobertura parcial y sin cota
+            # el valor solo se mueve en la direccion que favorece al que
+            # mueve — los hijos sin mirar pueden esconder algo mejor, y eso
+            # no es pesimismo sino la aritmetica del max.
+            if not _better_for_mover(best.value, own, stm_white):
                 return own, None, 0, own_quality
+            # LA GUARDA DE CALIDAD YA NO VETA POR RATIO (propietario, 8-ago,
+            # tras el caso Eclipsia; el racional es de Wolfram: "there is no
+            # reason whatsoever to be pessimistic in eval propagation cause
+            # solver should have independent notion of PN/DN").  Un hijo
+            # favorable con motor detras se propaga con el soporte que
+            # tenga; si ese soporte queda por debajo de la tolerancia sigue
+            # siendo una pregunta abierta y la respuesta se sigue comprando
+            # (§ _queue_quality_convergence), que es la mitad del sistema
+            # que si funcionaba.
+            if (best.quality < own_quality * BACKED_QUALITY_TOLERANCE
+                    and discrepancies is not None):
+                discrepancies.append((best.move, row.key, own_quality))
     quality = best.quality
-    if not complete and quality >= PROVEN_QUALITY:
+    if (not complete or bounded) and quality >= PROVEN_QUALITY:
         # La autoridad de una PRUEBA termina en el primer nodo cuyas
         # alternativas no estan probadas.  Sin este corte, una linea que un
         # visitante CAMINO hasta un mate terminal (nodos sin eval propia, la
@@ -1541,12 +1609,24 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # Antes de que nadie compare: el hijo que se justifica pasando por su
         # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
         _draw_cycling_children(children, spines)
+        # Los escaparates multipv, UNA consulta por nivel y solo para las
+        # filas con huecos (aristas sin valor, o nodo sin expandir): son las
+        # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
+        # que a proposito no arrastra el JSON del escaparate por cada nodo.
+        gaps = [row.key for row in rows
+                if not row.expanded
+                or any(c.value is None
+                       for c in children.get(row.key, ()))]
+        showcases = (dict(Position.objects.filter(key__in=gaps)
+                          .values_list('key', 'last_analysis'))
+                     if gaps else {})
         dirty, propagate, standing, discrepancies = [], [], [], []
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
             value, move, below, quality = _backed_for(
-                row, children.get(row.key, ()), discrepancies)
+                row, children.get(row.key, ()), discrepancies,
+                bound=_showcase_bound(showcases.get(row.key)))
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -4409,18 +4489,29 @@ UNEXPLORED_CLICK_CAP = 64
 
 
 def is_unexplored(child):
-    """SIN EXPLORAR: el arbol no sabe NADA de esta jugada todavia.
+    """SIN EXPLORAR: nadie ha buscado AQUI todavia.
 
-    Ni status, ni respaldo, ni eval propia.  Un hijo con respaldo pero sin
-    eval propia NO cuenta: de ese ya sabemos algo, y el boton de la pagina
-    existe para los huecos, no para re-pedir lo que ya tiene valor.
+    El discriminante son los NODOS — el mismo de la siembra y del chip de la
+    tabla (§ ``_seed_child_eval``, ``views._walked_value``): cero busqueda
+    propia y cero peso en el respaldo.  Una eval SEMBRADA por la linea del
+    padre no cuenta como exploracion: "una siembra no es una medida, es una
+    reclamacion heredada", y el boton existe justo para comprar la medida.
+    Antes esos hijos caminados quedaban fuera ("include all walked nodes in
+    the Queue all unexplored button" — comunidad, 8-ago) y como ademas ya
+    tenian un numero, nada volvia a pedirles analisis propio: la reclamacion
+    heredada se quedaba de titular indefinidamente.
+
+    Un hijo con RESPALDO si cuenta como explorado: su numero viene de
+    busqueda real en su subarbol, no de una linea de paso.
 
     Vive aqui, con nombre, porque la pagina tiene que ETIQUETAR con el mismo
     criterio con el que el boton CUENTA: mientras fueron dos predicados, el
     boton ofrecia "analizar 20 respuestas sin explorar" encima de una tabla
     con cero filas asi.
     """
-    return (child.status == 'UNKNOWN' and child.eval_cp is None
+    return (child.status == 'UNKNOWN'
+            and not (child.nodes_invested or 0)
+            and not (child.backed_nodes or 0)
             and child.backed_eval is None)
 
 
@@ -4463,12 +4554,11 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             budget = max(REQUEST_BUDGET_LADDER[0], budget_for(child))
         else:
             # Salvo que la respuesta ya reclame un mate corto con distancia
-            # conocida: eso se verifica barato.  Hoy es una guarda estructural
-            # mas que un caso vivo — ``unexplored_children`` exige que el hijo
-            # no tenga NI eval propia NI respaldo, asi que lo normal es que no
-            # haya distancia que leer y este brazo no se active.  Esta escrito
-            # para que la politica no dependa de ese filtro: si algun dia un
-            # hijo llega aqui con distancia, no se le compra una excavacion.
+            # conocida: eso se verifica barato.  Desde que los hijos con eval
+            # SEMBRADA entran por este boton (una siembra no es una medida),
+            # este brazo es un caso vivo: la linea del padre puede haber
+            # dejado una distancia de mate, y a esa reclamacion no se le
+            # compra una excavacion sino la verificacion que la iguala.
             # ``budget_for`` ya trae la escalera por visitas, que sigue
             # mandando cuando pide mas que el clamp.
             budget = budget_for(child)
