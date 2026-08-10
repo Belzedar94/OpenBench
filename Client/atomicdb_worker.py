@@ -33,7 +33,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072901
+ATOMICDB_WORKER_BUILD = 2026081001
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -755,13 +755,13 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
         pending = [e for e in entries
                    if syzygy_file_state(directory, e) != 'ok']
         if not pending:
-            log(f'syzygy: {len(entries)} ficheros verificados en {directory}',
+            log(f'syzygy: {len(entries)} files verified in {directory}',
                 flush=True)
             return directory
 
         missing_bytes = sum(e['bytes'] for e in pending)
-        log(f'syzygy: faltan {len(pending)}/{len(entries)} ficheros '
-            f'({missing_bytes / (1 << 20):.0f} MB); descargando a {directory}',
+        log(f'syzygy: {len(pending)}/{len(entries)} files missing '
+            f'({missing_bytes / (1 << 20):.0f} MB); downloading to {directory}',
             flush=True)
         failed = 0
         for entry in pending:
@@ -769,16 +769,16 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
                 _download_syzygy_file(server, entry, directory, get)
             except Exception as error:
                 failed += 1
-                log(f"syzygy: {entry['name']} fallo ({error})", flush=True)
+                log(f"syzygy: {entry['name']} failed ({error})", flush=True)
         if not failed:
-            log(f'syzygy: set completo en {directory}', flush=True)
+            log(f'syzygy: full set in {directory}', flush=True)
             return directory
-        log(f'syzygy: {failed} ficheros pendientes tras el intento '
+        log(f'syzygy: {failed} files still missing after attempt '
             f'{attempt}/{attempts}', flush=True)
 
-    log('syzygy: no se pudo completar el set; el worker arranca SIN '
-        'tablebases (el analisis sigue siendo correcto, solo mas lento en '
-        'finales)', flush=True)
+    log('syzygy: could not complete the set; the worker starts WITHOUT '
+        'tablebases (analysis stays correct, only slower in endgames)',
+        flush=True)
     return None
 
 
@@ -792,7 +792,7 @@ def resolve_syzygy(args, server, log=print, script_path=None, get=None):
     if args.syzygy:
         return args.syzygy
     if getattr(args, 'no_fetch_syzygy', False):
-        log('syzygy: descarga desactivada (--no-fetch-syzygy)', flush=True)
+        log('syzygy: download disabled (--no-fetch-syzygy)', flush=True)
         return ''
     fetched = fetch_syzygy_set(server, syzygy_dir(script_path), log=log,
                                get=get)
@@ -1166,14 +1166,14 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         except LeaseRequestError as e:
             if not e.ambiguous:
                 lease_session = secrets.token_urlsafe(24)
-            print(f'[{slot}] lease response error: {e}; reintento en 30s',
+            print(f'[{slot}] lease response error: {e}; retrying in 30s',
                   flush=True)
             if stop.wait(30):
                 break
             continue
         lease_session = secrets.token_urlsafe(24)
         if not tasks:
-            print(f'[{slot}] sin tareas; espero 60s', flush=True)
+            print(f'[{slot}] no tasks available; waiting 60s', flush=True)
             if a.once:
                 break
             if stop.wait(60):
@@ -1207,7 +1207,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     progress=current_task.progress,
                 )
             except Exception as e:
-                print(f'[{slot}] engine failure: {e}; reiniciando motor',
+                print(f'[{slot}] engine failure: {e}; restarting the engine',
                       flush=True)
                 try:
                     eng.close()
@@ -1281,26 +1281,27 @@ def main():
     ap.add_argument('-P', required=True)
     ap.add_argument('-S', required=True)
     ap.add_argument('--engine', default='',
-                    help='binario propio (opcional; sin el se descarga el de referencia)')
+                    help='your own binary (optional; without it the '
+                         'reference build is downloaded)')
     ap.add_argument('-T', type=int, default=4)
     ap.add_argument('--jobs', type=int, default=1,
-                    help='analisis concurrentes; -T se REPARTE entre ellos. '
-                         'Una posicion sola escala mal con muchos hilos, asi '
-                         'que K analisis de T/K hilos rinden mas que uno de T')
+                    help='concurrent analyses; -T is SPLIT between them. '
+                         'A single position scales poorly with many threads, '
+                         'so K analyses of T/K threads outperform one of T')
     ap.add_argument('--hash', type=int, default=512)
     ap.add_argument('--syzygy', default='',
-                    help='dirs de TB atomicas separados por ; (si se pasa, '
-                         'manda tal cual y no se descarga nada)')
+                    help='atomic TB dirs separated by ; (when given, it is '
+                         'used as-is and nothing is downloaded)')
     ap.add_argument('--no-fetch-syzygy', action='store_true',
-                    help=f'no descargar el set {SYZYGY_SET} (1,3 GB) cuando '
-                         'no se ha pasado --syzygy')
+                    help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
+                         'when --syzygy was not given')
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
-                    help='no actualizar este archivo desde el servidor oficial')
+                    help='do not update this file from the official server')
     ap.add_argument('--solve', action='store_true',
-                    help='servir tambien tareas SOLVE (pruebas exhaustivas) '
-                         'ademas de analisis; sin este flag el worker se '
-                         'comporta exactamente igual que antes')
+                    help='also serve SOLVE tasks (exhaustive proofs) besides '
+                         'analysis; without this flag the worker behaves '
+                         'exactly as before')
     a = ap.parse_args()
 
     if not a.no_auto_update and _install_worker_update(a.S):
@@ -1328,9 +1329,9 @@ def main():
                 dirs[0], VariantBoard=chess.variant.AtomicBoard)
             for d in dirs[1:]:
                 tb.add_directory(d)
-            print(f'syzygy: {len(dirs)} dirs, pre-probe activo', flush=True)
+            print(f'syzygy: {len(dirs)} dirs, pre-probe active', flush=True)
         except Exception as error:
-            print(f'syzygy: {len(dirs)} dirs para el motor; sin pre-probe '
+            print(f'syzygy: {len(dirs)} dirs for the engine; no pre-probe '
                   f'({error})', flush=True)
 
     import platform
@@ -1342,11 +1343,11 @@ def main():
         a.jobs = 1
     jobs, slot_threads, solver_cores = plan_threads(a.T, a.jobs, a.solve)
     if jobs < a.jobs:
-        print(f'aviso: --jobs {a.jobs} recortado a {jobs}: -T {a.T} no da '
-              f'un hilo entero por trabajo', flush=True)
+        print(f'note: --jobs {a.jobs} reduced to {jobs}: -T {a.T} does not '
+              f'give each job a full thread', flush=True)
     if a.solve and a.T < 2:
-        print('aviso: --solve con -T 1 comparte el unico hilo entre '
-              'analisis y pruebas', flush=True)
+        print('note: --solve with -T 1 shares the single thread between '
+              'analysis and proofs', flush=True)
 
     base = f'{a.U}-{platform.node() or "worker"}-atomicdb'
     # With a single job the identity is byte-identical to every previous
@@ -1378,8 +1379,8 @@ def main():
 
     spread = ('x'.join(str(n) for n in sorted(set(slot_threads), reverse=True))
               if len(set(slot_threads)) > 1 else str(slot_threads[0]))
-    print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} trabajos de '
-          f'{spread} hilos (suma {sum(slot_threads) + solver_cores})'
+    print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} jobs of '
+          f'{spread} threads ({sum(slot_threads) + solver_cores} in total)'
           + (f' + {solver_cores} solver' if solver_cores else '')
           + f' -> {a.S}', flush=True)
 
