@@ -1480,7 +1480,7 @@ class LineProvenanceTests(TestCase):
         self.assertRegex(
             body,
             r'<td><em class="dim eval-claim"[^>]*'
-            r'title="from engine line 2 of this node\S+s current analysis — '
+            r'title="from engine line 2 of this node\S+s current analysis; '
             r'no direct search of the resulting position yet"[^>]*>30</em>')
         # Y ni "line 2" ni "walked" ocupan sitio en la fila.
         self.assertNotIn('>line 2</span>', body)

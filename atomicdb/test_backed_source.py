@@ -319,10 +319,10 @@ class BackedJumpRenderTests(TestCase):
         self.assertIn(
             f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
         self.assertIn(
-            'aria-label="backed ·12 — jump to the source of this value, '
-            '12 ply(s) below"',
+            'aria-label="jump to the position this value comes from, '
+            '12 plies below"',
             chip)
-        self.assertIn('click to jump to the position this value comes from',
+        self.assertIn('Click to jump to the position this value comes from',
                       chip)
         # La flecha suelta de al lado ya no existe.
         self.assertNotIn('backed-jump', body)
@@ -357,8 +357,8 @@ class BackedJumpRenderTests(TestCase):
         self.assertIn(
             f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
         self.assertIn(
-            'aria-label="backed ·12 — jump to the source of this value, '
-            '12 ply(s) below"',
+            'aria-label="jump to the position this value comes from, '
+            '12 plies below"',
             chip)
         self.assertNotIn('backed-jump', body)
 

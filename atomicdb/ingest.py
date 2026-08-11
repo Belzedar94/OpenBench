@@ -1221,7 +1221,12 @@ def _draw_cycling_children(by_parent, cache):
     X (ese ciclo es problema de OTRO padre, y ese padre lo vera cuando le
     toque).  Agotar el tope tampoco reclama nada: equivocarse hacia "no hay
     ciclo" deja el valor como estaba, y hacia "hay ciclo" inventaria tablas.
+
+    Devuelve el conjunto ``{(parent_key, move_uci)}`` de hijos anulados: si
+    uno de esos ceros acaba GANANDO el negamax de su padre, el llamante le
+    compra la desambiguacion (§ _queue_cycle_disambiguation).
     """
+    cycled = set()
     walks = []
     for parent_key, children in by_parent.items():
         for child in children:
@@ -1248,6 +1253,7 @@ def _draw_cycling_children(by_parent, cache):
                 # un ply a la anterior y la barrida no llegaba nunca a punto
                 # fijo.
                 child.value, child.plies = 0, 0
+                cycled.add((parent_key, child.move))
                 continue
             spine = cache.spines.get(below)
             if below in seen or not spine or status != 'UNKNOWN':
@@ -1256,6 +1262,7 @@ def _draw_cycling_children(by_parent, cache):
             walk[2], walk[3] = below, spine
             alive.append(walk)
         walks = alive
+    return cycled
 
 
 def _resolve_spine_steps(cache, walks):
@@ -1429,6 +1436,69 @@ def _rung_at_least(nodes):
         if rung >= nodes:
             return rung
     return BUDGET_LADDER[-1]
+
+
+def _queue_cycle_disambiguation(picks):
+    """Compra el analisis que deshace un respaldo decidido por un ciclo.
+
+    EL CASO (Wolfram, 11-ago).  El paseo de repeticion anulo a tablas al
+    unico hijo bueno de un nodo cuyas alternativas eran mates perdidos; el
+    cero gano el negamax y borro un +9 de toda la linea de arriba.  El
+    subarbol siguio analizandose, la espina dejo de ciclar... y nadie
+    desperto al padre: el ascenso solo mira CAMBIOS de valor, y el backed
+    del hijo no habia cambiado — el cero se quedo de titular hasta que un
+    humano pateo la familia a clicks ("there were gray moves other than
+    repetition and it was ignored").
+
+    La salida es la de siempre en esta casa: una decision tomada con
+    informacion incompleta COMPRA la informacion que falta.  Cuando el
+    movimiento que el respaldo elige es uno que el paseo anulo, se le compra
+    al hijo un pase MAS HONDO que el que ya tiene — repetir su peldano
+    podria reproducir la misma espina; el siguiente re-ordena de verdad — y
+    el ingest de ese pase siembra a los padres, que es el despertador que a
+    este caso le faltaba.  Mismo brazo y mismo cupo que la convergencia de
+    calidad: son la misma clase de pregunta abierta.
+    """
+    if not picks:
+        return 0
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', arm=QUALITY_ARM).count()
+    room = max(0, QUALITY_QUEUE_CAP - pending)
+    if room <= 0:
+        return 0
+    made = 0
+    for move_uci, parent_key, floor_quality in picks:
+        if made >= room:
+            break
+        edge = (Edge.objects.filter(parent_id=parent_key, move_uci=move_uci)
+                .select_related('child').first())
+        if edge is None:
+            continue
+        child = edge.child
+        if child.status != 'UNKNOWN':
+            continue
+        budget = _rung_at_least(max(floor_quality,
+                                    (child.nodes_invested or 0) + 1))
+        task, created = AnalysisTask.objects.get_or_create(
+            position=child, generation=child.visits,
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(child.visits, budget),
+                      'source': AnalysisTask.Source.FILL,
+                      'arm': QUALITY_ARM})
+        if created:
+            made += 1
+        elif task.state == 'PENDING' and task.budget_nodes < budget:
+            adopted = AnalysisTask.objects.filter(
+                id=task.id, state='PENDING',
+                budget_nodes=task.budget_nodes).update(
+                    budget_nodes=budget, source=AnalysisTask.Source.FILL,
+                    arm=QUALITY_ARM)
+            if adopted:
+                made += 1
+    if made:
+        DBEvent.objects.create(kind='CYCLE_DISAMBIGUATION', payload={
+            'queued': made, 'chosen_cycles': len(picks)})
+    return made
 
 
 def _queue_quality_convergence(discrepancies):
@@ -1608,7 +1678,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         children = _backed_children_by_parent([row.key for row in rows])
         # Antes de que nadie compare: el hijo que se justifica pasando por su
         # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
-        _draw_cycling_children(children, spines)
+        cycled = _draw_cycling_children(children, spines)
         # Los escaparates multipv, UNA consulta por nivel y solo para las
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
@@ -1621,12 +1691,21 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                           .values_list('key', 'last_analysis'))
                      if gaps else {})
         dirty, propagate, standing, discrepancies = [], [], [], []
+        cycle_picks = []
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
                 bound=_showcase_bound(showcases.get(row.key)))
+            if move and (row.key, move) in cycled:
+                # El respaldo acaba de decidirse por un hijo que el paseo
+                # anulo: esa decision viaja con su correccion comprada
+                # (§ _queue_cycle_disambiguation).  ANTES del corte de "sin
+                # cambios" a proposito: un clavado viejo re-intenta la
+                # compra en cada pasada y el dedup de tareas absorbe la
+                # repeticion.
+                cycle_picks.append((move, row.key, row.nodes_invested or 0))
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -1642,6 +1721,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)
             changed_total += len(dirty)
         _queue_quality_convergence(discrepancies)
+        _queue_cycle_disambiguation(cycle_picks)
         if not (propagate or standing):
             break
         if processed >= BACKED_MAX_NODES:
