@@ -1,7 +1,7 @@
 {
     "client_version"  : 44,
     "client_repo_url" : "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref" : "6a85178cc8b0417c7faefd5de670e383a20c7714",
+    "client_repo_ref" : "c716735d8fc4a731fb80f8c138520c198adde053",
 
     "use_cross_approval"          : false,
     "require_login_to_view"       : false,
@@ -42,7 +42,8 @@
         "HORDE_openings_v3_interim.epd",
         "HORDE_openings_v3.epd",
         "HORDE_openings_v3_train.epd",
-        "HORDE_openings_v3_validation.epd"
+        "HORDE_openings_v3_validation.epd",
+        "TERACHESS_openings_v1.epd"
     ],
 
     "engines": [

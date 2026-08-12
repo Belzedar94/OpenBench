@@ -57,7 +57,7 @@
   "gates": {
     "deterministic_archive": true,
     "full_dual_oracle_validation": true,
-    "immutable_source_registered": false,
+    "immutable_source_registered": true,
     "official_runner_validation": false,
     "authorized_for_strength_sprt": false
   }

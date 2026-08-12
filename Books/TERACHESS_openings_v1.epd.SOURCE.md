@@ -20,7 +20,7 @@ paired OpenBench validation and strength tests.
 
 Both independent Terachess rule implementations parsed and round-tripped all
 5,000 positions, agreed on every complete legal move set, and found zero
-terminal positions or duplicate FENs. The opening-ply range was exactly 8–16.
+terminal positions or duplicate FENs. The opening-ply range was exactly 8-16.
 
 The artifact supplies 5,000 opening pairs, or 10,000 games, before its first
 wrap. Registration makes it available for official validation workloads; a

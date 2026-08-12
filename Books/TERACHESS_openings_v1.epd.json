@@ -1,0 +1,7 @@
+{
+    "onboarding_ready": true,
+    "datagen_enabled": false,
+    "sha": "1f117b0ed03049afad62481494fff9e3232774d188433a99ffff1454d84babe7",
+    "raw_sha": "1f117b0ed03049afad62481494fff9e3232774d188433a99ffff1454d84babe7",
+    "source": "https://raw.githubusercontent.com/Belzedar94/OpenBench/c716735d8fc4a731fb80f8c138520c198adde053/Books/TERACHESS_openings_v1.epd.zip"
+}
