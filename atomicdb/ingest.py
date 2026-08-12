@@ -679,9 +679,16 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     backed = backup_backed_evals([pos.key, *parent_keys])
     uncertainty = _uncertainty_expand([pos.key, *parent_keys])
     refuted = _witness_refuted_revisit(pos, parent_keys)
+    # La cascada corta del descenso por valor: el nodo que se acaba de mirar a
+    # fondo deja sus respuestas sin juzgar en la cola a precio de mirada, que
+    # es como el walker encuentra el siguiente cuello de botella en vez de
+    # volver a la misma punta.  Con el descenso df-pn no hace nada.
+    cascaded = _queue_value_cascade(pos)
     summary = {'closed_children': closed_here, 'backed_up': changed,
                'backed_evals': backed, 'uncertainty_expanded': uncertainty,
                'witness_refuted': refuted}
+    if cascaded:
+        summary['cascaded'] = cascaded
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
@@ -3234,6 +3241,107 @@ def top_up_analysis_pool(target=None):
 # nuevo aqui no le toca el presupuesto a ninguno.
 CAMPAIGN_ARM = 'campaign'
 
+# ---------------- presupuestos del descenso por VALOR ----------------
+#
+# LA OTRA MITAD DEL REWORK.  El walker de la espina (§ ``proof.descend_value``)
+# decide DONDE se compra; aqui se decide CUANTO, y sin esta mitad la primera
+# no vale nada: el 11-ago las 40 ultimas tareas AUTO salieron todas al primer
+# peldano de la escalera de exploracion — 8M — porque ``budget_for`` cuenta
+# VISITAS, y un nodo recien encontrado siempre tiene cero.  Ocho millones de
+# nodos en la jugada que sostiene un +812 a 22 plies no mueven el numero; solo
+# vuelven a decir lo que la siembra del padre ya decia.
+#
+# LA REGLA: el objetivo del paseo entra por el primer peldano de PETICIONES,
+# el mismo que compra un click humano, porque es la misma clase de pregunta —
+# "que pasa de verdad aqui" — y no una mirada de reconocimiento.  La escalera
+# de exploracion deja de gobernar la linea principal y se queda para lo que
+# siempre fue: miradas baratas a lo que todavia no se ha ordenado.
+#
+# LOS DESVIOS SON BARATOS A PROPOSITO.  Una alternativa competitiva se compra
+# para saber si compite de verdad, no para resolverla: un peldano por encima
+# de la mirada minima basta para eso.  Un hijo virgen se compra para tener su
+# primera medida, que es exactamente el primer peldano.
+VALUE_SPINE_NODES = REQUEST_BUDGET_LADDER[0]   # 128M: la punta de la espina
+VALUE_BACKUP_NODES = BUDGET_LADDER[1]          # 32M: el desvio competitivo
+VALUE_EXPLORE_NODES = BUDGET_LADDER[0]         # 8M: la primera mirada
+# La CASCADA del cuello de botella.  Tras analizar un nodo de la espina, sus
+# respuestas sin juzgar se miran baratas: es lo que descubre por donde sigue
+# el cuello, y el propietario lo pidio con esas palabras ("como mucho una
+# cascada rapida a 8M para encontrar el siguiente cuello").  Con CUPO PROPIO,
+# como los demas brazos: un cuarto del colchon, para que la cascada no pueda
+# convertir el reparto en un mar de sondas de 8M — que es exactamente el
+# sintoma del que venimos.
+VALUE_CASCADE_NODES = BUDGET_LADDER[0]
+VALUE_CASCADE_CAP = 16
+VALUE_CASCADE_ARM = 'cascade'
+
+
+def value_budget(target):
+    """Nodos que compra un objetivo del walker, por su BRAZO.
+
+    Los dos brazos con suelo miran escaleras distintas y no es un descuido.
+    Una punta ya comprada sube por la escalera de PETICIONES — 128M, 512M, 2B,
+    10B — porque es la misma linea principal pidiendo mas profundidad.  Un
+    nodo pre-ciclo sube por la de EXPLORACION a partir de lo que el hijo que
+    cierra el bucle ya tiene: ahi no se busca profundidad, se busca que la
+    espina deje de ser la misma (§ ``_queue_cycle_disambiguation``).
+    """
+    if target.arm == proof.VALUE_ARM_RUNG:
+        return _next_rung(target.floor_nodes)
+    if target.arm == proof.VALUE_ARM_CYCLE:
+        return _rung_at_least(target.floor_nodes)
+    if target.arm == proof.VALUE_ARM_BACKUP:
+        return VALUE_BACKUP_NODES
+    if target.arm == proof.VALUE_ARM_EXPLORE:
+        return VALUE_EXPLORE_NODES
+    return VALUE_SPINE_NODES
+
+
+def _queue_value_cascade(pos, cap=VALUE_CASCADE_CAP):
+    """Mira barato las respuestas SIN JUZGAR del nodo recien analizado.
+
+    Corre despues del respaldo de cada ingesta y solo con el descenso por
+    valor encendido: es su brazo de reconocimiento, no una politica general.
+    Sin el, el walker baja a la punta de la espina, compra sus 128M... y el
+    siguiente paseo vuelve a la misma punta, porque las respuestas que podrian
+    mover el valor siguen sin tener ni un numero que ordenar.
+
+    ``is_unjudged`` y no ``is_unexplored``: una eval SEMBRADA por el MultiPV
+    del nodo ya es senal suficiente para ordenar, y recomprarla seria gasto
+    que no descubre nada.  Es el criterio de los brazos automaticos y esa
+    distincion es deliberada (§ ``is_unjudged``).
+
+    Entra por banda AUTO — trabajo del sistema, no adelanta a nadie — y con
+    cupo propio, contando SOLO su propia cola: lo que hayan encolado cobertura
+    o calidad no es suyo y no se le cobra.
+    """
+    if proof.descent_mode() != proof.DESCENT_VALUE:
+        return 0
+    if pos.status != 'UNKNOWN':
+        return 0
+    pending = AnalysisTask.objects.filter(
+        state='PENDING', arm=VALUE_CASCADE_ARM).count()
+    room = min(cap, max(0, VALUE_CASCADE_CAP - pending))
+    if room <= 0:
+        return 0
+    made = 0
+    for child in unjudged_children(pos):
+        if made >= room:
+            break
+        task, created = AnalysisTask.objects.get_or_create(
+            position=child, generation=child.visits,
+            defaults={'budget_nodes': VALUE_CASCADE_NODES,
+                      'multipv': multipv_for(child.visits,
+                                             VALUE_CASCADE_NODES),
+                      'source': AnalysisTask.Source.AUTO,
+                      'arm': VALUE_CASCADE_ARM})
+        if created:
+            made += 1
+    if made:
+        DBEvent.objects.create(kind='VALUE_CASCADE', payload={
+            'key': pos.key, 'queued': made})
+    return made
+
 
 def _task_counter():
     """Contador monotono y barato para el reparto blando del repertorio.
@@ -3267,10 +3375,19 @@ def _next_tasks_by_proof(n):
     PROBADO bajo un nodo OR no le debe nada a la prueba, y comprarle el
     peldano entero de la escalera es el gasto que el propietario senalo en
     ``3...Qd4`` (§ ``proof.proved_or_clamp``).
+
+    CON ``ATOMICDB_DESCENT=value`` EL DESCENSO ES OTRO, y el presupuesto
+    tambien: baja por la espina de ``backed_move`` hasta la hoja que sostiene
+    el valor y la compra por el brazo que le corresponda
+    (§ ``proof.descend_value``, ``value_budget``).  Todo lo demas de esta
+    funcion — las campanas como punto de arranque, la reserva del lote, la
+    lapida de lo inalcanzable y los dos clamps — es el mismo codigo para los
+    dos modos, que es lo que hace que apagarlo sea una linea de entorno.
     """
     campaigns = proof.active_campaigns()
     if not campaigns:
         return []
+    by_value = proof.descent_mode() == proof.DESCENT_VALUE
     roots = proof.campaign_roots()
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
@@ -3284,8 +3401,14 @@ def _next_tasks_by_proof(n):
         campaign = campaigns[attempts % len(campaigns)]
         counter = base + attempts
         start = proof.campaign_start(counter, roots)
-        pos, _plies = proof.descend(campaign, counter=counter, avoid=seen,
-                                    start=start)
+        if by_value:
+            target = proof.descend_value(campaign, counter=counter,
+                                         avoid=seen, start=start)
+            pos = None if target is None else target.position
+        else:
+            target = None
+            pos, _plies = proof.descend(campaign, counter=counter, avoid=seen,
+                                        start=start)
         attempts += 1
         if pos is None or pos.key in seen:
             continue
@@ -3294,8 +3417,16 @@ def _next_tasks_by_proof(n):
             pos.priority = DEAD
             pos.save(update_fields=['priority'])
             continue
-        budget = budget_for(pos)
         clamp = _short_mate_clamp(pos)
+        # EL CARVE-OUT DEL MATE CORTO MANDA TAMBIEN SOBRE EL WALKER.  Una
+        # reclamacion de mate en <=3 con distancia conocida no compra la
+        # excavacion de 128M por bajar por la espina: compra su verificacion,
+        # exactamente igual que la compraba por el descenso de siempre.  Y la
+        # escalera por visitas que ``budget_for`` trae dentro sigue mandando
+        # cuando ya pide mas que el clamp, que es la senal de que la
+        # reclamacion no se sostiene.
+        budget = (budget_for(pos) if target is None or clamp is not None
+                  else value_budget(target))
         or_clamp = proof.proved_or_clamp(pos.key, campaigns)
         if or_clamp is not None:
             # El clamp de hermanos gana al carve-out del mate corto, y no es

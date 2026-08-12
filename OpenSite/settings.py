@@ -176,6 +176,17 @@ ATOMICDB_CAMPAIGN_DESCENT = os.environ.get(
 # elige un presupuesto y no escribe nada en la base.
 ATOMICDB_OR_CLAMP = os.environ.get(
     'ATOMICDB_OR_CLAMP', '').lower() not in ('0', 'false', 'no')
+# Por donde BAJA el selector de prueba: 'proof' (df-pn, el historico) o
+# 'value' (el walker de la espina de ``backed_move``).  Medido en produccion
+# el 11-ago-2026: df-pn mandaba el 65% del gasto AUTO bajo 1.e3 con sondas de
+# 8M y el 2,5% bajo g1f3, que es la mejor jugada del tablero por respaldo
+# (+812).  A esta distancia de la prueba los pn son ficcion y su minimo
+# degenera en la linea floja mas barata de enumerar; la espina, en cambio, ya
+# es el negamax de los dos bandos sobre busqueda real.  APAGADO por defecto en
+# el codigo — el default es el comportamiento de siempre — y se enciende con
+# una linea en el env file del despliegue; quitarla es el rollback entero, sin
+# desplegar nada y sin residuo en la base (§ docs/solver-allocation.md).
+ATOMICDB_DESCENT = os.environ.get('ATOMICDB_DESCENT', 'proof')
 
 INSTALLED_APPS = [
     'atomicdb',

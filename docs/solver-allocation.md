@@ -181,6 +181,15 @@ de `ATOMICDB_SELECTOR_DELTA` (cualquier cosa que huela a «no» lo apaga):
 | `ATOMICDB_CAMPAIGN_DESCENT` | los descensos con raíz de campaña (a) | ON |
 | `ATOMICDB_OR_CLAMP` | el presupuesto mínimo de hermanos (b) | ON |
 
+Al lado de estos dos vive `ATOMICDB_DESCENT`, que no apaga nada sino que
+elige POR DÓNDE se baja (§6). Su default es el comportamiento histórico y
+está en el código, no en el entorno: `value` se pone a mano en el env file y
+quitar esa línea es el rollback entero.
+
+| variable | qué elige | default |
+| --- | --- | --- |
+| `ATOMICDB_DESCENT` | `proof` (df-pn) o `value` (walker de la espina) | `proof` |
+
 Encendidos por defecto y no en sombra, a diferencia de `ATOMICDB_SELECTOR_V2`,
 porque ninguno de los dos estrena un motor: (a) mueve el punto de arranque de
 una fracción acotada de los descensos y (b) mueve un presupuesto hacia abajo.
@@ -205,3 +214,158 @@ la fracción tiene que rondar el 35 % del tope. Además, las tareas minteadas
 desde una raíz de campaña salen marcadas con `arm='campaign'`: quien vota
 puede ver su línea en la cola, que es la mitad visible de «las campañas
 deberían funcionar».
+
+## 6. El descenso por VALOR (12-ago-2026)
+
+Las dos reglas de arriba deciden dónde ARRANCA un descenso y cuánto vale un
+hermano ya resuelto. Ninguna toca la pregunta de en medio: **por dónde se
+baja**. Esta sección sí.
+
+### 6.1 El síntoma, con recibos
+
+Auditoría del 11-ago sobre la base viva, campaña `root-white-win`
+(WHITE_WIN desde startpos), única activa:
+
+| medida | valor |
+| --- | --- |
+| `pn` de `1.e3` en la raíz | 119 |
+| `pn` de `g1f3` en la raíz | 475 |
+| valor respaldado de `g1f3` | **+812** (la mejor jugada del tablero) |
+| últimas 40 tareas AUTO bajo `1.e3` | 26 |
+| últimas 40 tareas AUTO bajo `g1f3` | 1 |
+| tareas de esas 40 a 8M (`BUDGET_LADDER[0]`) | 40 |
+| reparto del GASTO AUTO bajo `1.e3` / `g1f3` | 65 % / 2,5 % |
+
+Dos tercios del motor donado se estaban gastando en sondas de reconocimiento
+sobre una línea mediocre, y la jugada que sostiene el valor de la raíz recibía
+una tarea de cada cuarenta.
+
+### 6.2 El diagnóstico
+
+`pn` es una estimación del coste de COMPLETAR la prueba formal. A la distancia
+a la que está esta prueba —nadie va a cerrar Atomic desde startpos esta
+década— todos los `pn` del árbol son ficción, y un mínimo sobre ficciones no
+elige la línea prometedora: elige **la línea floja más barata de enumerar**.
+Un `pn` de 119 no dice que `1.e3` gane; dice que a `1.e3` todavía le quedan
+pocos hijos informados.
+
+Dos defectos concretos salieron de la misma auditoría:
+
+- el 5 % «explore» del reparto 80/15/5 bajaba por `ranked[-1]`, o sea **el peor
+  hijo del nodo**: explorar lo que ya se sabe malo;
+- el presupuesto lo ponía `budget_for`, que cuenta VISITAS, y un nodo recién
+  encontrado siempre tiene cero: 8M en la jugada que sostiene un +812 a 22
+  plies no mueve el número, sólo repite lo que la siembra del padre ya decía.
+
+### 6.3 La regla: seguir la espina respaldada
+
+El enunciado del propietario, entero: «cogería el mejor opening (`g1f3`, +812
+backed), miraría la mejor respuesta negra y bajaría los 22 plies hasta analizar
+las jugadas concretas que sostienen el 812. Buen análisis ahí, y al siguiente
+bottleneck. Como mucho una cascada rápida a 8M para encontrar el siguiente
+cuello.»
+
+La infraestructura ya existía: la cadena de `backed_move` **es** esa espina —
+el negamax de los dos bandos sobre búsqueda real, calculado por
+`ingest.backup_backed_evals`, el mismo que el explorador pinta con el chip de
+respaldo. El walker (`proof.descend_value`) la recorre:
+
+1. **Primaria** de cada nodo: su `backed_move`. Si apunta a un hijo que ese
+   paseo no puede seguir —cerrado desde la última cascada, o ya visitado—
+   manda el orden por valor (`best_known` en POV blanca; blancas maximizan,
+   negras minimizan) con la histéresis de `selected_child`. `pn` sobrevive
+   como **desempate** y sólo como desempate: dos hijos que valen lo mismo para
+   el que mueve siguen diferenciándose en lo que cuesta cerrarlos, y esa es la
+   pregunta que `pn` contesta bien.
+2. **Terminación**: el nodo SIN `backed_move` es la hoja cuyo `eval_cp` crudo
+   sostiene todo lo de arriba. Ahí se compra.
+3. **Revisitas**, para que el walker no vuelva eternamente a la misma punta:
+   una punta que ya lleva ≥128M encima no se recompra. El objetivo pasa al
+   primer nodo de la espina —de abajo arriba— con respuestas SIN JUZGAR
+   (`is_unjudged`): ese es el cuello de botella. Una espina entera sin cuellos
+   sí es una línea que hay que profundizar, y la punta cobra el peldaño
+   siguiente al que ya tiene.
+4. **Ciclos**: el paseo lleva visited-set —el DAG cierra ciclos de verdad, que
+   `1.Nf3 Nf6 2.Ng1 Ng8` ES startpos— y una espina que vuelve sobre sí misma
+   deja como objetivo el nodo pre-ciclo, por encima de lo que ya tiene el hijo
+   que cierra el bucle. Mismo espíritu que `_queue_cycle_disambiguation`.
+5. **Reserva**: una punta que este mismo lote ya reparte, o que ya tiene tarea
+   PENDING o LEASED, no se entrega por duplicado; el paseo se va por la
+   alternativa competitiva más profunda (Δ < `VALUE_ALTERNATIVE_MARGIN_CP`,
+   150cp) y sigue la espina desde ahí.
+
+### 6.4 El 80/15/5, re-significado
+
+El mismo `_bucket` determinista de siempre, con el mismo hash, sorteado **una
+vez por paseo** y no una por ply: ahora el bucket describe el paseo entero
+—punta, desvío o hijo virgen— y no una elección repetida en cada nodo.
+
+| bucket | a dónde va | presupuesto |
+| --- | --- | --- |
+| 80 % primary | la punta de la espina principal | 128M (`REQUEST_BUDGET_LADDER[0]`) |
+| 15 % backup | el desvío competitivo más profundo | 32M |
+| 5 % explore | el mejor hijo SIN EXPLORAR del camino | 8M |
+
+El 5 % ya no compra el peor hijo: compra la **medida** que una eval sembrada
+por el MultiPV del padre no es.
+
+### 6.5 Presupuestos
+
+La escalera de exploración deja de gobernar la línea principal. El objetivo del
+paseo entra por el primer peldaño de PETICIONES —el mismo que compra un click
+humano— porque es la misma clase de pregunta: «qué pasa de verdad aquí», no una
+mirada de reconocimiento.
+
+| brazo del walker | presupuesto |
+| --- | --- |
+| punta de la espina / cuello de botella | 128M |
+| punta saturada sin cuello | siguiente peldaño de `REQUEST_BUDGET_LADDER` |
+| nodo pre-ciclo | `_rung_at_least(nodos del hijo que cicla + 1)` |
+| desvío competitivo | 32M |
+| hijo sin explorar | 8M |
+| cascada del cuello | 8M, cupo 16 |
+
+**La cascada** (`_queue_value_cascade`) corre tras el respaldo de cada ingesta:
+las respuestas sin juzgar del nodo recién analizado entran a precio de mirada,
+con `arm='cascade'` para poder auditarlas y con cupo propio de 16 —un cuarto
+del colchón de 64— para que no pueda convertir el reparto en el mar de sondas
+de 8M del que venimos. Con el descenso df-pn no hace nada.
+
+**Los clamps siguen mandando por encima de todo.** Una reclamación de mate
+corto con distancia conocida compra su verificación y no la excavación de
+128M (`_short_mate_clamp`), exactamente igual que la compraba por el descenso
+de siempre; y un hermano de un ganador ya probado sigue cayendo a
+`OR_CLAMP_NODES` (§3). Lo que este paquete sube es el precio de lo que la
+prueba SÍ necesita; no toca el de lo que ya dejó de necesitar.
+
+### 6.6 Las campañas de la comunidad
+
+Sin cambios en el reparto acotado (§2): la campaña sigue decidiendo dónde
+ARRANCA el descenso. Lo que cambia es que, desde esa raíz, el walker hace
+**exactamente el mismo bucle** que desde startpos: sigue la espina de ESA
+posición hasta la hoja que sostiene SU evaluación, la compra, y en el descenso
+siguiente relee la espina fresca desde la misma raíz para encontrar el cuello
+nuevo. Espina, punta, cuello y peldaño se resuelven DENTRO de su subárbol —
+salirse de él a comprar en la espina global sería el «no sirve de nada» que las
+campañas vienen a arreglar. Lo que una campaña refina es el número de su raíz.
+
+### 6.7 Qué NO cambia
+
+- `Position.priority`, el selector v2 y los brazos de calidad
+  (`QUALITY_ARM`, convergencia, desambiguación) siguen igual.
+- La fairness de la cola: AUTO sigue detrás de USER, y el cupo de leases
+  profundos sigue limitando cuántas tareas gordas hay a la vez.
+- No hace falta `recascade`: esto no toca el backprop, sólo lo LEE.
+- No escribe columnas nuevas ni reordena `pn`/`dn`. Apagarlo no deja residuo.
+
+### 6.8 Cómo se comprueba que está vivo
+
+Sobre las `AnalysisTask` AUTO PENDING recién minteadas:
+
+- la mayoría cuelgan del mejor opening por respaldo (hoy `g1f3`; antes, 2,5 %);
+- los presupuestos están dominados por 128M, con 8M sólo en `arm='cascade'` y
+  en los desvíos del 5 %;
+- ninguna tarea nueva del tipo «1.e3 a 8M».
+
+Criterio de aceptación a 24h: >60 % del gasto AUTO bajo el mejor opening y
+presupuesto medio por tarea AUTO ≥ ~100M (hoy: 8M).

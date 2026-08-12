@@ -78,13 +78,14 @@ porque no son una fuente de verdad.
 import hashlib
 import math
 import time
+from collections import namedtuple
 
 from django.conf import settings
 from django.db.models import Q
 
 from . import logic, solve_estimate
-from .models import (Campaign, DBEvent, Edge, Position, ProofCampaign,
-                     ProofNode)
+from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
+                     ProofCampaign, ProofNode)
 
 # 2^62: infinito de la aritmetica de prueba.  Cabe en un BigInteger con sitio
 # de sobra para que sumar varios "infinitos" en Python no desborde antes del
@@ -1158,6 +1159,467 @@ def descend(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
         node = Position.objects.get(key=chosen[2])
         plies += 1
     return node, plies
+
+
+# ---------------- el descenso por VALOR: el walker de la espina ------------
+#
+# POR QUE HAY UN SEGUNDO DESCENSO, con los numeros que lo pidieron.  El de
+# arriba es df-pn puro y optimiza UNA cosa: lo que cuesta completar la prueba
+# formal.  Medido en produccion el 11-ago sobre la campana WHITE_WIN desde
+# startpos: en la raiz, ``1.e3`` tiene pn = 119 y ``g1f3`` pn = 475, asi que el
+# minimo se va por ``1.e3`` — y el reparto REAL de las ultimas 40 tareas AUTO
+# fue 26 bajo ``1.e3``, UNA bajo ``g1f3``, y las 40 al primer peldano (8M).
+# ``g1f3`` es, por respaldo, la mejor jugada del tablero: +812.
+#
+# El diagnostico no es que los pn esten mal calculados.  Es que a esta
+# distancia de la prueba TODOS los pn son ficcion — nadie va a cerrar Atomic
+# desde startpos esta decada — y un minimo sobre ficciones degenera en "la
+# linea floja mas barata de enumerar".  Un pn de 119 no dice que ``1.e3`` gane;
+# dice que a ``1.e3`` todavia le quedan pocos hijos informados.
+#
+# LO QUE MIRA ESTE DESCENSO EN SU LUGAR: la ESPINA de ``backed_move``.  Esa
+# cadena ya es el negamax de los DOS bandos — mejor jugada del atacante, mejor
+# defensa del defensor — calculada por ``ingest.backup_backed_evals`` sobre
+# busqueda real, y es la misma que el explorador pinta con el chip de respaldo.
+# Se baja por ella hasta la hoja cuyo ``eval_cp`` crudo sostiene el numero de
+# arriba y se compra analisis AHI.  El enunciado del propietario, entero:
+# "cogeria el mejor opening, miraria la mejor respuesta negra y bajaria los 22
+# plies hasta analizar las jugadas concretas que sostienen el 812.  Buen
+# analisis ahi, y al siguiente cuello de botella".
+#
+# QUE NO CAMBIA.  El objetivo de la campana, el reparto blando 80/15/5, la
+# reserva del lote, el tope de plies, las campanas de la comunidad como punto
+# de arranque y los clamps de presupuesto siguen siendo exactamente los de
+# antes.  Cambia por DONDE se baja y, en consecuencia, cuanto se compra.
+#
+# DONDE vs CUANTO, otra vez separados.  Este modulo decide el sitio y devuelve
+# un BRAZO que lo explica; el precio de cada brazo lo pone ``ingest``
+# (§ ``value_budget``), que es donde viven las dos escaleras.  Es la misma
+# division que ya tenian ``descend`` y ``budget_for``, y es lo que permite
+# cambiar el precio de un brazo sin tocar el paseo.
+
+DESCENT_PROOF = 'proof'
+DESCENT_VALUE = 'value'
+
+# Brazos del walker.  Viajan dentro del plan, no a la columna ``arm`` de la
+# tarea: alli sigue mandando quien la PIDIO (el descenso normal, o una campana
+# de la comunidad), que es lo que hace visible el voto de quien vota.
+VALUE_ARM_SPINE = 'spine'            # la punta de la espina: donde se compra
+VALUE_ARM_BOTTLENECK = 'bottleneck'  # punta comprada: el cuello de mas arriba
+VALUE_ARM_RUNG = 'rung'              # punta comprada y sin cuello: mas hondo
+VALUE_ARM_CYCLE = 'cycle'            # la espina se muerde la cola
+VALUE_ARM_BACKUP = 'backup'          # desvio por la alternativa competitiva
+VALUE_ARM_EXPLORE = 'explore'        # el mejor hijo sin explorar del camino
+
+# CUANDO UNA ALTERNATIVA SIGUE SIENDO UNA PREGUNTA.  Peon y medio de
+# distancia respecto a la primaria, PARA EL QUE MUEVE.  Por debajo de eso las
+# dos jugadas compiten de verdad y cual sostiene el valor es una pregunta
+# abierta; por encima, gastar en la segunda es comprar lo que ya se sabe.  Es
+# el mismo umbral con el que el ingest declara que dos afirmaciones sobre un
+# nodo se contradicen (``UNCERTAINTY_GAP``), y por la misma razon: es donde
+# una diferencia deja de ser ruido de busqueda.
+VALUE_ALTERNATIVE_MARGIN_CP = 150
+
+# Tope de desvios que prueba UN intento, y es el guardarrail del riesgo que
+# tiene este descenso por construccion: UNA espina y sesenta y cuatro huecos
+# de colchon.  Cada tarea que se mintea reserva su punta, asi que la siguiente
+# tiene que ofrecer otro sitio; si el tope fuera pequeno, el colchon se
+# quedaria a medio llenar y la flota mirando al techo — que es peor que la
+# dispersion que venimos a quitar.  Sesenta y cuatro es el tamano del colchon
+# (``ingest.ANALYSIS_POOL_TARGET``) por eso mismo: el paseo tiene que poder
+# ofrecer tantos sitios distintos como se le piden.  El coste no se dispara
+# porque los desvios son PEREZOSOS — solo se camina el que hace falta — y
+# porque una alternativa a menos de peon y medio de la primaria es rara: en
+# una linea decidida no hay sesenta, hay dos o tres por nodo.
+VALUE_BACKTRACK_MAX = 64
+
+# ``(posicion, plies, brazo, suelo de nodos)``.  ``floor_nodes`` solo viaja
+# cuando el brazo lo necesita para elegir peldano: los nodos que la punta ya
+# tiene (revisita) o los del hijo que cierra el ciclo (desambiguacion).
+ValueTarget = namedtuple('ValueTarget', 'position plies arm floor_nodes')
+
+_VALUE_CHILD_COLUMNS = ('move_uci', 'child_id', 'child__status', 'child__fen',
+                        'child__eval_cp', 'child__backed_eval',
+                        'child__backed_move', 'child__backed_nodes',
+                        'child__nodes_invested')
+
+
+def descent_mode():
+    """``proof`` (df-pn, el historico y el DEFAULT) o ``value`` (la espina).
+
+    El default vive en el codigo y es el comportamiento de siempre: encender
+    el walker es una linea en el env file del despliegue y quitarla es el
+    rollback entero, sin desplegar nada.  Cualquier valor que no sea
+    exactamente ``value`` deja el descenso df-pn, que es la respuesta segura a
+    un entorno mal escrito.
+    """
+    mode = str(getattr(settings, 'ATOMICDB_DESCENT', DESCENT_PROOF)).lower()
+    return DESCENT_VALUE if mode == DESCENT_VALUE else DESCENT_PROOF
+
+
+def _saturated_nodes():
+    """Nodos a partir de los cuales la punta ya esta comprada de entrada.
+
+    Es el MISMO numero que el objetivo primario compra (§ ``ingest``,
+    ``VALUE_SPINE_NODES``), leido de alli y no copiado aqui: si el primer
+    peldano de peticiones vuelve a moverse con la capacidad donada — ya paso
+    dos veces — el umbral de "esto ya esta comprado" tiene que moverse con el
+    o el walker empezaria a re-comprar lo que acaba de pagar.
+    """
+    from . import ingest
+    return ingest.VALUE_SPINE_NODES
+
+
+class _ValueChild:
+    """Un hijo visto por el walker: una fila de arista con lo justo.
+
+    Los atributos se llaman como las COLUMNAS de ``Position`` a proposito.
+    Los dos predicados que este descenso pregunta — que es un hijo SIN JUZGAR
+    y que es uno SIN EXPLORAR — viven en ``ingest``, son uno cada uno y son
+    deliberadamente distintos entre si (§ ``is_unjudged``, ``is_unexplored``).
+    Darles algo con forma de posicion es lo que evita a la vez materializar un
+    ``Position`` por hijo y copiar aqui las reglas, que es como dos criterios
+    que dicen ser el mismo dejan de serlo.
+    """
+
+    __slots__ = ('index', 'move_uci', 'key', 'status', 'fen', 'eval_cp',
+                 'backed_eval', 'backed_move', 'backed_nodes',
+                 'nodes_invested', 'value')
+
+    def __init__(self, index, move_uci, key, status, fen, eval_cp, backed_eval,
+                 backed_move, backed_nodes, nodes_invested):
+        self.index = index
+        self.move_uci = move_uci
+        self.key = key
+        self.status = status
+        self.fen = fen
+        self.eval_cp = eval_cp
+        self.backed_eval = backed_eval
+        self.backed_move = backed_move
+        self.backed_nodes = backed_nodes
+        self.nodes_invested = nodes_invested
+        self.value = None       # best_known en POV blanca, lo pone el orden
+
+
+class _ValueStep:
+    """Un nodo del camino recorrido, con lo que se miro en el."""
+
+    __slots__ = ('key', 'fen', 'nodes', 'children', 'ranked', 'primary')
+
+    def __init__(self, key, fen, nodes, children, ranked):
+        self.key = key
+        self.fen = fen
+        self.nodes = nodes or 0
+        self.children = children
+        self.ranked = ranked
+        self.primary = None     # el hijo por el que siguio la espina
+
+
+def _value_children(parent_key):
+    """Los hijos de un nodo con todo lo que el walker mira, en UNA consulta."""
+    rows = (Edge.objects.filter(parent_id=parent_key).order_by('id')
+            .values_list(*_VALUE_CHILD_COLUMNS))
+    return [_ValueChild(index, *row) for index, row in enumerate(rows)]
+
+
+def _value_ranked(goal, fen, children, child_nodes):
+    """Hijos VIVOS ordenados por "lo mejor para el que mueve, primero".
+
+    El valor de un hijo es su ``best_known`` — respaldo si lo hay, eval propia
+    si no — en perspectiva BLANCA, como toda columna de este sistema; el orden
+    lo pone el bando al turno, que en un DAG cambia cada ply.  La precedencia
+    no se reescribe aqui: la contesta ``ingest.known_eval_of``, que es la
+    unica que la sabe.
+
+    Un hijo SIN ningun valor no se mezcla con los que si lo tienen: va al
+    final, porque "no se sabe" no es un numero con el que comparar.  Comprarle
+    la primera mirada es un acto distinto y tiene su propio brazo.
+
+    ``pn`` entra SOLO como desempate, y esa es toda su participacion en este
+    descenso: dos hijos que valen lo mismo para el que mueve siguen
+    diferenciandose en lo que cuesta cerrarlos, y esa es justo la pregunta que
+    pn contesta bien.  Sin fila de prueba se puntua con la inicializacion de
+    hoja de siempre, igual que hace ``_ranked_children``.
+    """
+    from . import ingest
+    stm_white = fen.split()[1] == 'w'
+    ranked = []
+    for child in children:
+        if child.status != 'UNKNOWN':
+            continue          # ya resuelto: no queda pregunta que hacerle
+        child.value = ingest.known_eval_of(child.status, child.backed_eval,
+                                           child.eval_cp)
+        node = child_nodes.get(child.key)
+        pn = (node.pn if node is not None else leaf_numbers(
+            child.fen, child.status, child.eval_cp, goal,
+            annoyance=shallow_annoyance(child.fen, child.eval_cp))[0])
+        if child.value is None:
+            order = (1, 0, pn, child.index)
+        else:
+            order = (0, -child.value if stm_white else child.value, pn,
+                     child.index)
+        ranked.append((order, child))
+    ranked.sort(key=lambda item: item[0])
+    return [child for _order, child in ranked]
+
+
+def _value_primary(ranked, node):
+    """El primario del FALLBACK: la histeresis si sigue viva, si no el mejor.
+
+    ``selected_child`` es lo unico escrito sobre quien era el primario de un
+    nodo, y aqui es lo unico para lo que se usa: la espina no lo necesita
+    — ``backed_move`` ya dice por donde va — y el reparto 80/15/5 tampoco.
+    """
+    if node is not None and node.selected_child:
+        for child in ranked:
+            if child.move_uci == node.selected_child:
+                return child
+    return ranked[0]
+
+
+def _spine_step(backed_move, ranked, node):
+    """El hijo por el que sigue la espina, o ``None`` si aqui se acaba.
+
+    ``backed_move`` ES la espina.  Un nodo sin ella es la HOJA cuyo eval crudo
+    sostiene el valor de todo lo que cuelga por encima, y por tanto el sitio
+    donde comprar analisis mueve el numero: ahi termina el paseo.
+
+    El fallback no es una segunda politica de descenso.  Cubre el caso en que
+    la espina apunta a un hijo que ESTE paseo no puede seguir — cerrado desde
+    la ultima cascada, o ya visitado — y entonces manda el orden por valor con
+    la histeresis.  Sin el, una espina que acaba de cerrarse dejaria el paseo
+    parado en un nodo que ya no tiene nada que preguntar.
+    """
+    if not backed_move or not ranked:
+        return None
+    for child in ranked:
+        if child.move_uci == backed_move:
+            return child
+    return _value_primary(ranked, node)
+
+
+def _walk_spine(campaign, key, fen, backed_move, nodes, visited, max_plies):
+    """Baja la espina desde un nodo y devuelve ``(camino, hijo que cicla)``.
+
+    ``visited`` se comparte y se MUTA: es el guardarrail de ciclos del paseo
+    entero, y el DAG cierra ciclos de verdad (1.Nf3 Nf6 2.Ng1 Ng8 ES la
+    posicion inicial una vez quitados los contadores).  El hijo que devuelve
+    el segundo hueco es el que vuelve sobre algo ya pisado; ``None`` significa
+    que el paseo termino por donde tenia que terminar.
+    """
+    path, plies = [], 0
+    while True:
+        children = _value_children(key)
+        rows = _node_rows(campaign, [key] + [child.key for child in children])
+        ranked = _value_ranked(campaign.goal, fen, children, rows)
+        step = _ValueStep(key, fen, nodes, children, ranked)
+        path.append(step)
+        if plies >= max_plies:
+            return path, None
+        chosen = _spine_step(backed_move, ranked, rows.get(key))
+        if chosen is None:
+            return path, None
+        if chosen.key in visited:
+            return path, chosen
+        step.primary = chosen
+        visited.add(chosen.key)
+        key, fen = chosen.key, chosen.fen
+        backed_move, nodes = chosen.backed_move, chosen.nodes_invested
+        plies += 1
+
+
+def _has_unjudged(step):
+    """True si a este nodo le cuelga alguna respuesta sin juzgar."""
+    from . import ingest
+    return any(ingest.is_unjudged(child) for child in step.children)
+
+
+def _tip_plan(path, arm, plies):
+    """El plan de la punta de un camino: comprarla, o subir al cuello.
+
+    LA REVISITA.  Una punta que ya lleva encima el presupuesto del objetivo
+    primario no necesita otra copia del mismo analisis: lo que la linea
+    necesita entonces es el CUELLO DE BOTELLA, y ese es el primer nodo de la
+    espina — de abajo arriba, que es como se busca lo mas cercano a donde se
+    decide el valor — con respuestas que nadie ha juzgado todavia.  Una espina
+    entera sin cuellos si es una linea que hay que profundizar, y entonces la
+    punta cobra el peldano siguiente al que ya tiene.
+    """
+    tip = path[-1]
+    if tip.nodes < _saturated_nodes():
+        return tip.key, arm, None, plies
+    for step in reversed(path):
+        if _has_unjudged(step):
+            return step.key, VALUE_ARM_BOTTLENECK, None, plies
+    return tip.key, VALUE_ARM_RUNG, tip.nodes, plies
+
+
+def _competitive(step):
+    """Las alternativas a la primaria de un nodo que siguen siendo pregunta.
+
+    Competitiva = a menos de ``VALUE_ALTERNATIVE_MARGIN_CP`` de la primaria
+    PARA EL QUE MUEVE, y por tanto capaz de acabar sosteniendo el valor ella
+    misma.  Una alternativa que ademas es MEJOR que la primaria entra sola por
+    la misma desigualdad: la diferencia le sale negativa.
+
+    Un hijo sin ningun valor no entra aqui — no se puede afirmar que compita
+    con nada — y no se pierde: lo virgen tiene su propio brazo.
+    """
+    primary = step.primary or (step.ranked[0] if step.ranked else None)
+    if primary is None or primary.value is None:
+        return []
+    stm_white = step.fen.split()[1] == 'w'
+    rivals = []
+    for child in step.ranked:
+        if child is primary or child.value is None:
+            continue
+        loss = (primary.value - child.value if stm_white
+                else child.value - primary.value)
+        if loss < VALUE_ALTERNATIVE_MARGIN_CP:
+            rivals.append(child)
+    return rivals
+
+
+def _value_detours(campaign, path, max_plies):
+    """Desvios por alternativa competitiva, del nodo MAS PROFUNDO hacia arriba.
+
+    Cada desvio se resuelve como el paseo principal: se baja por la
+    alternativa y se sigue su espina hasta donde termine.  Perezoso a
+    proposito — cada uno cuesta consultas — y de abajo arriba porque lo
+    profundo es donde el valor se esta decidiendo de verdad; una alternativa
+    en el ply 1 cambia de repertorio, no de respuesta.
+
+    Es tambien el BACKTRACK del contrato de reserva: cuando la punta ya la
+    reparte este mismo lote, o ya tiene una tarea viva, el paseo no se rinde
+    ni entrega un duplicado — se va por la alternativa mas profunda que
+    todavia es una pregunta abierta.
+    """
+    tried = 0
+    for depth in range(len(path) - 1, -1, -1):
+        step = path[depth]
+        prefix = [item.key for item in path[:depth + 1]]
+        for child in _competitive(step):
+            if tried >= VALUE_BACKTRACK_MAX:
+                return
+            if child.key in prefix:
+                continue
+            tried += 1
+            visited = set(prefix)
+            visited.add(child.key)
+            branch, _cycled = _walk_spine(
+                campaign, child.key, child.fen, child.backed_move,
+                child.nodes_invested, visited,
+                max(0, max_plies - depth - 1))
+            yield path[:depth + 1] + branch, depth + len(branch)
+
+
+def _best_unexplored(path):
+    """``(hijo, plies)`` sin explorar mas prometedor del camino, o ``None``.
+
+    ES EL 5% DEL REPARTO, RE-SIGNIFICADO.  El descenso df-pn lo gastaba en
+    ``ranked[-1]`` — el PEOR hijo del nodo — que es explorar lo que ya se sabe
+    malo, y es uno de los defectos que este paquete viene a quitar.  Aqui se
+    gasta en lo que NADIE ha mirado: una eval sembrada por el MultiPV del
+    padre es una reclamacion heredada, no una medida, y este brazo compra la
+    medida.
+
+    Se busca de abajo arriba y se para en el primer nodo que tenga alguno,
+    por lo mismo que los desvios: la comparacion entre dos hijos virgenes de
+    NODOS distintos no existe — mueven bandos distintos a plies distintos —
+    pero dentro de un nodo si, y el nodo mas profundo es el que esta mas cerca
+    de donde se decide el valor.
+    """
+    from . import ingest
+    for plies in range(len(path) - 1, -1, -1):
+        step = path[plies]
+        stm_white = step.fen.split()[1] == 'w'
+        virgin = [child for child in step.children
+                  if ingest.is_unexplored(child) and child.eval_cp is not None]
+        if not virgin:
+            continue
+        best = max(virgin, key=lambda child: (child.eval_cp if stm_white
+                                              else -child.eval_cp))
+        return best, plies + 1
+    return None
+
+
+def _value_plans(campaign, path, cycled, bucket, max_plies):
+    """Los objetivos que este intento probaria, en orden de preferencia.
+
+    Generador a proposito: el primero que sea utilizable gana y los desvios
+    — lo unico que cuesta consultas de mas — no se calculan si no hacen falta.
+    """
+    if cycled is not None:
+        # La espina vuelve sobre si misma.  Repetir el peldano del hijo que
+        # cierra el bucle reproduciria la misma espina; el siguiente re-ordena
+        # de verdad.  Mismo espiritu que ``ingest._queue_cycle_disambiguation``
+        # y misma cuenta: por encima de lo que ese hijo ya tiene.
+        yield (path[-1].key, VALUE_ARM_CYCLE, cycled.nodes_invested + 1,
+               len(path) - 1)
+    detours = _value_detours(campaign, path, max_plies)
+    if bucket == 'backup':
+        branch = next(detours, None)
+        if branch is not None:
+            yield _tip_plan(branch[0], VALUE_ARM_BACKUP, branch[1])
+    elif bucket == 'explore':
+        virgin = _best_unexplored(path)
+        if virgin is not None:
+            yield virgin[0].key, VALUE_ARM_EXPLORE, None, virgin[1]
+    yield _tip_plan(path, VALUE_ARM_SPINE, len(path) - 1)
+    for branch, plies in detours:
+        yield _tip_plan(branch, VALUE_ARM_SPINE, plies)
+
+
+def _has_live_task(position_key):
+    """True si esa posicion ya tiene una tarea PENDING o LEASED.
+
+    ``avoid`` cubre el lote que se esta repartiendo AHORA; esto cubre el que
+    se reparte desde hace un rato.  Una punta con la tarea arrendada no
+    necesita una segunda copia de la misma pregunta: necesita que el paseo se
+    vaya por la alternativa.
+    """
+    return AnalysisTask.objects.filter(
+        position_id=position_key,
+        state__in=(AnalysisTask.TState.PENDING,
+                   AnalysisTask.TState.LEASED)).exists()
+
+
+def descend_value(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
+                  start=None):
+    """El objetivo del descenso por VALOR, o ``None`` si no hay ninguno.
+
+    Devuelve un ``ValueTarget``: la posicion donde comprar, a que profundidad
+    se encontro, con que BRAZO — que es lo que ``ingest.value_budget`` traduce
+    a presupuesto — y el suelo de nodos cuando el brazo lo necesita.
+
+    ``avoid``, ``start`` y ``max_plies`` significan exactamente lo mismo que en
+    ``descend``: la reserva del lote, la raiz de la campana de la comunidad
+    donde arranca este descenso y el tope de plies del paseo.
+
+    EL REPARTO 80/15/5 SE SORTEA UNA VEZ POR PASEO, no una por ply.  En el
+    descenso df-pn el bucket elegia una jugada en CADA nodo, asi que tenia
+    sentido re-sortearlo con la profundidad; aqui describe el paseo entero —
+    la punta de la espina, un desvio competitivo o un hijo virgen — y sortearlo
+    varias veces solo emborronaria las tres fracciones.  El sorteo sigue siendo
+    el mismo hash determinista de siempre: mismo estado, misma cola, replay
+    reproducible.
+    """
+    node = campaign.root if start is None else start
+    if node.status != 'UNKNOWN':
+        return None
+    reserved = set(avoid)
+    bucket = _bucket(counter, normalized_policy(campaign))
+    path, cycled = _walk_spine(campaign, node.key, node.fen, node.backed_move,
+                               node.nodes_invested, {node.key}, max_plies)
+    for key, arm, floor, plies in _value_plans(campaign, path, cycled, bucket,
+                                               max_plies):
+        if key in reserved or _has_live_task(key):
+            continue
+        position = Position.objects.filter(key=key).first()
+        if position is None or position.status != 'UNKNOWN':
+            continue
+        return ValueTarget(position, plies, arm, floor)
+    return None
 
 
 def open_and_obligations(campaign, limit=10):

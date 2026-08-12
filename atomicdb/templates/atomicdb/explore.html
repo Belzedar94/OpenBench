@@ -117,7 +117,7 @@
     decir de donde viene lo de abajo.  Siguen siendo dos frases con dos
     tooltips propios — cada una explica lo suyo — separadas por una raya para
     que el ``·`` de dentro del resumen no compita con el de fuera.{% endcomment %}
-    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} &middot; {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
+    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} &mdash; {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn">Request analysis</button>
