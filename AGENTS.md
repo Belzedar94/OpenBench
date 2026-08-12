@@ -1,52 +1,60 @@
 # AGENTS.md — Torre de control OpenBench (guía para agentes)
 
 Guía operativa para cualquier agente de IA (o sesión futura) que use esta instancia de
-OpenBench: hoy sirve a **Spell-Stockfish**; el siguiente inquilino es **Atomic-Stockfish**.
-Escrita el 2026-07-12. Si algo de aquí contradice el código, gana el código — y actualiza
-este documento.
+OpenBench. Hoy sirve a **cinco engines**: Spell-Stockfish, Atomic-Stockfish,
+Alice-Stockfish, Horde-Stockfish y Fairy-Stockfish-Atomic-Baseline (baseline congelado).
+Escrita el 2026-07-12; revisión mayor 2026-08-12. Si algo de aquí contradice el código,
+gana el código — y actualiza este documento.
 
-## 0. Override operativo vigente (2026-07-21)
+## 0. Estado operativo vigente (2026-08-12)
 
-- La única instancia oficial y permanente es **https://belzedar.duckdns.org**.
-  Todo test, DATAGEN, worker y cambio de prioridad oficial debe apuntar allí y
-  quedar visible en esa web.
-- Las referencias posteriores a servidores locales describen historia o entornos
-  de desarrollo. Local (`:8000`/`:8001`) sólo puede usarse para pruebas rápidas,
-  aisladas y desechables; nunca para reproducir la cola viva ni para producción.
-- Límite de esta torre: **8 threads por worker OpenBench como máximo**, salvo
-  autorización posterior y explícita del propietario.
-- Pausa temporal vigente desde 2026-07-21: no ejecutar ningún worker. Sólo
-  publicar/configurar DATAGEN en la instancia oficial hasta que el propietario
-  autorice reanudar workers.
-- Incidente 2026-07-21: se copió DB/Media operacional a `:8001` y se inició un
-  worker T30 creyendo que era una cola compartida de producción. El workload no
-  podía aparecer en la web permanente y duplicó trabajo de Spell. Se detuvieron
-  esos procesos antes de generar Atomic. No repetir: la prueba mínima de destino
-  es que el workload sea visible en `belzedar.duckdns.org` antes de arrancar un worker.
+- La única instancia oficial es **https://belzedar.duckdns.org**, desplegada en el
+  VPS (`/opt/openbench`, servicio systemd `openbench`, nginx delante, PostgreSQL
+  como base de datos; la misma caja sirve AtomicDB). Todo test, DATAGEN, worker y
+  cambio de prioridad debe quedar visible en esa web ANTES de arrancar nada.
+- El server local en el 5950X es SOLO para pruebas desechables (`:8000`/`:8001`);
+  nunca reproducir la cola viva ni producción en local (incidente 2026-07-21: un
+  worker local T30 contra una copia de la DB duplicó trabajo de Spell).
+- Workers: autorizados y en producción (la pausa de 2026-07-21 terminó hace
+  semanas). El tope histórico de 8 hilos por worker ya no es global: el hilo
+  máximo por máquina lo decide el propietario caso a caso, y el cliente (build
+  42+) mide el RSS real de cada motor y baja su propia concurrencia si la RAM
+  no da. La máquina t24 corre con SLA del agente; PC2 es discrecional del
+  propietario y no se gestiona.
+- Veredictos: antes de creerse un SPRT, desglosar el score POR MÁQUINA
+  (`per-machine`): un worker que crashea regala partidas al lado dev y fabrica
+  falsos passed. Ya pasó; no reaprenderlo.
+- Los veredictos passed/failed se publican solos en Discord (categoría por motor)
+  vía el feed del VPS; ver §4b.7 — un motor sin entrada en `HOOKS` publica en el
+  canal de Atomic EN SILENCIO.
 
 ## 1. Qué es esto
 
 Fork de `sscg13/OpenBench@shatranj` (que a su vez es fork del OpenBench de AndyGrant),
 extendido en la rama **`spell-runner`** para servir de instancia ÚNICA multi-proyecto:
 
-- **Servidor Django** (SPRT, SPSA, redes por SHA, libros, colas de workers) — corre LOCAL
-  en esta máquina (Windows 10, Ryzen 5950X).
+- **Servidor Django** (SPRT, SPSA, DATAGEN, redes por SHA, libros, colas de workers) —
+  corre en el VPS (`/opt/openbench`, systemd `openbench`).
 - **Worker** (`Client/`) que compila el engine, corre el bench y arbitra partidas.
 - **Ruteo variante→runner**: cada variante juega con el árbitro adecuado (ver §3).
 
-Rutas en esta máquina:
+Rutas:
 
 | Cosa | Ruta |
 |---|---|
-| Este fork (server+client) | `C:\Users\djime\Documents\Chess_variants\Codex\Fairy-Stockfish organization\openbench-spell` |
+| Checkout de trabajo local (agentes) | `C:\Users\djime\Documents\Chess_variants\Codex\Fairy-Stockfish organization\Openbench Project\cpuflags-fix\repo` (rama `spell-runner`) |
 | Fork publicado (workers remotos) | `https://github.com/Belzedar94/OpenBench` rama `spell-runner` (default) |
-| Web pública | Túnel TryCloudflare EFÍMERO sobre el servidor local — la URL vigente está en `%TEMP%\ob_public_url.txt` del host (cambia en cada arranque del túnel; hosting estable pendiente de decisión) |
-| venv del servidor | `<fork>\.venv` (Django 4.2.30, scipy 1.18, whitenoise) |
-| Motor spell (público) | `https://github.com/Belzedar94/Spell-Stockfish` (branch de trabajo `phase-4-strength`, base `master`) |
-| Docs de despliegue/diseño | `Spell-Stockfish\docs\openbench-server-runbook.md` y `docs\openbench-spell.md` |
-| DB | `<fork>\db.sqlite3` (SQLite; suficiente para pocos workers) |
+| Server de producción | VPS `/opt/openbench` (deploy: ver el runbook del final de este doc) |
+| Web pública | `https://belzedar.duckdns.org` |
+| DB | PostgreSQL en el VPS (migrada desde SQLite; los procesos Django NO se reconectan solos tras un reinicio de PG — reiniciar servicios) |
+| Motor spell (público) | `https://github.com/Belzedar94/Spell-Stockfish` (rama viva `main`) |
+| Docs de despliegue/diseño | `Spell-Stockfish\docs\openbench-server-runbook.md` (alta original, jul-2026) y `docs\openbench-spell.md` (diseño del ruteo) |
+| Checkout histórico | `Openbench Project\OpenBench-spell-runner` (rama snapshot; su AGENTS.md quedó superseded por ESTE) |
 
-## 2. Arrancar y entrar
+## 2. Arrancar y entrar (HISTÓRICO: server local de pruebas)
+
+> Esta sección describe cómo levantar una instancia LOCAL desechable. La
+> producción vive en el VPS y se opera con el runbook del final de este doc.
 
 ```powershell
 cd "<fork>"
@@ -140,6 +148,56 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
 8. **Primer test**: `/newTest/` → dev branch vs base branch del MISMO repo `source` (el
    server rechaza forks: `requests_illegal_fork`), bench declarado = el del commit, preset
    STC. Con un worker conectado, debería compilar, benchear y jugar.
+
+## 4b. Alta consolidada de un engine (proceso REAL, probado con Horde y Alice, ago-2026)
+
+El §4 sigue siendo el contrato técnico; esto es el orden de operaciones completo con
+todo lo que se aprendió en las altas de Atomic, Horde y Alice. Plantilla JSON de
+referencia: `Engines/Alice-Stockfish.json` (la más reciente: flujo público,
+`worker_max_concurrency: 8`, `cutechess_max_concurrency: 2`,
+`cutechess_launch_stagger_ms: 500`, presets con `base_branch` PINEADO POR SHA y
+`both_bench`/`both_network`).
+
+1. **Motor**: repo público con shim de Makefile (§4.2), bench determinista con
+   `Bench: <N>` en los commits (§4.3), y si usa red propia, el patrón
+   `EVALFILE=` horneado como default de EvalFile (SPELL_EVALFILE_DEFAULT).
+2. **Libro**: `.epd` con el token de variante en el nombre (§3: el token decide el
+   árbitro), publicado como release pública + `Books/<nombre>.json` con el sha en
+   modo TEXTO (§4.5).
+3. **Server**: `Engines/<Motor>.json` + entrada en `"engines"` y `"books"` de
+   `Config/config.json` → deploy al VPS (runbook del final) → restart. La config se
+   carga al arrancar; sin restart no existe.
+4. **Red**: subirla en `/networks/` (o `Scripts/upload_net.py`) y marcarla default
+   si los tests deben usarla sin decirlo. Cambiarla luego en tests vivos exige
+   tocar LOS DOS lados (gotcha §6).
+5. **Baseline congelado** (opcional): si el proyecto mide contra una vara externa
+   (patrón `Fairy-Stockfish-Atomic-Baseline`), es un engine más con su JSON y su
+   pin. Puede retirarse de `"engines"` cuando ya no se use SIN borrar su JSON
+   (así está hoy `Fairy-Stockfish-Hordetest-Baseline.json`: archivo presente,
+   fuera de la lista).
+6. **Binarios de release** (si el motor los distribuye): la coreografía es "merge
+   con pin coherente" — el zip de release, el pin del cliente y el commit del
+   repo deben señalar EXACTAMENTE el mismo árbol (lección Horde+Alice, jul-2026).
+7. **Discord** (SIN esto los veredictos se pierden o van al canal equivocado):
+   crear la categoría del motor con `#announcements`, `#contribute`, `#general` y
+   `#test-bench-<motor>` (announcements y test-bench solo-lectura), webhook del
+   test-bench guardado en el VPS junto a los demás, y **una entrada en el dict
+   `HOOKS` de `/root/discord_sprt_feed.py`** — el ruteo es por subcadena de
+   `dev_engine` y el default es Atomic, así que un motor nuevo sin entrada
+   publica sus veredictos en el canal de Atomic en silencio (pasó con Horde y
+   Alice: días de veredictos en el canal ajeno). Sembrar el histórico con
+   `/root/siembra_feed.py <motor> <fichero-webhook>` (en seco primero,
+   `--publicar` después). Al crear canales: NUNCA resolver por nombre a secas,
+   filtrar por categoría padre (hay cinco `#announcements`).
+8. **Primer test / tests por script**: el camino web (`/newTest/`) se valida solo.
+   El camino Django (para clonar o crear en lote): clonar un test plantilla con
+   `pk=None`, crear `Engine(name=<descriptivo>, source=<zip del sha COMPLETO>,
+   sha, bench)` por lado, resetear contadores/flags del clon, y **validar cada
+   bench contra un build limpio local ANTES de escribirlo** (reproducir primero
+   un bench ya registrado del mismo engine para validar el entorno; si tu build
+   de un engine registrado no reproduce su bench, tu firma nueva tampoco vale).
+9. **Después del alta**: verificar el primer veredicto en el canal Discord del
+   motor (no en el de Atomic), y el primer SPRT con el desglose por máquina (§0).
 
 ## 5. Workers
 
@@ -282,8 +340,19 @@ Si el orden parece mal, se dice con los números delante y se espera.
 - Al medir benches a mano en PowerShell: las pipes de here-string meten un BOM que mata el
   PRIMER comando UCI en silencio. Redirige stdin desde archivo o usa Python.
 - Los tests solo pueden apuntar al repo registrado en `source` (no a forks personales).
-- SQLite aguanta pocos workers reportando; si la flota crece → PostgreSQL.
+- SQLite aguantó lo que aguantó: la producción YA corre PostgreSQL en el VPS. Secuela
+  operativa: tras cualquier reinicio de PG (incluye `unattended-upgrade` nocturnos),
+  los procesos Django de larga vida quedan con la conexión rota y NO sanan solos —
+  reiniciar `openbench` y los servicios `atomicdb-*`.
 - `Config/config.json` no se valida al arranque (bug upstream): revísalo a mano.
+- **El score de un SPRT se audita POR MÁQUINA antes de creerlo** (un worker que
+  crashea regala partidas al dev). Y un veredicto sin canal Discord correcto es un
+  veredicto que nadie vio: HOOKS primero (§4b.7).
+- **Las ramas base de los tests envejecen**: la cola puede llevar meses corriendo
+  contra un pin viejo aunque la rama viva haya avanzado (pasó con Spell: tests
+  pineados a un ancestro de `main` mientras `main` acumulaba fixes de paridad).
+  Al crear un test nuevo, decidir conscientemente el pin — y si toca estrenar
+  base, registrar su bench validado (§4b.8).
 - **Nombre del test en el índice = `prettyDevName` (mytags.py), y se rige por
   `Engine.name`, NO por un campo "título"**. Reglas del tag: (a) si
   `dev.name == base.name` y `dev_network != base_network` → muestra EL NOMBRE
@@ -314,37 +383,22 @@ Si el orden parece mal, se dice con los números delante y se espera.
   la lista de machines). Verificación buena:
   `Get-CimInstance Win32_Process | ? { $_.CommandLine -match 'client.py' }`.
 
-## 7. Estado y pendientes (2026-07-13)
+## 7. Estado (2026-08-12)
 
-- Hecho: server local operativo; Spell-Stockfish registrado (flujo público); red run5rl
-  subida; libro `spell_openings.epd` publicado como release y manifestado; shim de Makefile
-  en el repo del motor; `uci_pair_runner` integrado y endurecido (verificación adversarial).
-- Hecho también (2026-07-12, tarde): fork publicado en `Belzedar94/OpenBench@spell-runner`
-  (única rama, default; zipball verificado); servidor endurecido (SECRET_KEY/DEBUG por
-  env + WhiteNoise) y expuesto vía túnel TryCloudflare.
-- Hosting web: decisión del propietario (2026-07-12) = **quedarse con el túnel efímero
-  por ahora**; hosting estable "ya veremos" (candidatos evaluados: VPS propio, Fly.io,
-  túnel Cloudflare con dominio). **Vercel se evaluó y se DESCARTÓ**: serverless no encaja
-  (sin disco persistente para SQLite/redes, límite de subida 4,5MB vs redes de 101MB, sin
-  procesos residentes para los watchers) — no re-proponerlo.
-- **E2E VERIFICADO** (2026-07-12 noche): test #1 (GAMES, mismo branch ambos lados) corrió
-  el ciclo completo sin intervención — worker registrado → zipball del repo público →
-  build nativo por el shim → gate de bench → libro del release → 40 partidas de spell
-  arbitradas por uci_pair_runner → 19-20-1 (Elo ~0, como debe leer un smoke). La torre
-  está OPERATIVA para SPRT/GAMES netless y SPSA.
-- Tests CON red asignada: RESUELTO — el motor hornea `EVALFILE=` como default de la
-  opción EvalFile (SPELL_EVALFILE_DEFAULT; bench con red = 11477541 para run5rl). Los
-  engines que copien el patrón deben citar ese bench en sus commits cuando asignen red.
-- Hecho: Atomic-Stockfish y el baseline Fairy congelado estan registrados con sus
-  benches, red, libros y pin del corpus Atomic. Los cuatro presets Syzygy son tests
-  `GAMES` de 2.000 partidas (STC/LTC por NNUE/clasico), sin LOS ni SPRT.
-- El arranque Atomic usa copias de concurrencia 8 escalonadas 1,5 s. En la medición
-  local de 48 handshakes reales (3 grupos de 16 procesos), la mediana fue 1,493 s,
-  p95 2,179 s y máximo 2,462 s; la ráfaga única anterior rozaba 5 s.
-- Pendiente: desplegar este onboarding, subir la red Atomic y ejecutar los cuatro
-  workloads Syzygy; migrar a PostgreSQL si la flota crece.
-- Histórico de decisiones y erratas verificadas: `Spell-Stockfish\docs\openbench-server-runbook.md`
-  (despliegue) y `Spell-Stockfish\docs\openbench-spell.md` (diseño del ruteo).
+- **Servidos**: Spell-Stockfish, Atomic-Stockfish, Alice-Stockfish, Horde-Stockfish
+  y Fairy-Stockfish-Atomic-Baseline (más `Fairy-Stockfish-Hordetest-Baseline.json`
+  presente pero fuera de la lista, ver §4b.5). Cada motor con su categoría Discord
+  y su entrada en `HOOKS`.
+- **Infra**: VPS con PostgreSQL, nginx y systemd; deploy por el runbook del final.
+  Flota mixta (SLA propio solo en t24; el resto va y viene). El cliente 42+
+  auto-regula la concurrencia por RSS medido.
+- **Redes**: se identifican por sha256 y una default por engine (Spell hoy:
+  `run5rl_e10_l07` — es la misma red publicada como `Spell_v1.nnue` en el
+  release 1.0). Los benches de commit se citan CON la red asignada del momento.
+- **Histórico completo del alta original** (túnel efímero, SQLite, decisiones de
+  hosting, E2E del 12-jul): `Spell-Stockfish\docs\openbench-server-runbook.md` y
+  las revisiones de este archivo en git — se retiró de aquí para que el estado
+  no mienta.
 
 ## 8. DATAGEN distribuido genérico (rama `datagen-mode`, 2026-07-16)
 
