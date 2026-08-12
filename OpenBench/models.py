@@ -30,7 +30,7 @@ from django.db.models import (
 from django.contrib.auth.models import User
 
 from OpenBench.datagen_publication import (
-    DATAGEN_PUBLICATION_PROTOCOL,
+    DATAGEN_PUBLICATION_PROTOCOLS,
     build_publication_contract,
     canonical_json_sha256,
     publication_contract_is_current,
@@ -188,11 +188,13 @@ class Test(Model):
         max_length=64, default='', blank=True,
     )
     datagen_teacher_mode = CharField(max_length=32, default='', blank=True)
+    datagen_teacher_id = CharField(max_length=128, default='', blank=True)
     datagen_environment_contract_sha256 = CharField(
         max_length=64, default='', blank=True,
     )
-    # Protocol v41 freezes the complete publisher-facing identity before the
-    # chunk map exists. Legacy DATAGEN rows keep protocol 0 and empty fields.
+    # Publication protocols freeze the complete publisher-facing identity
+    # before the chunk map exists. Legacy DATAGEN rows keep protocol 0 and
+    # empty fields.
     datagen_publication_protocol = IntegerField(default=0)
     datagen_campaign_id = CharField(max_length=128, default='', blank=True)
     datagen_external_workload_id = CharField(
@@ -266,7 +268,8 @@ class Test(Model):
     def is_publication_datagen(self):
         return (
             self.is_generic_datagen()
-            and self.datagen_publication_protocol == DATAGEN_PUBLICATION_PROTOCOL
+            and self.datagen_publication_protocol
+            in DATAGEN_PUBLICATION_PROTOCOLS
         )
 
     def datagen_requires_producer_artifact(self):
@@ -383,8 +386,10 @@ class Test(Model):
 
     def freeze_datagen_publication_contract(self, network, book):
         if not self.is_publication_datagen():
-            raise ValueError('Only protocol v41 DATAGEN has a publication contract')
-        self.datagen_network_sha256 = network['sha256']
+            raise ValueError(
+                'Only publication DATAGEN has a publication contract'
+            )
+        self.datagen_network_sha256 = network['sha256'] or ''
         self.datagen_network_bytes = network['bytes']
         self.datagen_book_kind = book['kind']
         self.datagen_book_source = book['source'] or ''
@@ -409,18 +414,18 @@ class Test(Model):
     class Meta:
         constraints = [
             CheckConstraint(
-                check=Q(datagen_publication_protocol__in=[0, 41]),
+                check=Q(datagen_publication_protocol__in=[0, 41, 42]),
                 name='datagen_publication_protocol_valid',
             ),
             UniqueConstraint(
                 fields=['datagen_campaign_id', 'datagen_external_workload_id'],
-                condition=Q(datagen_publication_protocol=41),
-                name='unique_datagen_v41_campaign_workload',
+                condition=Q(datagen_publication_protocol__in=[41, 42]),
+                name='unique_datagen_publication_campaign_workload',
             ),
             UniqueConstraint(
                 fields=['datagen_campaign_id', 'datagen_role', 'datagen_cohort'],
-                condition=Q(datagen_publication_protocol=41),
-                name='unique_datagen_v41_campaign_role_cohort',
+                condition=Q(datagen_publication_protocol__in=[41, 42]),
+                name='unique_datagen_publication_campaign_role_cohort',
             ),
         ]
 

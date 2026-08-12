@@ -417,6 +417,8 @@ def verify_datagen_template(errors, request, field):
         'BOOK_SHA256_CANONICAL', 'NETWORK_SHA256',
         'NETWORK_SHA256_CANONICAL', 'PRODUCER_SHA256', 'SYZYGY',
         'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
+        'TEACHER_ID',
+        'ENGINE_COMMIT', 'PUBLICATION_CONTRACT_SHA256',
     }
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
 
@@ -441,8 +443,9 @@ def verify_datagen_template(errors, request, field):
             '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, '
             '{BOOK_SHA256_CANONICAL}, {NETWORK_SHA256}, '
             '{NETWORK_SHA256_CANONICAL}, {PRODUCER_SHA256}, {SYZYGY}, '
-            '{SYZYGY_MANIFEST_SHA256}, {SYZYGY_MAX}, {TEACHER_MODE}, and include '
-            'SEED/COUNT/OUT/THREADS'
+            '{SYZYGY_MANIFEST_SHA256}, {SYZYGY_MAX}, {TEACHER_MODE}, '
+            '{TEACHER_ID}, {ENGINE_COMMIT}, '
+            '{PUBLICATION_CONTRACT_SHA256}, and include SEED/COUNT/OUT/THREADS'
         )
 
 
@@ -497,6 +500,14 @@ def verify_datagen_tablebase_contract(errors, request):
     elif request.POST.get('datagen_teacher_mode', '') != '':
         errors.append(
             'datagen_teacher_mode requires {TEACHER_MODE} in the command'
+        )
+
+    protocol = str(request.POST.get(
+        'datagen_publication_protocol', ''
+    )).strip()
+    if protocol != '42' and request.POST.get('datagen_teacher_id', '') != '':
+        errors.append(
+            'datagen_teacher_id requires publication protocol 42'
         )
 
 def verify_datagen_counts(errors, request, total_field, chunk_field):

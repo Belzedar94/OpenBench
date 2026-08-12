@@ -15,7 +15,9 @@ from OpenBench.models import (
 from OpenBench.datagen_publication import (
     DATAGEN_PUBLICATION_LEASE_SCHEMA,
     DATAGEN_PUBLICATION_PROTOCOL,
+    DATAGEN_PUBLICATION_PROTOCOL_V42,
     canonical_json_sha256,
+    publication_lease_schema,
 )
 
 
@@ -104,6 +106,30 @@ def is_generic_datagen(test):
     return (
         getattr(test, 'test_mode', None) == 'DATAGEN'
         and bool(getattr(test, 'datagen_command', ''))
+    )
+
+
+def machine_datagen_publication_protocols(machine):
+    """Return authenticated worker support; missing legacy clients mean v41."""
+
+    info = getattr(machine, 'info', {})
+    if not isinstance(info, dict):
+        return frozenset()
+    if 'datagen_publication_protocols' not in info:
+        return frozenset({DATAGEN_PUBLICATION_PROTOCOL})
+    advertised = info['datagen_publication_protocols']
+    if not isinstance(advertised, list):
+        return frozenset()
+    if any(type(value) is not int for value in advertised):
+        return frozenset()
+    return frozenset(advertised)
+
+
+def valid_publication_assignment(test, machine):
+    return (
+        not test.is_publication_datagen()
+        or test.datagen_publication_protocol
+        in machine_datagen_publication_protocols(machine)
     )
 
 
@@ -249,6 +275,10 @@ def tablebase_lease(test, machine, chunk_idx, lease_attempt):
         return {}, ''
     if publication and not test.datagen_publication_contract_is_current():
         raise ValueError('DATAGEN publication contract is stale')
+    if publication and not valid_publication_assignment(test, machine):
+        raise ValueError(
+            'Worker does not advertise the publication protocol'
+        )
 
     family = test.datagen_tablebase_family
     worker_max = 0
@@ -268,6 +298,34 @@ def tablebase_lease(test, machine, chunk_idx, lease_attempt):
             raise ValueError('Worker tablebase capability does not match campaign')
 
     if publication:
+        if (
+            test.datagen_publication_protocol
+            == DATAGEN_PUBLICATION_PROTOCOL_V42
+        ):
+            threads = machine.info.get('concurrency')
+            if type(threads) is not int or threads <= 0:
+                raise ValueError('Worker has invalid DATAGEN concurrency')
+            lease = {
+                'schema': publication_lease_schema(
+                    DATAGEN_PUBLICATION_PROTOCOL_V42
+                ),
+                'protocol': DATAGEN_PUBLICATION_PROTOCOL_V42,
+                'test_id': test.id,
+                'chunk_idx': chunk_idx,
+                'attempt': lease_attempt,
+                'machine_id': machine.id,
+                'publication_contract_sha256': (
+                    test.datagen_publication_contract_sha256.lower()
+                ),
+                'environment_contract_sha256': (
+                    test.datagen_environment_contract_sha256.lower()
+                ),
+                'threads': threads,
+                'teacher_id': test.datagen_teacher_id,
+                'network_kind': 'none',
+            }
+            return lease, canonical_json_sha256(lease)
+
         lease = {
             'schema': DATAGEN_PUBLICATION_LEASE_SCHEMA,
             'protocol': DATAGEN_PUBLICATION_PROTOCOL,
