@@ -2,7 +2,7 @@
 <td><a href="/user/{{test.author}}">{{test.author|capfirst|slice:":6"}}</a></td>
 <td>{{test.dev_engine}}</td>
 <td>
-    <a href="{{test|workload_url}}">{{test|prettyDevName}}</a>
+    <a class="branch-link" href="{{test|workload_url}}" title="{{test|prettyDevName}}">{{test|prettyDevName}}</a>
         {% if test.error %} <span class="marker-error" title="Crash or illegal move">*</span> {% endif %}
         {% if test|test_is_fischer %} <span class="marker-fischer" title="Fischer random chess">*</span> {% endif %}
 </td>
@@ -12,4 +12,4 @@
         {% if test|test_is_time_odds %} <span class="marker-time-odds" title="Time odds">*</span> {% endif %}
         {% if test|test_is_smp_odds %} <span class="marker-thread-odds" title="Thread odds">*</span> {% endif %}
 </td>
-<td class='statblock statblock-{{test|testResultColour}}'><strong>{{test|shortStatBlock|linebreaksbr}}</strong></td>
+<td class='statblock statblock-{{test|testResultColour}}'><a class="statblock-link" href="{{test|workload_url}}"><strong>{{test|shortStatBlock|linebreaksbr}}</strong></a></td>

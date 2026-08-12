@@ -30,6 +30,7 @@ import OpenBench.config
 import OpenBench.datagen
 import OpenBench.datagen_publication
 import OpenBench.index_metrics
+import OpenBench.live_elo
 import OpenBench.stats
 import OpenBench.utils
 
@@ -2439,6 +2440,28 @@ def api_pgns(request, pgn_id):
     response['Expires'] = -1
     response['Content-Length'] = os.path.getsize(pgn_path)
     response['Content-Disposition'] = 'attachment; filename=%d.pgn.tar' % (pgn_id)
+    return response
+
+@csrf_exempt
+def api_live_elo(request, id):
+
+    # The numbers behind the dials on a gameplay workload's page, so the page
+    # can refresh them without reloading. Same reading the page was rendered
+    # with, computed in one place (OpenBench.live_elo).
+
+    if not api_authenticate(request):
+        return JsonResponse(
+            { 'error' : 'API requires authentication for this server' }, status=403)
+
+    if not (workload := Test.objects.filter(id=id).first()):
+        return JsonResponse({ 'error' : 'No such Workload exists' }, status=404)
+
+    if not OpenBench.live_elo.has_live_elo(workload):
+        return JsonResponse(
+            { 'error' : 'Workload #%d does not report Elo' % (id) }, status=404)
+
+    response = JsonResponse(OpenBench.live_elo.live_elo_payload(workload))
+    response['Cache-Control'] = 'no-store'
     return response
 
 @csrf_exempt

@@ -5,11 +5,42 @@
 
 {% block scripts %}
     <script src="{% static 'copy_text.js' %}?{{ static_version }}"></script>
+    {% if live_elo %}
+        <script src="{% static 'live_elo.js' %}?{{ static_version }}" defer></script>
+    {% endif %}
 {% endblock %}
 
 {% block content %}
 
     <div class="workload-container">
+
+    <!-- Live dials: LLR, LOS and Elo, refreshed in place while the test runs -->
+    {% if live_elo %}
+        <div id="live-elo" class="live-elo w-100 mb-3"
+             data-endpoint="/api/liveElo/{{workload.id}}/"
+             data-mode="{{live_elo.mode}}"
+             data-live="{% if live_elo.finished %}0{% else %}1{% endif %}"
+             data-llr="{{live_elo.llr}}"
+             data-llr-lower="{{live_elo.llr_lower}}"
+             data-llr-upper="{{live_elo.llr_upper}}"
+             data-elo="{{live_elo.elo}}"
+             data-elo-lower="{{live_elo.elo_lower}}"
+             data-elo-upper="{{live_elo.elo_upper}}"
+             data-elo-axis-lower="{{live_elo.elo_axis_lower}}"
+             data-elo-axis-upper="{{live_elo.elo_axis_upper}}"
+             data-los="{{live_elo.los}}">
+
+            <div class="live-elo-dials">
+                {% if live_elo.mode == "SPRT" %}
+                    <div class="live-elo-dial" data-gauge="llr"></div>
+                {% endif %}
+                <div class="live-elo-dial" data-gauge="los"></div>
+                <div class="live-elo-dial" data-gauge="elo"></div>
+            </div>
+
+            <pre class="live-elo-summary" id="live-elo-summary">{{live_elo.summary}}</pre>
+        </div>
+    {% endif %}
 
     <div id="config" style="display: block; overflow-x: auto;">
         <table class="test-config left-align wrappable" style="table-layout: auto; width: 100%;">

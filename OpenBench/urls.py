@@ -108,6 +108,7 @@ urlpatterns = [
     django.urls.path(r'api/networks/<str:engine>/<str:identifier>/', OpenBench.views.api_network_download),
     django.urls.path(r'api/buildinfo/', OpenBench.views.api_build_info),
     django.urls.path(r'api/pgns/<int:pgn_id>/', OpenBench.views.api_pgns),
+    django.urls.path(r'api/liveElo/<int:id>/', OpenBench.views.api_live_elo),
     django.urls.path(r'api/datagen/<int:test_id>/<int:chunk_idx>/', OpenBench.views.api_datagen_chunk),
     django.urls.path(r'api/datagen/<int:test_id>/', OpenBench.views.api_datagen_manifest),
     django.urls.path(r'api/datagen-producer/<str:sha256>/', OpenBench.views.api_datagen_producer),

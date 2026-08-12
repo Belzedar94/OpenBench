@@ -26,6 +26,7 @@
 # A Workload can be a "DATAGEN", which is a Data Generation session
 
 import datetime
+import OpenBench.live_elo
 import OpenBench.views
 
 from django.core.paginator import Paginator
@@ -49,6 +50,10 @@ def view_workload(request, workload, workload_type):
     if workload_type == 'TEST':
         data['type']            = workload_type
         data['dev_text']        = 'Dev'
+
+        # Dials on top of the page, for the workloads that have an Elo to show
+        if OpenBench.live_elo.has_live_elo(workload):
+            data['live_elo'] = OpenBench.live_elo.live_elo_payload(workload)
 
     if workload_type == 'TUNE':
         data['type']            = workload_type
