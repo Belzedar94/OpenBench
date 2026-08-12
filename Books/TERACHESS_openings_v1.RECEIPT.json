@@ -1,0 +1,64 @@
+{
+  "schema": "TERACHESS_OPENING_BOOK_V1_RECEIPT_V1",
+  "status": "openbench_validation_candidate",
+  "artifact": {
+    "name": "TERACHESS_openings_v1.epd",
+    "lines": 5000,
+    "unique_lines": 5000,
+    "white_to_move": 2743,
+    "black_to_move": 2257,
+    "opening_ply_min": 8,
+    "opening_ply_max": 16,
+    "payload_bytes": 911542,
+    "payload_sha256": "1f117b0ed03049afad62481494fff9e3232774d188433a99ffff1454d84babe7",
+    "archive_member": "TERACHESS_openings_v1.epd",
+    "archive_bytes": 132952,
+    "archive_sha256": "87ed4fba357de4020e42e711c16e9f9a08ec0d6eac12851f224699aafa2cb256"
+  },
+  "generation": {
+    "engine_sha256": "4031535940f205704cfde57233e66e2960872fbea80fa7880eef9e1bcf4237b5",
+    "network_bytes": 56858966,
+    "network_sha256": "05162b618577fd28413f65c69aae9d549a9cd712451b5003e64dea7785e52861",
+    "nodes": 5000,
+    "multipv": 6,
+    "candidate_gap_cp": 150,
+    "final_eval_limit_cp": 800,
+    "min_ply": 8,
+    "max_ply": 16,
+    "seed": 2026,
+    "discarded": 12,
+    "elapsed_seconds": 1087.503
+  },
+  "validation": {
+    "oracles": ["a", "b"],
+    "positions_checked": 5000,
+    "canonical_roundtrip_errors": 0,
+    "legal_move_set_mismatches": 0,
+    "terminal_positions": 0,
+    "duplicate_positions": 0,
+    "errors": 0,
+    "elapsed_seconds": 44.881,
+    "ply_histogram": {
+      "8": 576,
+      "9": 573,
+      "10": 550,
+      "11": 581,
+      "12": 557,
+      "13": 536,
+      "14": 529,
+      "15": 567,
+      "16": 531
+    }
+  },
+  "capacity": {
+    "pairs_before_first_wrap": 5000,
+    "games_before_first_wrap": 10000
+  },
+  "gates": {
+    "deterministic_archive": true,
+    "full_dual_oracle_validation": true,
+    "immutable_source_registered": false,
+    "official_runner_validation": false,
+    "authorized_for_strength_sprt": false
+  }
+}
