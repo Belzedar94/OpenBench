@@ -708,14 +708,15 @@ class ServerReporter:
 ## standard chess through cutechess, exactly as before.
 
 VARIANTS = {
-    'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
-    'ALICE'    : ('uci-pair-runner', 'alice'       ),
-    'HORDE'    : ('cutechess'      , 'horde'       ),
-    'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
-    'ATOMIC'   : ('cutechess'      , 'atomic'      ),
-    'FRC'      : ('cutechess'      , 'fischerandom'),
-    '960'      : ('cutechess'      , 'fischerandom'),
-    'FISCHER'  : ('cutechess'      , 'fischerandom'),
+    'SPELL'     : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'ALICE'     : ('uci-pair-runner', 'alice'       ),
+    'TERACHESS' : ('uci-pair-runner', 'terachess'   ),
+    'HORDE'     : ('cutechess'      , 'horde'        ),
+    'SHATRANJ'  : ('cutechess'      , 'shatranj'     ),
+    'ATOMIC'    : ('cutechess'      , 'atomic'       ),
+    'FRC'       : ('cutechess'      , 'fischerandom' ),
+    '960'       : ('cutechess'      , 'fischerandom' ),
+    'FISCHER'   : ('cutechess'      , 'fischerandom' ),
 }
 
 # Fallback when the book name carries no token (DATAGEN runs use book='None';
@@ -724,10 +725,21 @@ VARIANTS = {
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
+    'TERACHESS-STOCKFISH'                : ('uci-pair-runner', 'terachess'  ),
     'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
     'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
+}
+
+# Variant-specific policy for the pure-UCI runner. Keep this separate from the
+# routing table: these flags are not accepted by cutechess-ob. Terachess games
+# average 575 plies and have reached 842 naturally; the project contract rejects
+# caps below 1,000 because they manufacture draws. 1,200 matches the measured
+# no-adjudication pilot and leaves the generic runner default unchanged for all
+# other variants.
+UCI_PAIR_VARIANT_FLAGS = {
+    'terachess': '--max-plies 1200',
 }
 
 # Only contracts the Server can actually emit belong here. OpenBench/config.py
@@ -925,8 +937,12 @@ class Cutechess:
         is_datagen = config.workload['test']['type'] == 'DATAGEN'
         no_reverse = is_datagen and not config.workload['test']['play_reverses']
 
-        # Always include -recover and -variant
-        return ['-repeat', ''][no_reverse] + ' -recover -variant %s' % (variant)
+        # Always include -recover and -variant. Only the custom runner accepts
+        # the policy flags below; never leak them to cutechess-ob.
+        settings = ['-repeat', ''][no_reverse] + ' -recover -variant %s' % (variant)
+        if runner == 'uci-pair-runner' and variant in UCI_PAIR_VARIANT_FLAGS:
+            settings += ' ' + UCI_PAIR_VARIANT_FLAGS[variant]
+        return settings
 
     @staticmethod
     def concurrency_settings(config):

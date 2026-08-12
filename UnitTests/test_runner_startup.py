@@ -135,6 +135,54 @@ class HordeVariantRoutingTests(unittest.TestCase):
         )
 
 
+class TerachessVariantRoutingTests(unittest.TestCase):
+
+    def test_book_token_and_engine_fallback_use_the_pair_runner(self):
+        tagged = routing_config(
+            "TERACHESS_openings_v1.epd",
+            dev_engine="Terachess-Stockfish",
+            base_engine="Terachess-Stockfish",
+        )
+        untagged = routing_config(
+            "tera_openings_v1.epd",
+            dev_engine="Terachess-Stockfish",
+            base_engine="Terachess-Stockfish",
+        )
+        self.assertEqual(
+            worker.variant_routing(tagged),
+            ("uci-pair-runner", "terachess"),
+        )
+        self.assertEqual(
+            worker.variant_routing(untagged),
+            ("uci-pair-runner", "terachess"),
+        )
+
+    def test_pair_runner_receives_the_measured_1200_ply_cap(self):
+        config = routing_config(
+            "tera_openings_v1.epd",
+            dev_engine="Terachess-Stockfish",
+            base_engine="Terachess-Stockfish",
+        )
+        self.assertEqual(
+            worker.Cutechess.basic_settings(config),
+            "-repeat -recover -variant terachess --max-plies 1200",
+        )
+
+    def test_terachess_policy_does_not_leak_to_other_runners(self):
+        spell = worker.Cutechess.basic_settings(
+            routing_config(
+                "spell_openings.epd",
+                dev_engine="Spell-Stockfish",
+                base_engine="Spell-Stockfish",
+            )
+        )
+        atomic = worker.Cutechess.basic_settings(
+            routing_config("ATOMIC_openings.epd")
+        )
+        self.assertNotIn("--max-plies", spell)
+        self.assertNotIn("--max-plies", atomic)
+
+
 class CutechessLaunchStaggerTests(unittest.TestCase):
 
     def test_native_runner_uses_an_explicit_worker_local_path(self):
