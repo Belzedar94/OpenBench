@@ -76,8 +76,19 @@
     --statblock-blue: #60F0FF;
     --statblock-yellow: #EFF891;
     --statblock-red: #FA9696;
+    --statblock-hover: rgba(0, 0, 0, 0.10);
     --long-statblock-bg: var(--color3);
     --long-statblock-ink: var(--color-font2);
+
+    /* Live Elo dials */
+    --gauge-track: #4A4A4A;
+    --gauge-bad: #C0392B;
+    --gauge-warn: #D9891F;
+    --gauge-good: #3D9A4E;
+    --gauge-needle: #FF5A4B;
+    --gauge-tick: #6E7681;
+    --gauge-ink: #949BA4;
+    --gauge-value-ink: #DBDEE1;
 
     /* Semantic inks (these were literal keywords in the original rules and in
        the inline styles that the markers/icons replaced). */
@@ -155,8 +166,18 @@ html[data-theme="light"] {
     --statblock-blue: #66CCFF;
     --statblock-yellow: #FFFF00;
     --statblock-red: #FF6A6A;
+    --statblock-hover: rgba(0, 0, 0, 0.075);
     --long-statblock-bg: #f5f5f5;
     --long-statblock-ink: #212529;
+
+    --gauge-track: #dee2e6;
+    --gauge-bad: #dc3545;
+    --gauge-warn: #fd7e14;
+    --gauge-good: #198754;
+    --gauge-needle: #dc3545;
+    --gauge-tick: #adb5bd;
+    --gauge-ink: #6c757d;
+    --gauge-value-ink: #212529;
 
     --error-ink: #b02a37;
     --warning-ink: #997404;
@@ -233,8 +254,18 @@ html[data-theme="light"] {
         --statblock-blue: #66CCFF;
         --statblock-yellow: #FFFF00;
         --statblock-red: #FF6A6A;
+        --statblock-hover: rgba(0, 0, 0, 0.075);
         --long-statblock-bg: #f5f5f5;
         --long-statblock-ink: #212529;
+
+        --gauge-track: #dee2e6;
+        --gauge-bad: #dc3545;
+        --gauge-warn: #fd7e14;
+        --gauge-good: #198754;
+        --gauge-needle: #dc3545;
+        --gauge-tick: #adb5bd;
+        --gauge-ink: #6c757d;
+        --gauge-value-ink: #212529;
 
         --error-ink: #b02a37;
         --warning-ink: #997404;
@@ -655,6 +686,33 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
     background-color: var(--statblock-red);
 }
 
+/* The whole result box is the link to its test. The padding moves onto the
+   anchor so the click target is the box a visitor is aiming at, and not just
+   the glyphs inside it. */
+
+#content td.statblock {
+    padding: 0;
+}
+
+#content .statblock-link {
+    display: block;
+    padding: 7px 10px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+}
+
+#content .statblock-link:link,
+#content .statblock-link:visited,
+#content .statblock-link:active,
+#content .statblock-link:hover {
+    color: inherit;
+}
+
+#content .statblock-link:hover {
+    background-color: var(--statblock-hover);
+}
+
 #content .redlink {
     color: var(--redlink);
 }
@@ -666,6 +724,100 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
     color: var(--long-statblock-ink);
     border-radius: 4px;
     padding: 0.50rem 0.75rem;
+}
+
+/* Live Elo dials: LLR, LOS and Elo on top of a gameplay workload.
+   Drawn by live_elo.js; the design follows Fishtest's live_elo page. The
+   colours stay here so the theme switch repaints the needles for free. */
+
+#content .live-elo {
+    float: left;
+}
+
+#content .live-elo-dials {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: flex-end;
+}
+
+#content .live-elo-dial {
+    flex: 1 1 190px;
+    min-width: 0;
+    max-width: 260px;
+}
+
+#content .live-elo-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+#content .live-elo-band {
+    fill: none;
+    stroke-linecap: butt;
+}
+
+#content .live-elo-band-track {
+    stroke: var(--gauge-track);
+}
+
+#content .live-elo-band-bad {
+    stroke: var(--gauge-bad);
+}
+
+#content .live-elo-band-warn {
+    stroke: var(--gauge-warn);
+}
+
+#content .live-elo-band-good {
+    stroke: var(--gauge-good);
+}
+
+#content .live-elo-tick {
+    stroke: var(--gauge-tick);
+    stroke-width: 1.5;
+}
+
+#content .live-elo-tick-mark {
+    stroke: var(--gauge-value-ink);
+    stroke-width: 2.5;
+}
+
+#content .live-elo-needle,
+#content .live-elo-hub {
+    fill: var(--gauge-needle);
+}
+
+#content .live-elo-value {
+    fill: var(--gauge-value-ink);
+    font-family: "Courier Prime", monospace;
+    font-size: 26px;
+    font-weight: bold;
+}
+
+#content .live-elo-label {
+    fill: var(--gauge-ink);
+    font-family: "Courier Prime", monospace;
+    font-size: 13px;
+    letter-spacing: 1px;
+}
+
+#content .live-elo-bound {
+    fill: var(--gauge-ink);
+    font-family: "Courier Prime", monospace;
+    font-size: 11px;
+}
+
+#content .live-elo-summary {
+    margin: 0.5rem 0 0;
+    padding: 0.50rem 0.75rem;
+    background-color: var(--long-statblock-bg);
+    color: var(--long-statblock-ink);
+    border-radius: 4px;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* Test Views */
@@ -847,6 +999,98 @@ html.theme-ready textarea {
         color 180ms ease;
 }
 
+/* Styles for laptop-class widths. A 1920x1200 panel at 150% Windows scaling
+   is 1280x800 CSS pixels, and the page used to answer that with a horizontal
+   scrollbar on the body: a 200px sidebar, 2rem of gutter and a 1000px cap on
+   the content leave the index table without the width it needs. Nothing here
+   fires above 1366px, so the wide-screen layout is exactly as it was. */
+
+@media (max-width: 1366px) {
+
+    /* A flex item is min-width:auto by default, so the nowrap table inside
+       could push this column -- and the page with it -- past the viewport. */
+    #content-parent {
+        min-width: 0;
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+
+    /* The 1000px cap costs width this page no longer has to spare. */
+    #content {
+        max-width: 100%;
+    }
+
+    /* A flex item will not shrink below its own min-content width, and the
+       engine list carries names like Fairy-Stockfish-Atomic-Baseline: without
+       min-width, one entry in the navigation decided how much of the viewport
+       the sidebar took. */
+    #sidebar {
+        flex-basis: 168px;
+        flex-shrink: 0;
+        min-width: 0;
+        padding: 52px 6px 12px 6px;
+    }
+
+    #sidebar ul {
+        padding: 0px 4px;
+        line-height: 1.6;
+    }
+
+    #sidebar li {
+        padding: 3px 6px 1px;
+        font-size: 0.75rem;
+    }
+
+    #sidebar li a {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    #sidebar .header {
+        font-size: 0.85rem;
+    }
+
+    /* The capacity cards keep a readable width and take a second row when
+       they need one, instead of clipping their own values. */
+    #content .index-metrics {
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    }
+
+    #content th, #content td {
+        padding: 8px 8px 5px 8px;
+    }
+
+    /* "Active: N Machines / N Threads / N MNPS" takes a second line rather
+       than running off the end of its header row. */
+    #content .table-header th {
+        white-space: normal;
+    }
+
+    /* Branch names are the one column with no natural bound. The full name
+       stays in the link's title, and on its own test page. */
+    #content .branch-link {
+        display: inline-block;
+        max-width: 20ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        vertical-align: bottom;
+    }
+
+    /* Three dials still fit a 1280 viewport; below that they wrap cleanly. */
+    #content .live-elo-dial {
+        max-width: 240px;
+    }
+
+    /* Last resort for a table that still will not fit: the container scrolls
+       sideways, never the body. Only inside this query -- above it the wide
+       layout lets a long table spill past the content column, which is what
+       it has always done. */
+    #content .table-scroll {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+}
+
 /* Styles for screen widths less than 768px */
 @media (max-width: 767px) {
     #sidebar {
@@ -962,6 +1206,12 @@ html.theme-ready textarea {
     #content #actions {
         order: -1;
         margin: 0 0 1rem 0;
+    }
+
+    /* The dials stay at the top of the page on a phone as well */
+    #content .live-elo {
+        order: -2;
+        float: none;
     }
 
     #content #config {
