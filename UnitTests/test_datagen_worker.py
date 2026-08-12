@@ -260,6 +260,139 @@ def publication_config(tablebase=False):
     return cfg, network_bytes
 
 
+def publication_v42_config():
+    cfg = config()
+    test = cfg.workload['test']
+    data = test['datagen']
+    test.update({'syzygy_wdl': 'DISABLED', 'syzygy_adj': 'DISABLED'})
+    test['dev'].update({
+        'repo': 'https://github.com/example/taikyoku-engine',
+        'requested_ref': 'branch',
+        'options': '',
+        'network': '',
+        'netname': '',
+        'tablebase_family': 'standard',
+    })
+    command = (
+        'datagen teacher_id {TEACHER_ID} '
+        'source_commit {ENGINE_COMMIT} '
+        'contract_sha256 {PUBLICATION_CONTRACT_SHA256} '
+        'producer_sha256 {PRODUCER_SHA256} '
+        'book {BOOK} book_sha256 {BOOK_SHA256} '
+        'network {NETWORK} network_sha256 {NETWORK_SHA256} '
+        'format TK01-v1 nodes 8000 count {COUNT} threads {THREADS} '
+        'seed {SEED} out {OUT} random_plies 8 write_min_ply 6 '
+        'eval_limit 10000 max_game_plies 20000'
+    )
+    data.update({
+        'command': command,
+        'base_seed': 100,
+        'producer_artifact_required': True,
+        'producer_contract_sha256': 'd' * 64,
+        'publication_protocol': 42,
+        'tablebase_required': False,
+        'tablebase_family': '',
+        'tablebase_max': 0,
+        'tablebase_manifest_sha256': '',
+        'teacher_mode': '',
+        'teacher_id': 'taikyoku-material-advance-v1',
+        'environment_contract_sha256': 'c' * 64,
+    })
+    contract = {
+        'schema': 'openbench-datagen-publication-contract-v42',
+        'protocol': 42,
+        'campaign_id': 'taikyoku-regime',
+        'external_workload_id': 'canary-260k',
+        'role': 'canary',
+        'cohort': 'material-n8000-startpos-v1',
+        'engine': {
+            'name': test['dev']['engine'],
+            'repo': test['dev']['repo'],
+            'source': test['dev']['source'],
+            'requested_ref': test['dev']['requested_ref'],
+            'commit': test['dev']['sha'],
+            'bench': test['dev']['bench'],
+            'options': test['dev']['options'],
+        },
+        'network': {
+            'kind': 'none',
+            'name': None,
+            'openbench_id': None,
+            'sha256': None,
+            'bytes': 0,
+        },
+        'book': {
+            'kind': 'builtin-startpos',
+            'name': 'NONE',
+            'source': None,
+            'text_sha256': None,
+            'raw_sha256': None,
+        },
+        'generation': {
+            'command': command,
+            'command_sha256': hashlib.sha256(command.encode()).hexdigest(),
+            'total_count': data['total_count'],
+            'positions_per_chunk': data['positions_per_chunk'],
+            'base_seed': data['base_seed'],
+            'seed_method': 'base-plus-chunk-index-v1',
+        },
+        'producer': {
+            'required': True,
+            'contract_sha256': data['producer_contract_sha256'],
+        },
+        'teacher': {
+            'kind': 'builtin-evaluator',
+            'id': data['teacher_id'],
+        },
+        'syzygy': {
+            'required': False,
+            'family': None,
+            'max': 0,
+            'manifest_sha256': None,
+            'environment_contract_sha256': data[
+                'environment_contract_sha256'
+            ],
+        },
+        'format': {
+            'id': 'TK01-v1',
+            'max_game_plies': 20000,
+            'repetition': 'fourth-position-v1',
+        },
+    }
+    contract_sha256 = hashlib.sha256(json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode()).hexdigest()
+    data['publication_contract'] = contract
+    data['publication_contract_sha256'] = contract_sha256
+    lease = {
+        'schema': 'openbench-datagen-publication-lease-v42',
+        'protocol': 42,
+        'test_id': test['id'],
+        'chunk_idx': data['chunk_idx'],
+        'attempt': data['attempt'],
+        'machine_id': cfg.machine_id,
+        'publication_contract_sha256': contract_sha256,
+        'environment_contract_sha256': data['environment_contract_sha256'],
+        'threads': cfg.threads,
+        'teacher_id': data['teacher_id'],
+        'network_kind': 'none',
+    }
+    data['environment_lease'] = lease
+    data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+        lease, sort_keys=True, separators=(',', ':')
+    ).encode()).hexdigest()
+    producer = {
+        'sha256': 'ab' * 32,
+        'bytes': 123,
+        'commit': test['dev']['sha'],
+    }
+    return cfg, producer
+
+
 def horde_publication_config(
     book_name='HORDE_openings.epd',
     book_sha256=None,
@@ -761,6 +894,140 @@ class DatagenWorkerTests(unittest.TestCase):
                     'publication_contract_sha256'
                 ],
             )
+            self.assertNotIn('path', json.dumps(payload).lower())
+        finally:
+            os.remove(path)
+
+    def test_v42_worker_validates_lease_and_renders_network_none_contract(self):
+        cfg, producer = publication_v42_config()
+        attestation = worker.datagen_tablebase_attestation(cfg)
+
+        self.assertEqual(attestation['publication_protocol'], 42)
+        self.assertEqual(attestation['threads'], cfg.threads)
+        self.assertEqual(
+            attestation['teacher_id'], 'taikyoku-material-advance-v1'
+        )
+        self.assertEqual(attestation['network_kind'], 'none')
+        rendered = worker.render_datagen_command(
+            cfg,
+            os.path.join('Datagen', 'test_7_chunk_3.bin'),
+            producer=producer,
+            tablebase=attestation,
+        )
+        self.assertIn('network NONE network_sha256 NONE', rendered)
+        self.assertIn('teacher_id taikyoku-material-advance-v1', rendered)
+        self.assertIn('source_commit ' + ('a' * 40), rendered)
+        self.assertIn(
+            'contract_sha256 '
+            + cfg.workload['test']['datagen'][
+                'publication_contract_sha256'
+            ],
+            rendered,
+        )
+        self.assertIn('producer_sha256 ' + ('ab' * 32), rendered)
+        self.assertIn('threads 2', rendered)
+
+        with self.assertRaisesRegex(
+            worker.DatagenConfigurationError, 'network:none'
+        ):
+            worker.render_datagen_command(
+                cfg,
+                'Datagen/test_7_chunk_3.bin',
+                'Networks/dummy',
+                producer,
+                attestation,
+            )
+
+    def test_v42_worker_rejects_rehashed_semantic_contract_mutations(self):
+        mutations = (
+            ('network', {
+                'kind': 'none', 'name': 'dummy', 'openbench_id': None,
+                'sha256': None, 'bytes': 0,
+            }),
+            ('teacher', {
+                'kind': 'builtin-evaluator', 'id': 'different-teacher',
+            }),
+            ('format', {
+                'id': 'TK01-v1', 'max_game_plies': 19999,
+                'repetition': 'fourth-position-v1',
+            }),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                cfg, _producer = publication_v42_config()
+                data = cfg.workload['test']['datagen']
+                data['publication_contract'][field] = value
+                digest = hashlib.sha256(json.dumps(
+                    data['publication_contract'],
+                    sort_keys=True,
+                    separators=(',', ':'),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode()).hexdigest()
+                data['publication_contract_sha256'] = digest
+                data['environment_lease'][
+                    'publication_contract_sha256'
+                ] = digest
+                data['environment_lease_sha256'] = hashlib.sha256(json.dumps(
+                    data['environment_lease'],
+                    sort_keys=True,
+                    separators=(',', ':'),
+                ).encode()).hexdigest()
+                with self.assertRaisesRegex(
+                    worker.DatagenConfigurationError, 'does not match'
+                ):
+                    worker.datagen_publication_contract(cfg)
+
+    def test_v42_report_carries_generation_receipt_fields(self):
+        cfg, producer = publication_v42_config()
+        attestation = worker.datagen_tablebase_attestation(cfg)
+        command = worker.render_datagen_command(
+            cfg,
+            'Datagen/test_7_chunk_3.bin',
+            producer=producer,
+            tablebase=attestation,
+        )
+        generation = {
+            'threads': attestation['threads'],
+            'rendered_command_sha256': hashlib.sha256(
+                command.encode()
+            ).hexdigest(),
+            'teacher_id': attestation['teacher_id'],
+            'network_kind': attestation['network_kind'],
+        }
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            'completed_chunks': 1,
+            'total_chunks': 1,
+            'environment_receipt_sha256': 'e' * 64,
+        }
+        with tempfile.NamedTemporaryFile(delete=False) as output:
+            output.write(b'archive')
+            path = output.name
+        try:
+            with mock.patch.object(
+                worker.requests, 'post', return_value=response
+            ) as post:
+                worker.ServerReporter.report_datagen(
+                    cfg,
+                    path,
+                    hashlib.sha256(b'archive').hexdigest(),
+                    len(b'archive'),
+                    producer=producer,
+                    tablebase=attestation,
+                    generation=generation,
+                )
+            payload = post.call_args.kwargs['data']
+            self.assertEqual(payload['assigned_threads'], 2)
+            self.assertEqual(
+                payload['rendered_command_sha256'],
+                generation['rendered_command_sha256'],
+            )
+            self.assertEqual(
+                payload['teacher_id'], 'taikyoku-material-advance-v1'
+            )
+            self.assertEqual(payload['network_kind'], 'none')
             self.assertNotIn('path', json.dumps(payload).lower())
         finally:
             os.remove(path)
@@ -1390,6 +1657,97 @@ class DatagenWorkerTests(unittest.TestCase):
                 'generator', 'chunk',
             ],
         )
+
+    def test_v42_complete_workload_uploads_exact_rendered_command_receipt(self):
+        cfg, _ = publication_v42_config()
+        producer_bytes = b'taikyoku-generator-executable'
+        producer_sha256 = hashlib.sha256(producer_bytes).hexdigest()
+        captured = {}
+
+        def register(
+            _config, path, sha256, byte_count, commit, metadata_only=False
+        ):
+            if metadata_only:
+                return {'upload_required': True}
+            self.assertEqual(Path(path).read_bytes(), producer_bytes)
+            self.assertEqual(sha256, producer_sha256)
+            return {
+                'sha256': sha256,
+                'bytes': byte_count,
+                'commit': commit,
+            }
+
+        def generate(
+            _config, _engine, output_path, _log_path, _heartbeat,
+            network_path, producer=None, tablebase=None,
+        ):
+            self.assertIsNone(network_path)
+            self.assertEqual(producer['sha256'], producer_sha256)
+            self.assertEqual(tablebase['publication_protocol'], 42)
+            Path(output_path).write_bytes(b'tk01-records')
+
+        def upload(
+            _config, _path, _sha256, _byte_count, producer=None,
+            tablebase=None, generation=None,
+        ):
+            captured['producer'] = producer
+            captured['tablebase'] = tablebase
+            captured['generation'] = generation
+            return {
+                'completed_chunks': 1,
+                'total_chunks': 8,
+                'environment_receipt_sha256': 'e' * 64,
+            }
+
+        with tempfile.TemporaryDirectory() as cwd:
+            previous = os.getcwd()
+            os.chdir(cwd)
+            Path('Datagen').mkdir()
+            Path('Engines').mkdir()
+            Path('Engines', 'engine.exe').write_bytes(producer_bytes)
+            try:
+                with mock.patch.object(worker, 'download_opening_book'), \
+                     mock.patch.object(
+                         worker, 'safe_download_network_weights',
+                         return_value=None,
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_download_engine',
+                         return_value='engine.exe',
+                     ), \
+                     mock.patch.object(
+                         worker, 'safe_run_benchmarks', return_value=1000,
+                     ), \
+                     mock.patch.object(worker.ServerReporter, 'report_nps'), \
+                     mock.patch.object(
+                         worker.ServerReporter, 'report_datagen_producer',
+                         side_effect=register,
+                     ), \
+                     mock.patch.object(
+                         worker, 'run_datagen_command', side_effect=generate,
+                     ), \
+                     mock.patch.object(
+                         worker.ServerReporter, 'report_datagen',
+                         side_effect=upload,
+                     ):
+                    worker.complete_workload(cfg)
+            finally:
+                os.chdir(previous)
+
+        expected_command = worker.render_datagen_command(
+            cfg,
+            'Datagen/test_7_chunk_3.bin',
+            producer=captured['producer'],
+            tablebase=captured['tablebase'],
+        )
+        self.assertEqual(captured['generation'], {
+            'threads': 2,
+            'rendered_command_sha256': hashlib.sha256(
+                expected_command.encode()
+            ).hexdigest(),
+            'teacher_id': 'taikyoku-material-advance-v1',
+            'network_kind': 'none',
+        })
 
     def test_producer_snapshot_is_private_executable_and_exact(self):
         with tempfile.TemporaryDirectory() as directory:

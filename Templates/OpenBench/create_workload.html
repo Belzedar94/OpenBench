@@ -174,6 +174,9 @@
                                 Protocol v41 additionally requires
                                 <code>&#123;NETWORK_SHA256&#125;</code> and freezes the
                                 complete publisher contract before scheduling.
+                                Protocol v42 uses <code>network:none</code>, a
+                                builtin teacher ID, and authenticates the engine
+                                commit plus rendered command.
                                 Atomic tablebase DATAGEN must use
                                 <code>&#123;SYZYGY&#125;</code>,
                                 <code>&#123;SYZYGY_MANIFEST_SHA256&#125;</code>,
@@ -207,7 +210,12 @@
                             <select id="datagen_publication_protocol" name="datagen_publication_protocol">
                                 <option selected value="0"> Legacy / no publication contract </option>
                                 <option value="41"> v41 authenticated publication </option>
+                                <option value="42"> v42 network:none publication </option>
                             </select>
+                        </div>
+                        <div class="row">
+                            <label for="datagen_teacher_id"> Builtin Teacher ID </label>
+                            <input id="datagen_teacher_id" name="datagen_teacher_id">
                         </div>
                         <div class="row">
                             <label for="datagen_campaign_id"> Campaign ID </label>
@@ -257,6 +265,9 @@
                             <textarea id="datagen_command" name="datagen_command" rows="4"></textarea>
                             <small>
                                 Use <code>&#123;PRODUCER_SHA256&#125;</code> for generator evidence.
+                                Protocol v42 uses <code>network:none</code>, a
+                                builtin teacher ID, and authenticates the engine
+                                commit plus rendered command.
                                 Atomic tablebase DATAGEN must use
                                 <code>&#123;SYZYGY&#125;</code>,
                                 <code>&#123;SYZYGY_MANIFEST_SHA256&#125;</code>,
@@ -290,7 +301,12 @@
                             <select id="datagen_publication_protocol" name="datagen_publication_protocol">
                                 <option selected value="0"> Legacy / no publication contract </option>
                                 <option value="41"> v41 authenticated publication </option>
+                                <option value="42"> v42 network:none publication </option>
                             </select>
+                        </div>
+                        <div class="row">
+                            <label for="datagen_teacher_id"> Builtin Teacher ID </label>
+                            <input id="datagen_teacher_id" name="datagen_teacher_id">
                         </div>
                         <div class="row">
                             <label for="datagen_campaign_id"> Campaign ID </label>

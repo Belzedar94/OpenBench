@@ -429,12 +429,23 @@ Si el orden parece mal, se dice con los números delante y se espera.
   crear el workload; cualquier drift posterior falla cerrado. No convertir
   workloads legacy a v41 por backfill.
 
+- El protocolo v42 añade publicación `network:none` con productor obligatorio
+  y teacher builtin. Congela teacher ID, formato TK01-v1, commit y contrato; la
+  lease fija hilos/teacher/network-kind y el receipt liga también el SHA-256 del
+  comando completamente renderizado, reconstruido por el servidor antes de
+  leer el upload. Un worker debe anunciar v42 explícitamente; ausencia del
+  capability significa solo v41. Los documentos v41 no cambian. No lanzar v42
+  hasta que la migración, client pin, productor y canary por máquina estén
+  visibles y verdes en la instancia oficial.
+
 - Contrato y runbook: `docs/datagen-mode.md`.
 - OpenBench trata cada chunk como blob opaco; formato, merge y auditoría son del
   proyecto del motor. No introducir reglas Spell/Atomic en modelos o vistas.
 - La plantilla usa `{SEED}`, `{COUNT}`, `{OUT}`, `{THREADS}` y opcionalmente
   `{BOOK}`, `{BOOK_SHA256}`, `{NETWORK}`, `{NETWORK_SHA256}` y
-  `{PRODUCER_SHA256}`. v41 exige los cuatro placeholders de libro/red. Atomic Syzygy
+  `{PRODUCER_SHA256}`. v41 exige los cuatro placeholders de libro/red. v42
+  exige además `{TEACHER_ID}`, `{ENGINE_COMMIT}` y
+  `{PUBLICATION_CONTRACT_SHA256}`, con libro/red `NONE`. Atomic Syzygy
   usa ademas el grupo v40 completo descrito arriba. `BOOK_SHA256` es la identidad raw de
   los bytes extraídos (o la identidad histórica si el manifiesto no publica
   `raw_sha`). El proceso debe terminar con código cero dejando `{OUT}` completo.

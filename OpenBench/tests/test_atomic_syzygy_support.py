@@ -375,6 +375,7 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
             captured['tablebases']['atomic']['manifest_sha256'], 'a' * 64
         )
         self.assertEqual(captured['client_ver'], worker.CLIENT_VERSION)
+        self.assertEqual(captured['datagen_publication_protocols'], [41, 42])
 
 
 class AtomicSyzygySchedulingTests(unittest.TestCase):

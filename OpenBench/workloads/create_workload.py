@@ -242,19 +242,34 @@ def create_new_datagen(request):
     if errors:
         return None, errors
 
+    publication = OpenBench.datagen_publication.publication_requested(
+        request.POST
+    )
+    publication_protocol = 0
     publication_network = None
     publication_book = None
-    if OpenBench.datagen_publication.publication_requested(request.POST):
+    if publication:
+        publication_protocol = int(
+            request.POST['datagen_publication_protocol']
+        )
         try:
-            selected_network = Network.objects.get(
-                engine=request.POST['dev_engine'],
-                sha256=request.POST['dev_network'],
-            )
-            publication_network = (
-                OpenBench.datagen_publication.capture_network_identity(
-                    selected_network, settings.MEDIA_ROOT
+            if (
+                publication_protocol
+                == OpenBench.datagen_publication.DATAGEN_PUBLICATION_PROTOCOL
+            ):
+                selected_network = Network.objects.get(
+                    engine=request.POST['dev_engine'],
+                    sha256=request.POST['dev_network'],
                 )
-            )
+                publication_network = (
+                    OpenBench.datagen_publication.capture_network_identity(
+                        selected_network, settings.MEDIA_ROOT
+                    )
+                )
+            else:
+                publication_network = (
+                    OpenBench.datagen_publication.network_none_identity()
+                )
             publication_book = (
                 OpenBench.datagen_publication.capture_book_identity(
                     request.POST['book_name'], OPENBENCH_CONFIG['books']
@@ -272,13 +287,13 @@ def create_new_datagen(request):
         role = request.POST['datagen_role'].strip()
         cohort = request.POST['datagen_cohort'].strip()
         if Test.objects.filter(
-            datagen_publication_protocol=41,
+            datagen_publication_protocol__in=(41, 42),
             datagen_campaign_id=campaign_id,
             datagen_external_workload_id=workload_id,
         ).exists():
             return None, ['DATAGEN campaign already contains this external workload id']
         if Test.objects.filter(
-            datagen_publication_protocol=41,
+            datagen_publication_protocol__in=(41, 42),
             datagen_campaign_id=campaign_id,
             datagen_role=role,
             datagen_cohort=cohort,
@@ -351,6 +366,12 @@ def create_new_datagen(request):
                 tablebase_manifest,
                 teacher_mode,
             )
+            test.datagen_teacher_id = (
+                request.POST.get('datagen_teacher_id', '').strip()
+                if publication_protocol
+                == OpenBench.datagen_publication.DATAGEN_PUBLICATION_PROTOCOL_V42
+                else ''
+            )
 
             test.test_mode = 'DATAGEN'
             test.awaiting = not dev_has_all
@@ -363,8 +384,8 @@ def create_new_datagen(request):
                 ).name
                 test.dev_netname = test.base_netname = name
 
-            if publication_network is not None:
-                test.datagen_publication_protocol = 41
+            if publication:
+                test.datagen_publication_protocol = publication_protocol
                 test.datagen_campaign_id = request.POST[
                     'datagen_campaign_id'
                 ].strip()
@@ -387,7 +408,7 @@ def create_new_datagen(request):
     except OpenBench.datagen_publication.PublicationContractError as error:
         return None, [str(error)]
     except IntegrityError:
-        if publication_network is None:
+        if not publication:
             raise
         return None, ['DATAGEN publication campaign slot was created concurrently']
 

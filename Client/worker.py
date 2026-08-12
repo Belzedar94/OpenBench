@@ -628,7 +628,8 @@ class ServerReporter:
 
     @staticmethod
     def report_datagen(
-        config, path, sha256, byte_count, producer=None, tablebase=None
+        config, path, sha256, byte_count, producer=None, tablebase=None,
+        generation=None,
     ):
 
         payload = {
@@ -664,6 +665,15 @@ class ServerReporter:
                 payload['publication_contract_sha256'] = tablebase[
                     'publication_contract_sha256'
                 ]
+        if generation is not None:
+            payload.update({
+                'assigned_threads': generation['threads'],
+                'rendered_command_sha256': generation[
+                    'rendered_command_sha256'
+                ],
+                'teacher_id': generation['teacher_id'],
+                'network_kind': generation['network_kind'],
+            })
 
         target = url_join(config.server, 'clientSubmitDatagen')
         payload['machine_id'] = config.machine_id
@@ -1776,6 +1786,7 @@ def server_configure_worker(config):
         },
         'focus'          : config.focus,          # List of engines we have a preference to help
         'client_ver'     : CLIENT_VERSION,        # Version of the Client, which the server may reject
+        'datagen_publication_protocols': [41, 42],
     }
 
     payload = {
@@ -2140,13 +2151,24 @@ def upload_datagen_producer(
 
 
 def upload_datagen_output(
-    config, path, sha256, byte_count, heartbeat, producer=None, tablebase=None
+    config, path, sha256, byte_count, heartbeat, producer=None, tablebase=None,
+    generation=None,
 ):
     """Upload one immutable archive with bounded transport retries."""
 
     for attempt in range(DATAGEN_TRANSFER_RETRIES):
         try:
-            if tablebase is None:
+            if generation is not None:
+                response = ServerReporter.report_datagen(
+                    config,
+                    path,
+                    sha256,
+                    byte_count,
+                    producer=producer,
+                    tablebase=tablebase,
+                    generation=generation,
+                )
+            elif tablebase is None:
                 if producer is None:
                     response = ServerReporter.report_datagen(
                         config, path, sha256, byte_count
@@ -2251,7 +2273,7 @@ def datagen_publication_contract(config):
     protocol = data.get('publication_protocol', 0)
     if protocol in (None, 0):
         return None
-    if protocol != 41:
+    if protocol not in (41, 42):
         raise DatagenConfigurationError(
             'DATAGEN publication protocol is malformed or unsupported'
         )
@@ -2297,18 +2319,29 @@ def datagen_publication_contract(config):
             and re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,127}', document[field])
             for field in ('campaign_id', 'external_workload_id', 'role', 'cohort')
         )
-        network_valid = (
-            set(network) == {'name', 'openbench_id', 'sha256', 'bytes'}
-            and isinstance(network['name'], str)
-            and bool(network['name'])
-            and isinstance(network['openbench_id'], str)
-            and re.fullmatch(r'[0-9A-F]{8}', network['openbench_id'])
-            and isinstance(network['sha256'], str)
-            and re.fullmatch(r'[0-9a-f]{64}', network['sha256'])
-            and network['sha256'].upper().startswith(network['openbench_id'])
-            and type(network['bytes']) is int
-            and network['bytes'] > 0
-        )
+        if protocol == 41:
+            network_valid = (
+                set(network) == {'name', 'openbench_id', 'sha256', 'bytes'}
+                and isinstance(network['name'], str)
+                and bool(network['name'])
+                and isinstance(network['openbench_id'], str)
+                and re.fullmatch(r'[0-9A-F]{8}', network['openbench_id'])
+                and isinstance(network['sha256'], str)
+                and re.fullmatch(r'[0-9a-f]{64}', network['sha256'])
+                and network['sha256'].upper().startswith(
+                    network['openbench_id']
+                )
+                and type(network['bytes']) is int
+                and network['bytes'] > 0
+            )
+        else:
+            network_valid = network == {
+                'kind': 'none',
+                'name': None,
+                'openbench_id': None,
+                'sha256': None,
+                'bytes': 0,
+            }
         if frozen_book.get('name') == 'NONE':
             book_valid = frozen_book == {
                 'kind': 'builtin-startpos',
@@ -2364,7 +2397,29 @@ def datagen_publication_contract(config):
                 syzygy.get('environment_contract_sha256', ''),
             )
         )
-        if syzygy_valid and syzygy['required']:
+        if protocol == 42:
+            syzygy_valid = (
+                syzygy_valid
+                and syzygy == {
+                    'required': False,
+                    'family': None,
+                    'max': 0,
+                    'manifest_sha256': None,
+                    'environment_contract_sha256': (
+                        data['environment_contract_sha256']
+                    ),
+                }
+                and teacher == {
+                    'kind': 'builtin-evaluator',
+                    'id': data.get('teacher_id'),
+                }
+                and isinstance(data.get('teacher_id'), str)
+                and re.fullmatch(
+                    r'[a-z0-9][a-z0-9._-]{0,127}',
+                    data.get('teacher_id'),
+                )
+            )
+        elif syzygy_valid and syzygy['required']:
             syzygy_valid = (
                 syzygy.get('family') == 'atomic'
                 and type(syzygy.get('max')) is int
@@ -2396,10 +2451,8 @@ def datagen_publication_contract(config):
             and engine['bench'] > 0
             and isinstance(engine.get('options'), str)
         )
-        expected = (
-            document.get('schema') == 'openbench-datagen-publication-contract-v41'
-            and document.get('protocol') == 41
-            and publication_ids_valid
+        common_expected = (
+            publication_ids_valid
             and network_valid
             and book_valid
             and generation_valid
@@ -2413,8 +2466,6 @@ def datagen_publication_contract(config):
             and engine['commit'] == str(dev['sha']).lower()
             and engine['bench'] == dev['bench']
             and engine['options'] == dev['options']
-            and network['openbench_id'] == str(dev['network']).upper()
-            and network['name'] == dev['netname']
             and frozen_book['name'] == book['name']
             and frozen_book['source'] == book['source']
             and frozen_book['text_sha256'] == book['sha']
@@ -2435,8 +2486,47 @@ def datagen_publication_contract(config):
                 == (data['tablebase_manifest_sha256'] or None)
             and syzygy['environment_contract_sha256']
                 == data['environment_contract_sha256']
-            and teacher['mode'] == (data['teacher_mode'] or None)
         )
+        if protocol == 41:
+            expected = (
+                document.get('schema')
+                    == 'openbench-datagen-publication-contract-v41'
+                and document.get('protocol') == 41
+                and common_expected
+                and network['openbench_id'] == str(dev['network']).upper()
+                and network['name'] == dev['netname']
+                and teacher['mode'] == (data['teacher_mode'] or None)
+            )
+        else:
+            expected = (
+                document.get('schema')
+                    == 'openbench-datagen-publication-contract-v42'
+                and document.get('protocol') == 42
+                and set(document) == {
+                    'schema', 'protocol', 'campaign_id',
+                    'external_workload_id', 'role', 'cohort', 'engine',
+                    'network', 'book', 'generation', 'producer', 'teacher',
+                    'syzygy', 'format',
+                }
+                and common_expected
+                and producer['required'] is True
+                and not dev.get('network')
+                and not dev.get('netname')
+                and frozen_book == {
+                    'kind': 'builtin-startpos',
+                    'name': 'NONE',
+                    'source': None,
+                    'text_sha256': None,
+                    'raw_sha256': None,
+                }
+                and not data.get('tablebase_required')
+                and not data.get('teacher_mode')
+                and document.get('format') == {
+                    'id': 'TK01-v1',
+                    'max_game_plies': 20000,
+                    'repetition': 'fourth-position-v1',
+                }
+            )
     except (KeyError, TypeError, AttributeError):
         expected = False
     if not expected:
@@ -2478,6 +2568,64 @@ def datagen_tablebase_attestation(config):
     ).lower()
     teacher_mode = lease.get('teacher_mode', '')
     test = config.workload['test']
+
+    if publication is not None and data.get('publication_protocol') == 42:
+        expected_fields = {
+            'schema', 'protocol', 'test_id', 'chunk_idx', 'attempt',
+            'machine_id', 'publication_contract_sha256',
+            'environment_contract_sha256', 'threads', 'teacher_id',
+            'network_kind',
+        }
+        if (
+            set(lease) != expected_fields
+            or lease.get('schema')
+                != 'openbench-datagen-publication-lease-v42'
+            or lease.get('protocol') != 42
+            or lease.get('test_id') != test.get('id')
+            or lease.get('chunk_idx') != data.get('chunk_idx')
+            or lease.get('attempt') != data.get('attempt')
+            or str(lease.get('machine_id')) != str(config.machine_id)
+            or lease.get('publication_contract_sha256')
+                != data.get('publication_contract_sha256')
+            or expected_contract
+                != str(data.get(
+                    'environment_contract_sha256', ''
+                )).lower()
+            or not re.fullmatch(r'[0-9a-f]{64}', expected_contract)
+            or type(lease.get('threads')) is not int
+            or lease.get('threads') <= 0
+            or lease.get('threads') != config.threads
+            or lease.get('teacher_id') != data.get('teacher_id')
+            or lease.get('network_kind') != 'none'
+            or data.get('tablebase_required') is not False
+            or data.get('tablebase_family')
+            or data.get('tablebase_max') != 0
+            or data.get('tablebase_manifest_sha256')
+            or data.get('teacher_mode')
+            or test.get('syzygy_wdl') != 'DISABLED'
+            or test.get('syzygy_adj') != 'DISABLED'
+        ):
+            raise DatagenConfigurationError(
+                'DATAGEN publication v42 lease is malformed or unsupported'
+            )
+        return {
+            'path': None,
+            'tablebase_required': False,
+            'family': '',
+            'required_max': 0,
+            'worker_max': 0,
+            'manifest_sha256': None,
+            'environment_contract_sha256': expected_contract,
+            'environment_lease_sha256': lease_sha256,
+            'teacher_mode': None,
+            'publication_contract_sha256': data[
+                'publication_contract_sha256'
+            ],
+            'publication_protocol': 42,
+            'threads': lease['threads'],
+            'teacher_id': lease['teacher_id'],
+            'network_kind': lease['network_kind'],
+        }
 
     if publication is not None:
         schema = 'openbench-datagen-publication-lease-v41'
@@ -3151,7 +3299,12 @@ def render_datagen_command(
     network_sha256 = None
     if publication is not None:
         network_sha256 = publication['network']['sha256']
-        if (
+        if data.get('publication_protocol') == 42:
+            if network_path or publication['network'].get('kind') != 'none':
+                raise DatagenConfigurationError(
+                    'DATAGEN protocol 42 requires network:none'
+                )
+        elif (
             not network_path
             or datagen_file_sha256(network_path) != (
                 network_sha256,
@@ -3191,6 +3344,14 @@ def render_datagen_command(
             '0' if not authenticated_tablebase else str(tablebase['required_max'])
         ),
         'TEACHER_MODE': data.get('teacher_mode', '') or 'NONE',
+        'TEACHER_ID': data.get('teacher_id', '') or 'NONE',
+        'ENGINE_COMMIT': str(
+            config.workload['test']['dev'].get('sha', '')
+        ).lower() or 'NONE',
+        'PUBLICATION_CONTRACT_SHA256': (
+            str(data.get('publication_contract_sha256', '')).lower()
+            or 'NONE'
+        ),
     }
     if data.get('producer_artifact_required') and producer is None:
         raise DatagenConfigurationError(
@@ -3409,13 +3570,25 @@ def complete_datagen_workload(config):
                     'DATAGEN archive hashing failed: %s' % error
                 ) from error
             response = upload_datagen_output(
-                config,
-                compressed_path,
-                sha256,
-                byte_count,
-                heartbeat,
-                producer,
-                tablebase,
+                config, compressed_path, sha256, byte_count, heartbeat,
+                producer, tablebase,
+                (
+                    {
+                        'threads': tablebase['threads'],
+                        'rendered_command_sha256': hashlib.sha256(
+                            render_datagen_command(
+                                config,
+                                output_path,
+                                dev_network,
+                                producer,
+                                tablebase,
+                            ).encode('utf-8')
+                        ).hexdigest(),
+                        'teacher_id': tablebase['teacher_id'],
+                        'network_kind': tablebase['network_kind'],
+                    }
+                    if chunk.get('publication_protocol') == 42 else None
+                ),
             )
 
             print(

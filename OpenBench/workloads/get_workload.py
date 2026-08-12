@@ -34,8 +34,9 @@ import OpenBench.variant_contract
 from OpenBench.config import OPENBENCH_CONFIG
 from OpenBench.datagen import (
     claim_chunk, has_assignable_chunk, is_generic_datagen,
-    valid_atomic_datagen_tablebase_contract,
+    valid_atomic_datagen_tablebase_contract, valid_publication_assignment,
 )
+from OpenBench.datagen_publication import DATAGEN_PUBLICATION_PROTOCOLS
 from OpenBench.models import Result, Test
 
 from django.db import transaction
@@ -124,6 +125,7 @@ def filter_valid_workloads(request, machine):
     options = [
         x for x in workloads
         if valid_tablebase_assignment(x, machine)
+        and valid_publication_assignment(x, machine)
         and valid_hardware_assignment(x, machine)
         and has_assignable_chunk(x)
     ]
@@ -322,8 +324,14 @@ def workload_to_dictionary(
         'variant_contract': variant_contract,
     }
 
+    # Keep serialization compatible with the lightweight test/tooling objects
+    # historically accepted here.  The persisted Test method has the same
+    # predicate, but those objects intentionally expose fields rather than ORM
+    # methods.
     publication_datagen = (
-        getattr(test, 'datagen_publication_protocol', 0) == 41
+        is_generic_datagen(test)
+        and getattr(test, 'datagen_publication_protocol', 0)
+        in DATAGEN_PUBLICATION_PROTOCOLS
     )
     if publication_datagen:
         if not test.datagen_publication_contract_is_current():
@@ -421,6 +429,7 @@ def workload_to_dictionary(
                 test.datagen_tablebase_manifest_sha256
             ),
             'teacher_mode': test.datagen_teacher_mode,
+            'teacher_id': test.datagen_teacher_id,
             'environment_lease': datagen_chunk.environment_lease,
             'environment_lease_sha256': (
                 datagen_chunk.environment_lease_sha256
@@ -428,11 +437,11 @@ def workload_to_dictionary(
             'publication_protocol': test.datagen_publication_protocol,
             'publication_contract': (
                 test.datagen_publication_contract
-                if test.is_publication_datagen() else None
+                if publication_datagen else None
             ),
             'publication_contract_sha256': (
                 test.datagen_publication_contract_sha256
-                if test.is_publication_datagen() else None
+                if publication_datagen else None
             ),
         }
         workload['distribution'] = None

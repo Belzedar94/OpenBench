@@ -23,6 +23,14 @@
 > immutable contract, and the completed API publishes the contract plus a
 > self-hashed manifest. Protocol-v41 evidence fails closed on any drift.
 
+> Worker protocol v42 adds publication without a network artifact for engines
+> whose authenticated teacher is compiled into the producer. It freezes
+> `network:none`, a builtin teacher ID, the TK01-v1 format contract, and the
+> producer source commit. Every lease fixes the assigned thread count; every
+> upload and receipt bind that count plus a server-reconstructed SHA-256 of the
+> fully rendered command. A worker must advertise v42 explicitly before it can
+> claim such a chunk. Missing capability continues to mean v41 only.
+
 Este fork añade un workload `DATAGEN` genérico. OpenBench distribuye trabajo,
 verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
 conoce el formato de entrenamiento ni concatena archivos; esas responsabilidades
@@ -57,6 +65,10 @@ estos placeholders:
   valores permitidos son `pure` y `true`; `true` conserva el comportamiento
   legacy-playing. No existe un default semantico del servidor.
 
+- `{TEACHER_ID}`: identidad del evaluador builtin congelado por v42.
+- `{ENGINE_COMMIT}`: commit completo asignado y embebido por el build publico.
+- `{PUBLICATION_CONTRACT_SHA256}`: hash del contrato canonico de publicacion.
+
 `SEED`, `COUNT`, `OUT` y `THREADS` son obligatorios. `BOOK`, `BOOK_SHA256`,
 `NETWORK`, `NETWORK_SHA256` y `PRODUCER_SHA256` son opcionales en legacy; v41
 exige `BOOK`, `BOOK_SHA256`, `NETWORK` y `NETWORK_SHA256`. Los tres placeholders Syzygy se
@@ -67,6 +79,12 @@ motor debe declarar la familia `atomic` y un manifest pin, y
 conversiones, formatos, saltos de línea, NUL ni plantillas mayores de 4096
 caracteres. `NETWORK` no modifica el mecanismo existente que pasa `EVALFILE`
 durante el build.
+
+v42 exige ademas `{PRODUCER_SHA256}`, `{TEACHER_ID}`, `{ENGINE_COMMIT}` y
+`{PUBLICATION_CONTRACT_SHA256}`; requiere libro `NONE`, red vacia y los cuatro
+placeholders de libro/red, que el worker renderiza literalmente como `NONE`.
+No admite el grupo Syzygy ni `{TEACHER_MODE}`. La red no se descarga y el build
+recibe `OPENBENCH_DATAGEN=1` y `GIT_SHA_FULL`, pero nunca `EVALFILE`.
 
 El cliente escribe por stdin:
 
@@ -155,6 +173,28 @@ final solo responde si contrato, leases, receipts y CAS siguen válidos; expone
 el contrato completo con schema/version y `manifest_sha256`. Cambios operativos
 de prioridad o throughput no cambian la identidad publicable.
 
+### Contrato de publicacion v42 (`network:none`)
+
+v42 reutiliza las identidades de campana y la unicidad de v41, pero sustituye
+la red registrada por la identidad canonica
+`{"kind":"none","name":null,"openbench_id":null,"sha256":null,"bytes":0}`.
+Solo acepta startpos builtin, productor obligatorio, ausencia de Syzygy y un
+teacher builtin identificado por slug. El contrato agrega el formato fijo
+`TK01-v1`, cap de 20.000 plies y repeticion por cuarta aparicion.
+
+Un worker antiguo o que omita `datagen_publication_protocols` conserva soporte
+v41 y no puede reclamar v42. Un worker v42 anuncia `[41,42]`; al asignar un
+chunk, el servidor congela en la lease sus hilos efectivos, teacher ID y
+`network_kind=none`. Antes de leer el upload, el servidor vuelve a renderizar el
+comando completo con seed/count/output, productor, commit y hash de contrato y
+compara su SHA-256, los hilos y las identidades declaradas por el cliente.
+
+El receipt v42 conserva esa evidencia bajo `generation`, junto al productor,
+artefacto, teacher y network-none. El manifest final vuelve a reconstruir lease,
+comando y receipt; un cambio posterior de configuracion del worker no invalida
+la evidencia congelada. Los documentos v41 mantienen sus schemas y campos sin
+cambios.
+
 Antes de ejecutar el comando, el cliente descarga/compila únicamente la rama
 dev del motor y comprueba su bench una sola vez, independientemente de
 `{THREADS}`. Ese NPS es sólo informativo: DATAGEN no escala trabajo ni parámetros
@@ -186,6 +226,8 @@ En `/newTest/`, seleccionar `DATAGEN` y completar:
 - para Atomic Syzygy: limite N-MAN y teacher mode explicito `pure|true`;
 - para publicar con v41: protocolo 41, campaign id, external workload id,
   role y cohort como slugs ASCII en minúsculas;
+- para publicar con v42: protocolo 42, las mismas identidades y un builtin
+  teacher ID; libro `NONE` y ninguna red;
 - prioridad y throughput.
 
 También se mantiene `/newDatagen/` como acceso directo al mismo modo. Los
@@ -263,6 +305,10 @@ contrato completo y su SHA-256, y un `manifest_sha256` calculado sobre todo el
 documento anterior al campo self-hash. Todos los chunks, también los que no
 usan tablas, publican lease y receipt v41 ligados al mismo contrato.
 
+En una campana v42, el manifest usa schemas v42 y agrega `teacher_id` y
+`network_kind=none`; cada receipt liga tambien los hilos asignados y el hash del
+comando renderizado que el servidor reconstruyo independientemente.
+
 La validación universal termina en SHA-256 y bytes. Descompresión, validación de
 registros, combinación de cabeceras, deduplicación y auditoría quedan fuera de
 OpenBench. Por ejemplo, un proyecto Spell puede concatenar offline sus registros
@@ -290,7 +336,7 @@ python manage.py migrate
 python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test OpenBench.tests.test_datagen_mode OpenBench.tests.test_atomic_syzygy_support
-python manage.py test UnitTests.test_datagen_worker UnitTests.test_atomic_onboarding
+python -m unittest UnitTests.test_datagen_worker UnitTests.test_atomic_onboarding
 ```
 
 ## Paso a producción
@@ -299,25 +345,28 @@ La instancia actual es anterior al historial explícito de migraciones de la app
 `OpenBench`. Hacer primero un ensayo completo sobre una copia de `db.sqlite3` y
 de `Media/`. En una ventana coordinada:
 
-1. Publicar en el fork una ref de cliente que contenga la versión 41; verificar
+1. Publicar en el fork una ref de cliente que contenga la versión vigente; verificar
    que el zip de auto-update incluye el worker DATAGEN.
 2. Parar de forma ordenada el servidor y los workers de producción y respaldar
    DB y Media. No desplegar a mitad de workloads activos.
 3. Verificar que el esquema existente coincide con el snapshot pre-DATAGEN.
 4. Marcar sólo el baseline ya existente con
    `python manage.py migrate OpenBench 0001 --fake`.
-5. Aplicar todas las migraciones reales hasta `0009` con
+5. Aplicar todas las migraciones reales hasta `0011` con
    `python manage.py migrate`. `0006` congela contratos, crea reservas/cuotas
    y hace backfill de evidencia de productor ya existente; `0007` añade el
    contrato, lease y receipt de entorno v40; `0008` agrega el contrato de
    publicación v41 y sus constraints parciales sin convertir filas legacy;
    `0009` une esa cadena con el cambio de default de perfiles de producción y
-   no ejecuta operaciones de esquema.
+   no ejecuta operaciones de esquema; `0010` agrega el contrato de variante y
+   `0011` agrega teacher ID, protocolo v42 y unicidad conjunta v41/v42.
 6. Crear/verificar permisos de `Media/datagen`, arrancar servidor, ejecutar
    `check`, probar login, un download y un DATAGEN de un chunk.
-7. Arrancar clientes versión 41 de forma gradual y vigilar logs, disco y leases.
+7. Arrancar clientes de la versión configurada de forma gradual y vigilar logs,
+   disco y leases. Antes de una campana v42, verificar que cada maquina anuncia
+   explicitamente `[41,42]`.
 
-No usar `--fake` para `0002`–`0008`: crean el esquema DATAGEN, CAS y sus
+No usar `--fake` para `0002`–`0011`: crean el esquema DATAGEN, CAS y sus
 relaciones de integridad. Para upstream hacia sscg13 hay que rebasar estos commits sobre su
 HEAD, resolver posibles diferencias de modelos/migraciones y enviar servidor,
 cliente, tests y documentación juntos. Conviene acordar además política de

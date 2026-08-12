@@ -1659,7 +1659,7 @@ def _frozen_datagen_tablebase_attestation(test, chunk, machine):
 
 
 def _frozen_datagen_publication_attestation(test, chunk, machine):
-    """Reconstruct the complete protocol-v41 publication lease."""
+    """Reconstruct the complete frozen publication lease."""
 
     lease = chunk.environment_lease
     if (
@@ -1670,6 +1670,79 @@ def _frozen_datagen_publication_attestation(test, chunk, machine):
         or not re.fullmatch(r'[0-9a-f]{64}', chunk.environment_lease_sha256)
     ):
         raise PermissionError('DATAGEN publication lease is missing or stale')
+
+    if (
+        test.datagen_publication_protocol
+        == OpenBench.datagen_publication.DATAGEN_PUBLICATION_PROTOCOL_V42
+    ):
+        # The server authored this value at claim time. Reconstruct evidence
+        # from the immutable lease so a later worker reconfiguration cannot
+        # invalidate an already accepted chunk or its exported manifest.
+        threads = lease.get('threads')
+        expected_lease = {
+            'schema': OpenBench.datagen_publication.publication_lease_schema(42),
+            'protocol': 42,
+            'test_id': test.id,
+            'chunk_idx': chunk.idx,
+            'attempt': chunk.attempts,
+            'machine_id': machine.id,
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256
+            ),
+            'environment_contract_sha256': (
+                test.datagen_environment_contract_sha256
+            ),
+            'threads': threads,
+            'teacher_id': test.datagen_teacher_id,
+            'network_kind': 'none',
+        }
+        if (
+            chunk.machine_id != machine.id
+            or type(threads) is not int
+            or threads <= 0
+            or test.datagen_tablebase_required
+            or test.datagen_teacher_mode
+            or not re.fullmatch(
+                r'[0-9a-f]{64}', chunk.producer_sha256 or ''
+            )
+            or lease != expected_lease
+            or OpenBench.datagen_publication.canonical_json_sha256(lease)
+               != chunk.environment_lease_sha256
+        ):
+            raise PermissionError(
+                'DATAGEN publication v42 lease does not match campaign or worker'
+            )
+        try:
+            rendered_sha256 = (
+                OpenBench.datagen_publication.rendered_datagen_command_sha256(
+                    test, chunk, chunk.producer_sha256, threads
+                )
+            )
+        except OpenBench.datagen_publication.PublicationContractError as error:
+            raise PermissionError(
+                'DATAGEN publication v42 command evidence is malformed'
+            ) from error
+        return {
+            'protocol': 42,
+            'tablebase_required': False,
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256
+            ),
+            'environment_contract_sha256': (
+                test.datagen_environment_contract_sha256
+            ),
+            'environment_lease_sha256': chunk.environment_lease_sha256,
+            'family': '',
+            'required_max': 0,
+            'worker_max': 0,
+            'manifest_sha256': None,
+            'teacher_mode': None,
+            'threads': threads,
+            'rendered_command_sha256': rendered_sha256,
+            'teacher_id': test.datagen_teacher_id,
+            'network_kind': 'none',
+        }
+
     leased_tablebase = lease.get('tablebase')
     if not isinstance(leased_tablebase, dict):
         raise PermissionError('DATAGEN publication lease is malformed')
@@ -1755,6 +1828,54 @@ def _datagen_tablebase_attestation(request, test, chunk, machine):
     expected = _frozen_datagen_tablebase_attestation(test, chunk, machine)
     if expected is None:
         return None
+    if expected['protocol'] == 42:
+        try:
+            submitted = {
+                'protocol': 42,
+                'tablebase_required': False,
+                'publication_contract_sha256': request.POST[
+                    'publication_contract_sha256'
+                ].lower(),
+                'environment_contract_sha256': request.POST[
+                    'environment_contract_sha256'
+                ].lower(),
+                'environment_lease_sha256': request.POST[
+                    'environment_lease_sha256'
+                ].lower(),
+                'family': request.POST.get('tablebase_family', ''),
+                'required_max': int(request.POST.get('tablebase_max', 0)),
+                'worker_max': int(
+                    request.POST.get('tablebase_worker_max', 0)
+                ),
+                'manifest_sha256': (
+                    request.POST.get('tablebase_manifest_sha256') or None
+                ),
+                'teacher_mode': request.POST.get('teacher_mode') or None,
+                'threads': int(request.POST['assigned_threads']),
+                'rendered_command_sha256': request.POST[
+                    'rendered_command_sha256'
+                ].lower(),
+                'teacher_id': request.POST['teacher_id'],
+                'network_kind': request.POST['network_kind'],
+            }
+            for field in (
+                'publication_contract_sha256',
+                'environment_contract_sha256',
+                'environment_lease_sha256',
+                'rendered_command_sha256',
+            ):
+                assert re.fullmatch(r'[0-9a-f]{64}', submitted[field])
+            assert submitted['threads'] > 0
+        except (KeyError, TypeError, ValueError, AssertionError):
+            raise ValueError(
+                'DATAGEN upload omitted publication v42 attestation'
+            )
+        if submitted != expected:
+            raise PermissionError(
+                'DATAGEN publication v42 attestation does not match campaign '
+                'or worker'
+            )
+        return submitted
     if expected['protocol'] == 41:
         try:
             submitted = {
@@ -1839,6 +1960,45 @@ def _datagen_environment_receipt(
 ):
     if attestation is None:
         return {}, ''
+    if attestation['protocol'] == 42:
+        receipt = {
+            'schema': (
+                OpenBench.datagen_publication.publication_receipt_schema(42)
+            ),
+            'protocol': 42,
+            'test_id': test.id,
+            'chunk_idx': chunk.idx,
+            'attempt': chunk.attempts,
+            'machine_id': machine.id,
+            'publication_contract_sha256': (
+                attestation['publication_contract_sha256']
+            ),
+            'environment_contract_sha256': (
+                attestation['environment_contract_sha256']
+            ),
+            'environment_lease_sha256': (
+                attestation['environment_lease_sha256']
+            ),
+            'generation': {
+                'threads': attestation['threads'],
+                'rendered_command_sha256': (
+                    attestation['rendered_command_sha256']
+                ),
+            },
+            'network': {'kind': attestation['network_kind']},
+            'teacher': {
+                'kind': 'builtin-evaluator',
+                'id': attestation['teacher_id'],
+            },
+            'artifact': {
+                'sha256': artifact_sha256,
+                'bytes': artifact_bytes,
+            },
+            'producer': producer,
+        }
+        return receipt, OpenBench.datagen_publication.canonical_json_sha256(
+            receipt
+        )
     if attestation['protocol'] == 41:
         receipt = {
             'schema': (
@@ -2208,8 +2368,9 @@ def client_submit_datagen(request, machine):
             progressed = Test.objects.filter(
                 pk=test_id, finished=False, deleted=False,
             )
-            if tablebase_attestation is not None and (
-                tablebase_attestation['protocol'] == 41
+            if (
+                tablebase_attestation is not None
+                and tablebase_attestation['protocol'] in (41, 42)
             ):
                 progressed = progressed.filter(
                     datagen_publication_contract_sha256=(
@@ -2662,16 +2823,22 @@ def api_datagen_manifest(request, test_id):
         ],
     }
     if test.is_publication_datagen():
+        if test.datagen_publication_protocol == 42:
+            document['environment'].update({
+                'teacher_id': test.datagen_teacher_id,
+                'network_kind': 'none',
+            })
         document.update({
             'schema': (
-                OpenBench.datagen_publication.
-                DATAGEN_PUBLICATION_MANIFEST_SCHEMA
+                OpenBench.datagen_publication.publication_manifest_schema(
+                    test.datagen_publication_protocol
+                )
             ),
             'version': (
                 OpenBench.datagen_publication.
                 DATAGEN_PUBLICATION_MANIFEST_VERSION
             ),
-            'protocol': 41,
+            'protocol': test.datagen_publication_protocol,
             'publication_contract': test.datagen_publication_contract,
             'publication_contract_sha256': (
                 test.datagen_publication_contract_sha256

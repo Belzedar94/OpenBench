@@ -175,7 +175,8 @@ class DatagenModeTests(TestCase):
         return test
 
     def make_machine(
-        self, username='worker', machine_id=None, atomic=0, manifest=None
+        self, username='worker', machine_id=None, atomic=0, manifest=None,
+        publication_protocols=None,
     ):
         user = User.objects.create_user(username, password='password')
         Profile.objects.create(user=user, enabled=True)
@@ -195,6 +196,8 @@ class DatagenModeTests(TestCase):
             },
             'syzygy_max': 0,
         }
+        if publication_protocols is not None:
+            info['datagen_publication_protocols'] = publication_protocols
         return Machine.objects.create(
             id=machine_id,
             user=user,
@@ -334,6 +337,63 @@ class DatagenModeTests(TestCase):
         ):
             test, errors = create_workload.create_new_datagen(request)
         return test, errors, network_sha256
+
+    def make_publication_v42_test(
+        self,
+        campaign_id='taikyoku-regime',
+        workload_id='canary-260k',
+        role='canary',
+        cohort='material-n8000-startpos-v1',
+        total=2,
+        per_chunk=2,
+    ):
+        command = (
+            'datagen teacher_id {TEACHER_ID} '
+            'source_commit {ENGINE_COMMIT} '
+            'contract_sha256 {PUBLICATION_CONTRACT_SHA256} '
+            'producer_sha256 {PRODUCER_SHA256} '
+            'book {BOOK} book_sha256 {BOOK_SHA256} '
+            'network {NETWORK} network_sha256 {NETWORK_SHA256} '
+            'format TK01-v1 nodes 8000 count {COUNT} '
+            'threads {THREADS} seed {SEED} out {OUT} '
+            'random_plies 8 write_min_ply 6 eval_limit 10000 '
+            'max_game_plies 20000'
+        )
+        payload = {
+            'dev_engine': 'Spell-Stockfish',
+            'dev_repo': 'https://github.com/example/taikyoku-engine',
+            'dev_branch': 'publication-v42',
+            'dev_network': '',
+            'dev_options': '',
+            'book_name': 'NONE',
+            'datagen_command': command,
+            'datagen_total_count': str(total),
+            'datagen_positions_per_chunk': str(per_chunk),
+            'datagen_base_seed': '202608120000000',
+            'priority': '0',
+            'throughput': '1000',
+            'datagen_publication_protocol': '42',
+            'datagen_campaign_id': campaign_id,
+            'datagen_external_workload_id': workload_id,
+            'datagen_role': role,
+            'datagen_cohort': cohort,
+            'datagen_teacher_id': 'taikyoku-material-advance-v1',
+        }
+        request = RequestFactory().post('/newDatagen/', payload)
+        request.user = self.user
+        engine_info = (
+            (
+                'https://example.test/publication-v42.zip',
+                'publication-v42',
+                'b' * 40,
+                9586353,
+            ),
+            True,
+        )
+        with mock.patch.object(
+            create_workload, 'verify_workload', return_value=([], engine_info)
+        ):
+            return create_workload.create_new_datagen(request)
 
     def test_creation_builds_exact_numbered_chunk_map(self):
         payload = {
@@ -510,6 +570,200 @@ class DatagenModeTests(TestCase):
         malformed = dict(payload, datagen_publication_protocol='0')
         self.assertTrue(
             OpenBench.datagen_publication.validate_publication_request(malformed)
+        )
+
+    def test_v42_request_requires_network_none_teacher_and_full_evidence(self):
+        command = (
+            'datagen {SEED} {COUNT} {THREADS} {OUT} {BOOK} '
+            '{BOOK_SHA256} {NETWORK} {NETWORK_SHA256} {PRODUCER_SHA256} '
+            '{TEACHER_ID} {ENGINE_COMMIT} {PUBLICATION_CONTRACT_SHA256}'
+        )
+        payload = {
+            'datagen_publication_protocol': '42',
+            'datagen_campaign_id': 'taikyoku-regime',
+            'datagen_external_workload_id': 'canary-260k',
+            'datagen_role': 'canary',
+            'datagen_cohort': 'material-n8000-startpos-v1',
+            'datagen_teacher_id': 'taikyoku-material-advance-v1',
+            'dev_network': '',
+            'book_name': 'NONE',
+            'datagen_command': command,
+        }
+        self.assertEqual(
+            OpenBench.datagen_publication.validate_publication_request(
+                payload
+            ),
+            [],
+        )
+
+        for network in ('DEADBEEF', 'tk-net3', 'dummy-network'):
+            with self.subTest(network=network):
+                errors = (
+                    OpenBench.datagen_publication.
+                    validate_publication_request(
+                        dict(payload, dev_network=network)
+                    )
+                )
+                self.assertTrue(any('network:none' in error for error in errors))
+        for field in (
+            'datagen_teacher_id', 'TEACHER_ID', 'ENGINE_COMMIT',
+            'PUBLICATION_CONTRACT_SHA256', 'PRODUCER_SHA256',
+        ):
+            malformed = dict(payload)
+            if field == 'datagen_teacher_id':
+                malformed[field] = ''
+            else:
+                malformed['datagen_command'] = command.replace(
+                    ' {%s}' % field, ''
+                )
+            with self.subTest(field=field):
+                self.assertTrue(
+                    OpenBench.datagen_publication.
+                    validate_publication_request(malformed)
+                )
+
+    def test_v42_creation_freezes_network_none_teacher_format_and_producer(self):
+        test, errors = self.make_publication_v42_test()
+
+        self.assertIsNone(errors)
+        contract = test.datagen_publication_contract
+        self.assertEqual(
+            contract['schema'], 'openbench-datagen-publication-contract-v42'
+        )
+        self.assertEqual(contract['protocol'], 42)
+        self.assertEqual(
+            contract['network'],
+            OpenBench.datagen_publication.network_none_identity(),
+        )
+        self.assertEqual(contract['book']['kind'], 'builtin-startpos')
+        self.assertEqual(contract['teacher'], {
+            'kind': 'builtin-evaluator',
+            'id': 'taikyoku-material-advance-v1',
+        })
+        self.assertEqual(contract['format'], {
+            'id': 'TK01-v1',
+            'max_game_plies': 20000,
+            'repetition': 'fourth-position-v1',
+        })
+        self.assertTrue(contract['producer']['required'])
+        self.assertFalse(contract['syzygy']['required'])
+        self.assertEqual(test.dev_network, '')
+        self.assertEqual(test.datagen_network_sha256, '')
+        self.assertEqual(test.datagen_network_bytes, 0)
+        self.assertTrue(test.datagen_publication_contract_is_current())
+
+    def test_v42_old_worker_cannot_claim_and_capable_worker_freezes_lease(self):
+        test, errors = self.make_publication_v42_test()
+        self.assertIsNone(errors)
+        old_worker = self.make_machine('v41-only-worker')
+
+        self.assertIsNone(claim_chunk(test, old_worker))
+        pending = test.datagen_chunks.get()
+        self.assertEqual(pending.status, DatagenChunk.PENDING)
+        self.assertEqual(pending.attempts, 0)
+
+        worker = self.make_machine(
+            'v42-worker', publication_protocols=[41, 42]
+        )
+        chunk = claim_chunk(test, worker)
+        self.assertIsNotNone(chunk)
+        self.assertEqual(chunk.attempts, 1)
+        self.assertEqual(chunk.environment_lease, {
+            'schema': 'openbench-datagen-publication-lease-v42',
+            'protocol': 42,
+            'test_id': test.id,
+            'chunk_idx': 0,
+            'attempt': 1,
+            'machine_id': worker.id,
+            'publication_contract_sha256': (
+                test.datagen_publication_contract_sha256
+            ),
+            'environment_contract_sha256': (
+                test.datagen_environment_contract_sha256
+            ),
+            'threads': 2,
+            'teacher_id': 'taikyoku-material-advance-v1',
+            'network_kind': 'none',
+        })
+
+    def test_v42_wrong_threads_or_command_hash_rejects_before_upload_hash(self):
+        test, errors = self.make_publication_v42_test()
+        self.assertIsNone(errors)
+        machine = self.make_machine(
+            'v42-evidence-worker', publication_protocols=[41, 42]
+        )
+        chunk = claim_chunk(test, machine)
+        producer = self.register_producer(test, chunk, machine).json()
+        chunk.refresh_from_db()
+
+        for overrides in (
+            {'assigned_threads': 1},
+            {'rendered_command_sha256': 'd' * 64},
+            {'teacher_id': 'different-teacher'},
+            {'network_kind': 'registered'},
+        ):
+            with self.subTest(overrides=overrides), mock.patch.object(
+                OpenBench.views,
+                '_datagen_uploaded_digest',
+                side_effect=AssertionError('upload body must not be hashed'),
+            ) as digest:
+                response = self.submit_chunk(
+                    test, chunk, machine, producer,
+                    tablebase_overrides=overrides,
+                )
+                self.assertEqual(response.status_code, 409, response.content)
+                digest.assert_not_called()
+
+    def test_v42_receipt_and_manifest_bind_rendered_command(self):
+        test, errors = self.make_publication_v42_test()
+        self.assertIsNone(errors)
+        machine = self.make_machine(
+            'v42-receipt-worker', publication_protocols=[41, 42]
+        )
+        chunk = claim_chunk(test, machine)
+        producer = self.register_producer(test, chunk, machine).json()
+        chunk.refresh_from_db()
+        expected_command_sha256 = (
+            OpenBench.datagen_publication.rendered_datagen_command_sha256(
+                test, chunk, producer['sha256'], 2
+            )
+        )
+
+        response = self.submit_chunk(test, chunk, machine, producer)
+        self.assertEqual(response.status_code, 200, response.content)
+        test.refresh_from_db()
+        chunk.refresh_from_db()
+        receipt = chunk.environment_receipt
+        self.assertEqual(
+            receipt['schema'], 'openbench-datagen-publication-receipt-v42'
+        )
+        self.assertEqual(receipt['generation'], {
+            'threads': 2,
+            'rendered_command_sha256': expected_command_sha256,
+        })
+        self.assertEqual(receipt['network'], {'kind': 'none'})
+        self.assertEqual(receipt['teacher']['id'], test.datagen_teacher_id)
+        self.assertEqual(receipt['producer']['sha256'], producer['sha256'])
+
+        authorization = 'Basic ' + base64.b64encode(
+            b'datagen:password'
+        ).decode('ascii')
+        document = Client(HTTP_AUTHORIZATION=authorization).get(
+            '/api/datagen/%d/' % test.id, secure=True
+        ).json()
+        self.assertEqual(
+            document['schema'],
+            'openbench-datagen-publication-manifest-v42',
+        )
+        self.assertEqual(document['protocol'], 42)
+        self.assertEqual(
+            document['environment']['teacher_id'], test.datagen_teacher_id
+        )
+        self.assertEqual(document['environment']['network_kind'], 'none')
+        manifest_sha256 = document.pop('manifest_sha256')
+        self.assertEqual(
+            manifest_sha256,
+            OpenBench.datagen_publication.canonical_json_sha256(document),
         )
 
     def test_v41_creation_rejects_missing_network_bytes_without_rows(self):
@@ -1838,7 +2092,42 @@ class DatagenModeTests(TestCase):
                 'producer_bytes': producer['bytes'],
                 'producer_commit': producer['commit'],
             })
-        if tablebase or test.is_publication_datagen():
+        if (
+            test.is_publication_datagen()
+            and test.datagen_publication_protocol == 42
+        ):
+            lease = chunk.environment_lease
+            producer_sha256 = (
+                producer['sha256'] if producer is not None
+                else chunk.producer_sha256
+            )
+            fields.update({
+                'environment_contract_sha256': (
+                    lease['environment_contract_sha256']
+                ),
+                'environment_lease_sha256': (
+                    chunk.environment_lease_sha256
+                ),
+                'publication_contract_sha256': (
+                    lease['publication_contract_sha256']
+                ),
+                'tablebase_family': '',
+                'tablebase_max': 0,
+                'tablebase_worker_max': 0,
+                'tablebase_manifest_sha256': '',
+                'teacher_mode': '',
+                'assigned_threads': lease['threads'],
+                'rendered_command_sha256': (
+                    OpenBench.datagen_publication.
+                    rendered_datagen_command_sha256(
+                        test, chunk, producer_sha256, lease['threads']
+                    )
+                ),
+                'teacher_id': lease['teacher_id'],
+                'network_kind': lease['network_kind'],
+            })
+            fields.update(tablebase_overrides or {})
+        elif tablebase or test.is_publication_datagen():
             lease = chunk.environment_lease
             tablebase_lease = lease['tablebase']
             fields.update({

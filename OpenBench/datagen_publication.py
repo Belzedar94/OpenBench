@@ -7,13 +7,30 @@ import string
 
 
 DATAGEN_PUBLICATION_PROTOCOL = 41
+DATAGEN_PUBLICATION_PROTOCOL_V42 = 42
+DATAGEN_PUBLICATION_PROTOCOLS = frozenset({
+    DATAGEN_PUBLICATION_PROTOCOL,
+    DATAGEN_PUBLICATION_PROTOCOL_V42,
+})
 DATAGEN_PUBLICATION_CONTRACT_SCHEMA = (
     'openbench-datagen-publication-contract-v41'
 )
+DATAGEN_PUBLICATION_CONTRACT_SCHEMA_V42 = (
+    'openbench-datagen-publication-contract-v42'
+)
 DATAGEN_PUBLICATION_LEASE_SCHEMA = 'openbench-datagen-publication-lease-v41'
+DATAGEN_PUBLICATION_LEASE_SCHEMA_V42 = (
+    'openbench-datagen-publication-lease-v42'
+)
 DATAGEN_PUBLICATION_RECEIPT_SCHEMA = 'openbench-datagen-publication-receipt-v41'
+DATAGEN_PUBLICATION_RECEIPT_SCHEMA_V42 = (
+    'openbench-datagen-publication-receipt-v42'
+)
 DATAGEN_PUBLICATION_MANIFEST_SCHEMA = (
     'openbench-datagen-publication-manifest-v41'
+)
+DATAGEN_PUBLICATION_MANIFEST_SCHEMA_V42 = (
+    'openbench-datagen-publication-manifest-v42'
 )
 DATAGEN_PUBLICATION_MANIFEST_VERSION = 1
 DATAGEN_SEED_METHOD = 'base-plus-chunk-index-v1'
@@ -53,10 +70,56 @@ def canonical_json_sha256(document):
     return hashlib.sha256(canonical_json_bytes(document)).hexdigest()
 
 
+def publication_contract_schema(protocol):
+    return {
+        DATAGEN_PUBLICATION_PROTOCOL: DATAGEN_PUBLICATION_CONTRACT_SCHEMA,
+        DATAGEN_PUBLICATION_PROTOCOL_V42: (
+            DATAGEN_PUBLICATION_CONTRACT_SCHEMA_V42
+        ),
+    }.get(protocol)
+
+
+def publication_lease_schema(protocol):
+    return {
+        DATAGEN_PUBLICATION_PROTOCOL: DATAGEN_PUBLICATION_LEASE_SCHEMA,
+        DATAGEN_PUBLICATION_PROTOCOL_V42: DATAGEN_PUBLICATION_LEASE_SCHEMA_V42,
+    }.get(protocol)
+
+
+def publication_receipt_schema(protocol):
+    return {
+        DATAGEN_PUBLICATION_PROTOCOL: DATAGEN_PUBLICATION_RECEIPT_SCHEMA,
+        DATAGEN_PUBLICATION_PROTOCOL_V42: (
+            DATAGEN_PUBLICATION_RECEIPT_SCHEMA_V42
+        ),
+    }.get(protocol)
+
+
+def publication_manifest_schema(protocol):
+    return {
+        DATAGEN_PUBLICATION_PROTOCOL: DATAGEN_PUBLICATION_MANIFEST_SCHEMA,
+        DATAGEN_PUBLICATION_PROTOCOL_V42: (
+            DATAGEN_PUBLICATION_MANIFEST_SCHEMA_V42
+        ),
+    }.get(protocol)
+
+
+def network_none_identity():
+    return {
+        'kind': 'none',
+        'name': None,
+        'openbench_id': None,
+        'sha256': None,
+        'bytes': 0,
+    }
+
+
 def publication_requested(post):
     protocol = str(post.get('datagen_publication_protocol', '')).strip()
     identities = [str(post.get(field, '')).strip() for field in PUBLICATION_IDENTITY_FIELDS]
-    return protocol == str(DATAGEN_PUBLICATION_PROTOCOL) or any(identities)
+    return protocol in {
+        str(item) for item in DATAGEN_PUBLICATION_PROTOCOLS
+    } or any(identities)
 
 
 def validate_publication_request(post):
@@ -65,13 +128,20 @@ def validate_publication_request(post):
     if not publication_requested(post):
         protocol = str(post.get('datagen_publication_protocol', '')).strip()
         return [] if protocol in {'', '0'} else [
-            'DATAGEN publication protocol must be 41 or omitted for legacy workloads'
+            'DATAGEN publication protocol must be 41, 42, or omitted for legacy workloads'
         ]
 
     errors = []
-    if str(post.get('datagen_publication_protocol', '')).strip() != '41':
+    protocol_text = str(
+        post.get('datagen_publication_protocol', '')
+    ).strip()
+    try:
+        protocol = int(protocol_text)
+    except ValueError:
+        protocol = None
+    if protocol not in DATAGEN_PUBLICATION_PROTOCOLS:
         errors.append(
-            'DATAGEN publication identities require explicit protocol 41'
+            'DATAGEN publication identities require explicit protocol 41 or 42'
         )
 
     campaign_id = str(post.get('datagen_campaign_id', '')).strip()
@@ -95,9 +165,6 @@ def validate_publication_request(post):
             'DATAGEN publication cohort must be a lowercase ASCII slug of at most 128 characters'
         )
 
-    if not str(post.get('dev_network', '')).strip():
-        errors.append('DATAGEN publication protocol 41 requires a network')
-
     try:
         fields = {
             name for _literal, name, _format_spec, _conversion
@@ -108,12 +175,51 @@ def validate_publication_request(post):
         }
     except ValueError:
         fields = set()
-    required = {'BOOK', 'BOOK_SHA256', 'NETWORK', 'NETWORK_SHA256'}
-    if not required.issubset(fields):
-        errors.append(
-            'DATAGEN publication protocol 41 requires {BOOK}, {BOOK_SHA256}, '
-            '{NETWORK}, and {NETWORK_SHA256}'
-        )
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL:
+        if not str(post.get('dev_network', '')).strip():
+            errors.append('DATAGEN publication protocol 41 requires a network')
+        required = {'BOOK', 'BOOK_SHA256', 'NETWORK', 'NETWORK_SHA256'}
+        if not required.issubset(fields):
+            errors.append(
+                'DATAGEN publication protocol 41 requires {BOOK}, '
+                '{BOOK_SHA256}, {NETWORK}, and {NETWORK_SHA256}'
+            )
+
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL_V42:
+        if str(post.get('dev_network', '')).strip():
+            errors.append(
+                'DATAGEN publication protocol 42 requires network:none'
+            )
+        if str(post.get('book_name', '')).strip() != 'NONE':
+            errors.append(
+                'DATAGEN publication protocol 42 requires builtin startpos'
+            )
+        teacher_id = str(post.get('datagen_teacher_id', '')).strip()
+        if not _SLUG.fullmatch(teacher_id):
+            errors.append(
+                'DATAGEN protocol 42 teacher id must be a lowercase ASCII '
+                'slug of at most 128 characters'
+            )
+        required = {
+            'BOOK', 'BOOK_SHA256', 'NETWORK', 'NETWORK_SHA256',
+            'PRODUCER_SHA256', 'TEACHER_ID', 'ENGINE_COMMIT',
+            'PUBLICATION_CONTRACT_SHA256',
+        }
+        if not required.issubset(fields):
+            errors.append(
+                'DATAGEN publication protocol 42 requires {BOOK}, '
+                '{BOOK_SHA256}, {NETWORK}, {NETWORK_SHA256}, '
+                '{PRODUCER_SHA256}, {TEACHER_ID}, {ENGINE_COMMIT}, and '
+                '{PUBLICATION_CONTRACT_SHA256}'
+            )
+        forbidden = fields & {
+            'SYZYGY', 'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
+        }
+        if forbidden:
+            errors.append(
+                'DATAGEN publication protocol 42 does not allow tablebase '
+                'or teacher-mode placeholders'
+            )
 
     return errors
 
@@ -224,6 +330,13 @@ def _validate_network_identity(network):
         raise PublicationContractError('DATAGEN publication network identity is malformed')
 
 
+def _validate_network_none_identity(network):
+    if network != network_none_identity():
+        raise PublicationContractError(
+            'DATAGEN publication network:none identity is malformed'
+        )
+
+
 def _validate_book_identity(book, expected_name):
     if not isinstance(book, dict) or set(book) != {
         'kind', 'name', 'source', 'text_sha256', 'raw_sha256',
@@ -255,7 +368,15 @@ def _validate_book_identity(book, expected_name):
 
 
 def build_publication_contract(test, network, book):
-    _validate_network_identity(network)
+    protocol = test.datagen_publication_protocol
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL:
+        _validate_network_identity(network)
+    elif protocol == DATAGEN_PUBLICATION_PROTOCOL_V42:
+        _validate_network_none_identity(network)
+    else:
+        raise PublicationContractError(
+            'DATAGEN publication protocol is unsupported'
+        )
     _validate_book_identity(book, test.book_name)
     campaign_id = str(test.datagen_campaign_id)
     workload_id = str(test.datagen_external_workload_id)
@@ -275,13 +396,27 @@ def build_publication_contract(test, network, book):
         or not _COMMIT.fullmatch(commit)
         or not all(isinstance(value, str) for value in engine_strings)
         or not all(engine_strings[:4])
-        or test.dev_network.upper() != network['openbench_id']
-        or test.dev_netname != network['name']
         or type(test.dev.bench) is not int
         or test.dev.bench <= 0
     ):
         raise PublicationContractError(
             'DATAGEN publication workload identity is incomplete or malformed'
+        )
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL and (
+        test.dev_network.upper() != network['openbench_id']
+        or test.dev_netname != network['name']
+    ):
+        raise PublicationContractError(
+            'DATAGEN publication network changed'
+        )
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL_V42 and (
+        test.dev_network
+        or test.dev_netname
+        or test.book_name != 'NONE'
+        or not _SLUG.fullmatch(str(test.datagen_teacher_id))
+    ):
+        raise PublicationContractError(
+            'DATAGEN protocol 42 builtin identities are malformed'
         )
     command = test.datagen_command
     if not isinstance(command, str) or not command:
@@ -322,6 +457,13 @@ def build_publication_contract(test, network, book):
         raise PublicationContractError(
             'DATAGEN publication producer or environment identity is malformed'
         )
+    if (
+        protocol == DATAGEN_PUBLICATION_PROTOCOL_V42
+        and not producer_required
+    ):
+        raise PublicationContractError(
+            'DATAGEN protocol 42 requires an authenticated producer'
+        )
     if tablebase_required:
         if (
             test.datagen_tablebase_family != 'atomic'
@@ -344,9 +486,23 @@ def build_publication_contract(test, network, book):
             'DATAGEN publication has unexpected Syzygy identity'
         )
 
-    return {
-        'schema': DATAGEN_PUBLICATION_CONTRACT_SCHEMA,
-        'protocol': DATAGEN_PUBLICATION_PROTOCOL,
+    if (
+        protocol == DATAGEN_PUBLICATION_PROTOCOL_V42
+        and (
+            tablebase_required
+            or test.datagen_teacher_mode
+            or test.datagen_tablebase_family
+            or test.datagen_tablebase_max != 0
+            or test.datagen_tablebase_manifest_sha256
+        )
+    ):
+        raise PublicationContractError(
+            'DATAGEN protocol 42 requires the builtin material teacher'
+        )
+
+    document = {
+        'schema': publication_contract_schema(protocol),
+        'protocol': protocol,
         'campaign_id': campaign_id,
         'external_workload_id': workload_id,
         'role': test.datagen_role,
@@ -374,9 +530,14 @@ def build_publication_contract(test, network, book):
             'required': producer_required,
             'contract_sha256': producer_contract,
         },
-        'teacher': {
-            'mode': test.datagen_teacher_mode or None,
-        },
+        'teacher': (
+            {'mode': test.datagen_teacher_mode or None}
+            if protocol == DATAGEN_PUBLICATION_PROTOCOL else
+            {
+                'kind': 'builtin-evaluator',
+                'id': test.datagen_teacher_id,
+            }
+        ),
         'syzygy': {
             'required': tablebase_required,
             'family': test.datagen_tablebase_family or None,
@@ -389,15 +550,32 @@ def build_publication_contract(test, network, book):
             ),
         },
     }
+    if protocol == DATAGEN_PUBLICATION_PROTOCOL_V42:
+        document['format'] = {
+            'id': 'TK01-v1',
+            'max_game_plies': 20000,
+            'repetition': 'fourth-position-v1',
+        }
+    return document
 
 
 def frozen_asset_identities(test):
-    network = {
-        'name': test.dev_netname,
-        'openbench_id': test.dev_network.upper(),
-        'sha256': test.datagen_network_sha256,
-        'bytes': test.datagen_network_bytes,
-    }
+    if (
+        test.datagen_publication_protocol
+        == DATAGEN_PUBLICATION_PROTOCOL_V42
+    ):
+        if test.datagen_network_sha256 or test.datagen_network_bytes:
+            raise PublicationContractError(
+                'DATAGEN network:none frozen identity is malformed'
+            )
+        network = network_none_identity()
+    else:
+        network = {
+            'name': test.dev_netname,
+            'openbench_id': test.dev_network.upper(),
+            'sha256': test.datagen_network_sha256,
+            'bytes': test.datagen_network_bytes,
+        }
     if test.datagen_book_kind == 'builtin-startpos':
         if (
             test.book_name != 'NONE'
@@ -441,10 +619,11 @@ def publication_contract_is_current(test):
         getattr(test, 'datagen_book_source', ''),
         getattr(test, 'datagen_book_text_sha256', ''),
         getattr(test, 'datagen_book_raw_sha256', ''),
+        getattr(test, 'datagen_teacher_id', ''),
     )
     if protocol == 0:
         return not any(publication_fields)
-    if protocol != DATAGEN_PUBLICATION_PROTOCOL:
+    if protocol not in DATAGEN_PUBLICATION_PROTOCOLS:
         return False
     document = getattr(test, 'datagen_publication_contract', None)
     digest = getattr(test, 'datagen_publication_contract_sha256', None)
@@ -471,3 +650,58 @@ def add_manifest_hash(document):
     result = dict(document)
     result['manifest_sha256'] = canonical_json_sha256(document)
     return result
+
+
+def rendered_datagen_command(test, chunk, producer_sha256, threads):
+    """Render the exact v42 command independently of the client."""
+
+    if (
+        test.datagen_publication_protocol
+        != DATAGEN_PUBLICATION_PROTOCOL_V42
+    ):
+        raise PublicationContractError(
+            'Rendered command evidence is only defined for protocol 42'
+        )
+    if (
+        not isinstance(producer_sha256, str)
+        or not _SHA256.fullmatch(producer_sha256)
+        or type(threads) is not int
+        or threads <= 0
+    ):
+        raise PublicationContractError(
+            'DATAGEN protocol 42 generation evidence is malformed'
+        )
+    output_path = 'Datagen/test_%d_chunk_%d.bin' % (test.id, chunk.idx)
+    values = {
+        'SEED': str(chunk.seed()),
+        'COUNT': str(chunk.position_count),
+        'OUT': output_path,
+        'THREADS': str(threads),
+        'BOOK': 'NONE',
+        'BOOK_SHA256': 'NONE',
+        'NETWORK': 'NONE',
+        'NETWORK_SHA256': 'NONE',
+        'PRODUCER_SHA256': producer_sha256,
+        'SYZYGY': 'NONE',
+        'SYZYGY_MANIFEST_SHA256': 'NONE',
+        'SYZYGY_MAX': '0',
+        'TEACHER_MODE': 'NONE',
+        'TEACHER_ID': test.datagen_teacher_id,
+        'ENGINE_COMMIT': str(test.dev.sha).lower(),
+        'PUBLICATION_CONTRACT_SHA256': (
+            test.datagen_publication_contract_sha256.lower()
+        ),
+    }
+    try:
+        return test.datagen_command.format_map(values)
+    except (KeyError, ValueError) as error:
+        raise PublicationContractError(
+            'DATAGEN protocol 42 command cannot be rendered'
+        ) from error
+
+
+def rendered_datagen_command_sha256(test, chunk, producer_sha256, threads):
+    command = rendered_datagen_command(
+        test, chunk, producer_sha256, threads,
+    )
+    return hashlib.sha256(command.encode('utf-8')).hexdigest()
