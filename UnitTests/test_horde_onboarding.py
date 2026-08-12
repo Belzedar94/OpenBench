@@ -38,11 +38,11 @@ class HordeOnboardingTests(unittest.TestCase):
             'Books/%s.json' % HORDE_BOOK_V3_INTERIM
         )
 
-    def test_client_v44_is_pinned_to_an_immutable_commit(self):
+    def test_client_v45_is_pinned_to_an_immutable_commit(self):
         # The pin itself lives only in ``Config/config.json``; duplicating the
         # literal in the test suite is what made it drift. Assert the contract
-        # (protocol 44, immutable 40-digit commit, never a branch name).
-        self.assertEqual(self.general['client_version'], 44)
+        # (protocol 45, immutable 40-digit commit, never a branch name).
+        self.assertEqual(self.general['client_version'], 45)
         self.assertRegex(self.general['client_repo_ref'], r'^[0-9a-f]{40}$')
 
     def test_specialist_onboarding_is_schedulable(self):

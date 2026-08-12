@@ -30,7 +30,7 @@ Activation requires all of the following receipts:
 
 Receipt 7 is the blocking one, and it is not optional bookkeeping. A stock
 `cutechess-ob` answers to `-variant horde` and will arbitrate a game with
-non-Lichess semantics and upload the result as if it counted. Client 44
+non-Lichess semantics and upload the result as if it counted. Client 45
 therefore hashes the referee before launching any workload whose
 `variant_contract` is `LICHESS_HORDE_V1` and refuses the workload unless it
 matches the recorded build (`worker.REFEREE_PINS`, kept equal to the manifest
@@ -111,7 +111,7 @@ expose generation commands. The role-specific producer writes
 Records contain physical Horde positions, so White pawns remain `P`; the
 legacy `H` identity is introduced only by the Run 6B evaluator boundary.
 
-Client 44 validates every uncompressed Horde chunk before compression or
+Client 45 validates every uncompressed Horde chunk before compression or
 upload. It requires publication protocol 41 and binds the file to all of the
 following assigned identities:
 
