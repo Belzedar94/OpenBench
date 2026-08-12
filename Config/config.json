@@ -50,6 +50,7 @@
         "Atomic-Stockfish",
         "Alice-Stockfish",
         "Fairy-Stockfish-Atomic-Baseline",
-        "Horde-Stockfish"
+        "Horde-Stockfish",
+        "Terachess-Stockfish"
     ]
 }
