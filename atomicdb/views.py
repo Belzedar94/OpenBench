@@ -3550,14 +3550,23 @@ def api_query(request):
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
+    children = _child_moves(pos)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
               'backed_plies': m['backed_plies'], 'visits': m['visits']}
-             for m in _child_moves(pos)]
+             for m in children]
+    # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
+    # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
+    # mejor conocimiento (backed incluido) y emparejarlo con la PV directa
+    # entrega pares incoherentes — un cliente jugo la segunda mejor creyendo
+    # que llevaba el score de la primera (reporte del propietario, 13-ago;
+    # misma leccion de la flecha del explore, 29-jul).
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'point': point,
-        'backed_plies': pos.backed_plies, 'best_move': pos.best_move,
+        'backed_plies': pos.backed_plies,
+        'best_move': (None if pos.closure == 'TERMINAL'
+                      else _arrow_move(children, pos)),
         'tier': 'PRACTICAL', 'trust': _trust_for(pos),
         'history_scope': 'COUNTERS_AND_REPETITION_IGNORED',
         'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})

@@ -518,6 +518,38 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(payload['point'], 30)
         self.assertEqual(payload['backed_plies'], 3)
 
+    def test_api_query_best_move_tops_the_same_table_it_returns(self):
+        """``best_move`` y ``score`` salen de la MISMA fuente: el top de la
+        tabla de mejor conocimiento, no la PV de la ultima busqueda propia.
+
+        Caso real (13-ago, ``ce72956a...``): score 562 venia del respaldo via
+        una jugada, ``best_move`` decia OTRA (la PV directa, que valia 494), y
+        un cliente jugo la segunda mejor creyendo que llevaba el 562.  Misma
+        leccion que la flecha del explore (29-jul): tabla y titular se mueven
+        JUNTOS o el payload se contradice a si mismo.
+        """
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        edges = list(Edge.objects.filter(parent=root)[:2])
+        backed_uci, direct_uci = edges[0].move_uci, edges[1].move_uci
+        # El respaldo sostiene 562 via la primera; la busqueda directa dijo
+        # la segunda a 494.  Blancas al turno: White-POV se lee tal cual.
+        Position.objects.filter(key=edges[0].child.key).update(
+            backed_eval=562, backed_plies=1)
+        Position.objects.filter(key=edges[1].child.key).update(
+            eval_cp=494, nodes_invested=128_000_000)
+        Position.objects.filter(key=root.key).update(
+            eval_cp=494, best_move=direct_uci,
+            backed_eval=562, backed_plies=2, expanded=True)
+
+        payload = Client().get('/atomicdb/api/query',
+                               {'fen': root.fen}).json()
+
+        self.assertEqual(payload['score'], 562)
+        self.assertEqual(payload['best_move'], backed_uci)
+        self.assertEqual(payload['moves'][0]['uci'], backed_uci)
+        self.assertEqual(payload['moves'][0]['score'], 562)
+
 
 class ValueOrderTests(TestCase):
     """La tabla ordena por VALOR y solo por valor (§ views._child_moves).
