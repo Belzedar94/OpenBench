@@ -65,7 +65,12 @@
     before, which is what line the request is in.{% endcomment %}
     <li><span class="t" title="Place in the queue: how many of this account's requests are served before it">#{{ q.place }}</span>
       <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
-      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}</span></li>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}{% if q.backers %} · {{ q.backers }} more {{ q.backers|pluralize:"person,people" }} asked for this{% endif %}</span>
+      {% if is_self and q.can_bump %}<form class="queue-bump" method="post"
+        action="/atomicdb/queue/bump/{{ q.task_id }}/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <button type="submit" title="Serve this one first out of everything you have waiting. It takes the place your own first request already held, so nobody else's request moves.">Move to front</button>
+      </form>{% endif %}</li>
     {% endfor %}
   </ul>
   {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}

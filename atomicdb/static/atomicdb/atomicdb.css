@@ -1750,6 +1750,29 @@ html.theme-ready .tile {
   font-size: .8rem;
 }
 
+/* Adelantar una peticion propia.  Un enlace de texto y no un boton con caja:
+   vive dentro de una fila de cola, junto a la linea y el presupuesto, y una
+   caja por fila convertiria la lista en una botonera.  Mismo tratamiento que
+   el "Mark all read" de la campana, que es el otro POST minusculo del sitio. */
+.queue-bump {
+  display: inline;
+  margin-left: .5rem;
+}
+
+.queue-bump button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: .8rem;
+  cursor: pointer;
+}
+
+.queue-bump button:hover {
+  text-decoration: underline;
+}
+
 .contrib-spec {
   margin-top: .15rem;
   font-size: .8rem;

@@ -43,6 +43,13 @@ Limits apply per visitor to keep the queue healthy.</p>
 <p class="dim" style="font-size:.9rem">Repeated visitor requests buy genuinely
 deeper searches: 128M, 512M, 2B and then 10B nodes. A healthy worker keeps a
 multi-hour lease alive explicitly, so a deep task cannot be assigned twice.</p>
+<p class="dim" style="font-size:.9rem">Asking for a position somebody else
+already asked for joins their request instead of queueing a duplicate: every
+account that asked is notified when the analysis lands, and the more people
+waiting on one request, the sooner it is served. Your own queue stays yours to
+order. The <strong>Move to front</strong> control on your contributor page
+serves one of your waiting requests before the rest of yours; it takes the
+place your own first request already held, so nobody else's request moves.</p>
 <p>Programmatic access: <code>GET /atomicdb/api/query?fen=...</code> returns
 the stored verdict, score and move list as JSON. Scores are from the side to
 move (chessdb.cn convention). Unknown positions return 404; use the FEN box

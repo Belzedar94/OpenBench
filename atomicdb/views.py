@@ -4206,6 +4206,68 @@ def notifications_page(request):
 
 # ---------------- pagina de contribuidor ----------------
 
+def api_queue_bump(request, task_id):
+    """Adelanta UNA peticion propia al frente de la cola PROPIA.
+
+    Peticion de comunidad (Wolfram): "some checkmark to push smth to the front
+    of my own queue, not to the back, would be nice".  Quien pide cinco cosas
+    seguidas descubre a menudo, con la cuarta ya encolada, que la que de verdad
+    quiere ver es esa; hasta hoy la unica forma de adelantarla era esperar a
+    las tres de delante.
+
+    LO QUE ESTO NO ES: un adelantamiento en la cola de nadie mas.  La fila se
+    coloca en el sitio que la PRIMERA peticion pendiente de esta misma cuenta
+    ya ocupaba (§ ``ingest.front_of_own_queue``), asi que lo que cambia es cual
+    de las tuyas cobra en tu turno.  Las bandas, el estrato nombrado y el
+    reparto justo entre cuentas no se tocan, y lo que ya esta corriendo a tu
+    nombre sigue contando por delante de todo lo que esperas.
+
+    EL MATIZ, PORQUE EL REPARTO CUENTA NODOS Y NO FILAS: con peticiones del
+    mismo peldano — que es como llega casi todo — la secuencia de cuentas
+    servidas es literalmente la misma antes y despues.  Con peldanos
+    distintos, adelantar una barata por delante de una cara adelanta tambien
+    al resto de tu cola, porque ahora tu segunda peticion arranca detras de
+    128M en vez de detras de 10B.  No es una excepcion a tu favor: es la misma
+    regla de siempre leida sobre tu nuevo orden, y lo unico que puede
+    conseguir es servirte lo barato antes y lo caro despues.  Tu deuda total
+    de nodos no se mueve, asi que tu parte del pool tampoco.
+
+    LA CUENTA TIENE QUE SER LA TUYA, y se comprueba aqui: el boton solo sale en
+    tu propia pagina, pero esconder un control no es negarlo.  Sin sesion, al
+    login de OpenBench, que es lo que hace el resto de las paginas personales.
+
+    SIN ``csrf_exempt``, por lo mismo que ``api_request``: esto lo manda un
+    formulario de la pagina de contribuidor, que lleva su token.  Exenta, una
+    pagina de terceros podria reordenarle la cola a quien la visitara con
+    sesion iniciada.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return redirect(f'/login/?next={quote("/atomicdb/me/")}')
+    with atomic():
+        task = (AnalysisTask.objects.select_for_update()
+                .filter(pk=task_id, source=AnalysisTask.Source.USER,
+                        requested_by=request.user.username,
+                        state=AnalysisTask.TState.PENDING).first())
+        if task is None:
+            # No es tuya, ya se sirvio o no existe.  Las tres se responden
+            # igual a proposito: contestar distinto a "no es tuya" y a "no
+            # existe" convierte esta ruta en un contador de tareas ajenas.
+            status, moved = 'not-yours', False
+        else:
+            seq = ingest.front_of_own_queue(task)
+            if seq is None:
+                status, moved = 'already-first', False
+            else:
+                AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
+                status, moved = 'moved', True
+    if request.POST.get('back'):
+        return redirect(
+            f'/atomicdb/user/{quote(request.user.username, safe="")}/')
+    return JsonResponse({'status': status, 'moved': moved})
+
+
 def contributor_me(request):
     """Atajo a tu propia pagina. Sin sesion, al login de OpenBench.
 

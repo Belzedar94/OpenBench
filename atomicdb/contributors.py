@@ -302,7 +302,13 @@ def _queue_rows(username):
     # Una sola sentencia para las veinte filas (``queue_ahead_map`` ordena la
     # banda una vez), que es lo que evita el N+1 que esta pagina no puede
     # pagar.
-    pending = list(mine.filter(state=PENDING).order_by('id')[:QUEUE_ROWS + 1])
+    # ``queue_seq`` ANTES QUE ``id``, que es el orden en el que esta cuenta
+    # cobra de verdad (§ live_request.fair_share).  Con la columna a cero —
+    # nadie ha adelantado nada — es literalmente el orden de llegada de antes;
+    # en cuanto alguien adelanta una suya, listarlas por ``id`` pintaria la
+    # adelantada en su sitio viejo con el numero de sitio nuevo al lado.
+    pending = list(mine.filter(state=PENDING)
+                   .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
     places = live_request.queue_ahead_map(pending)
     for task in pending:
         task.ahead = places.get(task.id)
@@ -487,8 +493,16 @@ def present(username, now=None):
     pending_rows = [
         _presented(task, labels, now,
                    {'place': task.ahead + 1,
-                    'when': _ago(task.created, now)})
-        for task in pending]
+                    'when': _ago(task.created, now),
+                    # El boton de adelantar no sale en la primera fila: no
+                    # tiene a donde ir, y un control que no hace nada es peor
+                    # que su ausencia.  Quien mira la cola de otro no lo ve
+                    # nunca (lo pone la plantilla), y la vista lo comprueba
+                    # otra vez de todas formas.
+                    'can_bump': index > 0,
+                    'task_id': task.id,
+                    'backers': task.backers})
+        for index, task in enumerate(pending)]
     done_rows = [
         _presented(task, labels, now,
                    {'when': _ago(task.completed, now),

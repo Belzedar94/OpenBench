@@ -311,6 +311,33 @@ class AnalysisTask(models.Model):
     # esa misma cuenta atiende primero sus propias peticiones dentro de la
     # banda USER; para el resto de la flota no cambia nada.
     requested_by = models.CharField(max_length=64, default='', blank=True)
+    # LAS OTRAS cuentas que pidieron ESTA MISMA tarea, en orden de llegada.
+    # Reporte de comunidad (Eclipsia): "multiple people asking to analyse the
+    # same position should give it more precedence".  Hasta hoy el segundo que
+    # pedia lo mismo desaparecia: ``_request_rung`` encontraba la tarea ya
+    # encolada, le subia el presupuesto si hacia falta y devolvia
+    # 'already-queued' sin dejar rastro de quien mas la esperaba — ni orden ni
+    # aviso.  El primero conserva la autoria (``requested_by``, y con ella la
+    # afinidad de su worker); los demas viven aqui.
+    also_requested_by = models.JSONField(default=list, blank=True)
+    # ``len(also_requested_by)``, desnormalizado porque el ORDEN DE SERVICIO lo
+    # lee en SQL (§ live_request.SERVICE_KEYS) y contar los elementos de un
+    # JSON no se escribe igual en SQLite que en PostgreSQL.  Cero en todo lo
+    # que existia y en toda peticion normal: la columna solo se despega del
+    # suelo cuando alguien MAS pide lo mismo, que es cuando significa algo.
+    backers = models.IntegerField(default=0)
+    # El sitio de esta tarea DENTRO de la cola de su peticionario.  Cero es
+    # "nunca se toco" y entonces manda el ``id``, que es el orden de llegada de
+    # siempre: con la columna a cero en todas las filas, el reparto justo
+    # ordena EXACTAMENTE como ordenaba (§ live_request.fair_share).
+    #
+    # Peticion de comunidad (Wolfram): "some checkmark to push smth to the
+    # front of my own queue, not to the back, would be nice".  Adelantar una
+    # propia escribe aqui un valor por debajo del de sus companeras, y solo
+    # aqui: la tarea adelantada hereda el sitio que la PRIMERA de esa misma
+    # cuenta ya tenia, nunca uno mejor, asi que la cola de los demas no se
+    # entera (§ views.api_queue_bump).
+    queue_seq = models.BigIntegerField(default=0)
     # Ruta (UCIs separados por coma) por la que el peticionario LLEGO a la
     # posicion, ya validada contra las reglas de Atomic.  El DAG transpone:
     # el linaje canonico puede ensenar otro orden de jugadas y el autor no
@@ -695,13 +722,22 @@ class RequestNotification(models.Model):
 
     ``task`` es SET_NULL: el aviso habla de una POSICION que ya tiene
     resultado, y ese hecho sobrevive a que la fila de la tarea desaparezca.
-    Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez — y la
-    pone la base, no un ``exists()`` de la vista al que otro procesador de la
-    cola puede adelantarse.  Sobre las filas con ``task`` a NULL esa unicidad
-    NO afirma nada — para una unica, dos NULL son distintos — asi que la
-    constraint lo dice con su condicion en vez de aparentar un limite que no
-    pone: el dedup rige mientras la tarea existe, que es exactamente cuando
-    el procesador de la cola puede intentar avisar dos veces.
+    Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez A CADA
+    PERSONA — y la pone la base, no un ``exists()`` de la vista al que otro
+    procesador de la cola puede adelantarse.  Sobre las filas con ``task`` a
+    NULL esa unicidad NO afirma nada — para una unica, dos NULL son
+    distintos — asi que la constraint lo dice con su condicion en vez de
+    aparentar un limite que no pone: el dedup rige mientras la tarea existe,
+    que es exactamente cuando el procesador de la cola puede intentar avisar
+    dos veces.
+
+    EL NOMBRE ENTRA EN LA CLAVE desde que una tarea puede tener varios
+    peticionarios (§ ``AnalysisTask.also_requested_by``).  Con la unicidad
+    sobre ``task`` a secas, avisar al segundo era imposible por construccion:
+    la fila del primero ocupaba el unico hueco y el resto se caia en
+    silencio.  Lo que la constraint tiene que impedir sigue siendo lo mismo,
+    dos avisos IGUALES de la misma tarea a la misma persona, y eso es
+    exactamente lo que dice ahora.
     """
 
     username = models.CharField(max_length=64)
@@ -721,7 +757,8 @@ class RequestNotification(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(
-            fields=['task'], condition=models.Q(task__isnull=False),
+            fields=['task', 'username'],
+            condition=models.Q(task__isnull=False),
             name='uniq_notification_per_task')]
         indexes = [models.Index(fields=['username', 'seen'],
                                 name='atomic_notify_unseen')]

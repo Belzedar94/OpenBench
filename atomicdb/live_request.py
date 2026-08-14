@@ -150,6 +150,23 @@ def fair_share(queryset):
     FILL manda la prioridad de POSICION, que es la que calcula el selector, y
     este escalon no debe tener ni voz ahi.
 
+    LA VENTANA ORDENA POR ``queue_seq`` Y LUEGO POR ``id``, y con la columna a
+    cero en todas las filas eso ES el orden de llegada de siempre: es lo que
+    hace que adelantar una peticion propia (§ ``views.api_queue_bump``) no
+    necesite un segundo camino de orden.  Adelantar RECOLOCA la suma dentro de
+    la cuenta que adelanta y solo dentro de ella: la particion no cambia, asi
+    que ninguna fila ajena ve moverse su ``fair_ahead``.
+
+    LO ARRENDADO VA DELANTE DE LO PENDIENTE, y eso es lo que impide que
+    adelantar sea un descuento.  Sin esta clave, una peticion adelantada se
+    colocaba tambien por delante del arriendo VIVO de su propia cuenta y
+    heredaba un ``fair_ahead`` de cero: la deuda de nodos que esa cuenta ya
+    tiene contraida — diez mil millones buscandose ahora mismo — dejaba de
+    contar, y bastaba con adelantar antes de cada arriendo para vivir
+    permanentemente en el frente.  Fuera de ese caso no cambia nada: la fila
+    que un worker se lleva es la primera de su cuenta, asi que lo arrendado ya
+    era el prefijo de la particion.
+
     EL QUERYSET QUE ENTRA TIENE QUE LLEVAR ``CHARGED``, no solo lo pendiente:
     una ventana solo ve las filas que sobreviven al WHERE, asi que filtrar
     aqui lo arrendado seria descontarlo de la suma.  Las filas arrendadas
@@ -157,15 +174,29 @@ def fair_share(queryset):
     ``choose_pending`` porque su lote solo bloquea PENDING, ``queue_ahead``
     porque solo cuenta PENDING.
     """
+    running_first = Case(When(state=LEASED, then=Value(0)), default=Value(1),
+                         output_field=IntegerField())
     return (queryset
             .annotate(_fair_cumulative=Window(
                 expression=Sum('budget_nodes'),
                 partition_by=[F('source'), F('requested_by')],
-                order_by=F('id').asc()))
+                order_by=(running_first.asc(), F('queue_seq').asc(),
+                          F('id').asc())))
             .annotate(fair_ahead=Case(
                 When(source=USER,
                      then=F('_fair_cumulative') - F('budget_nodes')),
-                default=Value(0), output_field=BigIntegerField())))
+                default=Value(0), output_field=BigIntegerField()))
+            # El recuento de personas se lee ACOTADO A LA BANDA USER, por lo
+            # mismo que el reparto: una tarea que nacio de un click puede
+            # acabar DEGRADADA a AUTO (§ ``ingest``, la expansion de
+            # cobertura) conservando lo que ya tenia encima.  Dentro de AUTO
+            # todas las filas empatan a cero en el reparto, asi que un
+            # recuento vivo ahi decidiria por delante de la prioridad de
+            # POSICION — que es lo que el selector calcula precisamente para
+            # mandar en esa banda.
+            .annotate(backer_rank=Case(
+                When(source=USER, then=F('backers')),
+                default=Value(0), output_field=IntegerField())))
 
 
 # Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
@@ -175,7 +206,19 @@ def fair_share(queryset):
 # ``views.choose_pending`` antepone ``-source`` y su own-first (que depende de
 # que worker pregunte, y por eso el estimador no puede tenerlo) y cierra con la
 # prioridad de POSICION; ``queue_ahead`` cierra con el ``id`` y ya.
-SERVICE_KEYS = ('-named_first', 'fair_ahead')
+#
+# ``-backer_rank`` ES EL ESCALON MAS BAJO, y ese sitio es la respuesta entera a
+# "multiple people asking to analyse the same position should give it more
+# precedence" (Eclipsia).  Va DESPUES del reparto justo, no antes: delante, una
+# posicion popular adelantaria a toda la cola y bastaria con dos personas
+# pidiendo lo mismo para dejar sin turno a quien pide solo — la inanicion que
+# el estrato nombrado ya nos enseno a no repetir.  Detras, solo desempata entre
+# filas que YA cobran a la vez, y ahi si decide: la peticion que espera media
+# docena de personas sale antes que la que espera una.  Que las dos se
+# encuentren empatadas no es casualidad — sumarse a una peticion ajena la manda
+# al frente de la cola de SU autor (§ ``ingest.add_requester``), que es justo
+# donde estan los ceros de todo el mundo.
+SERVICE_KEYS = ('-named_first', 'fair_ahead', '-backer_rank')
 
 
 def named_first_rank(now=None, band_only=False):
@@ -331,6 +374,17 @@ def _left_text(seconds):
     return f'about {seconds / 3600:.1f} h left'
 
 
+def _backers_text(task):
+    """' · 3 people asked for this', o cadena vacia si solo la pidio uno.
+
+    ``backers`` cuenta a los que se SUMARON, asi que el total lleva ademas al
+    autor.  Se dice solo cuando hay algo que decir: "1 person asked for this"
+    debajo de cada peticion seria ruido en todas las filas del sitio.
+    """
+    people = (task.backers or 0) + 1
+    return f' · {people} people asked for this' if people > 1 else ''
+
+
 def _quiet_text(silence, dead):
     """Lo que se dice de un arriendo que no reporta: el hecho, y nada mas.
 
@@ -368,6 +422,11 @@ def summary(pos, now=None):
 
     budget = f'{_human(task.budget_nodes)} nodes'
     if task.state == PENDING:
+        # Quien pincha en una posicion que ya tiene peticion no recibe tarea
+        # nueva: se suma a la que hay.  Sin decirlo, ese click se veia igual
+        # que un click perdido — la pagina seguia contando la peticion de otro
+        # y nada acusaba recibo de la suya.
+        crowd = _backers_text(task)
         ahead = queue_ahead(task)
         if ahead is None:
             # Una tarea de grado peticion que NO va por la banda de visitante
@@ -380,7 +439,7 @@ def summary(pos, now=None):
             place = f'{ahead} request{"" if ahead == 1 else "s"} ahead'
         else:
             place = 'next up'
-        return {'text': f'Waiting for a worker · {budget} · {place}',
+        return {'text': f'Waiting for a worker · {budget} · {place}{crowd}',
                 'chip': 'cold'}
 
     machine = task.machine or 'a worker'

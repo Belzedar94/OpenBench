@@ -3518,6 +3518,105 @@ def _completed_max_budget(pos):
         .first())
 
 
+def front_of_own_queue(task):
+    """Sitio de cola que deja a ``task`` la PRIMERA de su propio peticionario.
+
+    Devuelve el valor que hay que escribir en ``queue_seq``, o ``None`` si ya
+    va delante y no hay nada que mover.
+
+    EL SUELO ES LA PRIMERA PENDIENTE DE ESA CUENTA, y ni un sitio mas arriba.
+    Esa es la propiedad entera: la adelantada hereda un sitio que su cuenta YA
+    tenia, asi que el numero de peticiones de esa cuenta por delante de
+    cualquier fila ajena no cambia — mueve LAS SUYAS, no las de los demas.
+
+    Lo ARRENDADO de la misma cuenta no entra en la cuenta del suelo y no hace
+    falta que entre: la ventana del reparto ordena lo que corre por delante de
+    lo que espera (§ ``live_request.fair_share``), asi que ningun valor escrito
+    aqui puede saltarse la deuda de nodos que esa cuenta ya tiene en un motor.
+    Es ahi y no aqui porque ahi es donde se suma.
+
+    Solo mira la banda USER de la misma cuenta: es la particion en la que
+    reparte ``fair_share``, y es la unica dentro de la cual reordenar no le
+    quita el turno a nadie.
+    """
+    mine = (AnalysisTask.objects
+            .filter(source=AnalysisTask.Source.USER,
+                    requested_by=task.requested_by,
+                    state=AnalysisTask.TState.PENDING)
+            .exclude(pk=task.pk))
+    front = mine.order_by('queue_seq', 'id').values_list(
+        'queue_seq', 'id').first()
+    if front is None:
+        return None
+    front_seq, front_id = front
+    if (task.queue_seq, task.pk) < (front_seq, front_id):
+        return None
+    return front_seq - 1
+
+
+def _record_requester(task, username):
+    """Anota que ``username`` TAMBIEN pidio esta tarea. Escribe si hace falta.
+
+    Devuelve True cuando la tarea gana un peticionario NUEVO, que es lo unico
+    que merece adelantarla.
+
+    Reporte de comunidad (Eclipsia): "multiple people asking to analyse the
+    same position should give it more precedence".  El segundo que pide algo
+    ya encolado no recibe tarea propia — seria trabajo duplicado, y hasta hoy
+    era ademas una fila muerta que la absorcion tenia que barrer despues — asi
+    que lo que recibe es sitio en la que ya existe: su nombre en la fila (y
+    con el, el aviso cuando aterrice) y un escalon de precedencia por cada
+    persona que espera (§ ``live_request.SERVICE_KEYS``).
+
+    SIN NOMBRE NO HAY VOTO.  Un click sin sesion no se distingue del anterior
+    — es la misma decision que ya toma el reparto justo con la marea anonima,
+    y por el mismo motivo: lo que no se puede distinguir no se puede contar.
+    Lo que si hace un nombre nuevo sobre una peticion anonima es ADOPTARLA:
+    pasa a ser suya, con su afinidad y su aviso, porque hasta ahora no era de
+    nadie.
+    """
+    if not username or task.state not in (AnalysisTask.TState.PENDING,
+                                          AnalysisTask.TState.LEASED):
+        return False
+    if not task.requested_by:
+        task.requested_by = username
+        task.save(update_fields=['requested_by'])
+        return False
+    if username == task.requested_by or username in (task.also_requested_by
+                                                     or []):
+        return False
+    task.also_requested_by = list(task.also_requested_by or []) + [username]
+    task.backers = len(task.also_requested_by)
+    task.save(update_fields=['also_requested_by', 'backers'])
+    return True
+
+
+def add_requester(task, username):
+    """Suma un peticionario Y le compra el frente de la cola de su autor.
+
+    Las dos mitades del mismo trato, en una sola puerta: quien llama solo
+    tiene que saber que alguien mas pidio esto.  Adelantar es lo que pone la
+    peticion donde el recuento de personas decide de verdad — el escalon de
+    ``backers`` desempata entre las que cobran a la vez, y las que cobran a la
+    vez son las primeras de cada cuenta.
+
+    No es un privilegio nuevo: adelantar una peticion propia ya lo puede hacer
+    su autor con un click (§ ``views.api_queue_bump``), asi que sumarse a una
+    ajena no compra nada que su autor no tuviera.
+    """
+    if not _record_requester(task, username):
+        return False
+    if task.state != AnalysisTask.TState.PENDING:
+        # Ya esta en un motor: el orden de la cola no le dice nada, y lo unico
+        # que faltaba — el aviso cuando aterrice — ya esta anotado.
+        return True
+    seq = front_of_own_queue(task)
+    if seq is not None:
+        task.queue_seq = seq
+        task.save(update_fields=['queue_seq'])
+    return True
+
+
 def ladder_exhausted(pos):
     """True when the visitor ladder has nothing left to buy on ``pos`` itself.
 
@@ -3613,6 +3712,12 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
             task.route = route
         task.save(update_fields=['source', 'budget_nodes', 'requested_by',
                                  'route'])
+        # OTRA PERSONA pidiendo lo mismo.  No se crea una fila paralela — dos
+        # motores buscando la misma posicion con el mismo presupuesto es
+        # trabajo tirado, y la fila de mas acababa siendo un zombi que la
+        # absorcion tenia que barrer — pero tampoco se pierde: queda anotada en
+        # la que ya existe, con su aviso y su escalon de precedencia.
+        add_requester(task, requested_by)
         if promoted:
             return 'queued'
     elif task.state == 'LEASED':
@@ -3650,6 +3755,10 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         if task.source != 'USER':
             task.source = 'USER'
             task.save(update_fields=['source'])
+        # Sumarse a algo que YA esta en un motor no cambia ningun orden, pero
+        # sigue habiendo alguien esperando el resultado: sin su nombre en la
+        # fila, la campana solo sonaba para el primero.
+        add_requester(task, requested_by)
     return 'already-queued'
 
 

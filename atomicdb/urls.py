@@ -99,6 +99,10 @@ urlpatterns = [
     path('user/<str:username>/', views.contributor,
          name='atomicdb-contributor'),
     path('me/', views.contributor_me, name='atomicdb-me'),
+    # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de
+    # una sola persona: sin cache, como la pagina desde la que se pulsa.
+    path('queue/bump/<int:task_id>/', views.api_queue_bump,
+         name='atomicdb-queue-bump'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.
