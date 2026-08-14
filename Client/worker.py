@@ -280,6 +280,24 @@ class Configuration:
             raise ValueError('--atomic-syzygy requires --atomic-syzygy-manifest')
         self.fleet       = args.fleet    if args.fleet    else False
         self.focus       = args.focus    if args.focus    else []
+        self.focus_test  = self.parse_focus_test(args.focus_test)
+
+    @staticmethod
+    def parse_focus_test(value):
+
+        # Opting into a single test is strict on purpose: the Server serves
+        # that test or nothing at all. Without it nothing changes, and work
+        # keeps arriving from the Server's own global priorities
+
+        if value in (None, ''):
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                '--focus-test expects a test id, not "%s"' % (value)
+            )
 
     def init_client(self):
 
@@ -1828,10 +1846,20 @@ def server_configure_worker(config):
 
 def server_request_workload(config):
 
-    print('\nRequesting Workload from Server...')
+    focus_test = getattr(config, 'focus_test', None)
+
+    if focus_test is None:
+        print('\nRequesting Workload from Server...')
+    else:
+        print('\nRequesting Workload from Server [Test #%d only]...' % (focus_test))
 
     payload  = { 'machine_id' : config.machine_id, 'secret' : config.secret_token, 'blacklist' : config.blacklist }
     target   = url_join(config.server, 'clientGetWorkload')
+
+    # Older Servers ignore the extra field, and older Clients never send it
+    if focus_test is not None:
+        payload['focus_test'] = focus_test
+
     response = requests.post(target, data=payload, timeout=TIMEOUT_HTTP)
 
     # Server errors produce garbage back, which we should not alarm a user with
@@ -1846,6 +1874,16 @@ def server_request_workload(config):
     # The 'error' header is included if there was an issue
     if 'error' in response:
         raise Exception('[Error] %s' % (response['error']))
+
+    # Say out loud what the opt-in did, so an idle worker is never a mystery
+    if focus_test is not None:
+        focus = response.get('focus')
+        if focus is None:
+            print('[Note] This Server does not support --focus-test')
+            print('[Note] Work will be assigned by the Server as usual')
+        elif not focus.get('served'):
+            print('[Note] %s' % (focus.get('message', 'No work for this test')))
+            print('[Note] Waiting for test #%d to become available' % (focus_test))
 
     # Log the start of a new Workload
     if 'workload' in response:
@@ -4169,6 +4207,9 @@ def parse_arguments(client_args):
                         help='Atomic Syzygy inventory JSON', required=False)
     p.add_argument(      '--fleet'   , help='Fleet Mode'              , action='store_true')
     p.add_argument(      '--focus'   , help='Prefer certain engine(s)', nargs='+'          )
+    p.add_argument(      '--focus-test',
+                        help='Only run this test id, and idle otherwise',
+                        required=False)
 
     # Ignore unknown arguments ( from client )
     worker_args, unknown = p.parse_known_args()
