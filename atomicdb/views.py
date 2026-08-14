@@ -2062,7 +2062,8 @@ def _walk_backed_spine(pos):
 
     Esa ultima parada no es solo defensiva: una espina que vuelve sobre sus
     pasos no tiene origen que enseñar, tiene una REPETICION — el mismo ciclo
-    que ``ingest._draw_cycling_children`` valora como tablas al subir.  El
+    que el respaldo marca al subir y valora como tablas
+    (§ ``ingest._draw_cycling_children``, ``_backed_for``).  El
     tercer valor lo dice para que el explorador lo pueda etiquetar en vez de
     dejar al visitante creyendo que aterrizo en la fuente del numero.
 
@@ -3169,6 +3170,27 @@ def _line_numbers(pos):
     return numbers
 
 
+def _repetition_moves(pos):
+    """Las jugadas de esta tabla que solo valen TABLAS, cuando hay que decirlo.
+
+    Un nodo que publica un cero de repeticion tiene que enseñar ese cero en la
+    fila de la que sale, o el visitante lee una cabecera a 0 sobre una tabla en
+    la que la mejor jugada dice +9 y no hay forma de saber de donde sale
+    ninguno de los dos (Wolfram, 12-ago: "0 was propagated from repetition
+    somehow but was not displayed at child node").
+
+    La pregunta cuesta un paseo por el grafo, asi que se hace SOLO cuando hay
+    un numero que explicar: el nodo esta abierto y su respaldo son tablas
+    apoyadas en una arista.  Bajo el contrato de ``ingest._backed_for`` ese es
+    exactamente el estado en el que un cero de repeticion puede estar
+    publicado, asi que la puerta no se deja fuera ninguna fila que contradiga a
+    su cabecera; y en el resto de la base — que es toda ella — no cuesta nada.
+    """
+    if pos.status != 'UNKNOWN' or not pos.backed_move or pos.backed_eval != 0:
+        return frozenset()
+    return ingest.repetition_moves(pos)
+
+
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
@@ -3218,6 +3240,7 @@ def _child_moves(pos):
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    repeats = _repetition_moves(pos)
     moves = []
     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
     numbers = _proof_numbers_for([edge.child.key for edge in edges])
@@ -3271,6 +3294,25 @@ def _child_moves(pos):
         else:
             # sin analizar: encima de perder, debajo de lo caminado
             score, rank, tier = None, -9_999.5, 1
+        repetition = e.move_uci in repeats
+        if repetition:
+            # LA FILA DICE LO QUE EL PADRE USA (§ ingest, el bloque de la
+            # repeticion).  Por esta arista el respaldo de arriba no usa el
+            # numero del hijo sino las tablas de la repeticion, y la tabla
+            # tiene que enseñar ESE numero: la cabecera publicaba un 0 que
+            # ninguna fila decia mientras esta pintaba el numero circular del
+            # hijo, que es el sintoma (b) del 12-ago.  Pierde ademas el chip
+            # de respaldo: ese chip promete una espina que baja hasta un
+            # origen, y lo que hay debajo es un bucle que vuelve aqui.  El de
+            # repeticion lo dice en su lugar.
+            #
+            # Y el numero deja de contar como conocimiento de motor (tier 2):
+            # de esta jugada el motor habra dicho lo que sea, pero el 0 de la
+            # celda no lo ha medido nadie.  ``walked`` se queda en falso — la
+            # procedencia de este numero no es una linea sembrada sino una
+            # repeticion, y para eso esta su propia marca.
+            score, rank, tier = 0, 0.0, 2
+            backed_plies, backed_light, walked = 0, False, False
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -3303,6 +3345,10 @@ def _child_moves(pos):
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
                       'backed_light': backed_light,
+                      # Esta jugada vuelve a la posicion que la esta valorando
+                      # (§ _repetition_moves): el numero de la celda son las
+                      # tablas que el respaldo de arriba usa por esta arista.
+                      'repetition': repetition,
                       # Lo que decide el tier viaja en la fila: la marca que
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.

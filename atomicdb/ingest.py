@@ -1104,7 +1104,7 @@ _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
-    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine')
+    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles')
 
     def __init__(self, move, value, quality, plies, key=None, spine=None):
         self.move, self.value = move, value
@@ -1114,6 +1114,11 @@ class _ChildValue:
         # rellena cuando el valor es PRESTADO: un status probado o una eval
         # propia no vienen de ninguna espina y no pueden ciclar.
         self.key, self.spine = key, spine
+        # Lo pone el paseo (§ _draw_cycling_children) y lo VALORA el negamax
+        # (§ _backed_for): el hecho del grafo — esta arista vuelve al padre —
+        # se separa de lo que ese hecho vale, porque cuanto vale depende de
+        # quien mueve y el paseo no tiene perspectiva.
+        self.cycles = False
 
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
@@ -1178,6 +1183,50 @@ def _better_for_mover(value, reference, stm_white):
 # sin ninguna el nodo vale tablas — que es exactamente lo que vale poder
 # repetir.
 #
+# EL CERO ES UNA AFIRMACION, Y HAY QUE TRATARLO COMO TAL (Wolfram, 12-ago).  El
+# primer parche lo escribio como valor libre: el hijo pasaba a valer 0 y se
+# quedaba con el PESO DE BUSQUEDA del numero que acababa de tirar, asi que un
+# paseo de punteros heredaba la autoridad de 128M de nodos de motor.  El
+# residuo que reporto la comunidad son tres cosas en una frase — "eval already
+# updated to 0 sometimes but I think it's buggy ... 0 was propagated from
+# repetition somehow but was not displayed at child node and it was not 0
+# anyway" — y cada una tiene su nombre:
+#
+#   (a) el 0 llegaba al padre, si;
+#   (b) NINGUNA fila lo enseñaba: la tabla pinta el mejor conocimiento del hijo
+#       — el numero circular, +903 — mientras la cabecera publicaba el 0 que el
+#       padre habia usado por esa misma arista.  Dos numeros para una arista es
+#       la definicion de "de donde sale esto";
+#   (c) y no era 0: el que mueve tenia alternativas que nadie habia mirado
+#       ("there were gray moves other than repetition and it was ignored",
+#       11-ago).
+#
+# Lo que vale la LINEA sigue siendo tablas — eso no se toca, es (a) y es la
+# regla del 3-ago.  Lo que cambia es de que esta hecho ese cero: es un hecho
+# sobre un PASEO, no una medida.  Nadie ha buscado nunca si esa repeticion es
+# forzada.  Asi que entra como entra en esta casa todo lo que no tiene motor
+# detras:
+#
+#   * SIN PESO.  Calidad 0, por debajo de cualquier medida de verdad y bajo el
+#     veto de calidad que ya existe.  Unas tablas PROBADAS le ganan el empate a
+#     unas tablas caminadas, que es el orden correcto;
+#   * SIN DECIDIR UN NODO CON COBERTURA PARCIAL.  Un nodo con jugadas que nadie
+#     ha abierto no sabe que lo suyo sean tablas, ni por arriba ni por abajo:
+#     publicar el cero ahi es el sintoma (c) literal.  Con cobertura COMPLETA
+#     el max/min es el minimax de verdad y el cero manda: el que mueve no
+#     tiene nada mejor que repetir y eso es un veredicto.  Sin ella se queda
+#     con su ancla, y sin ancla no publica nada: es la misma aritmetica del
+#     corte del 14-ago ("sin ancla, la derrota no se respalda") aplicada a la
+#     otra mitad del tablero de valores.  Y en los dos casos compra la
+#     desambiguacion (§ _queue_cycle_disambiguation), que es lo que impide que
+#     "no publico nada" se convierta en un silencio permanente.
+#
+# El sintoma (b) se cierra en la vista con la misma regla leida al reves: un
+# nodo que publica tablas por repeticion tiene que enseñar ESAS tablas en la
+# fila de la que salen (§ views._child_moves, ``repetition_moves``).  La
+# cabecera y la tabla dicen el mismo numero o el sitio esta mintiendo en una de
+# las dos.
+#
 # COSTE.  Solo se camina lo que ya esta RESPALDADO (un status probado o una
 # eval propia no vienen de ninguna espina) y el paseo se corta en el primer
 # nodo sin ``backed_move``, que en un arbol normal es el primer paso.  Un ply
@@ -1215,11 +1264,17 @@ class _SpineCache:
 
 
 def _draw_cycling_children(by_parent, cache):
-    """Pone a TABLAS todo hijo cuyo valor vuelve a su propio padre.
+    """MARCA todo hijo cuyo valor vuelve a su propio padre.
 
     Camina la espina del HIJO (``backed_move`` a ``backed_move``) buscando al
     padre que lo esta evaluando.  Si aparece, el valor del hijo esta pasando
-    por X para justificarse en X: es una repeticion y aporta 0.
+    por X para justificarse en X: es una repeticion.
+
+    Marca, no valora.  Un paseo por punteros ``backed_move`` establece un
+    HECHO del grafo — esta arista vuelve aqui — y eso es todo lo que un paseo
+    puede establecer.  Cuanto vale ese hecho, y sobre todo cuanto PESA, lo
+    decide el negamax (§ _backed_for), que es donde vive el resto de la
+    aritmetica.
 
     Paradas, todas ellas "no hay ciclo": la espina se acaba (nodo sin respaldo
     que prestar), la arista del respaldo ya no existe (respaldo mas viejo que
@@ -1253,13 +1308,12 @@ def _draw_cycling_children(by_parent, cache):
                 continue                    # arista perdida: no hay ciclo
             below, status = step
             if below == parent_key:
-                # Repeticion: vale tablas, y la distancia es CERO porque esas
-                # tablas nacen en esta misma arista — no las presta nadie de
-                # mas abajo.  Ademas es lo que hace converger a ``recascade_-
-                # backed``: con la distancia del ciclo, cada pasada le sumaba
-                # un ply a la anterior y la barrida no llegaba nunca a punto
-                # fijo.
-                child.value, child.plies = 0, 0
+                # Repeticion.  La distancia es CERO porque lo que esta arista
+                # aporta nace AQUI — no lo presta nadie de mas abajo — y ademas
+                # es lo que hace converger a ``recascade_backed``: con la
+                # distancia del ciclo, cada pasada le sumaba un ply a la
+                # anterior y la barrida no llegaba nunca a punto fijo.
+                child.cycles, child.plies = True, 0
                 cycled.add((parent_key, child.move))
                 continue
             spine = cache.spines.get(below)
@@ -1290,6 +1344,25 @@ def _resolve_spine_steps(cache, walks):
                          'child__status', 'child__backed_move')):
         cache.steps[(parent_id, move_uci)] = (child_id, status)
         cache.spines[child_id] = spine
+
+
+def repetition_moves(row):
+    """Las jugadas de ``row`` que solo valen TABLAS: su valor vuelve aqui.
+
+    El explorador la llama para poder ENSEÑAR la repeticion en la fila de la
+    que sale (§ views._child_moves): un nodo que publica tablas por repeticion
+    y una tabla en la que ninguna fila dice 0 es el sintoma (b) del reporte del
+    12-ago, y son dos numeros para una misma arista.
+
+    Es el MISMO paseo que usa el respaldo, no una segunda copia del predicado:
+    dos definiciones de "esto cicla" son dos definiciones que se separan, y la
+    que se separa siempre es la de la vista.  Cuesta la consulta de las aristas
+    mas un puñado del paseo, asi que el llamante la pide solo cuando tiene un
+    numero que explicar.
+    """
+    children = _backed_children_by_parent([row.key]).get(row.key, ())
+    cycled = _draw_cycling_children({row.key: children}, _SpineCache())
+    return {move for _key, move in cycled}
 
 
 def coverage_is_partial(row, children):
@@ -1337,7 +1410,8 @@ def _showcase_bound(last_analysis):
     return worst if isinstance(worst, int) else None
 
 
-def _backed_for(row, children, discrepancies=None, bound=None):
+def _backed_for(row, children, discrepancies=None, bound=None,
+                cycle_picks=None):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
@@ -1348,6 +1422,12 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     tolerancia.  Ya no se bloquean (§ abajo), pero siguen siendo preguntas
     abiertas y el llamante las convierte en trabajo: ver
     ``_queue_quality_convergence``.
+
+    ``cycle_picks`` recoge lo mismo para la otra pregunta abierta: el mejor
+    conocimiento del nodo es una REPETICION.  Se apunta la eligiera o no —
+    con cobertura completa manda y con cobertura parcial no decide nada —
+    porque la pregunta ("¿de verdad no hay nada mejor que repetir?") es la
+    misma en los dos casos y se compra igual (§ _queue_cycle_disambiguation).
 
     ``bound`` es la cota del escaparate multipv del PROPIO nodo
     (§ ``_showcase_bound``); el llamante la trae porque esta funcion no
@@ -1360,6 +1440,17 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     informed = [c for c in children if c.value is not None]
     if not informed:
         return None, None, 0, 0
+    stm_white = row.fen.split()[1] == 'w'
+    for child in informed:
+        if child.cycles:
+            # LO QUE VALE UNA REPETICION (§ el bloque de arriba): tablas, que
+            # es lo que vale la LINEA, y no el numero que el ciclo circula.  Y
+            # sin un gramo de peso: nadie ha buscado jamas si esa repeticion es
+            # forzada — es un hecho sobre un paseo por punteros ``backed_move``
+            # — asi que compite con lo que compite un valor sin motor detras.
+            # Un empate a tablas contra unas tablas PROBADAS lo gana la prueba,
+            # que es exactamente el orden correcto.
+            child.value, child.quality = 0, 0
     # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago).  Los hijos sin
     # informacion entran al negamax como UN pseudo-hijo con el valor de la
     # cota del escaparate: es el mejor caso posible de lo desconocido segun
@@ -1375,7 +1466,6 @@ def _backed_for(row, children, discrepancies=None, bound=None):
         informed.append(_ChildValue(None, bound,
                                     row.nodes_invested or 0, 0))
         bounded = True
-    stm_white = row.fen.split()[1] == 'w'
     # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
     # (menos plies), luego el orden de movegen, para que el resultado sea
     # determinista bajo replay.
@@ -1386,6 +1476,24 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     complete = bounded or not coverage_is_partial(row, children)
     own = row.eval_cp
     own_quality = row.nodes_invested or 0
+    if best.cycles:
+        # El mejor conocimiento de este nodo es repetir.  Es una pregunta
+        # abierta ANTES de mirar si decide algo, y por eso se apunta aqui.
+        if cycle_picks is not None:
+            cycle_picks.append((best.move, row.key, own_quality))
+        if not complete:
+            # UNA REPETICION NO DECIDE UN NODO CON JUGADAS SIN MIRAR (Wolfram,
+            # 11 y 12-ago).  Que la mejor respuesta CONOCIDA sea volver aqui no
+            # dice nada de las que nadie ha abierto — "there were gray moves
+            # other than repetition and it was ignored" — y publicar las tablas
+            # es cerrar por arriba al que mueve con informacion parcial, justo
+            # la direccion que esta casa tiene prohibida.  Se queda con su
+            # ancla; sin ancla no sabe nada de si mismo y no respalda (mismo
+            # corte que el del 14-ago para la derrota sin ancla).  La compra de
+            # arriba es lo que hace que esto no sea un silencio permanente.
+            if own is not None:
+                return own, None, 0, own_quality
+            return None, None, 0, 0
     if (own is not None and best.quality <= 0
             and (bounded or not complete)
             and _better_for_mover(best.value, own, stm_white)):
@@ -1484,6 +1592,13 @@ def _queue_cycle_disambiguation(picks):
     el ingest de ese pase siembra a los padres, que es el despertador que a
     este caso le faltaba.  Mismo brazo y mismo cupo que la convergencia de
     calidad: son la misma clase de pregunta abierta.
+
+    DESDE EL 12-AGO SE COMPRA TAMBIEN LO QUE NO DECIDE.  Con cobertura parcial
+    la repeticion ya no publica su cero (§ _backed_for), pero el nodo se queda
+    igual de a oscuras: su mejor respuesta conocida sigue siendo volver por
+    donde vino.  Callar ahi seria cambiar un numero malo por un silencio, que
+    es el mismo clavado con mejor pinta.  La compra es lo que convierte la
+    duda en trabajo, decida o no decida.
     """
     if not picks:
         return 0
@@ -1702,9 +1817,10 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         if not rows:
             break
         children = _backed_children_by_parent([row.key for row in rows])
-        # Antes de que nadie compare: el hijo que se justifica pasando por su
-        # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
-        cycled = _draw_cycling_children(children, spines)
+        # Antes de que nadie compare: queda MARCADO el hijo que se justifica
+        # pasando por su propio padre.  Lo que esa marca vale lo dice el
+        # negamax, que es quien sabe de quien es el turno (§ _backed_for).
+        _draw_cycling_children(children, spines)
         # Los escaparates multipv, UNA consulta por nivel y solo para las
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
@@ -1721,17 +1837,15 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
+            # Las dos preguntas abiertas del respaldo salen por parametro y el
+            # final del nivel las compra.  La del ciclo se apunta aunque la
+            # repeticion no acabe decidiendo nada, y a proposito ANTES del
+            # corte de "sin cambios": un clavado viejo re-intenta la compra en
+            # cada pasada y el dedup de tareas absorbe la repeticion.
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
-                bound=_showcase_bound(showcases.get(row.key)))
-            if move and (row.key, move) in cycled:
-                # El respaldo acaba de decidirse por un hijo que el paseo
-                # anulo: esa decision viaja con su correccion comprada
-                # (§ _queue_cycle_disambiguation).  ANTES del corte de "sin
-                # cambios" a proposito: un clavado viejo re-intenta la
-                # compra en cada pasada y el dedup de tareas absorbe la
-                # repeticion.
-                cycle_picks.append((move, row.key, row.nodes_invested or 0))
+                bound=_showcase_bound(showcases.get(row.key)),
+                cycle_picks=cycle_picks)
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):

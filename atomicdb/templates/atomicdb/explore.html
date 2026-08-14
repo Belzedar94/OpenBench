@@ -607,7 +607,9 @@
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
+            class="backed-mark"
+            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
