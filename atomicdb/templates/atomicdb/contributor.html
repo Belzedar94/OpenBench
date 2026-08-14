@@ -59,9 +59,13 @@
   {% if queue_pending %}
   <ul class="feed">
     {% for q in queue_pending %}
-    <li><span class="t">#{{ q.place }}</span>
+    {% comment %}The place in the queue is said ONCE, by the number: how many
+    requests are in front of a row is exactly what "#{{ q.place }}" already
+    reports, and the room that frees up says something the row could not say
+    before, which is what line the request is in.{% endcomment %}
+    <li><span class="t" title="Place in the queue: how many of this account's requests are served before it">#{{ q.place }}</span>
       <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
-      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.ahead %} · {{ q.ahead }} request{{ q.ahead|pluralize }} ahead{% else %} · next up{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}</span></li>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}</span></li>
     {% endfor %}
   </ul>
   {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}

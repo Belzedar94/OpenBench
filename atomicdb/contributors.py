@@ -401,7 +401,7 @@ def _badges(nodes_total):
 
 def _labels(keys):
     from . import views
-    return views._line_labels_many([key for key in keys if key])
+    return views._line_readings_many([key for key in keys if key])
 
 
 def _presented(task, labels, now, extra=None):
@@ -410,20 +410,26 @@ def _presented(task, labels, now, extra=None):
     La ruta declarada por el peticionario gana al linaje canonico cuando sigue
     siendo valida: el DAG transpone y nadie reconoce su propia peticion pintada
     en otro orden de jugadas (§ ``AnalysisTask.route``).
+
+    El nombre de apertura viaja SIEMPRE con el rotulo que lo acompana — los
+    dos salen de la misma lectura — porque el nombre heredado depende del
+    orden de jugadas y una fila que los mezclara estaria nombrando una linea
+    que no es la que pinta.
     """
     from . import views
 
-    preview, full = labels.get(task.position_id, ('', ''))
+    preview, full, opening = labels.get(task.position_id, ('', '', ''))
     play = ''
     if task.route:
-        routed = views._route_labels(task.route, task.position_id)
+        routed = views._route_labels_full(task.route, task.position_id)
         if routed is not None and routed[0]:
-            preview, full = routed
+            preview, full, opening = routed
             play = task.route
     row = {
         'key': task.position_id,
         'san': preview or 'the start position',
         'full': full or 'the start position',
+        'opening': opening,
         'play': play,
         'budget': human(task.budget_nodes),
     }
@@ -475,9 +481,12 @@ def present(username, now=None):
             'since': _ago(task.leased_at, now),
             'quiet': beat is None or beat < lease_cutoff,
         }))
+    # ``place`` es el sitio en la cola y es lo UNICO que se pinta de la espera:
+    # decir ademas "N requests ahead" era el mismo numero dos veces con dos
+    # redacciones (sugerencia de Eclipsia, #suggestions).
     pending_rows = [
         _presented(task, labels, now,
-                   {'ahead': task.ahead, 'place': task.ahead + 1,
+                   {'place': task.ahead + 1,
                     'when': _ago(task.created, now)})
         for task in pending]
     done_rows = [
@@ -537,7 +546,7 @@ def present(username, now=None):
              OpeningNameSuggestion.SState.PENDING: 'hot'}
     suggestion_rows = []
     for row in suggestions:
-        preview, full = labels.get(row.position_id, ('', ''))
+        preview, full, _opening = labels.get(row.position_id, ('', '', ''))
         suggestion_rows.append({
             'name': row.proposed_name,
             'previous': row.previous_name,

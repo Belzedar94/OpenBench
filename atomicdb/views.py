@@ -177,6 +177,10 @@ LINEAGE_REFRESH_LOCK_SECONDS = 60
 # v2: las entradas van FECHADAS (``{'stored_at': ..., 'payload': ...}``), que
 # es lo que permite preguntarles la edad en vez de solo si siguen ahi.
 LINEAGE_CACHE_VERSION = 2
+# Version PROPIA del rotulo de ruta (§ ``_route_label_cache_key``), que se
+# mueve sola cuando cambia SU payload y sin arrastrar al linaje.
+# v2: el payload lleva ademas el nombre de apertura de esa misma ruta.
+ROUTE_LABEL_VERSION = 2
 # Las claves de los hijos SIN arista de una posicion (§ ``_child_keys``).  Es
 # lo unico cacheado de esta pagina que no puede quedarse obsoleto — el mapa
 # (FEN del padre, jugada) -> clave del hijo no depende de nada que cambie — asi
@@ -2486,17 +2490,51 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             for key in keys if key in payloads}
 
 
-def _line_labels_many(keys, preview_plies=10):
-    resolved = _lines_to_root(keys)
-    labels = {}
-    for key, (top, line) in resolved.items():
+def _opening_name_for_keys(keys):
+    """Last catalogued Atomic opening on an ALREADY replayed line, or ''.
+
+    The same rule the explorer card follows: the catalogue is keyed by
+    position, so a transposition still recognises the opening, and a line
+    that runs past its last named position keeps that name.  Callers hand
+    over the key of every prefix they already walked, which is what spares
+    this a second replay (§ ``openings.match_line_keys_object``).
+
+    Anything the catalogue cannot answer is an empty name and nothing else:
+    a queue row exists to say what was asked for, and it is not allowed to
+    take a page down because a line has no name.
+    """
+    try:
+        match = openings.match_line_keys(keys)
+    except (openings.InvalidOpeningLine, openings.OpeningCatalogError):
+        return ''
+    return '' if match is None else str(match['name'])
+
+
+def _line_readings_many(keys, preview_plies=10):
+    """``{key: (preview, full, opening)}`` from ONE walk per lineage.
+
+    All three come out of the same breadcrumb on purpose.  A row that prints
+    its line in one move order and names its opening from another contradicts
+    itself, and the inherited name really does depend on the order: two routes
+    into the same position can cross differently named ancestors.  Resolving
+    them together is also what keeps a page that shows both from paying the
+    reverse walk twice.
+    """
+    readings = {}
+    for key, (top, line) in _lines_to_root(keys).items():
         full = _format_san_line(top, line, max_plies=512, keep_head=True)
         # Preview con elipsis EN MEDIO: la cabeza dice que apertura es y la
         # cola dice DONDE va — dos posiciones distintas de la misma linea
         # profunda nunca deben compartir label.
         preview = _format_san_line(top, line, max_plies=preview_plies)
-        labels[key] = (preview, full)
-    return labels
+        readings[key] = (preview, full, _opening_name_for_keys(
+            [top.key, *(step['key'] for step in line)]))
+    return readings
+
+
+def _line_labels_many(keys, preview_plies=10):
+    return {key: reading[:2] for key, reading
+            in _line_readings_many(keys, preview_plies).items()}
 
 
 def _line_labels(key, preview_plies=10):
@@ -2510,13 +2548,20 @@ def _route_label_cache_key(route, target_key, preview_plies):
     # promete tratar bien.  El objetivo y el presupuesto de preview van en
     # claro porque son cortos y porque los tres juntos son la identidad: la
     # misma ruta hacia otra posicion es otra etiqueta.
+    #
+    # ``ROUTE_LABEL_VERSION`` es SUYO y no el del linaje: el payload gano un
+    # tercer campo y las entradas viejas ya no encajan, pero invalidar por
+    # eso el linaje entero — que es el paseo caro y el que absorbe las
+    # tormentas de F5 — seria pagar un arranque en frio del sitio por un
+    # rotulo.
     digest = hashlib.sha256(route.encode('utf-8', 'replace')).hexdigest()[:32]
     return (f'atomicdb.routelabel.v{LINEAGE_CACHE_VERSION}'
+            f'.{ROUTE_LABEL_VERSION}'
             f'.{preview_plies}.{target_key}.{digest}')
 
 
 def _route_labels_many(pairs, preview_plies=10):
-    """``{(route, target_key): (preview, full)}`` para varias filas de golpe.
+    """``{(route, target_key): (preview, full, opening)}``, varias de golpe.
 
     ESTO ERA EL GASTO MAYOR DE LA PORTADA.  Cada fila de "Now analyzing" y de
     "Up next" con ruta declarada rejugaba su linea entera con pyffish —
@@ -2571,14 +2616,32 @@ def _route_labels_many(pairs, preview_plies=10):
 
 
 def _walk_route_labels(route, target_key, preview_plies):
-    """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale."""
+    """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale.
+
+    El nombre de apertura sale del MISMO paseo, y por eso viaja aqui dentro:
+    calcularlo aparte costaria un segundo rejuego identico de la misma linea,
+    que es justo lo que la cache de este rotulo existe para no pagar.
+    """
     try:
         top, line, _ucis = _validated_play_route(route, target_key)
     except (PlayRouteError, PlayRouteConflict):
         return None
     full = _format_san_line(top, line, max_plies=512, keep_head=True)
     preview = _format_san_line(top, line, max_plies=preview_plies)
-    return preview, full
+    opening = _opening_name_for_keys(
+        [top.key, *(step['key'] for step in line)])
+    return preview, full, opening
+
+
+def _route_labels_full(route, target_key, preview_plies=10):
+    """(preview, full, opening) de esa RUTA, o None.
+
+    Una sola lectura para las tres cosas a proposito: son la misma linea
+    contada de tres maneras, y pedirlas por separado admite que una entrada
+    caduque en medio y la fila acabe con el rotulo de una ruta y el nombre de
+    otra."""
+    return _route_labels_many([(route, target_key)],
+                              preview_plies).get((route, target_key))
 
 
 def _route_labels(route, target_key, preview_plies=10):
@@ -2589,8 +2652,8 @@ def _route_labels(route, target_key, preview_plies=10):
     guardarse; aqui se re-valida entera (legalidad, llegada al objetivo,
     prefijos materializados) porque el arbol pudo cambiar debajo — ante
     cualquier duda, None y el linaje canonico de siempre."""
-    return _route_labels_many([(route, target_key)],
-                              preview_plies).get((route, target_key))
+    labels = _route_labels_full(route, target_key, preview_plies)
+    return None if labels is None else labels[:2]
 
 
 def _san_line(key, max_plies=16, keep_head=False):
@@ -3260,7 +3323,7 @@ def home(request):
         preview, full = labels.get(task.position_id, ('', ''))
         routed = routes.get((task.route, task.position_id))
         if routed is not None:
-            preview, full = routed
+            preview, full = routed[:2]
         analyzing.append({'key': task.position_id,
                           'san': preview or 'start position',
                           'full': full or 'start position',
@@ -3274,7 +3337,7 @@ def home(request):
         source, route = pending_meta.get(key, ('', ''))
         routed = routes.get((route, key))
         if routed is not None:
-            preview, full = routed
+            preview, full = routed[:2]
         upnext.append({'key': key,
                        'san': preview or 'start position',
                        'full': full or 'start position',
