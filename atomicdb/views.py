@@ -1624,6 +1624,17 @@ def _backed_source_url(key, ucis=None):
     return base if ucis is None else base + '?play=' + ','.join(ucis)
 
 
+def _proven_line_end_url(key, ucis=None):
+    """Enlace al final de la linea probada, con la ruta propia del que pincha.
+
+    Misma regla de ruta que ``_backed_source_url``, y por lo mismo: una ruta
+    VACIA tambien viaja, porque cero plies de historia es una historia
+    legitima y omitirla mandaria al destino al linaje canonico.
+    """
+    base = f'/atomicdb/proven-line-end/{key}/'
+    return base if ucis is None else base + '?play=' + ','.join(ucis)
+
+
 def _signed_opening_anchor(target_key, match, route_ply):
     """Bind the last catalogued opening to one exact explorer target.
 
@@ -2120,6 +2131,119 @@ def backed_source(request, key):
     response = redirect(url)
     # El origen se mueve en cuanto cae analisis nuevo bajo esta posicion: este
     # 302 no es cacheable por nadie.
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+# EL OTRO SALTO DE ESTA PAGINA, y por que no es el de arriba.
+# ``backed_source`` baja hasta donde NACE un numero abierto y por eso se para
+# en cuanto encuentra algo probado: debajo de una prueba no hay busqueda que
+# perseguir.  Una posicion CERRADA tiene la pregunta contraria — no de donde
+# sale el valor, sino donde acaba la linea que lo demuestra — y esa la
+# contesta este paseo.
+# Peticion de Eclipsia en #suggestions: "something clickable to immediately
+# take you to the terminal position".
+#
+# Tope: el MISMO con el que se guardo la linea (``ingest.WON_LINE_MAX_PLIES``),
+# leido de alli y no copiado, para que ninguna linea legitima pueda quedarse a
+# medio recorrer si ese numero se mueve.
+PROVEN_LINE_MAX_PLIES = ingest.WON_LINE_MAX_PLIES
+
+
+def _proven_next_move(pos):
+    """Con que jugada arranca la linea probada de esta posicion, o ``''``.
+
+    La linea GUARDADA manda cuando existe: es literalmente lo que el
+    explorador imprime bajo el veredicto, y un salto que acabase en otro
+    sitio contradiria a la pagina desde la que se pincha.  Un cierre MINIMAX
+    no guarda linea, solo el testigo de cada nodo, y ahi ese testigo es el
+    arranque.
+
+    ``best_move`` de un nodo ABIERTO es una heuristica, no un testigo, asi
+    que una posicion sin cerrar no arranca ninguna linea probada.
+    """
+    if pos.status == 'UNKNOWN':
+        return ''
+    line = (pos.won_line or '').split()
+    return line[0] if line else (pos.best_move or '')
+
+
+def _walk_proven_line(pos):
+    """Baja la linea probada de una posicion cerrada hasta su ultimo nodo.
+
+    Devuelve ``(final, ucis_caminados)``.  Sin nada que caminar la lista sale
+    vacia y el llamante no tiene salto que ofrecer.
+
+    PARADAS, todas ellas "aqui se acaba lo que hay que ensenar":
+      * la linea guardada se termino, o el nodo no declara continuacion.
+      * la arista todavia no esta materializada (``materialise_won_line``
+        corta en cuanto un testigo historico deja de ser legal).
+      * el paseo vuelve sobre una posicion que ya cruzo: el DAG transpone y
+        un ciclo colgaria esto.
+
+    Una consulta por paso como mucho, y solo al pinchar: la pagina que ofrece
+    el salto no paga ni una (§ ``explore``, ``proven_end_url``).
+    """
+    if pos.status == 'UNKNOWN':
+        # Un nodo ABIERTO puede llevar ``won_line`` puesta: es el testigo
+        # REFUTADO que guarda ``proof='DISPUTED'``.  Recorrerlo seria pasear
+        # una linea que el propio sistema ya declaro falsa, asi que aqui no
+        # hay nada probado que seguir ni con la URL escrita a mano.
+        return pos, []
+    node, walked, seen = pos, [], {pos.key}
+    line = (pos.won_line or '').split()
+    for step in range(PROVEN_LINE_MAX_PLIES):
+        if line:
+            uci = line[step] if step < len(line) else ''
+        else:
+            uci = _proven_next_move(node)
+        if not uci:
+            break
+        try:
+            edge = (Edge.objects.select_related('child')
+                    .get(parent=node, move_uci=uci))
+        except Edge.DoesNotExist:
+            break
+        if edge.child.key in seen:
+            break
+        seen.add(edge.child.key)
+        walked.append(uci)
+        node = edge.child
+    return node, walked
+
+
+def proven_line_end(request, key):
+    """Salta al final de la linea probada que esta posicion ensena.
+
+    Un GET puro, igual que ``backed_source``: lee, redirige y no escribe nada
+    — ni siquiera materializa la arista que le falte a una linea antigua,
+    porque crear nodos es lo que hace ``goto`` y esto no es ``goto``.
+
+    La ruta de ``?play=`` se revalida entera contra la posicion DE PARTIDA y
+    el destino la recibe extendida con los plies caminados, para que el
+    visitante aterrice con SU partida y no con un linaje reconstruido.
+    """
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return render(request, 'atomicdb/missing.html', status=404)
+    try:
+        route = _validated_play_route(request.GET.get('play'), pos.key)
+    except PlayRouteError:
+        route = None
+    end, walked = _walk_proven_line(pos)
+    ucis = None
+    if route is not None:
+        _top, _line, play_ucis = route
+        ucis = [*play_ucis, *walked]
+    # El destino RECHAZA la ruta que se pasa de largo, y una linea de mate
+    # larga bajo una partida larga desborda: mejor llegar sin historia que
+    # servir una pagina de error desde el propio enlace de la casa.
+    if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
+        ucis = None
+    response = redirect(_explore_url(end.key, ucis))
+    # El final se mueve en cuanto se certifica una linea mas corta o se
+    # materializa un ply que faltaba: este 302 no lo cachea nadie.
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -4844,6 +4968,19 @@ def explore(request, key):
         move['backed_url'] = _backed_source_url(move['key'], child_route)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening, names=community_map)
+    # SALTO AL FINAL DE LA LINEA PROBADA.  Se ofrece cuando el primer paso de
+    # esa linea es una fila NAVEGABLE de la tabla de abajo, y esa condicion es
+    # la que lo mantiene honesto por los dos lados: sin arista no hay viaje que
+    # prometer, y una primera jugada bloqueada por repeticion no se puede
+    # pinchar desde ninguna otra parte de esta pagina tampoco.  No cuesta ni
+    # una consulta — las filas ya estan cargadas — y el paseo entero se paga al
+    # pinchar (§ _walk_proven_line).
+    proven_first = _proven_next_move(pos)
+    proven_end_url = (
+        _proven_line_end_url(pos.key, active_ucis)
+        if proven_first and any(move['uci'] == proven_first
+                                and not move['blocked'] for move in moves)
+        else None)
     # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
     # explorar" — sin explorar esta una respuesta que EXISTE y a la que nadie
     # ha mirado, y esa se etiqueta en su propia fila (§ ingest.is_unexplored)
@@ -4980,6 +5117,9 @@ def explore(request, key):
         # Y si el salto acabo dando la vuelta, se dice: el visitante pincho
         # buscando de donde sale el numero y lo que hay es una repeticion.
         'backed_repetition': bool(request.GET.get(BACKED_REPETITION_PARAM)),
+        # El salto al final de la linea probada, o None cuando no hay linea
+        # que recorrer y entonces la plantilla no pinta control ninguno.
+        'proven_end_url': proven_end_url,
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.

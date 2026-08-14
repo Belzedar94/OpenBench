@@ -529,12 +529,23 @@
     })();
     </script>
     {% endif %}
+    {% comment %}El chip del final de la linea ES el salto, con la misma
+    forma que el chip de respaldo de la cabecera: un solo elemento, y solo
+    cuando el viaje existe de verdad (§ views, proven_end_url).  La linea que
+    lleva el chip es siempre la que se esta imprimiendo al lado, asi que el
+    aterrizaje no puede contradecir a lo que se lee.{% endcomment %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
-      <strong>{{ pos.won_line }}</strong></p>
+      <strong>{{ pos.won_line }}</strong>{% if proven_end_url %} <a
+        class="backed-mark" href="{{ proven_end_url }}"
+        aria-label="jump to the last position of this winning line"
+        title="Follow this line to its end and land on the position it finishes at">end of line</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
     <p style="font-size:.85rem"><span class="dim">witness move:</span>
-      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span></p>
+      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
+        class="backed-mark" href="{{ proven_end_url }}"
+        aria-label="jump to the last position this witness leads to"
+        title="Follow the witness move of each position down to where the line ends">end of line</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MATE_PV' and not pos.won_line %}
     <p class="dim" style="font-size:.8rem">closed before line recording was added;
       the mate was verified move by move at closure time</p>

@@ -79,6 +79,10 @@ urlpatterns = [
     # el destino se mueve con cada analisis que cae debajo, asi que tampoco
     # lleva cache.
     path('backed-source/<str:key>/', views.backed_source),
+    # Salto al final de la linea PROBADA: camina el testigo y redirige.  Lee
+    # igual que el de arriba, y su destino tambien se mueve — una linea mas
+    # corta certificada, un ply que faltaba — asi que tampoco lleva cache.
+    path('proven-line-end/<str:key>/', views.proven_line_end),
     path('method/', _method_cached),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),

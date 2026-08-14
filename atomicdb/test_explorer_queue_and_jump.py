@@ -1,8 +1,11 @@
-"""The waiting queue row: which opening the request is in.
+"""Two explorer rows: the opening a request is in, and the end of a proof.
 
-The row used to spend its words on "N requests ahead", which is the number
-the "#N" beside it already gives, so the room now goes to something the row
-could not say at all.
+Both come from the same report in #suggestions. The waiting row used to spend
+its words on "N requests ahead", which is the number the "#N" beside it
+already gives, so the room now goes to something the row could not say at
+all: which opening the requested line is in. And a position closed by a
+proven line had the line printed but no way to reach the end of it without
+walking every ply by hand.
 
 What is fixed here:
 
@@ -10,14 +13,17 @@ What is fixed here:
   * the name belongs to the MOVE ORDER the row prints, which matters because
     an inherited name depends on the order and the same position is reachable
     through differently named ancestors;
-  * a line the catalogue does not name prints no name rather than a guess.
+  * a line the catalogue does not name prints no name rather than a guess;
+  * a proven position offers one jump, and it lands on the last position of
+    the very line printed beside it;
+  * nothing is offered where there is no proven line to walk.
 """
 
 import html as html_module
 import re
 
 from . import contributors, ingest, logic, views
-from .models import AnalysisTask, Edge
+from .models import AnalysisTask, Edge, Position
 from .testing import TestCase
 
 
@@ -52,10 +58,31 @@ def _positions(ucis, *, connect):
     return nodes
 
 
+def _chain(node, ucis):
+    """Materialise a continuation from a position, edges included."""
+    nodes = []
+    for uci in ucis:
+        child = ingest.get_or_create_position(logic.apply_move(node.fen, uci))
+        Edge.objects.get_or_create(parent=node, move_uci=uci,
+                                   defaults={'child': child})
+        nodes.append(child)
+        node = child
+    return nodes
+
+
 def _waiting(position, route='', username='alice'):
     return AnalysisTask.objects.create(
         position=position, generation=0, budget_nodes=128_000_000,
         source=AnalysisTask.Source.USER, requested_by=username, route=route)
+
+
+def _close(position, **fields):
+    """Close a position by hand: these tests navigate proofs, they do not
+    produce them."""
+    for name, value in fields.items():
+        setattr(position, name, value)
+    position.save(update_fields=list(fields))
+    return position
 
 
 class WaitingRowOpeningTests(TestCase):
@@ -134,3 +161,134 @@ class WaitingRowOpeningTests(TestCase):
         sequence is allowed to take the page down with it."""
         self.assertEqual(views._opening_name_for_keys([]), '')
         self.assertEqual(views._opening_name_for_keys(['not-a-key']), '')
+
+
+class ProvenLineJumpTests(TestCase):
+    """One click from a proof to the position it ends on."""
+
+    def setUp(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        self.top = _chain(root, ['g1f3'])[0]
+        self.line = ['d7d6', 'b1c3', 'b8c6']
+        self.nodes = _chain(self.top, self.line)
+        self.end = self.nodes[-1]
+        _close(self.top, status='WHITE_WIN', closure='MATE_PV',
+               proof='ANDOR', won_line=' '.join(self.line),
+               best_move=self.line[0], mate_in=len(self.line))
+        self.url = f'/atomicdb/explore/{self.top.key}/'
+        self.jump = f'/atomicdb/proven-line-end/{self.top.key}/'
+
+    def test_a_proven_position_offers_the_jump_beside_its_line(self):
+        body = self.client.get(self.url).content.decode()
+
+        self.assertIn('winning line:', body)
+        self.assertIn(self.jump, body)
+        self.assertIn('end of line', body)
+
+    def test_the_jump_lands_on_the_last_position_of_that_line(self):
+        response = self.client.get(self.jump)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{self.end.key}/')
+
+    def test_the_landing_is_never_cached(self):
+        """The end moves the moment a shorter line is certified or a missing
+        ply is materialised."""
+        response = self.client.get(self.jump)
+
+        self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_the_jump_extends_the_route_the_visitor_came_with(self):
+        """A visitor arrives with their own game, not with a reconstructed
+        lineage, and leaves with it too."""
+        response = self.client.get(self.jump + '?play=g1f3')
+
+        self.assertEqual(
+            response['Location'],
+            f'/atomicdb/explore/{self.end.key}/?play=g1f3,'
+            + ','.join(self.line))
+
+    def test_a_route_that_does_not_reach_the_position_lands_without_one(self):
+        response = self.client.get(self.jump + '?play=a2a3')
+
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{self.end.key}/')
+
+    def test_the_walk_writes_nothing(self):
+        before = Position.objects.count(), Edge.objects.count()
+
+        self.client.get(self.jump)
+
+        self.assertEqual((Position.objects.count(), Edge.objects.count()),
+                         before)
+
+    def test_an_unsolved_position_offers_no_jump(self):
+        body = self.client.get(
+            f'/atomicdb/explore/{self.end.key}/').content.decode()
+
+        self.assertNotIn('/atomicdb/proven-line-end/', body)
+
+    def test_a_refuted_witness_is_not_a_line_to_walk(self):
+        """An open node keeps its disputed witness in ``won_line``. Walking it
+        would be parading a line the system already called false."""
+        disputed = _chain(self.end, ['h2h3'])[0]
+        _close(disputed, proof='DISPUTED', won_line='a7a6')
+
+        body = self.client.get(
+            f'/atomicdb/explore/{disputed.key}/').content.decode()
+
+        self.assertNotIn('/atomicdb/proven-line-end/', body)
+        self.assertEqual(views._walk_proven_line(disputed), (disputed, []))
+
+    def test_a_line_whose_first_ply_is_not_in_the_tree_offers_no_jump(self):
+        """An old closure whose witness was never materialised has a line to
+        print and no line to walk, and the page promises only the second."""
+        orphan = ingest.get_or_create_position(
+            logic.apply_move(self.top.fen, 'g8f6'))
+        Edge.objects.get_or_create(parent=self.top, move_uci='g8f6',
+                                   defaults={'child': orphan})
+        _close(orphan, status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
+               won_line='b1c3 b8c6', best_move='b1c3', mate_in=2)
+
+        body = self.client.get(
+            f'/atomicdb/explore/{orphan.key}/').content.decode()
+
+        self.assertIn('winning line:', body)
+        self.assertNotIn('/atomicdb/proven-line-end/', body)
+
+    def test_a_witness_chain_without_a_stored_line_is_followed_node_by_node(
+            self):
+        """A MINIMAX closure records no line, only the witness move of each
+        node, so the descent reads that claim one position at a time."""
+        for node, uci in zip([self.top, *self.nodes], self.line):
+            _close(node, status='WHITE_WIN', closure='MINIMAX', won_line=None,
+                   best_move=uci)
+        _close(self.end, status='WHITE_WIN', closure='MINIMAX', won_line=None,
+               best_move=None)
+
+        body = self.client.get(self.url).content.decode()
+        response = self.client.get(self.jump)
+
+        self.assertIn('witness move:', body)
+        self.assertIn(self.jump, body)
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{self.end.key}/')
+
+    def test_the_walk_stops_where_the_line_comes_back_on_itself(self):
+        """1.Nf3 Nc6 2.Ng1 Nb8 IS the start position again once the counters
+        are gone, and a proof line that closes on itself has no end to show."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        cycle = ['g1f3', 'b8c6', 'f3g1', 'c6b8']
+        nodes = _chain(root, cycle)
+        _close(root, status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
+               won_line=' '.join(cycle), best_move=cycle[0])
+
+        end, walked = views._walk_proven_line(root)
+
+        self.assertEqual(walked, cycle[:3])
+        self.assertEqual(end.key, nodes[2].key)
+
+    def test_the_walk_never_outruns_the_cap_the_line_was_stored_under(self):
+        self.assertEqual(views.PROVEN_LINE_MAX_PLIES,
+                         ingest.WON_LINE_MAX_PLIES)
