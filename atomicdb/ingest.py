@@ -1419,6 +1419,25 @@ def _backed_for(row, children, discrepancies=None, bound=None):
             if (best.quality < own_quality * BACKED_QUALITY_TOLERANCE
                     and discrepancies is not None):
                 discrepancies.append((best.move, row.key, own_quality))
+        elif (best.value <= -MATE_BAND if stm_white
+              else best.value >= MATE_BAND):
+            # SIN ANCLA, LA DERROTA NO SE RESPALDA (propietario, 14-ago).
+            # Un nodo sin eval propia ni escaparate cuyo unico conocimiento
+            # es una respuesta que PIERDE no sabe nada de si mismo: el que
+            # mueve tiene el resto de la legalidad por abrir y no va a
+            # elegir su derrota.  Es la misma aritmetica que ya rige los
+            # cierres de status — una hija ganadora basta, la perdida exige
+            # cobertura completa — aplicada al respaldo heuristico.  El
+            # caso real: un mate MINIMAX llego por transposicion a la unica
+            # hija materializada de dos nodos jamas analizados, el min
+            # sobre ese subset de uno les sello backed 10000, y las dos
+            # filas fantasma encabezaron la tabla por encima de la unica
+            # jugada con 2B de motor detras (Nf3 d6, cadena de +1268
+            # congelada).  El corte del 28-jul ya degradaba la CALIDAD de
+            # estas pruebas parciales; el VALOR en banda de mate contra el
+            # que mueve tampoco puede subir.  La ganancia del que mueve
+            # sigue pasando con una sola hija, como siempre.
+            return None, None, 0, 0
     quality = best.quality
     if (not complete or bounded) and quality >= PROVEN_QUALITY:
         # La autoridad de una PRUEBA termina en el primer nodo cuyas

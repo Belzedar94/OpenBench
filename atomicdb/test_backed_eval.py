@@ -58,6 +58,47 @@ class BackedChainTests(TestCase):
         p.refresh_from_db()
         self.assertEqual(p.backed_move, 'd2d4')
 
+    def test_partial_loss_without_anchor_backs_nothing(self):
+        """Un mate EN CONTRA por la unica hija mirada no respalda al nodo.
+
+        El caso real (14-ago, Nf3 d6): un cierre MINIMAX llego por
+        transposicion a la unica hija materializada de un nodo sin eval
+        propia ni analisis, con 16 respuestas mas por abrir.  El min sobre
+        ese subset de uno sellaba backed 10000 — "las negras estan
+        perdidas" cuando lo unico probado es que UNA de sus 17 respuestas
+        pierde — y la fila fantasma encabezaba la tabla sobre jugadas con
+        motor de verdad detras.  Misma regla que los cierres de status:
+        la derrota exige cobertura completa.
+        """
+        padre = _pos('PLA', 'b', expanded=True)
+        perdida = _pos('PLA-LOSS', 'w', status='WHITE_WIN',
+                       backed_eval=10_000, backed_plies=0)
+        _edge(padre, perdida, 'e8d7')
+        for i in range(3):
+            _edge(padre, _pos(f'PLA-H{i}', 'w'))
+
+        ingest.backup_backed_evals([padre.key])
+
+        padre.refresh_from_db()
+        self.assertIsNone(padre.backed_eval)
+        self.assertIsNone(padre.backed_move)
+
+    def test_partial_win_for_mover_still_backs_up(self):
+        # El espejo legitimo: al que MUEVE le basta una hija ganadora,
+        # exactamente como en el minimax de status.
+        padre = _pos('PWI', 'w', expanded=True)
+        ganada = _pos('PWI-WIN', 'b', status='WHITE_WIN',
+                      backed_eval=10_000, backed_plies=0)
+        _edge(padre, ganada, 'd1h5')
+        for i in range(3):
+            _edge(padre, _pos(f'PWI-H{i}', 'b'))
+
+        ingest.backup_backed_evals([padre.key])
+
+        padre.refresh_from_db()
+        self.assertEqual(padre.backed_eval, 10_000)
+        self.assertEqual(padre.backed_move, 'd1h5')
+
     def test_transposition_updates_every_parent(self):
         # Un DAG tiene varios padres: la transposicion recibe el refinamiento
         # por las dos rutas, no solo por la primera que encuentre el ascenso.
@@ -1008,19 +1049,21 @@ class BackedIngestTests(TestCase):
         parent.refresh_from_db()
         self.assertEqual(parent.status, 'WHITE_WIN')
 
-    def test_a_walked_mate_line_loses_proof_weight_at_partial_nodes(self):
+    def test_a_walked_mate_line_stops_at_the_losers_partial_node(self):
         """A proof's authority ends where the unproven alternatives begin.
 
         A visitor WALKED a line to a terminal mate without requesting a
-        single analysis.  The terminal is genuinely proven, but every walked
-        node above it has no eval of its own, so the directional guard had
-        no anchor and the mate-band value climbed the whole chain carrying
-        PROVEN quality — the explorer painted 9994 BACKED over territory no
-        engine ever looked at (Wolfram, 28-jul).  The value may climb (it is
-        the best knowledge), but past a partial-coverage node it carries
-        only that node's own search support: the first evaluated ancestor
-        blocks it, and the convergence purchase sends the ENGINE down the
-        line the human explored.
+        single analysis.  The terminal is genuinely proven, but the walked
+        node above it belongs to the LOSING side, has no eval of its own,
+        and has every alternative reply unopened.  The 28-jul contract let
+        the mate-band value climb with degraded quality (the explorer
+        painted 9994 BACKED over territory no engine ever looked at —
+        Wolfram); 14-ago tightened it after two transposition-fed ghosts
+        headlined a table over a move with 2B of real search (Nf3 d6): a
+        defeat needs full coverage to back up, exactly like status
+        closures, so the loser's partial node now carries NO backed value
+        at all and the evaluated ancestor keeps its own knowledge through
+        its point eval.
         """
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
@@ -1043,16 +1086,14 @@ class BackedIngestTests(TestCase):
 
         walked.refresh_from_db()
         root.refresh_from_db()
-        # The walked node itself may honestly carry the value...
-        self.assertIsNotNone(walked.backed_eval)
-        # ...but WITHOUT proof weight,
-        self.assertLess(walked.backed_nodes, ingest.PROVEN_QUALITY)
-        # so the evaluated ancestor keeps its own knowledge,
-        self.assertEqual(root.backed_eval, 120)
-        self.assertIsNone(root.backed_move)
-        # and the discrepancy buys the walked line an engine analysis.
-        self.assertTrue(AnalysisTask.objects.filter(
-            position=walked, source=AnalysisTask.Source.FILL).exists())
+        # The loser's partial node backs nothing: one refuted reply out of
+        # twenty proves nothing about the node itself.
+        self.assertIsNone(walked.backed_eval)
+        self.assertIsNone(walked.backed_move)
+        # The evaluated ancestor is untouched: no backed value, and its
+        # header still says +120 through the point eval.
+        self.assertIsNone(root.backed_eval)
+        self.assertEqual(ingest.best_known_eval(root), 120)
 
     def test_a_shallow_pass_displaces_and_the_delivery_confirms_it(self):
         """The purchase's delivery route, end to end through submit.
