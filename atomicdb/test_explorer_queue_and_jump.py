@@ -185,6 +185,18 @@ class ProvenLineJumpTests(TestCase):
         self.assertIn(self.jump, body)
         self.assertIn('end of line', body)
 
+    def test_the_chip_says_how_far_it_goes_before_anybody_clicks(self):
+        """The distance is the length of the line printed beside it.
+
+        A jump that announced a number of its own could disagree with the
+        line the page is showing; taking the count from that very line is the
+        only figure that cannot.
+        """
+        body = self.client.get(self.url).content.decode()
+
+        self.assertIn(f'end of line ·{len(self.line)}', body)
+        self.assertIn(f'{len(self.line)} plies below', body)
+
     def test_the_jump_lands_on_the_last_position_of_that_line(self):
         response = self.client.get(self.jump)
 
@@ -215,7 +227,9 @@ class ProvenLineJumpTests(TestCase):
         self.assertEqual(response['Location'],
                          f'/atomicdb/explore/{self.end.key}/')
 
-    def test_the_walk_writes_nothing(self):
+    def test_a_line_already_in_the_tree_is_walked_without_building_anything(
+            self):
+        """Nothing to build, nothing built: the chain is already there."""
         before = Position.objects.count(), Edge.objects.count()
 
         self.client.get(self.jump)
@@ -239,11 +253,48 @@ class ProvenLineJumpTests(TestCase):
             f'/atomicdb/explore/{disputed.key}/').content.decode()
 
         self.assertNotIn('/atomicdb/proven-line-end/', body)
-        self.assertEqual(views._walk_proven_line(disputed), (disputed, []))
+        self.assertEqual(views._walk_proven_line(disputed),
+                         (disputed, [], ''))
 
-    def test_a_line_whose_first_ply_is_not_in_the_tree_offers_no_jump(self):
-        """An old closure whose witness was never materialised has a line to
-        print and no line to walk, and the page promises only the second."""
+    def test_a_ply_missing_from_the_tree_no_longer_cuts_the_jump_short(self):
+        """THE REPORTED BUG, and the whole reason this walk changed.
+
+        A closure stores its winning line as text; the chain of positions it
+        names becomes a real tree only when the materialiser runs over it.
+        Closures older than that helper have as much of the chain as somebody
+        happened to click, so a mate in two commonly had the first ply in the
+        tree and nothing under it. Following edges, the jump stopped there and
+        dropped the visitor on the position BEFORE the mate, one ply from the
+        line it had just promised to walk to the end (Eclipsia, with the line
+        "Bd7 Bxd7#" printed right beside the chip).
+
+        The plies of a proven line are not a guess, so the walk builds the one
+        it is missing and carries on to the end of the line.
+        """
+        top = _chain(self.end, ['h2h3'])[0]
+        line = ['e7e5', 'd2d4']
+        _close(top, status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
+               won_line=' '.join(line), best_move=line[0], mate_in=2)
+        # Only the FIRST ply exists, exactly as a single click leaves it.
+        first = _chain(top, line[:1])[0]
+        self.assertFalse(Edge.objects.filter(parent=first).exists())
+
+        response = self.client.get(f'/atomicdb/proven-line-end/{top.key}/')
+
+        landing = logic.key_of(logic.apply_move(
+            logic.apply_move(top.fen, line[0]), line[1]))
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{landing}/')
+        self.assertTrue(Edge.objects.filter(parent=first,
+                                            move_uci=line[1]).exists())
+
+    def test_a_line_no_ply_of_which_is_in_the_tree_is_still_walkable(self):
+        """Same rule from the top: the chain is built out of the closure.
+
+        The page used to refuse the jump whenever the first ply was not an
+        edge yet, which meant the oldest proofs, the ones that most need the
+        shortcut, were the ones that never offered it.
+        """
         orphan = ingest.get_or_create_position(
             logic.apply_move(self.top.fen, 'g8f6'))
         Edge.objects.get_or_create(parent=self.top, move_uci='g8f6',
@@ -253,9 +304,35 @@ class ProvenLineJumpTests(TestCase):
 
         body = self.client.get(
             f'/atomicdb/explore/{orphan.key}/').content.decode()
+        response = self.client.get(
+            f'/atomicdb/proven-line-end/{orphan.key}/')
 
         self.assertIn('winning line:', body)
-        self.assertNotIn('/atomicdb/proven-line-end/', body)
+        self.assertIn(f'/atomicdb/proven-line-end/{orphan.key}/', body)
+        landing = logic.key_of(logic.apply_move(
+            logic.apply_move(orphan.fen, 'b1c3'), 'b8c6'))
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{landing}/')
+
+    def test_a_witness_that_no_longer_replays_lands_short_and_says_so(self):
+        """The one case where a stored line genuinely ends early.
+
+        Nothing can build a ply that is not a legal move any more, so the
+        walk stops on the last one that was, and the landing carries the
+        reason rather than passing itself off as the end of the line.
+        """
+        stale = _chain(self.end, ['h2h4'])[0]
+        _close(stale, status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
+               won_line='e7e5 h4h5 a1a8', best_move='e7e5', mate_in=3)
+
+        response = self.client.get(f'/atomicdb/proven-line-end/{stale.key}/')
+
+        landed = logic.key_of(logic.apply_move(
+            logic.apply_move(stale.fen, 'e7e5'), 'h4h5'))
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{landed}/?incomplete=1')
+        body = self.client.get(response['Location']).content.decode()
+        self.assertIn('>chain breaks here</span>', body)
 
     def test_a_witness_chain_without_a_stored_line_is_followed_node_by_node(
             self):
@@ -284,10 +361,11 @@ class ProvenLineJumpTests(TestCase):
         _close(root, status='WHITE_WIN', closure='MATE_PV', proof='ENGINE',
                won_line=' '.join(cycle), best_move=cycle[0])
 
-        end, walked = views._walk_proven_line(root)
+        end, walked, outcome = views._walk_proven_line(root)
 
         self.assertEqual(walked, cycle[:3])
         self.assertEqual(end.key, nodes[2].key)
+        self.assertEqual(outcome, 'repetition')
 
     def test_the_walk_never_outruns_the_cap_the_line_was_stored_under(self):
         self.assertEqual(views.PROVEN_LINE_MAX_PLIES,

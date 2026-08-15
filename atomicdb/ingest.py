@@ -1928,6 +1928,21 @@ def best_known_eval(pos):
 WON_LINE_MAX_PLIES = 64
 
 
+def won_line_materialisable(pos):
+    """Puede este nodo convertir su linea guardada en arbol?
+
+    La condicion de ``materialise_won_line``, escrita UNA vez porque hay quien
+    necesita saberla sin pagarla: el explorador ofrece el salto al final de la
+    linea sabiendo que el click va a poder construir lo que le falte
+    (§ ``views.explore``), y preguntarselo con una copia de esta regla es como
+    un control acaba prometiendo un viaje que no existe.
+    """
+    return bool(pos.closure == 'MATE_PV'
+                and pos.status in ('WHITE_WIN', 'BLACK_WIN')
+                and pos.proof != 'DISPUTED'
+                and (pos.won_line or '').split())
+
+
 def materialise_won_line(pos, verify=False):
     """Crea la cadena de la ``won_line`` como arbol de verdad.
 
@@ -1942,8 +1957,7 @@ def materialise_won_line(pos, verify=False):
     menos este.  Prefiero subestimar el margen a inventarlo.
     """
     line = (pos.won_line or '').split()
-    if (pos.closure != 'MATE_PV' or pos.status not in ('WHITE_WIN', 'BLACK_WIN')
-            or pos.proof == 'DISPUTED' or not line):
+    if not won_line_materialisable(pos):
         return {'created_edges': 0, 'closed': 0, 'plies': 0}
     if verify and not logic.verify_mate_pv(
             pos.fen, line, pos.status == 'WHITE_WIN'):
