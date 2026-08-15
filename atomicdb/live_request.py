@@ -53,10 +53,11 @@ contradicting the other.
 
 from datetime import timedelta
 
-from django.db.models import (BigIntegerField, Case, F, IntegerField, Q, Sum,
-                              Value, When, Window)
+from django.db.models import (BigIntegerField, Case, CharField, F,
+                              IntegerField, Q, Sum, Value, When, Window)
 from django.utils import timezone
 
+from . import lanes
 from .ingest import notification_deserved
 from .models import AnalysisTask, WorkerPing
 
@@ -124,9 +125,64 @@ def named_tier(now=None):
             | Q(created__lt=(now or timezone.now()) - STARVED_AFTER))
 
 
-def fair_share(queryset):
-    """Anota ``fair_ahead``: los NODOS que ese MISMO peticionario ya tiene
-    encolados por delante de cada fila.
+def _effective_account():
+    """La cuenta con la que una fila REPARTE: su autor, o quien le presto carril.
+
+    Vacio en ``lane_account`` significa "el autor", que es lo que dice toda
+    fila que no ha respaldado nadie, asi que esta expresion vale
+    ``requested_by`` en la inmensa mayoria de la cola y la particion es la de
+    siempre (§ ``models.AnalysisTask.lane_account``).
+    """
+    return Case(When(lane_account='', then=F('requested_by')),
+                default=F('lane_account'), output_field=CharField())
+
+
+def _lane_condition(name):
+    """Las filas del carril de ``name``: las suyas, y las que respalda."""
+    return Q(lane_account=name) | Q(lane_account='', requested_by=name)
+
+
+def _lane_size(context):
+    """Cuanta gente hay en el carril de cada fila.  El multiplicador.
+
+    ES LO QUE CONVIERTE UNA CUOTA POR CUENTA EN UNA CUOTA POR CARRIL.  La suma
+    propia de cada miembro, multiplicada por el tamano de su carril: un carril
+    de contribuidor tiene un miembro, asi que multiplica por uno y su orden
+    interno es EXACTAMENTE el de antes de que existieran los carriles; el
+    comun tiene tantos como gente haya dentro, asi que cada uno avanza esas
+    veces mas rapido y el comun entero avanza al ritmo de UN carril.  Ahi esta
+    la aritmetica de "las cuentas alternativas no compran nada": cinco alts
+    suben el recuento y se reparten la misma cuota cinco veces.
+
+    Y ES LO QUE HACE EL CAMBIO AUDITABLE.  Dentro de un carril el
+    multiplicador es constante, asi que el orden relativo entre sus filas no
+    se mueve ni una posicion; y cuando todo el mundo esta en el comun — que es
+    lo que pasa el dia del despliegue, y siempre que ningun contribuidor tenga
+    nada encolado — es una constante global y el orden servido es IDENTICO al
+    de hoy.
+    """
+    members = context['members']
+    commons = max(1, members.get(lanes.LANE_COMMONS, 1))
+    branches = [When(_lane_condition(name),
+                     then=Value(max(1, members.get(name, 1))))
+                for name in context['contributors']]
+    if not branches:
+        # Sin carriles propios no hay nada que distinguir: una constante, y de
+        # paso ni un CASE que evaluar por fila.
+        return Value(commons)
+    return Case(*branches, default=Value(commons),
+                output_field=IntegerField())
+
+
+def fair_share(queryset, context=None):
+    """Anota ``lane_ahead``: los NODOS que ese mismo peticionario ya tiene
+    encolados por delante de cada fila, escalados por el tamano de su CARRIL.
+
+    ``context`` es el reparto de carriles (§ ``lanes.lane_context``).  Quien
+    ordena DENTRO de una transaccion tiene que resolverlo antes y pasarlo aqui:
+    leerlo desde dentro pone una lectura de ``WorkerPing`` y de la banda entera
+    detras de las escrituras de esa misma transaccion.  Los demas lectores lo
+    dejan a ``None`` y se resuelve solo.
 
     QUE ES.  Deficit round-robin ponderado por coste, y es el ultimo escalon
     del orden de servicio: el primero que llega de cada cuenta lleva cero
@@ -183,15 +239,18 @@ def fair_share(queryset):
     """
     running_first = Case(When(state=LEASED, then=Value(0)), default=Value(1),
                          output_field=IntegerField())
+    if context is None:
+        context = lanes.lane_context()
     return (queryset
             .annotate(_fair_cumulative=Window(
                 expression=Sum('budget_nodes'),
-                partition_by=[F('source'), F('requested_by')],
+                partition_by=[F('source'), _effective_account()],
                 order_by=(running_first.asc(), F('queue_seq').asc(),
                           F('id').asc())))
-            .annotate(fair_ahead=Case(
+            .annotate(lane_ahead=Case(
                 When(source=USER,
-                     then=F('_fair_cumulative') - F('budget_nodes')),
+                     then=(F('_fair_cumulative') - F('budget_nodes'))
+                          * _lane_size(context)),
                 default=Value(0), output_field=BigIntegerField()))
             # El recuento de personas se lee ACOTADO A LA BANDA USER, por lo
             # mismo que el reparto: una tarea que nacio de un click puede
@@ -225,7 +284,7 @@ def fair_share(queryset):
 # encuentren empatadas no es casualidad — sumarse a una peticion ajena la manda
 # al frente de la cola de SU autor (§ ``ingest.add_requester``), que es justo
 # donde estan los ceros de todo el mundo.
-SERVICE_KEYS = ('-named_first', 'fair_ahead', '-backer_rank')
+SERVICE_KEYS = ('-named_first', 'lane_ahead', '-backer_rank')
 
 
 def named_first_rank(now=None, band_only=False):

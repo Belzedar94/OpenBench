@@ -471,6 +471,13 @@ def api_lease(request):
     supports_lease_token = worker_build >= LEASE_TOKEN_BUILD
     lease_session = request.POST.get('lease_session', '')[:64]
     active_task_id = None
+    # El reparto de CARRILES, resuelto ANTES de abrir la transaccion.  Lee
+    # ``WorkerPing`` y la banda que espera, y las dos las escribe o las
+    # bloquea la transaccion de mas abajo: resuelto desde dentro, el refresco
+    # de la entrada compartida se encontraba la tabla cogida por sus propias
+    # escrituras.  Fuera cuesta lo mismo (casi siempre, nada: la entrada vive
+    # treinta segundos y esto corre cada tres) y no depende de nadie.
+    lane_context = lanes.lane_context()
 
     with atomic():
         # recuperar leases caducados
@@ -610,7 +617,7 @@ def api_lease(request):
             # y ``fair_ahead`` valen 0 en todas, asi que sigue siendo el unico
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
-            ordered = (live_request.fair_share(ordered)
+            ordered = (live_request.fair_share(ordered, context=lane_context)
                        .order_by('-source', '-own_first',
                                  *live_request.SERVICE_KEYS,
                                  '-queue_rank', 'id'))

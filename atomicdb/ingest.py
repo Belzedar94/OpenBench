@@ -3820,9 +3820,20 @@ def add_requester(task, username):
     No es un privilegio nuevo: adelantar una peticion propia ya lo puede hacer
     su autor con un click (§ ``views.api_queue_bump``), asi que sumarse a una
     ajena no compra nada que su autor no tuviera.
+
+    Y ADEMAS LE PRESTA SU CARRIL, si el suyo esta mas despejado.  Adelantar
+    dentro de la cola del autor no sirve de nada cuando esa cola entera esta
+    detras de todo el mundo: era el aviso de Eclipsia del 15-ago sobre una
+    peticion de soothdest, con el autor a unas 2.690 filas de profundidad.  El
+    carril se resuelve AQUI y no en el orden de servicio porque los candidatos
+    viven en una lista JSON y sus cargas son agregados sobre la misma tabla que
+    la ventana esta recorriendo: ninguna de las dos cosas cabe en la unica
+    sentencia que el arriendo puede permitirse.  Aqui cuesta un agregado
+    pequeno sobre un click que ya escribe (§ ``lanes.effective_account``).
     """
     if not _record_requester(task, username):
         return False
+    _resolve_lane_account(task)
     if task.state != AnalysisTask.TState.PENDING:
         # Ya esta en un motor: el orden de la cola no le dice nada, y lo unico
         # que faltaba — el aviso cuando aterrice — ya esta anotado.
@@ -3873,6 +3884,14 @@ def withdraw_requester(task, now=None):
         task.queue_seq = 0
         task.save(update_fields=['requested_by', 'also_requested_by',
                                  'backers', 'queue_seq'])
+        # EL CARRIL SE VUELVE A RESOLVER, por lo mismo que ``queue_seq`` vuelve
+        # a cero: la fila cambio de dueno, asi que el prestamo de carril que
+        # tenia hablaba de un reparto de peticionarios que ya no existe.  El
+        # que se marcha puede ser justo el que prestaba el suyo, y el que entra
+        # puede ser el que ya lo prestaba — y entonces el prestamo sobra,
+        # porque prestarse el carril a uno mismo es lo que ya significa el
+        # vacio (§ ``lanes.effective_account``).
+        _resolve_lane_account(task)
         return 'handed-over'
     AnalysisTask.objects.filter(pk=task.pk).update(
         state=AnalysisTask.TState.CANCELLED, completed=now or timezone.now())
@@ -3951,6 +3970,27 @@ def restore_cancelled(task):
                                 state=AnalysisTask.TState.CANCELLED).update(
         state=AnalysisTask.TState.PENDING, completed=None)
     return True
+
+
+def _resolve_lane_account(task):
+    """Reescribe ``lane_account`` con el mejor colocado de sus peticionarios.
+
+    Se recalcula cada vez que cambia el CONJUNTO de peticionarios, que es
+    cuando la respuesta puede cambiar.  No se recalcula despues: la asignacion
+    es una foto, y si el respaldo elegido llena luego su propia cola la
+    peticion viaja en un carril que ya no es el mas ligero.  Eso esta acotado
+    — para entonces la peticion ya esta cerca del frente de ese carril — y se
+    ve en la pagina de carriles, que es donde debe tomarse la siguiente
+    decision sobre ella.
+    """
+    from . import lanes
+    names = [name for name in
+             [task.requested_by] + list(task.also_requested_by or []) if name]
+    lane = lanes.effective_account(task.requested_by, task.also_requested_by,
+                                   lanes.charged_loads(names))
+    if lane != task.lane_account:
+        task.lane_account = lane
+        task.save(update_fields=['lane_account'])
 
 
 def ladder_exhausted(pos):

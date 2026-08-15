@@ -379,6 +379,22 @@ class AnalysisTask(models.Model):
     # que existia y en toda peticion normal: la columna solo se despega del
     # suelo cuando alguien MAS pide lo mismo, que es cuando significa algo.
     backers = models.IntegerField(default=0)
+    # De QUIEN es el CARRIL con el que esta peticion viaja, cuando no es el de
+    # su autor.  Vacio — que es lo que dice toda fila que existia y toda
+    # peticion que pidio una sola persona — significa "el de ``requested_by``",
+    # asi que la columna no necesita relleno y no cambia nada por si sola.
+    #
+    # Aviso de la comunidad (Eclipsia, 15-ago, sobre una peticion de
+    # soothdest): una peticion que piden varios se cobraba SOLO a su autor, asi
+    # que con el autor saturado se quedaba enterrada bajo su propio atasco
+    # — unas 2.690 filas — y sumarse no cambiaba nada visible.  Desde aqui la
+    # peticion viaja con el carril del MEJOR COLOCADO de los suyos
+    # (§ ``lanes.effective_account``), que es lo que hace que sumarse sirva.
+    #
+    # La AUTORIA no se mueve: el aviso al aterrizar, la cola del perfil y la
+    # afinidad del worker siguen leyendo ``requested_by``.  Prestar tu carril
+    # no es quedarte la peticion.
+    lane_account = models.CharField(max_length=64, default='', blank=True)
     # El sitio de esta tarea DENTRO de la cola de su peticionario.  Cero es
     # "nunca se toco" y entonces manda el ``id``, que es el orden de llegada de
     # siempre: con la columna a cero en todas las filas, el reparto justo

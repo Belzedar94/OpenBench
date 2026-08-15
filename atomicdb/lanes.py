@@ -24,12 +24,15 @@ and it does not open a lane, because the vote said CPU is what earns a lane and
 the owner runs workers like everybody else.
 """
 
+import logging
 from datetime import timedelta
 
 from django.db.models import Count, Min, Sum
 from django.utils import timezone
 
 from .models import AnalysisTask, WorkerPing
+
+logger = logging.getLogger(__name__)
 
 # The commons is keyed by the empty string, which is also what an anonymous
 # request already carries in ``requested_by``.  That is not a coincidence worth
@@ -52,15 +55,21 @@ def window_start(now=None):
 
 
 def _recent_worker_accounts(now=None):
-    """Account names with a worker seen inside the window.  One query.
+    """Account names that DELIVERED inside the window.  One query.
 
-    Reads ``WorkerPing.last_seen``, which is ``auto_now`` and indexed, so the
-    row of a machine that has been off for a month is still there and simply
-    falls out of the window.  That is the property the lane wants: the table
-    remembers, the window forgets.
+    ``last_result_at`` and deliberately not ``last_seen``: the second is
+    ``auto_now`` and moves on any authenticated call, so a process that polls
+    ``/api/lease`` forever and never returns an analysis would earn a share of
+    the fleet without searching a single node.  A lane is bought with delivered
+    work, which is the whole content of "only plugging in CPU earns you a
+    lane".
+
+    The row of a machine that has been off for a month is still there and
+    simply falls out of the window.  That is the property the lane wants: the
+    table remembers, the window forgets.
     """
     return set(WorkerPing.objects
-               .filter(last_seen__gte=window_start(now))
+               .filter(last_result_at__gte=window_start(now))
                .values_list('user', flat=True))
 
 
@@ -92,7 +101,7 @@ def contributor_accounts(now=None):
 
 
 def ran_a_worker(username, now=None):
-    """Did THIS account run a worker inside the window?  One row lookup.
+    """Did THIS account deliver inside the window?  One row lookup.
 
     The single-name form, for the callers that already know whose account they
     are asking about and must not pay for the whole set (the rung selector runs
@@ -101,7 +110,7 @@ def ran_a_worker(username, now=None):
     if not username:
         return False
     return (WorkerPing.objects
-            .filter(user=username, last_seen__gte=window_start(now))
+            .filter(user=username, last_result_at__gte=window_start(now))
             .exists())
 
 
@@ -115,6 +124,124 @@ def lane_of(requested_by, contributors):
     if requested_by and requested_by in contributors:
         return requested_by
     return LANE_COMMONS
+
+
+def effective_account(author, backers, loads):
+    """Which of a request's requesters it rides with: the lightest queue.
+
+    Reported live on 15 August (Eclipsia, on a request authored by soothdest).
+    A request several people asked for was charged to its author alone, so with
+    a saturated author it stayed buried under that author's own backlog, about
+    2690 rows deep, and backing it changed nothing anybody could see.  That
+    reads as the feature being broken, and it is a fair reading: the point of
+    backing is that more people waiting means sooner, not later.
+
+    ``loads`` maps an account to the nodes it already has charged.  Ties break
+    on the AUTHOR, which is what keeps an unbacked request unchanged by
+    construction: with one candidate there is nothing to choose.
+
+    Returns '' when the author wins, because '' is what the column means by
+    "nobody moved this" and writing the author's own name would be the same
+    fact spelled twice.
+    """
+    candidates = [name for name in [author] + list(backers or []) if name]
+    if len(candidates) < 2:
+        return ''
+    best = min(candidates,
+               key=lambda name: (loads.get(name, 0), candidates.index(name)))
+    return '' if best == author else best
+
+
+def charged_loads(names):
+    """``{account: charged nodes}`` for ``names``.  One GROUP BY.
+
+    The same band the ordering charges, read through the same predicates, so
+    "whose queue is lighter" means here exactly what it means there.
+    """
+    from .live_request import CHARGED, SERVEABLE
+    if not names:
+        return {}
+    rows = (AnalysisTask.objects
+            .filter(source=AnalysisTask.Source.USER,
+                    requested_by__in=sorted(names))
+            .filter(CHARGED).filter(SERVEABLE)
+            .values('requested_by').annotate(load=Sum('budget_nodes'))
+            .order_by())
+    return {row['requested_by']: row['load'] or 0 for row in rows}
+
+
+# ---------------- the layout the ordering reads ----------------
+
+# How stale the lane layout may be when the queue is ordered.  Thirty seconds
+# because that is the scale at which the layout actually moves: a lane opens
+# when somebody's first result lands and closes seven days later, and the
+# member count changes when a person's queue empties.  The alternative, two
+# aggregates inside every lease call, would put a scan of the whole waiting
+# band on a path that runs every three seconds.  A weight that is half a minute
+# old still shares the fleet out correctly; it just reacts half a minute late.
+LANE_CONTEXT_KEY = 'atomicdb.lanes.context.v1'
+LANE_CONTEXT_SECONDS = 30
+
+
+def measure_lane_context(now):
+    """Who owns a lane, and how many people are standing in each one.
+
+    ``members`` is what turns an ACCOUNT share into a LANE share: a member's
+    own prefix sum multiplied by the size of their lane.  A contributor lane
+    has one member, so its multiplier is 1 and its internal order is exactly
+    what it was before lanes existed.  The commons has as many members as there
+    are people in it, so each advances that many times faster and the commons
+    as a whole advances at one lane's rate.  That is the arithmetic behind
+    "creating alt accounts gains nothing": five alts raise the count and divide
+    the same share five ways.
+    """
+    from .live_request import CHARGED, SERVEABLE
+    contributors = contributor_accounts(now)
+    pairs = (AnalysisTask.objects
+             .filter(source=AnalysisTask.Source.USER)
+             .filter(CHARGED).filter(SERVEABLE)
+             .values('lane_account', 'requested_by')
+             .annotate(rows=Count('id')).order_by())
+    members = {}
+    for row in pairs:
+        account = row['lane_account'] or row['requested_by']
+        members.setdefault(lane_of(account, contributors), set()).add(account)
+    return {
+        # A sorted list and not a frozenset: this crosses a cache backend, and
+        # a plain list is the shape every backend round-trips unchanged.
+        'contributors': sorted(contributors),
+        'members': {lane: len(names) for lane, names in members.items()},
+    }
+
+
+# The layout to share the fleet out by when the real one cannot be read.  No
+# lanes and one member: every row lands in the commons, the multiplier is the
+# constant 1, and the order that comes out is EXACTLY the order from before
+# lanes existed.  That is the only safe way to degrade here.  Guessing a
+# layout would reorder the queue on a fact nobody measured, and raising would
+# stall the whole fleet on a weight that is not load bearing: this key is a
+# fairness weight, not a correctness invariant.
+NEUTRAL_CONTEXT = {'contributors': [], 'members': {}}
+
+
+def lane_context(now=None):
+    """``measure_lane_context`` behind the shared snapshot.
+
+    MUST BE CALLED OUTSIDE THE LEASE TRANSACTION.  It reads ``WorkerPing`` and
+    the waiting band, and the lease already holds rows in both; doing it inside
+    put a table read behind the transaction's own writes and the refresh failed
+    under lock.  ``views.api_lease`` resolves it once, before it opens the
+    transaction, and hands it down.
+    """
+    from . import metrics
+    try:
+        return metrics.shared_snapshot(LANE_CONTEXT_KEY,
+                                       build=measure_lane_context,
+                                       required=True, now=now,
+                                       fresh_seconds=LANE_CONTEXT_SECONDS)
+    except Exception:                    # noqa: BLE001
+        logger.exception('atomicdb: could not resolve the lane layout')
+        return NEUTRAL_CONTEXT
 
 
 # ---------------- what the queue looks like, grouped by lane ----------------
