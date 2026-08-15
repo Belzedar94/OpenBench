@@ -491,6 +491,11 @@ def _own_pending(pos, username, live):
     for: every task in the USER band deserves a notification
     (see ``ingest.notification_deserved``), so if ``_live_task`` found none
     then none exists.
+
+    THE TWO CONTROLS OF THIS PAGE HANG OFF THIS ONE LOOKUP: moving your own
+    request to the front and taking it back are the same row, the same
+    permission and the same return address, so asking twice who owns what here
+    would be two answers waiting to disagree.
     """
     if not username or live is None:
         return None
@@ -536,7 +541,17 @@ def bump_control(pos, username, live=None, back=''):
     And it is not said TWICE: when the status line above is already narrating
     this very request, the place is said there and only the button goes here.
     """
-    task = _own_pending(pos, username, live)
+    return _bump_control_for(_own_pending(pos, username, live), live, back)
+
+
+def _bump_control_for(task, live, back):
+    """``bump_control`` over an ALREADY resolved row (§ ``_own_pending``).
+
+    Existe para que ``context`` pregunte una sola vez de quien es la peticion
+    de esta pagina y sirva con esa respuesta los dos controles.  La puerta
+    publica se queda como estaba: quien solo tiene la cuenta y la posicion
+    sigue llamando a ``bump_control``.
+    """
     if task is None:
         return {}
     from .ingest import front_of_own_queue
@@ -560,14 +575,58 @@ def bump_control(pos, username, live=None, back=''):
     }}
 
 
+def withdraw_control(pos, username, live=None, back=''):
+    """The take-it-back control for THIS position, or ``{}``.
+
+    Peticion de comunidad (asfault): "is there a way to cancel requests before
+    they have started - for when you accidentally request analysis for some
+    already deeply analysed line".
+
+    VIVE AL LADO DEL DE ADELANTAR, y no por simetria: es que el sitio donde uno
+    se da cuenta del error es este.  Acabas de pedir analisis de esta posicion
+    y la tabla de abajo te esta ensenando que la linea ya estaba vista, asi que
+    la pagina que te lo cuenta es la que tiene que ofrecerte deshacerlo.  Los
+    dos controles hablan ADEMAS de la misma fila — tu peticion pendiente de
+    aqui — con el mismo permiso y la misma vuelta, asi que salen de la misma
+    consulta (§ ``_own_pending``).
+
+    LA CONDICION ES MAS CORTA QUE LA DEL BOTON DE ADELANTAR, y es deliberado:
+    aquel necesita ademas poder moverse, porque un boton que contesta
+    'already-first' no hace nada.  Retirar SIEMPRE hace algo — la peticion sale
+    de la cola — asi que basta con que la fila sea tuya y siga esperando.  La
+    primera de tu cola es justamente la que mas se quiere retirar: es la ultima
+    que pediste.
+
+    ``backers`` viaja para que la pagina pueda decir la verdad antes del click:
+    con mas gente detras, retirar te quita a TI y la peticion sigue viva bajo
+    la siguiente persona (§ ``ingest.withdraw_requester``).
+    """
+    return _withdraw_control_for(_own_pending(pos, username, live), back)
+
+
+def _withdraw_control_for(task, back):
+    """``withdraw_control`` over an ALREADY resolved row (§ ``_own_pending``)."""
+    if task is None:
+        return {}
+    return {'queue_withdraw': {
+        'task_id': task.id,
+        # Cuantas personas MAS esperan esta peticion.  Cero es el caso normal y
+        # entonces retirar la cierra; por encima de cero, retirar es dejar de
+        # esperarla tu.
+        'backers': task.backers or 0,
+        'back': back,
+    }}
+
+
 def context(pos, now=None, username='', back=''):
     """What the template consumes: ``{}`` when there is nothing to say.
 
     Same shape as ``depth.context`` and ``views._suggestions_badge``: with no
     key, the template does not paint even the gap.
 
-    The live task is read ONCE and serves both things that hang off it: the
-    status line and the move-to-front control.
+    The live task is read ONCE and serves everything that hangs off it: the
+    status line, the move-to-front control and the take-it-back control.  Whose
+    request it is gets asked once too, and the two controls share the answer.
     """
     if pos.status != 'UNKNOWN':
         return {}
@@ -576,5 +635,7 @@ def context(pos, now=None, username='', back=''):
     row = _narrate(pos, live, now=now)
     if row is not None:
         out['live_request'] = row
-    out.update(bump_control(pos, username, live=live, back=back))
+    own = _own_pending(pos, username, live)
+    out.update(_bump_control_for(own, live, back))
+    out.update(_withdraw_control_for(own, back))
     return out

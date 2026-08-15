@@ -12,6 +12,7 @@ import heapq
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -120,6 +121,65 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # tiempo online solo compra lo barato.
 ONLINE_MATE_PROOF_SECONDS = 5.0
 _priority_refresh_cache = {'at': 0.0}
+
+
+# Cuantos PASES se recuerdan por posicion (§ ``Position.analysis_passes``).
+# Seis cubre la escalera de peticiones entera — 128M, 512M, 2B, 10B — con dos
+# sitios de sobra para las sondas automaticas que caen entre medias, que es
+# donde esta la lectura que se pidio: como se movio la eval al profundizar.
+# Mas alla de eso lo que se recuerda ya no es una serie, es un archivo, y esto
+# vive en una columna de una tabla de millones de filas.
+PASS_HISTORY_MAX = 6
+# Los campos numericos de una linea ``info`` de UCI que merece la pena leer.
+# El worker guarda la linea CRUDA (``raw``) tal y como la escupio el motor, que
+# es exactamente lo que se pidio poder ver; esto es para quien quiere el numero
+# sin volver a parsear texto por su cuenta.
+_INFO_FIELDS = ('depth', 'seldepth', 'nodes', 'nps', 'time', 'hashfull')
+_INFO_RE = re.compile(r'\b(' + '|'.join(_INFO_FIELDS) + r') (\d+)\b')
+
+
+def info_fields(raw):
+    """Los enteros de una linea ``info`` de UCI: ``{'depth': 34, ...}``.
+
+    Vacio para lo que no traiga linea cruda — un worker antiguo no la manda —
+    y eso NO es un cero: no saber a que profundidad se busco algo y afirmar que
+    fue a profundidad cero son cosas distintas, y la segunda es mentira.
+
+    UN SOLO PARSEADOR para los dos consumidores (el resumen de pase que se
+    guarda y el bloque de analisis que devuelve la API), por lo mismo de
+    siempre: dos lecturas del mismo texto acaban discrepando.
+    """
+    if not isinstance(raw, str) or not raw:
+        return {}
+    return {name: int(value) for name, value in _INFO_RE.findall(raw)}
+
+
+def pass_summary(lines, nodes_budget, best_eval, best_move, restricted,
+                 showcase, now=None):
+    """Lo que se recuerda de UN pase: una linea, sin PVs dentro.
+
+    ``showcase`` dice si este pase se quedo con la foto vigente o si el
+    arbitraje lo dejo fuera por mas corto o mas estrecho (§ ``ingest_analysis``).
+    Es la mitad util del registro: sin ese campo, una serie de evals distintas
+    no distingue "el motor cambio de opinion al profundizar" de "este numero
+    salio de una sonda de 8M que no manda en este nodo".
+    """
+    top = next((ln for ln in lines if isinstance(ln, dict)), None) or {}
+    info = info_fields(top.get('raw'))
+    entry = {
+        'budget': int(nodes_budget or 0),
+        'lines': sum(1 for ln in lines if isinstance(ln, dict)),
+        'eval_cp': best_eval,
+        'move': best_move,
+        'mate': top.get('mate'),
+        'restricted': bool(restricted),
+        'showcase': bool(showcase),
+        'at': (now or timezone.now()).isoformat(),
+    }
+    for name in ('depth', 'seldepth', 'nodes'):
+        if name in info:
+            entry[name] = info[name]
+    return entry
 
 
 def capped_analysis(lines, max_plies=STORED_PV_MAX_PLIES):
@@ -596,6 +656,13 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
+        # Los numeros PROPIOS de este pase, antes de que el arbitraje de abajo
+        # los toque: lo que sigue puede anular ``best_eval``/``best_move`` para
+        # que un pase corto o restringido no mande en la posicion, y eso es una
+        # decision sobre QUIEN DECIDE, no sobre lo que el motor dijo.  El
+        # registro de pases guarda lo segundo — es la pregunta entera de
+        # Wolfram: que evaluacion dio el motor a menos profundidad.
+        pass_eval, pass_move = best_eval, best_move
         # El ESCAPARATE de lineas no se pisa NI hacia abajo NI hacia atras.
         #
         # ANCHURA.  Un visitante pide MultiPV 5 y ve sus cinco lineas; si
@@ -633,8 +700,20 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         stored_budget = (current[0].get('_budget', 0)
                          if current and isinstance(current[0], dict) else 0)
         shallower = bool(current) and nodes_budget < stored_budget
-        if not shallower and (not current or nodes_budget > stored_budget
-                              or len(snapshot) >= len(current)):
+        took_showcase = not shallower and (
+            not current or nodes_budget > stored_budget
+            or len(snapshot) >= len(current))
+        # LA SERIE DE PASES, y se anota SIEMPRE, gane o pierda el arbitraje: el
+        # pase que pierde es exactamente el que responde "que evaluacion dio el
+        # motor a menos profundidad" (Wolfram).  Lo mas nuevo primero, y el
+        # recorte por el otro extremo.
+        pos.analysis_passes = ([pass_summary(lines, nodes_budget, pass_eval,
+                                             pass_move, restricted,
+                                             took_showcase)]
+                               + [entry for entry in (pos.analysis_passes or [])
+                                  if isinstance(entry, dict)]
+                               )[:PASS_HISTORY_MAX]
+        if took_showcase:
             # Un pase mas ANCHO que el nuevo no se tira: sus lineas 3..N
             # llevan informacion que el pase profundo de 2 lineas no repite
             # (peticion de Wolfram).  Se conservan marcadas como pase
@@ -665,7 +744,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # bucle pudo recalcular status/closure/priority de esta misma fila, y
         # un save() completo los pisaria con el snapshot que cargamos antes.
         pos.save(update_fields=['visits', 'nodes_invested', 'last_analysis',
-                                'best_move', 'eval_cp', 'updated'])
+                                'analysis_passes', 'best_move', 'eval_cp',
+                                'updated'])
 
     changed = backup_cascade([pos.key])
     # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
@@ -3754,6 +3834,125 @@ def add_requester(task, username):
     return True
 
 
+def withdraw_requester(task, now=None):
+    """Saca a su AUTOR de una peticion pendiente. Devuelve que le paso a la fila.
+
+    Peticion de comunidad (asfault): "is there a way to cancel requests before
+    they have started - for when you accidentally request analysis for some
+    already deeply analysed line".
+
+    DOS FINALES, Y LOS DECIDE QUIEN MAS ESPERA:
+
+    * ``'handed-over'`` — la peticion tenia MAS PETICIONARIOS
+      (§ ``also_requested_by``, desplegado ayer).  Cancelar retira TU parte, no
+      la de los demas: el primero de los que se sumaron pasa a ser el autor y
+      la fila sigue en la cola con su presupuesto y su generacion intactos.
+      Cerrarla seria darle a una persona el poder de tirar la peticion de
+      otras, que es exactamente lo contrario de lo que compro el recuento de
+      personas.
+    * ``'cancelled'`` — no la esperaba nadie mas, asi que la fila sale de la
+      cola con ``CANCELLED`` (§ ``AnalysisTask.TState``, por que ese estado y
+      no la absorcion).
+
+    ``queue_seq`` VUELVE A CERO al cambiar de dueno, y no es un detalle: ese
+    numero es un sitio DENTRO de la cola de un peticionario concreto
+    (§ ``front_of_own_queue``), y heredado tal cual pondria la fila en un lugar
+    de la cola nueva que su dueno nuevo no eligio.  Cero es "nunca se toco",
+    que es literalmente cierto de esta fila en la cola a la que llega.
+
+    Quien llama es el dueno de la transaccion y ya comprobo lo suyo: que la
+    fila es de quien la retira y que sigue PENDING.  LEASED no llega hasta
+    aqui nunca — eso ya esta en un motor y cierra solo, con sus nodos y su
+    maquina.
+    """
+    backers = list(task.also_requested_by or [])
+    if backers:
+        task.requested_by = backers[0]
+        task.also_requested_by = backers[1:]
+        task.backers = len(backers) - 1
+        task.queue_seq = 0
+        task.save(update_fields=['requested_by', 'also_requested_by',
+                                 'backers', 'queue_seq'])
+        return 'handed-over'
+    AnalysisTask.objects.filter(pk=task.pk).update(
+        state=AnalysisTask.TState.CANCELLED, completed=now or timezone.now())
+    return 'cancelled'
+
+
+def clear_own_queue(username, now=None):
+    """Retira a ``username`` de TODO lo que tiene esperando.
+
+    Peticion de comunidad (Eclipsia, dos veces): una racha de peticiones que ya
+    no se quieren se deshacia de una en una, y quien encola mil quinientas en
+    una hora no vuelve a pulsar mil quinientas veces.
+
+    Devuelve ``(retiradas, traspasadas)`` con la MISMA semantica por fila que
+    el boton de una sola (§ ``withdraw_requester``): lo que otra persona
+    tambien pidio cambia de dueno y sigue en la cola, y solo lo que no esperaba
+    nadie mas sale de ella.
+
+    DOS SENTENCIAS Y NO UNA POR FILA.  El caso que existe de verdad es el de la
+    racha larga, y recorrerla en Python seria mil quinientos ``UPDATE``.  Lo
+    que se recorre es solo lo que tiene mas peticionarios — cada traspaso va a
+    un nombre distinto, asi que eso no es un ``UPDATE`` en bloque — y eso son
+    unas pocas filas: sumarse a una peticion ajena es raro por construccion
+    (hay que pedir LO MISMO mientras sigue viva).
+
+    ``backers`` es la llave de la particion y no la lista JSON, por lo mismo
+    que la columna existe: contar los elementos de un JSON no se escribe igual
+    en SQLite que en PostgreSQL (§ ``AnalysisTask.backers``).  Es ademas la
+    misma columna con la que el orden de servicio desempata, asi que si alguna
+    vez se desincronizara de la lista, la cola ya estaria mal antes que esto.
+
+    IDEMPOTENTE por construccion: el filtro es ``PENDING``, y a la segunda
+    llamada no queda ninguna.
+    """
+    if not username:
+        return 0, 0
+    now = now or timezone.now()
+    mine = AnalysisTask.objects.filter(source=AnalysisTask.Source.USER,
+                                       requested_by=username,
+                                       state=AnalysisTask.TState.PENDING)
+    handed = withdrawn_by_hand = 0
+    for task in mine.filter(backers__gt=0):
+        # El recuento sale del RESULTADO y no del filtro que la trajo:
+        # ``backers`` es un espejo de la lista, y una fila cuyo contador se
+        # hubiera adelantado a su lista se retira de verdad en vez de
+        # traspasarse.  Contarla como traspasada le diria a su autor que su
+        # peticion sigue viva bajo otro nombre cuando ya no esta.
+        if withdraw_requester(task, now=now) == 'handed-over':
+            handed += 1
+        else:
+            withdrawn_by_hand += 1
+    # ``mine`` se vuelve a evaluar: lo traspasado ya es de otro y no entra.
+    cancelled = mine.filter(backers=0).update(
+        state=AnalysisTask.TState.CANCELLED, completed=now)
+    return cancelled + withdrawn_by_hand, handed
+
+
+def restore_cancelled(task):
+    """Devuelve a la cola una peticion retirada. DESHACER, no pedir de nuevo.
+
+    Es lo que sostiene que cancelar una sola sea un click sin confirmacion: el
+    error se deshace con otro click, y lo que vuelve es LA MISMA fila — su
+    presupuesto, su generacion, su ruta y su sitio en la cola — no una peticion
+    nueva que volveria a entrar por el suelo de la escalera.
+
+    Devuelve False si ya no hay nada que deshacer: la fila volvio por otra via
+    o la posicion se cerro mientras tanto, y resucitar una peticion sobre algo
+    ya decidido crearia justo el zombi que el cierre barre
+    (§ ``_emit_closure_events``).
+    """
+    if task.state != AnalysisTask.TState.CANCELLED:
+        return False
+    if task.position.status != 'UNKNOWN':
+        return False
+    AnalysisTask.objects.filter(pk=task.pk,
+                                state=AnalysisTask.TState.CANCELLED).update(
+        state=AnalysisTask.TState.PENDING, completed=None)
+    return True
+
+
 def ladder_exhausted(pos):
     """True when the visitor ladder has nothing left to buy on ``pos`` itself.
 
@@ -3838,6 +4037,33 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
                   'requested_by': requested_by, 'route': route,
                   'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
+        return 'queued'
+    if task.state == AnalysisTask.TState.CANCELLED:
+        # Aqui hubo una peticion y su autor la retiro (§ ``withdraw_requester``).
+        # La unicidad (posicion, generacion) deja el HUECO ocupado por esa fila,
+        # asi que pedir otra vez no puede crear una nueva: o se revive esta, o
+        # la posicion se queda sin poder pedirse nunca mas — que seria convertir
+        # un boton de deshacer en una condena.
+        #
+        # VUELVE COMO UNA PETICION NUEVA, no como la de antes: el peldano se
+        # recalcula (la escalera pudo avanzar mientras tanto), el autor es quien
+        # pide AHORA, y los respaldos y el sitio en la cola arrancan a cero
+        # porque los de la fila vieja eran de una peticion que ya no existe.
+        # Deshacer un arrepentimiento es otra cosa y tiene su propio camino
+        # (§ ``restore_cancelled``), que si devuelve la fila tal y como estaba.
+        task.state = AnalysisTask.TState.PENDING
+        task.completed = None
+        task.budget_nodes = max(task.budget_nodes, floor)
+        task.source = AnalysisTask.Source.USER
+        task.requested_by = requested_by
+        task.also_requested_by = []
+        task.backers = 0
+        task.queue_seq = 0
+        task.route = route
+        task.multipv = multipv_for(pos.visits, task.budget_nodes, clamp=clamp)
+        task.save(update_fields=['state', 'completed', 'budget_nodes',
+                                 'source', 'requested_by', 'also_requested_by',
+                                 'backers', 'queue_seq', 'route', 'multipv'])
         return 'queued'
     if task.state == 'PENDING':
         task.budget_nodes = max(task.budget_nodes, floor)

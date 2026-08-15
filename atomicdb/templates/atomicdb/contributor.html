@@ -43,6 +43,23 @@
 
 <section class="contrib-section">
   <h2>{{ owner_label }} queue</h2>
+  {% comment %}El recibo de lo que se acaba de hacer con la cola, y el deshacer
+  cuando lo hay (§ views._queue_receipt).  Va POR ENCIMA de todo lo demas y no
+  pegado a la lista de espera a proposito: quien vacia su cola entera deja esta
+  seccion sin una sola fila, y ahi es justamente donde hace falta que algo diga
+  lo que acaba de pasar.  Solo sale en la pagina propia.{% endcomment %}
+  {% comment %}Un <div> y no un <p>: lleva un formulario dentro, y un <p> solo
+  admite contenido de frase — el navegador lo cerraria antes del <form> y el
+  minificador de plantillas se encontraria un cierre que no puso nadie.{% endcomment %}
+  {% if queue_receipt %}
+  <div class="queue-receipt">{{ queue_receipt }}
+    {% if queue_undo_task %}<form method="post"
+      action="/atomicdb/queue/cancel/{{ queue_undo_task }}/">{% csrf_token %}
+      <input type="hidden" name="back" value="/atomicdb/user/{{ profile_user|urlencode }}/">
+      <input type="hidden" name="undo" value="1">
+      <button type="submit">Undo</button>
+    </form>{% endif %}</div>
+  {% endif %}
   {% if has_queue %}
   <h3 class="contrib-sub">Running now</h3>
   {% if queue_leased %}
@@ -73,10 +90,40 @@
     at, and the line above is the way there.{% endcomment %}
     <li><span class="t" title="Place in the visitor queue: how many requests are served before this one">#{{ q.place }}</span>
       <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
-      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}{% if q.backers %} · {{ q.backers }} more {{ q.backers|pluralize:"person,people" }} asked for this{% endif %}</span></li>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}{% if q.backers %} · {{ q.backers }} more {{ q.backers|pluralize:"person,people" }} asked for this{% endif %}</span>
+      {% comment %}Retirar SI va por fila, aunque adelantar se haya ido de aqui.
+      Aquello sobraba porque la lista ya esta ordenada por turno; esto no tiene
+      ese problema — lo que se quiere quitar puede ser cualquiera de las filas,
+      y en una racha que ya no se quiere son todas — y esta es la unica pagina
+      que las ensena juntas.  Un click y sin dialogo, porque el recibo de arriba
+      trae el deshacer.{% endcomment %}
+      {% if is_self %}<form class="queue-cancel" method="post"
+        action="/atomicdb/queue/cancel/{{ q.task_id }}/">{% csrf_token %}
+        <input type="hidden" name="back" value="/atomicdb/user/{{ profile_user|urlencode }}/">
+        <button type="submit" title="{% if q.backers %}Take your name off this request. Other people asked for the same position, so it stays in the queue under them.{% else %}Take this request out of the queue. Nothing has been spent on it yet, and you can put it back.{% endif %}">Withdraw</button>
+      </form>{% endif %}</li>
     {% endfor %}
   </ul>
   {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}
+  {% comment %}Vaciar la cola entera (Eclipsia).  El desplegable ES el paso de
+  confirmacion: hay que abrirlo para llegar al boton, dice cuantas son y que le
+  pasa a lo que otra gente tambien pidio, y no depende de JS ni abre un dialogo.
+  Cerrado no ocupa mas que un renglon, que es lo que le corresponde a algo que
+  casi nadie va a pulsar.{% endcomment %}
+  {% if is_self and queue_pending_total %}
+  <details class="queue-clear">
+    <summary>Clear my queue</summary>
+    <p class="dim">This takes all {{ queue_pending_total }} of your waiting
+      request{{ queue_pending_total|pluralize }} out of the queue. Anything
+      already running keeps running, and a request somebody else also asked for
+      stays in the queue under them. There is no undo for this one.</p>
+    <form method="post" action="/atomicdb/queue/clear/">{% csrf_token %}
+      <input type="hidden" name="back" value="/atomicdb/user/{{ profile_user|urlencode }}/">
+      <input type="hidden" name="confirm" value="1">
+      <button type="submit">Withdraw all {{ queue_pending_total }}</button>
+    </form>
+  </details>
+  {% endif %}
   {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
 
   <h3 class="contrib-sub">Served</h3>

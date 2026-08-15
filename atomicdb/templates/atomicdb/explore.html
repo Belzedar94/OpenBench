@@ -201,7 +201,20 @@
     primera de su cola y con eso se lleva el boton, asi que sin el numero el
     unico efecto visible del click seria que todo desaparecio
     (§ live_request.bump_control).{% endcomment %}
-    {% if queue_bump %}
+    {% comment %}Y retirarla, en el mismo renglon y por lo mismo: los dos
+    controles hablan de TU peticion de esta posicion, y este es ademas el sitio
+    donde uno se da cuenta del error ("cancel requests before they have started
+    ... when you accidentally request analysis for some already deeply analysed
+    line", asfault) — acabas de pedirla y la tabla de abajo te esta ensenando
+    que la linea ya estaba vista.
+
+    EL RENGLON SALE SI SALE CUALQUIERA DE LOS DOS, y esa condicion no es
+    cosmetica: retirar tiene la condicion mas corta — adelantar necesita ademas
+    tener a donde ir — asi que colgar el renglon de ``queue_bump`` escondia el
+    boton de retirar justo en la peticion que encabeza tu cola, que es la que
+    mas se quiere retirar porque es la ultima que pediste
+    (§ live_request.withdraw_control).{% endcomment %}
+    {% if queue_bump or queue_withdraw %}
     <div class="livereq">{% if queue_bump.place %}<span class="dim">Your
       request here is <span title="Place in the visitor queue: how many requests are served before this one">#{{ queue_bump.place }}</span>
       in the visitor queue</span>{% endif %}{% if queue_bump.can_move %}<form
@@ -209,6 +222,25 @@
       action="/atomicdb/queue/bump/{{ queue_bump.task_id }}/">{% csrf_token %}
       <input type="hidden" name="back" value="{{ queue_bump.back }}">
       <button type="submit" title="Serve this one first out of everything you have waiting. It takes the place your own first request already held, so nobody else's request moves.">Move to front</button>
+      </form>{% endif %}{% if queue_withdraw %}<form
+      class="queue-cancel" method="post"
+      action="/atomicdb/queue/cancel/{{ queue_withdraw.task_id }}/">{% csrf_token %}
+      <input type="hidden" name="back" value="{{ queue_withdraw.back }}">
+      <button type="submit" title="{% if queue_withdraw.backers %}Take your name off this request. Other people asked for the same position, so it stays in the queue under them.{% else %}Take this request out of the queue. Nothing has been spent on it yet, and you can put it back.{% endif %}">Withdraw</button>
+      </form>{% endif %}</div>
+    {% endif %}
+    {% comment %}Y el recibo de lo que se acaba de hacer, con su deshacer: el
+    click vuelve AQUI (§ views._own_queue_page), asi que es esta pagina la que
+    tiene que decir que paso.  Sin esto, retirar desde la posicion dejaba la
+    linea en blanco y ni una palabra — que es justo lo que hace insegura una
+    accion de un solo click.{% endcomment %}
+    {% if queue_receipt %}
+    <div class="queue-receipt">{{ queue_receipt }}
+      {% if queue_undo_task %}<form method="post"
+        action="/atomicdb/queue/cancel/{{ queue_undo_task }}/">{% csrf_token %}
+        <input type="hidden" name="back" value="{{ queue_undo_back }}">
+        <input type="hidden" name="undo" value="1">
+        <button type="submit">Undo</button>
       </form>{% endif %}</div>
     {% endif %}
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"

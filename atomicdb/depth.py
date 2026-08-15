@@ -82,7 +82,21 @@ def chosen_rung(request):
     legitima en un boton roto y, de paso, seria un oraculo de quien tiene
     derecho y quien no.
     """
-    raw = (request.POST.get(BUDGET_FIELD) or '').strip()
+    return chosen_rung_for(request.POST.get(BUDGET_FIELD),
+                           getattr(request, 'user', None))
+
+
+def chosen_rung_for(raw, user):
+    """La misma regla, con la cuenta DICHA en vez de leida de la sesion.
+
+    La API oficial de peticion (§ ``views.api_public_request``) no mira la
+    cookie de sesion a proposito, asi que su cuenta no esta en
+    ``request.user``: le llega en el cuerpo, autenticada con credenciales.  El
+    derecho a elegir peldano es el mismo para las dos puertas, y por eso la
+    regla se lee de un solo sitio en vez de copiarse con otra fuente de
+    identidad al lado.
+    """
+    raw = (raw or '').strip()
     if not raw:
         return None, False
     try:
@@ -91,7 +105,7 @@ def chosen_rung(request):
         return None, True
     if budget not in REQUEST_BUDGET_LADDER:
         return None, True
-    if not may_choose(getattr(request, 'user', None)):
+    if not may_choose(user):
         return None, False
     return budget, False
 

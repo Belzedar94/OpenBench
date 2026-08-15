@@ -103,6 +103,16 @@ urlpatterns = [
     # una sola persona: sin cache, como la pagina desde la que se pulsa.
     path('queue/bump/<int:task_id>/', views.api_queue_bump,
          name='atomicdb-queue-bump'),
+    # Retirar una peticion propia de la cola, y devolverla (``undo=1``).  Las
+    # dos direcciones por la misma ruta porque son la misma fila y el mismo
+    # permiso; escriben, asi que tampoco llevan cache.
+    path('queue/cancel/<int:task_id>/', views.api_queue_cancel,
+         name='atomicdb-queue-cancel'),
+    # Vaciar la cola propia entera.  Sin ``<id>``: lo que identifica lo que
+    # toca es la sesion, y una ruta que aceptara un nombre seria una ruta para
+    # vaciarle la cola a otro.
+    path('queue/clear/', views.api_queue_clear,
+         name='atomicdb-queue-clear'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.
@@ -114,6 +124,12 @@ urlpatterns = [
     path('pv-verify/<str:key>/', views.api_pv_verify),
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),
+    # La API oficial de peticion, hermana de ``api/query``: la de lectura vive
+    # ahi arriba desde el principio y esta es la de escritura, con la misma
+    # forma de direccion (una FEN en el cuerpo, no una clave interna en la
+    # ruta).  Estado vivo y escribe: sin cache, como todo lo de esta lista.
+    path('api/request', views.api_public_request,
+         name='atomicdb-api-request'),
     path('api/frontier/<str:key>/', views.api_frontier),
     path('api/live-request/<str:key>/', views.api_live_request),
     path('api/map/v1', map_api),

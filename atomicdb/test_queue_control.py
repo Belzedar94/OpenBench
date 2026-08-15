@@ -1,7 +1,7 @@
 """Lo que una persona puede hacer con SU cola, y lo que gana pedir en grupo.
 
-Dos peticiones de #suggestions, y las dos son sobre el mismo sitio — el orden
-en el que se sirve la banda de visitante — pero desde lados opuestos:
+Cuatro peticiones de #suggestions, y todas son sobre el mismo sitio — el orden
+en el que se sirve la banda de visitante — desde lados distintos:
 
 * ADELANTAR LO PROPIO (Wolfram): "some checkmark to push smth to the front of
   my own queue, not to the back, would be nice".  Lo que aqui se defiende no
@@ -13,6 +13,13 @@ en el que se sirve la banda de visitante — pero desde lados opuestos:
   position should give it more precedence".  El segundo que pedia lo mismo
   desaparecia entero: sin fila, sin orden y sin aviso.  Ahora se suma a la que
   existe, y lo que compra con ese click es precedencia y campana.
+* RETIRAR UNA (asfault): "is there a way to cancel requests before they have
+  started - for when you accidentally request analysis for some already deeply
+  analysed line".  Lo que se defiende aqui es que retirar no cueste nada — ni
+  nodos, ni un peldano de la escalera, ni la peticion de la otra persona que
+  pidio lo mismo.
+* VACIAR LA COLA ENTERA (Eclipsia, dos veces): lo mismo, en bloque, con la
+  misma regla por fila y una confirmacion delante.
 
 La absorcion sigue teniendo trabajo despues de esto, y tiene su propia clase:
 las peticiones que se solapan por PRESUPUESTO (dos generaciones sobre la misma
@@ -463,6 +470,507 @@ class BumpOnThePositionTests(TestCase):
         self.assertIsNone(shown['queue_bump']['place'])
 
 
+class _WithdrawHarness(_BumpHarness):
+    """La misma cola de siempre, con los botones de retirar encima."""
+
+    def _withdraw(self, task, username, **extra):
+        self.client.login(username=username, password='p')
+        response = self.client.post(f'/atomicdb/queue/cancel/{task.id}/',
+                                    extra)
+        self.client.logout()
+        return response
+
+    def _clear(self, username, **extra):
+        self.client.login(username=username, password='p')
+        response = self.client.post('/atomicdb/queue/clear/',
+                                    {'confirm': '1', **extra})
+        self.client.logout()
+        return response
+
+    def _state(self, task):
+        return AnalysisTask.objects.get(pk=task.pk).state
+
+
+class WithdrawOwnRequestTests(_WithdrawHarness):
+    """Retirar UNA peticion propia que todavia no ha empezado."""
+
+    def test_a_waiting_request_leaves_the_queue(self):
+        mine = self._queue('a', [self.RUNG] * 2)
+
+        response = self._withdraw(mine[1], 'a')
+
+        self.assertEqual(response.json()['status'], 'cancelled')
+        self.assertEqual(self._state(mine[1]),
+                         AnalysisTask.TState.CANCELLED)
+        # Por PERTENENCIA y no por lista exacta: con la banda de visitante
+        # vacia, el siguiente arriendo lo atiende la exploracion del selector,
+        # que encola lo suyo.  Lo que se afirma aqui es de estas dos filas.
+        served = self._serve_order(2)
+        self.assertIn(mine[0].id, served)
+        self.assertNotIn(mine[1].id, served)
+
+    def test_a_running_request_is_refused(self):
+        """"before they have started" ES la frontera, y es el estado LEASED.
+
+        Cerrar una arrendada no la para: el motor sigue buscando y lo unico
+        que se consigue es tirar su resultado cuando llegue.
+        """
+        mine = self._queue('a', [self.RUNG])
+        AnalysisTask.objects.filter(pk=mine[0].pk).update(
+            state=AnalysisTask.TState.LEASED, machine='a#0',
+            leased_at=timezone.now())
+
+        response = self._withdraw(mine[0], 'a')
+
+        self.assertEqual(response.json()['status'], 'not-yours')
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.LEASED)
+
+    def test_a_served_request_is_refused(self):
+        mine = self._queue('a', [self.RUNG])
+        AnalysisTask.objects.filter(pk=mine[0].pk).update(
+            state=AnalysisTask.TState.COMPLETED, completed=timezone.now())
+
+        self.assertEqual(self._withdraw(mine[0], 'a').json()['status'],
+                         'not-yours')
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.COMPLETED)
+
+    def test_the_queue_of_a_stranger_cannot_be_emptied(self):
+        yours = self._queue('b', [self.RUNG])
+
+        response = self._withdraw(yours[0], 'a')
+
+        self.assertEqual(response.json()['status'], 'not-yours')
+        self.assertEqual(self._state(yours[0]), AnalysisTask.TState.PENDING)
+
+    def test_without_a_session_nothing_can_be_withdrawn(self):
+        """Sin nombre no hay propiedad: una peticion anonima no es de nadie."""
+        anonymous = AnalysisTask.objects.create(
+            position=self._positions(1, offset=700)[0], generation=0,
+            budget_nodes=self.RUNG, source=AnalysisTask.Source.USER)
+
+        response = self.client.post(
+            f'/atomicdb/queue/cancel/{anonymous.id}/')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+        self.assertEqual(self._state(anonymous), AnalysisTask.TState.PENDING)
+
+    def test_a_get_withdraws_nothing(self):
+        mine = self._queue('a', [self.RUNG])
+        self.client.login(username='a', password='p')
+
+        response = self.client.get(f'/atomicdb/queue/cancel/{mine[0].id}/')
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.PENDING)
+
+    def test_the_button_posts_back_to_the_page_it_was_pressed_from(self):
+        mine = self._queue('a', [self.RUNG])
+
+        response = self._withdraw(mine[0], 'a', back='1')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/user/a/?cancelled={mine[0].id}')
+
+
+class WithdrawKeepsOtherBackersTests(_WithdrawHarness):
+    """Retirar quita TU parte, nunca la de quien pidio lo mismo.
+
+    El respaldo se desplego ayer (§ ``also_requested_by``): una peticion puede
+    tener detras a varias personas.  Cerrarla porque la primera se arrepiente
+    seria darle a una el poder de tirar la espera de las demas — justo lo
+    contrario de lo que compro el recuento de personas.
+    """
+
+    def _shared(self, owner, backers):
+        task = self._queue(owner, [self.RUNG])[0]
+        AnalysisTask.objects.filter(pk=task.pk).update(
+            also_requested_by=backers, backers=len(backers), queue_seq=-3)
+        return AnalysisTask.objects.get(pk=task.pk)
+
+    def test_the_request_survives_under_the_first_of_the_others(self):
+        shared = self._shared('a', ['b', 'c'])
+
+        response = self._withdraw(shared, 'a')
+
+        self.assertEqual(response.json()['status'], 'handed-over')
+        shared.refresh_from_db()
+        self.assertEqual(shared.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(shared.requested_by, 'b')
+        self.assertEqual(shared.also_requested_by, ['c'])
+        self.assertEqual(shared.backers, 1)
+
+    def test_it_still_gets_served_and_to_its_new_owner(self):
+        shared = self._shared('a', ['b'])
+
+        self._withdraw(shared, 'a')
+
+        self.assertEqual(self._serve_order(1), [shared.id])
+        self.assertEqual(
+            AnalysisTask.objects.get(pk=shared.pk).requested_by, 'b')
+
+    def test_the_place_it_held_in_the_old_queue_does_not_travel(self):
+        """``queue_seq`` es un sitio DENTRO de una cola concreta.
+
+        Heredado tal cual, la peticion aterrizaria en un puesto de la cola
+        nueva que su dueno nuevo no eligio — y por delante de lo que el si
+        habia adelantado.
+        """
+        shared = self._shared('a', ['b'])
+        yours = self._queue('b', [self.RUNG] * 2, offset=200)
+        AnalysisTask.objects.filter(pk=yours[0].pk).update(queue_seq=-1)
+
+        self._withdraw(shared, 'a')
+
+        self.assertEqual(AnalysisTask.objects.get(pk=shared.pk).queue_seq, 0)
+        self.assertEqual(self._serve_order(3),
+                         [yours[0].id, shared.id, yours[1].id])
+
+    def test_the_last_person_waiting_closes_it(self):
+        shared = self._shared('a', ['b'])
+        self._withdraw(shared, 'a')
+
+        response = self._withdraw(AnalysisTask.objects.get(pk=shared.pk), 'b')
+
+        self.assertEqual(response.json()['status'], 'cancelled')
+        self.assertEqual(self._state(shared), AnalysisTask.TState.CANCELLED)
+
+
+
+class ClearOwnQueueTests(_WithdrawHarness):
+    """Vaciar la cola propia entera (Eclipsia), con la regla de una fila."""
+
+    def test_everything_waiting_goes_and_the_count_comes_back(self):
+        mine = self._queue('a', [self.RUNG] * 5)
+
+        payload = self._clear('a').json()
+
+        self.assertEqual(payload['cancelled'], 5)
+        self.assertEqual(payload['handed_over'], 0)
+        self.assertEqual(
+            AnalysisTask.objects.filter(
+                pk__in=[task.pk for task in mine],
+                state=AnalysisTask.TState.CANCELLED).count(), 5)
+        served = self._serve_order(5)
+        for task in mine:
+            self.assertNotIn(task.id, served)
+
+    def test_a_second_pass_reports_zero_and_changes_nothing(self):
+        self._queue('a', [self.RUNG] * 3)
+        self._clear('a')
+
+        payload = self._clear('a').json()
+
+        self.assertEqual(payload['cancelled'], 0)
+        self.assertEqual(payload['handed_over'], 0)
+
+    def test_it_never_reaches_another_account(self):
+        mine = self._queue('a', [self.RUNG] * 2)
+        yours = self._queue('b', [self.RUNG] * 2, offset=100)
+
+        self._clear('a')
+
+        served = self._serve_order(3)
+        self.assertEqual([task.id for task in yours if task.id in served],
+                         [yours[0].id, yours[1].id])
+        for task in mine:
+            self.assertNotIn(task.id, served)
+
+    def test_what_is_already_running_keeps_running(self):
+        mine = self._queue('a', [self.RUNG] * 2)
+        AnalysisTask.objects.filter(pk=mine[0].pk).update(
+            state=AnalysisTask.TState.LEASED, machine='a#0',
+            leased_at=timezone.now())
+
+        self.assertEqual(self._clear('a').json()['cancelled'], 1)
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.LEASED)
+
+    def test_what_somebody_else_also_asked_for_stays_under_them(self):
+        mine = self._queue('a', [self.RUNG] * 3)
+        AnalysisTask.objects.filter(pk=mine[1].pk).update(
+            also_requested_by=['b'], backers=1)
+
+        payload = self._clear('a').json()
+
+        self.assertEqual(payload, {'status': 'cleared', 'cancelled': 2,
+                                   'handed_over': 1})
+        survivor = AnalysisTask.objects.get(pk=mine[1].pk)
+        self.assertEqual(survivor.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(survivor.requested_by, 'b')
+        served = self._serve_order(2)
+        self.assertIn(mine[1].id, served)
+        self.assertNotIn(mine[0].id, served)
+        self.assertNotIn(mine[2].id, served)
+
+    def test_a_post_without_the_confirmation_empties_nothing(self):
+        """El desplegable de la plantilla es el paso extra, y la vista lo EXIGE.
+
+        Esconder un boton detras de un desplegable no es negarlo: sin esta
+        comprobacion, un POST suelto vaciaria la cola de quien lo recibiera.
+        """
+        mine = self._queue('a', [self.RUNG] * 2)
+        self.client.login(username='a', password='p')
+
+        response = self.client.post('/atomicdb/queue/clear/')
+        self.client.logout()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['status'], 'confirm-required')
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.PENDING)
+
+    def test_without_a_session_it_leads_to_the_login(self):
+        response = self.client.post('/atomicdb/queue/clear/', {'confirm': '1'})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_a_get_empties_nothing(self):
+        mine = self._queue('a', [self.RUNG])
+        self.client.login(username='a', password='p')
+
+        response = self.client.get('/atomicdb/queue/clear/')
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.PENDING)
+
+
+class WithdrawOnThePagesTests(_WithdrawHarness):
+    """Donde estan los controles, que es la mitad de la peticion."""
+
+    def test_every_waiting_row_offers_to_withdraw_and_none_offers_to_bump(self):
+        """La asimetria con "Move to front" es deliberada, y sobrevive a su mudanza.
+
+        Adelantar se fue de esta lista el 15-ago porque una lista ordenada por
+        turno ensena arriba lo que ya iba primero.  Retirar no tiene ese
+        problema: lo que se quiere quitar puede ser cualquier fila, y en una
+        racha que ya no se quiere son todas.  Ademas esta es la unica pagina
+        que las ensena juntas.
+        """
+        mine = self._queue('a', [self.RUNG] * 2)
+
+        self.client.login(username='a', password='p')
+        page = self.client.get('/atomicdb/user/a/').content.decode()
+        self.client.logout()
+
+        for task in mine:
+            self.assertIn(f'/atomicdb/queue/cancel/{task.id}/', page)
+        self.assertNotIn(f'/atomicdb/queue/bump/{mine[0].id}/', page)
+
+    def test_a_stranger_sees_no_control_at_all(self):
+        """La pagina de una cuenta es PUBLICA: los botones no pueden serlo."""
+        self._queue('a', [self.RUNG] * 2)
+
+        self.client.login(username='b', password='p')
+        page = self.client.get('/atomicdb/user/a/').content.decode()
+        self.client.logout()
+
+        self.assertNotIn('/atomicdb/queue/cancel/', page)
+        self.assertNotIn('/atomicdb/queue/clear/', page)
+
+    def test_the_clear_control_says_how_many_and_only_when_there_are_some(self):
+        self._queue('a', [self.RUNG] * 3)
+
+        self.client.login(username='a', password='p')
+        with_queue = self.client.get('/atomicdb/user/a/').content.decode()
+        self.client.post('/atomicdb/queue/clear/', {'confirm': '1'})
+        emptied = self.client.get('/atomicdb/user/a/').content.decode()
+        self.client.logout()
+
+        self.assertIn('Withdraw all 3', with_queue)
+        self.assertNotIn('/atomicdb/queue/clear/', emptied)
+
+    def test_the_page_says_what_just_happened_and_offers_the_undo(self):
+        mine = self._queue('a', [self.RUNG])
+
+        self.client.login(username='a', password='p')
+        self.client.post(f'/atomicdb/queue/cancel/{mine[0].id}/', {'back': '1'})
+        page = self.client.get(
+            f'/atomicdb/user/a/?cancelled={mine[0].id}').content.decode()
+        self.client.logout()
+
+        self.assertIn('Request withdrawn', page)
+        self.assertIn('Undo', page)
+
+    def test_the_receipt_survives_a_queue_left_with_nothing_in_it(self):
+        """El caso que mas lo necesita: vaciar la cola entera.
+
+        Sin fila ninguna la seccion cae al estado vacio, y si el recibo colgase
+        de la lista, quien acaba de vaciar su cola no leeria una sola palabra
+        de lo que acaba de hacer.
+        """
+        self._queue('a', [self.RUNG] * 2)
+
+        self.client.login(username='a', password='p')
+        response = self.client.post('/atomicdb/queue/clear/',
+                                    {'confirm': '1', 'back': '1'})
+        page = self.client.get(response['Location']).content.decode()
+        self.client.logout()
+
+        self.assertIn('Withdrew 2 waiting requests', page)
+
+    def test_a_stranger_cannot_be_told_that_he_withdrew_anything(self):
+        """El recibo cuelga de la query, y la pagina es PUBLICA."""
+        self._queue('a', [self.RUNG])
+
+        self.client.login(username='b', password='p')
+        page = self.client.get(
+            '/atomicdb/user/a/?cleared=9').content.decode()
+        self.client.logout()
+
+        self.assertNotIn('Withdrew', page)
+
+class WithdrawOnThePositionTests(TestCase):
+    """El otro sitio donde se retira: la pagina de la posicion.
+
+    Es el sitio donde uno se da cuenta (asfault): acabas de pedir analisis y la
+    tabla de abajo te esta ensenando que la linea ya estaba vista.  Desde el
+    15-ago comparte renglon con el boton de adelantar, que se mudo aqui por la
+    peticion de Opabinia, y lo que se defiende en esta clase es que los dos
+    controles convivan sin taparse ni mentirse.
+    """
+
+    def setUp(self):
+        for name in ('alice', 'bob'):
+            worker_account(name, 'p')
+        self.client = Client()
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        self.first, self.second = (
+            ingest.get_or_create_position(logic.apply_move(root.fen, uci))
+            for uci in ('e2e4', 'd2d4'))
+
+    def _ask(self, position, username='alice'):
+        ingest.request_analysis(position, requested_by=username)
+        return AnalysisTask.objects.get(position=position, state='PENDING')
+
+    def _body(self, position, username=''):
+        if username:
+            self.client.login(username=username, password='p')
+        body = self.client.get(
+            f'/atomicdb/explore/{position.key}/').content.decode()
+        self.client.logout()
+        return body
+
+    def test_the_position_you_asked_for_offers_to_take_it_back(self):
+        waiting = self._ask(self.first)
+
+        body = self._body(self.first, 'alice')
+
+        self.assertIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+        self.assertIn('Withdraw', body)
+
+    def test_both_controls_live_together_when_both_apply(self):
+        """Adelantar y retirar hablan de la MISMA fila y caben en el renglon."""
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+
+        body = self._body(self.second, 'alice')
+
+        self.assertIn(f'/atomicdb/queue/bump/{waiting.id}/', body)
+        self.assertIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+
+    def test_the_first_of_your_queue_can_still_be_taken_back(self):
+        """La condicion de retirar es MAS CORTA, y es deliberado.
+
+        Adelantar necesita ademas tener a donde ir; retirar siempre hace algo.
+        Y la que encabeza tu cola es justamente la que mas se quiere retirar:
+        es la ultima que pediste.
+        """
+        leading = self._ask(self.first)
+        self._ask(self.second)
+
+        body = self._body(self.first, 'alice')
+
+        self.assertNotIn(f'/atomicdb/queue/bump/{leading.id}/', body)
+        self.assertIn(f'/atomicdb/queue/cancel/{leading.id}/', body)
+
+    def test_a_stranger_looking_at_the_same_page_sees_neither(self):
+        waiting = self._ask(self.first)
+
+        body = self._body(self.first, 'bob')
+
+        self.assertNotIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+        self.assertNotIn('Withdraw', body)
+
+    def test_joining_somebody_elses_request_does_not_let_you_drop_it(self):
+        """Sumarse no te hace dueno: la fila sigue siendo de quien la abrio."""
+        waiting = self._ask(self.first, 'alice')
+        ingest.request_analysis(self.first, requested_by='bob')
+
+        body = self._body(self.first, 'bob')
+
+        self.assertNotIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+
+    def test_a_request_already_running_offers_nothing_to_withdraw(self):
+        waiting = self._ask(self.first)
+        AnalysisTask.objects.filter(pk=waiting.pk).update(
+            state=AnalysisTask.TState.LEASED, machine='m#0',
+            leased_at=timezone.now(), lease_heartbeat_at=timezone.now())
+
+        body = self._body(self.first, 'alice')
+
+        self.assertNotIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+
+    def test_a_solved_position_has_nothing_to_offer(self):
+        waiting = self._ask(self.first)
+        Position.objects.filter(key=self.first.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        body = self._body(self.first, 'alice')
+
+        self.assertNotIn(f'/atomicdb/queue/cancel/{waiting.id}/', body)
+
+    def test_the_click_comes_back_to_the_position_and_says_what_it_did(self):
+        """El recibo y su deshacer se pintan donde aterriza el click.
+
+        Sin esto, retirar desde una posicion dejaba la linea de estado en
+        blanco y ni una palabra — y el deshacer es lo que sostiene que retirar
+        sea un click sin confirmacion.
+        """
+        waiting = self._ask(self.first)
+        back = f'/atomicdb/explore/{self.first.key}/'
+
+        self.client.login(username='alice', password='p')
+        response = self.client.post(
+            f'/atomicdb/queue/cancel/{waiting.id}/', {'back': back})
+        page = self.client.get(response['Location']).content.decode()
+        self.client.logout()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response['Location'].startswith(back))
+        self.assertIn('Request withdrawn', page)
+        self.assertIn('Undo', page)
+        self.assertIn(f'/atomicdb/queue/cancel/{waiting.id}/', page)
+
+    def test_the_undo_from_the_position_puts_it_back(self):
+        waiting = self._ask(self.first)
+        back = f'/atomicdb/explore/{self.first.key}/'
+
+        self.client.login(username='alice', password='p')
+        self.client.post(f'/atomicdb/queue/cancel/{waiting.id}/',
+                         {'back': back})
+        response = self.client.post(f'/atomicdb/queue/cancel/{waiting.id}/',
+                                    {'back': back, 'undo': '1'})
+        self.client.logout()
+
+        self.assertTrue(response['Location'].startswith(back))
+        self.assertEqual(AnalysisTask.objects.get(pk=waiting.pk).state,
+                         AnalysisTask.TState.PENDING)
+
+    def test_a_back_that_leaves_the_site_is_refused(self):
+        """Lo que llega del cliente es una PISTA, no un destino."""
+        waiting = self._ask(self.first)
+
+        self.client.login(username='alice', password='p')
+        response = self.client.post(f'/atomicdb/queue/cancel/{waiting.id}/',
+                                    {'back': 'https://elsewhere.example/'})
+        self.client.logout()
+
+        self.assertTrue(
+            response['Location'].startswith('/atomicdb/user/alice/'))
+
+
 def _serve(task, machine='m1'):
     """Reclamar y aplicar, que es lo que hacen el submit y su procesador."""
     job, _created = ingest_queue.enqueue(task, {
@@ -729,3 +1237,102 @@ class EndToEndClickTests(TestCase):
             sorted(RequestNotification.objects.values_list('username',
                                                            flat=True)),
             ['eclipsia', 'wolfram'])
+
+
+class WithdrawCostsNothingTests(_DuplicateHarness):
+    """Retirar no compra nada, y sobre todo no GASTA nada.
+
+    Es la propiedad que decide el estado: contarlo como completado le diria a
+    la escalera que el peldano ya esta pagado, y el siguiente click sobre esa
+    posicion compraria el de arriba.  Quien se equivoco de linea acabaria
+    pagando 512M por equivocarse.
+    """
+
+    def setUp(self):
+        super().setUp()
+        worker_account('asfault', 'p')
+
+    def _withdraw(self, task):
+        self.client.login(username='asfault', password='p')
+        response = self.client.post(f'/atomicdb/queue/cancel/{task.id}/')
+        self.client.logout()
+        return response
+
+    def test_the_ladder_does_not_advance(self):
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        rung = task.budget_nodes
+
+        self._withdraw(task)
+        self.assertEqual(self._ask('asfault'), 'queued')
+
+        again = AnalysisTask.objects.get(position=self.target)
+        self.assertEqual(again.budget_nodes, rung)
+        self.assertEqual(again.state, AnalysisTask.TState.PENDING)
+
+    def test_asking_again_revives_the_same_row(self):
+        """La unicidad (posicion, generacion) no deja crear una fila nueva.
+
+        Sin revivir, la posicion se quedaba sin poder pedirse NUNCA MAS: el
+        hueco de su generacion estaba ocupado por la retirada y
+        ``get_or_create`` devolvia esa.
+        """
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        self._withdraw(task)
+
+        self._ask('wolfram')
+
+        self.assertEqual(
+            AnalysisTask.objects.filter(position=self.target).count(), 1)
+        again = AnalysisTask.objects.get(pk=task.pk)
+        self.assertEqual(again.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(again.requested_by, 'wolfram')
+
+    def test_a_withdrawn_request_is_not_a_served_one(self):
+        """Ni en la lista de servidas ni en el contador de contribucion."""
+        self._ask('asfault')
+        self._withdraw(AnalysisTask.objects.get(position=self.target))
+
+        page = contributors.present('asfault')
+
+        self.assertEqual(page['queue_done'], [])
+        self.assertEqual(page['queue_pending'], [])
+        self.assertEqual(page['requests_total_h'], '0')
+
+    def test_undo_puts_it_back_exactly_where_it_was(self):
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        self._withdraw(task)
+
+        self.client.login(username='asfault', password='p')
+        response = self.client.post(f'/atomicdb/queue/cancel/{task.id}/',
+                                    {'undo': '1'})
+        self.client.logout()
+
+        self.assertEqual(response.json()['status'], 'restored')
+        back = AnalysisTask.objects.get(pk=task.pk)
+        self.assertEqual(back.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(back.budget_nodes, task.budget_nodes)
+        self.assertIsNone(back.completed)
+
+    def test_undo_is_refused_once_the_position_has_a_verdict(self):
+        """Resucitar una peticion sobre algo ya decidido crea un zombi.
+
+        ``choose_pending`` salta lo que no esta en UNKNOWN, asi que esa fila
+        no la serviria nadie nunca y se quedaria en la cola para siempre.
+        """
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        self._withdraw(task)
+        Position.objects.filter(key=self.target.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        self.client.login(username='asfault', password='p')
+        response = self.client.post(f'/atomicdb/queue/cancel/{task.id}/',
+                                    {'undo': '1'})
+        self.client.logout()
+
+        self.assertEqual(response.json()['status'], 'cannot-restore')
+        self.assertEqual(AnalysisTask.objects.get(pk=task.pk).state,
+                         AnalysisTask.TState.CANCELLED)

@@ -62,6 +62,29 @@ class Position(models.Model):
     # necesitan slack.  NULL = no medido, que se trata como cero.
     clock_slack = models.SmallIntegerField(null=True)
     last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis
+    # QUE DIJO CADA PASE, en una linea por pase y del mas nuevo al mas viejo.
+    #
+    # Peticion de comunidad (Wolfram): "preferably all passes that were done in
+    # the node, as it is practically useful to know which evaluation engine
+    # gave at lower depth".  ``last_analysis`` guarda las LINEAS, y solo las de
+    # dos pases: el vigente y — cuando era mas ancho — el anterior.  Eso
+    # responde a la mitad de la pregunta; la otra mitad es la SERIE, que es
+    # justamente lo que ensena si el numero se movio al profundizar o llevaba
+    # tres pases diciendo lo mismo.
+    #
+    # RESUMENES Y NO LINEAS, y por eso cabe.  Al lado esta escrito por que
+    # ``last_analysis`` recorta las PVs a 24 plies: es un JSON POR POSICION y
+    # su tamano medio se multiplica por los millones de filas de esta tabla.
+    # Una entrada de aqui son unas decenas de bytes — presupuesto, anchura,
+    # eval, jugada, profundidad y fecha — sin una sola PV dentro, y solo crece
+    # en los nodos revisitados, que son una minoria.  Con ``PASS_HISTORY_MAX``
+    # entradas el techo por fila esta acotado por construccion.
+    #
+    # HACIA DELANTE Y SIN RELLENAR NADA: las filas que ya existen tienen lista
+    # vacia y no hay forma honesta de reconstruirles la serie — los pases que
+    # no se guardaron no se pueden inventar.  La API lo dice cuando responde
+    # (§ views.api_query, ``analysis.passes_from``).
+    analysis_passes = models.JSONField(default=list, blank=True)
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
     # ¿CUELGA ESTA POSICION DE LA RAIZ?  Lo sabia el Dijkstra global — un nodo
     # sin regret finito estaba desconectado — y saberlo costaba recorrer el
@@ -281,6 +304,36 @@ class AnalysisTask(models.Model):
         PENDING   = 'PENDING'
         LEASED    = 'LEASED'
         COMPLETED = 'COMPLETED'
+        # RETIRADA POR QUIEN LA PIDIO, antes de que ningun motor la mirase.
+        #
+        # Peticion de comunidad (asfault): "is there a way to cancel requests
+        # before they have started - for when you accidentally request analysis
+        # for some already deeply analysed line".  Hasta hoy la unica salida de
+        # la cola era que un worker la sirviera.
+        #
+        # POR QUE UN ESTADO PROPIO Y NO LA ABSORCION.  Absorber es
+        # ``COMPLETED`` sin nodos (§ ``ingest.absorb_tasks``) y significa "el
+        # trabajo se hizo, pero no lo hizo esta fila": el peldano SE COMPRO.
+        # Cancelar dice lo contrario — no se compro nada — y contarlo como
+        # completado tiene dos precios que nadie pidio pagar.  Uno es visible:
+        # la fila aparece en "Served" de su autor con cero nodos, o sea el
+        # sitio miente sobre lo que ese click consiguio.  El otro es peor y es
+        # silencioso: ``ingest._completed_max_budget`` lee los COMPLETED para
+        # saber por que peldano va la escalera, asi que cancelar un 128M
+        # ensenaria a la posicion que ese peldano ya esta pagado y el siguiente
+        # click compraria 512M — cancelar saldria caro justo a quien cancela
+        # porque se equivoco de linea.
+        #
+        # Y CUESTA CASI NADA porque el resto del codigo ya filtra por estado en
+        # POSITIVO: no hay un solo ``exclude(state=...)`` ni una enumeracion de
+        # los tres estados sobre esta tabla.  Una fila retirada cae sola fuera
+        # de la cola (``state='PENDING'``), fuera del reparto justo
+        # (``CHARGED``), fuera de lo servido, fuera de la contabilidad de nodos
+        # y fuera de la escalera.  Lo unico que hubo que ensenar aparte es a
+        # volver: la unicidad (posicion, generacion) deja el hueco ocupado por
+        # la fila retirada, asi que la siguiente peticion la REVIVE en vez de
+        # chocar (§ ``ingest._request_rung``).
+        CANCELLED = 'CANCELLED'
 
     class Source(models.TextChoices):
         AUTO = 'AUTO'   # selector best-first
@@ -700,6 +753,50 @@ class RequestLog(models.Model):
     ip       = models.GenericIPAddressField(db_index=True)
     position = models.ForeignKey(Position, on_delete=models.CASCADE)
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class ApiRequestLog(models.Model):
+    """Un recibo por llamada ACEPTADA a la API de peticion de analisis.
+
+    Peticion de comunidad (Wolfram): "is there official API for requesting
+    analysis".  El click de la pagina no lleva tope horario — el propietario lo
+    retiro el 28-jul porque frenaba a quien usaba el explorador de verdad y no
+    frenaba a nadie mas — y lo que acota su gasto son el dedup por ip+posicion
+    y el techo de cola.  Un cliente programatico no tiene ninguna de las dos
+    frenadas naturales de un humano: no hay una pagina que recargar entre
+    peticion y peticion, y un bucle mal escrito no se cansa.
+
+    ASI QUE EL TOPE ES DE LA PUERTA, NO DE LA PERSONA.  Esta tabla cuenta solo
+    llamadas de API, y por eso existe en vez de reusar ``RequestLog``: contar
+    las dos puertas juntas dejaria que una tarde de exploracion normal en el
+    navegador agotase el presupuesto del script de esa misma cuenta, que es
+    exactamente la decision que el propietario ya tomo al reves.
+
+    ``account`` vacio = llamada sin credenciales.  A esas se les cuenta por
+    ``ip``, que es lo unico que las agrupa; a las que traen cuenta se les
+    cuenta por cuenta, y la IP de esas se guarda igual porque un abuso se
+    diagnostica por donde entra.  Nombre en texto y no FK, por lo mismo que
+    ``AnalysisTask.requested_by``: el router prohibe relaciones entre esta base
+    y la de OpenBench.
+    """
+
+    account = models.CharField(max_length=64, default='', blank=True)
+    ip      = models.GenericIPAddressField()
+    created = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            # La unica consulta que hace el tope: las MIAS en la ultima hora.
+            # Compuestos y no dos indices sueltos: con ``account`` a secas
+            # habria que bajar por todas las llamadas de esa cuenta desde que
+            # existe la tabla y descartar por fecha, y el prefijo izquierdo de
+            # estos ya sirve para cualquier consulta por cuenta o por
+            # direccion a secas — un indice suelto encima seria una copia que
+            # solo cuesta escrituras.
+            models.Index(fields=['account', 'created'],
+                         name='atomic_apireq_account'),
+            models.Index(fields=['ip', 'created'], name='atomic_apireq_ip'),
+        ]
 
 
 class RequestNotification(models.Model):

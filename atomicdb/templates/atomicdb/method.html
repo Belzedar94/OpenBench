@@ -51,10 +51,73 @@ order: while a request of yours is waiting, the position it was asked for
 offers a <strong>Move to front</strong> control that serves it before the rest
 of yours. It takes the place your own first request already held, so nobody
 else's request moves.</p>
-<p>Programmatic access: <code>GET /atomicdb/api/query?fen=...</code> returns
-the stored verdict, score and move list as JSON. Scores are from the side to
-move (chessdb.cn convention). Unknown positions return 404; use the FEN box
-or the explorer to add them to the tree.</p>
+<p class="dim" style="font-size:.9rem">A request you have not been served yet
+is still yours to take back. <strong>Withdraw</strong> sits beside that same
+control on the position, and on every waiting row of your contributor page,
+which is the one place they are all listed together. Nothing has been spent on
+a waiting request, so withdrawing costs nothing and puts nothing on your
+record; the ladder does not advance either, so the same rung is still there if
+you ask again. One click, and the page you came back to offers to undo it. If
+somebody else asked for the same position, withdrawing only takes your name
+off: the request stays in the queue under them. A request a worker has already
+started cannot be withdrawn, because the search is already running.
+<strong>Clear my queue</strong>, at the foot of the waiting list, does the same
+to everything you have waiting at once, with the same rule for shared requests;
+that one asks for confirmation and has no undo.</p>
+<h2 id="api">API</h2>
+<p>Two endpoints, one to read and one to ask. Both speak FEN and return JSON,
+and both are usable without an account.</p>
+<p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
+the stored verdict, score and move list. Scores are from the side to move
+(chessdb.cn convention). Unknown positions return 404; use the request
+endpoint below, the FEN box or the explorer to add them to the tree.</p>
+<p class="dim" style="font-size:.9rem">The reply also carries an
+<code>analysis</code> block with the engine's own output on that position, or
+<code>null</code> where no engine has looked yet. <code>lines</code> is the
+current pass and <code>previous</code> the pass before it, kept whenever it was
+wider than the one that replaced it; each line carries its move, <code>cp</code>
+or <code>mate</code> (side to move, like the rest of the reply), the PV, the
+<code>depth</code>, <code>seldepth</code> and <code>nodes</code> the engine
+reported, and the untouched <code>raw</code> UCI info string it came from.
+<code>budget_nodes</code> is the node budget of the pass that produced
+<code>lines</code>. <code>passes</code> is one summary per pass, newest first:
+budget, width, evaluation, move, depth and whether that pass is the one on
+display, which is what shows how the evaluation moved as the search went
+deeper. Passes have only been recorded since 15 August 2026, so a position
+analysed before then has a series that starts partway through:
+<code>passes_complete</code> is false there, and no attempt is made to invent
+the missing entries.</p>
+<p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
+<code>fen</code> queues analysis for that position, taking exactly the path the
+explorer button takes. Same budget ladder (128M, then 512M, 2B, 10B on repeat
+requests), same deduplication, same queue cap, and the same joining rule: if
+the position is already queued, you are recorded as another requester rather
+than queueing a duplicate.</p>
+<p class="dim" style="font-size:.9rem">Optional fields:
+<code>username</code> and <code>password</code> put the request on your
+account, which is what buys the notification when it lands, the affinity with
+your own workers, and your place in the fair share; without them the request is
+anonymous and served like a click without a session. <code>budget</code> picks
+a ladder rung, and is honoured for the same accounts the explorer's depth
+slider is offered to. Session cookies are deliberately ignored here, so a page
+in your browser cannot spend your queue behind your back.</p>
+<p class="dim" style="font-size:.9rem">The reply carries <code>status</code>,
+the position <code>key</code> and canonical <code>fen</code>, the
+<code>task</code> id and its <code>budget_nodes</code> when there is a live one,
+<code>ahead</code> (how many requests are served first), <code>backed</code>
+(true when you joined a request somebody else had already made), and
+<code>seeded</code> when the FEN was not in the tree and was added by this call.
+<code>status</code> is <code>queued</code>, <code>already-queued</code>,
+<code>already-solved</code>, <code>expanded</code> (the ladder here is spent, so
+the work went to the replies below), <code>saturated</code> (nothing left to buy
+here or below), or <code>refused</code>. A refusal explains itself in
+<code>reason</code>: an unreadable FEN or a bad budget give 400, wrong
+credentials 403, too many calls 429, and a full queue or a busy database 503
+with a <code>Retry-After</code>.</p>
+<p class="dim" style="font-size:.9rem">The request endpoint allows 60 calls per
+hour per account, or per address when no credentials are sent. It is a limit on
+this door only: the explorer button has no hourly limit and a day of browsing
+does not eat into the allowance of a script on the same account.</p>
 <p>To contribute compute, create an account via
 <a href="/register/">the OpenBench registration</a>
 (instant activation), then run the analysis worker. All you need is python3:

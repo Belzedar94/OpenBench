@@ -1787,16 +1787,24 @@ html.theme-ready .tile {
   font-size: .8rem;
 }
 
-/* Adelantar una peticion propia.  Un enlace de texto y no un boton con caja:
-   vive dentro de una fila de cola, junto a la linea y el presupuesto, y una
-   caja por fila convertiria la lista en una botonera.  Mismo tratamiento que
-   el "Mark all read" de la campana, que es el otro POST minusculo del sitio. */
-.queue-bump {
+/* Lo que se puede hacer con una peticion propia: adelantarla y retirarla.
+   Enlaces de texto y no botones con caja, y por dos motivos que apuntan al
+   mismo sitio.  En la fila de la cola, una caja por fila convertiria la lista
+   en una botonera.  En la pagina de la posicion, los dos comparten renglon con
+   la linea de estado, que es una frase, y ahi una caja competiria con los tres
+   botones de peticion que estan justo encima.  Mismo peso visual entre ellos a
+   proposito: son dos opciones de la misma peticion, no una principal y una
+   secundaria.  Mismo tratamiento que el "Mark all read" de la campana, que es
+   el otro POST minusculo del sitio. */
+.queue-bump,
+.queue-cancel {
   display: inline;
   margin-left: .5rem;
 }
 
-.queue-bump button {
+.queue-bump button,
+.queue-cancel button,
+.queue-receipt button {
   padding: 0;
   border: none;
   background: none;
@@ -1806,8 +1814,58 @@ html.theme-ready .tile {
   cursor: pointer;
 }
 
-.queue-bump button:hover {
+.queue-bump button:hover,
+.queue-cancel button:hover,
+.queue-receipt button:hover {
   text-decoration: underline;
+}
+
+/* El recibo de lo que se acaba de hacer con la cola.  Lleva marca de color a
+   la izquierda y no fondo: la seccion entera es una lista y un bloque relleno
+   ahi dentro compite con lo que la persona ha venido a mirar. */
+.queue-receipt {
+  margin: .1rem 0 .8rem;
+  padding-left: .6rem;
+  border-left: 3px solid var(--accent);
+  font-size: .9rem;
+}
+
+.queue-receipt form {
+  display: inline;
+  margin-left: .4rem;
+}
+
+/* Vaciar la cola entera.  Cerrado es un renglon; abierto ES el paso de
+   confirmacion, con la cifra y las consecuencias antes del boton. */
+.queue-clear {
+  margin: .6rem 0 0;
+  font-size: .85rem;
+}
+
+.queue-clear summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.queue-clear p {
+  margin: .35rem 0;
+  max-width: 46rem;
+}
+
+.queue-clear button {
+  padding: .25rem .7rem;
+  border: 1px solid var(--warm);
+  border-radius: 4px;
+  background: none;
+  color: var(--warm);
+  font: inherit;
+  font-size: .85rem;
+  cursor: pointer;
+}
+
+.queue-clear button:hover {
+  background: var(--warm);
+  color: var(--bg);
 }
 
 .contrib-spec {

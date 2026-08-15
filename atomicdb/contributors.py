@@ -73,10 +73,26 @@ MILESTONES = ((10_000_000_000_000, '10T club'),
               (100_000_000_000, '100B club'),
               (1_000_000_000, '1B club'))
 
+CANCELLED = AnalysisTask.TState.CANCELLED
 COMPLETED = AnalysisTask.TState.COMPLETED
 LEASED = AnalysisTask.TState.LEASED
 PENDING = AnalysisTask.TState.PENDING
 USER = AnalysisTask.Source.USER
+
+
+def _requests_of(username):
+    """Las peticiones de una cuenta que TODAVIA cuentan como suyas.
+
+    Lo RETIRADO queda fuera, y esta es la unica linea del modulo que tiene que
+    saberlo: las tres listas de la cola filtran por estado y una fila cancelada
+    no esta en ninguno de los tres, pero el medidor de "requests made" contaba
+    filas a secas y habria seguido contando lo que su autor deshizo.  Esa cifra
+    vive en una rejilla de medidores de CONTRIBUCION, al lado de los nodos y de
+    los analisis servidos: una peticion retirada no es ninguna de las dos cosas.
+    """
+    return AnalysisTask.objects.filter(source=USER,
+                                       requested_by=username).exclude(
+        state=CANCELLED)
 
 
 def _ago(moment, now):
@@ -281,8 +297,7 @@ def has_activity(username):
     if not username:
         return False
     return (WorkerPing.objects.filter(user=username).exists()
-            or AnalysisTask.objects.filter(source=USER,
-                                           requested_by=username).exists()
+            or _requests_of(username).exists()
             or OpeningNameSuggestion.objects.filter(
                 suggested_by=username).exists())
 
@@ -294,7 +309,7 @@ def _queue_rows(username):
     aunque la maquina que la sirva sea suya — eso se cuenta en la flota, que es
     otra seccion y otra pregunta.
     """
-    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    mine = _requests_of(username)
     # Cuantas peticiones cobran antes que esta.  Mismo orden que
     # ``choose_pending``, leido del mismo sitio: desde el reparto justo del
     # 7-ago el sitio en la cola ya no es "cuantas hay con id menor", asi que
@@ -453,9 +468,14 @@ def present(username, now=None):
                       .values_list('machine', flat=True))
 
     pending, leased, done = _queue_rows(username)
-    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    mine = _requests_of(username)
     pending, pending_more = _overflow(pending, QUEUE_ROWS,
                                       mine.filter(state=PENDING))
+    # Lo que dice el boton de vaciar, SIN una consulta mas: ``_overflow`` ya
+    # conto la banda entera cuando desbordo, y cuando no desbordo la lista ES
+    # la banda entera.  Un ``count()`` aparte aqui seria un segundo recuento de
+    # lo mismo en la pagina que menos se puede permitir consultas de sobra.
+    pending_total = len(pending) + pending_more
     done, done_more = _overflow(done, QUEUE_ROWS, mine.filter(state=COMPLETED))
 
     suggestions = list(OpeningNameSuggestion.objects
@@ -502,6 +522,16 @@ def present(username, now=None):
         _presented(task, labels, now,
                    {'place': task.ahead + 1,
                     'when': _ago(task.created, now),
+                    # RETIRAR SI SE QUEDA AQUI, y la asimetria con el boton
+                    # que se acaba de ir no es un descuido.  Adelantar en esta
+                    # lista no servia porque la lista YA esta ordenada por
+                    # turno: lo de arriba es lo que ya iba primero.  Retirar no
+                    # tiene ese problema — lo que se quiere quitar puede ser
+                    # cualquiera, y en una racha de peticiones que ya no se
+                    # quieren son todas — y ademas esta es la unica pagina que
+                    # las ensena juntas.  El de la POSICION es el otro camino,
+                    # para la que se esta mirando (§ live_request).
+                    'task_id': task.id,
                     'backers': task.backers})
         for task in pending]
     done_rows = [
@@ -583,6 +613,7 @@ def present(username, now=None):
         # empieza directamente por lo que puede hacer.
         'has_counters': bool(requests_total or nodes_all),
         'queue_pending': pending_rows, 'queue_pending_more': pending_more,
+        'queue_pending_total': pending_total,
         'queue_leased': leased_rows,
         'queue_done': done_rows, 'queue_done_more': done_more,
         'has_queue': bool(pending_rows or leased_rows or done_rows),
