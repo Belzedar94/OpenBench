@@ -42,6 +42,13 @@ aterriza.  Asi el conjunto de tareas que te encienden la campana y el conjunto
 de tareas que esta linea narra son el MISMO, y no dos criterios parecidos que
 un dia discrepan.  Una sonda de cobertura de 8M que dura un segundo no sale:
 nadie la pidio y nadie la esta esperando.
+
+AND WHAT YOU CAN DO ABOUT IT, which lives here for the same reason: the
+move-to-front control (§ ``bump_control``) talks about one request on one
+position, reads the same live row this line reads, and reports its place in
+the queue with the very rule that composes the text above.  Two modules
+answering "how much queue is in front of this" is how one page ends up
+contradicting the other.
 """
 
 from datetime import timedelta
@@ -414,10 +421,20 @@ def summary(pos, now=None):
         # peticion ni existe.  Ademas asi el explorador de una posicion cerrada
         # no paga ni una consulta por esto.
         return None
-    now = now or timezone.now()
-    task = _live_task(pos)
+    return _narrate(pos, _live_task(pos), now=now)
+
+
+def _narrate(pos, task, now=None):
+    """The line for ONE already-read task, or ``None`` when there is none.
+
+    Split out of ``summary`` so the page can read the live task ONCE and use
+    it for both things that hang off it: narrating it, and deciding whether
+    the move-to-front control is pointing at that very row
+    (see ``bump_control``).
+    """
     if task is None:
         return None
+    now = now or timezone.now()
     from .views import LEASE_MINUTES, _human
 
     budget = f'{_human(task.budget_nodes)} nodes'
@@ -465,11 +482,99 @@ def summary(pos, now=None):
             'chip': 'hot'}
 
 
-def context(pos, now=None):
-    """Lo que la plantilla consume: ``{}`` cuando no hay nada que decir.
+def _own_pending(pos, username, live):
+    """The PENDING request of ``username`` on THIS position, or ``None``.
 
-    Mismo patron que ``depth.context`` y que ``views._suggestions_badge`` — sin
-    clave, la plantilla no pinta ni el hueco.
+    Free in the common case: when the row the page is already narrating is
+    the visitor's own and it is waiting, that row IS the answer and no second
+    statement is needed.  And with no live row at all there is nothing to look
+    for: every task in the USER band deserves a notification
+    (see ``ingest.notification_deserved``), so if ``_live_task`` found none
+    then none exists.
     """
-    row = summary(pos, now=now)
-    return {'live_request': row} if row is not None else {}
+    if not username or live is None:
+        return None
+    if live.state == PENDING and live.requested_by == username:
+        return live
+    return (AnalysisTask.objects
+            .filter(position=pos, state=PENDING, source=USER,
+                    requested_by=username)
+            .order_by('id').first())
+
+
+def bump_control(pos, username, live=None, back=''):
+    """The move-to-front control for THIS position, or ``{}``.
+
+    WHY IT LIVES HERE AND NOT ON THE ACCOUNT PAGE.  The button was born on
+    the queue list, one per waiting row, and there it was close to useless:
+    a list ordered by turn shows at the top the requests that already went
+    first, while the one somebody actually wants to overtake sits in place
+    one hundred and something, off the page.  "It would be better if the Move
+    to front was on the page of the position, because usually you want to
+    move something that's like hundreds in the queue to the front"
+    (Opabinia); "those buttons clog the interface and essentially useless
+    cause you suggest to move what is already basically in front of the queue
+    to the very front" (Wolfram).  Here there is exactly one request to talk
+    about, the visitor's own on the position in front of them, so there is one
+    control and it sits where the impatience is.
+
+    WHEN IT SHOWS: with a session, and with a PENDING request of your own
+    here.  Whoever JOINED somebody else's request (``also_requested_by``) does
+    not see it, because that row is not theirs and the endpoint would refuse
+    it.  The BUTTON needs one thing more, that the request can really move,
+    which costs one statement and earns it: a button that answers
+    'already-first' is worse than no button.
+
+    THE QUEUE PLACE PAINTED HERE IS THE PLACE OF THIS TASK, counted by the
+    same rule the account page prints beside every waiting row
+    (``queue_ahead``): a control has to show the number it acts on, or the
+    click cannot be read.  The place OUTLIVES the button on purpose, because
+    a click that moves a request also takes that request to the front of its
+    own queue and so takes the button away with it: with the number gone too,
+    the only visible effect of pressing would be that everything disappeared.
+
+    And it is not said TWICE: when the status line above is already narrating
+    this very request, the place is said there and only the button goes here.
+    """
+    task = _own_pending(pos, username, live)
+    if task is None:
+        return {}
+    from .ingest import front_of_own_queue
+    can_move = front_of_own_queue(task) is not None
+    said = live is not None and live.id == task.id and live.state == PENDING
+    ahead = None if said else queue_ahead(task)
+    # ``None`` when the status line above already says it, and also when the
+    # task left the visitor band and has no place to report: an invented
+    # number here would be worse than none, exactly as in that status line.
+    place = None if ahead is None else ahead + 1
+    if not can_move and place is None:
+        return {}
+    return {'queue_bump': {
+        'task_id': task.id,
+        'can_move': can_move,
+        'place': place,
+        # Where the button comes back to, composed by the page and not echoed
+        # from the request: the endpoint takes it as a hint and refuses
+        # anything that is not a route of this site.
+        'back': back,
+    }}
+
+
+def context(pos, now=None, username='', back=''):
+    """What the template consumes: ``{}`` when there is nothing to say.
+
+    Same shape as ``depth.context`` and ``views._suggestions_badge``: with no
+    key, the template does not paint even the gap.
+
+    The live task is read ONCE and serves both things that hang off it: the
+    status line and the move-to-front control.
+    """
+    if pos.status != 'UNKNOWN':
+        return {}
+    live = _live_task(pos)
+    out = {}
+    row = _narrate(pos, live, now=now)
+    if row is not None:
+        out['live_request'] = row
+    out.update(bump_control(pos, username, live=live, back=back))
+    return out

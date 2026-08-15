@@ -164,6 +164,26 @@
     <p class="livereq" id="livereq"{% if not live_request %} hidden{% endif %}><span
       class="chip {{ live_request.chip }}" id="livereq-chip"></span><span
       id="livereq-text">{{ live_request.text }}</span></p>
+    {% comment %}Adelantar TU peticion de esta posicion, y solo la tuya.  Va
+    aqui y no en la lista de la cola porque aqui es donde se decide: lo que se
+    quiere adelantar es la posicion que se esta mirando, no una fila que hay
+    que ir a buscar a la pagina de la cuenta ("it would be better if the Move
+    to front was on the page of the position", Opabinia).  El sitio de cola
+    que se pinta es el de ESTA peticion, solo sale cuando la linea de arriba
+    no lo ha dicho ya, y SOBREVIVE al boton: adelantar deja la peticion la
+    primera de su cola y con eso se lleva el boton, asi que sin el numero el
+    unico efecto visible del click seria que todo desaparecio
+    (§ live_request.bump_control).{% endcomment %}
+    {% if queue_bump %}
+    <div class="livereq">{% if queue_bump.place %}<span class="dim">Your
+      request here is <span title="Place in the visitor queue: how many requests are served before this one">#{{ queue_bump.place }}</span>
+      in the visitor queue</span>{% endif %}{% if queue_bump.can_move %}<form
+      class="queue-bump" method="post"
+      action="/atomicdb/queue/bump/{{ queue_bump.task_id }}/">{% csrf_token %}
+      <input type="hidden" name="back" value="{{ queue_bump.back }}">
+      <button type="submit" title="Serve this one first out of everything you have waiting. It takes the place your own first request already held, so nobody else's request moves.">Move to front</button>
+      </form>{% endif %}</div>
+    {% endif %}
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>

@@ -4279,13 +4279,19 @@ def api_queue_bump(request, task_id):
     de nodos no se mueve, asi que tu parte del pool tampoco.
 
     LA CUENTA TIENE QUE SER LA TUYA, y se comprueba aqui: el boton solo sale en
-    tu propia pagina, pero esconder un control no es negarlo.  Sin sesion, al
-    login de OpenBench, que es lo que hace el resto de las paginas personales.
+    la pagina de una posicion que tu has pedido, pero esconder un control no es
+    negarlo.  Sin sesion, al login de OpenBench, que es lo que hace el resto de
+    las paginas personales.
+
+    DE DONDE SE PULSA.  Desde el 15-ago, de la pagina de la POSICION y no de
+    la lista de la cola (§ ``live_request.bump_control``), asi que la vuelta
+    ya no puede ser un destino fijo: ``back`` trae la pagina desde la que se
+    pincho y se acepta solo si es una ruta de este sitio, con la pagina de la
+    cuenta como suelo.  Misma guarda que el boton de marcar avisos vistos.
 
     SIN ``csrf_exempt``, por lo mismo que ``api_request``: esto lo manda un
-    formulario de la pagina de contribuidor, que lleva su token.  Exenta, una
-    pagina de terceros podria reordenarle la cola a quien la visitara con
-    sesion iniciada.
+    formulario del explorador, que lleva su token.  Exenta, una pagina de
+    terceros podria reordenar la cola de quien la visitara con sesion abierta.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -4308,9 +4314,10 @@ def api_queue_bump(request, task_id):
             else:
                 AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
                 status, moved = 'moved', True
-    if request.POST.get('back'):
-        return redirect(
-            f'/atomicdb/user/{quote(request.user.username, safe="")}/')
+    back = request.POST.get('back') or ''
+    if back:
+        own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
+        return redirect(back if back.startswith('/atomicdb/') else own_page)
     return JsonResponse({'status': status, 'moved': moved})
 
 
@@ -5174,9 +5181,15 @@ def explore(request, key):
         # render con selector no se le sirve a nadie mas.
         **depth.context(request, pos),
         # En que va la peticion viva de ESTA posicion: esperando en la cola, o
-        # buscandose ahora y cuanto falta.  Vacio cuando no hay tarea viva, y
-        # entonces la plantilla no pinta ni el hueco (§ live_request.context).
-        **live_request.context(pos),
+        # buscandose ahora y cuanto falta.  Y, junto a esa linea, el control
+        # para adelantar TU peticion de aqui, que es donde de verdad hace
+        # falta (§ live_request.bump_control).  Vacio cuando no hay tarea
+        # viva, y entonces la plantilla no pinta ni el hueco.
+        **live_request.context(
+            pos,
+            username=(request.user.username
+                      if request.user.is_authenticated else ''),
+            back=_explore_url(pos.key, active_ucis, current_anchor)),
         'pos': pos, 'moves': moves, 'parents': parents,
         # Las lineas del motor listas para ENSEÑAR: cortadas en su primer
         # cruce consigo mismas (§ _analysis_lines_for_display).  El JSON

@@ -494,11 +494,18 @@ class CostTests(TestCase):
         Client().get(self.url)   # almacen de claves caliente, como en produccion
 
     def _queries(self, silent=False):
+        # APAGAR ES APAGAR ``context``, que es lo que el explorador llama y lo
+        # que engloba TODO lo que este modulo le cuesta a la pagina: la linea
+        # de estado y el control de adelantar que cuelga de la misma lectura
+        # (§ live_request.bump_control).  Con la narracion sola apagada, la
+        # lectura de la tarea viva seguiria pagandose en las dos medidas y la
+        # resta ya no mediria nada.  Las cifras que se comparan no cambian:
+        # sin sesion el control no cuesta ni una sentencia.
         alias = settings.ATOMICDB_DATABASE_ALIAS
         with CaptureQueriesContext(connections[alias]) as counted:
             if silent:
-                with mock.patch('atomicdb.live_request.summary',
-                                return_value=None):
+                with mock.patch('atomicdb.live_request.context',
+                                return_value={}):
                     response = Client().get(self.url)
             else:
                 response = Client().get(self.url)
