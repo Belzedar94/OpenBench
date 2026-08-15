@@ -933,6 +933,42 @@ details summary {
   color: var(--hot);
 }
 
+/* Que linea compra "Verify PV". Va pegado al boton porque es su argumento y
+   no un ajuste de despues, asi que comparte la fila y no abre otra: el
+   ``gap`` de ``.reqrow`` los separaria como si fueran dos acciones. El
+   desplegable toma prestada la forma de ``.reqbtn`` (mismo borde, misma
+   superficie, mismo tamano de letra) para que la pareja se lea como un solo
+   control, y ``max-width`` evita que una linea con nombre largo empuje la
+   fila fuera de la columna del tablero. */
+.pvlinechoice {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  max-width: 100%;
+}
+
+.pvlinelab {
+  color: var(--ink-muted);
+  font-size: .8rem;
+}
+
+.pvline {
+  min-width: 0;      /* que encoja en un telefono en vez de ensanchar la fila */
+  max-width: 12rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--ink);
+  font: inherit;
+  font-size: .85rem;
+  cursor: pointer;
+}
+
+.pvline:hover {
+  border-color: var(--won);
+}
+
 /* Selector de profundidad del boton de peticion. Solo se pinta para quien
    puede elegir peldano, asi que estas reglas no tocan el explorador de nadie
    mas. Todo el bloque es flexible y ningun hijo tiene ancho intrinseco que
@@ -1519,6 +1555,7 @@ html.theme-ready .tile,
 html.theme-ready .raw,
 html.theme-ready .verdict,
 html.theme-ready .reqbtn,
+html.theme-ready .pvline,
 html.theme-ready .fenbox input,
 html.theme-ready .linebox,
 html.theme-ready .campaign-card,
