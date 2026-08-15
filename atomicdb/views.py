@@ -1274,12 +1274,34 @@ def api_pv_verify(request, key):
             route = raw_route
         except (PlayRouteError, PlayRouteConflict):
             route = ''
+    # QUE LINEA, si el visitante eligio una.  Sin ``line`` el boton hace lo de
+    # siempre, caer por la lista hasta el primer hueco, y con ella camina esa
+    # (§ ingest.enqueue_pv_verification).
+    #
+    # Un valor ILEGIBLE se rechaza, no se redondea a cero.  Degradarlo a la
+    # caida automatica volveria a comprar la linea 1 en silencio despues de que
+    # alguien pidiera la 3, que es exactamente el bug del que viene esto: el
+    # click tiene que fallar donde falla y no acabar pagando otra cosa.
+    raw_line = (request.POST.get('line') or '').strip()
+    try:
+        line = int(raw_line) if raw_line else 0
+    except ValueError:
+        line = -1
+    if line < 0:
+        return JsonResponse(_pv_verify_payload(
+            ingest.VerifyOutcome(0, line=0, unknown_line=True)), status=400)
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)
         outcome = ingest.enqueue_pv_verification(pos,
                                                  requested_by=requested_by,
-                                                 route=route)
-    return JsonResponse(_pv_verify_payload(outcome))
+                                                 route=route, line=line)
+    payload = _pv_verify_payload(outcome)
+    # Pedir una linea que no existe es una peticion mal formada, y se contesta
+    # como tal: el 200 lo reservan las peticiones que el servidor SI atendio,
+    # compraran algo o no.
+    return JsonResponse(payload,
+                        status=400 if payload['status'] == 'unknown-line'
+                        else 200)
 
 
 def _pv_verify_payload(outcome):
@@ -1292,7 +1314,14 @@ def _pv_verify_payload(outcome):
     """
     detail = getattr(outcome, 'detail', None) or {}
     queued = int(outcome)
-    return {'status': 'queued' if queued else 'nothing-to-do',
+    if detail.get('unknown_line'):
+        # Ni compra ni ausencia de trabajo: la peticion nombraba una linea que
+        # esta posicion no ofrece.  Con ``nothing-to-do`` el explorador diria
+        # "todo verificado", que es mentira sobre una linea que ni se miro.
+        status = 'unknown-line'
+    else:
+        status = 'queued' if queued else 'nothing-to-do'
+    return {'status': status,
             'queued': queued,
             'line': detail.get('line', 0),
             # ``line`` a secas ya no basta para saber que se camino: el numero
@@ -1309,8 +1338,8 @@ def _human_plies(n):
     return f'{n} ply' if n == 1 else f'{n} plies'
 
 
-def _pv_verify_san(detail):
-    """La jugada que abre el hueco, en SAN, con el UCI como red de seguridad.
+def _move_san(fen, move):
+    """Una jugada suelta, en SAN, con el UCI como red de seguridad.
 
     Con los puntos suspensivos delante cuando la juegan las negras, que es como
     se nombra una jugada suelta en cualquier tablero: sin ellos "e6" y "e4" se
@@ -1323,8 +1352,6 @@ def _pv_verify_san(detail):
     """
     import pyffish as pf
 
-    move = detail.get('move') or ''
-    fen = detail.get('move_fen') or ''
     if not (move and fen):
         return move
     black = fen.split()[1:2] == ['b']
@@ -1333,6 +1360,11 @@ def _pv_verify_san(detail):
     except Exception:
         san = move
     return f'...{san}' if black else san
+
+
+def _pv_verify_san(detail):
+    """La jugada que abre el hueco del paseo, nombrada como en un tablero."""
+    return _move_san(detail.get('move_fen') or '', detail.get('move') or '')
 
 
 def _pv_verify_line(detail):
@@ -1358,6 +1390,14 @@ def _pv_verify_message(queued, detail):
     mudarse a la segunda linea porque la primera esta entera — y sin esta
     frase las dos se veian exactamente igual desde fuera: un numero.
     """
+    if detail.get('unknown_line'):
+        # La lista de la pagina y la de la posicion se han separado: entre el
+        # render y el click aterrizo un pase nuevo.  Se dice y se manda
+        # recargar; callarlo dejaria al visitante creyendo que pidio algo.
+        named = _pv_verify_line(detail) if detail.get('line') else 'that line'
+        return (f'{named.capitalize()} is not one of the lines stored here '
+                'right now, so nothing was queued. Reload the page to see '
+                'the current list.')
     where = _pv_verify_line(detail)
     covered = detail.get('covered_plies') or 0
     if queued:
@@ -1385,9 +1425,15 @@ def _pv_verify_message(queued, detail):
         return 'No engine line is stored here yet, so there is nothing to ' \
                'verify.'
     if covered:
-        # Aqui no se nombra un candidato sino CUANTOS se caminaron, asi que la
-        # cifra es ``lines_tried`` y no el numero del que se compro.
-        scope = 'line 1' if tried == 1 else f'the top {tried} lines'
+        # Con una linea ELEGIDA solo se camino esa, asi que se la nombra por su
+        # numero: decir "line 1" despues de que alguien pidiera la 3 es la
+        # misma confusion que traia el boton.  En la caida automatica no se
+        # nombra un candidato sino CUANTOS se caminaron, y ahi la cifra es
+        # ``lines_tried`` y no el numero del que se compro.
+        if detail.get('line'):
+            scope = _pv_verify_line(detail)
+        else:
+            scope = 'line 1' if tried == 1 else f'the top {tried} lines'
         return ('Everything this button can verify is already analysed: '
                 f'{scope} covered {_human_plies(covered)} down.')
     return ('The stored line no longer applies here, so there was nothing '
@@ -4806,6 +4852,36 @@ def _pv_verify_plies(pos):
     return min(len(pv), ingest.PV_VERIFY_MAX_PLIES)
 
 
+def _pv_verify_lines(pos):
+    """Que lineas puede elegir el boton aqui: numero, jugada y procedencia.
+
+    LO QUE ARREGLA (Wolfram, 14-ago): "verify PV still completely useless for
+    requesting other lines in PV than second - it always tries to request first
+    line".  El boton caia por la lista y paraba en el primer hueco, asi que
+    mientras la 1 tuviera algo que comprar no habia click que llegara a la 3.
+    Faltaba la mitad de arriba del camino: un sitio donde decir cual.
+
+    LOS NUMEROS SON LOS DEL PASEO, no los de un bucle de plantilla: salen de
+    ``ingest.verify_candidates``, que es la misma lista que caminara el click.
+    Contarlas aqui por separado seria volver a lo mismo por otra puerta: elegir
+    la 3 de una lista y comprar la 3 de otra.
+
+    Y CADA UNA SE NOMBRA POR SU JUGADA, no solo por su numero: en el escaparate
+    de arriba las lineas se leen por lo que juegan, y un desplegable de "1, 2,
+    3" obligaria a contar filas para saber cual es cual.  Las que salen del
+    arbol lo dicen, con las mismas palabras que el recibo (§ _pv_verify_line):
+    no son lo que el motor sostiene hoy sino una jugada que un pase ancho dejo
+    sembrada.
+    """
+    offered = []
+    for index, pv, from_tree in ingest.verify_candidates(pos):
+        san = _move_san(pos.fen, pv[0])
+        offered.append({
+            'index': index, 'san': san, 'from_tree': from_tree,
+            'label': f'{san} (from the tree)' if from_tree else san})
+    return offered
+
+
 def _queued_children(moves):
     """Cuantos de estos hijos tienen analisis EN VUELO, en UNA consulta.
 
@@ -5166,6 +5242,11 @@ def explore(request, key):
     # linea caminada ensenaba su eval sembrada tan segura como una de 512M
     # (§ _walked_value).  Mismo predicado que ordena la tabla de abajo.
     eval_walked = eval_stm is not None and _walked_value(pos)
+    # El boton de verificar y su selector se deciden JUNTOS y en este orden:
+    # sin plies que ofrecer no hay boton, y sin boton no hay por que preguntar
+    # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
+    # cuando las lineas vigentes no llenan el tope).
+    pv_plies = _pv_verify_plies(pos)
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
         # Selector de profundidad del boton de peticion: vacio — y por tanto
@@ -5205,7 +5286,12 @@ def explore(request, key):
         # cuenta aqui y no en la plantilla: con menos de cuatro plies no hay
         # linea que contrastar — es la jugada y su respuesta, que es
         # exactamente lo que el boton de al lado ya compra.
-        'pv_verify_plies': _pv_verify_plies(pos),
+        'pv_verify_plies': pv_plies,
+        # Y CUALES, para que el click pueda nombrar una: sin esta lista el
+        # boton solo sabe caer por la suya y la linea 3 es inalcanzable
+        # (§ _pv_verify_lines).  Con un solo candidato no hay nada que elegir
+        # y la plantilla no pinta el control.
+        'pv_verify_lines': _pv_verify_lines(pos) if pv_plies else [],
         # La flecha apunta al TOP de la misma lista que pinta la tabla (mejor
         # conocimiento, backed incluido), no al best_move de la ultima
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben

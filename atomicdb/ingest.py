@@ -5394,7 +5394,18 @@ def _walk_pv_frontier(pos, pv, requested_by='', route=''):
     return counts
 
 
-def enqueue_pv_verification(pos, requested_by='', route=''):
+def verify_candidates(pos):
+    """La lista de ``_verify_candidates``, para quien tiene que OFRECERLA.
+
+    El explorador no puede numerar las lineas por su cuenta.  Si la pagina
+    cuenta una lista y el paseo camina otra, pedir la 3 acaba comprando la que
+    el servidor decida, que es justo lo que hay que cerrar, asi que el selector
+    se pinta con ESTOS numeros y con ningun otro.
+    """
+    return _verify_candidates(pos)
+
+
+def enqueue_pv_verification(pos, requested_by='', route='', line=0):
     """Compra analisis donde la verificacion de la linea FALTA.  Cuantas.
 
     Empieza por la linea VIGENTE de ``last_analysis`` — saltando el escaparate
@@ -5410,6 +5421,21 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     sobre ella tiene que decir "esperando", no comprar la linea siguiente,
     porque si no doblar clicks doblaria la factura.
 
+    ``line`` ELIGE CANDIDATO, y es la otra mitad de aquella peticion (Wolfram,
+    14-ago): "verify PV still completely useless for requesting other lines in
+    PV than second - it always tries to request first line".  El recorrido de
+    arriba es una CAIDA, no una eleccion: para en el primer candidato con
+    hueco, asi que mientras la linea 1 tenga algo que comprar la 3 es
+    inalcanzable por muchos clicks que se le den.  Con ``line=N`` se camina la
+    N y solo la N, sin caer a la siguiente cuando esa no tiene hueco, porque
+    quien la nombro no pidio "la que sea" sino esa.  ``line=0`` sigue siendo la
+    caida de siempre, que es lo que compra el click sin elegir.
+
+    Un ``line`` que no esta en la lista NO se redondea al vecino mas cercano ni
+    se degrada a la caida: vuelve ``unknown_line`` y no compra nada.  Aceptar a
+    ojo un numero que no existe seria reproducir el bug por otra puerta: pedir
+    una linea y pagar otra.
+
     Devuelve un ``VerifyOutcome``: el numero de tareas de siempre, y colgado de
     el lo que hara falta para CONTARLO — la linea que se siguio, si salio
     del arbol o de un analisis vigente, cuantos plies de ella estaban ya
@@ -5418,8 +5444,16 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     El llamante es dueno de la transaccion, igual que en
     ``enqueue_unexplored_children``.
     """
+    candidates = _verify_candidates(pos)
+    if line:
+        candidates = [cand for cand in candidates if cand[0] == line]
+        if not candidates:
+            return VerifyOutcome(0, line=line, lines_tried=0, from_tree=False,
+                                 covered_plies=0, plies=0, in_flight=0,
+                                 budget=None, move='', move_fen='',
+                                 unknown_line=True)
     covered, walked, tried = 0, 0, 0
-    for index, pv, from_tree in _verify_candidates(pos):
+    for index, pv, from_tree in candidates:
         tried += 1
         walk = _walk_pv_frontier(pos, pv, requested_by=requested_by,
                                  route=route)
@@ -5432,9 +5466,12 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
                 covered_plies=walk['covered_plies'], plies=walk['plies'],
                 in_flight=walk['in_flight'], budget=walk['budget'],
                 move=walk['move'], move_fen=walk['move_fen'])
-    # Sin compra no hay linea que nombrar, pero si hay paseo que contar: lo que
-    # se recorrio es lo que respalda el "ya esta todo verificado" del aviso.
-    return VerifyOutcome(0, line=0, lines_tried=tried, from_tree=False,
+    # Sin compra no hay linea que nombrar CUANDO se cayo por la lista; con una
+    # elegida a mano si la hay, y el aviso tiene que decir SU numero o volvera
+    # a hablar de la linea 1.  Lo caminado se cuenta igual: es lo que respalda
+    # el "ya esta todo verificado".
+    return VerifyOutcome(0, line=line, lines_tried=tried,
+                         from_tree=bool(line) and bool(candidates[0][2]),
                          covered_plies=covered, plies=walked, in_flight=0,
                          budget=None, move='', move_fen='')
 

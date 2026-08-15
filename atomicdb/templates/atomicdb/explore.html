@@ -128,8 +128,29 @@
       predicado (§ ingest.is_unexplored).{% endcomment %}
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
         title="Queues one engine search for each move in the table that no engine has searched yet">Analyse the {{ unexplored_count }} unanalysed move{{ unexplored_count|pluralize }}</button>{% endif %}
+      {% comment %}El tooltip cuenta las DOS formas de usarlo desde que hay
+      selector: sin elegir sigue moviendose a la linea siguiente cuando la de
+      antes esta entera, y con una elegida camina esa y para ahi.  Prometer lo
+      primero cuando alguien acaba de nombrar la 3 seria contradecir al
+      control que tiene al lado.{% endcomment %}
       {% if pv_verify_plies %}<button class="reqbtn" id="pvbtn"
-        title="Walks down this line and queues engine analysis where it is still missing. Skips what is already verified, and moves to the next line when this one is covered end to end">Verify PV</button>{% endif %}
+        title="Walks down a line and queues engine analysis where it is still missing, skipping what is already verified. With no line picked it moves on to the next one when a line is covered end to end; pick a line and it walks that one only">Verify PV</button>{% endif %}
+      {% comment %}QUE LINEA compra ese boton, y por eso al lado y no debajo:
+      es el argumento del click, no un ajuste posterior.  Sin el, el boton solo
+      sabia caer por la lista y pararse en el primer hueco, asi que mientras la
+      1 tuviera algo que comprar no habia forma de llegar a la 3: "verify PV
+      still completely useless for requesting other lines in PV than second -
+      it always tries to request first line" (Wolfram, 14-ago).
+
+      La primera opcion es lo que el boton ha hecho siempre y sigue siendo la
+      de por defecto: quien solo quiera comprar el hueco mas cercano hace el
+      mismo click de antes.  Las demas son los candidatos del paseo, con SUS
+      numeros y nombradas por su jugada (§ views._pv_verify_lines).
+
+      Con un candidato unico no se pinta: un desplegable de una opcion no es
+      una eleccion, es un adorno que ocupa sitio.{% endcomment %}
+      {% if pv_verify_lines|length > 1 %}<span class="pvlinechoice"><label class="pvlinelab" for="pvline">line</label><select id="pvline" class="pvline"
+        title="Which line of the engine output to walk. The default buys the nearest gap, moving on when a line is covered end to end; pick a line to walk that one and no other"><option value="0">nearest gap</option>{% for cand in pv_verify_lines %}<option value="{{ cand.index }}">{{ cand.index }}. {{ cand.label }}</option>{% endfor %}</select></span>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
@@ -489,21 +510,28 @@
       // la segunda linea, y en el recuento a secas esas dos cosas se veian
       // igual.  La frase la compone el servidor, que es quien camino.
       const pvbtn = document.getElementById('pvbtn');
+      const pvline = document.getElementById('pvline');
       if (pvbtn) {
         pvbtn.addEventListener('click', function () {
           pvbtn.disabled = true;
           pvbtn.textContent = 'Queueing...';
           showNote('');   // un click nuevo no hereda el veredicto del anterior
           const pvRoute = new URLSearchParams(location.search).get('play') || '';
+          // La linea elegida viaja CON el click. Sin selector va '0', que es
+          // el hueco mas cercano y lo que el boton compraba antes de que se
+          // pudiera elegir.
+          const line = pvline ? pvline.value : '0';
           fetch('/atomicdb/pv-verify/' + key + '/',
                 {method: 'POST',
                  headers: {'Content-Type': 'application/x-www-form-urlencoded',
                            'X-CSRFToken': csrf()},
-                 body: new URLSearchParams({route: pvRoute}).toString()})
+                 body: new URLSearchParams({route: pvRoute,
+                                            line: line}).toString()})
             .then(r => r.json())
             .then(data => {
               showNote(data.message || '',
-                       data.status === 'nothing-to-do');
+                       data.status === 'nothing-to-do'
+                       || data.status === 'unknown-line');
               if (data.status === 'queued') {
                 const n = data.queued;
                 pvbtn.textContent = 'Queued ' + n + ' analys'
@@ -516,8 +544,18 @@
                   'nothing-to-do': 'Nothing left to verify here',
                   'queue-full': 'Queue is full, try later',
                   'already-solved': 'Already solved',
+                  // La lista de la pagina ya no es la de la posicion: un pase
+                  // nuevo aterrizo mientras esto estaba abierto.
+                  'unknown-line': 'That line is gone, reload',
                 }[data.status] || 'Something went wrong';
               }
+              // Con selector siempre queda otra linea que pedir, asi que el
+              // boton no se muere con el veredicto de UNA: lo que acaba de
+              // contestar es sobre la elegida, no sobre el nodo entero.
+              // Repetir no cuesta doble, el servidor devuelve "en vuelo"
+              // sobre lo que ya esta encolado.  Sin selector se queda como
+              // siempre: no hay nada mas que pedir desde aqui.
+              if (pvline) { pvbtn.disabled = false; }
             })
             .catch(() => {
               pvbtn.textContent = 'Network error, try again';
