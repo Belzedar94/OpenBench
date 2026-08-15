@@ -1451,21 +1451,30 @@ def _backed_for(row, children, discrepancies=None, bound=None,
             # Un empate a tablas contra unas tablas PROBADAS lo gana la prueba,
             # que es exactamente el orden correcto.
             child.value, child.quality = 0, 0
-    # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago).  Los hijos sin
-    # informacion entran al negamax como UN pseudo-hijo con el valor de la
-    # cota del escaparate: es el mejor caso posible de lo desconocido segun
-    # el propio motor, asi que el max/min sobre ``informed`` vuelve a ser el
-    # minimax de verdad sobre la informacion disponible y las guardas de
-    # cobertura parcial dejan de aplicar.  Es lo que baja el +1051 de la
-    # cabecera al +589 del unico hijo mirado (caso Eclipsia, 8-ago) en
-    # cuanto el escaparate afirma que el resto no compite.  Solo entra con
-    # al menos un hijo REAL informado: una cota sin testigo no respalda nada.
-    bounded = False
-    if bound is not None and (len(informed) < len(children)
-                              or coverage_is_partial(row, children)):
-        informed.append(_ChildValue(None, bound,
-                                    row.nodes_invested or 0, 0))
-        bounded = True
+    # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago; recortada 15-ago).
+    # La cota del escaparate certifica que NINGUN hijo sin mirar es mejor
+    # para el que mueve que la ultima linea del multipv, asi que con cota
+    # las guardas de cobertura parcial dejan de aplicar y el negamax corre
+    # sobre los hijos informados como si la mesa estuviera completa.  Es lo
+    # que baja el +1051 de la cabecera al +589 del unico hijo mirado (caso
+    # Eclipsia, 8-ago).
+    #
+    # Lo que la cota YA NO HACE (propietario, 15-ago): competir.  Entraba
+    # al negamax como pseudo-hijo y en cuanto su numero era mejor para el
+    # que mueve que TODOS los hijos medidos, ganaba ella — la cabecera
+    # publicaba un valor sin arista (1326/1 con backed_move vacio, caso
+    # 6c0c9151) y el hijo real a 1341 no subia nunca: el gate de
+    # profundidad que se retiro el 8-ago, reintroducido por la puerta de
+    # atras (el pase gordo del padre frenando al hijo de 128M).  La orden
+    # es literal: "me da igual que el padre haya sido analizado por 10B
+    # nodos y el hijo solo 128M, quiero que SIEMPRE se haga backprop".
+    # La cota da PERMISO; el valor lo pone siempre un hijo de verdad, y
+    # la discrepancia pase-del-padre contra hijo-somero ya tiene su canal
+    # (§ _queue_quality_convergence).  Sigue exigiendo un hijo REAL
+    # informado: una cota sin testigo no respalda nada.
+    bounded = (bound is not None
+               and (len(informed) < len(children)
+                    or coverage_is_partial(row, children)))
     # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
     # (menos plies), luego el orden de movegen, para que el resultado sea
     # determinista bajo replay.
