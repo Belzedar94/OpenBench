@@ -68,6 +68,7 @@ _home_cached = page_cache.stale_while_revalidate(
     vary_on_cookie(csrf_protect(views.home)))
 _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
+_queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 
 urlpatterns = [
     path('', _home_cached),
@@ -99,6 +100,10 @@ urlpatterns = [
     path('user/<str:username>/', views.contributor,
          name='atomicdb-contributor'),
     path('me/', views.contributor_me, name='atomicdb-me'),
+    # La cola agrupada por CARRIL.  Publica y sin nada personal dentro: sus
+    # agregados ya viven en un snapshot compartido de un minuto (§ lanes),
+    # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
+    path('queue/', _queue_cached, name='atomicdb-queue'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de
     # una sola persona: sin cache, como la pagina desde la que se pulsa.
     path('queue/bump/<int:task_id>/', views.api_queue_bump,

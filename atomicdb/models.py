@@ -944,6 +944,17 @@ class WorkerPing(models.Model):
     last_nps   = models.BigIntegerField(default=0)
     nps_updated = models.DateTimeField(null=True)
     last_seen  = models.DateTimeField(auto_now=True, db_index=True)
+    # When this worker last DELIVERED a result, as opposed to last said hello.
+    # ``last_seen`` moves on any authenticated call, so a process that polls
+    # ``/api/lease`` forever and never returns an analysis looks exactly like a
+    # machine carrying the project.  That gap costs nothing while the only
+    # thing it opens is the rung selector, but a contributor lane is a share of
+    # the fleet, and a share has to be earned with delivered work.  Written in
+    # ``views.api_submit`` beside the ``tasks_done`` bump, which is the one
+    # place a result is known to have landed.  NULL is "has never delivered
+    # since this column existed", which is what every pre-existing row means
+    # and why the column has to be nullable rather than defaulted to now.
+    last_result_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['machine', 'user'],

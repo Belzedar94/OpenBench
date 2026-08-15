@@ -26,8 +26,8 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
-               live_request, logic, metrics, notifications, openings, proof,
-               revalidate, solve, solve_estimate)
+               lanes, live_request, logic, metrics, notifications, openings,
+               proof, revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
@@ -930,6 +930,13 @@ def api_submit(request):
         ping_updates = {
             'tasks_done': F('tasks_done') + 1,
             'last_seen': timezone.now(),
+            # A DELIVERY, not a hello.  This is the only point in the protocol
+            # where the server knows an analysis actually landed, so it is the
+            # only honest place to stamp the evidence a contributor lane is
+            # earned with (§ lanes, § migration 0041).  It sits beside the
+            # ``tasks_done`` bump because they answer the same question, one
+            # cumulatively and one with a date.
+            'last_result_at': timezone.now(),
         }
         if searched > 0 and elapsed > 0:
             ping_updates.update({
@@ -4575,6 +4582,45 @@ def _approver_gate(request):
     if not Profile.objects.filter(user=request.user, approver=True).exists():
         return redirect('/index/')
     return None
+
+
+def queue_page(request):
+    """The queue grouped by lane, so fairness can be checked and not believed.
+
+    A share of the fleet that nobody can see is a promise, and this page is
+    what turns it into a measurement: who is waiting, how much they have
+    charged, and what fraction of the last hour each lane actually received.
+    The columns are read from the same predicates the ordering uses (§
+    ``lanes.measure_lanes``), so a disagreement between this table and the
+    queue is a bug in one place rather than a difference of opinion between
+    two.
+
+    Public and cached like the rest of the read views: the numbers behind it
+    are three GROUP BY, and one visitor should not pay them for everybody.
+    """
+    table = lanes.lane_table()
+    rows = []
+    for row in table['rows']:
+        rows.append({
+            **row,
+            'name': row['lane'] or 'Commons',
+            'nodes_h': _human(row['nodes']),
+            'served_h': _human(row['served']),
+            'waited': (_ago_text(row['oldest']) if row['oldest'] else ''),
+        })
+    return render(request, 'atomicdb/queue.html', {
+        'lane_rows': rows,
+        'served_minutes': table['served_minutes'],
+        'has_served': bool(table['served_total']),
+        'window_days': lanes.CONTRIBUTOR_WINDOW_DAYS,
+    })
+
+
+def _ago_text(moment):
+    """"3 hours" for a queue age, in ONE unit.  Same shape the profile uses."""
+    from django.utils.timesince import timesince
+    text = timesince(moment, now=timezone.now(), depth=1)
+    return 'just now' if text.split()[:1] == ['0'] else text
 
 
 def suggestions(request):

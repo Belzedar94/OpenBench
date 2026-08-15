@@ -1,0 +1,41 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB queue by lane{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">The queue, by lane</h2>
+<p class="dim">The fleet is shared out between <strong>lanes</strong>. An account
+  that ran a worker in the last {{ window_days }} days gets a lane of its own;
+  everybody else, signed in or not, shares one lane called
+  <strong>Commons</strong>. Alt accounts buy nothing, because they all land in
+  the same commons. Inside a lane, requests are ordered by the nodes that
+  account already has queued, so a big batch interleaves instead of walling the
+  queue.</p>
+
+{% if lane_rows %}
+<table>
+  <tr>
+    <th>Lane</th><th>People</th><th>Waiting</th><th>Running</th>
+    <th>Queued nodes</th><th>Served ({{ served_minutes }} min)</th>
+    <th>Oldest wait</th>
+  </tr>
+  {% for row in lane_rows %}
+  <tr>
+    <td>{% if row.contributor %}<a class="qline"
+        href="/atomicdb/user/{{ row.name }}/">{{ row.name }}</a>{% else %}<strong>{{ row.name }}</strong>{% endif %}</td>
+    <td class="dim">{{ row.member_count }}</td>
+    <td>{{ row.waiting }}</td>
+    <td class="dim">{{ row.running }}</td>
+    <td class="dim">{{ row.nodes_h }}</td>
+    <td>{% if has_served %}{{ row.served_h }} <span class="dim">({{ row.share }}%)</span>{% else %}<span class="dim">nothing yet</span>{% endif %}</td>
+    <td class="dim">{{ row.waited }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="dim">Served counts the nodes the fleet actually spent in the last
+  {{ served_minutes }} minutes, not what was asked for. A lane with nothing
+  waiting still appears while it has recent deliveries to account for.</p>
+{% else %}
+<p class="dim">Nothing is queued right now.</p>
+{% endif %}
+
+{% endblock %}

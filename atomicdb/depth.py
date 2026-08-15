@@ -23,18 +23,15 @@ apaga el ordenador el fin de semana sin dejar dentro a quien presto una tarde
 hace tres meses.
 """
 
-from datetime import timedelta
-
-from django.utils import timezone
-
+from . import lanes
 from .ingest import REQUEST_BUDGET_LADDER, request_ladder_state
-from .models import WorkerPing
 
-# Ventana de contribuidor.  Mas generosa que cualquier medidor de presencia del
-# sitio (240s en la pagina de contribuidor, minutos en los de la portada) a
-# proposito: alli se cuenta capacidad VIVA, aqui se responde "esta persona
-# sostiene esto", que es una pregunta de semanas y no de segundos.
-CONTRIBUTOR_WINDOW_DAYS = 7
+# La ventana de contribuidor vive en ``lanes`` desde que la comunidad voto los
+# carriles: la misma pregunta ("corrio un worker esta semana") decide quien
+# elige peldano y quien tiene carril propio, y dos implementaciones de una sola
+# pregunta acaban discrepando el dia que una cambie.  Se reexporta el nombre
+# porque este modulo lo publicaba y hay quien lo importa de aqui.
+CONTRIBUTOR_WINDOW_DAYS = lanes.CONTRIBUTOR_WINDOW_DAYS
 # Nombre del campo en el POST de ``/atomicdb/request/<key>/``.
 BUDGET_FIELD = 'budget'
 
@@ -58,9 +55,7 @@ def may_choose(user):
     from OpenBench.models import Profile
     if not Profile.objects.filter(user=user, enabled=True).exists():
         return False
-    since = timezone.now() - timedelta(days=CONTRIBUTOR_WINDOW_DAYS)
-    return WorkerPing.objects.filter(user=user.username,
-                                     last_seen__gte=since).exists()
+    return lanes.ran_a_worker(user.username)
 
 
 def chosen_rung(request):
