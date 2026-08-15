@@ -106,16 +106,37 @@ class BackedSpineWalkTests(TestCase):
         self.assertEqual(response['Location'],
                          f'/atomicdb/explore/{won.key}/')
 
-    def test_a_missing_edge_leaves_the_visitor_where_the_walk_got(self):
-        """Un respaldo puede ser mas viejo que el grafo que lo sostenia."""
-        top = _pos('MT', 'w', eval_cp=5, backed_eval=400, backed_move='a1a1')
+    def test_a_missing_edge_lands_where_the_walk_got_and_says_so(self):
+        """Un respaldo puede ser mas viejo que el grafo que lo sostenia.
+
+        Aterrizar ahi callando era el "doesn't always work correctly" que
+        reporto Wolfram: el chip promete la fuente del numero y el visitante
+        acaba en un nodo cualquiera sin nada que le diga que la cadena se
+        rompio.  Se aterriza igual y se dice, con la misma marca con la que se
+        dice una repeticion.
+        """
+        # La jugada de la arista es LEGAL en el fen sintetico: el aterrizaje
+        # pinta tambien su migaja de pan, y esa replica la linea de verdad.
+        top = _pos('MT', 'w', eval_cp=5, backed_eval=400, backed_move='e1e2')
         mid = _pos('MM', 'b', eval_cp=9, backed_eval=400, backed_move='h7h8q')
-        _edge(top, mid, 'a1a1')
+        _edge(top, mid, 'e1e2')
 
         response = _jump(self.client, top.key)
 
         self.assertEqual(response['Location'],
-                         f'/atomicdb/explore/{mid.key}/')
+                         f'/atomicdb/explore/{mid.key}/?incomplete=1')
+        body = self.client.get(response['Location']).content.decode()
+        self.assertIn('>chain breaks here</span>', body)
+
+    def test_a_walk_that_reaches_the_origin_says_nothing_extra(self):
+        here = _pos('QUIET', 'w', eval_cp=512, backed_eval=512)
+
+        response = _jump(self.client, here.key)
+
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{here.key}/')
+        body = self.client.get(response['Location']).content.decode()
+        self.assertNotIn('chain breaks here', body)
 
     def test_a_transposition_cycle_cuts_instead_of_hanging(self):
         # 1.Nf3 Nf6 2.Ng1 Ng8 vuelve a la posicion inicial: la espina puede
@@ -133,8 +154,13 @@ class BackedSpineWalkTests(TestCase):
         self.assertEqual(response['Location'],
                          f'/atomicdb/explore/{b.key}/?repetition=1')
 
-    def test_the_ply_cap_bounds_the_descent(self):
-        """El mismo tope con el que el valor SUBIO acota lo que se baja."""
+    def test_the_ply_cap_bounds_the_descent_and_the_landing_says_it(self):
+        """El mismo tope con el que el valor SUBIO acota lo que se baja.
+
+        Ninguna espina legitima llega al tope, asi que agotarlo tampoco es
+        aterrizar en un origen: se etiqueta como cualquier otra cadena que no
+        llego al final.
+        """
         length = ingest.BACKED_MAX_PLIES + 6
         chain = [_pos(f'L{i}', 'w' if i % 2 == 0 else 'b',
                       eval_cp=i, backed_eval=9_000, backed_move='a1a1')
@@ -146,7 +172,8 @@ class BackedSpineWalkTests(TestCase):
 
         self.assertEqual(
             response['Location'],
-            f'/atomicdb/explore/{chain[ingest.BACKED_MAX_PLIES].key}/')
+            f'/atomicdb/explore/{chain[ingest.BACKED_MAX_PLIES].key}/'
+            '?incomplete=1')
 
     def test_the_walk_costs_one_query_per_step_at_most(self):
         alias = settings.ATOMICDB_DATABASE_ALIAS
@@ -159,11 +186,11 @@ class BackedSpineWalkTests(TestCase):
         # Dos aristas caminadas, dos consultas: el hijo viaja en el mismo
         # select_related y la parada no cuesta nada.
         with self.assertNumQueries(2, using=alias):
-            origin, walked, repetition = views._walk_backed_spine(a)
+            origin, walked, outcome = views._walk_backed_spine(a)
 
         self.assertEqual(origin.key, c.key)
         self.assertEqual(walked, ['a1a1', 'a1a1'])
-        self.assertFalse(repetition)
+        self.assertEqual(outcome, '')
 
     def test_an_unknown_key_is_a_404(self):
         response = _jump(self.client, _key('nobody'))

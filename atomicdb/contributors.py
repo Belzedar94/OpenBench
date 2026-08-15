@@ -491,18 +491,19 @@ def present(username, now=None):
     # decir ademas "N requests ahead" era el mismo numero dos veces con dos
     # redacciones (sugerencia de Eclipsia, #suggestions).
     pending_rows = [
+        # NO HAY BOTON DE ADELANTAR EN ESTAS FILAS, y es deliberado desde el
+        # 15-ago: una lista ordenada por turno ensena arriba lo que ya iba
+        # primero, asi que un control por fila ofrecia adelantar justo lo que
+        # no hacia falta adelantar, y la peticion que si lo merece esta en el
+        # puesto ciento y pico, fuera de esta pagina.  El control vive ahora
+        # en la pagina de la POSICION, donde la peticion se mira de verdad
+        # (§ ``live_request.bump_control``), y el enlace de la linea es el
+        # camino hasta el.
         _presented(task, labels, now,
                    {'place': task.ahead + 1,
                     'when': _ago(task.created, now),
-                    # El boton de adelantar no sale en la primera fila: no
-                    # tiene a donde ir, y un control que no hace nada es peor
-                    # que su ausencia.  Quien mira la cola de otro no lo ve
-                    # nunca (lo pone la plantilla), y la vista lo comprueba
-                    # otra vez de todas formas.
-                    'can_bump': index > 0,
-                    'task_id': task.id,
                     'backers': task.backers})
-        for index, task in enumerate(pending)]
+        for task in pending]
     done_rows = [
         _presented(task, labels, now,
                    {'when': _ago(task.completed, now),

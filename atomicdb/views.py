@@ -195,12 +195,24 @@ PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
 OPENING_ANCHOR_PARAM = 'opening'
-# El salto al origen de un respaldo puede acabar en una REPETICION en vez de en
-# una fuente (§ ``_walk_backed_spine``).  Viaja como parametro porque el que lo
-# sabe es el paseo, y el que lo tiene que decir es la pagina de destino; pintar
-# el aviso sin el implicaria caminar la espina en cada render, que es
-# justamente lo que ese paseo no hace.
+# WHAT A JUMP REPORTS WHEN IT DOES NOT ARRIVE, and why the two jumps of this
+# page report it the same way.  Both walks descend a chain the database
+# asserts (the support spine of a backed value, the witness chain of a proof)
+# and both can end somewhere that is not the end of that chain: the chain
+# closes on itself, or it breaks before it runs out.  Landing silently in
+# either case is what made a visitor read a working jump as a broken one
+# ("BACKED is clickable although it doesn't always work correctly tbh",
+# Wolfram), so the walk hands its outcome to the landing page and the landing
+# page says it.  It travels as a query parameter because the one who knows is
+# the walk and the one who has to say it is the destination; deducing it there
+# would mean walking the chain again on every render, which is exactly what
+# these walks do not do.
 BACKED_REPETITION_PARAM = 'repetition'
+JUMP_INCOMPLETE_PARAM = 'incomplete'
+JUMP_REPETITION = 'repetition'
+JUMP_INCOMPLETE = 'incomplete'
+JUMP_OUTCOME_PARAM = {JUMP_REPETITION: BACKED_REPETITION_PARAM,
+                      JUMP_INCOMPLETE: JUMP_INCOMPLETE_PARAM}
 OPENING_ANCHOR_SALT = 'atomicdb.explorer.opening-anchor.v1'
 OPENING_ANCHOR_MAX_CHARS = 1024
 # board.js predates opening anchors and carries only one ``play`` value.
@@ -2086,57 +2098,79 @@ def goto(request, key, uci):
     return redirect(_explore_url(child.key, child_route, child_anchor))
 
 
+def _jump_landing_url(key, ucis, outcome):
+    """Explore URL of a landing, carrying what the walk could not finish.
+
+    The two jumps of the explorer share this so that a chain that closed on
+    itself and a chain that broke read the same on arrival whichever control
+    was clicked.  A completed walk lands with no extra parameter: there is
+    nothing to explain.
+    """
+    url = _explore_url(key, ucis)
+    param = JUMP_OUTCOME_PARAM.get(outcome)
+    if param:
+        url += ('&' if '?' in url else '?') + param + '=1'
+    return url
+
+
 def _walk_backed_spine(pos):
     """Baja por la espina de soporte hasta donde NACE el valor respaldado.
 
-    Devuelve ``(origen, ucis_caminados, repeticion)``.  El valor de un nodo
-    respaldado no es suyo: se lo presta ``backed_move``, y ese hijo puede a su
-    vez estar prestandolo.  Bajar a mano esa cadena es lo que este paseo
-    ahorra.
+    Devuelve ``(origen, ucis_caminados, resultado)``, con el MISMO tercer valor
+    que el paseo de la linea probada (§ ``_walk_proven_line``): cadena vacia
+    cuando se llego al final de la cadena, ``JUMP_REPETITION`` cuando se cerro
+    sobre si misma y ``JUMP_INCOMPLETE`` cuando se rompio antes de acabarse.
+    El valor de un nodo respaldado no es suyo: se lo presta ``backed_move``, y
+    ese hijo puede a su vez estar prestandolo.  Bajar a mano esa cadena es lo
+    que este paseo ahorra.
 
-    PARADAS, todas ellas "este nodo ES el origen":
+    PARADAS QUE SON UNA LLEGADA, todas ellas "este nodo ES el origen":
       * ``status != UNKNOWN``: el valor viene de un cierre PROBADO, y por
         debajo de una prueba no hay nada que buscar.
       * sin ``backed_move``, o ``backed_eval`` a None: no hay espina.
       * ``backed_eval == eval_cp``: la busqueda propia del nodo ancla el
         valor; el respaldo solo coincide con lo que el motor ya dijo aqui.
-    Y dos paradas defensivas, que dejan al visitante donde el paseo llego:
-      * la arista ``backed_move`` no existe (respaldo mas viejo que el grafo).
-      * el hijo ya estaba visitado: el DAG transpone y un ciclo colgaria esto.
-    El tope de ``ingest.BACKED_MAX_PLIES`` es el mismo con el que subio el
-    valor, asi que ninguna espina legitima puede ser mas larga que el.
 
-    Esa ultima parada no es solo defensiva: una espina que vuelve sobre sus
-    pasos no tiene origen que enseñar, tiene una REPETICION — el mismo ciclo
-    que el respaldo marca al subir y valora como tablas
-    (§ ``ingest._draw_cycling_children``, ``_backed_for``).  El
-    tercer valor lo dice para que el explorador lo pueda etiquetar en vez de
-    dejar al visitante creyendo que aterrizo en la fuente del numero.
+    PARADAS QUE NO SON UNA LLEGADA, y por eso viajan etiquetadas:
+      * la arista ``backed_move`` no existe (respaldo mas viejo que el grafo).
+        A diferencia de la linea probada, aqui no hay nada que materializar:
+        ``backed_move`` es el soporte de un numero, no un ply demostrado, y
+        crear esa arista seria inventarse el grafo que sostenia el valor.
+      * el hijo ya estaba visitado: el DAG transpone y un ciclo colgaria esto.
+        Una espina que vuelve sobre sus pasos no tiene origen que enseñar,
+        tiene una REPETICION, el mismo ciclo que el respaldo marca al subir y
+        valora como tablas (§ ``ingest._draw_cycling_children``,
+        ``_backed_for``).
+      * el tope de ``ingest.BACKED_MAX_PLIES``, el mismo con el que subio el
+        valor: ninguna espina legitima puede ser mas larga que el, asi que
+        agotarlo es la cadena diciendo algo raro.
 
     Una consulta por paso como mucho.  Es un GET esporadico de un click
     humano, no algo que se pague al pintar una tabla.
     """
     node, walked, seen = pos, [], {pos.key}
-    repetition = False
     for _ in range(ingest.BACKED_MAX_PLIES):
         if node.status != 'UNKNOWN':
-            break
+            return node, walked, ''
         if not node.backed_move or node.backed_eval is None:
-            break
+            return node, walked, ''
         if node.backed_eval == node.eval_cp:
-            break
-        try:
-            edge = (Edge.objects.select_related('child')
-                    .get(parent=node, move_uci=node.backed_move))
-        except Edge.DoesNotExist:
-            break
+            return node, walked, ''
+        edge = (Edge.objects.select_related('child')
+                .filter(parent=node, move_uci=node.backed_move).first())
+        if edge is None:
+            # El respaldo es mas viejo que el grafo que lo sostenia: se
+            # aterriza donde el paseo llego, DICIENDOLO.  Callarlo dejaba al
+            # visitante en un nodo cualquiera con cara de fuente.
+            return node, walked, JUMP_INCOMPLETE
         if edge.child.key in seen:
-            repetition = True
-            break
+            return node, walked, JUMP_REPETITION
         seen.add(edge.child.key)
         walked.append(node.backed_move)
         node = edge.child
-    return node, walked, repetition
+    # El tope corto el descenso con la espina todavia viva: tampoco es un
+    # origen, y el destino lo dice igual que las otras dos paradas raras.
+    return node, walked, JUMP_INCOMPLETE
 
 
 def backed_source(request, key):
@@ -2159,7 +2193,7 @@ def backed_source(request, key):
         route = _validated_play_route(request.GET.get('play'), pos.key)
     except PlayRouteError:
         route = None
-    origin, walked, repetition = _walk_backed_spine(pos)
+    origin, walked, outcome = _walk_backed_spine(pos)
     ucis = None
     if route is not None:
         _top, _line, play_ucis = route
@@ -2170,12 +2204,7 @@ def backed_source(request, key):
     # historia que no llegar.
     if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
         ucis = None
-    url = _explore_url(origin.key, ucis)
-    if repetition:
-        # La espina se cerro sobre si misma: aqui no nace ningun valor.  El
-        # destino lo dice en vez de dejar que el aterrizaje parezca una fuente.
-        url += ('&' if '?' in url else '?') + BACKED_REPETITION_PARAM + '=1'
-    response = redirect(url)
+    response = redirect(_jump_landing_url(origin.key, ucis, outcome))
     # El origen se mueve en cuanto cae analisis nuevo bajo esta posicion: este
     # 302 no es cacheable por nadie.
     response['Cache-Control'] = 'no-store'
@@ -2215,56 +2244,102 @@ def _proven_next_move(pos):
     return line[0] if line else (pos.best_move or '')
 
 
-def _walk_proven_line(pos):
-    """Baja la linea probada de una posicion cerrada hasta su ultimo nodo.
+def _walk_proven_line(pos, materialise=False):
+    """Walk the proven line of a closed position down to its last node.
 
-    Devuelve ``(final, ucis_caminados)``.  Sin nada que caminar la lista sale
-    vacia y el llamante no tiene salto que ofrecer.
+    Returns ``(final, walked_ucis, outcome)``, where ``outcome`` is ``''``
+    when the line was walked to its end, ``JUMP_REPETITION`` when it closed
+    back on a position already crossed, and ``JUMP_INCOMPLETE`` when the
+    chain broke before the line ran out.
 
-    PARADAS, todas ellas "aqui se acaba lo que hay que ensenar":
-      * la linea guardada se termino, o el nodo no declara continuacion.
-      * la arista todavia no esta materializada (``materialise_won_line``
-        corta en cuanto un testigo historico deja de ser legal).
-      * el paseo vuelve sobre una posicion que ya cruzo: el DAG transpone y
-        un ciclo colgaria esto.
+    WHY A MISSING EDGE IS NOT A STOP, which is the bug this walk was reported
+    with.  A closure records its winning line as TEXT; the chain of positions
+    it names becomes a real tree only when ``ingest.materialise_won_line``
+    runs, and closures older than that helper (or nodes where a visitor
+    clicked the first winning move by hand and nothing else) have the first
+    ply in the tree and nothing below it.  Following edges, the walk landed
+    one ply in and stopped: on a mate in two you were dropped on the position
+    before the mate, which is exactly what Eclipsia reported with the line
+    "Bd7 Bxd7#" printed beside the chip.  The line is proven, so the plies it
+    names are not a guess and materialising them invents nothing: the same
+    helper that the closure path already calls is asked for the chain, once
+    per line and bounded by its own ply cap, and the walk carries on.
 
-    Una consulta por paso como mucho, y solo al pinchar: la pagina que ofrece
-    el salto no paga ni una (§ ``explore``, ``proven_end_url``).
+    Materialising is for the CLICK only.  A page render never writes, so the
+    default is off and a read-only walk still stops where the tree does.
+
+    THE REAL STOPS, all of them "the proof ends here":
+      * the stored line ran out, or the node declares no continuation.  A
+        stored line is the line the page prints beside the chip, so its end
+        is the end of the trip: walking past it would land the visitor
+        somewhere the page never mentioned.
+      * the witness no longer replays, so not even materialising produces
+        the ply (``materialise_won_line`` cuts at the first illegal move).
+      * the walk comes back to a position it already crossed: the DAG
+        transposes and a cycle would hang this.
+
+    One statement per ply, and only on the click: the page that offers the
+    jump pays nothing for it (see ``explore``, ``proven_end_url``).
     """
     if pos.status == 'UNKNOWN':
         # Un nodo ABIERTO puede llevar ``won_line`` puesta: es el testigo
         # REFUTADO que guarda ``proof='DISPUTED'``.  Recorrerlo seria pasear
         # una linea que el propio sistema ya declaro falsa, asi que aqui no
         # hay nada probado que seguir ni con la URL escrita a mano.
-        return pos, []
+        return pos, [], ''
     node, walked, seen = pos, [], {pos.key}
     line = (pos.won_line or '').split()
+    # Which nodes have already been asked for their chain.  One call per
+    # stored line: the helper builds the WHOLE chain in one go, so asking the
+    # same node twice would only repeat the work of the first call.
+    built = set()
     for step in range(PROVEN_LINE_MAX_PLIES):
         if line:
-            uci = line[step] if step < len(line) else ''
+            # The root's stored line is being followed, so the node that owns
+            # it is the root: its chain is what has to exist.
+            uci, owner = (line[step] if step < len(line) else ''), pos
         else:
+            # Node by node down a witness chain.  A node that carries its own
+            # stored line owns it from here on.
             uci = _proven_next_move(node)
+            owner = node if (node.won_line or '').split() else None
         if not uci:
-            break
-        try:
+            return node, walked, ''
+        edge = (Edge.objects.select_related('child')
+                .filter(parent=node, move_uci=uci).first())
+        if (edge is None and materialise and owner is not None
+                and owner.key not in built):
+            built.add(owner.key)
+            ingest.materialise_won_line(owner)
             edge = (Edge.objects.select_related('child')
-                    .get(parent=node, move_uci=uci))
-        except Edge.DoesNotExist:
-            break
+                    .filter(parent=node, move_uci=uci).first())
+        if edge is None:
+            return node, walked, JUMP_INCOMPLETE
         if edge.child.key in seen:
-            break
+            return node, walked, JUMP_REPETITION
         seen.add(edge.child.key)
         walked.append(uci)
         node = edge.child
-    return node, walked
+    # The cap cut the walk.  A stored line consumed to its last ply is a
+    # finished trip even when its length is exactly the cap; anything else
+    # here is a witness chain that was still going.
+    if line and len(walked) >= len(line):
+        return node, walked, ''
+    return node, walked, JUMP_INCOMPLETE
 
 
 def proven_line_end(request, key):
     """Salta al final de la linea probada que esta posicion ensena.
 
-    Un GET puro, igual que ``backed_source``: lee, redirige y no escribe nada
-    — ni siquiera materializa la arista que le falte a una linea antigua,
-    porque crear nodos es lo que hace ``goto`` y esto no es ``goto``.
+    Lo que este click escribe, y por que puede.  Una linea ganadora se guarda
+    como TEXTO y solo se vuelve arbol cuando ``ingest.materialise_won_line``
+    la recorre, asi que las lineas mas viejas que ese ayudante llegan aqui a
+    medio materializar y el paseo se plantaba en el primer ply que faltaba —
+    en un mate en dos, justo antes del mate.  Los plies de una linea PROBADA
+    no son una conjetura: son lo que el cierre ya afirma, y crearlos no
+    inventa nada.  Se pide la cadena al mismo ayudante del cierre, acotada por
+    su propio tope, y es lo unico que este GET escribe; el ``goto`` de al lado
+    lleva creando una arista por click desde siempre.
 
     La ruta de ``?play=`` se revalida entera contra la posicion DE PARTIDA y
     el destino la recibe extendida con los plies caminados, para que el
@@ -2278,7 +2353,7 @@ def proven_line_end(request, key):
         route = _validated_play_route(request.GET.get('play'), pos.key)
     except PlayRouteError:
         route = None
-    end, walked = _walk_proven_line(pos)
+    end, walked, outcome = _walk_proven_line(pos, materialise=True)
     ucis = None
     if route is not None:
         _top, _line, play_ucis = route
@@ -2288,7 +2363,7 @@ def proven_line_end(request, key):
     # servir una pagina de error desde el propio enlace de la casa.
     if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
         ucis = None
-    response = redirect(_explore_url(end.key, ucis))
+    response = redirect(_jump_landing_url(end.key, ucis, outcome))
     # El final se mueve en cuanto se certifica una linea mas corta o se
     # materializa un ply que faltaba: este 302 no lo cachea nadie.
     response['Cache-Control'] = 'no-store'
@@ -4325,13 +4400,19 @@ def api_queue_bump(request, task_id):
     de nodos no se mueve, asi que tu parte del pool tampoco.
 
     LA CUENTA TIENE QUE SER LA TUYA, y se comprueba aqui: el boton solo sale en
-    tu propia pagina, pero esconder un control no es negarlo.  Sin sesion, al
-    login de OpenBench, que es lo que hace el resto de las paginas personales.
+    la pagina de una posicion que tu has pedido, pero esconder un control no es
+    negarlo.  Sin sesion, al login de OpenBench, que es lo que hace el resto de
+    las paginas personales.
+
+    DE DONDE SE PULSA.  Desde el 15-ago, de la pagina de la POSICION y no de
+    la lista de la cola (§ ``live_request.bump_control``), asi que la vuelta
+    ya no puede ser un destino fijo: ``back`` trae la pagina desde la que se
+    pincho y se acepta solo si es una ruta de este sitio, con la pagina de la
+    cuenta como suelo.  Misma guarda que el boton de marcar avisos vistos.
 
     SIN ``csrf_exempt``, por lo mismo que ``api_request``: esto lo manda un
-    formulario de la pagina de contribuidor, que lleva su token.  Exenta, una
-    pagina de terceros podria reordenarle la cola a quien la visitara con
-    sesion iniciada.
+    formulario del explorador, que lleva su token.  Exenta, una pagina de
+    terceros podria reordenar la cola de quien la visitara con sesion abierta.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -4354,9 +4435,10 @@ def api_queue_bump(request, task_id):
             else:
                 AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
                 status, moved = 'moved', True
-    if request.POST.get('back'):
-        return redirect(
-            f'/atomicdb/user/{quote(request.user.username, safe="")}/')
+    back = request.POST.get('back') or ''
+    if back:
+        own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
+        return redirect(back if back.startswith('/atomicdb/') else own_page)
     return JsonResponse({'status': status, 'moved': moved})
 
 
@@ -5152,19 +5234,6 @@ def explore(request, key):
         move['backed_url'] = _backed_source_url(move['key'], child_route)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening, names=community_map)
-    # SALTO AL FINAL DE LA LINEA PROBADA.  Se ofrece cuando el primer paso de
-    # esa linea es una fila NAVEGABLE de la tabla de abajo, y esa condicion es
-    # la que lo mantiene honesto por los dos lados: sin arista no hay viaje que
-    # prometer, y una primera jugada bloqueada por repeticion no se puede
-    # pinchar desde ninguna otra parte de esta pagina tampoco.  No cuesta ni
-    # una consulta — las filas ya estan cargadas — y el paseo entero se paga al
-    # pinchar (§ _walk_proven_line).
-    proven_first = _proven_next_move(pos)
-    proven_end_url = (
-        _proven_line_end_url(pos.key, active_ucis)
-        if proven_first and any(move['uci'] == proven_first
-                                and not move['blocked'] for move in moves)
-        else None)
     # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
     # explorar" — sin explorar esta una respuesta que EXISTE y a la que nadie
     # ha mirado, y esa se etiqueta en su propia fila (§ ingest.is_unexplored)
@@ -5188,6 +5257,35 @@ def explore(request, key):
             'enters_opening': _exact_child_opening(
                 offtree_keys[uci], current_opening, names=community_map),
         })
+    # JUMP TO THE END OF THE PROVEN LINE.  Offered when the first ply of that
+    # line can really be travelled, which is one of two things: the ply is
+    # already an edge of the table below, or the closure can build its chain
+    # on the click (``ingest.won_line_materialisable``, the very rule the
+    # builder applies, asked and not copied).  Being in the tree stopped being
+    # the only condition on 15-ago: an old closure whose chain was never
+    # materialised has a line to walk all the same, and the plies it names are
+    # what the closure already asserts.
+    #
+    # What the ban on a BLOCKED first move protects is the other side, and it
+    # stays: a move this page refuses to make from every other control cannot
+    # be made from this one either.
+    #
+    # Not one statement is spent here.  The walk is paid on the click, and how
+    # far it goes is said by the line printed beside the chip.
+    proven_first = _proven_next_move(pos)
+    proven_first_key, proven_first_walkable = None, False
+    if proven_first:
+        in_tree = [move['key'] for move in moves
+                   if move['uci'] == proven_first]
+        proven_first_key = (in_tree[0] if in_tree
+                            else offtree_keys.get(proven_first))
+        proven_first_walkable = bool(
+            in_tree or ingest.won_line_materialisable(pos))
+    proven_end_url = (
+        _proven_line_end_url(pos.key, active_ucis)
+        if proven_first_walkable and proven_first_key is not None
+        and not (blocked_keys is not None and proven_first_key in blocked_keys)
+        else None)
     numbered = _numbered_line(
         top,
         line,
@@ -5255,9 +5353,15 @@ def explore(request, key):
         # render con selector no se le sirve a nadie mas.
         **depth.context(request, pos),
         # En que va la peticion viva de ESTA posicion: esperando en la cola, o
-        # buscandose ahora y cuanto falta.  Vacio cuando no hay tarea viva, y
-        # entonces la plantilla no pinta ni el hueco (§ live_request.context).
-        **live_request.context(pos),
+        # buscandose ahora y cuanto falta.  Y, junto a esa linea, el control
+        # para adelantar TU peticion de aqui, que es donde de verdad hace
+        # falta (§ live_request.bump_control).  Vacio cuando no hay tarea
+        # viva, y entonces la plantilla no pinta ni el hueco.
+        **live_request.context(
+            pos,
+            username=(request.user.username
+                      if request.user.is_authenticated else ''),
+            back=_explore_url(pos.key, active_ucis, current_anchor)),
         'pos': pos, 'moves': moves, 'parents': parents,
         # Las lineas del motor listas para ENSEÑAR: cortadas en su primer
         # cruce consigo mismas (§ _analysis_lines_for_display).  El JSON
@@ -5311,9 +5415,20 @@ def explore(request, key):
         # Y si el salto acabo dando la vuelta, se dice: el visitante pincho
         # buscando de donde sale el numero y lo que hay es una repeticion.
         'backed_repetition': bool(request.GET.get(BACKED_REPETITION_PARAM)),
+        # Y si acabo antes de tiempo, tambien: la cadena se rompio y esto no
+        # es el final que el control prometia.  Lo dicen los dos saltos por
+        # igual (§ _jump_landing_url).
+        'jump_incomplete': bool(request.GET.get(JUMP_INCOMPLETE_PARAM)),
         # El salto al final de la linea probada, o None cuando no hay linea
         # que recorrer y entonces la plantilla no pinta control ninguno.
         'proven_end_url': proven_end_url,
+        # CUANTOS PLIES viaja ese salto, dichos ANTES del click.  Es la
+        # longitud de la linea que se imprime justo al lado, que es la unica
+        # cifra que no puede contradecir a la pagina: el control promete
+        # exactamente lo que la pagina enseña.  Sin linea impresa (un cierre
+        # MINIMAX solo guarda el testigo de cada nodo) no hay longitud que
+        # prometer y el chip no la inventa.
+        'proven_end_plies': len((pos.won_line or '').split()) or None,
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.

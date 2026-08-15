@@ -19,6 +19,7 @@ las peticiones que se solapan por PRESUPUESTO (dos generaciones sobre la misma
 posicion) no las cubre el dedup del submit y se siguen cerrando al aterrizar.
 """
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import Client
 from django.utils import timezone
@@ -200,48 +201,45 @@ class BackersStayInTheVisitorBandTests(_BumpHarness):
 class BumpOnTheProfileTests(_BumpHarness):
     """Lo que la pagina de la cuenta ensena, que es de donde sale el click."""
 
-    def test_the_page_offers_the_move_on_every_row_but_the_first(self):
-        self._queue('a', [self.RUNG] * 3)
-
-        rows = contributors.present('a')['queue_pending']
-
-        self.assertEqual([row['can_bump'] for row in rows],
-                         [False, True, True])
-
     def test_the_list_follows_the_order_that_the_queue_will_serve(self):
         mine = self._queue('a', [self.RUNG] * 3)
 
         self._bump(mine[2], 'a')
         rows = contributors.present('a')['queue_pending']
 
-        self.assertEqual([row['task_id'] for row in rows],
-                         [mine[2].id, mine[0].id, mine[1].id])
+        self.assertEqual(
+            [row['key'] for row in rows],
+            [mine[2].position_id, mine[0].position_id, mine[1].position_id])
         # Y los numeros de sitio siguen contando desde el frente, sin huecos:
         # una lista ordenada por llegada con estos numeros al lado seria la
         # pagina contradiciendose sola.
         self.assertEqual([row['place'] for row in rows], [1, 2, 3])
 
-    def test_the_control_is_painted_on_your_page_and_on_nobody_elses(self):
-        """La pagina de una cuenta es PUBLICA: el boton no puede serlo.
+    def test_no_row_of_the_queue_carries_the_control_any_more(self):
+        """UNA fila por peticion era el sitio equivocado para este boton.
 
-        Que la vista lo compruebe otra vez no hace sobrante esta asercion —
-        un boton que nadie puede pulsar es una promesa rota en la pagina de
-        cualquiera que pase por ahi.
+        La lista sale en orden de turno, asi que lo que se ve arriba es lo que
+        ya iba primero: cada boton en pantalla ofrecia adelantar justo lo que
+        no hacia falta ("those buttons clog the interface and essentially
+        useless cause you suggest to move what is already basically in front
+        of the queue to the very front", Wolfram), y la peticion que de verdad
+        se quiere adelantar esta cien filas mas abajo, fuera de la pagina.  Ni
+        siquiera en la propia: el control vive en la pagina de la POSICION.
         """
-        mine = self._queue('a', [self.RUNG] * 2)
-
+        self._queue('a', [self.RUNG] * 3)
         self.client.login(username='a', password='p')
+
         own_page = self.client.get('/atomicdb/user/a/').content.decode()
-        self.client.logout()
-        self.client.login(username='b', password='p')
-        seen_by_a_stranger = self.client.get(
-            '/atomicdb/user/a/').content.decode()
-        self.client.logout()
 
-        self.assertIn(f'/atomicdb/queue/bump/{mine[1].id}/', own_page)
-        self.assertNotIn('/atomicdb/queue/bump/', seen_by_a_stranger)
+        self.assertNotIn('/atomicdb/queue/bump/', own_page)
+        self.assertNotIn('Move to front', own_page)
+        # Y la fila conserva lo que si es suyo: el sitio en la cola y el
+        # camino hasta la posicion, que es por donde se llega al control.
+        self.assertIn('#1', own_page)
 
-    def test_the_button_posts_back_to_the_page_it_was_pressed_from(self):
+    def test_the_button_falls_back_to_your_page_without_a_route(self):
+        """``back`` es una pista, no una orden: solo se obedece una ruta del
+        sitio, y sin ella se vuelve a la pagina de la cuenta de siempre."""
         mine = self._queue('a', [self.RUNG] * 2)
         self.client.login(username='a', password='p')
 
@@ -250,6 +248,219 @@ class BumpOnTheProfileTests(_BumpHarness):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Location'], '/atomicdb/user/a/')
+
+    def test_a_back_that_leaves_the_site_is_refused(self):
+        mine = self._queue('a', [self.RUNG] * 2)
+        self.client.login(username='a', password='p')
+
+        response = self.client.post(f'/atomicdb/queue/bump/{mine[1].id}/',
+                                    {'back': '//example.invalid/'})
+
+        self.assertEqual(response['Location'], '/atomicdb/user/a/')
+
+
+class BumpOnThePositionTests(TestCase):
+    """Donde vive ahora el control, y lo que tiene que decir estando ahi.
+
+    Peticion de Opabinia en #suggestions: "it would be better if the Move to
+    front was on the page of the position, because usually you want to move
+    something that's like hundreds in the queue to the front".  En la lista de
+    la cola el boton solo alcanzaba a las primeras veinte filas, que son
+    justamente las que no necesitan adelantarse; en la pagina de la posicion
+    hay exactamente una peticion de la que hablar y es la que se esta mirando.
+    """
+
+    def setUp(self):
+        for name in ('alice', 'bob'):
+            worker_account(name, 'p')
+        self.client = Client()
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        self.first, self.second = (
+            ingest.get_or_create_position(logic.apply_move(root.fen, uci))
+            for uci in ('e2e4', 'd2d4'))
+
+    def _ask(self, position, username='alice'):
+        ingest.request_analysis(position, requested_by=username)
+        return AnalysisTask.objects.get(position=position, state='PENDING')
+
+    def _body(self, position, username=''):
+        if username:
+            self.client.login(username=username, password='p')
+        body = self.client.get(
+            f'/atomicdb/explore/{position.key}/').content.decode()
+        self.client.logout()
+        return body
+
+    def _control(self, body, task):
+        return f'/atomicdb/queue/bump/{task.id}/' in body
+
+    def test_the_position_you_asked_for_carries_the_control(self):
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+
+        self.assertTrue(self._control(self._body(self.second, 'alice'),
+                                      waiting))
+
+    def test_the_one_already_at_the_front_offers_nothing(self):
+        """Un boton que contesta 'already-first' es peor que su ausencia."""
+        leading = self._ask(self.first)
+        self._ask(self.second)
+
+        self.assertFalse(self._control(self._body(self.first, 'alice'),
+                                       leading))
+
+    def test_a_stranger_looking_at_the_same_page_sees_no_control(self):
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+
+        body = self._body(self.second, 'bob')
+
+        self.assertFalse(self._control(body, waiting))
+        self.assertNotIn('Move to front', body)
+
+    def test_without_a_session_there_is_no_control_at_all(self):
+        self._ask(self.first)
+        self._ask(self.second)
+
+        self.assertNotIn('Move to front', self._body(self.second))
+
+    def test_joining_somebody_elses_request_does_not_hand_you_its_place(self):
+        """Sumarse pone tu nombre en la fila; la fila sigue siendo de su
+        autor, y el endpoint tampoco se la moveria a nadie mas."""
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+        ingest.request_analysis(self.second, requested_by='bob')
+
+        body = self._body(self.second, 'bob')
+
+        self.assertEqual(AnalysisTask.objects.get(pk=waiting.pk).backers, 1)
+        self.assertFalse(self._control(body, waiting))
+
+    def test_the_control_shows_the_place_the_account_page_shows(self):
+        """LA MISMA CIFRA, calculada por la misma regla de reparto justo.
+
+        El control tiene que ensenar el sitio de la peticion sobre la que
+        actua, y ese sitio no puede ser otro que el que la pagina de la cuenta
+        imprime al lado de esa misma fila: dos numeros para un solo hecho es
+        como una pagina acaba contradiciendo a la otra.
+        """
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+        # Con un arriendo vivo aqui, la linea de estado narra el arriendo y no
+        # la espera: el sitio de la peticion propia no esta dicho todavia, asi
+        # que el control lo dice.
+        AnalysisTask.objects.create(
+            position=self.second, generation=1, budget_nodes=2_000_000_000,
+            source=AnalysisTask.Source.USER, requested_by='bob',
+            state=AnalysisTask.TState.LEASED, machine='m1',
+            leased_at=timezone.now(), lease_heartbeat_at=timezone.now())
+
+        body = self._body(self.second, 'alice')
+        rows = contributors.present('alice')['queue_pending']
+        listed = next(row['place'] for row in rows
+                      if row['key'] == self.second.key)
+
+        self.assertEqual(listed, live_request.queue_ahead(waiting) + 1)
+        self.assertIn(f'#{listed}', body)
+
+    def test_the_place_survives_the_click_that_takes_the_button_away(self):
+        """Que hizo el click, dicho por el mismo numero de antes.
+
+        Adelantar deja la peticion la primera de su propia cola, asi que el
+        boton desaparece con el click: si el sitio desapareciera con el, lo
+        unico que veria quien pulsa es que ya no hay nada que pulsar.
+        """
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+        AnalysisTask.objects.create(
+            position=self.second, generation=1, budget_nodes=2_000_000_000,
+            source=AnalysisTask.Source.USER, requested_by='bob',
+            state=AnalysisTask.TState.LEASED, machine='m1',
+            leased_at=timezone.now(), lease_heartbeat_at=timezone.now())
+        before = live_request.queue_ahead(waiting) + 1
+
+        self.client.login(username='alice', password='p')
+        self.client.post(f'/atomicdb/queue/bump/{waiting.id}/')
+        body = self._body(self.second, 'alice')
+
+        after = live_request.queue_ahead(
+            AnalysisTask.objects.get(pk=waiting.pk)) + 1
+        self.assertLess(after, before)
+        self.assertNotIn('Move to front', body)
+        self.assertIn(f'#{after}', body)
+
+    def test_the_place_is_not_said_twice_on_the_same_screen(self):
+        """La linea de estado ya cuenta la cola cuando narra ESTA espera."""
+        self._ask(self.first)
+        self._ask(self.second)
+
+        body = self._body(self.second, 'alice')
+
+        self.assertIn('Move to front', body)
+        self.assertIn('request ahead', body)
+        self.assertNotIn('in the visitor queue', body)
+
+    def test_the_click_moves_the_request_and_comes_back_to_the_position(self):
+        self._ask(self.first)
+        waiting = self._ask(self.second)
+        self.client.login(username='alice', password='p')
+        back = f'/atomicdb/explore/{self.second.key}/'
+
+        response = self.client.post(f'/atomicdb/queue/bump/{waiting.id}/',
+                                    {'back': back})
+
+        self.assertEqual(response['Location'], back)
+        self.assertEqual(
+            list(AnalysisTask.objects.filter(state='PENDING')
+                 .order_by('queue_seq', 'id')
+                 .values_list('position_id', flat=True))[0],
+            self.second.key)
+
+    def test_a_solved_position_has_no_queue_to_talk_about(self):
+        self._ask(self.first)
+        self._ask(self.second)
+        Position.objects.filter(key=self.second.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        self.assertNotIn('Move to front', self._body(self.second, 'alice'))
+
+    def test_a_visitor_without_a_session_pays_nothing_for_the_control(self):
+        """Un control personal no puede costarle nada a quien no lo ve.
+
+        La linea de estado ya leyo la tarea viva de esta posicion, y sin
+        sesion no hay cuenta que buscar: el explorador de un visitante
+        anonimo cuesta exactamente lo que costaba (§ test_live_request,
+        CostTests, que fija el presupuesto de la pagina entera).
+        """
+        self._ask(self.first)
+        self._ask(self.second)
+        live = live_request._live_task(self.second)
+
+        with self.assertNumQueries(
+                0, using=settings.ATOMICDB_DATABASE_ALIAS):
+            self.assertEqual(
+                live_request.bump_control(self.second, '', live=live), {})
+
+    def test_the_control_costs_one_statement_over_what_the_page_already_read(
+            self):
+        """Lo que se paga por saber si la peticion tiene a donde ir.
+
+        La tarea propia sale GRATIS cuando es la que la pagina ya narra, y el
+        sitio en la cola tampoco se pregunta cuando esa linea acaba de
+        decirlo: queda una sola sentencia, la que decide si el boton existe.
+        """
+        self._ask(self.first)
+        self._ask(self.second)
+        live = live_request._live_task(self.second)
+
+        with self.assertNumQueries(
+                1, using=settings.ATOMICDB_DATABASE_ALIAS):
+            shown = live_request.bump_control(self.second, 'alice', live=live)
+
+        self.assertTrue(shown['queue_bump']['can_move'])
+        # El sitio no se pregunta: la linea de estado ya lo dijo.
+        self.assertIsNone(shown['queue_bump']['place'])
 
 
 def _serve(task, machine='m1'):
