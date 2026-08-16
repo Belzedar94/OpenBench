@@ -1,14 +1,12 @@
 {
-    "client_version"  : 44,
-    "client_repo_url" : "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref" : "c716735d8fc4a731fb80f8c138520c198adde053",
-
-    "use_cross_approval"          : false,
-    "require_login_to_view"       : false,
-    "require_manual_registration" : false,
-    "balance_engine_throughputs"  : false,
-
-    "books" : [
+    "client_version": 45,
+    "client_repo_url": "https://github.com/Belzedar94/OpenBench",
+    "client_repo_ref": "18d1df6bdb9ff8f9609e319cf6f7b3a486daa4f8",
+    "use_cross_approval": false,
+    "require_login_to_view": false,
+    "require_manual_registration": false,
+    "balance_engine_throughputs": false,
+    "books": [
         "2moves_v1.epd",
         "3moves_FRC.epd",
         "4moves_noob.epd",
@@ -46,7 +44,6 @@
         "HORDE_openings_v3_validation.epd",
         "TERACHESS_openings_v1.epd"
     ],
-
     "engines": [
         "Spell-Stockfish",
         "Atomic-Stockfish",
