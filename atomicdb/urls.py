@@ -27,9 +27,9 @@ from .conquest_map import map_api
 # abajo.  A partir de la segunda peticion ese visitante ya trae cookie y entra
 # al cache con su propia entrada, que es donde estan las tormentas de F5.
 #
-# ``map`` y ``method`` VARIAN POR COOKIE desde que la cabecera lleva zona de
-# identidad.  Antes no tenian nada por visitante y compartian una sola entrada;
-# ahora su HTML dice quien eres — nombre, campana, recuento — y una entrada
+# ``map``, ``method`` y ``docs`` VARIAN POR COOKIE desde que la cabecera lleva
+# zona de identidad.  Antes no tenian nada por visitante y compartian una sola
+# entrada; ahora su HTML dice quien eres (nombre, campana, recuento) y una
 # compartida seria servirle a un visitante la sesion de otro.  El precio esta
 # medido y es el que ya paga la home: quien NO ha iniciado sesion sigue
 # compartiendo entrada (la cabecera anonima no lleva formulario, asi que no
@@ -68,6 +68,7 @@ _home_cached = page_cache.stale_while_revalidate(
     vary_on_cookie(csrf_protect(views.home)))
 _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
+_docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
 _queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 
 urlpatterns = [
@@ -85,6 +86,11 @@ urlpatterns = [
     # corta certificada, un ply que faltaba — asi que tampoco lleva cache.
     path('proven-line-end/<str:key>/', views.proven_line_end),
     path('method/', _method_cached),
+    # Que significa cada numero que se lee por ahi: filas, respaldo,
+    # repeticion, cola, API.  Estatica salvo dos constantes que la vista trae
+    # de donde se aplican, asi que entra en la misma cache de lectura que
+    # ``method`` y por las mismas razones.
+    path('docs/', _docs_cached, name='atomicdb-docs'),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
     # Avisos: la lista entera y el POST que los marca vistos, en la misma

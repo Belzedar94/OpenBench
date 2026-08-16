@@ -6126,6 +6126,34 @@ def method(request):
     return render(request, 'atomicdb/method.html')
 
 
+def docs(request):
+    """Que significa cada numero del explorador, en una sola pagina.
+
+    Peticion de comunidad: "wish there was more verbose documentation".  Lo
+    que faltaba no era el dato sino el sitio: las reglas de respaldo estan en
+    los tooltips de los chips, la repeticion en un comentario de ``ingest``, el
+    reparto de la cola en la cabecera de ``lanes``, y quien no las conoce no
+    sabe que existen para buscarlas.  ``method`` cuenta que CIERRA una
+    posicion; esta cuenta que VALE un numero abierto, que es la mitad que se
+    lee todos los dias.
+
+    Los dos limites que la pagina cita salen de las constantes que los aplican
+    de verdad (§ ``REQUEST_QUEUE_MAX``, ``API_REQUESTS_PER_HOUR``), por lo
+    mismo que la tabla de la cola lee los predicados del orden: una
+    documentacion que copia un numero a mano es una documentacion que miente
+    en cuanto alguien cambia el numero, y encima con cara de verdad.  El resto
+    del texto es prosa y vive en la plantilla.
+
+    Publica y cacheada como las demas vistas de LECTURA (§ urls): no toca la
+    base y no tiene nada de nadie dentro, asi que lo unico que la cache absorbe
+    aqui son las tormentas de F5 sobre un HTML que no cambia.
+    """
+    return render(request, 'atomicdb/docs.html', {
+        'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
+        'api_per_hour': API_REQUESTS_PER_HOUR,
+    })
+
+
 def conquest_map(request):
     """Public shell for the snapshot-backed Atomic move tree.
 
