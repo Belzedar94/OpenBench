@@ -124,26 +124,64 @@ def _machine_totals(since=None):
             for row in rows}
 
 
-def _by_owner(machine_totals, owner):
-    """Los mismos totales plegados por CUENTA.
+def _owner_of_machine():
+    """``{maquina: cuenta}`` SOLO donde el nombre no esta en disputa.
 
-    Una maquina sin ``WorkerPing`` no tiene dueno conocido y no entra en
-    ninguna cuenta: sus nodos siguen contando en el denominador de la flota,
-    porque se buscaron de verdad, pero atribuirselos a alguien seria inventar.
+    El nombre de maquina lo ELIGE el worker, asi que dos cuentas pueden
+    anunciar el mismo (paso el 16-ago: soothdest y NitroColoraze declarando
+    los dos "NitroColoraze-zen4").  El ``dict`` plano de antes se quedaba con
+    una fila arbitraria, y la portada atribuia los nodos de esa maquina a
+    quien no los busco — asi aparecio de contribuidor una cuenta que jamas
+    entrego nada.  Una maquina con dos duenos declarados no tiene dueno
+    conocido: sus filas viejas quedan sin atribuir, exactamente como las de
+    una maquina sin ``WorkerPing``.
     """
+    claims = {}
+    for machine, user in WorkerPing.objects.values_list('machine', 'user'):
+        claims.setdefault(machine, set()).add(user)
+    return {machine: next(iter(users))
+            for machine, users in claims.items() if len(users) == 1}
+
+
+def _fold(folded, account, nodes, tasks):
+    row = folded.setdefault(account, {'nodes': 0, 'tasks': 0})
+    row['nodes'] += nodes or 0
+    row['tasks'] += tasks or 0
+
+
+def _account_totals(since=None):
+    """``{cuenta: {nodes, tasks}}`` de lo COMPLETADO, por autoria REAL.
+
+    Dos fuentes, en orden de verdad.  Las filas ESTAMPADAS llevan la cuenta
+    autenticada que entrego (``delivered_by``, § views y migracion 0046) y se
+    agrupan por ella tal cual: ahi no hay nada que adivinar.  Las anteriores
+    al estampado caen al mapa de duenos por maquina, maquinas sin disputa
+    unicamente.  La ventana de 24h se cura sola en un dia de flota: todo lo
+    entregado desde el despliegue viene estampado.
+    """
+    stamped = (AnalysisTask.objects.filter(state=COMPLETED)
+               .exclude(delivered_by=''))
+    legacy = AnalysisTask.objects.filter(state=COMPLETED, delivered_by='')
+    if since is not None:
+        stamped = stamped.filter(completed__gte=since)
+        legacy = legacy.filter(completed__gte=since)
     folded = {}
-    for machine, totals in machine_totals.items():
-        user = owner.get(machine)
-        if not user:
-            continue
-        row = folded.setdefault(user, {'nodes': 0, 'tasks': 0})
-        row['nodes'] += totals['nodes']
-        row['tasks'] += totals['tasks']
+    for row in (stamped.values('delivered_by')
+                .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'))
+                .order_by()):
+        _fold(folded, row['delivered_by'], row['nodes'], row['tasks'])
+    owner = _owner_of_machine()
+    for row in (legacy.values('machine')
+                .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'))
+                .order_by()):
+        user = owner.get(row['machine'])
+        if user:
+            _fold(folded, user, row['nodes'], row['tasks'])
     return folded
 
 
 def measure_fleet(now):
-    """Totales por maquina y por cuenta, 24h y all-time.  DOS GROUP BY caros.
+    """Totales por maquina y por cuenta, 24h y all-time.  GROUP BY caros.
 
     El de "all time" agrupa TODAS las tareas completadas del proyecto y suma
     tres columnas que no estan en el indice: a 12,8M de posiciones es el
@@ -151,15 +189,13 @@ def measure_fleet(now):
     sitio.  No entra en la portada porque la portada lo necesite vivo — no lo
     necesita — sino porque era lo unico que quedaba sin publicar desde fuera.
     """
-    owner = dict(WorkerPing.objects.values_list('machine', 'user'))
     machines_all = _machine_totals()
     machines_24h = _machine_totals(since=now - timedelta(hours=24))
     return {
-        'owner': owner,
         'machines_all': machines_all,
         'machines_24h': machines_24h,
-        'users_all': _by_owner(machines_all, owner),
-        'users_24h': _by_owner(machines_24h, owner),
+        'users_all': _account_totals(),
+        'users_24h': _account_totals(since=now - timedelta(hours=24)),
         'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
         'nodes_all': sum(row['nodes'] for row in machines_all.values()),
     }

@@ -1,9 +1,14 @@
-"""Lanes: who owns a share of the fleet, what earns one, and who rides in it.
+"""The delivery window, the backing weight, and the queue page.
 
-The community voted contributor lanes in on 10 August.  This file covers the
-vocabulary (who owns a lane), the evidence (what earns one), and the two things
-that decide which lane a REQUEST travels in: the account that asked for it, and
-the account that lent it a lighter queue by backing it.
+Contributor lanes existed from 10 to 16 August and are gone: the binary
+window was gameable by a one minute worker run, and the community chose the
+pre-lane arrangement instead.  What this file asserts now:
+
+- the delivery-window predicate that still feeds the rung selector,
+- that running a worker buys NO queue position (the regression the removal
+  must never undo silently),
+- that backing a request still lends it the lightest requester's queue,
+- and the per-account queue page.
 
 Who gets served first, and in what proportion, is asserted in
 ``test_queue_fairness``: that file owns the order.
@@ -21,7 +26,12 @@ from .testing import TestCase, worker_account
 
 
 class ContributorPredicateTests(TestCase):
-    """A lane is earned by plugging in CPU, and by nothing else."""
+    """Contributing is evidenced by DELIVERED work, and by nothing else.
+
+    The predicate no longer buys queue position.  The rung selector
+    (``depth.may_choose``) still reads it, so what earns it stays load
+    bearing.
+    """
 
     def setUp(self):
         worker_account('miner', 'p')
@@ -35,7 +45,7 @@ class ContributorPredicateTests(TestCase):
                 last_result_at=timezone.now() - (age or timedelta()))
         return ping
 
-    def test_a_recent_delivery_earns_a_lane(self):
+    def test_a_recent_delivery_counts(self):
         self._ping('miner')
 
         self.assertEqual(lanes.contributor_accounts(), frozenset({'miner'}))
@@ -51,7 +61,7 @@ class ContributorPredicateTests(TestCase):
 
         ``last_seen`` is auto_now, so a process that polls for work and never
         returns an analysis kept it as fresh as a machine that was actually
-        searching.  A lane is bought with delivered work.
+        searching.  Contributing is evidenced by delivered work.
         """
         self._ping('miner', delivered=False)
 
@@ -59,28 +69,28 @@ class ContributorPredicateTests(TestCase):
         self.assertFalse(lanes.ran_a_worker('miner'))
 
     def test_a_delivery_inside_the_window_counts_when_switched_off(self):
-        # Somebody who turns the machine off for the weekend keeps their lane:
+        # Somebody who turns the machine off for the weekend stays trusted:
         # the row stays, the window is what forgets.
         self._ping('miner', age=timedelta(days=3))
 
         self.assertEqual(lanes.contributor_accounts(), frozenset({'miner'}))
 
-    def test_a_revoked_account_loses_its_lane(self):
+    def test_a_revoked_account_loses_the_privilege(self):
         from OpenBench.models import Profile
         self._ping('miner')
         Profile.objects.filter(user__username='miner').update(enabled=False)
 
         self.assertEqual(lanes.contributor_accounts(), frozenset())
 
-    def test_an_account_that_never_delivered_has_no_lane(self):
+    def test_an_account_that_never_delivered_is_not_contributing(self):
         self._ping('miner')
 
         self.assertFalse(lanes.ran_a_worker('lurker'))
         self.assertTrue(lanes.ran_a_worker('miner'))
 
-    def test_staff_alone_earns_no_lane(self):
+    def test_staff_alone_earns_nothing(self):
         # The owner opens the rung selector with is_staff, and that shortcut
-        # deliberately does NOT open a lane: the vote said CPU earns lanes.
+        # deliberately does NOT count as contributing: CPU is what counts.
         from django.contrib.auth.models import User
         User.objects.filter(username='lurker').update(is_staff=True)
 
@@ -95,30 +105,8 @@ class ContributorPredicateTests(TestCase):
         self.assertFalse(depth.may_choose(User.objects.get(username='lurker')))
 
 
-class LaneAssignmentTests(TestCase):
-    """Contributors get their own lane; everybody else shares the commons."""
-
-    def test_a_contributor_owns_a_lane_named_after_the_account(self):
-        self.assertEqual(lanes.lane_of('miner', frozenset({'miner'})), 'miner')
-
-    def test_a_named_non_contributor_falls_into_the_commons(self):
-        self.assertEqual(lanes.lane_of('lesha', frozenset({'miner'})),
-                         lanes.LANE_COMMONS)
-
-    def test_anonymous_falls_into_the_commons(self):
-        self.assertEqual(lanes.lane_of('', frozenset({'miner'})),
-                         lanes.LANE_COMMONS)
-
-    def test_alt_accounts_all_land_in_the_same_lane(self):
-        contributors = frozenset({'miner'})
-        alts = {lanes.lane_of(f'alt{index}', contributors)
-                for index in range(5)}
-
-        self.assertEqual(alts, {lanes.LANE_COMMONS})
-
-
 class DeliveryEvidenceTests(TestCase):
-    """``last_result_at`` records a DELIVERY, not a hello."""
+    """``last_result_at`` and ``delivered_by`` record a DELIVERY, not a hello."""
 
     def setUp(self):
         worker_account('u', 'p')
@@ -144,6 +132,11 @@ class DeliveryEvidenceTests(TestCase):
 
         ping = WorkerPing.objects.get(machine='u-box')
         self.assertIsNotNone(ping.last_result_at)
+        # And the TASK remembers the authenticated account that delivered it.
+        # The machine name is worker-chosen and can be claimed by two
+        # accounts, so this stamp is what the front page attributes by.
+        task = AnalysisTask.objects.get(id=task_id)
+        self.assertEqual(task.delivered_by, 'u')
 
     def test_the_column_starts_empty_for_every_row_that_already_existed(self):
         # The migration backfills nothing on purpose: a timestamp nobody
@@ -161,13 +154,6 @@ class QueuePageTests(TestCase):
         worker_account('lesha', 'p')
         self.client = Client()
 
-    def _contributor(self, user, machine='m1'):
-        """An account that has delivered, which is what opens a lane."""
-        ping = WorkerPing.objects.create(machine=machine, user=user)
-        WorkerPing.objects.filter(pk=ping.pk).update(
-            last_result_at=timezone.now())
-        return ping
-
     def _queue(self, owner, count, budget=128_000_000, offset=0):
         rows = [Position(key=f'{index + offset:064d}', fen=logic.start_fen(),
                          status='UNKNOWN', expanded=False)
@@ -179,64 +165,49 @@ class QueuePageTests(TestCase):
                          state='PENDING')
             for position in rows])
 
-    def test_a_contributor_gets_a_row_of_their_own(self):
-        self._contributor('miner')
-        self._queue('miner', 2)
-
-        table = lanes.measure_lanes(timezone.now())
-
-        self.assertEqual([row['lane'] for row in table['rows']], ['miner'])
-        self.assertEqual(table['rows'][0]['waiting'], 2)
-        self.assertEqual(table['rows'][0]['nodes'], 256_000_000)
-
-    def test_named_strangers_and_the_anonymous_tide_share_one_row(self):
-        self._queue('lesha', 2, offset=0)
-        self._queue('', 3, offset=100)
-
-        table = lanes.measure_lanes(timezone.now())
-
-        self.assertEqual([row['lane'] for row in table['rows']],
-                         [lanes.LANE_COMMONS])
-        commons = table['rows'][0]
-        self.assertEqual(commons['waiting'], 5)
-        # Two members: the named stranger, and the anonymous tide as ONE.
-        self.assertEqual(commons['member_count'], 2)
-
-    def test_a_contributor_and_the_commons_are_separate_rows(self):
-        self._contributor('miner')
-        self._queue('miner', 1, offset=0)
+    def test_every_account_gets_a_row_of_its_own(self):
+        self._queue('miner', 2, offset=0)
         self._queue('lesha', 1, offset=100)
 
-        table = lanes.measure_lanes(timezone.now())
+        table = lanes.measure_queue(timezone.now())
 
-        self.assertEqual({row['lane'] for row in table['rows']},
-                         {'miner', lanes.LANE_COMMONS})
+        self.assertEqual({row['account'] for row in table['rows']},
+                         {'miner', 'lesha'})
+        miner = next(row for row in table['rows'] if row['account'] == 'miner')
+        self.assertEqual(miner['waiting'], 2)
+        self.assertEqual(miner['nodes'], 256_000_000)
 
-    def test_a_lane_with_nothing_queued_does_not_appear(self):
-        self._contributor('miner')
+    def test_the_anonymous_tide_is_one_row(self):
+        self._queue('', 3, offset=0)
+
+        table = lanes.measure_queue(timezone.now())
+
+        self.assertEqual([row['account'] for row in table['rows']], [''])
+        self.assertEqual(table['rows'][0]['waiting'], 3)
+
+    def test_an_account_with_nothing_queued_does_not_appear(self):
         self._queue('lesha', 1)
 
-        table = lanes.measure_lanes(timezone.now())
+        table = lanes.measure_queue(timezone.now())
 
-        self.assertNotIn('miner', {row['lane'] for row in table['rows']})
+        self.assertNotIn('miner', {row['account'] for row in table['rows']})
 
     def test_a_closed_position_is_not_queue_anybody_is_waiting_behind(self):
         self._queue('lesha', 2)
         Position.objects.filter(key=f'{0:064d}').update(status='WHITE_WIN')
 
-        table = lanes.measure_lanes(timezone.now())
+        table = lanes.measure_queue(timezone.now())
 
         self.assertEqual(table['rows'][0]['waiting'], 1)
 
-    def test_the_page_renders_the_lanes(self):
-        self._contributor('miner')
+    def test_the_page_renders_the_accounts(self):
         self._queue('miner', 1, offset=0)
         self._queue('', 1, offset=100)
 
         response = self.client.get('/atomicdb/queue/')
 
         self.assertContains(response, 'miner')
-        self.assertContains(response, 'Commons')
+        self.assertContains(response, 'Anonymous')
 
     def test_the_page_says_so_when_the_queue_is_empty(self):
         response = self.client.get('/atomicdb/queue/')
@@ -244,7 +215,7 @@ class QueuePageTests(TestCase):
         self.assertContains(response, 'Nothing is queued right now.')
 
 
-class LaneServiceHarness(TestCase):
+class ServiceHarness(TestCase):
     """Drains the real lease endpoint, like ``test_queue_fairness`` does."""
 
     RUNG = 128_000_000
@@ -254,17 +225,16 @@ class LaneServiceHarness(TestCase):
         self.client = Client()
 
     def _account(self, user):
-        """A real account: user AND enabled profile.
-
-        Not optional scaffolding.  A lane needs an ENABLED profile, so a test
-        that queues to a bare username puts everybody in the commons and then
-        passes for the wrong reason.
-        """
         from django.contrib.auth.models import User
         if user and not User.objects.filter(username=user).exists():
             worker_account(user, 'p')
 
     def _contributor(self, user, machine=None):
+        """An account with a fresh delivery on record.
+
+        Since 16 August this buys NOTHING in the queue; the harness keeps it
+        so the tests can assert exactly that.
+        """
         self._account(user)
         ping = WorkerPing.objects.create(machine=machine or f'{user}-box',
                                          user=user)
@@ -298,38 +268,37 @@ class LaneServiceHarness(TestCase):
         return served
 
 
-class LaneShareTests(LaneServiceHarness):
-    """A lane is the unit that gets an equal share, whoever is standing in it."""
+class AccountShareTests(ServiceHarness):
+    """One commons.  Every account advances by the nodes it already has queued."""
 
-    def test_a_contributor_and_the_commons_split_the_fleet(self):
+    def test_equal_accounts_alternate(self):
+        self._queue('miner', [self.RUNG] * 10, offset=0)
+        self._queue('lesha', [self.RUNG] * 10, offset=100)
+
+        owners = [task.requested_by for task in self._serve(8)]
+
+        self.assertEqual(owners.count('miner'), 4)
+        self.assertEqual(owners.count('lesha'), 4)
+
+    def test_running_a_worker_buys_no_queue_position(self):
+        """The 16 August decision, as a regression test.
+
+        Between 10 and 16 August a fresh delivery opened a private lane and a
+        one minute worker run was a toll anybody could pay for one.  Now a
+        contributor with a delivery minutes old advances exactly like anybody
+        else; the only thing a worker buys its owner is affinity while it
+        runs, which ``test_queue_fairness`` asserts separately.
+        """
         self._contributor('miner')
         self._queue('miner', [self.RUNG] * 10, offset=0)
         self._queue('lesha', [self.RUNG] * 10, offset=100)
 
         owners = [task.requested_by for task in self._serve(8)]
 
-        # One lane each: the contributor and the commons alternate.
         self.assertEqual(owners.count('miner'), 4)
         self.assertEqual(owners.count('lesha'), 4)
 
-    def test_alt_accounts_buy_nothing(self):
-        """Five alts in the commons get, between them, what one account gets.
-
-        This is the property the vote asked for in as many words: "creating
-        alt accounts gains nothing: only plugging in CPU earns you a lane".
-        """
-        self._contributor('miner')
-        self._queue('miner', [self.RUNG] * 10, offset=0)
-        for index in range(5):
-            self._queue(f'alt{index}', [self.RUNG] * 10,
-                        offset=100 + 20 * index)
-
-        owners = [task.requested_by for task in self._serve(10)]
-
-        self.assertEqual(owners.count('miner'), 5)
-        self.assertEqual(sum(owners.count(f'alt{i}') for i in range(5)), 5)
-
-    def test_a_contributor_with_nothing_queued_holds_nothing(self):
+    def test_an_account_with_nothing_queued_holds_nothing(self):
         self._contributor('miner')
         self._queue('lesha', [self.RUNG] * 4, offset=100)
 
@@ -337,24 +306,40 @@ class LaneShareTests(LaneServiceHarness):
 
         self.assertEqual(owners, ['lesha'] * 4)
 
-    def test_a_lane_that_falls_out_of_the_window_joins_the_commons(self):
-        ping = self._contributor('miner')
-        self._queue('miner', [self.RUNG] * 6, offset=0)
-        self._queue('lesha', [self.RUNG] * 6, offset=100)
-        WorkerPing.objects.filter(pk=ping.pk).update(
-            last_result_at=timezone.now()
-            - timedelta(days=lanes.CONTRIBUTOR_WINDOW_DAYS, hours=1))
+    def test_a_newcomers_first_request_is_not_walled_out(self):
+        """The 6 August starvation case stays solved without lanes.
 
-        owners = [task.requested_by for task in self._serve(4)]
+        An account queued 1,562 requests in an hour and the FIFO tail meant
+        the next person waited behind all of them.  Per-account node weighting
+        is what fixed it, and it never depended on the lanes.
+        """
+        self._queue('flooder', [self.RUNG] * 200, offset=0)
+        self._queue('newcomer', [self.RUNG], offset=1000)
 
-        # Two members of one commons now, so they still alternate, but on the
-        # commons share rather than on a lane of their own.  Nothing is lost.
+        owners = [task.requested_by for task in self._serve(2)]
+
+        self.assertIn('newcomer', owners)
+
+    def test_every_account_advances_at_the_same_rate(self):
+        """Six accounts, one commons: an equal split, whoever they are.
+
+        This is the honest cost of dropping the lanes: alt accounts are
+        accounts.  The per-person cap and the public queue page are the
+        guards, and the fleet owner can see the split this test pins down.
+        """
+        self._queue('miner', [self.RUNG] * 10, offset=0)
+        for index in range(5):
+            self._queue(f'alt{index}', [self.RUNG] * 10,
+                        offset=100 + 20 * index)
+
+        owners = [task.requested_by for task in self._serve(12)]
+
         self.assertEqual(owners.count('miner'), 2)
-        self.assertEqual(owners.count('lesha'), 2)
-        self.assertEqual(AnalysisTask.objects.filter(state='PENDING').count(), 8)
+        for index in range(5):
+            self.assertEqual(owners.count(f'alt{index}'), 2)
 
 
-class BackedRequestLaneTests(LaneServiceHarness):
+class BackedRequestLaneTests(ServiceHarness):
     """The 15 August case: backing must move a request, not decorate it.
 
     Reported by Eclipsia on a request authored by soothdest.  The author was
@@ -363,8 +348,8 @@ class BackedRequestLaneTests(LaneServiceHarness):
     """
 
     def test_a_backed_request_rides_the_backers_empty_queue(self):
-        self._contributor('eclipsia')
-        self._contributor('soothdest')
+        self._account('eclipsia')
+        self._account('soothdest')
         buried = self._queue('soothdest', [self.RUNG] * 200, offset=0)
 
         ingest.add_requester(buried[150], 'eclipsia')
@@ -375,8 +360,8 @@ class BackedRequestLaneTests(LaneServiceHarness):
         self.assertEqual(served.lane_account, 'eclipsia')
 
     def test_the_author_keeps_the_request(self):
-        """Lending a lane is not taking the request."""
-        self._contributor('eclipsia')
+        """Lending a queue is not taking the request."""
+        self._account('eclipsia')
         task, = self._queue('soothdest', [self.RUNG], offset=0)
 
         ingest.add_requester(task, 'eclipsia')
@@ -386,7 +371,7 @@ class BackedRequestLaneTests(LaneServiceHarness):
         self.assertEqual(task.also_requested_by, ['eclipsia'])
 
     def test_a_backer_with_the_heavier_queue_lends_nothing(self):
-        self._contributor('eclipsia')
+        self._account('eclipsia')
         self._queue('eclipsia', [self.RUNG] * 50, offset=200)
         task, = self._queue('soothdest', [self.RUNG], offset=0)
 
@@ -402,6 +387,7 @@ class BackedRequestLaneTests(LaneServiceHarness):
         self.assertEqual(task.lane_account, '')
 
     def test_a_named_backer_adopts_an_anonymous_request(self):
+        self._account('eclipsia')
         task, = self._queue('', [self.RUNG], offset=0)
 
         ingest.add_requester(task, 'eclipsia')
@@ -416,7 +402,8 @@ class AccountQueueCapTests(TestCase):
 
     It used to be global: the total of every pending request in the project,
     so one busy account locked out people who had queued nothing.  That is the
-    same hoarding the lanes exist to undo, moved to the front door.
+    same hoarding the per-account weighting exists to undo, moved to the front
+    door.
     """
 
     def setUp(self):
@@ -464,8 +451,8 @@ class AccountQueueCapTests(TestCase):
         self.assertEqual(response.json()['status'], 'queued')
 
     def test_the_anonymous_tide_shares_one_allowance(self):
-        # One member of the commons, so one cap, the same decision the sharing
-        # and the deep lease cap already make about anonymous traffic.
+        # One shared identity, so one cap, the same decision the sharing and
+        # the deep lease cap already make about anonymous traffic.
         self._fill('', views.REQUEST_QUEUE_MAX)
 
         response = self._request(self.targets[0].key)
@@ -512,10 +499,11 @@ class AccountQueueCapTests(TestCase):
 class CancelledWorkCostsNothingTests(TestCase):
     """A request you took back stops counting, everywhere it counted.
 
-    CANCELLED landed beside the lanes, and the two features meet in three
-    places: the nodes a lane is charged, the allowance a person spends, and
-    the queue page.  A cancelled row that still weighed in any of them would
-    mean taking a request back did not give you anything back.
+    CANCELLED landed beside the per-account weighting, and the two features
+    meet in three places: the nodes an account is charged, the allowance a
+    person spends, and the queue page.  A cancelled row that still weighed in
+    any of them would mean taking a request back did not give you anything
+    back.
     """
 
     def setUp(self):
@@ -534,7 +522,7 @@ class CancelledWorkCostsNothingTests(TestCase):
                          state=state)
             for position in rows], batch_size=1000)
 
-    def test_cancelled_rows_are_not_charged_to_a_lane(self):
+    def test_cancelled_rows_are_not_charged_to_an_account(self):
         self._queue('asfault', 3, state=AnalysisTask.TState.CANCELLED)
 
         loads = lanes.charged_loads(['asfault'])
@@ -544,7 +532,7 @@ class CancelledWorkCostsNothingTests(TestCase):
     def test_cancelled_rows_do_not_show_on_the_queue_page(self):
         self._queue('asfault', 2, state=AnalysisTask.TState.CANCELLED)
 
-        table = lanes.measure_lanes(timezone.now())
+        table = lanes.measure_queue(timezone.now())
 
         self.assertEqual(table['rows'], [])
 
@@ -566,7 +554,7 @@ class CancelledWorkCostsNothingTests(TestCase):
 
 
 class HandoverLaneTests(TestCase):
-    """Taking a request back hands it on, and the lane goes with the owner."""
+    """Taking a request back hands it on, and the charge goes with the owner."""
 
     def setUp(self):
         for name in ('soothdest', 'eclipsia'):
@@ -582,10 +570,10 @@ class HandoverLaneTests(TestCase):
             also_requested_by=list(backers), backers=len(backers),
             state='PENDING')
 
-    def test_a_handover_to_the_lane_lender_drops_the_loan(self):
-        """The backer who lent the lane becomes the author, so the loan ends.
+    def test_a_handover_to_the_queue_lender_drops_the_loan(self):
+        """The backer who lent the queue becomes the author, so the loan ends.
 
-        Lending yourself a lane is what an empty column already means, and
+        Lending yourself a queue is what an empty column already means, and
         leaving the old name behind would charge the row to somebody who is
         no longer on it.
         """

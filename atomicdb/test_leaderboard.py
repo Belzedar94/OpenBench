@@ -178,7 +178,7 @@ class AttributionTests(TestCase):
     def test_a_machine_with_no_account_counts_only_for_the_fleet(self):
         # Sin ``WorkerPing`` no hay dueno conocido: sus nodos son reales y
         # entran en el denominador, pero atribuirselos a alguien seria
-        # inventar (§ contributors._by_owner).
+        # inventar (§ contributors._account_totals).
         _searched('alice', 3_000_000)
         _completed(_child('b2b3'), 'orphan-box-atomicdb', 1_000_000, 1.0)
 
@@ -189,6 +189,34 @@ class AttributionTests(TestCase):
         self.assertEqual(day['unclaimed_h'], '1.0M')
         # La cuota se mide contra la flota entera: 3 de 4, no 3 de 3.
         self.assertEqual(day['rows'][0]['share'], 75.0)
+
+    def test_a_machine_claimed_by_two_accounts_attributes_to_nobody(self):
+        # El caso soothdest del 16-ago: el nombre de maquina lo elige el
+        # worker, dos cuentas anunciaron el mismo, y el dict plano de duenos
+        # atribuia los nodos de esa maquina a una fila arbitraria.  Una
+        # maquina en disputa no tiene dueno conocido: filas viejas sin
+        # estampar quedan sin atribuir, como las de una maquina sin ping.
+        _searched('alice', 3_000_000)
+        _ping('alice-box-atomicdb', 'mallory')
+
+        day, _life = _boards()
+
+        self.assertEqual(_names(day), [])
+        self.assertEqual(day['unclaimed_h'], '3.0M')
+
+    def test_a_stamped_delivery_beats_the_machine_guess(self):
+        # Con ``delivered_by`` estampado (todo lo entregado desde el 16-ago),
+        # la disputa por el nombre de maquina da igual: la cuenta autenticada
+        # que entrego es un hecho, no una adivinanza.
+        task = _searched('alice', 3_000_000)
+        task.delivered_by = 'alice'
+        task.save(update_fields=['delivered_by'])
+        _ping('alice-box-atomicdb', 'mallory')
+
+        day, _life = _boards()
+
+        self.assertEqual(_names(day), ['alice'])
+        self.assertEqual(day['unclaimed_h'], '')
 
     def test_a_real_contribution_is_never_written_as_a_round_zero(self):
         # Un contribuidor pequeno al lado de una flota enorme: su cuota

@@ -416,6 +416,15 @@ class AnalysisTask(models.Model):
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')
+    # La CUENTA autenticada que entrego el resultado, estampada al completar
+    # (§ views, el submit).  No es redundante con ``machine``: ese nombre lo
+    # elige el worker y dos cuentas pueden anunciar el mismo, asi que "el
+    # dueno de la maquina" es una adivinanza y esto es un hecho.  Vacio en
+    # toda fila anterior al 16-ago (la migracion no rellena nada a proposito:
+    # una autoria que nadie registro seria inventada) y en las tareas que
+    # nunca se completaron.  La portada atribuye por esta columna y solo cae
+    # al mapa de duenos, maquinas sin ambiguedad unicamente, para lo antiguo.
+    delivered_by = models.CharField(max_length=64, default='', blank=True)
     leased_at    = models.DateTimeField(null=True)
     # Separate keepalive preserves the immutable assignment timestamp while
     # preventing a healthy multi-hour search from being leased a second time.

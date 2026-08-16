@@ -57,7 +57,6 @@ from django.db.models import (BigIntegerField, Case, CharField, F,
                               IntegerField, Q, Sum, Value, When, Window)
 from django.utils import timezone
 
-from . import lanes
 from .ingest import notification_deserved
 from .models import AnalysisTask, WorkerPing
 
@@ -137,52 +136,17 @@ def _effective_account():
                 default=F('lane_account'), output_field=CharField())
 
 
-def _lane_condition(name):
-    """Las filas del carril de ``name``: las suyas, y las que respalda."""
-    return Q(lane_account=name) | Q(lane_account='', requested_by=name)
-
-
-def _lane_size(context):
-    """Cuanta gente hay en el carril de cada fila.  El multiplicador.
-
-    ES LO QUE CONVIERTE UNA CUOTA POR CUENTA EN UNA CUOTA POR CARRIL.  La suma
-    propia de cada miembro, multiplicada por el tamano de su carril: un carril
-    de contribuidor tiene un miembro, asi que multiplica por uno y su orden
-    interno es EXACTAMENTE el de antes de que existieran los carriles; el
-    comun tiene tantos como gente haya dentro, asi que cada uno avanza esas
-    veces mas rapido y el comun entero avanza al ritmo de UN carril.  Ahi esta
-    la aritmetica de "las cuentas alternativas no compran nada": cinco alts
-    suben el recuento y se reparten la misma cuota cinco veces.
-
-    Y ES LO QUE HACE EL CAMBIO AUDITABLE.  Dentro de un carril el
-    multiplicador es constante, asi que el orden relativo entre sus filas no
-    se mueve ni una posicion; y cuando todo el mundo esta en el comun — que es
-    lo que pasa el dia del despliegue, y siempre que ningun contribuidor tenga
-    nada encolado — es una constante global y el orden servido es IDENTICO al
-    de hoy.
-    """
-    members = context['members']
-    commons = max(1, members.get(lanes.LANE_COMMONS, 1))
-    branches = [When(_lane_condition(name),
-                     then=Value(max(1, members.get(name, 1))))
-                for name in context['contributors']]
-    if not branches:
-        # Sin carriles propios no hay nada que distinguir: una constante, y de
-        # paso ni un CASE que evaluar por fila.
-        return Value(commons)
-    return Case(*branches, default=Value(commons),
-                output_field=IntegerField())
-
-
-def fair_share(queryset, context=None):
+def fair_share(queryset):
     """Anota ``lane_ahead``: los NODOS que ese mismo peticionario ya tiene
-    encolados por delante de cada fila, escalados por el tamano de su CARRIL.
+    encolados por delante de cada fila.
 
-    ``context`` es el reparto de carriles (§ ``lanes.lane_context``).  Quien
-    ordena DENTRO de una transaccion tiene que resolverlo antes y pasarlo aqui:
-    leerlo desde dentro pone una lectura de ``WorkerPing`` y de la banda entera
-    detras de las escrituras de esa misma transaccion.  Los demas lectores lo
-    dejan a ``None`` y se resuelve solo.
+    SIN CARRILES DESDE EL 16-AGO.  El multiplicador por tamano de carril que
+    vivio aqui del 10 al 16 de agosto se retiro con los carriles: el umbral
+    binario que los abria era trampeable con un worker de un minuto, y la
+    comunidad prefirio volver al reparto por cuenta a secas (la unica ventaja
+    del contribuidor es la afinidad de su propio worker, § views.choose_pending).
+    El nombre de la columna se queda: cada consumidor del orden lo lee ya y un
+    renombre tocaria cada uno de ellos para no cambiar nada.
 
     QUE ES.  Deficit round-robin ponderado por coste, y es el ultimo escalon
     del orden de servicio: el primero que llega de cada cuenta lleva cero
@@ -239,8 +203,6 @@ def fair_share(queryset, context=None):
     """
     running_first = Case(When(state=LEASED, then=Value(0)), default=Value(1),
                          output_field=IntegerField())
-    if context is None:
-        context = lanes.lane_context()
     return (queryset
             .annotate(_fair_cumulative=Window(
                 expression=Sum('budget_nodes'),
@@ -249,8 +211,7 @@ def fair_share(queryset, context=None):
                           F('id').asc())))
             .annotate(lane_ahead=Case(
                 When(source=USER,
-                     then=(F('_fair_cumulative') - F('budget_nodes'))
-                          * _lane_size(context)),
+                     then=F('_fair_cumulative') - F('budget_nodes')),
                 default=Value(0), output_field=BigIntegerField()))
             # El recuento de personas se lee ACOTADO A LA BANDA USER, por lo
             # mismo que el reparto: una tarea que nacio de un click puede

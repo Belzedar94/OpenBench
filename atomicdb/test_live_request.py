@@ -37,13 +37,12 @@ from .models import AnalysisTask, Position, WorkerPing
 from .test_explore_performance import CACHE_FOR_TESTS, build_explorer_fixture
 from .testing import TestCase
 
-# Lo que cuesta resolver el reparto de carriles con la entrada compartida
-# vacia: los workers que han ENTREGADO dentro de la ventana, y los pares
-# (carril, peticionario) que hay en la banda que espera.  DOS y no tres porque
-# en este fixture no hay ningun worker: sin nombres que comprobar, la consulta
-# de perfiles habilitados no llega a hacerse (§ ``lanes._enabled``).  Escrito
-# aqui una vez para que el dia que cambie se lea el motivo y no un numero.
-LANE_LAYOUT_QUERIES = 2
+# Lo que costaba resolver el reparto de carriles, hoy CERO: los carriles se
+# retiraron el 16-ago y el orden se anota sin leer ``WorkerPing`` ni la banda
+# entera (§ ``live_request.fair_share``).  La constante se queda a cero en vez
+# de borrarse para que el test que la suma siga contando el dia que alguien
+# vuelva a colgar consultas del render de una peticion viva.
+LANE_LAYOUT_QUERIES = 0
 
 # El texto de la linea, tal y como sale del minificador (que reordena
 # atributos, asi que no se asume ningun orden).
@@ -524,18 +523,11 @@ class CostTests(TestCase):
         self.assertEqual(self._queries(), self._queries(silent=True) + 1)
 
     def test_a_waiting_request_costs_two_plus_the_lane_layout(self):
-        """La cola por delante son DOS, y el reparto de carriles se comparte.
+        """La cola por delante son DOS consultas: la tarea viva y el sitio.
 
-        Las dos de siempre: la tarea viva y el sitio en la cola.  Las tres de
-        mas salen de resolver QUIEN tiene carril y cuanta gente hay en cada uno
-        (§ ``lanes.measure_lane_context``), sin lo cual la cifra que se pinta
-        no seria la del orden que de verdad se sirve — y una cifra que no es la
-        del orden servido es exactamente la mentira que este modulo no comete.
-
-        NO SE PAGAN POR RENDER.  Viven en la entrada compartida de treinta
-        segundos, asi que en produccion las paga UN lector cada medio minuto
-        para todo el sitio y las demas pestanas las leen de la cache; este test
-        mide justo el render que se la encuentra vacia, que es el caro.
+        Desde el 16-ago no hay reparto de carriles que resolver: el orden se
+        anota por cuenta con la misma ventana de siempre, asi que la cifra que
+        se pinta es la del orden servido sin pagar ni una lectura mas.
         """
         _waiting(self.pos)
 

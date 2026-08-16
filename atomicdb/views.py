@@ -537,13 +537,6 @@ def api_lease(request):
     supports_lease_token = worker_build >= LEASE_TOKEN_BUILD
     lease_session = request.POST.get('lease_session', '')[:64]
     active_task_id = None
-    # El reparto de CARRILES, resuelto ANTES de abrir la transaccion.  Lee
-    # ``WorkerPing`` y la banda que espera, y las dos las escribe o las
-    # bloquea la transaccion de mas abajo: resuelto desde dentro, el refresco
-    # de la entrada compartida se encontraba la tabla cogida por sus propias
-    # escrituras.  Fuera cuesta lo mismo (casi siempre, nada: la entrada vive
-    # treinta segundos y esto corre cada tres) y no depende de nadie.
-    lane_context = lanes.lane_context()
 
     with atomic():
         # recuperar leases caducados
@@ -683,7 +676,7 @@ def api_lease(request):
             # y ``fair_ahead`` valen 0 en todas, asi que sigue siendo el unico
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
-            ordered = (live_request.fair_share(ordered, context=lane_context)
+            ordered = (live_request.fair_share(ordered)
                        .order_by('-source', '-own_first',
                                  *live_request.SERVICE_KEYS,
                                  '-queue_rank', 'id'))
@@ -993,12 +986,19 @@ def api_submit(request):
         task.completed = timezone.now()
         task.nodes_searched = searched
         task.elapsed_seconds = elapsed
+        # La cuenta AUTENTICADA que entrega, que no es lo mismo que el dueno
+        # del nombre de maquina: ese nombre lo elige el worker y dos cuentas
+        # pueden anunciar el mismo (paso el 16-ago, soothdest y NitroColoraze
+        # sobre "NitroColoraze-zen4", y la portada atribuyo los nodos al que
+        # no los busco).  Con la cuenta estampada aqui, la atribucion de la
+        # portada deja de adivinar duenos (§ contributors._account_totals).
+        task.delivered_by = user.username
         # Procedencia opcional: un worker anterior a este build no la manda y
         # las columnas se quedan vacias, que es exactamente lo que ya pasaba.
         task.engine_sha = engine_sha
         task.net_sha = net_sha
         task.save(update_fields=[
-            'state', 'machine', 'completed', 'nodes_searched',
+            'state', 'machine', 'completed', 'delivered_by', 'nodes_searched',
             'elapsed_seconds', 'engine_sha', 'net_sha'])
         ping_updates = {
             'tasks_done': F('tasks_done') + 1,
@@ -4658,34 +4658,34 @@ def _approver_gate(request):
 
 
 def queue_page(request):
-    """The queue grouped by lane, so fairness can be checked and not believed.
+    """The queue by account, so fairness can be checked and not believed.
 
     A share of the fleet that nobody can see is a promise, and this page is
     what turns it into a measurement: who is waiting, how much they have
-    charged, and what fraction of the last hour each lane actually received.
-    The columns are read from the same predicates the ordering uses (§
-    ``lanes.measure_lanes``), so a disagreement between this table and the
-    queue is a bug in one place rather than a difference of opinion between
-    two.
+    charged, and what fraction of the last hour each account actually
+    received.  The columns are read from the same predicates the ordering
+    uses (§ ``lanes.measure_queue``), so a disagreement between this table
+    and the queue is a bug in one place rather than a difference of opinion
+    between two.
 
     Public and cached like the rest of the read views: the numbers behind it
-    are three GROUP BY, and one visitor should not pay them for everybody.
+    are two GROUP BY, and one visitor should not pay them for everybody.
     """
-    table = lanes.lane_table()
+    table = lanes.queue_table()
     rows = []
     for row in table['rows']:
         rows.append({
             **row,
-            'name': row['lane'] or 'Commons',
+            'name': row['account'] or 'Anonymous',
+            'named': bool(row['account']),
             'nodes_h': _human(row['nodes']),
             'served_h': _human(row['served']),
             'waited': (_ago_text(row['oldest']) if row['oldest'] else ''),
         })
     return render(request, 'atomicdb/queue.html', {
-        'lane_rows': rows,
+        'account_rows': rows,
         'served_minutes': table['served_minutes'],
         'has_served': bool(table['served_total']),
-        'window_days': lanes.CONTRIBUTOR_WINDOW_DAYS,
     })
 
 
