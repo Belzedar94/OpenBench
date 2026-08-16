@@ -15,8 +15,8 @@ from datetime import timedelta
 from django.test import Client
 from django.utils import timezone
 
-from . import ingest, lanes, logic
-from .models import AnalysisTask, Position, WorkerPing
+from . import ingest, lanes, logic, views
+from .models import AnalysisTask, Edge, Position, WorkerPing
 from .testing import TestCase, worker_account
 
 
@@ -405,6 +405,195 @@ class BackedRequestLaneTests(LaneServiceHarness):
         task, = self._queue('', [self.RUNG], offset=0)
 
         ingest.add_requester(task, 'eclipsia')
+
+        task.refresh_from_db()
+        self.assertEqual(task.requested_by, 'eclipsia')
+        self.assertEqual(task.lane_account, '')
+
+
+class AccountQueueCapTests(TestCase):
+    """The cap is per person, counted in requests, and it is a backstop.
+
+    It used to be global: the total of every pending request in the project,
+    so one busy account locked out people who had queued nothing.  That is the
+    same hoarding the lanes exist to undo, moved to the front door.
+    """
+
+    def setUp(self):
+        worker_account('busy', 'p')
+        worker_account('newcomer', 'p')
+        self.client = Client()
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.targets = [edge.child for edge in
+                        Edge.objects.filter(parent=self.root)
+                        .order_by('move_uci')[:2]]
+
+    def _fill(self, owner, count):
+        rows = [Position(key=f'{index:064d}', fen=logic.start_fen(),
+                         status='UNKNOWN', expanded=False)
+                for index in range(count)]
+        Position.objects.bulk_create(rows, batch_size=1000)
+        AnalysisTask.objects.bulk_create([
+            AnalysisTask(position=position, generation=0,
+                         budget_nodes=128_000_000,
+                         source=AnalysisTask.Source.USER, requested_by=owner,
+                         state='PENDING')
+            for position in rows], batch_size=1000)
+
+    def _request(self, key, username=None):
+        if username:
+            self.client.login(username=username, password='p')
+        return self.client.post(f'/atomicdb/request/{key}/')
+
+    def test_a_full_account_is_refused(self):
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+
+        response = self._request(self.targets[0].key, 'busy')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['status'], 'queue-full-account')
+
+    def test_a_full_account_blocks_nobody_else(self):
+        """The whole difference from the global cap it replaces."""
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+
+        response = self._request(self.targets[0].key, 'newcomer')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'queued')
+
+    def test_the_anonymous_tide_shares_one_allowance(self):
+        # One member of the commons, so one cap, the same decision the sharing
+        # and the deep lease cap already make about anonymous traffic.
+        self._fill('', views.REQUEST_QUEUE_MAX)
+
+        response = self._request(self.targets[0].key)
+
+        self.assertEqual(response.json()['status'], 'queue-full-account')
+
+    def test_running_work_does_not_spend_the_allowance(self):
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+        AnalysisTask.objects.filter(requested_by='busy').update(state='LEASED')
+
+        response = self._request(self.targets[0].key, 'busy')
+
+        self.assertEqual(response.json()['status'], 'queued')
+
+    def test_requests_on_solved_positions_do_not_spend_it_either(self):
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+        Position.objects.filter(key__in=[f'{i:064d}' for i in range(10)]
+                                ).update(status='WHITE_WIN')
+
+        response = self._request(self.targets[0].key, 'busy')
+
+        self.assertEqual(response.json()['status'], 'queued')
+
+    def test_the_refusal_leaves_a_receipt(self):
+        from .models import DBEvent
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+
+        self._request(self.targets[0].key, 'busy')
+
+        event = DBEvent.objects.filter(kind='LANE_CAP_HIT').first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload['account'], 'busy')
+
+    def test_the_bulk_button_respects_the_same_allowance(self):
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+        self.client.login(username='busy', password='p')
+
+        response = self.client.post(
+            f'/atomicdb/request-unexplored/{self.root.key}/')
+
+        self.assertEqual(response.json()['status'], 'queue-full-account')
+
+
+class CancelledWorkCostsNothingTests(TestCase):
+    """A request you took back stops counting, everywhere it counted.
+
+    CANCELLED landed beside the lanes, and the two features meet in three
+    places: the nodes a lane is charged, the allowance a person spends, and
+    the queue page.  A cancelled row that still weighed in any of them would
+    mean taking a request back did not give you anything back.
+    """
+
+    def setUp(self):
+        worker_account('asfault', 'p')
+        self.client = Client()
+
+    def _queue(self, owner, count, state='PENDING', offset=0):
+        rows = [Position(key=f'{index + offset:064d}', fen=logic.start_fen(),
+                         status='UNKNOWN', expanded=False)
+                for index in range(count)]
+        Position.objects.bulk_create(rows, batch_size=1000)
+        return AnalysisTask.objects.bulk_create([
+            AnalysisTask(position=position, generation=0,
+                         budget_nodes=128_000_000,
+                         source=AnalysisTask.Source.USER, requested_by=owner,
+                         state=state)
+            for position in rows], batch_size=1000)
+
+    def test_cancelled_rows_are_not_charged_to_a_lane(self):
+        self._queue('asfault', 3, state=AnalysisTask.TState.CANCELLED)
+
+        loads = lanes.charged_loads(['asfault'])
+
+        self.assertEqual(loads.get('asfault', 0), 0)
+
+    def test_cancelled_rows_do_not_show_on_the_queue_page(self):
+        self._queue('asfault', 2, state=AnalysisTask.TState.CANCELLED)
+
+        table = lanes.measure_lanes(timezone.now())
+
+        self.assertEqual(table['rows'], [])
+
+    def test_cancelled_rows_do_not_spend_the_allowance(self):
+        from . import views
+        self._queue('asfault', views.REQUEST_QUEUE_MAX,
+                    state=AnalysisTask.TState.CANCELLED)
+
+        self.assertFalse(views._account_queue_full('asfault'))
+
+    def test_clearing_your_queue_gives_the_allowance_back(self):
+        from . import views
+        self._queue('asfault', views.REQUEST_QUEUE_MAX)
+        self.assertTrue(views._account_queue_full('asfault'))
+
+        ingest.clear_own_queue('asfault')
+
+        self.assertFalse(views._account_queue_full('asfault'))
+
+
+class HandoverLaneTests(TestCase):
+    """Taking a request back hands it on, and the lane goes with the owner."""
+
+    def setUp(self):
+        for name in ('soothdest', 'eclipsia'):
+            worker_account(name, 'p')
+
+    def _task(self, owner, backers, offset=0):
+        position = Position.objects.create(key=f'{offset:064d}',
+                                           fen=logic.start_fen(),
+                                           status='UNKNOWN', expanded=False)
+        return AnalysisTask.objects.create(
+            position=position, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by=owner,
+            also_requested_by=list(backers), backers=len(backers),
+            state='PENDING')
+
+    def test_a_handover_to_the_lane_lender_drops_the_loan(self):
+        """The backer who lent the lane becomes the author, so the loan ends.
+
+        Lending yourself a lane is what an empty column already means, and
+        leaving the old name behind would charge the row to somebody who is
+        no longer on it.
+        """
+        task = self._task('soothdest', ['eclipsia'])
+        task.lane_account = 'eclipsia'
+        task.save(update_fields=['lane_account'])
+
+        self.assertEqual(ingest.withdraw_requester(task), 'handed-over')
 
         task.refresh_from_db()
         self.assertEqual(task.requested_by, 'eclipsia')

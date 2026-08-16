@@ -504,12 +504,16 @@ class RequestTests(TestCase):
 
     @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
     def test_request_queue_full_keeps_structured_status(self):
+        # El tope pasa a contarse POR PERSONA (decision del propietario,
+        # 15-ago), asi que el estado que vuelve nombra de QUIEN es la cola que
+        # esta llena: la tuya.  Sigue siendo un 503 con cuerpo estructurado,
+        # que es lo que este test protege.
         p = ingest.get_or_create_position(logic.start_fen())
 
         response = self.client.post(f'/atomicdb/request/{p.key}/')
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json(), {'status': 'queue-full'})
+        self.assertEqual(response.json(), {'status': 'queue-full-account'})
 
     def test_the_queue_ceiling_is_a_real_number(self):
         # El tope estuvo abierto de par en par (un millon) mientras se medía

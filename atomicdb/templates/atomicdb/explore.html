@@ -462,6 +462,9 @@
               'already-requested': 'Already requested, waiting...',
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',
+              // Tu propia cola, no la de todos: desde el tope por
+              // persona lo unico que hay que esperar es lo tuyo.
+              'queue-full-account': 'You have too many requests waiting',
               {% if depth_rungs %}
               // Un peldano que la escalera ya no contiene. La pagina no puede
               // producirlo; si llega, la escalera cambio bajo una pestana
@@ -601,6 +604,9 @@
                   // verificado, o en vuelo desde un click anterior.
                   'nothing-to-do': 'Nothing left to verify here',
                   'queue-full': 'Queue is full, try later',
+              // Tu propia cola, no la de todos: desde el tope por
+              // persona lo unico que hay que esperar es lo tuyo.
+              'queue-full-account': 'You have too many requests waiting',
                   'already-solved': 'Already solved',
                   // La lista de la pagina ya no es la de la posicion: un pase
                   // nuevo aterrizo mientras esto estaba abierto.

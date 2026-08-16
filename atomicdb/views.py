@@ -91,14 +91,34 @@ DEEP_LEASES_FLOOR = 1
 # el ``chunk_size`` con el que esto se recorria cuando era un solo cursor.
 LEASE_SCAN_CHUNK = 64
 MAX_REPORTED_NPS = 1_000_000_000_000
-# Techo global de peticiones humanas esperando (PENDING, source USER, sobre
-# posiciones aun sin resolver). Estuvo abierto de par en par desde el 27-jul
-# mientras se medía el uso real; con los numeros del 30-jul —la flota sirve
-# ~1.100 tareas/hora y la cola humana viva ronda las 100— cinco mil son unas
-# cuatro horas de trabajo y cincuenta veces el uso normal: quien usa la
-# pagina no lo vera nunca, y el dia que alguien la recorra con un script el
-# freno esta puesto. Lo que se rechaza es solo lo que pide una PERSONA: el
-# selector y los brazos automaticos siguen encolando pase lo que pase.
+# Techo de peticiones humanas esperando POR PERSONA (PENDING, source USER,
+# sobre posiciones aun sin resolver).  Cinco mil salen de los numeros del
+# 30-jul: la flota sirve ~1.100 tareas/hora y la cola humana viva ronda las
+# 100, asi que son unas cuatro horas de trabajo y cincuenta veces el uso
+# normal.  Quien usa la pagina no lo vera nunca; el dia que alguien la recorra
+# con un script, el freno esta puesto.
+#
+# ERA GLOBAL, Y ESO ES LO QUE CAMBIA (decision del propietario, 15-ago: ni
+# techo global ni techo en NODOS).  Sumando la cola de todo el mundo, una sola
+# cuenta ocupada dejaba fuera a gente que no habia pedido nada — el mismo
+# acaparamiento que los carriles existen para deshacer, puesto esta vez en la
+# puerta de entrada.  Contado por peticionario, el freno sigue frenando al que
+# se desboca y no le cuesta el turno a nadie mas: tu cola es tuya.
+#
+# Y SE CUENTA EN PETICIONES, NO EN NODOS, porque el presupuesto no lo elige
+# una persona: lo elige la escalera de la posicion (§ ``ingest._request_rung``).
+# Un tope en nodos castigaria a quien pincha en posiciones profundas que el
+# propio sitio decidio que eran caras.  Una peticion si es lo que un humano
+# hace, y contar lo que hace el humano es el unico tope sobre el que el humano
+# puede razonar.
+#
+# La marea anonima comparte cubo (``requested_by`` vacio) y por tanto comparte
+# UN cupo: es un solo miembro del comun, la misma decision que ya toman el
+# reparto y el tope de arriendos profundos, y por el mismo motivo — lo que no
+# se puede distinguir no se puede repartir.
+#
+# Solo se rechaza lo que pide una PERSONA: el selector y los brazos
+# automaticos siguen encolando pase lo que pase.
 REQUEST_QUEUE_MAX = 5000
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
@@ -365,6 +385,52 @@ def _live_moves(task):
     if 0 < len(live) < len(edges):
         return live
     return []
+
+
+def _account_queue_full(requested_by):
+    """True si ESTA cuenta ya tiene su cupo de peticiones esperando.
+
+    UNA sola definicion para las tres puertas que crean filas USER (el boton de
+    una jugada, el de la linea entera y el masivo de jugadas sin mirar): eran
+    tres copias del mismo ``count()`` y bastaba con anadir una cuarta puerta
+    para que el tope dejase de existir sin que nadie lo notara.
+
+    Cuenta lo que ESPERA y no lo que ya corre: lo arrendado tiene un motor
+    encima y va a terminar, asi que sumarlo cobraria dos veces por el mismo
+    trabajo.  Y solo sobre posiciones sin resolver, porque una PENDING sobre
+    una posicion cerrada no la sirve nadie (§ ``live_request.SERVEABLE``): no
+    es cola de nadie y no debe gastarle el cupo a nadie.
+    """
+    return (AnalysisTask.objects
+            .filter(state='PENDING', source='USER',
+                    position__status='UNKNOWN', requested_by=requested_by)
+            .count() >= REQUEST_QUEUE_MAX)
+
+
+def _queue_full_payload(requested_by):
+    """La negativa, con el recibo de por que.  ``(cuerpo, codigo)``.
+
+    ``LANE_CAP_HIT`` es raro por construccion — hacen falta cinco mil
+    peticiones esperando de una misma cuenta — asi que cada fila es senal y
+    ninguna es ruido.  Es ademas lo unico que convierte "me dijo que no" en
+    algo que se puede mirar despues.
+
+    Devuelve la pareja y no una respuesta porque el camino comun de las
+    peticiones (``_queue_request``, que sirve al click y a la API oficial) habla
+    en parejas: quien llama pone la envoltura.  Las puertas que si devuelven
+    una respuesta usan ``_queue_full_response``, que es esta misma envuelta.
+    """
+    DBEvent.objects.create(kind='LANE_CAP_HIT', payload={
+        'account': requested_by or '(anonymous)',
+        'waiting': REQUEST_QUEUE_MAX,
+    })
+    return {'status': 'queue-full-account'}, 503
+
+
+def _queue_full_response(requested_by):
+    """La misma negativa para las puertas que devuelven ``JsonResponse``."""
+    body, code = _queue_full_payload(requested_by)
+    return JsonResponse(body, status=code)
 
 
 def machine_base(machine):
@@ -1210,10 +1276,10 @@ def api_request_unexplored(request, key):
     # La misma puerta que el boton de una sola jugada: una expansion masiva no
     # tiene MENOS motivos para respetar el tope de cola que una peticion
     # suelta, y era el unico camino que entraba sin mirarlo.
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return JsonResponse({'status': 'queue-full'}, status=503)
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
+    if _account_queue_full(requested_by):
+        return _queue_full_response(requested_by)
 
     ip = _client_ip(request)
 
@@ -1236,9 +1302,7 @@ def api_request_unexplored(request, key):
         if not pending:
             return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
         queued = ingest.enqueue_unexplored_children(
-            pos, requested_by=(request.user.username
-                               if request.user.is_authenticated else ''),
-            route=route)
+            pos, requested_by=requested_by, route=route)
         RequestLog.objects.create(ip=ip, position=pos)
         DBEvent.objects.create(kind='BULK_REQUEST', payload={
             'ip': ip, 'key': pos.key, 'queued': queued,
@@ -1282,14 +1346,12 @@ def api_pv_verify(request, key):
         return JsonResponse({'status': 'unknown-position'}, status=404)
     if pos.status != 'UNKNOWN':
         return JsonResponse({'status': 'already-solved'})
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return JsonResponse({'status': 'queue-full'}, status=503)
     # Afinidad worker-peticionario, igual que en ``api_request``: la cuenta OB
     # del visitante logueado viaja hasta cada tarea de la linea.
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
+    if _account_queue_full(requested_by):
+        return _queue_full_response(requested_by)
     # Y la ruta declarada del autor: cada tarea de la PV hereda ruta + los
     # plies caminados, y el aviso vuelve en SU orden de jugadas.
     route = ''
@@ -1570,10 +1632,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
         # derecho a elegir (el resto llega con ``chosen is None``), y el techo
         # de cola de abajo sigue acotando el gasto igual que siempre.
         return {'status': 'already-requested'}, 200
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return {'status': 'queue-full'}, 503
+    if _account_queue_full(requested_by):
+        return _queue_full_payload(requested_by)
     # La ruta se valida AQUI y no antes: replicarla son hasta 64 jugadas contra
     # el movegen, y ninguna de las salidas de arriba la necesita.  Validarla al
     # entrar hacia que cada click repetido — que es la salida comun de un
@@ -1835,7 +1895,13 @@ def api_public_request(request):
 _REQUEST_REFUSALS = {
     'already-requested': 'this address already has a live request on this '
                          'position; wait for it to land',
-    'queue-full': 'the visitor queue is at its cap, try later',
+    # El tope es TUYO, y la frase tiene que decirlo: con el techo global, quien
+    # leia "the visitor queue is at its cap" se quedaba esperando a que la cola
+    # de otro bajase.  Lo que hay que hacer es otra cosa — dejar que aterrice
+    # lo tuyo, o vaciarlo (§ ``api_queue_clear``) — y sin esa frase no habia
+    # forma de saberlo desde la API.
+    'queue-full-account': 'you already have the maximum number of requests '
+                          'waiting; let some land or clear your queue',
     'saturated': 'nothing left to buy here or below it',
 }
 

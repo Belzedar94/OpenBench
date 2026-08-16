@@ -189,10 +189,16 @@ class RequestApiTests(TestCase):
 
     @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
     def test_the_queue_cap_of_the_button_also_holds_here(self):
+        # El tope se cuenta POR PERSONA (decision del propietario, 15-ago), en
+        # la misma direccion que la asignacion horaria de esta API, que ya era
+        # por cuenta.  Sigue siendo el mismo 503 por el mismo camino comun; lo
+        # que cambia es que el estado dice de QUIEN es la cola que esta llena,
+        # y la frase dice que hacer al respecto.
         response = self._post(**self._credentials('wolfram'))
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()['status'], 'queue-full')
+        self.assertEqual(response.json()['status'], 'queue-full-account')
+        self.assertIn('clear your queue', response.json()['reason'])
 
     @mock.patch('atomicdb.views.API_REQUESTS_PER_HOUR', 2)
     def test_the_hourly_allowance_is_per_account(self):
