@@ -187,6 +187,16 @@ ATOMICDB_OR_CLAMP = os.environ.get(
 # una linea en el env file del despliegue; quitarla es el rollback entero, sin
 # desplegar nada y sin residuo en la base (§ docs/solver-allocation.md).
 ATOMICDB_DESCENT = os.environ.get('ATOMICDB_DESCENT', 'proof')
+# TECHO DE GASTO POR HORA de cada brazo de compra del walker, en tareas
+# creadas.  Vacio = el default del modulo, que es donde vive el numero
+# (§ ingest.ARM_RATE_SETTING); ``0`` apaga el brazo.  Existen porque los cupos
+# por cola miden lo PENDIENTE y con la flota sirviendo al instante nunca llegan
+# a tocar: el 15-ago-2026 la cascada compro 4.551 analisis en una hora sin
+# rozar su cupo de 16.  Un numero mal escrito no arranca un motor nuevo ni
+# tumba el proceso: se ignora y manda el default (§ ingest.arm_rate).
+ATOMICDB_ARM_RATE_CASCADE = os.environ.get('ATOMICDB_ARM_RATE_CASCADE', '')
+ATOMICDB_ARM_RATE_QUALITY = os.environ.get('ATOMICDB_ARM_RATE_QUALITY', '')
+ATOMICDB_ARM_RATE_DESCEND = os.environ.get('ATOMICDB_ARM_RATE_DESCEND', '')
 
 INSTALLED_APPS = [
     'atomicdb',

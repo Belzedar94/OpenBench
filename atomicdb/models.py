@@ -443,6 +443,12 @@ class AnalysisTask(models.Model):
     # el sha del binario y el de la red, ese sesgo es atribuible.
     engine_sha   = models.CharField(max_length=64, blank=True, default='')
     net_sha      = models.CharField(max_length=64, blank=True, default='')
+    # Con ``arm``, el par que sostiene el techo de gasto por hora del walker:
+    # cuantas tareas creo un brazo en la ultima hora (§ ingest, presupuesto
+    # HORARIO de los brazos).  El indice compuesto que lo hace una lectura de
+    # rango en vez de un recorrido de la particion del brazo vive en SQL, no
+    # aqui, para que produccion pueda crearlo antes con CONCURRENTLY
+    # (§ migrations/0048_analysistask_arm_rate_index.py).
     created      = models.DateTimeField(auto_now_add=True)
     completed    = models.DateTimeField(null=True)
 

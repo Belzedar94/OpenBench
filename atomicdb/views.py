@@ -3230,6 +3230,10 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
+#   * ``ARM_RATE_BUDGET`` — el recibo de un brazo del walker que alcanzo su
+#     techo de gasto por hora (§ ingest, presupuesto HORARIO de los brazos).
+#     Dice que NO se compro nada, que es lo contrario de una noticia sobre el
+#     arbol, y tampoco lleva ``key``.
 #   * ``SOLVE_REJECTED``, ``TB_REJECTED``, ``SOLVE_DISPUTE_SIGNAL`` — auditoria
 #     de lo que llego y no se acepto, con nombre de maquina dentro.  Que una
 #     submission no colase no es un hecho sobre la posicion.
@@ -3252,6 +3256,7 @@ def _san_line(key, max_plies=16, keep_head=False):
 # kind instrumental nuevo se ve en la portada a la primera y se anade aqui; una
 # noticia que nunca aparece no la echa de menos nadie.
 FEED_HIDDEN_KINDS = {
+    'ARM_RATE_BUDGET',
     'BACKED_GUARD',
     'BREADTH_SWAP',
     'BULK_REQUEST',

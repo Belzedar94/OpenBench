@@ -1691,9 +1691,12 @@ def _queue_cycle_disambiguation(picks):
     """
     if not picks:
         return 0
+    hourly = _arm_budget_room(QUALITY_ARM)
+    if hourly <= 0:
+        return 0
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=QUALITY_ARM).count()
-    room = max(0, QUALITY_QUEUE_CAP - pending)
+    room = min(hourly, max(0, QUALITY_QUEUE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -1745,11 +1748,18 @@ def _queue_quality_convergence(discrepancies):
     """
     if not discrepancies:
         return 0
+    # El techo de gasto va DELANTE del cupo, y es el mismo para los dos
+    # compradores de este brazo: la desambiguacion de ciclos y la convergencia
+    # corren en la misma pasada de respaldo y gastan de la misma bolsa
+    # (§ presupuesto HORARIO de los brazos).
+    hourly = _arm_budget_room(QUALITY_ARM)
+    if hourly <= 0:
+        return 0
     # Cupo PROPIO: lo que hayan encolado cobertura o la reparacion de dn no es
     # cola de este brazo y no se le cobra (§ cupos por brazo).
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=QUALITY_ARM).count()
-    room = max(0, QUALITY_QUEUE_CAP - pending)
+    room = min(hourly, max(0, QUALITY_QUEUE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -3476,6 +3486,16 @@ def top_up_analysis_pool(target=None):
 # porcentaje.  Los brazos con cupo cuentan cada uno el SUYO, asi que un valor
 # nuevo aqui no le toca el presupuesto a ninguno.
 CAMPAIGN_ARM = 'campaign'
+# Marca del descenso que ELIGIO el walker de la espina, y la unica de las dos
+# que paga presupuesto horario (§ presupuesto HORARIO de los brazos).  Un
+# descenso que arranca en una campana conserva su marca: la comunidad voto esa
+# linea y su fraccion ya esta acotada aguas arriba al 35% de los descensos
+# (§ ``proof.CAMPAIGN_DESCENT_SHARE``), asi que con campanas saturadas el
+# techo real del walker es ~1/0,65 del presupuesto y sigue siendo del mismo
+# orden.  Cobrarle a ``campaign`` seria peor de lo que arregla: en cuanto el
+# presupuesto se agota el descenso vuelve a df-pn y esas compras siguen
+# marcandose ``campaign``, o sea el brazo se quedaria apagado para siempre.
+VALUE_DESCEND_ARM = 'descend'
 
 # ---------------- presupuestos del descenso por VALOR ----------------
 #
@@ -3503,10 +3523,17 @@ VALUE_EXPLORE_NODES = BUDGET_LADDER[0]         # 8M: la primera mirada
 # La CASCADA del cuello de botella.  Tras analizar un nodo de la espina, sus
 # respuestas sin juzgar se miran baratas: es lo que descubre por donde sigue
 # el cuello, y el propietario lo pidio con esas palabras ("como mucho una
-# cascada rapida a 8M para encontrar el siguiente cuello").  Con CUPO PROPIO,
-# como los demas brazos: un cuarto del colchon, para que la cascada no pueda
-# convertir el reparto en un mar de sondas de 8M — que es exactamente el
-# sintoma del que venimos.
+# cascada rapida a 8M para encontrar el siguiente cuello").
+#
+# DOS TOPES QUE MIDEN COSAS DISTINTAS.  El cupo de abajo es el FRENO DE
+# RAFAGA: un cuarto del colchon de PENDIENTES, para que la cascada no pueda
+# convertir el reparto en un mar de sondas de 8M.  Acota el STOCK, y por eso
+# no acotaba nada el 15-ago: con la flota sirviendo al instante la cola vuelve
+# a cero entre resultado y resultado, el cupo no llega a tocar nunca y cada
+# analisis que aterriza compra el siguiente.  El TECHO DE GASTO por hora
+# (§ presupuesto HORARIO de los brazos) acota el CAUDAL, que es lo que ese dia
+# se fue a 4.551 compras en una hora.  Se quedan los dos: son baratos y
+# ninguno cubre el agujero del otro.
 VALUE_CASCADE_NODES = BUDGET_LADDER[0]
 VALUE_CASCADE_CAP = 16
 VALUE_CASCADE_ARM = 'cascade'
@@ -3549,15 +3576,20 @@ def _queue_value_cascade(pos, cap=VALUE_CASCADE_CAP):
 
     Entra por banda AUTO — trabajo del sistema, no adelanta a nadie — y con
     cupo propio, contando SOLO su propia cola: lo que hayan encolado cobertura
-    o calidad no es suyo y no se le cobra.
+    o calidad no es suyo y no se le cobra.  Encima del cupo va el techo de
+    gasto por hora, que es el que aguanta con la flota rapida
+    (§ presupuesto HORARIO de los brazos).
     """
     if proof.descent_mode() != proof.DESCENT_VALUE:
         return 0
     if pos.status != 'UNKNOWN':
         return 0
+    hourly = _arm_budget_room(VALUE_CASCADE_ARM)
+    if hourly <= 0:
+        return 0
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=VALUE_CASCADE_ARM).count()
-    room = min(cap, max(0, VALUE_CASCADE_CAP - pending))
+    room = min(cap, hourly, max(0, VALUE_CASCADE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -3623,7 +3655,15 @@ def _next_tasks_by_proof(n):
     campaigns = proof.active_campaigns()
     if not campaigns:
         return []
-    by_value = proof.descent_mode() == proof.DESCENT_VALUE
+    # EL TECHO DE GASTO SE MIRA UNA VEZ POR LOTE — aqui es puerta y no clip,
+    # porque el lote ya viene acotado por quien pide (el relleno del arriendo
+    # o el hueco del colchon) — y agotarlo NO deja la cola vacia: devuelve el
+    # descenso a df-pn, que es el de siempre y no compra nada por su cuenta.
+    # Asi el goteo del colchon y el arriendo siguen recibiendo tareas — el
+    # presupuesto acota DONDE elige gastar el walker, no si la flota come
+    # (§ presupuesto HORARIO de los brazos).
+    by_value = (proof.descent_mode() == proof.DESCENT_VALUE
+                and _arm_budget_room(VALUE_DESCEND_ARM) > 0)
     roots = proof.campaign_roots()
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
@@ -3673,7 +3713,8 @@ def _next_tasks_by_proof(n):
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
-                      'arm': CAMPAIGN_ARM if start is not None else '',
+                      'arm': (CAMPAIGN_ARM if start is not None
+                              else VALUE_DESCEND_ARM if by_value else ''),
                       'multipv': multipv_for(pos.visits, budget,
                                              clamp=clamp)})
         if task.state == 'PENDING':
@@ -4839,6 +4880,11 @@ COVERAGE_DECISIVE_CP = 800
 # lo mismo, pero ahora cada brazo tiene su parte GARANTIZADA en vez de
 # competida.  Cobertura se lleva la mitad porque es el unico que cierra nodos;
 # los otros dos informan.
+#
+# Y MIDEN STOCK, NO CAUDAL.  Un cupo sobre lo PENDIENTE es un FRENO DE RAFAGA:
+# dice cuanto trabajo sin servir puede haber a la vez.  Lo que NO dice es
+# cuanto se compra por hora, y con la flota sirviendo al instante esas dos
+# cosas dejan de parecerse (§ presupuesto HORARIO de los brazos).
 COVERAGE_ARM = 'coverage'
 DN_ARM = 'dn'
 QUALITY_ARM = 'quality'
@@ -4847,6 +4893,108 @@ DN_REPAIR_QUEUE_CAP = 50
 QUALITY_QUEUE_CAP = 50
 COVERAGE_SCAN_ROWS = 2_000
 COVERAGE_SEED_NODES = 8_000_000
+
+
+# ---------------- presupuesto HORARIO de los brazos del walker ---------------
+#
+# LO QUE FALLO (15-ago-2026).  Los cupos de arriba cuentan lo PENDIENTE, y lo
+# pendiente solo se acumula cuando la flota va por detras.  Con la flota
+# sirviendo al instante la cola vuelve a cero entre un resultado y el
+# siguiente, el cupo no llega a tocar NUNCA, y cada analisis que aterriza
+# compra el suyo: 4.551 compras de cascada en una hora, medidas ese dia contra
+# un cupo de 16.  Un tope que solo aprieta cuando el sistema ya va lento no es
+# un tope, es un freno de emergencia — y falla ABIERTO justo el dia que la
+# flota es grande, que es cuando el gasto importa.
+#
+# LOS DOS MECANISMOS SE EXPLICAN EL UNO AL OTRO.  El cupo por cola es el freno
+# de rafaga y se queda donde estaba, porque es barato y porque es lo que
+# protege la cola de los demas brazos.  Esto es el TECHO DE GASTO: cuantas
+# tareas puede CREAR un brazo por hora de reloj, vaya la flota como vaya.  Uno
+# mira el stock, el otro el caudal, y ninguno tapa el agujero del otro.
+#
+# SIN ESTADO NUEVO.  La tabla de tareas ya guarda ``arm`` y ``created``, asi
+# que el presupuesto es un COUNT sobre ella y no hay contador que mantener,
+# que purgar ni que reconciliar tras un reinicio.  Lo unico que hizo falta es
+# que ese COUNT sea una lectura de rango y no un recorrido de todo lo que ese
+# brazo compro desde que existe (§ el indice compuesto de la migracion 0048).
+# Dos procesos de ingesta pueden leer el mismo COUNT y comprar los dos: el
+# rebase esta acotado por su concurrencia, y un lock distribuido para ahorrar
+# unas pocas tareas costaria mas de lo que ahorra.
+#
+# QUIEN PAGA Y QUIEN NO.  Solo los brazos del WALKER, que son los que compran
+# en bucle sobre su propio resultado.  Una peticion de una persona, el goteo
+# del colchon, la siembra de la raiz y el reanalisis por testigo disputado no
+# pasan por aqui y no pueden quedarse sin turno por culpa de un bucle
+# automatico: ninguno de ellos se realimenta.
+ARM_RATE_WINDOW = timedelta(hours=1)
+# UN recibo por brazo y tramo, no uno por compra saltada.  El recibo existe
+# para que el techo se vea en la portada de eventos; escribir uno por cada
+# resultado que aterriza convertiria el arreglo del bucle de compras en un
+# bucle de escrituras, que es el mismo error con otra tabla.
+ARM_RATE_RECEIPT_WINDOW = timedelta(minutes=10)
+ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
+# El numero vive AQUI, al lado de los cupos que completa, y el entorno solo lo
+# pisa (§ OpenSite/settings.py).  La cascada lleva el doble que los otros dos
+# porque compra la mirada mas barata de todas — 8M, un peldano de
+# reconocimiento — y es la que descubre por donde sigue el cuello.
+ARM_RATE_SETTING = {
+    VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),
+    QUALITY_ARM: ('ATOMICDB_ARM_RATE_QUALITY', 120),
+    VALUE_DESCEND_ARM: ('ATOMICDB_ARM_RATE_DESCEND', 120),
+}
+
+
+def arm_rate(arm):
+    """Tareas por hora que ese brazo del walker se permite CREAR.
+
+    ``0`` apaga el brazo entero, que es el rollback sin desplegar nada: una
+    linea en el env file y un reinicio, igual que ``ATOMICDB_DESCENT``.
+
+    Un valor mal escrito NO tumba el proceso ni estrena politica: manda el
+    default.  Es la leccion de siempre con los conmutadores cableados al
+    entorno — el despliegue tiene que poder accionarlos, y equivocarse al
+    teclear uno no puede ser un incidente.
+    """
+    name, default = ARM_RATE_SETTING[arm]
+    raw = str(getattr(settings, name, '')).strip()
+    return int(raw) if raw.isdigit() else default
+
+
+def _arm_budget_room(arm):
+    """Cuantas tareas MAS puede crear este brazo en la hora que corre.
+
+    Cero deja recibo (uno por tramo) y es la respuesta a "salta la compra".
+    Devuelve un HUECO y no un si/no porque un brazo compra en lotes: con la
+    puerta sola, el ultimo lote de la hora entraria entero y el techo seria en
+    realidad "el tope mas un cupo".  Clipando el lote, el techo lo es.
+
+    Se pregunta ANTES de comprar y sobre la ventana movil, no sobre horas de
+    reloj: un tope que se resetea en punto permite el doble del presupuesto a
+    caballo del cambio de hora, y ese doble es exactamente la rafaga que esto
+    existe para cortar.
+    """
+    rate = arm_rate(arm)
+    if rate <= 0:
+        # Apagado a mano no deja recibo: el recibo dice "este brazo alcanzo su
+        # techo", y un brazo apagado no alcanzo nada.  Ademas se ahorra el
+        # COUNT, que es lo unico que cuesta esta comprobacion.
+        return 0
+    made = AnalysisTask.objects.filter(
+        arm=arm, created__gte=timezone.now() - ARM_RATE_WINDOW).count()
+    if made >= rate:
+        _arm_rate_receipt(arm, rate, made)
+        return 0
+    return rate - made
+
+
+def _arm_rate_receipt(arm, rate, made):
+    since = timezone.now() - ARM_RATE_RECEIPT_WINDOW
+    if DBEvent.objects.filter(kind=ARM_RATE_EVENT, ts__gte=since,
+                              payload__arm=arm).exists():
+        return
+    DBEvent.objects.create(kind=ARM_RATE_EVENT, payload={
+        'arm': arm, 'rate': rate, 'made': made,
+        'window_minutes': int(ARM_RATE_WINDOW.total_seconds() // 60)})
 
 
 def _coverage_children(parent_keys):
