@@ -200,39 +200,17 @@ class RequestApiTests(TestCase):
         self.assertEqual(response.json()['status'], 'queue-full-account')
         self.assertIn('clear your queue', response.json()['reason'])
 
-    @mock.patch('atomicdb.views.API_REQUESTS_PER_HOUR', 2)
-    def test_the_hourly_allowance_is_per_account(self):
-        for _ in range(2):
-            self._post(ip='10.0.0.9', **self._credentials('wolfram'))
+    def test_the_door_has_no_hourly_gate(self):
+        """Decision del propietario (17-ago): paridad con el click de la web.
 
-        blocked = self._post(ip='10.0.0.9', **self._credentials('wolfram'))
-        other = self._post(ip='10.0.0.9', **self._credentials('eclipsia'))
-
-        self.assertEqual(blocked.status_code, 429)
-        self.assertEqual(blocked.json()['status'], 'refused')
-        self.assertEqual(blocked['Retry-After'], '3600')
-        self.assertNotEqual(other.status_code, 429)
-
-    @mock.patch('atomicdb.views.API_REQUESTS_PER_HOUR', 2)
-    def test_anonymous_callers_are_counted_by_address(self):
-        for _ in range(2):
-            self._post(ip='10.0.0.7')
-
-        blocked = self._post(ip='10.0.0.7')
-        elsewhere = self._post(ip='10.0.0.8')
-
-        self.assertEqual(blocked.status_code, 429)
-        self.assertNotEqual(elsewhere.status_code, 429)
-
-    @mock.patch('atomicdb.views.API_REQUESTS_PER_HOUR', 1)
-    def test_a_refusal_before_any_work_does_not_spend_the_allowance(self):
-        """Una FEN mal escrita no puede dejar a nadie fuera de su propia hora."""
-        self._post(fen='lol nope', **self._credentials('wolfram'))
-
-        payload = self._post(**self._credentials('wolfram')).json()
-
-        self.assertEqual(payload['status'], 'queued')
-        self.assertEqual(ApiRequestLog.objects.count(), 1)
+        El tope horario de 60 empujaba a scriptear el boton del explorador,
+        que nunca lo tuvo.  Lo que gobierna las dos puertas es el tope de
+        peticiones encoladas por persona y el reparto por cuenta del orden;
+        esta llamada repetida no puede ver un 429.
+        """
+        for _ in range(5):
+            r = self._post(ip='10.0.0.9', **self._credentials('wolfram'))
+            self.assertNotEqual(r.status_code, 429)
 
     def test_a_browser_session_does_not_authenticate_this_endpoint(self):
         """LA razon por la que la exencion de CSRF de aqui es segura.

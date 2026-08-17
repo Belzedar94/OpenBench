@@ -75,8 +75,7 @@ class DocsPageTests(TestCase):
 
         self.assertContains(response,
                             f'<strong>{views.REQUEST_QUEUE_MAX:,}</strong>')
-        self.assertContains(
-            response, f'<strong>{views.API_REQUESTS_PER_HOUR}</strong>')
+        self.assertContains(response, 'no hourly limit on this door')
 
     def test_the_navigation_takes_you_there(self):
         """Una pagina publica a la que no lleva ningun enlace no esta publicada."""

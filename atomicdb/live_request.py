@@ -295,10 +295,26 @@ def queue_ahead(task):
     es una condicion del momento del reparto, no un sitio en la cola, y quien
     lo tiene puesto ya esta contado delante.  La cifra puede quedarse larga
     por eso, nunca corta, que es el lado por el que esta linea puede errar.
+
+    VEINTE SEGUNDOS DE CACHE COMPARTIDA por tarea (17-ago): con seis mil
+    filas en banda, ordenar la cola entera en cada render frio era el coste
+    dominante de la portada para quien navega con sesion (5-7s medidos), y
+    la posicion inicial la mira todo el mundo.  Un sitio en cola de hace
+    veinte segundos sigue siendo el sitio: la banda avanza a ritmo de
+    analisis, no de renders.  El mapa multi-tarea del perfil queda vivo,
+    que alli una pasada ya sirve veinte filas.
     """
     if task is None:
         return None
-    return queue_ahead_map([task]).get(task.id)
+    from django.core.cache import cache
+    clave = 'atomicdb.qahead.%d' % task.id
+    # -1 codifica el None de "fuera de la banda servible": un None a secas en
+    # la cache es indistinguible de un fallo y recomputaria cada render.
+    sitio = cache.get(clave)
+    if sitio is None:
+        sitio = queue_ahead_map([task]).get(task.id)
+        cache.set(clave, -1 if sitio is None else sitio, 20)
+    return None if sitio == -1 else sitio
 
 
 def queue_ahead_map(tasks):

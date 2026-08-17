@@ -1713,13 +1713,12 @@ def api_request(request, key):
 
 # ---------------- API oficial de peticion ----------------
 
-# Tope de la PUERTA programatica, no de la persona (§ models.ApiRequestLog).
-# Sesenta a la hora es una llamada por minuto sostenida y deja sitio de sobra
-# para una rafaga: un cliente que recorre un repertorio pide unas decenas de
-# posiciones y termina, y un bucle roto se para en el primer minuto en vez de
-# llenar la cola.  El click del explorador NO pasa por aqui y sigue sin tope
-# horario, que es la decision que tomo el propietario el 28-jul.
-API_REQUESTS_PER_HOUR = 60
+# La puerta programatica NO lleva tope horario (decision del propietario,
+# 17-ago): la web tampoco lo tiene y mantener uno solo aqui era una asimetria
+# que empujaba a la gente a scriptear el click en vez de usar la API.  Lo que
+# gobierna a todo el mundo, por cualquier puerta, es el tope de peticiones
+# encoladas por persona (§ REQUEST_QUEUE_MAX) y el reparto por cuenta del
+# orden de servicio.  Cada llamada sigue dejando su recibo en ApiRequestLog.
 
 
 def _api_request_identity(request):
@@ -1829,19 +1828,6 @@ def api_public_request(request):
                        + ', '.join(str(rung)
                                    for rung in ingest.REQUEST_BUDGET_LADDER)},
             status=400)
-    hour_ago = timezone.now() - timedelta(hours=1)
-    spent = ApiRequestLog.objects.filter(created__gte=hour_ago)
-    spent = (spent.filter(account=username) if username
-             else spent.filter(account='', ip=ip))
-    if spent.count() >= API_REQUESTS_PER_HOUR:
-        response = JsonResponse(
-            {'status': 'refused',
-             'reason': f'at most {API_REQUESTS_PER_HOUR} API requests per '
-                       f'hour{"" if username else " per address"}'},
-            status=429)
-        response['Retry-After'] = '3600'
-        return response
-
     key = logic.key_of(fen)
     seeded = False
     try:
@@ -6137,12 +6123,11 @@ def docs(request):
     posicion; esta cuenta que VALE un numero abierto, que es la mitad que se
     lee todos los dias.
 
-    Los dos limites que la pagina cita salen de las constantes que los aplican
-    de verdad (§ ``REQUEST_QUEUE_MAX``, ``API_REQUESTS_PER_HOUR``), por lo
-    mismo que la tabla de la cola lee los predicados del orden: una
-    documentacion que copia un numero a mano es una documentacion que miente
-    en cuanto alguien cambia el numero, y encima con cara de verdad.  El resto
-    del texto es prosa y vive en la plantilla.
+    El limite que la pagina cita sale de la constante que lo aplica de verdad
+    (§ ``REQUEST_QUEUE_MAX``), por lo mismo que la tabla de la cola lee los
+    predicados del orden: una documentacion que copia un numero a mano es una
+    documentacion que miente en cuanto alguien cambia el numero, y encima con
+    cara de verdad.  El resto del texto es prosa y vive en la plantilla.
 
     Publica y cacheada como las demas vistas de LECTURA (§ urls): no toca la
     base y no tiene nada de nadie dentro, asi que lo unico que la cache absorbe
@@ -6150,7 +6135,6 @@ def docs(request):
     """
     return render(request, 'atomicdb/docs.html', {
         'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
-        'api_per_hour': API_REQUESTS_PER_HOUR,
     })
 
 

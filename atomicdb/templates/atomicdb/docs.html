@@ -145,11 +145,10 @@ anonymous, which works, and is served like a click without a session. A FEN the
 tree does not have is seeded rather than refused. Session cookies are
 deliberately ignored here, so a page open in your browser cannot spend your
 queue behind your back.</p>
-<p class="dim" style="font-size:.9rem">The limit is
-<strong>{{ api_per_hour }}</strong> calls per hour per account, or per address
-when no credentials are sent. It is a limit on this door only: the explorer
-button has no hourly limit, and a day of browsing does not eat into the
-allowance of a script on the same account.</p>
+<p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
+same as the explorer button: what governs both is the per-person cap on queued
+requests above, and the per-account sharing of the service order. Every call
+still leaves a receipt.</p>
 <p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
 the position row (<code>status</code>, <code>closure</code>,
 <code>score</code>, <code>point</code>, <code>backed_plies</code>,
