@@ -105,23 +105,39 @@ def _ago(moment, now):
     return f'{text} ago'
 
 
-def _machine_totals(since=None):
-    """``{maquina: {nodes, tasks, seconds}}`` de las tareas COMPLETADAS.
+def _totals(owner, since=None):
+    """Totales por MAQUINA y por CUENTA de una ventana, en UN solo GROUP BY.
 
-    Un GROUP BY sobre el indice ``(state, completed)``.  El numero de maquinas
-    distintas es de decenas, asi que lo que vuelve cabe en memoria por
-    construccion — a diferencia de las tareas, que no.
+    Agrupar por ``(machine, delivered_by)`` cuesta lo mismo que agrupar por
+    maquina (el indice recorrido es el de ``(state, completed)`` igual, y la
+    cardinalidad que vuelve sigue siendo de decenas), y de esa unica pasada
+    salen las dos vistas: la de maquinas sumando sus estampas, y la de
+    cuentas atribuyendo cada grupo a su cuenta real.  Cuando la atribucion
+    estampada llego (§ ``delivered_by``) esto eran consultas separadas y el
+    refresco del snapshot paso de dos barridos caros a seis; el warmer de
+    cinco minutos convertia cada uno en un pico de latencia de portada.
     """
     rows = AnalysisTask.objects.filter(state=COMPLETED)
     if since is not None:
         rows = rows.filter(completed__gte=since)
-    rows = rows.values('machine').annotate(
-        nodes=Sum('nodes_searched'), tasks=Count('id'),
-        seconds=Sum('elapsed_seconds')).order_by()
-    return {row['machine']: {'nodes': row['nodes'] or 0,
-                             'tasks': row['tasks'] or 0,
-                             'seconds': row['seconds'] or 0.0}
-            for row in rows}
+    rows = (rows.values('machine', 'delivered_by')
+            .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'),
+                      seconds=Sum('elapsed_seconds')).order_by())
+    machines, users = {}, {}
+    for row in rows:
+        m = machines.setdefault(row['machine'],
+                                {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
+        m['nodes'] += row['nodes'] or 0
+        m['tasks'] += row['tasks'] or 0
+        m['seconds'] += row['seconds'] or 0.0
+        # La cuenta REAL del grupo: la estampada si la hay (un hecho), y si
+        # la fila es anterior al estampado, el dueno sin disputa de la
+        # maquina (una inferencia honesta).  Sin ninguna de las dos, los
+        # nodos cuentan para la flota y para nadie mas.
+        user = row['delivered_by'] or owner.get(row['machine'])
+        if user:
+            _fold(users, user, row['nodes'], row['tasks'])
+    return machines, users
 
 
 def _owner_of_machine():
@@ -149,53 +165,26 @@ def _fold(folded, account, nodes, tasks):
     row['tasks'] += tasks or 0
 
 
-def _account_totals(since=None):
-    """``{cuenta: {nodes, tasks}}`` de lo COMPLETADO, por autoria REAL.
-
-    Dos fuentes, en orden de verdad.  Las filas ESTAMPADAS llevan la cuenta
-    autenticada que entrego (``delivered_by``, § views y migracion 0046) y se
-    agrupan por ella tal cual: ahi no hay nada que adivinar.  Las anteriores
-    al estampado caen al mapa de duenos por maquina, maquinas sin disputa
-    unicamente.  La ventana de 24h se cura sola en un dia de flota: todo lo
-    entregado desde el despliegue viene estampado.
-    """
-    stamped = (AnalysisTask.objects.filter(state=COMPLETED)
-               .exclude(delivered_by=''))
-    legacy = AnalysisTask.objects.filter(state=COMPLETED, delivered_by='')
-    if since is not None:
-        stamped = stamped.filter(completed__gte=since)
-        legacy = legacy.filter(completed__gte=since)
-    folded = {}
-    for row in (stamped.values('delivered_by')
-                .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'))
-                .order_by()):
-        _fold(folded, row['delivered_by'], row['nodes'], row['tasks'])
-    owner = _owner_of_machine()
-    for row in (legacy.values('machine')
-                .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'))
-                .order_by()):
-        user = owner.get(row['machine'])
-        if user:
-            _fold(folded, user, row['nodes'], row['tasks'])
-    return folded
-
-
 def measure_fleet(now):
-    """Totales por maquina y por cuenta, 24h y all-time.  GROUP BY caros.
+    """Totales por maquina y por cuenta, 24h y all-time.  DOS GROUP BY caros.
 
     El de "all time" agrupa TODAS las tareas completadas del proyecto y suma
     tres columnas que no estan en el indice: a 12,8M de posiciones es el
     trabajo mas caro que se hacia dentro de una peticion HTTP en todo el
     sitio.  No entra en la portada porque la portada lo necesite vivo — no lo
     necesita — sino porque era lo unico que quedaba sin publicar desde fuera.
+    Cada ventana paga UNA pasada y de ella salen maquinas y cuentas (§
+    ``_totals``): la atribucion estampada no anade barridos, solo una columna
+    al GROUP BY.
     """
-    machines_all = _machine_totals()
-    machines_24h = _machine_totals(since=now - timedelta(hours=24))
+    owner = _owner_of_machine()
+    machines_all, users_all = _totals(owner)
+    machines_24h, users_24h = _totals(owner, since=now - timedelta(hours=24))
     return {
         'machines_all': machines_all,
         'machines_24h': machines_24h,
-        'users_all': _account_totals(),
-        'users_24h': _account_totals(since=now - timedelta(hours=24)),
+        'users_all': users_all,
+        'users_24h': users_24h,
         'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
         'nodes_all': sum(row['nodes'] for row in machines_all.values()),
     }
