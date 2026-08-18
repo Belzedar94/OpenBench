@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 45 # Client version to send to the Server
+CLIENT_VERSION   = 46 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -103,6 +103,11 @@ HORDE_BIN_V1_SCHEMA_SHA256 = (
 )
 HORDE_RUN6B_SHA256 = (
     'B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7'
+)
+# schemas/horde-label-contract-v1.json in the engine tree: the manifest binds
+# the external label contract by name and complete SHA-256 (datagen-v1.md).
+HORDE_LABEL_CONTRACT_V1_SHA256 = (
+    'C299BA9ECD96DEF24363F8F62A8C67B88241AA860FB0735D4558B8EFEA0DCC22'
 )
 HORDE_OPENING_BOOK_SHA256 = (
     '93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958'
@@ -3029,7 +3034,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 'schema', 'schema_sha256', 'format_version', 'header_bytes',
                 'record_bytes', 'record_count', 'byte_order', 'source_commit',
                 'source_dirty', 'network', 'book_sha256', 'producer_sha256',
-                'payload_sha256', 'generation',
+                'payload_sha256', 'label_contract', 'generation',
             ]
             _horde_bin_v1_require(
                 list(manifest) == expected_top_keys,
@@ -3063,6 +3068,16 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 manifest['book_sha256'] == book_sha256
                 and manifest['producer_sha256'] == producer_sha256,
                 'book or producer identity is invalid',
+            )
+
+            label_contract = manifest['label_contract']
+            _horde_bin_v1_require(
+                isinstance(label_contract, dict)
+                and list(label_contract) == ['schema', 'schema_sha256']
+                and label_contract['schema'] == 'HORDE_LABEL_CONTRACT_V1'
+                and label_contract['schema_sha256']
+                    == HORDE_LABEL_CONTRACT_V1_SHA256,
+                'label contract identity is invalid',
             )
 
             generation = manifest['generation']
