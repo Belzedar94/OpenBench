@@ -29,23 +29,60 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026081001
+ATOMICDB_WORKER_BUILD = 2026081802
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
-WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
+HTTP_CONNECT_TIMEOUT_SECONDS = 3
+HTTP_CONNECT_RETRIES = 2
+WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = HTTP_CONNECT_TIMEOUT_SECONDS
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
 WORKER_UPDATE_TOTAL_TIMEOUT_SECONDS = 60
 WORKER_UPDATE_MAX_BYTES = 1024 * 1024
-SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
+SUBMIT_CONNECT_TIMEOUT_SECONDS = HTTP_CONNECT_TIMEOUT_SECONDS
 SUBMIT_READ_TIMEOUT_SECONDS = 600
 SUBMIT_RETRY_INITIAL_SECONDS = 15
 SUBMIT_RETRY_MAX_SECONDS = 300
+LEASE_CONNECT_TIMEOUT_SECONDS = HTTP_CONNECT_TIMEOUT_SECONDS
+LEASE_READ_TIMEOUT_SECONDS = 60
+LEASE_RETRY_INITIAL_SECONDS = 5
+LEASE_RETRY_MAX_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_NPS = 10 ** 12
+
+# Each HTTP-calling thread keeps its own Session.  This reuses a healthy TLS
+# connection without sharing requests.Session concurrently between threads.
+_HTTP_THREAD_LOCAL = threading.local()
+
+
+def _http_session():
+    session = getattr(_HTTP_THREAD_LOCAL, 'session', None)
+    if session is None:
+        session = requests.Session()
+        # A POST is safe to retry only while connecting: no request has reached
+        # the server yet.  Read/status retries remain with the protocol loops,
+        # which preserve lease nonces and immutable submit payloads.
+        retry = Retry(
+            total=HTTP_CONNECT_RETRIES,
+            connect=HTTP_CONNECT_RETRIES,
+            read=0,
+            redirect=0,
+            status=0,
+            other=0,
+            allowed_methods=None,
+            backoff_factor=0.25,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=1,
+                              pool_maxsize=1)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        _HTTP_THREAD_LOCAL.session = session
+    return session
 
 
 class WorkerUpdateError(Exception):
@@ -203,7 +240,7 @@ def _download_worker(server):
     url += f'?current_build={ATOMICDB_WORKER_BUILD}&_={int(time.time())}'
     response = None
     try:
-        response = requests.get(
+        response = _http_session().get(
             url,
             timeout=(WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS,
                      WORKER_UPDATE_READ_TIMEOUT_SECONDS),
@@ -390,7 +427,7 @@ def _submit_until_definitive(server, payload, task_id):
     transient_statuses = {408, 425, 429}
     while True:
         try:
-            response = requests.post(
+            response = _http_session().post(
                 server + '/atomicdb/api/submit', data=payload,
                 timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
                          SUBMIT_READ_TIMEOUT_SECONDS))
@@ -432,8 +469,9 @@ def _heartbeat_loop(server, auth, current_task, stop):
             if current:
                 payload.update(task_id=current['id'],
                                lease_token=current['lease_token'])
-            requests.post(server + '/atomicdb/api/heartbeat', data=payload,
-                          timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
+            _http_session().post(
+                server + '/atomicdb/api/heartbeat', data=payload,
+                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
                     .raise_for_status()
         except requests.RequestException as exc:
             print(f'heartbeat skipped: {exc}', flush=True)
@@ -447,9 +485,11 @@ def _request_tasks(server, auth, lease_session):
     A valid 2xx payload or a definitive 4xx response ends the logical request.
     """
     try:
-        response = requests.post(
+        response = _http_session().post(
             server + '/atomicdb/api/lease',
-            data=dict(auth, lease_session=lease_session), timeout=60)
+            data=dict(auth, lease_session=lease_session),
+            timeout=(LEASE_CONNECT_TIMEOUT_SECONDS,
+                     LEASE_READ_TIMEOUT_SECONDS))
     except requests.RequestException as exc:
         raise LeaseRequestError(str(exc), ambiguous=True) from exc
     status = response.status_code
@@ -737,14 +777,15 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
     self-update, and a resumed half-download all take the same path. Never
     raises -- a mirror having a bad day is not a reason to stop analysing.
     """
-    get = get or requests.get
+    get = get or _http_session().get
     directory = Path(directory) if directory is not None else syzygy_dir()
 
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            response = get(server.rstrip('/') + SYZYGY_BASE_PATH
-                           + 'manifest.json',
-                           timeout=SYZYGY_MANIFEST_TIMEOUT_SECONDS)
+            response = get(
+                server.rstrip('/') + SYZYGY_BASE_PATH + 'manifest.json',
+                timeout=(HTTP_CONNECT_TIMEOUT_SECONDS,
+                         SYZYGY_MANIFEST_TIMEOUT_SECONDS))
             response.raise_for_status()
             entries = parse_syzygy_manifest(response.json())
         except Exception as error:
@@ -815,8 +856,9 @@ def _fetch_verified(server, entry, dest):
     if not (dest.exists() and _ok()):
         print(f"downloading {entry['file']} ({entry['size_mb']} MB)...",
               flush=True)
-        r = requests.get(server + '/atomicdb/engines/' + entry['file'],
-                         timeout=600)
+        r = _http_session().get(
+            server + '/atomicdb/engines/' + entry['file'],
+            timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 600))
         r.raise_for_status()
         if hashlib.sha256(r.content).hexdigest() != entry['sha256']:
             sys.exit(f"download of {entry['file']} failed the sha256 check")
@@ -834,8 +876,9 @@ def provision_engine(server):
     key = f'{platform.system().lower()}-{platform.machine().lower()}'
     key = {'windows-amd64': 'windows-x86_64',
            'linux-amd64': 'linux-x86_64'}.get(key, key)
-    man = requests.get(server + '/atomicdb/engines/manifest.json',
-                       timeout=60).json()
+    man = _http_session().get(
+        server + '/atomicdb/engines/manifest.json',
+        timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 60)).json()
     if key not in man['binaries']:
         sys.exit(f'no prebuilt engine for {key}: pass --engine with your own '
                  f'build (prebuilts: {", ".join(sorted(man["binaries"]))})')
@@ -999,10 +1042,11 @@ def _solve_heartbeat_loop(server, auth, current_task, stop):
         if current is None:
             continue
         try:
-            requests.post(server + '/atomicdb/api/solve/heartbeat',
-                          data=dict(auth, task_id=current['id'],
-                                    lease_token=current['lease_token']),
-                          timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
+            _http_session().post(
+                server + '/atomicdb/api/solve/heartbeat',
+                data=dict(auth, task_id=current['id'],
+                          lease_token=current['lease_token']),
+                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
                     .raise_for_status()
         except requests.RequestException as exc:
             print(f'solve heartbeat skipped: {exc}', flush=True)
@@ -1015,9 +1059,10 @@ class SolveAcquireAmbiguous(Exception):
 def _solve_once(server, auth, solver, lease_session, current_task=None):
     """Acquire, solve and submit ONE proof task. Returns True if it did work."""
     try:
-        response = requests.post(
+        response = _http_session().post(
             server + '/atomicdb/api/solve/acquire',
-            data=dict(auth, lease_session=lease_session), timeout=60)
+            data=dict(auth, lease_session=lease_session),
+            timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 60))
         response.raise_for_status()
         tasks = response.json().get('tasks') or []
     except (requests.RequestException, ValueError) as exc:
@@ -1048,10 +1093,11 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
                                      gzip.compress(certificate.encode('utf-8')),
                                      'application/gzip')}
         try:
-            submitted = requests.post(server + '/atomicdb/api/solve/submit',
-                                      data=payload, files=files,
-                                      timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
-                                               SUBMIT_READ_TIMEOUT_SECONDS))
+            submitted = _http_session().post(
+                server + '/atomicdb/api/solve/submit',
+                data=payload, files=files,
+                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
+                         SUBMIT_READ_TIMEOUT_SECONDS))
             summary = submitted.json().get('summary', submitted.text[:200])
         except (requests.RequestException, ValueError) as exc:
             summary = f'submit error: {exc}'
@@ -1147,6 +1193,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     # transport/ambiguous-response failures where the server may have committed;
     # rotate only after a valid 2xx payload or a definitive 4xx rejection.
     lease_session = secrets.token_urlsafe(24)
+    lease_failures = 0
 
     while not stop.is_set():
         # Only one slot drives the self-update, and it does so between batches
@@ -1166,11 +1213,16 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         except LeaseRequestError as e:
             if not e.ambiguous:
                 lease_session = secrets.token_urlsafe(24)
-            print(f'[{slot}] lease response error: {e}; retrying in 30s',
+            lease_failures += 1
+            delay = min(LEASE_RETRY_INITIAL_SECONDS
+                        * (2 ** min(lease_failures - 1, 4)),
+                        LEASE_RETRY_MAX_SECONDS)
+            print(f'[{slot}] lease response error: {e}; retrying in {delay}s',
                   flush=True)
-            if stop.wait(30):
+            if stop.wait(delay):
                 break
             continue
+        lease_failures = 0
         lease_session = secrets.token_urlsafe(24)
         if not tasks:
             print(f'[{slot}] no tasks available; waiting 60s', flush=True)

@@ -48,13 +48,17 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.script = Path(self.temp.name) / 'atomicdb_worker.py'
         self.current = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD)
         self.script.write_bytes(self.current)
+        self.session = mock.Mock()
+        patcher = mock.patch('Client.atomicdb_worker._http_session',
+                             return_value=self.session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.temp.cleanup()
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_current_build_is_a_noop(self, get):
-        get.return_value = _Response(self.current)
+    def test_current_build_is_a_noop(self):
+        self.session.get.return_value = _Response(self.current)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -64,11 +68,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(self.script.with_name(
             self.script.name + '.previous').exists())
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_valid_new_build_is_installed_atomically_with_backup(self, get):
+    def test_valid_new_build_is_installed_atomically_with_backup(self):
         candidate = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD + 1,
                             "print('new')")
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
         old_mode = stat.S_IMODE(self.script.stat().st_mode)
 
         changed = atomicdb_worker._install_worker_update(
@@ -80,11 +83,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
             self.script.name + '.previous').read_bytes(), self.current)
         self.assertEqual(stat.S_IMODE(self.script.stat().st_mode), old_mode)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_invalid_candidate_leaves_current_worker_untouched(self, get):
+    def test_invalid_candidate_leaves_current_worker_untouched(self):
         candidate = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD + 1,
                             'this is not python !!!')
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -92,25 +94,23 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_redirect_is_rejected(self, get):
+    def test_redirect_is_rejected(self):
         response = _Response(b'', status=302)
         response.headers = {'Location': 'https://evil.invalid/worker.py'}
-        get.return_value = response
+        self.session.get.return_value = response
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
 
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
-        self.assertFalse(get.call_args.kwargs['allow_redirects'])
+        self.assertFalse(self.session.get.call_args.kwargs['allow_redirects'])
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_oversized_candidate_is_rejected_before_install(self, get):
+    def test_oversized_candidate_is_rejected_before_install(self):
         response = _Response(b'x')
         response.headers = {
             'Content-Length': str(atomicdb_worker.WORKER_UPDATE_MAX_BYTES + 1)}
-        get.return_value = response
+        self.session.get.return_value = response
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -118,24 +118,24 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_encoded_response_is_rejected(self, get):
+    def test_encoded_response_is_rejected(self):
         response = _Response(_source(
             atomicdb_worker.ATOMICDB_WORKER_BUILD + 1))
         response.headers['Content-Encoding'] = 'gzip'
-        get.return_value = response
+        self.session.get.return_value = response
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
 
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
-        self.assertEqual(get.call_args.kwargs['headers']['Accept-Encoding'],
+        self.assertEqual(
+            self.session.get.call_args.kwargs['headers']['Accept-Encoding'],
                          'identity')
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_network_failure_is_fail_open(self, get):
-        get.side_effect = atomicdb_worker.requests.ReadTimeout('offline')
+    def test_network_failure_is_fail_open(self):
+        self.session.get.side_effect = atomicdb_worker.requests.ReadTimeout(
+            'offline')
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -144,9 +144,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertEqual(self.script.read_bytes(), self.current)
 
     @mock.patch('Client.atomicdb_worker.time.monotonic')
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_trickling_response_has_a_total_deadline(self, get, monotonic):
-        get.return_value = _Response(_source(
+    def test_trickling_response_has_a_total_deadline(self, monotonic):
+        self.session.get.return_value = _Response(_source(
             atomicdb_worker.ATOMICDB_WORKER_BUILD + 1))
         monotonic.side_effect = [
             100,
@@ -160,9 +159,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertEqual(self.script.read_bytes(), self.current)
 
     @mock.patch('Client.atomicdb_worker._atomic_write')
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_write_failure_is_fail_open(self, get, atomic_write):
-        get.return_value = _Response(_source(
+    def test_write_failure_is_fail_open(self, atomic_write):
+        self.session.get.return_value = _Response(_source(
             atomicdb_worker.ATOMICDB_WORKER_BUILD + 1))
         atomic_write.side_effect = OSError('read-only')
 
@@ -172,11 +170,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_second_process_restarts_from_update_already_on_disk(self, get):
+    def test_second_process_restarts_from_update_already_on_disk(self):
         candidate = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD + 1)
         self.script.write_bytes(candidate)
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -187,11 +184,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
             self.script.name + '.previous').exists())
 
     def test_http_origin_is_rejected_without_a_request(self):
-        with mock.patch('Client.atomicdb_worker.requests.get') as get:
-            changed = atomicdb_worker._install_worker_update(
-                'http://example.invalid', self.script)
+        changed = atomicdb_worker._install_worker_update(
+            'http://example.invalid', self.script)
         self.assertFalse(changed)
-        get.assert_not_called()
+        self.session.get.assert_not_called()
 
     @mock.patch('Client.atomicdb_worker.os.execv')
     def test_restart_preserves_all_worker_arguments(self, execv):
@@ -209,11 +205,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
             '-P', 'secret', '-T', '8'])
         self.assertEqual(self.script.read_bytes(), installed)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_same_build_with_different_bytes_does_not_overwrite(self, get):
+    def test_same_build_with_different_bytes_does_not_overwrite(self):
         candidate = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD,
                             "print('reused build')")
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -221,14 +216,13 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_truncated_but_valid_python_is_rejected(self, get):
+    def test_truncated_but_valid_python_is_rejected(self):
         candidate = (
             '#!/usr/bin/env python3\n'
             'ATOMICDB_WORKER_UPDATE_PROTOCOL = 1\n'
             f'ATOMICDB_WORKER_BUILD = '
             f'{atomicdb_worker.ATOMICDB_WORKER_BUILD + 1}\n').encode()
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -236,11 +230,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.get')
-    def test_duplicate_build_assignment_is_rejected(self, get):
+    def test_duplicate_build_assignment_is_rejected(self):
         candidate = _source(atomicdb_worker.ATOMICDB_WORKER_BUILD + 1)
         candidate += b'ATOMICDB_WORKER_BUILD = 1\n'
-        get.return_value = _Response(candidate)
+        self.session.get.return_value = _Response(candidate)
 
         changed = atomicdb_worker._install_worker_update(
             'https://example.invalid', self.script)
@@ -248,8 +241,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertFalse(changed)
         self.assertEqual(self.script.read_bytes(), self.current)
 
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_heartbeat_publishes_token_build_and_live_nps(self, post):
+    def test_heartbeat_publishes_token_build_and_live_nps(self):
+        post = self.session.post
         class StopAfterOne:
             calls = 0
 
@@ -304,8 +297,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertIn((state.snapshot()['id'], state.snapshot()['lease_token']),
                       expected)
 
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_stale_engine_progress_is_omitted_from_heartbeat(self, post):
+    def test_stale_engine_progress_is_omitted_from_heartbeat(self):
+        post = self.session.post
         class StopAfterOne:
             calls = 0
 
@@ -331,8 +324,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertEqual(payload['worker_build'],
                          atomicdb_worker.ATOMICDB_WORKER_BUILD)
 
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_valid_lease_response_uses_the_logical_request_nonce(self, post):
+    def test_valid_lease_response_uses_the_logical_request_nonce(self):
+        post = self.session.post
         post.return_value.status_code = 200
         post.return_value.json.return_value = {'tasks': [{'id': 3016}]}
 
@@ -342,9 +335,10 @@ class WorkerAutoUpdateTests(SimpleTestCase):
         self.assertEqual(tasks, [{'id': 3016}])
         self.assertEqual(post.call_args.kwargs['data']['lease_session'],
                          'request-nonce-a')
+        self.assertEqual(post.call_args.kwargs['timeout'], (3, 60))
 
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_indeterminate_lease_responses_require_same_nonce_retry(self, post):
+    def test_indeterminate_lease_responses_require_same_nonce_retry(self):
+        post = self.session.post
         for status, payload in ((500, {'tasks': []}), (200, None)):
             post.reset_mock()
             post.return_value.status_code = status
@@ -363,8 +357,8 @@ class WorkerAutoUpdateTests(SimpleTestCase):
             self.assertEqual(post.call_args.kwargs['data']['lease_session'],
                              'request-nonce-a')
 
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_definitive_lease_rejection_allows_nonce_rotation(self, post):
+    def test_definitive_lease_rejection_allows_nonce_rotation(self):
+        post = self.session.post
         post.return_value.status_code = 403
 
         with self.assertRaises(atomicdb_worker.LeaseRequestError) as caught:
