@@ -4475,23 +4475,38 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
         child_route = ''
         if route and child.key in edges_by_child:
             child_route = route + ',' + edges_by_child[child.key]
-        task, created = AnalysisTask.objects.get_or_create(
+        # La tarea viva se busca por POSICION, no por (posicion, generacion):
+        # el dedup con generacion podia crear una segunda tarea si las visitas
+        # se movieron desde que nacio la primera.  Y sumarse a la de otra
+        # persona pasa por la MISMA puerta que el click individual
+        # (``add_requester``): respaldo anotado, aviso de vuelta y sitio en la
+        # cola — el click masivo era el unico camino que tiraba al segundo
+        # peticionario (reporte de math_god, 17-ago: "it just ignores my
+        # request").  Un respaldo cuenta en el total devuelto: el click de
+        # quien se suma compro exactamente ese analisis, aunque no lo creara.
+        vivo = (AnalysisTask.objects
+                .filter(position=child,
+                        state__in=(AnalysisTask.TState.PENDING,
+                                   AnalysisTask.TState.LEASED))
+                .order_by('id').first())
+        if vivo is not None:
+            respaldado = add_requester(vivo, requested_by)
+            if vivo.state == AnalysisTask.TState.PENDING \
+                    and vivo.source != source:
+                vivo.source = source
+                if child_route and not vivo.route:
+                    vivo.route = child_route
+                vivo.save(update_fields=['source', 'route'])
+                queued += 1
+            elif respaldado:
+                queued += 1
+            continue
+        AnalysisTask.objects.create(
             position=child, generation=child.visits,
-            defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(child.visits, budget,
-                                             clamp=clamp),
-                      'source': source, 'requested_by': requested_by,
-                      'route': child_route})
-        if created:
-            queued += 1
-        elif task.state == 'PENDING' and task.source != source:
-            task.source = source
-            if requested_by and not task.requested_by:
-                task.requested_by = requested_by
-            if child_route and not task.route:
-                task.route = child_route
-            task.save(update_fields=['source', 'requested_by', 'route'])
-            queued += 1
+            budget_nodes=budget,
+            multipv=multipv_for(child.visits, budget, clamp=clamp),
+            source=source, requested_by=requested_by, route=child_route)
+        queued += 1
     return queued
 
 
