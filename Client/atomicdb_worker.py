@@ -33,7 +33,7 @@ import requests
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026072901
+ATOMICDB_WORKER_BUILD = 2026081801
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = 15
 WORKER_UPDATE_READ_TIMEOUT_SECONDS = 30
@@ -43,6 +43,14 @@ SUBMIT_CONNECT_TIMEOUT_SECONDS = 15
 SUBMIT_READ_TIMEOUT_SECONDS = 600
 SUBMIT_RETRY_INITIAL_SECONDS = 15
 SUBMIT_RETRY_MAX_SECONDS = 300
+# The lease is the HOT door: a slot without a task produces nothing, so its
+# retry has to be cheap.  With a flat 60s timeout and a flat 30s wait, every
+# lost attempt cost 90s of idle engine (measured 18-aug: idle gaps quantized
+# at 91/181/271/361/451s on a box whose network dropped most lease attempts).
+LEASE_CONNECT_TIMEOUT_SECONDS = 10
+LEASE_READ_TIMEOUT_SECONDS = 60
+LEASE_RETRY_INITIAL_SECONDS = 5
+LEASE_RETRY_MAX_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_NPS = 10 ** 12
@@ -323,7 +331,7 @@ def _install_worker_update(server, script_path=None):
     All errors are fail-open: the currently running, known-good worker remains
     in memory and callers may continue processing tasks.
     """
-    script = Path(script_path or os.path.abspath(__file__))
+    script = Path(script_path or __file__).resolve()
     try:
         candidate = _download_worker(server)
         remote_build = _worker_build(candidate)
@@ -373,7 +381,7 @@ def _restart_updated_worker(script_path=None):
     for manual recovery. Automatic rollback here would race with another
     process that already restarted successfully from the shared script.
     """
-    script = Path(script_path or os.path.abspath(__file__))
+    script = Path(script_path or __file__).resolve()
     try:
         os.execv(sys.executable,
                  [sys.executable, str(script), *sys.argv[1:]])
@@ -449,7 +457,9 @@ def _request_tasks(server, auth, lease_session):
     try:
         response = requests.post(
             server + '/atomicdb/api/lease',
-            data=dict(auth, lease_session=lease_session), timeout=60)
+            data=dict(auth, lease_session=lease_session),
+            timeout=(LEASE_CONNECT_TIMEOUT_SECONDS,
+                     LEASE_READ_TIMEOUT_SECONDS))
     except requests.RequestException as exc:
         raise LeaseRequestError(str(exc), ambiguous=True) from exc
     status = response.status_code
@@ -617,7 +627,7 @@ def parse_syzygy_manifest(payload):
         # A name is a leaf, always. No directories, no traversal, no drives.
         if (name in ('.', '..') or '/' in name or '\\' in name
                 or name.startswith('.') or ':' in name
-                or os.path.basename(name) != name):
+                or Path(name).name != name):
             raise SyzygyManifestError(f'unsafe file name {name!r}')
         if name in seen:
             raise SyzygyManifestError(f'duplicate file name {name!r}')
@@ -755,13 +765,13 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
         pending = [e for e in entries
                    if syzygy_file_state(directory, e) != 'ok']
         if not pending:
-            log(f'syzygy: {len(entries)} ficheros verificados en {directory}',
+            log(f'syzygy: {len(entries)} files verified in {directory}',
                 flush=True)
             return directory
 
         missing_bytes = sum(e['bytes'] for e in pending)
-        log(f'syzygy: faltan {len(pending)}/{len(entries)} ficheros '
-            f'({missing_bytes / (1 << 20):.0f} MB); descargando a {directory}',
+        log(f'syzygy: {len(pending)}/{len(entries)} files missing '
+            f'({missing_bytes / (1 << 20):.0f} MB); downloading to {directory}',
             flush=True)
         failed = 0
         for entry in pending:
@@ -769,16 +779,16 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
                 _download_syzygy_file(server, entry, directory, get)
             except Exception as error:
                 failed += 1
-                log(f"syzygy: {entry['name']} fallo ({error})", flush=True)
+                log(f"syzygy: {entry['name']} failed ({error})", flush=True)
         if not failed:
-            log(f'syzygy: set completo en {directory}', flush=True)
+            log(f'syzygy: full set in {directory}', flush=True)
             return directory
-        log(f'syzygy: {failed} ficheros pendientes tras el intento '
+        log(f'syzygy: {failed} files still missing after attempt '
             f'{attempt}/{attempts}', flush=True)
 
-    log('syzygy: no se pudo completar el set; el worker arranca SIN '
-        'tablebases (el analisis sigue siendo correcto, solo mas lento en '
-        'finales)', flush=True)
+    log('syzygy: could not complete the set; the worker starts WITHOUT '
+        'tablebases (analysis stays correct, only slower in endgames)',
+        flush=True)
     return None
 
 
@@ -792,7 +802,7 @@ def resolve_syzygy(args, server, log=print, script_path=None, get=None):
     if args.syzygy:
         return args.syzygy
     if getattr(args, 'no_fetch_syzygy', False):
-        log('syzygy: descarga desactivada (--no-fetch-syzygy)', flush=True)
+        log('syzygy: download disabled (--no-fetch-syzygy)', flush=True)
         return ''
     fetched = fetch_syzygy_set(server, syzygy_dir(script_path), log=log,
                                get=get)
@@ -806,11 +816,13 @@ def _fetch_verified(server, entry, dest):
     import os
     import stat
 
+    dest = Path(dest)
+
     def _ok():
         with open(dest, 'rb') as f:
             return hashlib.sha256(f.read()).hexdigest() == entry['sha256']
 
-    if not (os.path.exists(dest) and _ok()):
+    if not (dest.exists() and _ok()):
         print(f"downloading {entry['file']} ({entry['size_mb']} MB)...",
               flush=True)
         r = requests.get(server + '/atomicdb/engines/' + entry['file'],
@@ -827,7 +839,6 @@ def _fetch_verified(server, entry, dest):
 def provision_engine(server):
     """Descarga el motor de referencia (y su red NNUE si el binario no la
     lleva embebida), todo sha256-verificado."""
-    import os
     import platform
 
     key = f'{platform.system().lower()}-{platform.machine().lower()}'
@@ -839,15 +850,17 @@ def provision_engine(server):
         sys.exit(f'no prebuilt engine for {key}: pass --engine with your own '
                  f'build (prebuilts: {", ".join(sorted(man["binaries"]))})')
     b = man['binaries'][key]
-    os.makedirs('Engines', exist_ok=True)
-    dest = os.path.join('Engines', b['file'])
+    Path('Engines').mkdir(exist_ok=True)
+    dest = Path('Engines') / b['file']
     _fetch_verified(server, b, dest)
     if b.get('needs_net') and 'net' in man:
         # la red va al cwd del worker: el default EvalFile del motor la
         # resuelve desde ahi
         _fetch_verified(server, man['net'], man['net']['file'])
     print(f'engine ready: {dest}', flush=True)
-    return dest
+    # str en el contrato: quien llama lo pasa a subprocess y telemetria tal
+    # cual llevaba anos recibiendolo; pathlib es de puertas adentro.
+    return str(dest)
 
 
 def _file_sha256(path):
@@ -876,10 +889,9 @@ def _net_sha256(engine_path):
     y junto al binario.  Una red embebida en el binario ya queda cubierta por
     el sha del propio ejecutable.
     """
-    import glob
-    candidates = sorted(glob.glob('*.nnue'))
-    directory = os.path.dirname(os.path.abspath(engine_path))
-    candidates += sorted(glob.glob(os.path.join(directory, '*.nnue')))
+    candidates = sorted(Path('.').glob('*.nnue'))
+    directory = Path(engine_path).resolve().parent
+    candidates += sorted(directory.glob('*.nnue'))
     for candidate in candidates:
         digest = _file_sha256(candidate)
         if digest:
@@ -1145,6 +1157,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     # transport/ambiguous-response failures where the server may have committed;
     # rotate only after a valid 2xx payload or a definitive 4xx rejection.
     lease_session = secrets.token_urlsafe(24)
+    lease_failures = 0
 
     while not stop.is_set():
         # Only one slot drives the self-update, and it does so between batches
@@ -1164,14 +1177,19 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         except LeaseRequestError as e:
             if not e.ambiguous:
                 lease_session = secrets.token_urlsafe(24)
-            print(f'[{slot}] lease response error: {e}; reintento en 30s',
+            lease_failures += 1
+            delay = min(LEASE_RETRY_INITIAL_SECONDS
+                        * (2 ** min(lease_failures - 1, 4)),
+                        LEASE_RETRY_MAX_SECONDS)
+            print(f'[{slot}] lease response error: {e}; retrying in {delay}s',
                   flush=True)
-            if stop.wait(30):
+            if stop.wait(delay):
                 break
             continue
+        lease_failures = 0
         lease_session = secrets.token_urlsafe(24)
         if not tasks:
-            print(f'[{slot}] sin tareas; espero 60s', flush=True)
+            print(f'[{slot}] no tasks available; waiting 60s', flush=True)
             if a.once:
                 break
             if stop.wait(60):
@@ -1205,7 +1223,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     progress=current_task.progress,
                 )
             except Exception as e:
-                print(f'[{slot}] engine failure: {e}; reiniciando motor',
+                print(f'[{slot}] engine failure: {e}; restarting the engine',
                       flush=True)
                 try:
                     eng.close()
@@ -1279,26 +1297,27 @@ def main():
     ap.add_argument('-P', required=True)
     ap.add_argument('-S', required=True)
     ap.add_argument('--engine', default='',
-                    help='binario propio (opcional; sin el se descarga el de referencia)')
+                    help='your own binary (optional; without it the '
+                         'reference build is downloaded)')
     ap.add_argument('-T', type=int, default=4)
     ap.add_argument('--jobs', type=int, default=1,
-                    help='analisis concurrentes; -T se REPARTE entre ellos. '
-                         'Una posicion sola escala mal con muchos hilos, asi '
-                         'que K analisis de T/K hilos rinden mas que uno de T')
+                    help='concurrent analyses; -T is SPLIT between them. '
+                         'A single position scales poorly with many threads, '
+                         'so K analyses of T/K threads outperform one of T')
     ap.add_argument('--hash', type=int, default=512)
     ap.add_argument('--syzygy', default='',
-                    help='dirs de TB atomicas separados por ; (si se pasa, '
-                         'manda tal cual y no se descarga nada)')
+                    help='atomic TB dirs separated by ; (when given, it is '
+                         'used as-is and nothing is downloaded)')
     ap.add_argument('--no-fetch-syzygy', action='store_true',
-                    help=f'no descargar el set {SYZYGY_SET} (1,3 GB) cuando '
-                         'no se ha pasado --syzygy')
+                    help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
+                         'when --syzygy was not given')
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
-                    help='no actualizar este archivo desde el servidor oficial')
+                    help='do not update this file from the official server')
     ap.add_argument('--solve', action='store_true',
-                    help='servir tambien tareas SOLVE (pruebas exhaustivas) '
-                         'ademas de analisis; sin este flag el worker se '
-                         'comporta exactamente igual que antes')
+                    help='also serve SOLVE tasks (exhaustive proofs) besides '
+                         'analysis; without this flag the worker behaves '
+                         'exactly as before')
     a = ap.parse_args()
 
     if not a.no_auto_update and _install_worker_update(a.S):
@@ -1326,9 +1345,9 @@ def main():
                 dirs[0], VariantBoard=chess.variant.AtomicBoard)
             for d in dirs[1:]:
                 tb.add_directory(d)
-            print(f'syzygy: {len(dirs)} dirs, pre-probe activo', flush=True)
+            print(f'syzygy: {len(dirs)} dirs, pre-probe active', flush=True)
         except Exception as error:
-            print(f'syzygy: {len(dirs)} dirs para el motor; sin pre-probe '
+            print(f'syzygy: {len(dirs)} dirs for the engine; no pre-probe '
                   f'({error})', flush=True)
 
     import platform
@@ -1340,11 +1359,11 @@ def main():
         a.jobs = 1
     jobs, slot_threads, solver_cores = plan_threads(a.T, a.jobs, a.solve)
     if jobs < a.jobs:
-        print(f'aviso: --jobs {a.jobs} recortado a {jobs}: -T {a.T} no da '
-              f'un hilo entero por trabajo', flush=True)
+        print(f'note: --jobs {a.jobs} reduced to {jobs}: -T {a.T} does not '
+              f'give each job a full thread', flush=True)
     if a.solve and a.T < 2:
-        print('aviso: --solve con -T 1 comparte el unico hilo entre '
-              'analisis y pruebas', flush=True)
+        print('note: --solve with -T 1 shares the single thread between '
+              'analysis and proofs', flush=True)
 
     base = f'{a.U}-{platform.node() or "worker"}-atomicdb'
     # With a single job the identity is byte-identical to every previous
@@ -1376,8 +1395,8 @@ def main():
 
     spread = ('x'.join(str(n) for n in sorted(set(slot_threads), reverse=True))
               if len(set(slot_threads)) > 1 else str(slot_threads[0]))
-    print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} trabajos de '
-          f'{spread} hilos (suma {sum(slot_threads) + solver_cores})'
+    print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} jobs of '
+          f'{spread} threads ({sum(slot_threads) + solver_cores} in total)'
           + (f' + {solver_cores} solver' if solver_cores else '')
           + f' -> {a.S}', flush=True)
 
