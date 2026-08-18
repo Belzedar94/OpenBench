@@ -7,9 +7,16 @@ from Client import atomicdb_worker
 
 class WorkerSubmitRetryTests(SimpleTestCase):
 
+    def setUp(self):
+        self.session = mock.Mock()
+        patcher = mock.patch('Client.atomicdb_worker._http_session',
+                             return_value=self.session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @mock.patch('Client.atomicdb_worker.time.sleep')
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_retries_exact_payload_after_read_timeout(self, post, sleep):
+    def test_retries_exact_payload_after_read_timeout(self, sleep):
+        post = self.session.post
         accepted = mock.Mock(status_code=200)
         accepted.json.return_value = {'ok': True, 'dup': True}
         post.side_effect = [atomicdb_worker.requests.ReadTimeout('late ACK'),
@@ -23,12 +30,12 @@ class WorkerSubmitRetryTests(SimpleTestCase):
         self.assertEqual(post.call_count, 2)
         self.assertIs(post.call_args_list[0].kwargs['data'], payload)
         self.assertIs(post.call_args_list[1].kwargs['data'], payload)
-        self.assertEqual(post.call_args_list[0].kwargs['timeout'], (15, 600))
+        self.assertEqual(post.call_args_list[0].kwargs['timeout'], (3, 600))
         sleep.assert_called_once_with(15)
 
     @mock.patch('Client.atomicdb_worker.time.sleep')
-    @mock.patch('Client.atomicdb_worker.requests.post')
-    def test_does_not_retry_definitive_stale_lease(self, post, sleep):
+    def test_does_not_retry_definitive_stale_lease(self, sleep):
+        post = self.session.post
         stale = mock.Mock(status_code=409)
         stale.json.return_value = {'error': 'stale-lease'}
         post.return_value = stale

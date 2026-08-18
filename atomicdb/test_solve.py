@@ -10,6 +10,7 @@ import importlib.util
 import pathlib
 import threading
 from io import StringIO
+from unittest import mock
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -553,7 +554,9 @@ class SolveWorkerLeaseTests(TestCase):
             stop.set()
             return _Ok()
 
-        with patch.object(worker.requests, 'post', side_effect=fake_post):
+        session = mock.Mock()
+        session.post.side_effect = fake_post
+        with patch.object(worker, '_http_session', return_value=session):
             with patch.object(worker, 'HEARTBEAT_INTERVAL_SECONDS', 0.01):
                 worker._solve_heartbeat_loop(
                     'http://server', {'username': 'solver'}, current, stop)
@@ -575,16 +578,19 @@ class SolveWorkerLeaseTests(TestCase):
             return len(rounds) > 2        # dos vueltas en vacio y fuera
 
         stop.wait = fake_wait
-        with patch.object(worker.requests, 'post') as post:
+        session = mock.Mock()
+        with patch.object(worker, '_http_session', return_value=session):
             worker._solve_heartbeat_loop('http://server', {}, current, stop)
 
-        post.assert_not_called()
+        session.post.assert_not_called()
 
     def test_a_broken_acquire_is_reported_as_ambiguous(self):
         def boom(url, data=None, **kwargs):
             raise worker.requests.RequestException('conexion cortada')
 
-        with patch.object(worker.requests, 'post', side_effect=boom):
+        session = mock.Mock()
+        session.post.side_effect = boom
+        with patch.object(worker, '_http_session', return_value=session):
             with self.assertRaises(worker.SolveAcquireAmbiguous):
                 worker._solve_once('http://server', {}, None, 'sesion-1')
 
