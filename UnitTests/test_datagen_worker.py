@@ -272,9 +272,12 @@ def horde_publication_config(
     book_sha256 = (
         book_sha256 or worker.HORDE_OPENING_BOOK_SHA256
     ).lower()
-    registered_generation = dict(
-        registered_generation or worker.HORDE_BIN_V1_GENERATION
-    )
+    registered_generation = registered_generation or worker.HORDE_BIN_V1_GENERATION
+    # A book may sanction more than one profile, so the registered entry is a
+    # tuple. Fixtures that pass one straight through get its first profile.
+    if isinstance(registered_generation, (tuple, list)):
+        registered_generation = registered_generation[0]
+    registered_generation = dict(registered_generation)
     command = (
         'horde_generate_training_data threads {THREADS} hash %d '
         'network {NETWORK} network_sha256 {NETWORK_SHA256} '
@@ -392,8 +395,10 @@ def horde_manifest(cfg, producer, payload):
     book_sha256 = data['publication_contract']['book'][
         'raw_sha256'
     ].upper()
+    # A registered book maps to a tuple of sanctioned profiles; the fixture
+    # builds a manifest for the first one.
     generation.update(
-        worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256]
+        worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256][0]
     )
     return {
         'schema': 'HORDE_BIN_V1',
@@ -412,6 +417,10 @@ def horde_manifest(cfg, producer, payload):
         'book_sha256': book_sha256,
         'producer_sha256': producer['sha256'].upper(),
         'payload_sha256': hashlib.sha256(payload).hexdigest().upper(),
+        'label_contract': {
+            'schema': 'HORDE_LABEL_CONTRACT_V1',
+            'schema_sha256': worker.HORDE_LABEL_CONTRACT_V1_SHA256,
+        },
         'generation': generation,
     }
 
@@ -480,7 +489,7 @@ class DatagenWorkerTests(unittest.TestCase):
             ):
                 generation = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
                     book_sha256
-                ]
+                ][0]
                 cfg, producer = horde_publication_config(
                     book_name, book_sha256, generation
                 )
@@ -516,7 +525,7 @@ class DatagenWorkerTests(unittest.TestCase):
 
     def test_horde_bin_v1_validator_rejects_rank8_contract_drift(self):
         book_sha256 = worker.HORDE_V3_TRAIN_BOOK_SHA256
-        generation = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256]
+        generation = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256][0]
         cfg, producer = horde_publication_config(
             'HORDE_openings_v3_train.epd', book_sha256, generation
         )
@@ -528,7 +537,7 @@ class DatagenWorkerTests(unittest.TestCase):
             output.write_bytes(horde_file_bytes(manifest, payload))
             with self.assertRaisesRegex(
                 worker.DatagenConfigurationError,
-                'generation setting opening_count',
+                'generation settings are not a registered Horde profile',
             ):
                 worker.validate_horde_bin_v1_output(
                     cfg, str(output), producer
@@ -562,7 +571,7 @@ class DatagenWorkerTests(unittest.TestCase):
             ),
             'depth': (
                 lambda document: document['generation'].update(depth=7),
-                'generation setting depth',
+                'generation settings are not a registered Horde profile',
             ),
             'record count type': (
                 lambda document: document.update(record_count=True),

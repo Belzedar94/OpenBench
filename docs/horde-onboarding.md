@@ -111,6 +111,16 @@ expose generation commands. The role-specific producer writes
 Records contain physical Horde positions, so White pawns remain `P`; the
 legacy `H` identity is introduced only by the Run 6B evaluator boundary.
 
+A workload that asks for tactical expansion writes the revision
+`HORDE_BIN_V1_R2` instead, schema SHA-256
+`013BF155072149A766B54A391ADBCB3EB1C539F49362EB06CA4E1530AE22B6A6`. The
+48-byte layout is identical; two reserved bit ranges gain meaning so an
+expansion child is distinguishable from a self-play line sample, and the
+generation object carries three extra keys naming the caps. A workload
+without expansion keeps the `HORDE_BIN_V1` identity and is byte-identical to
+what the pre-revision producer wrote, so the revision is visible exactly
+where it matters and invisible everywhere else.
+
 Client 44 validates every uncompressed Horde chunk before compression or
 upload. It requires publication protocol 41 and binds the file to all of the
 following assigned identities:

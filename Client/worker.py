@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 46 # Client version to send to the Server
+CLIENT_VERSION   = 47 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -101,6 +101,23 @@ HORDE_BIN_V1_RECORD_SIZE = 48
 HORDE_BIN_V1_SCHEMA_SHA256 = (
     'B46ADE18AB8954A6AB232593484273E50C12B51550A938763A7A7D94DCCB63E4'
 )
+# HORDE_BIN_V1_R2 keeps the 48-byte layout and gives meaning to two reserved bit
+# ranges, so tactical-expansion children are distinguishable from self-play line
+# samples.  A shard generated without expansion keeps the V1 identity and is
+# byte-identical to V1; only an expanded shard carries this one.
+HORDE_BIN_V1_R2_SCHEMA = 'HORDE_BIN_V1_R2'
+HORDE_BIN_V1_R2_SCHEMA_SHA256 = (
+    '013BF155072149A766B54A391ADBCB3EB1C539F49362EB06CA4E1530AE22B6A6'
+)
+HORDE_BIN_V1_SCHEMA_IDENTITIES = {
+    'HORDE_BIN_V1': HORDE_BIN_V1_SCHEMA_SHA256,
+    HORDE_BIN_V1_R2_SCHEMA: HORDE_BIN_V1_R2_SCHEMA_SHA256,
+}
+HORDE_BIN_V1_EXPANSION_KEYS = [
+    'expand_promo', 'expand_check', 'expand_max_children',
+]
+HORDE_BIN_V1_MAX_EXPANSION_CAP = 8
+HORDE_BIN_V1_EXPANSION_FAMILIES = 4
 HORDE_RUN6B_SHA256 = (
     'B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7'
 )
@@ -146,17 +163,61 @@ HORDE_BIN_V1_RANK8_GENERATION = {
     'write_max_ply': 200,
     'max_game_ply': 300,
 }
-HORDE_BIN_V1_REGISTERED_GENERATIONS = {
-    HORDE_OPENING_BOOK_SHA256: HORDE_BIN_V1_GENERATION,
-    HORDE_V3_TRAIN_BOOK_SHA256: {
-        **HORDE_BIN_V1_RANK8_GENERATION,
-        'opening_count': 1203,
-    },
-    HORDE_V3_VALIDATION_BOOK_SHA256: {
-        **HORDE_BIN_V1_RANK8_GENERATION,
-        'opening_count': 297,
-    },
+# Corpus A moves the teacher from depth 4 to a 10,000 node budget, because a
+# depth-4 label disagrees in sign with a 10k label on roughly one position in
+# seventy and a wrong sign is the worst kind of label error.  depth 64 is not a
+# depth limit, it is the ceiling the node budget runs under: the generator
+# rejects depth <= 0, so it cannot be omitted.
+HORDE_BIN_V1_CORPUS_A_GENERATION = {
+    'hash_mb': 16,
+    'depth': 64,
+    'nodes': 10000,
+    'random_move_min_ply': 4,
+    'random_move_max_ply': 16,
+    'random_move_count': 4,
+    'random_multi_pv': 4,
+    'random_multi_pv_diff': 100,
+    'write_min_ply': 5,
+    'write_max_ply': 200,
+    'max_game_ply': 300,
+    'expand_promo': 2,
+    'expand_check': 2,
+    'expand_max_children': 5,
 }
+# The startpos family, shard A4.  No book: the generator falls back to the true
+# Horde start position, so opening_count is 1 and the manifest carries the
+# literal NONE.  The write window is the first 12 plies, which is the regime the
+# opening book hides and where every net we have is most wrong.
+HORDE_BIN_V1_STARTPOS_GENERATION = {
+    'hash_mb': 16,
+    'depth': 64,
+    'nodes': 10000,
+    'random_move_min_ply': 0,
+    'random_move_max_ply': 11,
+    'random_move_count': 4,
+    'random_multi_pv': 4,
+    'random_multi_pv_diff': 100,
+    'write_min_ply': 0,
+    'write_max_ply': 12,
+    'max_game_ply': 300,
+    'opening_count': 1,
+}
+# A book may sanction more than one profile, because the same book is used at
+# more than one teacher budget.  The observed generation must match exactly one
+# of them, field for field.
+HORDE_BIN_V1_REGISTERED_GENERATIONS = {
+    HORDE_OPENING_BOOK_SHA256: (HORDE_BIN_V1_GENERATION,),
+    HORDE_V3_TRAIN_BOOK_SHA256: (
+        {**HORDE_BIN_V1_RANK8_GENERATION, 'opening_count': 1203},
+        {**HORDE_BIN_V1_CORPUS_A_GENERATION, 'opening_count': 1203},
+    ),
+    HORDE_V3_VALIDATION_BOOK_SHA256: (
+        {**HORDE_BIN_V1_RANK8_GENERATION, 'opening_count': 297},
+    ),
+}
+# Selected by the frozen book kind, not by a book hash: a startpos workload has
+# no book to hash.
+HORDE_BIN_V1_STARTPOS_GENERATIONS = (HORDE_BIN_V1_STARTPOS_GENERATION,)
 
 IS_WINDOWS = platform.system() == 'Windows' # Don't touch this
 IS_LINUX   = platform.system() != 'Windows' # Don't touch this
@@ -2879,10 +2940,8 @@ def _horde_bin_v1_validate_record(record, index):
         castling & ~0x03 == 0,
         'record %d has reserved castling bits' % index,
     )
-    _horde_bin_v1_require(
-        flags & 0x80 == 0,
-        'record %d has reserved sample flags' % index,
-    )
+    # Bit 7 is EXPANSION_CHILD under HORDE_BIN_V1_R2.  It is cross-checked
+    # against the family nibble below, so it is not validated on its own here.
     if castling:
         _horde_bin_v1_require(
             board[60] == 11,
@@ -2930,8 +2989,17 @@ def _horde_bin_v1_validate_record(record, index):
             'record %d has no pawn that can use the en-passant target' % index,
         )
 
-    _, _, score, best_move, played_move, result, reason = struct.unpack_from(
+    _, _, score, best_move, played_move, result, outcome = struct.unpack_from(
         '<HHhHHbB', record, 36
+    )
+    # HORDE_BIN_V1_R2 splits the outcome byte: bits 0-2 are the terminal reason,
+    # bits 3-5 the expansion family, bits 6-7 stay reserved zero.  A parent
+    # carries family 0, so its byte is exactly what V1 wrote.
+    reason = outcome & 0x07
+    family = (outcome >> 3) & 0x07
+    _horde_bin_v1_require(
+        outcome & 0xC0 == 0,
+        'record %d sets reserved outcome bits' % index,
     )
     _horde_bin_v1_require(
         result in (-1, 0, 1),
@@ -2940,6 +3008,16 @@ def _horde_bin_v1_validate_record(record, index):
     _horde_bin_v1_require(
         reason in range(1, 7),
         'record %d has an invalid outcome reason' % index,
+    )
+    _horde_bin_v1_require(
+        family < HORDE_BIN_V1_EXPANSION_FAMILIES,
+        'record %d has an unregistered expansion family' % index,
+    )
+    # A record cannot claim to be a child in one field and a parent in the
+    # other.
+    _horde_bin_v1_require(
+        bool(flags & 0x80) == (family != 0),
+        'record %d expansion flag disagrees with its family' % index,
     )
     _horde_bin_v1_require(
         (reason in (1, 2) and result in (-1, 1))
@@ -2973,7 +3051,7 @@ def _horde_bin_v1_validate_record(record, index):
         bool(flags & (1 << 5)) == (played_move != best_move),
         'record %d best-versus-played flag is invalid' % index,
     )
-    return side, result, reason, white_count, flags, score
+    return side, result, reason, white_count, flags, score, family
 
 
 def validate_horde_bin_v1_output(config, output_path, producer):
@@ -3017,11 +3095,17 @@ def validate_horde_bin_v1_output(config, output_path, producer):
         network_sha256 == HORDE_RUN6B_SHA256,
         'network is not the registered Run 6B artifact',
     )
-    registered_generation = HORDE_BIN_V1_REGISTERED_GENERATIONS.get(
-        book_sha256
-    )
+    # A startpos workload has no book to hash, so its profile is selected by the
+    # frozen book kind and the manifest carries the literal NONE.
+    if publication['book'].get('kind') == 'builtin-startpos':
+        book_sha256 = 'NONE'
+        registered_generations = HORDE_BIN_V1_STARTPOS_GENERATIONS
+    else:
+        registered_generations = HORDE_BIN_V1_REGISTERED_GENERATIONS.get(
+            book_sha256
+        )
     _horde_bin_v1_require(
-        registered_generation is not None,
+        registered_generations is not None,
         'opening book is not a registered Horde artifact',
     )
 
@@ -3040,9 +3124,12 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 list(manifest) == expected_top_keys,
                 'manifest fields are incomplete or out of order',
             )
+            schema = manifest['schema']
+            expanded = schema == HORDE_BIN_V1_R2_SCHEMA
             _horde_bin_v1_require(
-                manifest['schema'] == 'HORDE_BIN_V1'
-                and manifest['schema_sha256'] == HORDE_BIN_V1_SCHEMA_SHA256
+                schema in HORDE_BIN_V1_SCHEMA_IDENTITIES
+                and manifest['schema_sha256']
+                    == HORDE_BIN_V1_SCHEMA_IDENTITIES[schema]
                 and manifest['format_version'] == HORDE_BIN_V1_VERSION
                 and type(manifest['format_version']) is int
                 and manifest['header_bytes'] == HORDE_BIN_V1_HEADER_SIZE
@@ -3088,6 +3175,12 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 'random_multi_pv_diff', 'write_min_ply', 'write_max_ply',
                 'max_game_ply', 'opening_count',
             ]
+            # Fail closed in both directions: only an R2 file may carry the
+            # expansion keys, and an R2 file must carry all three of them.
+            if expanded:
+                expected_generation_keys = (
+                    expected_generation_keys + HORDE_BIN_V1_EXPANSION_KEYS
+                )
             _horde_bin_v1_require(
                 isinstance(generation, dict)
                 and list(generation) == expected_generation_keys,
@@ -3112,11 +3205,50 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 and config.threads > 0,
                 'seed or thread count does not match the assigned chunk',
             )
-            for field, expected in registered_generation.items():
+            # The observed settings must match exactly one sanctioned profile,
+            # field for field.  Matching a profile is what authorises the
+            # workload; nothing here is inferred from the command line.
+            matched_generation = None
+            for candidate in registered_generations:
+                if all(
+                    type(generation.get(field)) is int
+                    and generation.get(field) == expected
+                    for field, expected in candidate.items()
+                ):
+                    matched_generation = candidate
+                    break
+            _horde_bin_v1_require(
+                matched_generation is not None,
+                'generation settings are not a registered Horde profile',
+            )
+            # The profile decides whether children are expected, so a producer
+            # cannot smuggle expansion into a workload that did not ask for it,
+            # nor drop it from one that did.
+            profile_expanded = any(
+                key in matched_generation
+                for key in HORDE_BIN_V1_EXPANSION_KEYS
+            )
+            _horde_bin_v1_require(
+                profile_expanded == expanded,
+                'expansion state disagrees with the registered profile',
+            )
+            expansion_ceiling = 0
+            if expanded:
                 _horde_bin_v1_require(
-                    generation.get(field) == expected
-                    and type(generation.get(field)) is int,
-                    'generation setting %s is invalid' % field,
+                    all(
+                        0 <= generation[key] <= HORDE_BIN_V1_MAX_EXPANSION_CAP
+                        for key in HORDE_BIN_V1_EXPANSION_KEYS
+                    )
+                    and generation['expand_max_children'] > 0
+                    and (
+                        generation['expand_promo'] > 0
+                        or generation['expand_check'] > 0
+                    ),
+                    'expansion caps are outside the registered domain',
+                )
+                expansion_ceiling = min(
+                    generation['expand_promo'] + generation['expand_check'],
+                    generation['expand_max_children'],
                 )
 
             expected_size = (
@@ -3140,7 +3272,10 @@ def validate_horde_bin_v1_output(config, output_path, producer):
             results = [0, 0, 0]
             reasons = [0] * 7
             white_buckets = [0, 0, 0, 0]
-            flags_seen = [0] * 7
+            flags_seen = [0] * 8
+            families_seen = [0] * HORDE_BIN_V1_EXPANSION_FAMILIES
+            children_in_run = 0
+            saw_parent = False
             records_per_block = 4096
             index = 0
             while index < record_count:
@@ -3154,9 +3289,26 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 file_digest.update(block)
                 for offset in range(0, len(block), HORDE_BIN_V1_RECORD_SIZE):
                     record = block[offset:offset + HORDE_BIN_V1_RECORD_SIZE]
-                    side, result, reason, white_count, flags, _ = (
+                    side, result, reason, white_count, flags, _, family = (
                         _horde_bin_v1_validate_record(record, index)
                     )
+                    families_seen[family] += 1
+                    # Every child immediately follows its parent, and a parent
+                    # may not exceed the ceiling the profile declares.
+                    if family == 0:
+                        saw_parent = True
+                        children_in_run = 0
+                    else:
+                        _horde_bin_v1_require(
+                            saw_parent,
+                            'record %d is a child with no parent' % index,
+                        )
+                        children_in_run += 1
+                        _horde_bin_v1_require(
+                            children_in_run <= expansion_ceiling,
+                            'record %d exceeds the declared child ceiling'
+                            % index,
+                        )
                     sides[side] += 1
                     results[result + 1] += 1
                     reasons[reason] += 1
@@ -3166,7 +3318,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                         2 if white_count <= 24 else 3
                     )
                     white_buckets[bucket] += 1
-                    for bit in range(7):
+                    for bit in range(8):
                         flags_seen[bit] += bool(flags & (1 << bit))
                     index += 1
             _horde_bin_v1_require(
@@ -3201,6 +3353,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
         'reasons': reasons,
         'white_buckets': white_buckets,
         'flags': flags_seen,
+        'families': families_seen,
     }
 
 
