@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 47 # Client version to send to the Server
+CLIENT_VERSION   = 48 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -213,6 +213,7 @@ HORDE_BIN_V1_REGISTERED_GENERATIONS = {
     ),
     HORDE_V3_VALIDATION_BOOK_SHA256: (
         {**HORDE_BIN_V1_RANK8_GENERATION, 'opening_count': 297},
+        {**HORDE_BIN_V1_CORPUS_A_GENERATION, 'opening_count': 297},
     ),
 }
 # Selected by the frozen book kind, not by a book hash: a startpos workload has

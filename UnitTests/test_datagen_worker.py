@@ -384,7 +384,7 @@ def horde_record():
     return bytes(record)
 
 
-def horde_manifest(cfg, producer, payload):
+def horde_manifest(cfg, producer, payload, profile=None):
     test = cfg.workload['test']
     data = test['datagen']
     generation = {
@@ -396,13 +396,33 @@ def horde_manifest(cfg, producer, payload):
         'raw_sha256'
     ].upper()
     # A registered book maps to a tuple of sanctioned profiles; the fixture
-    # builds a manifest for the first one.
-    generation.update(
-        worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256][0]
+    # builds a manifest for the first one unless a caller names another.
+    if profile is None:
+        profile = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256][0]
+    # A registry entry is a mapping, so its key order is whatever the spread
+    # produced. The manifest's is part of the contract: the expansion keys are
+    # appended after opening_count, never interleaved.
+    generation.update({
+        key: value for key, value in profile.items()
+        if key not in worker.HORDE_BIN_V1_EXPANSION_KEYS
+    })
+    generation.update({
+        key: profile[key] for key in worker.HORDE_BIN_V1_EXPANSION_KEYS
+        if key in profile
+    })
+    # Expansion keys are admitted only under the revision identity, so a
+    # manifest for an expanded profile has to carry it.
+    expanded = any(
+        key in profile for key in worker.HORDE_BIN_V1_EXPANSION_KEYS
     )
     return {
-        'schema': 'HORDE_BIN_V1',
-        'schema_sha256': worker.HORDE_BIN_V1_SCHEMA_SHA256,
+        'schema': (
+            worker.HORDE_BIN_V1_R2_SCHEMA if expanded else 'HORDE_BIN_V1'
+        ),
+        'schema_sha256': (
+            worker.HORDE_BIN_V1_R2_SCHEMA_SHA256 if expanded
+            else worker.HORDE_BIN_V1_SCHEMA_SHA256
+        ),
         'format_version': worker.HORDE_BIN_V1_VERSION,
         'header_bytes': worker.HORDE_BIN_V1_HEADER_SIZE,
         'record_bytes': worker.HORDE_BIN_V1_RECORD_SIZE,
@@ -506,6 +526,175 @@ class DatagenWorkerTests(unittest.TestCase):
                 self.assertEqual(
                     manifest['generation']['opening_count'],
                     generation['opening_count'],
+                )
+
+    def horde_profile_case(self, book_sha256, profile, book_name):
+        """Build a chunk for one book/profile pair and hand it to the validator."""
+        cfg, producer = horde_publication_config(
+            book_name, book_sha256, profile
+        )
+        payload = horde_record()
+        manifest = horde_manifest(cfg, producer, payload, profile)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            return worker.validate_horde_bin_v1_output(
+                cfg, str(output), producer
+            )
+
+    def test_validation_book_sanctions_the_rank8_and_corpus_a_profiles(self):
+        # The v3 validation book is used at two teacher budgets: depth 4 for the
+        # Rank8 era candidate pool, and the corpus A node budget for the pool
+        # that has to match the corpus its training role was carved against.
+        sanctioned = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
+            worker.HORDE_V3_VALIDATION_BOOK_SHA256
+        ]
+        self.assertEqual(
+            list(sanctioned),
+            [
+                {**worker.HORDE_BIN_V1_RANK8_GENERATION, 'opening_count': 297},
+                {
+                    **worker.HORDE_BIN_V1_CORPUS_A_GENERATION,
+                    'opening_count': 297,
+                },
+            ],
+        )
+
+    def test_horde_bin_v1_validator_accepts_every_sanctioned_profile(self):
+        cases = [
+            (
+                'HORDE_openings_v3_train.epd',
+                worker.HORDE_V3_TRAIN_BOOK_SHA256,
+                1203,
+            ),
+            (
+                'HORDE_openings_v3_validation.epd',
+                worker.HORDE_V3_VALIDATION_BOOK_SHA256,
+                297,
+            ),
+        ]
+        for book_name, book_sha256, openings in cases:
+            sanctioned = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256]
+            for index, profile in enumerate(sanctioned):
+                with self.subTest(book=book_name, profile=index):
+                    summary = self.horde_profile_case(
+                        book_sha256, profile, book_name
+                    )
+                    self.assertEqual(summary['record_count'], 1)
+                    self.assertEqual(profile['opening_count'], openings)
+
+    def test_corpus_a_validation_pool_matches_the_training_teacher_budget(self):
+        # The pool the validation role is carved from shares one scale contract
+        # with the training role, and a scale contract carries one generation
+        # common block. So every field but the opening count has to be the
+        # corpus A field, or the chunk set cannot assemble under that contract.
+        corpus_a = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
+            worker.HORDE_V3_TRAIN_BOOK_SHA256
+        ][1]
+        pool = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
+            worker.HORDE_V3_VALIDATION_BOOK_SHA256
+        ][1]
+        self.assertEqual(
+            {key: value for key, value in pool.items()
+             if key != 'opening_count'},
+            {key: value for key, value in corpus_a.items()
+             if key != 'opening_count'},
+        )
+        self.assertEqual(pool['opening_count'], 297)
+        self.assertEqual(corpus_a['opening_count'], 1203)
+
+    def test_horde_bin_v1_validator_rejects_corpus_a_profile_drift(self):
+        book_sha256 = worker.HORDE_V3_VALIDATION_BOOK_SHA256
+        book_name = 'HORDE_openings_v3_validation.epd'
+        sanctioned = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[book_sha256][1]
+        cases = [
+            # The other book's opening count on this book.
+            ({'opening_count': 1203}, 'registered Horde profile'),
+            # A teacher budget that is neither sanctioned profile.
+            ({'nodes': 5000}, 'registered Horde profile'),
+            ({'depth': 4}, 'registered Horde profile'),
+            # Caps that no profile sanctions.
+            ({'expand_promo': 3}, 'registered Horde profile'),
+            ({'expand_check': 0}, 'registered Horde profile'),
+            ({'expand_max_children': 4}, 'registered Horde profile'),
+            # The startpos write window on a book workload.
+            ({'write_max_ply': 12}, 'registered Horde profile'),
+        ]
+        for override, message in cases:
+            with self.subTest(override=override):
+                profile = {**sanctioned, **override}
+                with self.assertRaisesRegex(
+                    worker.DatagenConfigurationError, message
+                ):
+                    self.horde_profile_case(book_sha256, profile, book_name)
+
+    def test_horde_bin_v1_validator_rejects_expansion_state_disagreement(self):
+        book_sha256 = worker.HORDE_V3_VALIDATION_BOOK_SHA256
+        book_name = 'HORDE_openings_v3_validation.epd'
+        rank8, corpus_a = worker.HORDE_BIN_V1_REGISTERED_GENERATIONS[
+            book_sha256
+        ]
+
+        # Expansion keys on a file that claims the plain V1 identity, and a
+        # plain V1 generation under the revision identity: both are caught at
+        # the key list, because only an R2 file may carry the three keys and an
+        # R2 file must carry all of them.
+        cfg, producer = horde_publication_config(
+            book_name, book_sha256, corpus_a
+        )
+        payload = horde_record()
+        manifest = horde_manifest(cfg, producer, payload, corpus_a)
+        manifest['schema'] = 'HORDE_BIN_V1'
+        manifest['schema_sha256'] = worker.HORDE_BIN_V1_SCHEMA_SHA256
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'generation manifest is incomplete or out of order',
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
+
+        cfg, producer = horde_publication_config(book_name, book_sha256, rank8)
+        manifest = horde_manifest(cfg, producer, payload, rank8)
+        manifest['schema'] = worker.HORDE_BIN_V1_R2_SCHEMA
+        manifest['schema_sha256'] = worker.HORDE_BIN_V1_R2_SCHEMA_SHA256
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'generation manifest is incomplete or out of order',
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
+                )
+
+        # Smuggling expansion into the depth-4 pool: the key list is satisfied
+        # and the observed settings still match the unexpanded profile, because
+        # a profile is matched on its own fields. The profile decides, so the
+        # disagreement is caught on the profile's expansion state.
+        smuggled = {
+            **rank8,
+            'expand_promo': 2,
+            'expand_check': 2,
+            'expand_max_children': 5,
+        }
+        cfg, producer = horde_publication_config(
+            book_name, book_sha256, rank8
+        )
+        manifest = horde_manifest(cfg, producer, payload, smuggled)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'chunk.bin')
+            output.write_bytes(horde_file_bytes(manifest, payload))
+            with self.assertRaisesRegex(
+                worker.DatagenConfigurationError,
+                'expansion state disagrees with the registered profile',
+            ):
+                worker.validate_horde_bin_v1_output(
+                    cfg, str(output), producer
                 )
 
     def test_horde_bin_v1_validator_rejects_unregistered_book_contract(self):

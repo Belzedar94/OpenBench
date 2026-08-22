@@ -121,6 +121,17 @@ without expansion keeps the `HORDE_BIN_V1` identity and is byte-identical to
 what the pre-revision producer wrote, so the revision is visible exactly
 where it matters and invisible everywhere else.
 
+A book sanctions a tuple of generation profiles, because the same book is used
+at more than one teacher budget, and an observed generation must match exactly
+one of them field for field. Client 48 adds the corpus A profile to the v3
+validation book, so that book now sanctions both the depth-4 Rank8 profile and
+the 10,000-node corpus A profile at `opening_count` 297. A validation-candidate
+pool shares one scale contract with the training role it is carved against, and
+a scale contract carries a single generation common block, so the pool has to
+be generated at the training role's teacher budget. Every field but the opening
+count is therefore the same in both profiles, and that identity is asserted in
+`UnitTests/test_datagen_worker.py` rather than left to inspection.
+
 Client 44 validates every uncompressed Horde chunk before compression or
 upload. It requires publication protocol 41 and binds the file to all of the
 following assigned identities:
