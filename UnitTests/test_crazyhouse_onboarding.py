@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+import zipfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTRACT = "LICHESS_CRAZYHOUSE_2026_08_12"
+ENGINE = "Crazyhouse-Stockfish"
+BOOK = "CRAZYHOUSE_openings_v1.epd"
+ENGINE_COMMIT = "97fe071f2de738da0f7a570419f0bc89382eef19"
+BOOK_SHA256 = "a8976a380a6cc4b3a1a6aae3bf14249b2ab6d1bac6cf4a2715625d7c01747603"
+BOOK_ARCHIVE_SHA256 = "d919a19e3192a0457991dfafc95d320f33047a458277386334ef34d1bd14d820"
+NETWORK_SHA256 = "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43"
+REFEREE_SHA256 = "f465025b2ad21526e2cbab2b7da1a231ff3d64f6e8a01a0be5963f525a0bddae"
+
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "Client"))
+
+from OpenBench import variant_contract
+import worker
+
+
+INSTALLER_PATH = (
+    ROOT
+    / "Client"
+    / "referees"
+    / CONTRACT
+    / "install_artifact.py"
+)
+INSTALLER_SPEC = importlib.util.spec_from_file_location(
+    "crazyhouse_referee_installer", INSTALLER_PATH
+)
+installer = importlib.util.module_from_spec(INSTALLER_SPEC)
+INSTALLER_SPEC.loader.exec_module(installer)
+
+
+def load_json(path):
+    return json.loads((ROOT / path).read_text(encoding="utf-8"))
+
+
+def routing_config(book=BOOK, contract=CONTRACT):
+    test = {
+        "type": "TEST",
+        "book": {"name": book},
+        "dev": {"engine": ENGINE},
+        "base": {"engine": ENGINE},
+    }
+    if contract is not None:
+        test["variant_contract"] = contract
+        test["book"]["variant_contract"] = contract
+        test["dev"]["variant_contract"] = contract
+        test["base"]["variant_contract"] = contract
+    return SimpleNamespace(workload={"test": test})
+
+
+class CrazyhouseDraftTests(unittest.TestCase):
+
+    def test_draft_is_present_but_cannot_be_scheduled(self):
+        general = load_json("Config/config.json")
+        engine = load_json("Engines/%s.json" % ENGINE)
+        self.assertNotIn(ENGINE, general["engines"])
+        self.assertNotIn(BOOK, general["books"])
+        self.assertFalse(engine["onboarding_ready"])
+        self.assertIsNone(engine["nps"])
+        self.assertEqual(
+            engine["nps_status"], "WAITING_TIMING_CLEAN_MEASUREMENT"
+        )
+        self.assertEqual(engine["source"], "https://github.com/Belzedar94/Crazyhouse-Stockfish")
+        self.assertEqual(engine["variant_contract"], CONTRACT)
+        self.assertEqual(engine["build"]["systems"], ["Windows"])
+        self.assertEqual(engine["build"]["artifact_roles"], ["play"])
+        defaults = engine["test_presets"]["default"]
+        self.assertEqual(defaults["base_branch"], ENGINE_COMMIT)
+        self.assertEqual(defaults["both_bench"], 113485)
+        self.assertEqual(
+            defaults["both_network"],
+            "crazyhouse_run15rl_e190_l03.nnue",
+        )
+        self.assertNotIn("test_bounds", defaults)
+        self.assertNotIn("test_max_games", defaults)
+
+    def test_opening_alias_is_byte_exact_and_deterministic(self):
+        archive = ROOT / "Books" / (BOOK + ".zip")
+        self.assertEqual(
+            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            BOOK_ARCHIVE_SHA256,
+        )
+        with zipfile.ZipFile(archive) as container:
+            self.assertEqual(container.namelist(), [BOOK])
+            payload = container.read(BOOK)
+        self.assertEqual(len(payload), 100204)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), BOOK_SHA256)
+        self.assertEqual(len(payload.splitlines()), 1024)
+        self.assertEqual(len(set(payload.splitlines())), 1024)
+
+    def test_manifest_pins_only_the_qualified_windows_referee(self):
+        manifest = load_json(
+            "Client/referees/%s/manifest.json" % CONTRACT
+        )
+        self.assertFalse(manifest["onboarding_ready"])
+        self.assertEqual(manifest["contract"], CONTRACT)
+        self.assertEqual(
+            manifest["profile"]["sha256"].lower(),
+            "d0602bc32877639f2d9a70741614882512083431b48b9f4e98a88e1067eb4d68",
+        )
+        windows = manifest["artifacts"]["windows"]
+        linux = manifest["artifacts"]["linux"]
+        self.assertEqual(windows["expected_bytes"], 2293660)
+        self.assertEqual(windows["expected_sha256"].lower(), REFEREE_SHA256)
+        self.assertEqual(
+            worker.REFEREE_PINS[CONTRACT]["Windows"].lower(),
+            REFEREE_SHA256,
+        )
+        self.assertIsNone(linux["expected_sha256"])
+        self.assertIsNone(linux["relative_path"])
+        self.assertIsNone(worker.REFEREE_PINS[CONTRACT]["Linux"])
+        worker_path = worker.CONTRACT_REFEREE_PATHS[CONTRACT]["Windows"]
+        self.assertEqual(
+            Path(worker_path),
+            Path("referees") / CONTRACT / windows["relative_path"],
+        )
+        self.assertIsNone(
+            worker.CONTRACT_REFEREE_PATHS[CONTRACT]["Linux"]
+        )
+
+
+class CrazyhouseServerContractTests(unittest.TestCase):
+
+    @staticmethod
+    def config(contract=CONTRACT, book_name=BOOK):
+        return {
+            "engines": {
+                ENGINE: {"variant_contract": contract},
+                "Baseline": {"variant_contract": contract},
+            },
+            "books": {book_name: {"variant_contract": contract}},
+        }
+
+    def test_exact_contract_is_accepted(self):
+        self.assertEqual(
+            variant_contract.configured_variant_contract(
+                self.config(), ENGINE, "Baseline", BOOK
+            ),
+            CONTRACT,
+        )
+
+    def test_missing_or_wrong_contract_is_rejected(self):
+        with self.assertRaisesRegex(
+            variant_contract.VariantContractError,
+            "Crazyhouse workloads require variant_contract",
+        ):
+            variant_contract.configured_variant_contract(
+                self.config(None), ENGINE, "Baseline", BOOK
+            )
+        with self.assertRaisesRegex(
+            variant_contract.VariantContractError,
+            "Crazyhouse workloads require variant_contract",
+        ):
+            variant_contract.configured_variant_contract(
+                self.config("LICHESS_HORDE_V1"),
+                ENGINE,
+                "Baseline",
+                BOOK,
+            )
+
+    def test_ambiguous_protected_family_is_rejected(self):
+        mixed_book = "CRAZYHOUSE_HORDE.epd"
+        with self.assertRaisesRegex(
+            variant_contract.VariantContractError,
+            "multiple protected variant families",
+        ):
+            variant_contract.configured_variant_contract(
+                self.config(CONTRACT, mixed_book),
+                ENGINE,
+                "Baseline",
+                mixed_book,
+            )
+
+
+class CrazyhouseClientRoutingTests(unittest.TestCase):
+
+    def setUp(self):
+        worker._REFEREE_DIGESTS.clear()
+
+    def test_exact_contract_routes_to_crazyhouse(self):
+        config = routing_config()
+        self.assertEqual(
+            worker.variant_routing(config), ("cutechess", "crazyhouse")
+        )
+        self.assertEqual(
+            worker.Cutechess.basic_settings(config),
+            "-repeat -recover -variant crazyhouse",
+        )
+
+    def test_name_inference_never_replaces_the_contract(self):
+        for config in (
+            routing_config(contract=None),
+            routing_config(book="ordinary.epd", contract=None),
+        ):
+            with self.subTest(book=config.workload["test"]["book"]["name"]):
+                with self.assertRaisesRegex(
+                    worker.VariantRoutingError,
+                    "require variant_contract=%s" % CONTRACT,
+                ):
+                    worker.variant_routing(config)
+
+    def test_contract_conflict_is_rejected(self):
+        config = routing_config(book="ATOMIC_openings.epd")
+        with self.assertRaisesRegex(
+            worker.VariantRoutingError, "conflicts with inferred route"
+        ):
+            worker.variant_routing(config)
+
+    def test_windows_path_is_contract_specific(self):
+        with mock.patch.object(worker.platform, "system", lambda: "Windows"):
+            path = Path(worker.referee_binary_path(routing_config()))
+        expected = (
+            ROOT
+            / "Client"
+            / "referees"
+            / CONTRACT
+            / "windows"
+            / "cutechess-cli.exe"
+        )
+        self.assertEqual(path.resolve(), expected.resolve())
+        self.assertNotEqual(path.resolve(), (ROOT / "Client" / "cutechess-ob.exe").resolve())
+
+    def test_linux_is_refused_without_a_pin_or_path(self):
+        with mock.patch.object(worker.platform, "system", lambda: "Linux"):
+            with self.assertRaisesRegex(
+                worker.VariantRoutingError,
+                "no recorded referee path.*refusing to fall back",
+            ):
+                worker.runner_base_command(routing_config())
+
+    def test_wrong_windows_referee_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cutechess-cli.exe"
+            binary.write_bytes(b"MZwrong-crazyhouse-referee")
+            with mock.patch.object(
+                worker, "referee_binary_path", return_value=str(binary)
+            ), mock.patch.object(worker.platform, "system", lambda: "Windows"):
+                with self.assertRaisesRegex(
+                    worker.VariantRoutingError, "requires the Windows referee"
+                ):
+                    worker.runner_base_command(routing_config())
+
+
+class CrazyhouseInstallerTests(unittest.TestCase):
+
+    @staticmethod
+    def fixture_manifest(payload, destination):
+        return {
+            "contract": CONTRACT,
+            "artifacts": {
+                "windows": {
+                    "relative_path": str(destination),
+                    "expected_bytes": len(payload),
+                    "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                    "magic_hex": "4D5A",
+                },
+                "linux": {
+                    "relative_path": None,
+                    "expected_bytes": None,
+                    "expected_sha256": None,
+                    "magic_hex": "7F454C46",
+                },
+            },
+        }
+
+    def test_check_and_install_are_hash_locked_and_non_overwriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"MZqualified-fixture"
+            source = root / "source.exe"
+            destination = root / "installed" / "cutechess-cli.exe"
+            source.write_bytes(payload)
+            manifest = self.fixture_manifest(payload, destination)
+            verification = installer.verify_artifact(
+                source, "windows", manifest
+            )
+            verification["destination"] = str(destination)
+            self.assertEqual(
+                installer.install_artifact(verification), "installed"
+            )
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(
+                installer.install_artifact(verification), "already-installed"
+            )
+            destination.write_bytes(b"MZdifferent")
+            with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+                installer.install_artifact(verification)
+
+    def test_linux_without_a_qualified_artifact_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "referee"
+            source.write_bytes(b"\x7fELFfixture")
+            manifest = self.fixture_manifest(b"MZfixture", "unused")
+            with self.assertRaisesRegex(ValueError, "no qualified linux"):
+                installer.verify_artifact(source, "linux", manifest)
+
+
+if __name__ == "__main__":
+    unittest.main()

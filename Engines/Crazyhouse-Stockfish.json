@@ -1,0 +1,44 @@
+{
+  "onboarding_ready": false,
+  "activation_blockers": [
+    "public_source_repository_missing",
+    "timing_clean_nps_missing",
+    "opening_artifact_not_published",
+    "legacy_network_not_registered",
+    "linux_referee_not_qualified",
+    "local_same_network_strength_gate_not_passed",
+    "official_canary_not_authorized"
+  ],
+  "private": false,
+  "nps": null,
+  "nps_status": "WAITING_TIMING_CLEAN_MEASUREMENT",
+  "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
+  "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
+  "build": {
+    "path": "src",
+    "compilers": ["g++"],
+    "cpuflags": [],
+    "systems": ["Windows"],
+    "artifact_roles": ["play"]
+  },
+  "test_presets": {
+    "default": {
+      "base_branch": "97fe071f2de738da0f7a570419f0bc89382eef19",
+      "both_bench": 113485,
+      "both_network": "crazyhouse_run15rl_e190_l03.nnue",
+      "both_options": "Threads=1 Hash=64",
+      "book_name": "CRAZYHOUSE_openings_v1.epd",
+      "upload_pgns": "TRUE",
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    }
+  },
+  "tune_presets": {
+    "default": {}
+  },
+  "datagen_presets": {
+    "default": {}
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "schema": "openbench-crazyhouse-referee-manifest/v1",
+  "contract": "LICHESS_CRAZYHOUSE_2026_08_12",
+  "onboarding_ready": false,
+  "variant": "crazyhouse",
+  "profile": {
+    "id": "LICHESS_CRAZYHOUSE_2026_08_12",
+    "sha256": "D0602BC32877639F2D9A70741614882512083431B48B9F4E98A88E1067EB4D68"
+  },
+  "referee_source": {
+    "upstream_repository": "https://github.com/AndyGrant/cutechess",
+    "upstream_commit": "24d4301152fb92ac442425e083a2658225f80720",
+    "qualified_commit": "d25294c1b1084f8854c0dc026ca3b150c911b4ee",
+    "qualified_tree": "208335f2040d7aac3e5c3b869cadf46b18fb5503",
+    "commits_above_upstream": 34,
+    "public_corresponding_source_available": false
+  },
+  "artifacts": {
+    "windows": {
+      "system": "Windows",
+      "relative_path": "windows/cutechess-cli.exe",
+      "expected_bytes": 2293660,
+      "expected_sha256": "F465025B2AD21526E2CBAB2B7DA1A231FF3D64F6E8A01A0BE5963F525A0BDDAE",
+      "magic_hex": "4D5A",
+      "qualification_result": "PASS_G4_CURRENT_REFEREE_QUALIFICATION",
+      "qualification_receipt_bytes": 5981,
+      "qualification_receipt_sha256": "282E92D561157210C554B37C2662EB45BDFC1F1DEFF9B6A7C49EFAC075676C59",
+      "published": false
+    },
+    "linux": {
+      "system": "Linux",
+      "relative_path": null,
+      "expected_bytes": null,
+      "expected_sha256": null,
+      "magic_hex": "7F454C46",
+      "qualification_result": null,
+      "published": false
+    }
+  },
+  "capability_barrier": {
+    "uci_option": "CrazyhouseProfile",
+    "nonce_option": "CrazyhouseCapabilityNonce",
+    "ack_prefix": "info string crazyhouse_capability_ack status=ok",
+    "required_before_game_start": true
+  },
+  "activation_blockers": [
+    "public_corresponding_referee_source_missing",
+    "windows_referee_artifact_not_published",
+    "linux_referee_not_qualified",
+    "crazyhouse_engine_repository_not_public",
+    "crazyhouse_book_not_published",
+    "crazyhouse_network_not_registered",
+    "local_same_network_strength_gate_not_passed",
+    "official_canary_not_authorized"
+  ]
+}

@@ -734,6 +734,7 @@ VARIANTS = {
     'SPELL'     : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
     'ALICE'     : ('uci-pair-runner', 'alice'       ),
     'TERACHESS' : ('uci-pair-runner', 'terachess'   ),
+    'CRAZYHOUSE': ('cutechess'      , 'crazyhouse'  ),
     'HORDE'     : ('cutechess'      , 'horde'        ),
     'SHATRANJ'  : ('cutechess'      , 'shatranj'     ),
     'ATOMIC'    : ('cutechess'      , 'atomic'       ),
@@ -749,6 +750,7 @@ ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'TERACHESS-STOCKFISH'                : ('uci-pair-runner', 'terachess'  ),
+    'CRAZYHOUSE-STOCKFISH'               : ('cutechess'      , 'crazyhouse' ),
     'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
     'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
@@ -766,12 +768,16 @@ UCI_PAIR_VARIANT_FLAGS = {
 }
 
 # Only contracts the Server can actually emit belong here. OpenBench/config.py
-# constrains the stored value to ``[A-Z0-9][A-Z0-9_]{0,63}`` and
-# OpenBench/variant_contract.py only knows LICHESS_HORDE_V1, so lowercase
-# entries were unreachable and advertised a contract vocabulary that does not
-# exist. Anything else must fail closed through the check below.
+# constrains the stored value to ``[A-Z0-9][A-Z0-9_]{0,63}``; anything else
+# must fail closed through the check below.
 VARIANT_CONTRACTS = {
+    'LICHESS_CRAZYHOUSE_2026_08_12': ('cutechess', 'crazyhouse'),
     'LICHESS_HORDE_V1': ('cutechess', 'horde'),
+}
+
+REQUIRED_CONTRACTS_BY_ROUTE = {
+    ('cutechess', 'crazyhouse'): 'LICHESS_CRAZYHOUSE_2026_08_12',
+    ('cutechess', 'horde'): 'LICHESS_HORDE_V1',
 }
 
 # Contracts whose arbitration semantics are not what a stock cutechess build
@@ -781,9 +787,26 @@ VARIANT_CONTRACTS = {
 # fails if the two ever disagree. ``None`` means "no reproducible build has been
 # recorded for this platform yet", which is refused exactly like a mismatch.
 REFEREE_PINS = {
+    'LICHESS_CRAZYHOUSE_2026_08_12': {
+        'Windows': 'F465025B2AD21526E2CBAB2B7DA1A231FF3D64F6E8A01A0BE5963F525A0BDDAE',
+        'Linux'  : None,
+    },
     'LICHESS_HORDE_V1': {
         'Windows': '1C0BBAB69E15A277C0B68BF032848B513F706749999CD5F6D09A1FB60F05B8A6',
         'Linux'  : '38F757CE9A735189E89305E5590320D0AE161C74092D1851E2049FFF212C4485',
+    },
+}
+
+# Crazyhouse is deliberately isolated from the shared Horde-patched binaries.
+# A missing platform entry is a scientific gate, not permission to fall back
+# to Client/cutechess-ob. Other contracts retain their established shared path.
+CONTRACT_REFEREE_PATHS = {
+    'LICHESS_CRAZYHOUSE_2026_08_12': {
+        'Windows': os.path.join(
+            'referees', 'LICHESS_CRAZYHOUSE_2026_08_12',
+            'windows', 'cutechess-cli.exe'
+        ),
+        'Linux': None,
     },
 }
 
@@ -847,9 +870,11 @@ def variant_routing(config):
             )
         return explicit
 
-    if inferred == ('cutechess', 'horde'):
+    required_contract = REQUIRED_CONTRACTS_BY_ROUTE.get(inferred)
+    if required_contract is not None:
         raise VariantRoutingError(
-            'Horde workloads require variant_contract=LICHESS_HORDE_V1'
+            '%s workloads require variant_contract=%s'
+            % (inferred[1].capitalize(), required_contract)
         )
 
     return inferred or ('cutechess', 'standard')
@@ -913,13 +938,36 @@ def verify_referee_binary(config, path):
         )
 
 
+def referee_binary_path(config):
+
+    contract = declared_variant_contract(config)
+    contract_paths = CONTRACT_REFEREE_PATHS.get(contract)
+    if contract_paths is None:
+        binary = ['cutechess-ob.exe', 'cutechess-ob'][IS_LINUX]
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), binary
+        )
+
+    system = platform.system()
+    relative = contract_paths.get(system)
+    if relative is None:
+        raise VariantRoutingError(
+            'Contract %s has no recorded referee path for %s; refusing to '
+            'fall back to the shared cutechess binary'
+            % (contract, system)
+        )
+
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), relative
+    )
+
+
 def runner_base_command(config):
 
     # Everything cutechess arbitrates natively keeps the original binary
     runner, variant = variant_routing(config)
     if runner == 'cutechess':
-        binary = ['cutechess-ob.exe', 'cutechess-ob'][IS_LINUX]
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), binary)
+        path = referee_binary_path(config)
         verify_referee_binary(config, path)
         return '"%s"' % path
 
