@@ -67,15 +67,19 @@ class CrazyhouseDraftTests(unittest.TestCase):
     def test_draft_is_present_but_cannot_be_scheduled(self):
         general = load_json("Config/config.json")
         engine = load_json("Engines/%s.json" % ENGINE)
+        book = load_json("Books/%s.json" % BOOK)
         self.assertNotIn(ENGINE, general["engines"])
         self.assertNotIn(BOOK, general["books"])
         self.assertFalse(engine["onboarding_ready"])
+        self.assertFalse(book["onboarding_ready"])
+        self.assertFalse(book["datagen_enabled"])
         self.assertIsNone(engine["nps"])
         self.assertEqual(
             engine["nps_status"], "WAITING_TIMING_CLEAN_MEASUREMENT"
         )
         self.assertEqual(engine["source"], "https://github.com/Belzedar94/Crazyhouse-Stockfish")
         self.assertEqual(engine["variant_contract"], CONTRACT)
+        self.assertEqual(book["variant_contract"], CONTRACT)
         self.assertEqual(engine["build"]["systems"], ["Windows"])
         self.assertEqual(engine["build"]["artifact_roles"], ["play"])
         defaults = engine["test_presets"]["default"]
@@ -87,6 +91,29 @@ class CrazyhouseDraftTests(unittest.TestCase):
         )
         self.assertNotIn("test_bounds", defaults)
         self.assertNotIn("test_max_games", defaults)
+        self.assertEqual(
+            engine["qualified_source"]["official_stockfish_ancestor"],
+            "229f6339e537a097a79831cd06dbfdb3e623d4ac",
+        )
+        self.assertEqual(
+            engine["legacy_evaluator"]["sha256"], NETWORK_SHA256
+        )
+        self.assertFalse(
+            engine["legacy_evaluator"][
+                "alias_or_champion_change_authorized"
+            ]
+        )
+        self.assertEqual(book["sha"], BOOK_SHA256)
+        self.assertEqual(book["raw_sha"], BOOK_SHA256)
+        self.assertEqual(book["archive_sha256"], BOOK_ARCHIVE_SHA256)
+        self.assertEqual(book["source_status"], "LOCAL_COMMIT_NOT_PUBLISHED")
+        self.assertEqual(
+            book["source"],
+            "https://raw.githubusercontent.com/Belzedar94/OpenBench/"
+            "42e6cd69196876a1264b346e6d749a8ed75c16e2/Books/"
+            + BOOK
+            + ".zip",
+        )
 
     def test_opening_alias_is_byte_exact_and_deterministic(self):
         archive = ROOT / "Books" / (BOOK + ".zip")

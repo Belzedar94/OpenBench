@@ -13,6 +13,20 @@
   "nps": null,
   "nps_status": "WAITING_TIMING_CLEAN_MEASUREMENT",
   "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
+  "qualified_source": {
+    "commit": "97fe071f2de738da0f7a570419f0bc89382eef19",
+    "tree": "f07f7c84d05726089e9c915eaa7f4f6859e33a8e",
+    "src_tree": "74b74e4adbd01f8bc46c0597fb64b30733a1506b",
+    "official_stockfish_ancestor": "229f6339e537a097a79831cd06dbfdb3e623d4ac"
+  },
+  "legacy_evaluator": {
+    "network_name": "crazyhouse_run15rl_e190_l03.nnue",
+    "public_alias_candidate": "Crazyhouse_v1.nnue",
+    "bytes": 58534811,
+    "sha256": "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43",
+    "embedded_in_play_artifact": true,
+    "alias_or_champion_change_authorized": false
+  },
   "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
   "build": {
     "path": "src",
