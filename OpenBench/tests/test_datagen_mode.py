@@ -114,7 +114,9 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('48', error)
+        self.assertIn(
+            str(OpenBench.config.OPENBENCH_CONFIG['client_version']), error
+        )
 
 
 class DatagenModeTests(TestCase):
