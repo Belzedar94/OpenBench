@@ -1,5 +1,5 @@
 {
-    "client_version": 47,
+    "client_version": 48,
     "client_repo_url": "https://github.com/Belzedar94/OpenBench",
     "client_repo_ref": "e976699e78f27ceb9405496ec06ee31c32a67cd7",
     "use_cross_approval": false,
@@ -52,6 +52,7 @@
         "Fairy-Stockfish-Atomic-Baseline",
         "Horde-Stockfish",
         "Terachess-Stockfish",
+        "3Check-Stockfish",
         "Crazyhouse-Stockfish"
     ]
 }

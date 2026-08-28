@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 47 # Client version to send to the Server
+CLIENT_VERSION   = 48 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -731,6 +731,8 @@ class ServerReporter:
 ## standard chess through cutechess, exactly as before.
 
 VARIANTS = {
+    'THREECHECK': ('cutechess'      , '3check'      ),
+    '3CHECK'     : ('cutechess'      , '3check'      ),
     'SPELL'     : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
     'ALICE'     : ('uci-pair-runner', 'alice'       ),
     'TERACHESS' : ('uci-pair-runner', 'terachess'   ),
@@ -747,6 +749,7 @@ VARIANTS = {
 # genfens builds the openings by calling the engine): route by the dev
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
+    '3CHECK-STOCKFISH'                   : ('cutechess'      , '3check'     ),
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'TERACHESS-STOCKFISH'                : ('uci-pair-runner', 'terachess'  ),
@@ -773,6 +776,7 @@ UCI_PAIR_VARIANT_FLAGS = {
 VARIANT_CONTRACTS = {
     'LICHESS_CRAZYHOUSE_2026_08_12': ('cutechess', 'crazyhouse'),
     'LICHESS_HORDE_V1': ('cutechess', 'horde'),
+    'LICHESS_THREECHECK_V1': ('cutechess', '3check'),
 }
 
 REQUIRED_CONTRACTS_BY_ROUTE = {

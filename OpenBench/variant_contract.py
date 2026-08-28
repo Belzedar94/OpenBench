@@ -1,6 +1,7 @@
 KNOWN_VARIANT_CONTRACTS = {
     'LICHESS_CRAZYHOUSE_2026_08_12',
     'LICHESS_HORDE_V1',
+    'LICHESS_THREECHECK_V1',
 }
 
 HORDE_ENGINE_NAMES = {
@@ -12,14 +13,26 @@ CRAZYHOUSE_ENGINE_NAMES = {
     'Crazyhouse-Stockfish',
 }
 
+THREECHECK_ENGINE_NAMES = {
+    '3Check-Stockfish',
+}
+
+BOOKLESS = 'NONE'
+
 PROTECTED_VARIANT_FAMILIES = (
     (
         'Crazyhouse',
         CRAZYHOUSE_ENGINE_NAMES,
-        'CRAZYHOUSE',
+        ('CRAZYHOUSE',),
         'LICHESS_CRAZYHOUSE_2026_08_12',
     ),
-    ('Horde', HORDE_ENGINE_NAMES, 'HORDE', 'LICHESS_HORDE_V1'),
+    ('Horde', HORDE_ENGINE_NAMES, ('HORDE',), 'LICHESS_HORDE_V1'),
+    (
+        '3Check',
+        THREECHECK_ENGINE_NAMES,
+        ('3CHECK', 'THREECHECK'),
+        'LICHESS_THREECHECK_V1',
+    ),
 )
 
 
@@ -34,8 +47,9 @@ def configured_variant_contract(config, dev_engine, base_engine, book_name):
     contracts = {
         engines[dev_engine].get('variant_contract'),
         engines[base_engine].get('variant_contract'),
-        books.get(book_name, {}).get('variant_contract'),
     }
+    if book_name != BOOKLESS:
+        contracts.add(books.get(book_name, {}).get('variant_contract'))
 
     if len(contracts) != 1:
         raise VariantContractError(
@@ -45,12 +59,12 @@ def configured_variant_contract(config, dev_engine, base_engine, book_name):
     contract = contracts.pop()
     required = {
         required_contract: family
-        for family, engine_names, book_token, required_contract
+        for family, engine_names, book_tokens, required_contract
         in PROTECTED_VARIANT_FAMILIES
         if (
             dev_engine in engine_names
             or base_engine in engine_names
-            or book_token in book_name.upper()
+            or any(token in book_name.upper() for token in book_tokens)
         )
     }
 
