@@ -274,6 +274,16 @@ def service_order(queryset, now=None):
             .order_by(*SERVICE_KEYS, 'id'))
 
 
+def _queue_ahead_cache_key(task_id):
+    return 'atomicdb.qahead.%d' % task_id
+
+
+def invalidate_queue_ahead(task_id):
+    """Forget the cached place of a task whose service order just changed."""
+    from django.core.cache import cache
+    cache.delete(_queue_ahead_cache_key(task_id))
+
+
 def queue_ahead(task):
     """Cuantas peticiones de visitante cobran antes que ``task``, o ``None``.
 
@@ -307,7 +317,7 @@ def queue_ahead(task):
     if task is None:
         return None
     from django.core.cache import cache
-    clave = 'atomicdb.qahead.%d' % task.id
+    clave = _queue_ahead_cache_key(task.id)
     # -1 codifica el None de "fuera de la banda servible": un None a secas en
     # la cache es indistinguible de un fallo y recomputaria cada render.
     sitio = cache.get(clave)

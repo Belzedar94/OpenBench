@@ -4845,6 +4845,8 @@ def api_queue_bump(request, task_id):
             else:
                 AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
                 status, moved = 'moved', True
+    if moved:
+        live_request.invalidate_queue_ahead(task_id)
     back = request.POST.get('back') or ''
     if back:
         own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
