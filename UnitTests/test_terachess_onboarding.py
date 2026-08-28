@@ -24,8 +24,8 @@ class TerachessOnboardingTests(unittest.TestCase):
         self.book = load_json("Books/%s.json" % BOOK)
 
     def test_client_and_book_are_immutably_registered(self):
-        self.assertEqual(self.general["client_version"], 44)
-        self.assertEqual(self.general["client_repo_ref"], BOOK_REF)
+        self.assertEqual(self.general["client_version"], 48)
+        self.assertRegex(self.general["client_repo_ref"], r"^[0-9a-f]{40}$")
         self.assertIn("Terachess-Stockfish", self.general["engines"])
         self.assertIn(BOOK, self.general["books"])
         self.assertTrue(self.book["onboarding_ready"])

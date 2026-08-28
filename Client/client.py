@@ -89,6 +89,33 @@ def archive_client_root(zip_file):
         raise ValueError('Client archive has an unexpected root')
     return root
 
+
+def copy_client_tree(client_dir, destination):
+
+    client_dir = os.path.abspath(client_dir)
+    destination = os.path.abspath(destination)
+
+    for root, dirs, files in os.walk(client_dir):
+        relative = os.path.relpath(root, client_dir)
+        target_dir = (
+            destination
+            if relative == '.'
+            else os.path.abspath(os.path.join(destination, relative))
+        )
+        if os.path.commonpath([destination, target_dir]) != destination:
+            raise ValueError('Client archive escaped the destination')
+        os.makedirs(target_dir, exist_ok=True)
+
+        for file in files:
+            # The bootstrap intentionally remains stable while worker modules
+            # and contract-specific artifacts hot-update around it.
+            if relative == '.' and file == 'client.py':
+                continue
+            shutil.copy2(
+                os.path.join(root, file),
+                os.path.join(target_dir, file),
+            )
+
 def custom_help(default_help):
 
     print (default_help)
@@ -165,12 +192,12 @@ def download_client_files(args):
                     archive_root = archive_client_root(zip_file)
                     zip_file.extractall(temp_dir)
 
-                # Copy all files except client.py
+                # Preserve Client-relative paths. Contract-specific referees
+                # and their app-local runtimes must not be flattened into the
+                # worker root. Older bootstraps did flatten paths, so the
+                # worker retains an exact-hash legacy placement fallback.
                 client_dir = os.path.join(temp_dir, archive_root, 'Client')
-                for root, dirs, files in os.walk(client_dir):
-                    for file in files:
-                        if file != 'client.py':
-                            shutil.copy2(os.path.join(root, file), os.path.join(os.getcwd(), file))
+                copy_client_tree(client_dir, os.getcwd())
 
     except:
         raise Exception('Unable to extract .zip archive contents')

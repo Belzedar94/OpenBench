@@ -48,6 +48,11 @@ class ClientUpdateTests(unittest.TestCase):
         payload = client_archive(
             ('%s/Client/client.py' % archive_root, b'new bootstrap'),
             ('%s/Client/worker.py' % archive_root, b'new worker'),
+            (
+                '%s/Client/referees/contract/windows/referee.exe'
+                % archive_root,
+                b'nested referee',
+            ),
         )
         version = {
             'client_repo_url': 'https://github.com/Belzedar94/OpenBench',
@@ -76,6 +81,17 @@ class ClientUpdateTests(unittest.TestCase):
 
             self.assertEqual(bootstrap.read_bytes(), b'old bootstrap')
             self.assertEqual(Path(target, 'worker.py').read_bytes(), b'new worker')
+            self.assertEqual(
+                Path(
+                    target,
+                    'referees',
+                    'contract',
+                    'windows',
+                    'referee.exe',
+                ).read_bytes(),
+                b'nested referee',
+            )
+            self.assertFalse(Path(target, 'referee.exe').exists())
 
     def test_archive_layout_fails_closed(self):
         payload = client_archive(

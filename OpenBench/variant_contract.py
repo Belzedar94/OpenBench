@@ -1,4 +1,5 @@
 KNOWN_VARIANT_CONTRACTS = {
+    'LICHESS_CRAZYHOUSE_2026_08_12',
     'LICHESS_HORDE_V1',
     'LICHESS_THREECHECK_V1',
 }
@@ -8,11 +9,31 @@ HORDE_ENGINE_NAMES = {
     'Fairy-Stockfish-Hordetest-Baseline',
 }
 
+CRAZYHOUSE_ENGINE_NAMES = {
+    'Crazyhouse-Stockfish',
+}
+
 THREECHECK_ENGINE_NAMES = {
     '3Check-Stockfish',
 }
 
 BOOKLESS = 'NONE'
+
+PROTECTED_VARIANT_FAMILIES = (
+    (
+        'Crazyhouse',
+        CRAZYHOUSE_ENGINE_NAMES,
+        ('CRAZYHOUSE',),
+        'LICHESS_CRAZYHOUSE_2026_08_12',
+    ),
+    ('Horde', HORDE_ENGINE_NAMES, ('HORDE',), 'LICHESS_HORDE_V1'),
+    (
+        '3Check',
+        THREECHECK_ENGINE_NAMES,
+        ('3CHECK', 'THREECHECK'),
+        'LICHESS_THREECHECK_V1',
+    ),
+)
 
 
 class VariantContractError(ValueError):
@@ -36,27 +57,30 @@ def configured_variant_contract(config, dev_engine, base_engine, book_name):
         )
 
     contract = contracts.pop()
-    horde_workload = (
-        dev_engine in HORDE_ENGINE_NAMES
-        or base_engine in HORDE_ENGINE_NAMES
-        or 'HORDE' in book_name.upper()
-    )
+    required = {
+        required_contract: family
+        for family, engine_names, book_tokens, required_contract
+        in PROTECTED_VARIANT_FAMILIES
+        if (
+            dev_engine in engine_names
+            or base_engine in engine_names
+            or any(token in book_name.upper() for token in book_tokens)
+        )
+    }
 
-    if horde_workload and contract != 'LICHESS_HORDE_V1':
+    if len(required) > 1:
         raise VariantContractError(
-            'Horde workloads require variant_contract=LICHESS_HORDE_V1'
+            'Workload matches multiple protected variant families: %s'
+            % ', '.join(sorted(required.values()))
         )
 
-    threecheck_workload = (
-        dev_engine in THREECHECK_ENGINE_NAMES
-        or base_engine in THREECHECK_ENGINE_NAMES
-        or '3CHECK' in book_name.upper()
-        or 'THREECHECK' in book_name.upper()
-    )
-    if threecheck_workload and contract != 'LICHESS_THREECHECK_V1':
-        raise VariantContractError(
-            '3Check workloads require variant_contract=LICHESS_THREECHECK_V1'
-        )
+    if required:
+        required_contract, family = next(iter(required.items()))
+        if contract != required_contract:
+            raise VariantContractError(
+                '%s workloads require variant_contract=%s'
+                % (family, required_contract)
+            )
 
     if contract is not None and contract not in KNOWN_VARIANT_CONTRACTS:
         raise VariantContractError('Unknown variant contract: %s' % contract)

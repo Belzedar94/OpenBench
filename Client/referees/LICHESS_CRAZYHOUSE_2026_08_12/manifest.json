@@ -1,0 +1,141 @@
+{
+  "schema": "openbench-crazyhouse-referee-manifest/v2",
+  "contract": "LICHESS_CRAZYHOUSE_2026_08_12",
+  "onboarding_ready": true,
+  "variant": "crazyhouse",
+  "profile": {
+    "id": "LICHESS_CRAZYHOUSE_2026_08_12",
+    "sha256": "D0602BC32877639F2D9A70741614882512083431B48B9F4E98A88E1067EB4D68"
+  },
+  "referee_source": {
+    "upstream_repository": "https://github.com/AndyGrant/cutechess",
+    "upstream_commit": "24d4301152fb92ac442425e083a2658225f80720",
+    "qualified_commit": "d25294c1b1084f8854c0dc026ca3b150c911b4ee",
+    "qualified_tree": "208335f2040d7aac3e5c3b869cadf46b18fb5503",
+    "commits_above_upstream": 34,
+    "public_repository": "https://github.com/Belzedar94/Crazyhouse-cutechess",
+    "public_corresponding_source_available": true
+  },
+  "artifacts": {
+    "windows": {
+      "system": "Windows",
+      "relative_path": "windows/cutechess-cli.exe",
+      "expected_bytes": 2293660,
+      "expected_sha256": "F465025B2AD21526E2CBAB2B7DA1A231FF3D64F6E8A01A0BE5963F525A0BDDAE",
+      "magic_hex": "4D5A",
+      "qualification_result": "PASS_G4_CURRENT_REFEREE_QUALIFICATION",
+      "qualification_receipt_bytes": 5981,
+      "qualification_receipt_sha256": "282E92D561157210C554B37C2662EB45BDFC1F1DEFF9B6A7C49EFAC075676C59",
+      "runtime": {
+        "mode": "app-local",
+        "files": [
+          {
+            "name": "libdouble-conversion.dll",
+            "bytes": 77810,
+            "sha256": "925E994660FC9848E1A2C258952D0188043EAA82869DDBC98A54B3EA2A5FEC9F",
+            "package": "mingw-w64-x86_64-double-conversion",
+            "version": "3.4.0-1",
+            "license": "BSD-3-Clause"
+          },
+          {
+            "name": "libgcc_s_seh-1.dll",
+            "bytes": 151732,
+            "sha256": "278F1101F2371C58B6B412A3206718E22343940A5164ACEB4FB75F2BF3B38ED4",
+            "package": "mingw-w64-x86_64-gcc-libs",
+            "version": "16.1.0-5",
+            "license": "GPL-3.0-or-later WITH GCC-exception-3.1"
+          },
+          {
+            "name": "libicudt78.dll",
+            "bytes": 33120806,
+            "sha256": "47D19B605A28461D44E0D8C062C465E92C9EDFB0244F023A8066F7337D317D0E",
+            "package": "mingw-w64-x86_64-icu",
+            "version": "78.3-3",
+            "license": "ICU"
+          },
+          {
+            "name": "libicuin78.dll",
+            "bytes": 3186867,
+            "sha256": "AF3341827897A41AB16667EE0699ACDB2B0338C3BF4ECC7F510A324F18755422",
+            "package": "mingw-w64-x86_64-icu",
+            "version": "78.3-3",
+            "license": "ICU"
+          },
+          {
+            "name": "libicuuc78.dll",
+            "bytes": 1999466,
+            "sha256": "3186171E946552E2A5E371CD0BC68BF37BD6E229A85DBB0D3C40231CF0858B49",
+            "package": "mingw-w64-x86_64-icu",
+            "version": "78.3-3",
+            "license": "ICU"
+          },
+          {
+            "name": "libpcre2-16-0.dll",
+            "bytes": 653924,
+            "sha256": "3E8DBD40F92E96AE24F7386BD129FB055865DA8F55F2FB03EB7744315976942F",
+            "package": "mingw-w64-x86_64-pcre2",
+            "version": "10.47-1",
+            "license": "BSD-3-Clause"
+          },
+          {
+            "name": "libstdc++-6.dll",
+            "bytes": 2667040,
+            "sha256": "3529D11C422B2AAF0BBAD7221BF62BA7B5A39F854E89A015BB58B6B55A677DA1",
+            "package": "mingw-w64-x86_64-gcc-libs",
+            "version": "16.1.0-5",
+            "license": "GPL-3.0-or-later WITH GCC-exception-3.1"
+          },
+          {
+            "name": "libwinpthread-1.dll",
+            "bytes": 65955,
+            "sha256": "F6AD1378F098C1229BE8E44BF22A9CC76C06A5D1630290D9BE43F203430894CB",
+            "package": "mingw-w64-x86_64-winpthreads",
+            "version": "14.0.0.r179.g24aaa6147-1",
+            "license": "MIT AND BSD-3-Clause-Clear"
+          },
+          {
+            "name": "libzstd.dll",
+            "bytes": 1196744,
+            "sha256": "B13D4F30B93C96823473D742DDA0075F7334CBA03A40C33D8A7DC282E37B1500",
+            "package": "mingw-w64-x86_64-zstd",
+            "version": "1.5.7-1",
+            "license": "BSD-3-Clause OR GPL-2.0-or-later"
+          },
+          {
+            "name": "Qt5Core.dll",
+            "bytes": 5533628,
+            "sha256": "A0508917A060A8282ED2B05C556FA04A5E7619F877E18F7B3352BE1D37F1DDDE",
+            "package": "mingw-w64-x86_64-qt5-base",
+            "version": "5.15.19+kde+r96-1",
+            "license": "LGPL-3.0-only WITH Qt-GPL-exception-1.0 OR GPL-2.0-only OR GPL-3.0-only"
+          },
+          {
+            "name": "zlib1.dll",
+            "bytes": 120814,
+            "sha256": "CB7AB3788D10940DF874ACD97B1821BBB5EE4A91F3EEC11982BB5BF7A3C96443",
+            "package": "mingw-w64-x86_64-zlib",
+            "version": "1.3.1-1",
+            "license": "Zlib"
+          }
+        ]
+      },
+      "published": true
+    },
+    "linux": {
+      "system": "Linux",
+      "relative_path": null,
+      "expected_bytes": null,
+      "expected_sha256": null,
+      "magic_hex": "7F454C46",
+      "qualification_result": null,
+      "published": false
+    }
+  },
+  "capability_barrier": {
+    "uci_option": "CrazyhouseProfile",
+    "nonce_option": "CrazyhouseCapabilityNonce",
+    "ack_prefix": "info string crazyhouse_capability_ack status=ok",
+    "required_before_game_start": true
+  },
+  "activation_blockers": []
+}

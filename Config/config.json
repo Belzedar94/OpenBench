@@ -1,7 +1,7 @@
 {
-    "client_version": 45,
+    "client_version": 48,
     "client_repo_url": "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref": "18d1df6bdb9ff8f9609e319cf6f7b3a486daa4f8",
+    "client_repo_ref": "964f6221bdd94fb1c3c01a9aba14fb533ce35b3f",
     "use_cross_approval": false,
     "require_login_to_view": false,
     "require_manual_registration": false,
@@ -42,7 +42,8 @@
         "HORDE_openings_v3.epd",
         "HORDE_openings_v3_train.epd",
         "HORDE_openings_v3_validation.epd",
-        "TERACHESS_openings_v1.epd"
+        "TERACHESS_openings_v1.epd",
+        "CRAZYHOUSE_openings.epd"
     ],
     "engines": [
         "Spell-Stockfish",
@@ -51,6 +52,7 @@
         "Fairy-Stockfish-Atomic-Baseline",
         "Horde-Stockfish",
         "Terachess-Stockfish",
-        "3Check-Stockfish"
+        "3Check-Stockfish",
+        "Crazyhouse-Stockfish"
     ]
 }

@@ -1,0 +1,63 @@
+{
+  "onboarding_ready": true,
+  "activation_blockers": [],
+  "private": false,
+  "nps": 234000,
+  "nps_status": "THREE_DEPTH10_RUNS_235088_233349_232775",
+  "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
+  "qualified_source": {
+    "commit": "5883acbeffd53138d31b278894d1fee451adffe8",
+    "tree": "ed166600c76a7ab0fd2abca5f6123c7e2eed1fbd",
+    "src_tree": "d01af0408fdeb642810fbe3aa76896f9110dacbe",
+    "official_stockfish_ancestor": "229f6339e537a097a79831cd06dbfdb3e623d4ac"
+  },
+  "legacy_evaluator": {
+    "network_name": "crazyhouse_run15rl_e190_l03.nnue",
+    "public_alias_candidate": "Crazyhouse_v1.nnue",
+    "bytes": 58534811,
+    "sha256": "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43",
+    "embedded_in_play_artifact": true,
+    "alias_or_champion_change_authorized": false
+  },
+  "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
+  "cutechess_max_concurrency": 12,
+  "cutechess_launch_stagger_ms": 1000,
+  "build": {
+    "path": "src",
+    "compilers": ["g++"],
+    "cpuflags": [],
+    "systems": ["Windows"],
+    "artifact_roles": ["play"]
+  },
+  "test_presets": {
+    "default": {
+      "base_branch": "5883acbeffd53138d31b278894d1fee451adffe8",
+      "both_bench": 38919,
+      "both_network": "crazyhouse_run15rl_e190_l03.nnue",
+      "book_name": "CRAZYHOUSE_openings.epd",
+      "test_bounds": "[0.00, 10.00]",
+      "test_confidence": "[0.05, 0.05]",
+      "upload_pgns": "TRUE",
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    },
+    "STC": {
+      "both_options": "Threads=1 Hash=32",
+      "both_time_control": "10.0+0.1",
+      "workload_size": 16
+    },
+    "LTC": {
+      "both_options": "Threads=1 Hash=128",
+      "both_time_control": "30.0+0.3",
+      "workload_size": 8
+    }
+  },
+  "tune_presets": {
+    "default": {}
+  },
+  "datagen_presets": {
+    "default": {}
+  }
+}
