@@ -1,22 +1,14 @@
 {
-  "onboarding_ready": false,
-  "activation_blockers": [
-    "public_source_repository_missing",
-    "timing_clean_nps_missing",
-    "opening_artifact_not_published",
-    "legacy_network_not_registered",
-    "linux_referee_not_qualified",
-    "local_same_network_strength_gate_not_passed",
-    "official_canary_not_authorized"
-  ],
+  "onboarding_ready": true,
+  "activation_blockers": [],
   "private": false,
-  "nps": null,
-  "nps_status": "WAITING_TIMING_CLEAN_MEASUREMENT",
+  "nps": 234000,
+  "nps_status": "THREE_DEPTH10_RUNS_235088_233349_232775",
   "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
   "qualified_source": {
-    "commit": "97fe071f2de738da0f7a570419f0bc89382eef19",
-    "tree": "f07f7c84d05726089e9c915eaa7f4f6859e33a8e",
-    "src_tree": "74b74e4adbd01f8bc46c0597fb64b30733a1506b",
+    "commit": "5883acbeffd53138d31b278894d1fee451adffe8",
+    "tree": "ed166600c76a7ab0fd2abca5f6123c7e2eed1fbd",
+    "src_tree": "d01af0408fdeb642810fbe3aa76896f9110dacbe",
     "official_stockfish_ancestor": "229f6339e537a097a79831cd06dbfdb3e623d4ac"
   },
   "legacy_evaluator": {
@@ -28,6 +20,8 @@
     "alias_or_champion_change_authorized": false
   },
   "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
+  "cutechess_max_concurrency": 12,
+  "cutechess_launch_stagger_ms": 1000,
   "build": {
     "path": "src",
     "compilers": ["g++"],
@@ -37,16 +31,27 @@
   },
   "test_presets": {
     "default": {
-      "base_branch": "97fe071f2de738da0f7a570419f0bc89382eef19",
-      "both_bench": 113485,
+      "base_branch": "5883acbeffd53138d31b278894d1fee451adffe8",
+      "both_bench": 38919,
       "both_network": "crazyhouse_run15rl_e190_l03.nnue",
-      "both_options": "Threads=1 Hash=64",
       "book_name": "CRAZYHOUSE_openings_v1.epd",
+      "test_bounds": "[0.00, 10.00]",
+      "test_confidence": "[0.05, 0.05]",
       "upload_pgns": "TRUE",
       "win_adj": "None",
       "draw_adj": "None",
       "syzygy_wdl": "DISABLED",
       "syzygy_adj": "DISABLED"
+    },
+    "STC": {
+      "both_options": "Threads=1 Hash=32",
+      "both_time_control": "10.0+0.1",
+      "workload_size": 16
+    },
+    "LTC": {
+      "both_options": "Threads=1 Hash=128",
+      "both_time_control": "30.0+0.3",
+      "workload_size": 8
     }
   },
   "tune_presets": {

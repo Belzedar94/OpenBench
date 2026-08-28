@@ -1,7 +1,7 @@
 {
   "schema": "openbench-crazyhouse-referee-manifest/v1",
   "contract": "LICHESS_CRAZYHOUSE_2026_08_12",
-  "onboarding_ready": false,
+  "onboarding_ready": true,
   "variant": "crazyhouse",
   "profile": {
     "id": "LICHESS_CRAZYHOUSE_2026_08_12",
@@ -13,7 +13,8 @@
     "qualified_commit": "d25294c1b1084f8854c0dc026ca3b150c911b4ee",
     "qualified_tree": "208335f2040d7aac3e5c3b869cadf46b18fb5503",
     "commits_above_upstream": 34,
-    "public_corresponding_source_available": false
+    "public_repository": "https://github.com/Belzedar94/Crazyhouse-cutechess",
+    "public_corresponding_source_available": true
   },
   "artifacts": {
     "windows": {
@@ -25,7 +26,7 @@
       "qualification_result": "PASS_G4_CURRENT_REFEREE_QUALIFICATION",
       "qualification_receipt_bytes": 5981,
       "qualification_receipt_sha256": "282E92D561157210C554B37C2662EB45BDFC1F1DEFF9B6A7C49EFAC075676C59",
-      "published": false
+      "published": true
     },
     "linux": {
       "system": "Linux",
@@ -43,14 +44,5 @@
     "ack_prefix": "info string crazyhouse_capability_ack status=ok",
     "required_before_game_start": true
   },
-  "activation_blockers": [
-    "public_corresponding_referee_source_missing",
-    "windows_referee_artifact_not_published",
-    "linux_referee_not_qualified",
-    "crazyhouse_engine_repository_not_public",
-    "crazyhouse_book_not_published",
-    "crazyhouse_network_not_registered",
-    "local_same_network_strength_gate_not_passed",
-    "official_canary_not_authorized"
-  ]
+  "activation_blockers": []
 }

@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = "LICHESS_CRAZYHOUSE_2026_08_12"
 ENGINE = "Crazyhouse-Stockfish"
 BOOK = "CRAZYHOUSE_openings_v1.epd"
-ENGINE_COMMIT = "97fe071f2de738da0f7a570419f0bc89382eef19"
-BOOK_SHA256 = "a8976a380a6cc4b3a1a6aae3bf14249b2ab6d1bac6cf4a2715625d7c01747603"
-BOOK_ARCHIVE_SHA256 = "d919a19e3192a0457991dfafc95d320f33047a458277386334ef34d1bd14d820"
+ENGINE_COMMIT = "5883acbeffd53138d31b278894d1fee451adffe8"
+BOOK_SHA256 = "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa"
+BOOK_ARCHIVE_SHA256 = "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c"
 NETWORK_SHA256 = "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43"
 REFEREE_SHA256 = "f465025b2ad21526e2cbab2b7da1a231ff3d64f6e8a01a0be5963f525a0bddae"
 
@@ -62,20 +62,21 @@ def routing_config(book=BOOK, contract=CONTRACT):
     return SimpleNamespace(workload={"test": test})
 
 
-class CrazyhouseDraftTests(unittest.TestCase):
+class CrazyhouseActivationTests(unittest.TestCase):
 
-    def test_draft_is_present_but_cannot_be_scheduled(self):
+    def test_engine_and_book_are_active_with_frozen_defaults(self):
         general = load_json("Config/config.json")
         engine = load_json("Engines/%s.json" % ENGINE)
         book = load_json("Books/%s.json" % BOOK)
-        self.assertNotIn(ENGINE, general["engines"])
-        self.assertNotIn(BOOK, general["books"])
-        self.assertFalse(engine["onboarding_ready"])
-        self.assertFalse(book["onboarding_ready"])
+        self.assertIn(ENGINE, general["engines"])
+        self.assertIn(BOOK, general["books"])
+        self.assertTrue(engine["onboarding_ready"])
+        self.assertTrue(book["onboarding_ready"])
         self.assertFalse(book["datagen_enabled"])
-        self.assertIsNone(engine["nps"])
+        self.assertEqual(engine["nps"], 234000)
         self.assertEqual(
-            engine["nps_status"], "WAITING_TIMING_CLEAN_MEASUREMENT"
+            engine["nps_status"],
+            "THREE_DEPTH10_RUNS_235088_233349_232775",
         )
         self.assertEqual(engine["source"], "https://github.com/Belzedar94/Crazyhouse-Stockfish")
         self.assertEqual(engine["variant_contract"], CONTRACT)
@@ -84,13 +85,23 @@ class CrazyhouseDraftTests(unittest.TestCase):
         self.assertEqual(engine["build"]["artifact_roles"], ["play"])
         defaults = engine["test_presets"]["default"]
         self.assertEqual(defaults["base_branch"], ENGINE_COMMIT)
-        self.assertEqual(defaults["both_bench"], 113485)
+        self.assertEqual(defaults["both_bench"], 38919)
         self.assertEqual(
             defaults["both_network"],
             "crazyhouse_run15rl_e190_l03.nnue",
         )
-        self.assertNotIn("test_bounds", defaults)
+        self.assertEqual(defaults["test_bounds"], "[0.00, 10.00]")
         self.assertNotIn("test_max_games", defaults)
+        self.assertEqual(
+            engine["test_presets"]["STC"]["both_time_control"],
+            "10.0+0.1",
+        )
+        self.assertEqual(
+            engine["test_presets"]["LTC"]["both_time_control"],
+            "30.0+0.3",
+        )
+        self.assertNotIn("test_max_games", engine["test_presets"]["STC"])
+        self.assertNotIn("test_max_games", engine["test_presets"]["LTC"])
         self.assertEqual(
             engine["qualified_source"]["official_stockfish_ancestor"],
             "229f6339e537a097a79831cd06dbfdb3e623d4ac",
@@ -106,13 +117,12 @@ class CrazyhouseDraftTests(unittest.TestCase):
         self.assertEqual(book["sha"], BOOK_SHA256)
         self.assertEqual(book["raw_sha"], BOOK_SHA256)
         self.assertEqual(book["archive_sha256"], BOOK_ARCHIVE_SHA256)
-        self.assertEqual(book["source_status"], "LOCAL_COMMIT_NOT_PUBLISHED")
+        self.assertEqual(book["source_status"], "PUBLISHED_AND_REAUTHENTICATED")
         self.assertEqual(
             book["source"],
-            "https://raw.githubusercontent.com/Belzedar94/OpenBench/"
-            "42e6cd69196876a1264b346e6d749a8ed75c16e2/Books/"
-            + BOOK
-            + ".zip",
+            "https://raw.githubusercontent.com/Belzedar94/"
+            "Crazyhouse-Stockfish/" + ENGINE_COMMIT
+            + "/openbench/books/" + BOOK + ".zip",
         )
 
     def test_opening_alias_is_byte_exact_and_deterministic(self):
@@ -124,16 +134,16 @@ class CrazyhouseDraftTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as container:
             self.assertEqual(container.namelist(), [BOOK])
             payload = container.read(BOOK)
-        self.assertEqual(len(payload), 100204)
+        self.assertEqual(len(payload), 39922)
         self.assertEqual(hashlib.sha256(payload).hexdigest(), BOOK_SHA256)
-        self.assertEqual(len(payload.splitlines()), 1024)
-        self.assertEqual(len(set(payload.splitlines())), 1024)
+        self.assertEqual(len(payload.splitlines()), 599)
+        self.assertEqual(len(set(payload.splitlines())), 489)
 
     def test_manifest_pins_only_the_qualified_windows_referee(self):
         manifest = load_json(
             "Client/referees/%s/manifest.json" % CONTRACT
         )
-        self.assertFalse(manifest["onboarding_ready"])
+        self.assertTrue(manifest["onboarding_ready"])
         self.assertEqual(manifest["contract"], CONTRACT)
         self.assertEqual(
             manifest["profile"]["sha256"].lower(),
@@ -143,6 +153,21 @@ class CrazyhouseDraftTests(unittest.TestCase):
         linux = manifest["artifacts"]["linux"]
         self.assertEqual(windows["expected_bytes"], 2293660)
         self.assertEqual(windows["expected_sha256"].lower(), REFEREE_SHA256)
+        self.assertTrue(windows["published"])
+        self.assertTrue(
+            manifest["referee_source"][
+                "public_corresponding_source_available"
+            ]
+        )
+        binary = (
+            ROOT / "Client" / "referees" / CONTRACT
+            / windows["relative_path"]
+        )
+        self.assertEqual(binary.stat().st_size, windows["expected_bytes"])
+        self.assertEqual(
+            hashlib.sha256(binary.read_bytes()).hexdigest(),
+            REFEREE_SHA256,
+        )
         self.assertEqual(
             worker.REFEREE_PINS[CONTRACT]["Windows"].lower(),
             REFEREE_SHA256,

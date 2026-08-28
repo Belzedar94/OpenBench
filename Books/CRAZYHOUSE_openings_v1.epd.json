@@ -1,13 +1,16 @@
 {
-  "onboarding_ready": false,
+  "onboarding_ready": true,
   "datagen_enabled": false,
   "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
-  "sha": "a8976a380a6cc4b3a1a6aae3bf14249b2ab6d1bac6cf4a2715625d7c01747603",
-  "raw_sha": "a8976a380a6cc4b3a1a6aae3bf14249b2ab6d1bac6cf4a2715625d7c01747603",
-  "archive_sha256": "d919a19e3192a0457991dfafc95d320f33047a458277386334ef34d1bd14d820",
-  "source": "https://raw.githubusercontent.com/Belzedar94/OpenBench/42e6cd69196876a1264b346e6d749a8ed75c16e2/Books/CRAZYHOUSE_openings_v1.epd.zip",
-  "source_status": "LOCAL_COMMIT_NOT_PUBLISHED",
-  "roots": 1024,
-  "payload_bytes": 100204,
-  "alias_of": "crazyhouse-local-gate-openings-v2.epd"
+  "sha": "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa",
+  "raw_sha": "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa",
+  "archive_sha256": "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c",
+  "source": "https://raw.githubusercontent.com/Belzedar94/Crazyhouse-Stockfish/5883acbeffd53138d31b278894d1fee451adffe8/openbench/books/CRAZYHOUSE_openings.epd.zip",
+  "source_status": "PUBLISHED_AND_REAUTHENTICATED",
+  "positions": 599,
+  "unique_roots": 489,
+  "payload_bytes": 39922,
+  "upstream_repository": "https://github.com/fairy-stockfish/books",
+  "upstream_commit": "1b0cf1f9473b5412e1631a9327098ac1b38b096b",
+  "license": "GPL-3.0"
 }
