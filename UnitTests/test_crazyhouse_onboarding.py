@@ -15,7 +15,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = "LICHESS_CRAZYHOUSE_2026_08_12"
 ENGINE = "Crazyhouse-Stockfish"
-BOOK = "CRAZYHOUSE_openings_v1.epd"
+BOOK = "CRAZYHOUSE_openings.epd"
 ENGINE_COMMIT = "5883acbeffd53138d31b278894d1fee451adffe8"
 BOOK_SHA256 = "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa"
 BOOK_ARCHIVE_SHA256 = "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c"

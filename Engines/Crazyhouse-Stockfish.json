@@ -34,7 +34,7 @@
       "base_branch": "5883acbeffd53138d31b278894d1fee451adffe8",
       "both_bench": 38919,
       "both_network": "crazyhouse_run15rl_e190_l03.nnue",
-      "book_name": "CRAZYHOUSE_openings_v1.epd",
+      "book_name": "CRAZYHOUSE_openings.epd",
       "test_bounds": "[0.00, 10.00]",
       "test_confidence": "[0.05, 0.05]",
       "upload_pgns": "TRUE",

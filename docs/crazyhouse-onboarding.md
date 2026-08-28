@@ -1,30 +1,32 @@
 # Crazyhouse onboarding
 
-Status: **inactive local preparation**. This document is not an official
-OpenBench canary, a strength result, a production deployment, or publication
-authorization.
+Status: **activation candidate**. This document records the public identities
+and fail-closed route that must be reauthenticated after production deployment.
+It is not itself a strength result.
 
 ## Frozen identities
 
 - Variant contract: `LICHESS_CRAZYHOUSE_2026_08_12`
-- Engine commit: `97fe071f2de738da0f7a570419f0bc89382eef19`
-- Engine tree: `f07f7c84d05726089e9c915eaa7f4f6859e33a8e`
-- Engine `src` tree: `74b74e4adbd01f8bc46c0597fb64b30733a1506b`
+- Engine commit: `5883acbeffd53138d31b278894d1fee451adffe8`
+- Engine tree: `ed166600c76a7ab0fd2abca5f6123c7e2eed1fbd`
+- Engine `src` tree: `d01af0408fdeb642810fbe3aa76896f9110dacbe`
 - Official Stockfish ancestor: `229f6339e537a097a79831cd06dbfdb3e623d4ac`
-- Crazyhouse bench: `113485`
+- Crazyhouse bench: `38919`
 - Legacy network: 58,534,811 bytes, SHA-256
   `8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43`
-- Opening payload: `CRAZYHOUSE_openings_v1.epd`, 100,204 bytes,
-  1,024 unique roots, SHA-256
-  `a8976a380a6cc4b3a1a6aae3bf14249b2ab6d1bac6cf4a2715625d7c01747603`
-- Opening archive: 26,842 bytes, SHA-256
-  `d919a19e3192a0457991dfafc95d320f33047a458277386334ef34d1bd14d820`
+- Opening payload: `CRAZYHOUSE_openings.epd`, 39,922 bytes,
+  599 positions and 489 unique roots, SHA-256
+  `1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa`
+- Opening archive: 3,401 bytes, SHA-256
+  `d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c`
 - Windows referee: 2,293,660 bytes, SHA-256
   `f465025b2ad21526e2cbab2b7da1a231ff3d64f6e8a01a0be5963f525a0bddae`
 - Qualified referee source commit:
   `d25294c1b1084f8854c0dc026ca3b150c911b4ee`
 - Qualified referee source tree:
   `208335f2040d7aac3e5c3b869cadf46b18fb5503`
+- Qualified referee source repository:
+  `https://github.com/Belzedar94/Crazyhouse-cutechess`
 
 `Crazyhouse_v1.nnue` is only a candidate public alias. The inactive descriptor
 continues to name the authenticated legacy file and records that neither an
@@ -73,25 +75,11 @@ at the project-owned lease path
 `D:/Crazyhouse-Stockfish/leases/p10-openbench-onboarding-clean-288/result.json`.
 That local path is a receipt reference, not a public artifact URL.
 
-## Activation gates
+## Production contract
 
-`Crazyhouse-Stockfish` and `CRAZYHOUSE_openings_v1.epd` deliberately remain
-absent from `Config/config.json`; `onboarding_ready` is false and NPS is null.
-Activation requires all of the following:
-
-1. Publish and reauthenticate the corresponding engine and referee source.
-2. Publish the Windows referee and opening archive at immutable identities.
-3. Register the exact legacy network bytes.
-4. Qualify and pin a Linux referee, or keep the engine's supported systems
-   restricted to Windows.
-5. Complete the local same-network ladder at `2+0.02`, `10+0.1` and
-   `30+0.3`, with at least 50 games per rung and advancement only at displayed
-   LOS 100.0%.
-6. Obtain the required publication/resource authorization.
-7. Pin and deploy a new Client commit/version before scheduling anything.
-8. Run an authorized production canary at `https://belzedar.duckdns.org` and
-   authenticate its assignment, referee, network, book, `-variant crazyhouse`
-   logs and PGNs.
-
-Until every applicable gate passes, scheduling or claiming official OpenBench
-evidence is invalid.
+The active presets are single-thread `10.0+0.1` with Hash 32 and `30.0+0.3`
+with Hash 128. Both use SPRT bounds `[0.00, 10.00]`, the same legacy network,
+the official Crazyhouse book above, no adjudication, and no maximum-game cap.
+Only Windows workers are eligible. The first production workload is a canary;
+its assignment, referee digest, network, book, `-variant crazyhouse` command,
+logs and PGNs must be checked before any strength campaign is interpreted.

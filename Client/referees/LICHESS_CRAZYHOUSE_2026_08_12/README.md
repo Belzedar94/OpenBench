@@ -11,10 +11,9 @@ workload can start. A missing or different file is rejected without falling
 back to the shared referee.
 
 No Linux referee has been qualified. Linux assignments therefore fail closed.
-The manifest and engine scaffold are inactive until corresponding source and
-artifacts are public, the engine repository and opening artifact are available,
-the legacy network is registered, the local same-network strength ladder has
-passed, and an official canary has been authorized.
+The exact Windows binary is shipped in this client tree and its corresponding
+source is public at `Belzedar94/Crazyhouse-cutechess`, commit
+`d25294c1b1084f8854c0dc026ca3b150c911b4ee`.
 
 Validate an artifact without installing it:
 
