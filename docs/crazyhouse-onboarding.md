@@ -21,6 +21,8 @@ It is not itself a strength result.
   `d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c`
 - Windows referee: 2,293,660 bytes, SHA-256
   `f465025b2ad21526e2cbab2b7da1a231ff3d64f6e8a01a0be5963f525a0bddae`
+- Windows app-local runtime: 11 hash-pinned DLLs, 48,774,786 bytes total;
+  package versions and license texts are preserved with the artifact.
 - Qualified referee source commit:
   `d25294c1b1084f8854c0dc026ca3b150c911b4ee`
 - Qualified referee source tree:
@@ -42,9 +44,11 @@ also rejected.
 The Client maps the contract to `cutechess/crazyhouse`, emits
 `-variant crazyhouse`, and selects
 `Client/referees/LICHESS_CRAZYHOUSE_2026_08_12/<platform>/...`. It never falls
-back to the shared `Client/cutechess-ob` artifacts. The Windows executable is
-hashed before launch. No Linux artifact is qualified or pinned, so Linux
-assignments are refused.
+back to the shared `Client/cutechess-ob` artifacts. The Windows executable and
+all 11 runtime DLLs are hashed before launch. No Linux artifact is qualified or
+pinned, so Linux assignments are refused. Client 47 preserves nested update
+paths; workers with an older immutable bootstrap may use the legacy flattened
+placement only when the same complete package passes every hash.
 
 ## Local verification receipt
 
@@ -74,6 +78,14 @@ The machine-readable local result is 4,937 bytes with SHA-256
 at the project-owned lease path
 `D:/Crazyhouse-Stockfish/leases/p10-openbench-onboarding-clean-288/result.json`.
 That local path is a receipt reference, not a public artifact URL.
+
+The post-review deployment hardening is pinned at commit
+`e976699e78f27ceb9405496ec06ee31c32a67cd7`, Client tree
+`5c2958965dd93a9cc7a2d8825c2bfebb80a94b1d`. It preserves nested paths during
+hot update, authenticates the complete Windows runtime, supports the exact
+legacy flattened placement, and terminates only registered runner process
+trees. The packaged referee reported `cutechess-cli 1.3.0-beta4` / Qt 5.15.19
+with `PATH` restricted to Windows system directories.
 
 ## Production contract
 
