@@ -731,6 +731,8 @@ class ServerReporter:
 ## standard chess through cutechess, exactly as before.
 
 VARIANTS = {
+    'THREECHECK': ('cutechess'      , '3check'      ),
+    '3CHECK'     : ('cutechess'      , '3check'      ),
     'SPELL'     : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
     'ALICE'     : ('uci-pair-runner', 'alice'       ),
     'TERACHESS' : ('uci-pair-runner', 'terachess'   ),
@@ -746,6 +748,7 @@ VARIANTS = {
 # genfens builds the openings by calling the engine): route by the dev
 # engine's registered variant instead.
 ENGINE_VARIANTS = {
+    '3CHECK-STOCKFISH'                   : ('cutechess'      , '3check'     ),
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
     'TERACHESS-STOCKFISH'                : ('uci-pair-runner', 'terachess'  ),
@@ -772,6 +775,7 @@ UCI_PAIR_VARIANT_FLAGS = {
 # exist. Anything else must fail closed through the check below.
 VARIANT_CONTRACTS = {
     'LICHESS_HORDE_V1': ('cutechess', 'horde'),
+    'LICHESS_THREECHECK_V1': ('cutechess', '3check'),
 }
 
 # Contracts whose arbitration semantics are not what a stock cutechess build
