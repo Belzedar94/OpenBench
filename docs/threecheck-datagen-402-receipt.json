@@ -1,0 +1,89 @@
+{
+  "schema": "threecheck.openbench.datagen-launch-receipt.v1",
+  "receipt_id": "THREECHECK-DATAGEN-402",
+  "created_utc": "2026-08-28T22:52:08.5569219Z",
+  "status": "APPROVED_QUEUED_NO_ELIGIBLE_ACTIVE_WORKER",
+  "public_engine_repository": "https://github.com/Belzedar94/3Check-Stockfish",
+  "public_main_commit": "cf645b66a6eaa8199fc34223f14707a7f1f54b77",
+  "producer_commit": "5bb26413044bbef9e03183ab144e0cce2dd2335f",
+  "producer_bench": 82325,
+  "openbench_onboarding_commit": "27d4caeb237aea378ec7027309348e7717c4feb9",
+  "openbench": {
+    "url": "https://belzedar.duckdns.org/datagen/402/",
+    "test_id": 402,
+    "approved": true,
+    "awaiting": false,
+    "finished": false,
+    "error": false,
+    "priority": 400,
+    "throughput": 1000,
+    "publication_protocol": 41,
+    "campaign_id": "threecheck-nnue-shared-d5-100m-20260829",
+    "external_workload_id": "legacy-v2-shared-corpus-100m",
+    "role": "train",
+    "cohort": "legacy-v2-d5-capture-filter-v1"
+  },
+  "network": {
+    "openbench_id": "313CC226",
+    "name": "3check-313cc226a173.nnue",
+    "bytes": 47721371,
+    "sha256": "313CC226A1736F68B3CE5C4B117B961BD015BF1552BBABFAF564930588D05CEB"
+  },
+  "corpus": {
+    "total_positions": 100000000,
+    "chunk_positions": 12500000,
+    "chunks": 8,
+    "base_seed": 202608280001,
+    "depth": 5,
+    "book": "NONE",
+    "variant": "3check",
+    "hash_mib": 512,
+    "record_bytes": 72,
+    "shared_training_use": [
+      "legacy",
+      "v2"
+    ],
+    "filters": {
+      "captures": true,
+      "checks": false,
+      "promotions": false,
+      "eval_limit": 10000,
+      "eval_diff_limit": 64000,
+      "keep_draws": true
+    },
+    "counter_encoding": "White and Black remaining-check counters are stored in the trailing reserved bits of each canonical legacy record. Legacy training ignores those bits and V2 consumes them."
+  },
+  "launch_verification": {
+    "chunks_pending": 8,
+    "chunks_running": 0,
+    "chunks_completed": 0,
+    "active_workers_last_five_minutes": 1,
+    "active_workers_advertising_threecheck": 0,
+    "reason": "The only active worker session predates the 3Check engine registration and is currently busy. Its declared capability set was not modified.",
+    "foreign_worker_action": "NONE"
+  },
+  "production_hotdeploy": {
+    "scope": [
+      "Config/config.json append-only engine registration",
+      "Engines/3Check-Stockfish.json",
+      "OpenBench/variant_contract.py Three-check contract registration"
+    ],
+    "web_service_only_restart": true,
+    "worker_restart": false,
+    "config_sha256": "A09EA26AD4B7E42016CAC9B5C5F3DE1D3799FCD60E5E472B0C542EA849BCCC5B",
+    "engine_config_sha256": "78549A21FDADF60B7647067B8E3A293B83F5DEE5428A2202073B09105A83DD80",
+    "variant_contract_sha256": "86F086CA7703F86894B475B9BA2E402B6C996D3E8450C5C05D7CF6F2FC5A3B77",
+    "internal_http": 200,
+    "public_http": 200
+  },
+  "evidence_boundary": {
+    "workload_created": true,
+    "workload_approved": true,
+    "dataset_complete": false,
+    "dataset_sha256_frozen": false,
+    "legacy_network_trained": false,
+    "v2_network_trained": false,
+    "architecture_comparison_complete": false
+  },
+  "next_safe_action": "Wait for a naturally new compatible worker session, then verify the first authenticated producer lease and monitor all eight chunks without altering foreign workers."
+}
