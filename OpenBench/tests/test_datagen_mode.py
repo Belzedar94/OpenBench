@@ -114,7 +114,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('47', error)
+        self.assertIn('48', error)
 
 
 class DatagenModeTests(TestCase):
