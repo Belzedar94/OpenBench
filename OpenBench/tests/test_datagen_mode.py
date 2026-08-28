@@ -102,7 +102,7 @@ class MachineIdentityTests(TestCase):
             {'error': 'Worker Account Disabled', 'stop': True},
         )
 
-    def test_protocol_v39_worker_is_told_to_upgrade_to_v44(self):
+    def test_protocol_v39_worker_is_told_to_upgrade_to_active_version(self):
         self.machine.info = dict(self.machine.info, client_ver=39)
         self.machine.save(update_fields=['info'])
         request = RequestFactory().post(
@@ -114,7 +114,7 @@ class MachineIdentityTests(TestCase):
 
         error = json.loads(response.content)['error']
         self.assertIn('Bad Client Version', error)
-        self.assertIn('44', error)
+        self.assertIn('47', error)
 
 
 class DatagenModeTests(TestCase):

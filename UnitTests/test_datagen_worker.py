@@ -412,6 +412,10 @@ def horde_manifest(cfg, producer, payload):
         'book_sha256': book_sha256,
         'producer_sha256': producer['sha256'].upper(),
         'payload_sha256': hashlib.sha256(payload).hexdigest().upper(),
+        'label_contract': {
+            'schema': 'HORDE_LABEL_CONTRACT_V1',
+            'schema_sha256': worker.HORDE_LABEL_CONTRACT_V1_SHA256,
+        },
         'generation': generation,
     }
 
