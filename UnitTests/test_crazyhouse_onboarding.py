@@ -172,14 +172,37 @@ class CrazyhouseActivationTests(unittest.TestCase):
             worker.REFEREE_PINS[CONTRACT]["Windows"].lower(),
             REFEREE_SHA256,
         )
+        runtime = windows["runtime"]
+        self.assertEqual(runtime["mode"], "app-local")
+        self.assertEqual(len(runtime["files"]), 11)
+        self.assertEqual(
+            set(worker.REFEREE_RUNTIME_PINS[CONTRACT]["Windows"]),
+            {record["name"] for record in runtime["files"]},
+        )
+        for record in runtime["files"]:
+            with self.subTest(runtime=record["name"]):
+                path = binary.parent / record["name"]
+                self.assertEqual(path.stat().st_size, record["bytes"])
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    record["sha256"].lower(),
+                )
+                pin = worker.REFEREE_RUNTIME_PINS[CONTRACT]["Windows"][
+                    record["name"]
+                ]
+                self.assertEqual(pin["bytes"], record["bytes"])
+                self.assertEqual(
+                    pin["sha256"].lower(), record["sha256"].lower()
+                )
         self.assertIsNone(linux["expected_sha256"])
         self.assertIsNone(linux["relative_path"])
         self.assertIsNone(worker.REFEREE_PINS[CONTRACT]["Linux"])
-        worker_path = worker.CONTRACT_REFEREE_PATHS[CONTRACT]["Windows"]
+        worker_paths = worker.CONTRACT_REFEREE_PATHS[CONTRACT]["Windows"]
         self.assertEqual(
-            Path(worker_path),
+            Path(worker_paths[0]),
             Path("referees") / CONTRACT / windows["relative_path"],
         )
+        self.assertEqual(Path(worker_paths[1]), Path("cutechess-cli.exe"))
         self.assertIsNone(
             worker.CONTRACT_REFEREE_PATHS[CONTRACT]["Linux"]
         )
@@ -286,6 +309,36 @@ class CrazyhouseClientRoutingTests(unittest.TestCase):
         self.assertEqual(path.resolve(), expected.resolve())
         self.assertNotEqual(path.resolve(), (ROOT / "Client" / "cutechess-ob.exe").resolve())
 
+    def test_pre_v47_flattened_path_is_supported_only_when_preferred_is_absent(self):
+        client_root = Path(worker.__file__).resolve().parent
+        legacy = client_root / "cutechess-cli.exe"
+        with mock.patch.object(
+            worker.platform, "system", lambda: "Windows"
+        ), mock.patch.object(
+            worker.os.path,
+            "isfile",
+            side_effect=lambda path: Path(path).resolve() == legacy.resolve(),
+        ):
+            path = Path(worker.referee_binary_path(routing_config()))
+        self.assertEqual(path.resolve(), legacy.resolve())
+
+    def test_packaged_windows_runtime_is_hash_locked(self):
+        with mock.patch.object(worker.platform, "system", lambda: "Windows"):
+            binary = worker.referee_binary_path(routing_config())
+            worker.verify_referee_runtime(routing_config(), binary)
+
+    def test_missing_windows_runtime_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cutechess-cli.exe"
+            binary.write_bytes(b"MZfixture")
+            with mock.patch.object(worker.platform, "system", lambda: "Windows"):
+                with self.assertRaisesRegex(
+                    worker.VariantRoutingError, "requires runtime file"
+                ):
+                    worker.verify_referee_runtime(
+                        routing_config(), str(binary)
+                    )
+
     def test_linux_is_refused_without_a_pin_or_path(self):
         with mock.patch.object(worker.platform, "system", lambda: "Linux"):
             with self.assertRaisesRegex(
@@ -359,6 +412,35 @@ class CrazyhouseInstallerTests(unittest.TestCase):
             manifest = self.fixture_manifest(b"MZfixture", "unused")
             with self.assertRaisesRegex(ValueError, "no qualified linux"):
                 installer.verify_artifact(source, "linux", manifest)
+
+    def test_runtime_package_is_required_and_hash_locked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = b"MZqualified-fixture"
+            runtime = b"runtime-fixture"
+            source = root / "cutechess-cli.exe"
+            dependency = root / "runtime.dll"
+            source.write_bytes(executable)
+            dependency.write_bytes(runtime)
+            manifest = self.fixture_manifest(
+                executable, root / "installed" / "cutechess-cli.exe"
+            )
+            manifest["artifacts"]["windows"]["runtime"] = {
+                "mode": "app-local",
+                "files": [{
+                    "name": dependency.name,
+                    "bytes": len(runtime),
+                    "sha256": hashlib.sha256(runtime).hexdigest(),
+                }],
+            }
+
+            verification = installer.verify_artifact(
+                source, "windows", manifest
+            )
+            self.assertEqual(len(verification["runtime"]), 1)
+            dependency.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "runtime byte count mismatch"):
+                installer.verify_artifact(source, "windows", manifest)
 
 
 if __name__ == "__main__":

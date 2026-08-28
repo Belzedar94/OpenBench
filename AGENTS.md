@@ -1,9 +1,10 @@
 # AGENTS.md — Torre de control OpenBench (guía para agentes)
 
 Guía operativa para cualquier agente de IA (o sesión futura) que use esta instancia de
-OpenBench. Hoy sirve a **cinco engines**: Spell-Stockfish, Atomic-Stockfish,
-Alice-Stockfish, Horde-Stockfish y Fairy-Stockfish-Atomic-Baseline (baseline congelado).
-Escrita el 2026-07-12; revisión mayor 2026-08-12. Si algo de aquí contradice el código,
+OpenBench. It currently serves **six engines**: Spell-Stockfish, Atomic-Stockfish,
+Alice-Stockfish, Horde-Stockfish, Crazyhouse-Stockfish and
+Fairy-Stockfish-Atomic-Baseline (frozen baseline).
+Escrita el 2026-07-12; revisión mayor 2026-08-29. Si algo de aquí contradice el código,
 gana el código — y actualiza este documento.
 
 ## 0. Estado operativo vigente (2026-08-12)
@@ -93,8 +94,13 @@ cloudflared tunnel --url http://localhost:8000
 | `SPELL` | `uci_pair_runner.py` | runner UCI puro nuestro, salida compatible cutechess |
 | `SHATRANJ` | cutechess-ob nativo | herencia del fork sscg13 |
 | `ATOMIC` | cutechess-ob nativo | **Atomic-Stockfish entra gratis por aquí** |
+| `CRAZYHOUSE` | contract-specific `cutechess-cli` | requires `LICHESS_CRAZYHOUSE_2026_08_12`; Windows only |
 | `FRC`/`960`/`FISCHER` | cutechess-ob nativo | fischerandom |
 | (ninguno) | cutechess estándar | ajedrez normal |
+
+Protected Crazyhouse and Horde workloads also require their exact explicit
+`variant_contract` on the workload, both engines and the book. A matching name
+token is routing evidence only and never authorizes a protected referee.
 
 Para Atomic: pon `ATOMIC` en el nombre del libro (p.ej. `ATOMIC_8moves.epd`) y cutechess
 arbitra la variante nativamente. Si tu variante NO la conoce cutechess, ese es el caso del
@@ -383,10 +389,11 @@ Si el orden parece mal, se dice con los números delante y se espera.
   la lista de machines). Verificación buena:
   `Get-CimInstance Win32_Process | ? { $_.CommandLine -match 'client.py' }`.
 
-## 7. Estado (2026-08-12)
+## 7. Estado (2026-08-29)
 
-- **Servidos**: Spell-Stockfish, Atomic-Stockfish, Alice-Stockfish, Horde-Stockfish
-  y Fairy-Stockfish-Atomic-Baseline (más `Fairy-Stockfish-Hordetest-Baseline.json`
+- **Servidos**: Spell-Stockfish, Atomic-Stockfish, Alice-Stockfish, Horde-Stockfish,
+  Crazyhouse-Stockfish and Fairy-Stockfish-Atomic-Baseline (plus
+  `Fairy-Stockfish-Hordetest-Baseline.json`
   presente pero fuera de la lista, ver §4b.5). Cada motor con su categoría Discord
   y su entrada en `HOOKS`.
 - **Infra**: VPS con PostgreSQL, nginx y systemd; deploy por el runbook del final.

@@ -797,14 +797,69 @@ REFEREE_PINS = {
     },
 }
 
+REFEREE_RUNTIME_PINS = {
+    'LICHESS_CRAZYHOUSE_2026_08_12': {
+        'Windows': {
+            'libdouble-conversion.dll': {
+                'bytes': 77810,
+                'sha256': '925E994660FC9848E1A2C258952D0188043EAA82869DDBC98A54B3EA2A5FEC9F',
+            },
+            'libgcc_s_seh-1.dll': {
+                'bytes': 151732,
+                'sha256': '278F1101F2371C58B6B412A3206718E22343940A5164ACEB4FB75F2BF3B38ED4',
+            },
+            'libicudt78.dll': {
+                'bytes': 33120806,
+                'sha256': '47D19B605A28461D44E0D8C062C465E92C9EDFB0244F023A8066F7337D317D0E',
+            },
+            'libicuin78.dll': {
+                'bytes': 3186867,
+                'sha256': 'AF3341827897A41AB16667EE0699ACDB2B0338C3BF4ECC7F510A324F18755422',
+            },
+            'libicuuc78.dll': {
+                'bytes': 1999466,
+                'sha256': '3186171E946552E2A5E371CD0BC68BF37BD6E229A85DBB0D3C40231CF0858B49',
+            },
+            'libpcre2-16-0.dll': {
+                'bytes': 653924,
+                'sha256': '3E8DBD40F92E96AE24F7386BD129FB055865DA8F55F2FB03EB7744315976942F',
+            },
+            'libstdc++-6.dll': {
+                'bytes': 2667040,
+                'sha256': '3529D11C422B2AAF0BBAD7221BF62BA7B5A39F854E89A015BB58B6B55A677DA1',
+            },
+            'libwinpthread-1.dll': {
+                'bytes': 65955,
+                'sha256': 'F6AD1378F098C1229BE8E44BF22A9CC76C06A5D1630290D9BE43F203430894CB',
+            },
+            'libzstd.dll': {
+                'bytes': 1196744,
+                'sha256': 'B13D4F30B93C96823473D742DDA0075F7334CBA03A40C33D8A7DC282E37B1500',
+            },
+            'Qt5Core.dll': {
+                'bytes': 5533628,
+                'sha256': 'A0508917A060A8282ED2B05C556FA04A5E7619F877E18F7B3352BE1D37F1DDDE',
+            },
+            'zlib1.dll': {
+                'bytes': 120814,
+                'sha256': 'CB7AB3788D10940DF874ACD97B1821BBB5EE4A91F3EEC11982BB5BF7A3C96443',
+            },
+        },
+        'Linux': None,
+    },
+}
+
 # Crazyhouse is deliberately isolated from the shared Horde-patched binaries.
 # A missing platform entry is a scientific gate, not permission to fall back
 # to Client/cutechess-ob. Other contracts retain their established shared path.
 CONTRACT_REFEREE_PATHS = {
     'LICHESS_CRAZYHOUSE_2026_08_12': {
-        'Windows': os.path.join(
-            'referees', 'LICHESS_CRAZYHOUSE_2026_08_12',
-            'windows', 'cutechess-cli.exe'
+        'Windows': (
+            os.path.join(
+                'referees', 'LICHESS_CRAZYHOUSE_2026_08_12',
+                'windows', 'cutechess-cli.exe'
+            ),
+            'cutechess-cli.exe',
         ),
         'Linux': None,
     },
@@ -894,7 +949,9 @@ def referee_sha256(path):
         with open(path, 'rb') as binary:
             while block := binary.read(1024 * 1024):
                 digest.update(block)
-        _REFEREE_DIGESTS.clear()
+        for stale in [entry for entry in _REFEREE_DIGESTS
+                      if entry[0] == path and entry != key]:
+            del _REFEREE_DIGESTS[stale]
         _REFEREE_DIGESTS[key] = digest.hexdigest().upper()
     return _REFEREE_DIGESTS[key]
 
@@ -928,14 +985,57 @@ def verify_referee_binary(config, path):
         ) from None
 
     if observed != expected.upper():
+        installer = (
+            'install_artifact.py'
+            if contract == 'LICHESS_CRAZYHOUSE_2026_08_12'
+            else 'install_artifacts.py'
+        )
         raise VariantRoutingError(
             'Contract %s requires the %s referee with sha256 %s, but %s has '
             'sha256 %s. Install the verified artifact with '
-            'Client/referees/%s/install_artifacts.py before running this '
+            'Client/referees/%s/%s before running this '
             'workload.'
             % (contract, platform.system(), expected.upper(),
-               os.path.basename(path), observed, contract)
+               os.path.basename(path), observed, contract, installer)
         )
+
+
+def verify_referee_runtime(config, binary_path):
+
+    contract = declared_variant_contract(config)
+    runtime_by_platform = REFEREE_RUNTIME_PINS.get(contract)
+    if runtime_by_platform is None:
+        return
+
+    system = platform.system()
+    runtime = runtime_by_platform.get(system)
+    if runtime is None:
+        raise VariantRoutingError(
+            'Contract %s has no recorded referee runtime for %s; refusing to '
+            'launch an incomplete referee package'
+            % (contract, system)
+        )
+
+    directory = os.path.dirname(binary_path)
+    for filename, expected in sorted(runtime.items()):
+        path = os.path.join(directory, filename)
+        try:
+            observed_bytes = os.stat(path).st_size
+            observed_sha256 = referee_sha256(path)
+        except OSError as error:
+            raise VariantRoutingError(
+                'Contract %s requires runtime file %s, which cannot be read: %s'
+                % (contract, filename, error)
+            ) from None
+        if (observed_bytes != expected['bytes']
+                or observed_sha256 != expected['sha256'].upper()):
+            raise VariantRoutingError(
+                'Contract %s requires runtime file %s with %d bytes and '
+                'sha256 %s, but observed %d bytes and sha256 %s'
+                % (contract, filename, expected['bytes'],
+                   expected['sha256'].upper(), observed_bytes,
+                   observed_sha256)
+            )
 
 
 def referee_binary_path(config):
@@ -949,17 +1049,26 @@ def referee_binary_path(config):
         )
 
     system = platform.system()
-    relative = contract_paths.get(system)
-    if relative is None:
+    candidates = contract_paths.get(system)
+    if candidates is None:
         raise VariantRoutingError(
             'Contract %s has no recorded referee path for %s; refusing to '
             'fall back to the shared cutechess binary'
             % (contract, system)
         )
 
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), relative
-    )
+    if isinstance(candidates, str):
+        candidates = (candidates,)
+    client_root = os.path.dirname(os.path.abspath(__file__))
+    for relative in candidates:
+        path = os.path.join(client_root, relative)
+        if os.path.isfile(path):
+            return path
+
+    # Return the preferred location when nothing exists so the hash verifier
+    # emits the exact missing-artifact failure. The second candidate supports
+    # workers whose immutable pre-v47 bootstrap flattened Client subpaths.
+    return os.path.join(client_root, candidates[0])
 
 
 def runner_base_command(config):
@@ -969,6 +1078,7 @@ def runner_base_command(config):
     if runner == 'cutechess':
         path = referee_binary_path(config)
         verify_referee_binary(config, path)
+        verify_referee_runtime(config, path)
         return '"%s"' % path
 
     # uci-pair-runner: same flags, cutechess-compatible output. Prefer the
@@ -996,6 +1106,47 @@ class Cutechess:
     ## Handles building the very long string of arguments that need to be passed
     ## to cutechess in order to launch a set of games. Operates on the Configuration,
     ## and a small number of secondary arguments that are not housed in the Configuration
+
+    _runner_lock = threading.Lock()
+    _runner_processes = {}
+
+    @staticmethod
+    def register_runner(process):
+
+        pid = getattr(process, 'pid', None)
+        if pid is None:
+            return
+        with Cutechess._runner_lock:
+            Cutechess._runner_processes[pid] = process
+
+    @staticmethod
+    def unregister_runner(process):
+
+        pid = getattr(process, 'pid', None)
+        if pid is None:
+            return
+        with Cutechess._runner_lock:
+            Cutechess._runner_processes.pop(pid, None)
+
+    @staticmethod
+    def terminate_runner(process):
+
+        pid = getattr(process, 'pid', None)
+        if pid is None:
+            return
+        try:
+            root = psutil.Process(pid)
+            descendants = root.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        processes = list(reversed(descendants)) + [root]
+        for child in processes:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        psutil.wait_procs(processes, timeout=5)
 
     @staticmethod
     def basic_settings(config):
@@ -1212,11 +1363,11 @@ class Cutechess:
     @staticmethod
     def kill_everything(dev_process, base_process):
 
-        if IS_LINUX:
-            kill_process_by_name('cutechess-ob')
-
-        if IS_WINDOWS:
-            kill_process_by_name('cutechess-ob.exe')
+        with Cutechess._runner_lock:
+            runners = list(Cutechess._runner_processes.values())
+            Cutechess._runner_processes.clear()
+        for runner in runners:
+            Cutechess.terminate_runner(runner)
 
         kill_process_by_name(dev_process)
         kill_process_by_name(base_process)
@@ -4141,6 +4292,11 @@ def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort
     cutechess = Popen(
         cutechess_command_argv(command), stdout=PIPE, stderr=STDOUT
     )
+    Cutechess.register_runner(cutechess)
+    if abort_flag is not None and abort_flag.is_set():
+        Cutechess.terminate_runner(cutechess)
+        Cutechess.unregister_runner(cutechess)
+        return None
 
     results = {
 
@@ -4207,11 +4363,14 @@ def run_and_parse_cutechess(config, command, cutechess_idx, results_queue, abort
             results['illegals'   ] = 0
 
     # Do not classify an intentional server/user abort as a runner failure;
-    # kill_everything() owns terminating the remaining subprocesses.
+    # terminate the exact registered process tree without a broad name match.
     if abort_flag is not None and abort_flag.is_set():
+        Cutechess.terminate_runner(cutechess)
+        Cutechess.unregister_runner(cutechess)
         return None
 
     returncode = cutechess.wait()
+    Cutechess.unregister_runner(cutechess)
     completed_assignment = (
         finished_games > 0
         and (expected_games is None or finished_games >= expected_games)

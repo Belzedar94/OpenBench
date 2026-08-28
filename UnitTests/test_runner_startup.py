@@ -185,6 +185,10 @@ class TerachessVariantRoutingTests(unittest.TestCase):
 
 class CutechessLaunchStaggerTests(unittest.TestCase):
 
+    def tearDown(self):
+        with worker.Cutechess._runner_lock:
+            worker.Cutechess._runner_processes.clear()
+
     def test_native_runner_uses_an_explicit_worker_local_path(self):
         config = routing_config("ATOMIC_openings.epd")
         expected_name = ["cutechess-ob.exe", "cutechess-ob"][worker.IS_LINUX]
@@ -236,6 +240,48 @@ class CutechessLaunchStaggerTests(unittest.TestCase):
             )
         self.assertIsNone(result)
         popen.assert_not_called()
+
+    def test_cleanup_targets_registered_runner_trees_not_process_names(self):
+        runner = SimpleNamespace(pid=4242)
+        worker.Cutechess.register_runner(runner)
+
+        with mock.patch.object(
+            worker.Cutechess, "terminate_runner"
+        ) as terminate, mock.patch.object(
+            worker, "kill_process_by_name"
+        ) as kill_name:
+            worker.Cutechess.kill_everything("dev-engine", "base-engine")
+
+        terminate.assert_called_once_with(runner)
+        self.assertEqual(
+            kill_name.call_args_list,
+            [mock.call("dev-engine"), mock.call("base-engine")],
+        )
+        self.assertEqual(worker.Cutechess._runner_processes, {})
+
+    def test_abort_race_after_launch_terminates_the_exact_runner(self):
+        config = routing_config("ATOMIC_openings.epd")
+        config.workload["distribution"] = {}
+        abort_flag = threading.Event()
+        abort_flag.set()
+        runner = SimpleNamespace(pid=4343)
+
+        with mock.patch.object(
+            worker, "Popen", return_value=runner
+        ), mock.patch.object(
+            worker.Cutechess, "terminate_runner"
+        ) as terminate:
+            result = worker.run_and_parse_cutechess(
+                config,
+                "cutechess-ob.exe -variant atomic",
+                1,
+                queue.Queue(),
+                abort_flag,
+            )
+
+        self.assertIsNone(result)
+        terminate.assert_called_once_with(runner)
+        self.assertEqual(worker.Cutechess._runner_processes, {})
 
 
 class CutechessStartupDiagnosticsTests(unittest.TestCase):
