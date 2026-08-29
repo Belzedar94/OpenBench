@@ -1248,7 +1248,7 @@ class DatagenWorkerTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_complete_workload_builds_one_engine_benches_compresses_and_uploads(self):
+    def test_complete_workload_benches_play_role_and_runs_producer_role(self):
         cfg = config()
         cfg.threads = 30
         captured = {}
@@ -1287,7 +1287,11 @@ class DatagenWorkerTests(unittest.TestCase):
                          'safe_download_network_weights',
                          return_value=os.path.join('Networks', '12345678'),
                      ), \
-                     mock.patch.object(worker, 'safe_download_engine', return_value='engine.exe') as build, \
+                     mock.patch.object(
+                         worker,
+                         'safe_download_engine',
+                         side_effect=['play.exe', 'producer.exe'],
+                     ) as build, \
                      mock.patch.object(worker, 'safe_run_benchmarks', return_value=1000) as bench, \
                      mock.patch.object(worker, 'run_datagen_command', side_effect=generate), \
                      mock.patch.object(
@@ -1302,15 +1306,21 @@ class DatagenWorkerTests(unittest.TestCase):
                 os.chdir(previous)
 
         self.assertEqual(captured['payload'], payload)
-        self.assertEqual(captured['engine'], os.path.join('Engines', 'engine.exe'))
+        self.assertEqual(
+            captured['engine'], os.path.join('Engines', 'producer.exe')
+        )
         self.assertEqual(captured['network'], os.path.join('Networks', '12345678'))
         self.assertEqual(
             compress.call_args.kwargs['expected_source'], source_identity
         )
-        build.assert_called_once()
-        self.assertEqual(build.call_args.args[1], 'dev')
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(
+            [call.kwargs['build_role'] for call in build.call_args_list],
+            ['play', 'datagen'],
+        )
         bench.assert_called_once()
         self.assertEqual(bench.call_args.args[1], 'dev')
+        self.assertEqual(bench.call_args.args[2], 'play.exe')
         self.assertEqual(bench.call_args.kwargs, {'bench_threads': 1})
 
     def test_required_producer_is_uploaded_before_generator_and_bound_to_chunk(self):
@@ -1346,7 +1356,7 @@ class DatagenWorkerTests(unittest.TestCase):
             self.assertEqual(commit, 'a' * 40)
             # A mutable build-cache path may change after publication. The
             # generator must still execute the authenticated private snapshot.
-            Path('Engines', 'engine.exe').write_bytes(b'replaced-engine-b')
+            Path('Engines', 'producer.exe').write_bytes(b'replaced-engine-b')
             return {
                 'sha256': sha256,
                 'bytes': byte_count,
@@ -1359,11 +1369,14 @@ class DatagenWorkerTests(unittest.TestCase):
         ):
             calls.append('generator')
             self.assertEqual(producer['sha256'], producer_sha)
-            self.assertNotEqual(engine, os.path.join('Engines', 'engine.exe'))
+            self.assertNotEqual(
+                engine, os.path.join('Engines', 'producer.exe')
+            )
             self.assertTrue(engine.endswith('.exe'))
             self.assertEqual(Path(engine).read_bytes(), producer_bytes)
             self.assertEqual(
-                Path('Engines', 'engine.exe').read_bytes(), b'replaced-engine-b'
+                Path('Engines', 'producer.exe').read_bytes(),
+                b'replaced-engine-b',
             )
             Path(output_path).write_bytes(b'v3-envelope')
 
@@ -1377,14 +1390,16 @@ class DatagenWorkerTests(unittest.TestCase):
             os.chdir(cwd)
             Path('Datagen').mkdir()
             Path('Engines').mkdir()
-            Path('Engines', 'engine.exe').write_bytes(producer_bytes)
+            Path('Engines', 'producer.exe').write_bytes(producer_bytes)
             try:
                 with mock.patch.object(worker, 'download_opening_book'), \
                      mock.patch.object(
                          worker, 'safe_download_network_weights', return_value=None
                      ), \
                      mock.patch.object(
-                         worker, 'safe_download_engine', return_value='engine.exe'
+                         worker,
+                         'safe_download_engine',
+                         side_effect=['play.exe', 'producer.exe'],
                      ), \
                      mock.patch.object(
                          worker, 'safe_run_benchmarks', return_value=1000
@@ -2030,6 +2045,27 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertEqual(download.call_args.args[7], 'a' * 40)
         self.assertEqual(download.call_args.args[8], 'datagen')
         self.assertEqual(download.call_args.args[9], provenance)
+
+    def test_safe_download_engine_can_select_play_role_for_datagen_bench(self):
+        cfg = config()
+        cfg.workload['test']['dev']['build']['datagen_provenance'] = {
+            'source_tree': 'b' * 40,
+            'src_tree': 'c' * 40,
+        }
+        with mock.patch.object(
+            worker, 'download_public_engine', return_value='engine.exe'
+        ) as download:
+            result = worker.safe_download_engine(
+                cfg,
+                'dev',
+                os.path.join('Networks', '12345678'),
+                build_role='play',
+            )
+
+        self.assertEqual(result, 'engine.exe')
+        self.assertFalse(download.call_args.args[5].endswith('-DATAGEN'))
+        self.assertEqual(download.call_args.args[8], 'play')
+        self.assertIsNone(download.call_args.args[9])
 
     def test_datagen_build_rejects_malformed_archive_provenance(self):
         with self.assertRaisesRegex(

@@ -3576,12 +3576,21 @@ def complete_datagen_workload(config):
                 test['book'].get('raw_sha'),
             )
             dev_network = safe_download_network_weights(config, 'dev')
-            dev_name = safe_download_engine(config, 'dev', dev_network)
+            # A generic DATAGEN workload has two physical build roles.  The
+            # normal playing binary owns the declared bench, while the
+            # separate DATAGEN binary is the authenticated producer.  Never
+            # ask a producer-only executable to emulate the UCI bench surface.
+            play_name = safe_download_engine(
+                config, 'dev', dev_network, build_role='play'
+            )
+            producer_name = safe_download_engine(
+                config, 'dev', dev_network, build_role='datagen'
+            )
             setup_complete = True
             # DATAGEN needs one deterministic compatibility check. Its NPS is
             # informational only and is never used to scale generation work.
             dev_nps = safe_run_benchmarks(
-                config, 'dev', dev_name, dev_network, bench_threads=1
+                config, 'dev', play_name, dev_network, bench_threads=1
             )
             try:
                 ServerReporter.report_nps(config, dev_nps, dev_nps).raise_for_status()
@@ -3596,7 +3605,7 @@ def complete_datagen_workload(config):
                 raise DatagenStopped()
 
             if chunk.get('producer_artifact_required'):
-                producer_path = os.path.join('Engines', dev_name)
+                producer_path = os.path.join('Engines', producer_name)
                 # Preserve .exe on Windows (and any explicit executable
                 # suffix elsewhere) while keeping the snapshot private to this
                 # exact chunk attempt.
@@ -3642,7 +3651,7 @@ def complete_datagen_workload(config):
                 (
                     producer_snapshot_path
                     if producer_snapshot_path is not None
-                    else os.path.join('Engines', dev_name)
+                    else os.path.join('Engines', producer_name)
                 ),
                 output_path,
                 log_path,
@@ -4147,7 +4156,7 @@ def safe_download_network_weights(config, branch):
 
     return net_path
 
-def safe_download_engine(config, branch, net_path):
+def safe_download_engine(config, branch, net_path, build_role=None):
 
     # Wraps utils.py:download_public_engine() and utils.py:download_private_engine()
 
@@ -4163,7 +4172,10 @@ def safe_download_engine(config, branch, net_path):
         config.workload['test']['type'] == 'DATAGEN'
         and bool(config.workload['test'].get('datagen'))
     )
-    build_role = 'datagen' if generic_datagen else 'play'
+    if build_role is None:
+        build_role = 'datagen' if generic_datagen else 'play'
+    elif build_role not in ('play', 'datagen'):
+        raise ValueError('Unsupported engine build role: %s' % build_role)
 
     bin_name = engine_binary_name(
         engine, commit_sha, net_path, private, build_role
