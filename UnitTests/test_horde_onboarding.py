@@ -42,7 +42,7 @@ class HordeOnboardingTests(unittest.TestCase):
         # The pin itself lives only in ``Config/config.json``; duplicating the
         # ref in the test suite is what made it drift. Assert the active
         # protocol and an immutable 40-digit commit, never a branch name.
-        self.assertEqual(self.general['client_version'], 49)
+        self.assertEqual(self.general['client_version'], 50)
         self.assertRegex(self.general['client_repo_ref'], r'^[0-9a-f]{40}$')
 
     def test_specialist_onboarding_is_schedulable(self):

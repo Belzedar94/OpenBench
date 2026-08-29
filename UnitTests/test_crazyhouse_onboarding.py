@@ -16,11 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = "LICHESS_CRAZYHOUSE_2026_08_12"
 ENGINE = "Crazyhouse-Stockfish"
 BOOK = "CRAZYHOUSE_openings.epd"
-ENGINE_COMMIT = "5883acbeffd53138d31b278894d1fee451adffe8"
+ENGINE_COMMIT = "c48e463b01fc2f17a634fe52b0ba355663804c33"
+ENGINE_TREE = "35bf7df9c6aade171ffa0a457ab7576b744d8f14"
+ENGINE_SRC_TREE = "2e0ba8b66317ef3e899a53e752ef9266fc17ac92"
 BOOK_SHA256 = "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa"
 BOOK_ARCHIVE_SHA256 = "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c"
 NETWORK_SHA256 = "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43"
 REFEREE_SHA256 = "f465025b2ad21526e2cbab2b7da1a231ff3d64f6e8a01a0be5963f525a0bddae"
+CAMPAIGN_SET_SHA256 = "e1313c53951334350a8a25195b800f47e2a9366e00f0697a8845cbed603120af"
+PARTITION_SHA256 = "694e984f910aa3e6c1dce749521dc79c2fae928630aef494ecdd0a029b25bf01"
+TRAIN_CAMPAIGN = "0ba8e277-fe6d-5762-9f14-83c234134be0"
+VALIDATION_CAMPAIGN = "6916cbda-69e9-5cb4-a85c-cf82876b42db"
 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "Client"))
@@ -72,7 +78,7 @@ class CrazyhouseActivationTests(unittest.TestCase):
         self.assertIn(BOOK, general["books"])
         self.assertTrue(engine["onboarding_ready"])
         self.assertTrue(book["onboarding_ready"])
-        self.assertFalse(book["datagen_enabled"])
+        self.assertTrue(book["datagen_enabled"])
         self.assertEqual(engine["nps"], 234000)
         self.assertEqual(
             engine["nps_status"],
@@ -82,7 +88,11 @@ class CrazyhouseActivationTests(unittest.TestCase):
         self.assertEqual(engine["variant_contract"], CONTRACT)
         self.assertEqual(book["variant_contract"], CONTRACT)
         self.assertEqual(engine["build"]["systems"], ["Windows"])
-        self.assertEqual(engine["build"]["artifact_roles"], ["play"])
+        self.assertEqual(engine["build"]["artifact_roles"], ["play", "datagen"])
+        self.assertEqual(
+            engine["build"]["datagen_provenance"],
+            {"source_tree": ENGINE_TREE, "src_tree": ENGINE_SRC_TREE},
+        )
         defaults = engine["test_presets"]["default"]
         self.assertEqual(defaults["base_branch"], ENGINE_COMMIT)
         self.assertEqual(defaults["both_bench"], 38919)
@@ -106,6 +116,9 @@ class CrazyhouseActivationTests(unittest.TestCase):
             engine["qualified_source"]["official_stockfish_ancestor"],
             "229f6339e537a097a79831cd06dbfdb3e623d4ac",
         )
+        self.assertEqual(engine["qualified_source"]["commit"], ENGINE_COMMIT)
+        self.assertEqual(engine["qualified_source"]["tree"], ENGINE_TREE)
+        self.assertEqual(engine["qualified_source"]["src_tree"], ENGINE_SRC_TREE)
         self.assertEqual(
             engine["legacy_evaluator"]["sha256"], NETWORK_SHA256
         )
@@ -124,6 +137,92 @@ class CrazyhouseActivationTests(unittest.TestCase):
             "Crazyhouse-Stockfish/" + ENGINE_COMMIT
             + "/openbench/books/" + BOOK + ".zip",
         )
+
+    def test_physical_v1_canaries_are_frozen_and_role_separated(self):
+        engine = load_json("Engines/%s.json" % ENGINE)
+        presets = engine["datagen_presets"]
+        expected = {
+            "default": {
+                "campaign": TRAIN_CAMPAIGN,
+                "base_seed": 202608290100000,
+                "external": "crazyhouse-physical-v1-train-canary-20260829",
+                "role": "train",
+            },
+            "Physical V1 Validation Canary": {
+                "campaign": VALIDATION_CAMPAIGN,
+                "base_seed": 202608290200000,
+                "external": "crazyhouse-physical-v1-validation-canary-20260829",
+                "role": "validation",
+            },
+        }
+        for name, frozen in expected.items():
+            with self.subTest(preset=name):
+                preset = presets[name]
+                self.assertEqual(preset["dev_branch"], ENGINE_COMMIT)
+                self.assertEqual(preset["both_bench"], 38919)
+                self.assertEqual(
+                    preset["both_network"],
+                    "crazyhouse_run15rl_e190_l03.nnue",
+                )
+                self.assertEqual(preset["book_name"], BOOK)
+                self.assertEqual(preset["datagen_total_count"], 512)
+                self.assertEqual(preset["datagen_positions_per_chunk"], 512)
+                self.assertEqual(
+                    preset["datagen_base_seed"], frozen["base_seed"]
+                )
+                self.assertEqual(preset["datagen_publication_protocol"], "41")
+                self.assertEqual(
+                    preset["datagen_campaign_id"], frozen["campaign"]
+                )
+                self.assertEqual(
+                    preset["datagen_external_workload_id"], frozen["external"]
+                )
+                self.assertEqual(preset["datagen_role"], frozen["role"])
+                self.assertEqual(
+                    preset["datagen_cohort"],
+                    "crazyhouse-physical-v1-canary-20260829",
+                )
+                self.assertEqual(preset["priority"], 400)
+                self.assertEqual(preset["throughput"], 1000)
+                self.assertEqual(preset["workload_size"], 1)
+                tokens = preset["datagen_command"].split()
+                bindings = dict(zip(tokens[1::2], tokens[2::2]))
+                self.assertEqual(
+                    tokens[0], "crazyhouse_generate_physical_production_v1"
+                )
+                self.assertEqual(bindings["--count"], "{COUNT}")
+                self.assertEqual(bindings["--seed"], "{SEED}")
+                self.assertEqual(bindings["--output"], "{OUT}")
+                self.assertEqual(
+                    bindings["--openbench-worker-threads"], "{THREADS}"
+                )
+                self.assertEqual(bindings["--threads"], "1")
+                self.assertEqual(bindings["--book"], "{BOOK}")
+                self.assertEqual(
+                    bindings["--book-sha256"], "{BOOK_SHA256_CANONICAL}"
+                )
+                self.assertEqual(bindings["--network"], "{NETWORK}")
+                self.assertEqual(
+                    bindings["--network-sha256"],
+                    "{NETWORK_SHA256_CANONICAL}",
+                )
+                self.assertEqual(
+                    bindings["--producer-sha256"], "{PRODUCER_SHA256}"
+                )
+                self.assertEqual(
+                    bindings["--campaign-set-sha256"], CAMPAIGN_SET_SHA256
+                )
+                self.assertEqual(
+                    bindings["--partition-sha256"], PARTITION_SHA256
+                )
+                self.assertEqual(bindings["--split-seed"], "12")
+                self.assertEqual(
+                    bindings["--validation-threshold"], "2305843009213693952"
+                )
+                self.assertEqual(bindings["--max-candidate-games"], "256")
+                self.assertEqual(bindings["--role"], frozen["role"])
+                self.assertEqual(bindings["--campaign-id"], frozen["campaign"])
+                self.assertEqual(bindings["--base-seed"], str(frozen["base_seed"]))
 
     def test_opening_alias_is_byte_exact_and_deterministic(self):
         archive = ROOT / "Books" / (BOOK + ".zip")

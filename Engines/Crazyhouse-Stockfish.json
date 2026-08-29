@@ -6,9 +6,9 @@
   "nps_status": "THREE_DEPTH10_RUNS_235088_233349_232775",
   "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
   "qualified_source": {
-    "commit": "5883acbeffd53138d31b278894d1fee451adffe8",
-    "tree": "ed166600c76a7ab0fd2abca5f6123c7e2eed1fbd",
-    "src_tree": "d01af0408fdeb642810fbe3aa76896f9110dacbe",
+    "commit": "c48e463b01fc2f17a634fe52b0ba355663804c33",
+    "tree": "35bf7df9c6aade171ffa0a457ab7576b744d8f14",
+    "src_tree": "2e0ba8b66317ef3e899a53e752ef9266fc17ac92",
     "official_stockfish_ancestor": "229f6339e537a097a79831cd06dbfdb3e623d4ac"
   },
   "legacy_evaluator": {
@@ -27,11 +27,15 @@
     "compilers": ["g++"],
     "cpuflags": [],
     "systems": ["Windows"],
-    "artifact_roles": ["play"]
+    "artifact_roles": ["play", "datagen"],
+    "datagen_provenance": {
+      "source_tree": "35bf7df9c6aade171ffa0a457ab7576b744d8f14",
+      "src_tree": "2e0ba8b66317ef3e899a53e752ef9266fc17ac92"
+    }
   },
   "test_presets": {
     "default": {
-      "base_branch": "5883acbeffd53138d31b278894d1fee451adffe8",
+      "base_branch": "c48e463b01fc2f17a634fe52b0ba355663804c33",
       "both_bench": 38919,
       "both_network": "crazyhouse_run15rl_e190_l03.nnue",
       "book_name": "CRAZYHOUSE_openings.epd",
@@ -58,6 +62,49 @@
     "default": {}
   },
   "datagen_presets": {
-    "default": {}
+    "default": {
+      "both_bench": 38919,
+      "both_network": "crazyhouse_run15rl_e190_l03.nnue",
+      "dev_branch": "c48e463b01fc2f17a634fe52b0ba355663804c33",
+      "book_name": "CRAZYHOUSE_openings.epd",
+      "datagen_command": "crazyhouse_generate_physical_production_v1 --artifact-repo-path artifacts/crazyhouse-stockfish-datagen --base-seed 202608290100000 --book {BOOK} --book-repo-path openbench/books/CRAZYHOUSE_openings.epd --book-sha256 {BOOK_SHA256_CANONICAL} --campaign-id 0ba8e277-fe6d-5762-9f14-83c234134be0 --campaign-set-sha256 e1313c53951334350a8a25195b800f47e2a9366e00f0697a8845cbed603120af --cohort crazyhouse-physical-v1-canary-20260829 --count {COUNT} --depth 64 --exploration-max-score-diff 256 --exploration-multipv 4 --exploration-plies 8 --external-workload-id crazyhouse-physical-v1-train-canary-20260829 --hash-mb 128 --max-candidate-games 256 --max-game-ply 512 --network {NETWORK} --network-repo-path artifacts/networks/crazyhouse_run15rl_e190_l03.nnue --network-sha256 {NETWORK_SHA256_CANONICAL} --nodes 16384 --openbench-protocol 41 --openbench-worker-threads {THREADS} --output {OUT} --partition-sha256 694e984f910aa3e6c1dce749521dc79c2fae928630aef494ecdd0a029b25bf01 --producer-sha256 {PRODUCER_SHA256} --role train --seed {SEED} --selection-policy-sha256 475fd0fb9a929e964ff32357031a18d33ecc2543e8681cc73068858c10db3014 --split-seed 12 --threads 1 --validation-threshold 2305843009213693952",
+      "datagen_total_count": 512,
+      "datagen_positions_per_chunk": 512,
+      "datagen_base_seed": 202608290100000,
+      "datagen_publication_protocol": "41",
+      "datagen_campaign_id": "0ba8e277-fe6d-5762-9f14-83c234134be0",
+      "datagen_external_workload_id": "crazyhouse-physical-v1-train-canary-20260829",
+      "datagen_role": "train",
+      "datagen_cohort": "crazyhouse-physical-v1-canary-20260829",
+      "priority": 400,
+      "throughput": 1000,
+      "workload_size": 1,
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    },
+    "Physical V1 Validation Canary": {
+      "both_bench": 38919,
+      "both_network": "crazyhouse_run15rl_e190_l03.nnue",
+      "dev_branch": "c48e463b01fc2f17a634fe52b0ba355663804c33",
+      "book_name": "CRAZYHOUSE_openings.epd",
+      "datagen_command": "crazyhouse_generate_physical_production_v1 --artifact-repo-path artifacts/crazyhouse-stockfish-datagen --base-seed 202608290200000 --book {BOOK} --book-repo-path openbench/books/CRAZYHOUSE_openings.epd --book-sha256 {BOOK_SHA256_CANONICAL} --campaign-id 6916cbda-69e9-5cb4-a85c-cf82876b42db --campaign-set-sha256 e1313c53951334350a8a25195b800f47e2a9366e00f0697a8845cbed603120af --cohort crazyhouse-physical-v1-canary-20260829 --count {COUNT} --depth 64 --exploration-max-score-diff 256 --exploration-multipv 4 --exploration-plies 8 --external-workload-id crazyhouse-physical-v1-validation-canary-20260829 --hash-mb 128 --max-candidate-games 256 --max-game-ply 512 --network {NETWORK} --network-repo-path artifacts/networks/crazyhouse_run15rl_e190_l03.nnue --network-sha256 {NETWORK_SHA256_CANONICAL} --nodes 16384 --openbench-protocol 41 --openbench-worker-threads {THREADS} --output {OUT} --partition-sha256 694e984f910aa3e6c1dce749521dc79c2fae928630aef494ecdd0a029b25bf01 --producer-sha256 {PRODUCER_SHA256} --role validation --seed {SEED} --selection-policy-sha256 475fd0fb9a929e964ff32357031a18d33ecc2543e8681cc73068858c10db3014 --split-seed 12 --threads 1 --validation-threshold 2305843009213693952",
+      "datagen_total_count": 512,
+      "datagen_positions_per_chunk": 512,
+      "datagen_base_seed": 202608290200000,
+      "datagen_publication_protocol": "41",
+      "datagen_campaign_id": "6916cbda-69e9-5cb4-a85c-cf82876b42db",
+      "datagen_external_workload_id": "crazyhouse-physical-v1-validation-canary-20260829",
+      "datagen_role": "validation",
+      "datagen_cohort": "crazyhouse-physical-v1-canary-20260829",
+      "priority": 400,
+      "throughput": 1000,
+      "workload_size": 1,
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    }
   }
 }

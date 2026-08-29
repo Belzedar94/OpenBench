@@ -1,0 +1,159 @@
+{
+  "schema": "crazyhouse.openbench.datagen-v41-canary-preregistration.v1",
+  "created_utc": "2026-08-29T03:26:18.1614044Z",
+  "status": "PREREGISTERED_CONFIG_LOCAL_GREEN_NO_WORKLOAD",
+  "project": "Crazyhouse-Stockfish",
+  "evidence_class": "E1_ENGINEERING",
+  "official_openbench_origin": "https://belzedar.duckdns.org",
+  "openbench_base": {
+    "commit": "8193a13f0bb5022aaed999e14179dbc8933f9a4d",
+    "tree": "9002bb2998555ba1cff0575d9f4fdbcec6aaed42"
+  },
+  "engine": {
+    "repository": "https://github.com/Belzedar94/Crazyhouse-Stockfish",
+    "commit": "c48e463b01fc2f17a634fe52b0ba355663804c33",
+    "tree": "35bf7df9c6aade171ffa0a457ab7576b744d8f14",
+    "src_tree": "2e0ba8b66317ef3e899a53e752ef9266fc17ac92",
+    "bench": 38919,
+    "winner_ancestor_of_main": true,
+    "postmerge_correctness_run": 33231102506,
+    "postmerge_correctness_conclusion": "success"
+  },
+  "archive_build": {
+    "status": "PASS",
+    "source": "https://github.com/Belzedar94/Crazyhouse-Stockfish/archive/c48e463b01fc2f17a634fe52b0ba355663804c33.zip",
+    "git_directory_present": false,
+    "producer_bytes": 4801167,
+    "producer_sha256": "9ba335839e2c8da22d30ba4b7a3d5761594034ca1784da8dade645658acca87b",
+    "build_recipe_sha256": "2ba3252c1013a883358977c9515fdd905688c6132651518b1a1ec3ba130d163b",
+    "toolchain_identity": "g++.exe (Rev5, Built by MSYS2 project) 16.1.0",
+    "toolchain_sha256": "75294827bcc5408a7e48259594aa9d768a0874309eb0e7354daa8f8f022baf35",
+    "reported_source_dirty": false,
+    "reported_source_identities_match": true,
+    "local_lease": "D:/Crazyhouse-Stockfish/leases/p11-openbench-archive-build-c48e463b-503"
+  },
+  "transport_patch": {
+    "client_version": 50,
+    "client_commit": "156fc603dbbbf31fe181b723128deff67bd2a58c",
+    "deployment_status": "LOCAL_TESTED_NOT_DEPLOYED",
+    "expected_red": "makefile_command rejected the seventh provenance argument before implementation",
+    "source_commit_from_resolved_workload": true,
+    "source_tree_from_engine_descriptor": true,
+    "src_tree_from_engine_descriptor": true,
+    "source_dirty_for_public_archive": false,
+    "play_build_unchanged": true,
+    "malformed_identity_rejected": true
+  },
+  "shared_partition": {
+    "method": "content-hash-complete-trajectory-v1",
+    "campaign_set_sha256": "e1313c53951334350a8a25195b800f47e2a9366e00f0697a8845cbed603120af",
+    "split_seed_u64": 12,
+    "validation_threshold_u64": 2305843009213693952,
+    "partition_sha256": "694e984f910aa3e6c1dce749521dc79c2fae928630aef494ecdd0a029b25bf01",
+    "selection_policy_sha256": "475fd0fb9a929e964ff32357031a18d33ecc2543e8681cc73068858c10db3014"
+  },
+  "canaries": [
+    {
+      "role": "train",
+      "campaign_id": "0ba8e277-fe6d-5762-9f14-83c234134be0",
+      "external_workload_id": "crazyhouse-physical-v1-train-canary-20260829",
+      "cohort": "crazyhouse-physical-v1-canary-20260829",
+      "base_seed": 202608290100000,
+      "total_records": 512,
+      "records_per_chunk": 512,
+      "max_candidate_games": 256,
+      "priority": 400
+    },
+    {
+      "role": "validation",
+      "campaign_id": "6916cbda-69e9-5cb4-a85c-cf82876b42db",
+      "external_workload_id": "crazyhouse-physical-v1-validation-canary-20260829",
+      "cohort": "crazyhouse-physical-v1-canary-20260829",
+      "base_seed": 202608290200000,
+      "total_records": 512,
+      "records_per_chunk": 512,
+      "max_candidate_games": 256,
+      "priority": 400
+    }
+  ],
+  "frozen_generation": {
+    "publication_protocol": 41,
+    "scientific_threads": 1,
+    "hash_mib": 128,
+    "depth_cap": 64,
+    "nodes_per_position": 16384,
+    "max_game_ply": 512,
+    "exploration_plies": 8,
+    "exploration_multipv": 4,
+    "exploration_max_score_diff": 256,
+    "network_sha256": "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43",
+    "book_sha256": "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa"
+  },
+  "local_canary_replay": {
+    "status": "PASS_BOTH_ROLES",
+    "openbench_worker_threads_capacity": 12,
+    "scientific_threads": 1,
+    "train": {
+      "records": 512,
+      "trajectories": 7,
+      "chunk_id": "83ba8d3f-c0b6-5cd3-af27-3695b1275516",
+      "chunk_sha256": "a4a31e99f05c7d5150faf5bc2c5248171967e840570db66775ca3c9701fc7332",
+      "bundle_bytes": 137780,
+      "bundle_sha256": "877e5ce7fe8e894df7b4889453be63961155a8bc9eed297c00bdf741ca9488b7",
+      "provenance_sha256": "8838ca58820b991c5f8abb856e64d66633018de7d67af8fde5e3e9d0b37833e6"
+    },
+    "validation": {
+      "records": 512,
+      "trajectories": 6,
+      "chunk_id": "58d6aa6e-9ba3-5dd8-bebb-027b3c054280",
+      "chunk_sha256": "d6ff80153800b6de7344da5156dbb0e60350486a91184d9e1129cf2e499ea2cb",
+      "bundle_bytes": 137791,
+      "bundle_sha256": "52e1474f3784dbf704db9847b536eb93e8ba6928a23f773c636cbdd73eb16ad1",
+      "provenance_sha256": "42d4c4894eed7502eb2a691a310b1540689931a2765762ffffaeef1ede2a62fe"
+    },
+    "failed_validation_probe": {
+      "candidate_budget": 64,
+      "exit_code": 1,
+      "examined": 64,
+      "role_ineligible": 56,
+      "complete_trajectories": 8,
+      "output_created": false,
+      "classification": "FAIL_CLOSED_UNREACHABLE_EXACT_QUOTA"
+    }
+  },
+  "local_tests": {
+    "crazyhouse_and_datagen_worker_tests_passed": 81,
+    "client_protocol_and_cross_variant_tests_passed": 15,
+    "targeted_django_tests_passed": 2,
+    "configuration_loader": "PASS"
+  },
+  "incidents": [
+    {
+      "id": "CH-OB-001",
+      "symptom": "The official source archive has no .git directory and could not satisfy complete producer source provenance.",
+      "false_inference": "GIT_SHA_FULL alone authenticates a producer build.",
+      "cause": "The worker did not transport the qualified full tree and src tree to the DATAGEN Makefile.",
+      "prevention": "Validate descriptor tree identities, bind all three source identities only to the DATAGEN role and build the exact public archive before activation.",
+      "gate": "P11/G11 official archive-build routing"
+    },
+    {
+      "id": "CH-OB-002",
+      "symptom": "The validation canary could not reach exactly 512 records after 64 candidates; 56 were role-ineligible and eight complete trajectories remained.",
+      "false_inference": "The train-role candidate budget is sufficient for the sparse validation role.",
+      "cause": "The 1/8 label-free validation partition filters most candidates before search.",
+      "prevention": "Freeze a 256-candidate budget for both roles and require both exact local quotas before production activation.",
+      "gate": "P11/G11 role-separated canary quota"
+    }
+  ],
+  "claims": {
+    "openbench_configuration_deployed": false,
+    "workloads_created": false,
+    "chunks_generated": false,
+    "dataset_admitted": false,
+    "training_started": false,
+    "model_selected": false,
+    "strength": false,
+    "release": false
+  },
+  "next_safe_action": "Publish the isolated OpenBench PR, require exact-head CI, deploy the merged configuration, then create and monitor the two official canaries without modifying foreign workers."
+}
