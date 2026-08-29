@@ -73,10 +73,26 @@ MILESTONES = ((10_000_000_000_000, '10T club'),
               (100_000_000_000, '100B club'),
               (1_000_000_000, '1B club'))
 
+CANCELLED = AnalysisTask.TState.CANCELLED
 COMPLETED = AnalysisTask.TState.COMPLETED
 LEASED = AnalysisTask.TState.LEASED
 PENDING = AnalysisTask.TState.PENDING
 USER = AnalysisTask.Source.USER
+
+
+def _requests_of(username):
+    """Las peticiones de una cuenta que TODAVIA cuentan como suyas.
+
+    Lo RETIRADO queda fuera, y esta es la unica linea del modulo que tiene que
+    saberlo: las tres listas de la cola filtran por estado y una fila cancelada
+    no esta en ninguno de los tres, pero el medidor de "requests made" contaba
+    filas a secas y habria seguido contando lo que su autor deshizo.  Esa cifra
+    vive en una rejilla de medidores de CONTRIBUCION, al lado de los nodos y de
+    los analisis servidos: una peticion retirada no es ninguna de las dos cosas.
+    """
+    return AnalysisTask.objects.filter(source=USER,
+                                       requested_by=username).exclude(
+        state=CANCELLED)
 
 
 def _ago(moment, now):
@@ -89,41 +105,64 @@ def _ago(moment, now):
     return f'{text} ago'
 
 
-def _machine_totals(since=None):
-    """``{maquina: {nodes, tasks, seconds}}`` de las tareas COMPLETADAS.
+def _totals(owner, since=None):
+    """Totales por MAQUINA y por CUENTA de una ventana, en UN solo GROUP BY.
 
-    Un GROUP BY sobre el indice ``(state, completed)``.  El numero de maquinas
-    distintas es de decenas, asi que lo que vuelve cabe en memoria por
-    construccion — a diferencia de las tareas, que no.
+    Agrupar por ``(machine, delivered_by)`` cuesta lo mismo que agrupar por
+    maquina (el indice recorrido es el de ``(state, completed)`` igual, y la
+    cardinalidad que vuelve sigue siendo de decenas), y de esa unica pasada
+    salen las dos vistas: la de maquinas sumando sus estampas, y la de
+    cuentas atribuyendo cada grupo a su cuenta real.  Cuando la atribucion
+    estampada llego (§ ``delivered_by``) esto eran consultas separadas y el
+    refresco del snapshot paso de dos barridos caros a seis; el warmer de
+    cinco minutos convertia cada uno en un pico de latencia de portada.
     """
     rows = AnalysisTask.objects.filter(state=COMPLETED)
     if since is not None:
         rows = rows.filter(completed__gte=since)
-    rows = rows.values('machine').annotate(
-        nodes=Sum('nodes_searched'), tasks=Count('id'),
-        seconds=Sum('elapsed_seconds')).order_by()
-    return {row['machine']: {'nodes': row['nodes'] or 0,
-                             'tasks': row['tasks'] or 0,
-                             'seconds': row['seconds'] or 0.0}
-            for row in rows}
+    rows = (rows.values('machine', 'delivered_by')
+            .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'),
+                      seconds=Sum('elapsed_seconds')).order_by())
+    machines, users = {}, {}
+    for row in rows:
+        m = machines.setdefault(row['machine'],
+                                {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
+        m['nodes'] += row['nodes'] or 0
+        m['tasks'] += row['tasks'] or 0
+        m['seconds'] += row['seconds'] or 0.0
+        # La cuenta REAL del grupo: la estampada si la hay (un hecho), y si
+        # la fila es anterior al estampado, el dueno sin disputa de la
+        # maquina (una inferencia honesta).  Sin ninguna de las dos, los
+        # nodos cuentan para la flota y para nadie mas.
+        user = row['delivered_by'] or owner.get(row['machine'])
+        if user:
+            _fold(users, user, row['nodes'], row['tasks'])
+    return machines, users
 
 
-def _by_owner(machine_totals, owner):
-    """Los mismos totales plegados por CUENTA.
+def _owner_of_machine():
+    """``{maquina: cuenta}`` SOLO donde el nombre no esta en disputa.
 
-    Una maquina sin ``WorkerPing`` no tiene dueno conocido y no entra en
-    ninguna cuenta: sus nodos siguen contando en el denominador de la flota,
-    porque se buscaron de verdad, pero atribuirselos a alguien seria inventar.
+    El nombre de maquina lo ELIGE el worker, asi que dos cuentas pueden
+    anunciar el mismo (paso el 16-ago: soothdest y NitroColoraze declarando
+    los dos "NitroColoraze-zen4").  El ``dict`` plano de antes se quedaba con
+    una fila arbitraria, y la portada atribuia los nodos de esa maquina a
+    quien no los busco — asi aparecio de contribuidor una cuenta que jamas
+    entrego nada.  Una maquina con dos duenos declarados no tiene dueno
+    conocido: sus filas viejas quedan sin atribuir, exactamente como las de
+    una maquina sin ``WorkerPing``.
     """
-    folded = {}
-    for machine, totals in machine_totals.items():
-        user = owner.get(machine)
-        if not user:
-            continue
-        row = folded.setdefault(user, {'nodes': 0, 'tasks': 0})
-        row['nodes'] += totals['nodes']
-        row['tasks'] += totals['tasks']
-    return folded
+    claims = {}
+    for machine, user in WorkerPing.objects.values_list('machine', 'user'):
+        claims.setdefault(machine, set()).add(user)
+    return {machine: next(iter(users))
+            for machine, users in claims.items() if len(users) == 1}
+
+
+def _fold(folded, account, nodes, tasks):
+    row = folded.setdefault(account, {'nodes': 0, 'tasks': 0})
+    row['nodes'] += nodes or 0
+    row['tasks'] += tasks or 0
 
 
 def measure_fleet(now):
@@ -134,16 +173,18 @@ def measure_fleet(now):
     trabajo mas caro que se hacia dentro de una peticion HTTP en todo el
     sitio.  No entra en la portada porque la portada lo necesite vivo — no lo
     necesita — sino porque era lo unico que quedaba sin publicar desde fuera.
+    Cada ventana paga UNA pasada y de ella salen maquinas y cuentas (§
+    ``_totals``): la atribucion estampada no anade barridos, solo una columna
+    al GROUP BY.
     """
-    owner = dict(WorkerPing.objects.values_list('machine', 'user'))
-    machines_all = _machine_totals()
-    machines_24h = _machine_totals(since=now - timedelta(hours=24))
+    owner = _owner_of_machine()
+    machines_all, users_all = _totals(owner)
+    machines_24h, users_24h = _totals(owner, since=now - timedelta(hours=24))
     return {
-        'owner': owner,
         'machines_all': machines_all,
         'machines_24h': machines_24h,
-        'users_all': _by_owner(machines_all, owner),
-        'users_24h': _by_owner(machines_24h, owner),
+        'users_all': users_all,
+        'users_24h': users_24h,
         'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
         'nodes_all': sum(row['nodes'] for row in machines_all.values()),
     }
@@ -281,8 +322,7 @@ def has_activity(username):
     if not username:
         return False
     return (WorkerPing.objects.filter(user=username).exists()
-            or AnalysisTask.objects.filter(source=USER,
-                                           requested_by=username).exists()
+            or _requests_of(username).exists()
             or OpeningNameSuggestion.objects.filter(
                 suggested_by=username).exists())
 
@@ -294,7 +334,7 @@ def _queue_rows(username):
     aunque la maquina que la sirva sea suya — eso se cuenta en la flota, que es
     otra seccion y otra pregunta.
     """
-    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    mine = _requests_of(username)
     # Cuantas peticiones cobran antes que esta.  Mismo orden que
     # ``choose_pending``, leido del mismo sitio: desde el reparto justo del
     # 7-ago el sitio en la cola ya no es "cuantas hay con id menor", asi que
@@ -302,10 +342,20 @@ def _queue_rows(username):
     # Una sola sentencia para las veinte filas (``queue_ahead_map`` ordena la
     # banda una vez), que es lo que evita el N+1 que esta pagina no puede
     # pagar.
-    pending = list(mine.filter(state=PENDING).order_by('id')[:QUEUE_ROWS + 1])
+    # ``queue_seq`` ANTES QUE ``id``, que es el orden en el que esta cuenta
+    # cobra de verdad (§ live_request.fair_share).  Con la columna a cero —
+    # nadie ha adelantado nada — es literalmente el orden de llegada de antes;
+    # en cuanto alguien adelanta una suya, listarlas por ``id`` pintaria la
+    # adelantada en su sitio viejo con el numero de sitio nuevo al lado.
+    pending = list(mine.filter(state=PENDING)
+                   .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
     places = live_request.queue_ahead_map(pending)
     for task in pending:
-        task.ahead = places.get(task.id)
+        # El mapa devuelve ``(cuantas delante, cuantas tuyas)``: aqui se pinta
+        # la primera, que es la columna que esta lista ya tenia.  La segunda
+        # la usa el panel de la posicion (§ ``live_request._place_text``).
+        place = places.get(task.id)
+        task.ahead = None if place is None else place[0]
     leased = list(mine.filter(state=LEASED)
                   .order_by('-leased_at', '-id')[:QUEUE_ROWS])
     done = list(mine.filter(state=COMPLETED)
@@ -401,7 +451,7 @@ def _badges(nodes_total):
 
 def _labels(keys):
     from . import views
-    return views._line_labels_many([key for key in keys if key])
+    return views._line_readings_many([key for key in keys if key])
 
 
 def _presented(task, labels, now, extra=None):
@@ -410,20 +460,26 @@ def _presented(task, labels, now, extra=None):
     La ruta declarada por el peticionario gana al linaje canonico cuando sigue
     siendo valida: el DAG transpone y nadie reconoce su propia peticion pintada
     en otro orden de jugadas (§ ``AnalysisTask.route``).
+
+    El nombre de apertura viaja SIEMPRE con el rotulo que lo acompana — los
+    dos salen de la misma lectura — porque el nombre heredado depende del
+    orden de jugadas y una fila que los mezclara estaria nombrando una linea
+    que no es la que pinta.
     """
     from . import views
 
-    preview, full = labels.get(task.position_id, ('', ''))
+    preview, full, opening = labels.get(task.position_id, ('', '', ''))
     play = ''
     if task.route:
-        routed = views._route_labels(task.route, task.position_id)
+        routed = views._route_labels_full(task.route, task.position_id)
         if routed is not None and routed[0]:
-            preview, full = routed
+            preview, full, opening = routed
             play = task.route
     row = {
         'key': task.position_id,
         'san': preview or 'the start position',
         'full': full or 'the start position',
+        'opening': opening,
         'play': play,
         'budget': human(task.budget_nodes),
     }
@@ -441,9 +497,14 @@ def present(username, now=None):
                       .values_list('machine', flat=True))
 
     pending, leased, done = _queue_rows(username)
-    mine = AnalysisTask.objects.filter(source=USER, requested_by=username)
+    mine = _requests_of(username)
     pending, pending_more = _overflow(pending, QUEUE_ROWS,
                                       mine.filter(state=PENDING))
+    # Lo que dice el boton de vaciar, SIN una consulta mas: ``_overflow`` ya
+    # conto la banda entera cuando desbordo, y cuando no desbordo la lista ES
+    # la banda entera.  Un ``count()`` aparte aqui seria un segundo recuento de
+    # lo mismo en la pagina que menos se puede permitir consultas de sobra.
+    pending_total = len(pending) + pending_more
     done, done_more = _overflow(done, QUEUE_ROWS, mine.filter(state=COMPLETED))
 
     suggestions = list(OpeningNameSuggestion.objects
@@ -475,10 +536,32 @@ def present(username, now=None):
             'since': _ago(task.leased_at, now),
             'quiet': beat is None or beat < lease_cutoff,
         }))
+    # ``place`` es el sitio en la cola y es lo UNICO que se pinta de la espera:
+    # decir ademas "N requests ahead" era el mismo numero dos veces con dos
+    # redacciones (sugerencia de Eclipsia, #suggestions).
     pending_rows = [
+        # NO HAY BOTON DE ADELANTAR EN ESTAS FILAS, y es deliberado desde el
+        # 15-ago: una lista ordenada por turno ensena arriba lo que ya iba
+        # primero, asi que un control por fila ofrecia adelantar justo lo que
+        # no hacia falta adelantar, y la peticion que si lo merece esta en el
+        # puesto ciento y pico, fuera de esta pagina.  El control vive ahora
+        # en la pagina de la POSICION, donde la peticion se mira de verdad
+        # (§ ``live_request.bump_control``), y el enlace de la linea es el
+        # camino hasta el.
         _presented(task, labels, now,
-                   {'ahead': task.ahead, 'place': task.ahead + 1,
-                    'when': _ago(task.created, now)})
+                   {'place': task.ahead + 1,
+                    'when': _ago(task.created, now),
+                    # RETIRAR SI SE QUEDA AQUI, y la asimetria con el boton
+                    # que se acaba de ir no es un descuido.  Adelantar en esta
+                    # lista no servia porque la lista YA esta ordenada por
+                    # turno: lo de arriba es lo que ya iba primero.  Retirar no
+                    # tiene ese problema — lo que se quiere quitar puede ser
+                    # cualquiera, y en una racha de peticiones que ya no se
+                    # quieren son todas — y ademas esta es la unica pagina que
+                    # las ensena juntas.  El de la POSICION es el otro camino,
+                    # para la que se esta mirando (§ live_request).
+                    'task_id': task.id,
+                    'backers': task.backers})
         for task in pending]
     done_rows = [
         _presented(task, labels, now,
@@ -537,7 +620,7 @@ def present(username, now=None):
              OpeningNameSuggestion.SState.PENDING: 'hot'}
     suggestion_rows = []
     for row in suggestions:
-        preview, full = labels.get(row.position_id, ('', ''))
+        preview, full, _opening = labels.get(row.position_id, ('', '', ''))
         suggestion_rows.append({
             'name': row.proposed_name,
             'previous': row.previous_name,
@@ -559,6 +642,7 @@ def present(username, now=None):
         # empieza directamente por lo que puede hacer.
         'has_counters': bool(requests_total or nodes_all),
         'queue_pending': pending_rows, 'queue_pending_more': pending_more,
+        'queue_pending_total': pending_total,
         'queue_leased': leased_rows,
         'queue_done': done_rows, 'queue_done_more': done_more,
         'has_queue': bool(pending_rows or leased_rows or done_rows),

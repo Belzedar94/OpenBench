@@ -23,18 +23,15 @@ apaga el ordenador el fin de semana sin dejar dentro a quien presto una tarde
 hace tres meses.
 """
 
-from datetime import timedelta
-
-from django.utils import timezone
-
+from . import lanes
 from .ingest import REQUEST_BUDGET_LADDER, request_ladder_state
-from .models import WorkerPing
 
-# Ventana de contribuidor.  Mas generosa que cualquier medidor de presencia del
-# sitio (240s en la pagina de contribuidor, minutos en los de la portada) a
-# proposito: alli se cuenta capacidad VIVA, aqui se responde "esta persona
-# sostiene esto", que es una pregunta de semanas y no de segundos.
-CONTRIBUTOR_WINDOW_DAYS = 7
+# La ventana de contribuidor vive en ``lanes`` desde que la comunidad voto los
+# carriles: la misma pregunta ("corrio un worker esta semana") decide quien
+# elige peldano y quien tiene carril propio, y dos implementaciones de una sola
+# pregunta acaban discrepando el dia que una cambie.  Se reexporta el nombre
+# porque este modulo lo publicaba y hay quien lo importa de aqui.
+CONTRIBUTOR_WINDOW_DAYS = lanes.CONTRIBUTOR_WINDOW_DAYS
 # Nombre del campo en el POST de ``/atomicdb/request/<key>/``.
 BUDGET_FIELD = 'budget'
 
@@ -58,9 +55,7 @@ def may_choose(user):
     from OpenBench.models import Profile
     if not Profile.objects.filter(user=user, enabled=True).exists():
         return False
-    since = timezone.now() - timedelta(days=CONTRIBUTOR_WINDOW_DAYS)
-    return WorkerPing.objects.filter(user=user.username,
-                                     last_seen__gte=since).exists()
+    return lanes.ran_a_worker(user.username)
 
 
 def chosen_rung(request):
@@ -82,7 +77,21 @@ def chosen_rung(request):
     legitima en un boton roto y, de paso, seria un oraculo de quien tiene
     derecho y quien no.
     """
-    raw = (request.POST.get(BUDGET_FIELD) or '').strip()
+    return chosen_rung_for(request.POST.get(BUDGET_FIELD),
+                           getattr(request, 'user', None))
+
+
+def chosen_rung_for(raw, user):
+    """La misma regla, con la cuenta DICHA en vez de leida de la sesion.
+
+    La API oficial de peticion (§ ``views.api_public_request``) no mira la
+    cookie de sesion a proposito, asi que su cuenta no esta en
+    ``request.user``: le llega en el cuerpo, autenticada con credenciales.  El
+    derecho a elegir peldano es el mismo para las dos puertas, y por eso la
+    regla se lee de un solo sitio en vez de copiarse con otra fuente de
+    identidad al lado.
+    """
+    raw = (raw or '').strip()
     if not raw:
         return None, False
     try:
@@ -91,7 +100,7 @@ def chosen_rung(request):
         return None, True
     if budget not in REQUEST_BUDGET_LADDER:
         return None, True
-    if not may_choose(getattr(request, 'user', None)):
+    if not may_choose(user):
         return None, False
     return budget, False
 

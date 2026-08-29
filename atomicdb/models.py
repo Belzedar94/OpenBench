@@ -62,6 +62,29 @@ class Position(models.Model):
     # necesitan slack.  NULL = no medido, que se trata como cero.
     clock_slack = models.SmallIntegerField(null=True)
     last_analysis = models.JSONField(null=True)  # raw MultiPV del ultimo analisis
+    # QUE DIJO CADA PASE, en una linea por pase y del mas nuevo al mas viejo.
+    #
+    # Peticion de comunidad (Wolfram): "preferably all passes that were done in
+    # the node, as it is practically useful to know which evaluation engine
+    # gave at lower depth".  ``last_analysis`` guarda las LINEAS, y solo las de
+    # dos pases: el vigente y — cuando era mas ancho — el anterior.  Eso
+    # responde a la mitad de la pregunta; la otra mitad es la SERIE, que es
+    # justamente lo que ensena si el numero se movio al profundizar o llevaba
+    # tres pases diciendo lo mismo.
+    #
+    # RESUMENES Y NO LINEAS, y por eso cabe.  Al lado esta escrito por que
+    # ``last_analysis`` recorta las PVs a 24 plies: es un JSON POR POSICION y
+    # su tamano medio se multiplica por los millones de filas de esta tabla.
+    # Una entrada de aqui son unas decenas de bytes — presupuesto, anchura,
+    # eval, jugada, profundidad y fecha — sin una sola PV dentro, y solo crece
+    # en los nodos revisitados, que son una minoria.  Con ``PASS_HISTORY_MAX``
+    # entradas el techo por fila esta acotado por construccion.
+    #
+    # HACIA DELANTE Y SIN RELLENAR NADA: las filas que ya existen tienen lista
+    # vacia y no hay forma honesta de reconstruirles la serie — los pases que
+    # no se guardaron no se pueden inventar.  La API lo dice cuando responde
+    # (§ views.api_query, ``analysis.passes_from``).
+    analysis_passes = models.JSONField(default=list, blank=True)
     expanded  = models.BooleanField(default=False)                 # aristas completas creadas
     # ¿CUELGA ESTA POSICION DE LA RAIZ?  Lo sabia el Dijkstra global — un nodo
     # sin regret finito estaba desconectado — y saberlo costaba recorrer el
@@ -276,11 +299,54 @@ class CampaignVote(models.Model):
         return f'vote for campaign {self.campaign_id}'
 
 
+class ContributorPref(models.Model):
+    """Preferencias por cuenta OB.  Una fila por cuenta, nacida al primer uso.
+
+    P5 (comunidad, 3-0, 28-ago-2026): ``lifo_queue`` — cada peticion nueva de
+    la cuenta entra al frente de su PROPIA cola.  Es la misma pieza y las
+    mismas garantias que el boton Move to front
+    (v. ``ingest.front_of_own_queue``): se hereda un sitio que la cuenta ya
+    tenia, nadie ajeno pierde turno.
+    """
+    account    = models.CharField(max_length=64, unique=True)
+    lifo_queue = models.BooleanField(default=False)
+
+
 class AnalysisTask(models.Model):
     class TState(models.TextChoices):
         PENDING   = 'PENDING'
         LEASED    = 'LEASED'
         COMPLETED = 'COMPLETED'
+        # RETIRADA POR QUIEN LA PIDIO, antes de que ningun motor la mirase.
+        #
+        # Peticion de comunidad (asfault): "is there a way to cancel requests
+        # before they have started - for when you accidentally request analysis
+        # for some already deeply analysed line".  Hasta hoy la unica salida de
+        # la cola era que un worker la sirviera.
+        #
+        # POR QUE UN ESTADO PROPIO Y NO LA ABSORCION.  Absorber es
+        # ``COMPLETED`` sin nodos (§ ``ingest.absorb_tasks``) y significa "el
+        # trabajo se hizo, pero no lo hizo esta fila": el peldano SE COMPRO.
+        # Cancelar dice lo contrario — no se compro nada — y contarlo como
+        # completado tiene dos precios que nadie pidio pagar.  Uno es visible:
+        # la fila aparece en "Served" de su autor con cero nodos, o sea el
+        # sitio miente sobre lo que ese click consiguio.  El otro es peor y es
+        # silencioso: ``ingest._completed_max_budget`` lee los COMPLETED para
+        # saber por que peldano va la escalera, asi que cancelar un 128M
+        # ensenaria a la posicion que ese peldano ya esta pagado y el siguiente
+        # click compraria 512M — cancelar saldria caro justo a quien cancela
+        # porque se equivoco de linea.
+        #
+        # Y CUESTA CASI NADA porque el resto del codigo ya filtra por estado en
+        # POSITIVO: no hay un solo ``exclude(state=...)`` ni una enumeracion de
+        # los tres estados sobre esta tabla.  Una fila retirada cae sola fuera
+        # de la cola (``state='PENDING'``), fuera del reparto justo
+        # (``CHARGED``), fuera de lo servido, fuera de la contabilidad de nodos
+        # y fuera de la escalera.  Lo unico que hubo que ensenar aparte es a
+        # volver: la unicidad (posicion, generacion) deja el hueco ocupado por
+        # la fila retirada, asi que la siguiente peticion la REVIVE en vez de
+        # chocar (§ ``ingest._request_rung``).
+        CANCELLED = 'CANCELLED'
 
     class Source(models.TextChoices):
         AUTO = 'AUTO'   # selector best-first
@@ -311,6 +377,49 @@ class AnalysisTask(models.Model):
     # esa misma cuenta atiende primero sus propias peticiones dentro de la
     # banda USER; para el resto de la flota no cambia nada.
     requested_by = models.CharField(max_length=64, default='', blank=True)
+    # LAS OTRAS cuentas que pidieron ESTA MISMA tarea, en orden de llegada.
+    # Reporte de comunidad (Eclipsia): "multiple people asking to analyse the
+    # same position should give it more precedence".  Hasta hoy el segundo que
+    # pedia lo mismo desaparecia: ``_request_rung`` encontraba la tarea ya
+    # encolada, le subia el presupuesto si hacia falta y devolvia
+    # 'already-queued' sin dejar rastro de quien mas la esperaba — ni orden ni
+    # aviso.  El primero conserva la autoria (``requested_by``, y con ella la
+    # afinidad de su worker); los demas viven aqui.
+    also_requested_by = models.JSONField(default=list, blank=True)
+    # ``len(also_requested_by)``, desnormalizado porque el ORDEN DE SERVICIO lo
+    # lee en SQL (§ live_request.SERVICE_KEYS) y contar los elementos de un
+    # JSON no se escribe igual en SQLite que en PostgreSQL.  Cero en todo lo
+    # que existia y en toda peticion normal: la columna solo se despega del
+    # suelo cuando alguien MAS pide lo mismo, que es cuando significa algo.
+    backers = models.IntegerField(default=0)
+    # De QUIEN es el CARRIL con el que esta peticion viaja, cuando no es el de
+    # su autor.  Vacio — que es lo que dice toda fila que existia y toda
+    # peticion que pidio una sola persona — significa "el de ``requested_by``",
+    # asi que la columna no necesita relleno y no cambia nada por si sola.
+    #
+    # Aviso de la comunidad (Eclipsia, 15-ago, sobre una peticion de
+    # soothdest): una peticion que piden varios se cobraba SOLO a su autor, asi
+    # que con el autor saturado se quedaba enterrada bajo su propio atasco
+    # — unas 2.690 filas — y sumarse no cambiaba nada visible.  Desde aqui la
+    # peticion viaja con el carril del MEJOR COLOCADO de los suyos
+    # (§ ``lanes.effective_account``), que es lo que hace que sumarse sirva.
+    #
+    # La AUTORIA no se mueve: el aviso al aterrizar, la cola del perfil y la
+    # afinidad del worker siguen leyendo ``requested_by``.  Prestar tu carril
+    # no es quedarte la peticion.
+    lane_account = models.CharField(max_length=64, default='', blank=True)
+    # El sitio de esta tarea DENTRO de la cola de su peticionario.  Cero es
+    # "nunca se toco" y entonces manda el ``id``, que es el orden de llegada de
+    # siempre: con la columna a cero en todas las filas, el reparto justo
+    # ordena EXACTAMENTE como ordenaba (§ live_request.fair_share).
+    #
+    # Peticion de comunidad (Wolfram): "some checkmark to push smth to the
+    # front of my own queue, not to the back, would be nice".  Adelantar una
+    # propia escribe aqui un valor por debajo del de sus companeras, y solo
+    # aqui: la tarea adelantada hereda el sitio que la PRIMERA de esa misma
+    # cuenta ya tenia, nunca uno mejor, asi que la cola de los demas no se
+    # entera (§ views.api_queue_bump).
+    queue_seq = models.BigIntegerField(default=0)
     # Ruta (UCIs separados por coma) por la que el peticionario LLEGO a la
     # posicion, ya validada contra las reglas de Atomic.  El DAG transpone:
     # el linaje canonico puede ensenar otro orden de jugadas y el autor no
@@ -320,6 +429,15 @@ class AnalysisTask(models.Model):
     state        = models.CharField(max_length=10, choices=TState.choices,
                                     default=TState.PENDING, db_index=True)
     machine      = models.CharField(max_length=64, default='')
+    # La CUENTA autenticada que entrego el resultado, estampada al completar
+    # (§ views, el submit).  No es redundante con ``machine``: ese nombre lo
+    # elige el worker y dos cuentas pueden anunciar el mismo, asi que "el
+    # dueno de la maquina" es una adivinanza y esto es un hecho.  Vacio en
+    # toda fila anterior al 16-ago (la migracion no rellena nada a proposito:
+    # una autoria que nadie registro seria inventada) y en las tareas que
+    # nunca se completaron.  La portada atribuye por esta columna y solo cae
+    # al mapa de duenos, maquinas sin ambiguedad unicamente, para lo antiguo.
+    delivered_by = models.CharField(max_length=64, default='', blank=True)
     leased_at    = models.DateTimeField(null=True)
     # Separate keepalive preserves the immutable assignment timestamp while
     # preventing a healthy multi-hour search from being leased a second time.
@@ -338,6 +456,12 @@ class AnalysisTask(models.Model):
     # el sha del binario y el de la red, ese sesgo es atribuible.
     engine_sha   = models.CharField(max_length=64, blank=True, default='')
     net_sha      = models.CharField(max_length=64, blank=True, default='')
+    # Con ``arm``, el par que sostiene el techo de gasto por hora del walker:
+    # cuantas tareas creo un brazo en la ultima hora (§ ingest, presupuesto
+    # HORARIO de los brazos).  El indice compuesto que lo hace una lectura de
+    # rango en vez de un recorrido de la particion del brazo vive en SQL, no
+    # aqui, para que produccion pueda crearlo antes con CONCURRENTLY
+    # (§ migrations/0048_analysistask_arm_rate_index.py).
     created      = models.DateTimeField(auto_now_add=True)
     completed    = models.DateTimeField(null=True)
 
@@ -675,6 +799,50 @@ class RequestLog(models.Model):
     created  = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
+class ApiRequestLog(models.Model):
+    """Un recibo por llamada ACEPTADA a la API de peticion de analisis.
+
+    Peticion de comunidad (Wolfram): "is there official API for requesting
+    analysis".  El click de la pagina no lleva tope horario — el propietario lo
+    retiro el 28-jul porque frenaba a quien usaba el explorador de verdad y no
+    frenaba a nadie mas — y lo que acota su gasto son el dedup por ip+posicion
+    y el techo de cola.  Un cliente programatico no tiene ninguna de las dos
+    frenadas naturales de un humano: no hay una pagina que recargar entre
+    peticion y peticion, y un bucle mal escrito no se cansa.
+
+    ASI QUE EL TOPE ES DE LA PUERTA, NO DE LA PERSONA.  Esta tabla cuenta solo
+    llamadas de API, y por eso existe en vez de reusar ``RequestLog``: contar
+    las dos puertas juntas dejaria que una tarde de exploracion normal en el
+    navegador agotase el presupuesto del script de esa misma cuenta, que es
+    exactamente la decision que el propietario ya tomo al reves.
+
+    ``account`` vacio = llamada sin credenciales.  A esas se les cuenta por
+    ``ip``, que es lo unico que las agrupa; a las que traen cuenta se les
+    cuenta por cuenta, y la IP de esas se guarda igual porque un abuso se
+    diagnostica por donde entra.  Nombre en texto y no FK, por lo mismo que
+    ``AnalysisTask.requested_by``: el router prohibe relaciones entre esta base
+    y la de OpenBench.
+    """
+
+    account = models.CharField(max_length=64, default='', blank=True)
+    ip      = models.GenericIPAddressField()
+    created = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            # La unica consulta que hace el tope: las MIAS en la ultima hora.
+            # Compuestos y no dos indices sueltos: con ``account`` a secas
+            # habria que bajar por todas las llamadas de esa cuenta desde que
+            # existe la tabla y descartar por fecha, y el prefijo izquierdo de
+            # estos ya sirve para cualquier consulta por cuenta o por
+            # direccion a secas — un indice suelto encima seria una copia que
+            # solo cuesta escrituras.
+            models.Index(fields=['account', 'created'],
+                         name='atomic_apireq_account'),
+            models.Index(fields=['ip', 'created'], name='atomic_apireq_ip'),
+        ]
+
+
 class RequestNotification(models.Model):
     """El analisis que ESTE visitante pidio ya esta servido.
 
@@ -695,13 +863,22 @@ class RequestNotification(models.Model):
 
     ``task`` es SET_NULL: el aviso habla de una POSICION que ya tiene
     resultado, y ese hecho sobrevive a que la fila de la tarea desaparezca.
-    Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez — y la
-    pone la base, no un ``exists()`` de la vista al que otro procesador de la
-    cola puede adelantarse.  Sobre las filas con ``task`` a NULL esa unicidad
-    NO afirma nada — para una unica, dos NULL son distintos — asi que la
-    constraint lo dice con su condicion en vez de aparentar un limite que no
-    pone: el dedup rige mientras la tarea existe, que es exactamente cuando
-    el procesador de la cola puede intentar avisar dos veces.
+    Su unicidad es lo que DEDUPLICA — una tarea avisa una sola vez A CADA
+    PERSONA — y la pone la base, no un ``exists()`` de la vista al que otro
+    procesador de la cola puede adelantarse.  Sobre las filas con ``task`` a
+    NULL esa unicidad NO afirma nada — para una unica, dos NULL son
+    distintos — asi que la constraint lo dice con su condicion en vez de
+    aparentar un limite que no pone: el dedup rige mientras la tarea existe,
+    que es exactamente cuando el procesador de la cola puede intentar avisar
+    dos veces.
+
+    EL NOMBRE ENTRA EN LA CLAVE desde que una tarea puede tener varios
+    peticionarios (§ ``AnalysisTask.also_requested_by``).  Con la unicidad
+    sobre ``task`` a secas, avisar al segundo era imposible por construccion:
+    la fila del primero ocupaba el unico hueco y el resto se caia en
+    silencio.  Lo que la constraint tiene que impedir sigue siendo lo mismo,
+    dos avisos IGUALES de la misma tarea a la misma persona, y eso es
+    exactamente lo que dice ahora.
     """
 
     username = models.CharField(max_length=64)
@@ -721,7 +898,8 @@ class RequestNotification(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(
-            fields=['task'], condition=models.Q(task__isnull=False),
+            fields=['task', 'username'],
+            condition=models.Q(task__isnull=False),
             name='uniq_notification_per_task')]
         indexes = [models.Index(fields=['username', 'seen'],
                                 name='atomic_notify_unseen')]
@@ -810,6 +988,17 @@ class WorkerPing(models.Model):
     last_nps   = models.BigIntegerField(default=0)
     nps_updated = models.DateTimeField(null=True)
     last_seen  = models.DateTimeField(auto_now=True, db_index=True)
+    # When this worker last DELIVERED a result, as opposed to last said hello.
+    # ``last_seen`` moves on any authenticated call, so a process that polls
+    # ``/api/lease`` forever and never returns an analysis looks exactly like a
+    # machine carrying the project.  That gap costs nothing while the only
+    # thing it opens is the rung selector, but a contributor lane is a share of
+    # the fleet, and a share has to be earned with delivered work.  Written in
+    # ``views.api_submit`` beside the ``tasks_done`` bump, which is the one
+    # place a result is known to have landed.  NULL is "has never delivered
+    # since this column existed", which is what every pre-existing row means
+    # and why the column has to be nullable rather than defaulted to now.
+    last_result_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['machine', 'user'],

@@ -26,14 +26,15 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
 from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, ingest, ingest_queue,
-               live_request, logic, metrics, notifications, openings, proof,
-               revalidate, solve, solve_estimate)
+               lanes, live_request, logic, metrics, notifications, openings,
+               proof, revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
-from .models import (AnalysisTask, Campaign, CampaignVote, DBEvent, Edge,
-                     OpeningNameSuggestion, Position, ProgressSnapshot,
-                     ProofCampaign, ProofNode, RequestLog, SolveTask,
-                     WorkerPing)
+from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
+                     DBEvent, Edge, OpeningNameSuggestion, Position,
+                     ProgressSnapshot, ProofCampaign, ProofNode, RequestLog,
+                     SolveTask, WorkerPing)
+from .models import ContributorPref
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -91,14 +92,34 @@ DEEP_LEASES_FLOOR = 1
 # el ``chunk_size`` con el que esto se recorria cuando era un solo cursor.
 LEASE_SCAN_CHUNK = 64
 MAX_REPORTED_NPS = 1_000_000_000_000
-# Techo global de peticiones humanas esperando (PENDING, source USER, sobre
-# posiciones aun sin resolver). Estuvo abierto de par en par desde el 27-jul
-# mientras se medía el uso real; con los numeros del 30-jul —la flota sirve
-# ~1.100 tareas/hora y la cola humana viva ronda las 100— cinco mil son unas
-# cuatro horas de trabajo y cincuenta veces el uso normal: quien usa la
-# pagina no lo vera nunca, y el dia que alguien la recorra con un script el
-# freno esta puesto. Lo que se rechaza es solo lo que pide una PERSONA: el
-# selector y los brazos automaticos siguen encolando pase lo que pase.
+# Techo de peticiones humanas esperando POR PERSONA (PENDING, source USER,
+# sobre posiciones aun sin resolver).  Cinco mil salen de los numeros del
+# 30-jul: la flota sirve ~1.100 tareas/hora y la cola humana viva ronda las
+# 100, asi que son unas cuatro horas de trabajo y cincuenta veces el uso
+# normal.  Quien usa la pagina no lo vera nunca; el dia que alguien la recorra
+# con un script, el freno esta puesto.
+#
+# ERA GLOBAL, Y ESO ES LO QUE CAMBIA (decision del propietario, 15-ago: ni
+# techo global ni techo en NODOS).  Sumando la cola de todo el mundo, una sola
+# cuenta ocupada dejaba fuera a gente que no habia pedido nada — el mismo
+# acaparamiento que los carriles existen para deshacer, puesto esta vez en la
+# puerta de entrada.  Contado por peticionario, el freno sigue frenando al que
+# se desboca y no le cuesta el turno a nadie mas: tu cola es tuya.
+#
+# Y SE CUENTA EN PETICIONES, NO EN NODOS, porque el presupuesto no lo elige
+# una persona: lo elige la escalera de la posicion (§ ``ingest._request_rung``).
+# Un tope en nodos castigaria a quien pincha en posiciones profundas que el
+# propio sitio decidio que eran caras.  Una peticion si es lo que un humano
+# hace, y contar lo que hace el humano es el unico tope sobre el que el humano
+# puede razonar.
+#
+# La marea anonima comparte cubo (``requested_by`` vacio) y por tanto comparte
+# UN cupo: es un solo miembro del comun, la misma decision que ya toman el
+# reparto y el tope de arriendos profundos, y por el mismo motivo — lo que no
+# se puede distinguir no se puede repartir.
+#
+# Solo se rechaza lo que pide una PERSONA: el selector y los brazos
+# automaticos siguen encolando pase lo que pase.
 REQUEST_QUEUE_MAX = 5000
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
@@ -177,6 +198,10 @@ LINEAGE_REFRESH_LOCK_SECONDS = 60
 # v2: las entradas van FECHADAS (``{'stored_at': ..., 'payload': ...}``), que
 # es lo que permite preguntarles la edad en vez de solo si siguen ahi.
 LINEAGE_CACHE_VERSION = 2
+# Version PROPIA del rotulo de ruta (§ ``_route_label_cache_key``), que se
+# mueve sola cuando cambia SU payload y sin arrastrar al linaje.
+# v2: el payload lleva ademas el nombre de apertura de esa misma ruta.
+ROUTE_LABEL_VERSION = 2
 # Las claves de los hijos SIN arista de una posicion (§ ``_child_keys``).  Es
 # lo unico cacheado de esta pagina que no puede quedarse obsoleto — el mapa
 # (FEN del padre, jugada) -> clave del hijo no depende de nada que cambie — asi
@@ -191,12 +216,24 @@ PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
 OPENING_ANCHOR_PARAM = 'opening'
-# El salto al origen de un respaldo puede acabar en una REPETICION en vez de en
-# una fuente (§ ``_walk_backed_spine``).  Viaja como parametro porque el que lo
-# sabe es el paseo, y el que lo tiene que decir es la pagina de destino; pintar
-# el aviso sin el implicaria caminar la espina en cada render, que es
-# justamente lo que ese paseo no hace.
+# WHAT A JUMP REPORTS WHEN IT DOES NOT ARRIVE, and why the two jumps of this
+# page report it the same way.  Both walks descend a chain the database
+# asserts (the support spine of a backed value, the witness chain of a proof)
+# and both can end somewhere that is not the end of that chain: the chain
+# closes on itself, or it breaks before it runs out.  Landing silently in
+# either case is what made a visitor read a working jump as a broken one
+# ("BACKED is clickable although it doesn't always work correctly tbh",
+# Wolfram), so the walk hands its outcome to the landing page and the landing
+# page says it.  It travels as a query parameter because the one who knows is
+# the walk and the one who has to say it is the destination; deducing it there
+# would mean walking the chain again on every render, which is exactly what
+# these walks do not do.
 BACKED_REPETITION_PARAM = 'repetition'
+JUMP_INCOMPLETE_PARAM = 'incomplete'
+JUMP_REPETITION = 'repetition'
+JUMP_INCOMPLETE = 'incomplete'
+JUMP_OUTCOME_PARAM = {JUMP_REPETITION: BACKED_REPETITION_PARAM,
+                      JUMP_INCOMPLETE: JUMP_INCOMPLETE_PARAM}
 OPENING_ANCHOR_SALT = 'atomicdb.explorer.opening-anchor.v1'
 OPENING_ANCHOR_MAX_CHARS = 1024
 # board.js predates opening anchors and carries only one ``play`` value.
@@ -351,6 +388,52 @@ def _live_moves(task):
     return []
 
 
+def _account_queue_full(requested_by):
+    """True si ESTA cuenta ya tiene su cupo de peticiones esperando.
+
+    UNA sola definicion para las tres puertas que crean filas USER (el boton de
+    una jugada, el de la linea entera y el masivo de jugadas sin mirar): eran
+    tres copias del mismo ``count()`` y bastaba con anadir una cuarta puerta
+    para que el tope dejase de existir sin que nadie lo notara.
+
+    Cuenta lo que ESPERA y no lo que ya corre: lo arrendado tiene un motor
+    encima y va a terminar, asi que sumarlo cobraria dos veces por el mismo
+    trabajo.  Y solo sobre posiciones sin resolver, porque una PENDING sobre
+    una posicion cerrada no la sirve nadie (§ ``live_request.SERVEABLE``): no
+    es cola de nadie y no debe gastarle el cupo a nadie.
+    """
+    return (AnalysisTask.objects
+            .filter(state='PENDING', source='USER',
+                    position__status='UNKNOWN', requested_by=requested_by)
+            .count() >= REQUEST_QUEUE_MAX)
+
+
+def _queue_full_payload(requested_by):
+    """La negativa, con el recibo de por que.  ``(cuerpo, codigo)``.
+
+    ``LANE_CAP_HIT`` es raro por construccion — hacen falta cinco mil
+    peticiones esperando de una misma cuenta — asi que cada fila es senal y
+    ninguna es ruido.  Es ademas lo unico que convierte "me dijo que no" en
+    algo que se puede mirar despues.
+
+    Devuelve la pareja y no una respuesta porque el camino comun de las
+    peticiones (``_queue_request``, que sirve al click y a la API oficial) habla
+    en parejas: quien llama pone la envoltura.  Las puertas que si devuelven
+    una respuesta usan ``_queue_full_response``, que es esta misma envuelta.
+    """
+    DBEvent.objects.create(kind='LANE_CAP_HIT', payload={
+        'account': requested_by or '(anonymous)',
+        'waiting': REQUEST_QUEUE_MAX,
+    })
+    return {'status': 'queue-full-account'}, 503
+
+
+def _queue_full_response(requested_by):
+    """La misma negativa para las puertas que devuelven ``JsonResponse``."""
+    body, code = _queue_full_payload(requested_by)
+    return JsonResponse(body, status=code)
+
+
 def machine_base(machine):
     """La maquina fisica detras de un slot: ``base#3`` -> ``base``.
 
@@ -438,6 +521,14 @@ def _locked_in_order(ordered):
             task = rows.get(task_id)
             if task is not None:
                 yield task
+
+
+# P7 (comunidad, 3-0, 28-ago-2026): cuentas de LA CASA.  Su hierro come de
+# la marea de fondo (AUTO/FILL) y de sus propias peticiones; un click de
+# visitante nunca cae en su plato.  La flota comunitaria sigue sirviendolo
+# todo — esto retira al worker de codex de la banda USER ajena, que era lo
+# votado tras la queja de Eclipsia (25-ago).
+HOUSE_ACCOUNTS = frozenset({'codex_local_worker'})
 
 
 @csrf_exempt
@@ -585,6 +676,11 @@ def api_lease(request):
                 .filter(live_request.SERVEABLE)
                 .annotate(queue_rank=human_rank, own_first=own_first,
                           named_first=named_first))
+            # P7: la casa no toca peticiones USER ajenas (v. HOUSE_ACCOUNTS).
+            if user.username in HOUSE_ACCOUNTS:
+                ordered = ordered.exclude(
+                    Q(source=AnalysisTask.Source.USER)
+                    & ~Q(requested_by=user.username))
             # Los dos escalones del medio se leen de ``live_request`` — son
             # LOS MISMOS objetos que usa el estimador, no una copia parecida.
             #
@@ -904,16 +1000,30 @@ def api_submit(request):
         task.completed = timezone.now()
         task.nodes_searched = searched
         task.elapsed_seconds = elapsed
+        # La cuenta AUTENTICADA que entrega, que no es lo mismo que el dueno
+        # del nombre de maquina: ese nombre lo elige el worker y dos cuentas
+        # pueden anunciar el mismo (paso el 16-ago, soothdest y NitroColoraze
+        # sobre "NitroColoraze-zen4", y la portada atribuyo los nodos al que
+        # no los busco).  Con la cuenta estampada aqui, la atribucion de la
+        # portada deja de adivinar duenos (§ contributors._account_totals).
+        task.delivered_by = user.username
         # Procedencia opcional: un worker anterior a este build no la manda y
         # las columnas se quedan vacias, que es exactamente lo que ya pasaba.
         task.engine_sha = engine_sha
         task.net_sha = net_sha
         task.save(update_fields=[
-            'state', 'machine', 'completed', 'nodes_searched',
+            'state', 'machine', 'completed', 'delivered_by', 'nodes_searched',
             'elapsed_seconds', 'engine_sha', 'net_sha'])
         ping_updates = {
             'tasks_done': F('tasks_done') + 1,
             'last_seen': timezone.now(),
+            # A DELIVERY, not a hello.  This is the only point in the protocol
+            # where the server knows an analysis actually landed, so it is the
+            # only honest place to stamp the evidence a contributor lane is
+            # earned with (§ lanes, § migration 0041).  It sits beside the
+            # ``tasks_done`` bump because they answer the same question, one
+            # cumulatively and one with a date.
+            'last_result_at': timezone.now(),
         }
         if searched > 0 and elapsed > 0:
             ping_updates.update({
@@ -972,7 +1082,11 @@ def _sha_field(raw):
 # (respuesta perdida tras el commit, proceso zombi con la misma identidad de
 # maquina) y dos patrones distintos serian dos superficies de fallo.
 
-SOLVE_LEASE_MINUTES = 20
+# La ventana la define ``ingest`` desde que el barrido de arriendos muertos
+# dejo de vivir aqui dentro (§ ``ingest.recycle_stale_solve_leases``): un
+# arriendo caduca porque pasa el tiempo, no porque llegue una peticion.  Se
+# reexporta con el mismo nombre para no tocar ninguna de sus referencias.
+SOLVE_LEASE_MINUTES = ingest.SOLVE_LEASE_MINUTES
 MAX_SOLVE_CERTIFICATE_BYTES = solve.MAX_COMPRESSED_BYTES
 
 
@@ -989,12 +1103,9 @@ def api_solve_acquire(request):
     with atomic():
         now = timezone.now()
         stale = now - timedelta(minutes=SOLVE_LEASE_MINUTES)
-        SolveTask.objects.filter(
-            state='LEASED', leased_at__lt=stale,
-        ).filter(Q(lease_heartbeat_at__isnull=True)
-                 | Q(lease_heartbeat_at__lt=stale)).update(
-            state='PENDING', machine='', lease_heartbeat_at=None,
-            lease_token='', lease_session='')
+        # El mismo barrido de siempre, ahora en ``ingest`` porque el ciclo
+        # periodico tambien tiene que poder hacerlo sin pasar por aqui.
+        ingest.recycle_stale_solve_leases(now=now)
 
         active = (SolveTask.objects.select_for_update()
                   .select_related('position')
@@ -1180,10 +1291,10 @@ def api_request_unexplored(request, key):
     # La misma puerta que el boton de una sola jugada: una expansion masiva no
     # tiene MENOS motivos para respetar el tope de cola que una peticion
     # suelta, y era el unico camino que entraba sin mirarlo.
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return JsonResponse({'status': 'queue-full'}, status=503)
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
+    if _account_queue_full(requested_by):
+        return _queue_full_response(requested_by)
 
     ip = _client_ip(request)
 
@@ -1206,15 +1317,58 @@ def api_request_unexplored(request, key):
         if not pending:
             return JsonResponse({'status': 'nothing-to-do', 'queued': 0})
         queued = ingest.enqueue_unexplored_children(
-            pos, requested_by=(request.user.username
-                               if request.user.is_authenticated else ''),
-            route=route)
+            pos, requested_by=requested_by, route=route)
         RequestLog.objects.create(ip=ip, position=pos)
         DBEvent.objects.create(kind='BULK_REQUEST', payload={
             'ip': ip, 'key': pos.key, 'queued': queued,
             'candidates': len(pending)})
     return JsonResponse({'status': 'queued', 'queued': queued,
                          'candidates': len(pending)})
+
+
+def api_my_queue(request):
+    """La cola PROPIA en JSON: ids, estado y los enlaces para actuar.
+
+    P3 (comunidad, 2-0, 28-ago-2026), peticion de Eclipsia (20-ago): sin los
+    ids una retirada por script era imposible.  Solo GET, solo la cuenta
+    logueada, y las filas en EL MISMO orden que pinta el perfil: lo arrendado
+    delante, luego ``queue_seq`` y llegada.
+    """
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'login required'}, status=401)
+    running_first = Case(When(state=AnalysisTask.TState.LEASED, then=Value(0)),
+                         default=Value(1), output_field=IntegerField())
+    rows = (AnalysisTask.objects
+            .filter(requested_by=request.user.username,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED))
+            .select_related('position')
+            .annotate(_run=running_first)
+            .order_by('_run', 'queue_seq', 'id'))
+    tasks = [{'task_id': t.id,
+              'position': t.position.key,
+              'fen': t.position.fen,
+              'budget_nodes': t.budget_nodes,
+              'state': t.state,
+              'queue_seq': t.queue_seq,
+              'bump': '/atomicdb/queue/bump/%d/' % t.id,
+              'cancel': '/atomicdb/queue/cancel/%d/' % t.id}
+             for t in rows[:200]]
+    return JsonResponse({'account': request.user.username, 'tasks': tasks})
+
+
+def api_pref_lifo(request):
+    """Interruptor "newest first" del perfil propio (P5).  POST y de vuelta."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'login required'}, status=401)
+    from .models import ContributorPref
+    pref, _ = ContributorPref.objects.get_or_create(
+        account=request.user.username)
+    pref.lifo_queue = request.POST.get('lifo') == '1'
+    pref.save(update_fields=['lifo_queue'])
+    return redirect(request.META.get('HTTP_REFERER', '/atomicdb/'))
 
 
 def api_pv_verify(request, key):
@@ -1252,14 +1406,12 @@ def api_pv_verify(request, key):
         return JsonResponse({'status': 'unknown-position'}, status=404)
     if pos.status != 'UNKNOWN':
         return JsonResponse({'status': 'already-solved'})
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return JsonResponse({'status': 'queue-full'}, status=503)
     # Afinidad worker-peticionario, igual que en ``api_request``: la cuenta OB
     # del visitante logueado viaja hasta cada tarea de la linea.
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
+    if _account_queue_full(requested_by):
+        return _queue_full_response(requested_by)
     # Y la ruta declarada del autor: cada tarea de la PV hereda ruta + los
     # plies caminados, y el aviso vuelve en SU orden de jugadas.
     route = ''
@@ -1270,12 +1422,34 @@ def api_pv_verify(request, key):
             route = raw_route
         except (PlayRouteError, PlayRouteConflict):
             route = ''
+    # QUE LINEA, si el visitante eligio una.  Sin ``line`` el boton hace lo de
+    # siempre, caer por la lista hasta el primer hueco, y con ella camina esa
+    # (§ ingest.enqueue_pv_verification).
+    #
+    # Un valor ILEGIBLE se rechaza, no se redondea a cero.  Degradarlo a la
+    # caida automatica volveria a comprar la linea 1 en silencio despues de que
+    # alguien pidiera la 3, que es exactamente el bug del que viene esto: el
+    # click tiene que fallar donde falla y no acabar pagando otra cosa.
+    raw_line = (request.POST.get('line') or '').strip()
+    try:
+        line = int(raw_line) if raw_line else 0
+    except ValueError:
+        line = -1
+    if line < 0:
+        return JsonResponse(_pv_verify_payload(
+            ingest.VerifyOutcome(0, line=0, unknown_line=True)), status=400)
     with atomic():
         pos = Position.objects.select_for_update().get(key=key)
         outcome = ingest.enqueue_pv_verification(pos,
                                                  requested_by=requested_by,
-                                                 route=route)
-    return JsonResponse(_pv_verify_payload(outcome))
+                                                 route=route, line=line)
+    payload = _pv_verify_payload(outcome)
+    # Pedir una linea que no existe es una peticion mal formada, y se contesta
+    # como tal: el 200 lo reservan las peticiones que el servidor SI atendio,
+    # compraran algo o no.
+    return JsonResponse(payload,
+                        status=400 if payload['status'] == 'unknown-line'
+                        else 200)
 
 
 def _pv_verify_payload(outcome):
@@ -1288,7 +1462,14 @@ def _pv_verify_payload(outcome):
     """
     detail = getattr(outcome, 'detail', None) or {}
     queued = int(outcome)
-    return {'status': 'queued' if queued else 'nothing-to-do',
+    if detail.get('unknown_line'):
+        # Ni compra ni ausencia de trabajo: la peticion nombraba una linea que
+        # esta posicion no ofrece.  Con ``nothing-to-do`` el explorador diria
+        # "todo verificado", que es mentira sobre una linea que ni se miro.
+        status = 'unknown-line'
+    else:
+        status = 'queued' if queued else 'nothing-to-do'
+    return {'status': status,
             'queued': queued,
             'line': detail.get('line', 0),
             # ``line`` a secas ya no basta para saber que se camino: el numero
@@ -1305,8 +1486,8 @@ def _human_plies(n):
     return f'{n} ply' if n == 1 else f'{n} plies'
 
 
-def _pv_verify_san(detail):
-    """La jugada que abre el hueco, en SAN, con el UCI como red de seguridad.
+def _move_san(fen, move):
+    """Una jugada suelta, en SAN, con el UCI como red de seguridad.
 
     Con los puntos suspensivos delante cuando la juegan las negras, que es como
     se nombra una jugada suelta en cualquier tablero: sin ellos "e6" y "e4" se
@@ -1319,8 +1500,6 @@ def _pv_verify_san(detail):
     """
     import pyffish as pf
 
-    move = detail.get('move') or ''
-    fen = detail.get('move_fen') or ''
     if not (move and fen):
         return move
     black = fen.split()[1:2] == ['b']
@@ -1329,6 +1508,11 @@ def _pv_verify_san(detail):
     except Exception:
         san = move
     return f'...{san}' if black else san
+
+
+def _pv_verify_san(detail):
+    """La jugada que abre el hueco del paseo, nombrada como en un tablero."""
+    return _move_san(detail.get('move_fen') or '', detail.get('move') or '')
 
 
 def _pv_verify_line(detail):
@@ -1354,6 +1538,14 @@ def _pv_verify_message(queued, detail):
     mudarse a la segunda linea porque la primera esta entera — y sin esta
     frase las dos se veian exactamente igual desde fuera: un numero.
     """
+    if detail.get('unknown_line'):
+        # La lista de la pagina y la de la posicion se han separado: entre el
+        # render y el click aterrizo un pase nuevo.  Se dice y se manda
+        # recargar; callarlo dejaria al visitante creyendo que pidio algo.
+        named = _pv_verify_line(detail) if detail.get('line') else 'that line'
+        return (f'{named.capitalize()} is not one of the lines stored here '
+                'right now, so nothing was queued. Reload the page to see '
+                'the current list.')
     where = _pv_verify_line(detail)
     covered = detail.get('covered_plies') or 0
     if queued:
@@ -1381,9 +1573,15 @@ def _pv_verify_message(queued, detail):
         return 'No engine line is stored here yet, so there is nothing to ' \
                'verify.'
     if covered:
-        # Aqui no se nombra un candidato sino CUANTOS se caminaron, asi que la
-        # cifra es ``lines_tried`` y no el numero del que se compro.
-        scope = 'line 1' if tried == 1 else f'the top {tried} lines'
+        # Con una linea ELEGIDA solo se camino esa, asi que se la nombra por su
+        # numero: decir "line 1" despues de que alguien pidiera la 3 es la
+        # misma confusion que traia el boton.  En la caida automatica no se
+        # nombra un candidato sino CUANTOS se caminaron, y ahi la cifra es
+        # ``lines_tried`` y no el numero del que se compro.
+        if detail.get('line'):
+            scope = _pv_verify_line(detail)
+        else:
+            scope = 'line 1' if tried == 1 else f'the top {tried} lines'
         return ('Everything this button can verify is already analysed: '
                 f'{scope} covered {_human_plies(covered)} down.')
     return ('The stored line no longer applies here, so there was nothing '
@@ -1422,6 +1620,51 @@ def _api_request_once(request, key):
     chosen, invalid = depth.chosen_rung(request)
     if invalid:
         return JsonResponse({'status': 'bad-budget'}, status=400)
+    # P2 (comunidad, 5-0, 28-ago-2026): el ultimo peldano no entra sin
+    # ``confirm=1``.  Un click accidental de 10B eran horas de flota sin
+    # vuelta atras una vez arrendado (math_god y Eclipsia, 25-ago); el
+    # explorador manda la marca tras un dialogo y un script que de verdad
+    # quiere 10B la escribe a mano.
+    if (chosen == ingest.REQUEST_BUDGET_LADDER[-1]
+            and request.POST.get('confirm') != '1'):
+        return JsonResponse({'status': 'confirm-10b'}, status=400)
+    requested_by = (request.user.username
+                    if request.user.is_authenticated else '')
+    payload, status = _queue_request(
+        pos, ip, requested_by=requested_by, chosen=chosen,
+        raw_route=request.POST.get('route'))
+    return JsonResponse(payload, status=status)
+
+
+def _validated_route_for(raw_route, key):
+    """La ruta declarada por quien pide (el ``?play=`` de su pagina), o vacia.
+
+    Se valida ENTERA contra las reglas antes de guardarse, y una ruta rota no
+    tumba la peticion: se pide igual y se pinta el linaje canonico.
+    """
+    raw_route = (raw_route or '').strip()
+    if not raw_route:
+        return ''
+    try:
+        _validated_play_route(raw_route, key)
+        return raw_route
+    except (PlayRouteError, PlayRouteConflict):
+        return ''
+
+
+def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
+    """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
+
+    El click del explorador entra por aqui desde siempre; la API oficial
+    (§ ``api_public_request``, peticion de Wolfram) entra por aqui tambien, y
+    ese es el punto entero de que esta funcion exista.  Una segunda
+    implementacion "para la API" habria sido una segunda politica de dedup, un
+    segundo techo de cola y una segunda escalera de presupuesto, y la que se
+    quedase atras el dia que cambien las reglas le mentiria a quien la use.
+
+    Devuelve ``(payload, codigo http)``.  Quien llama pone la envoltura — el
+    metodo, la identidad, y lo que su puerta anada al cuerpo — y nada mas.
+    """
     hour_ago = timezone.now() - timedelta(hours=1)
     # A recent click is only a duplicate while the request it represented is
     # still queued or running.  Once that task has completed, the same visitor
@@ -1456,27 +1699,18 @@ def _api_request_once(request, key):
         # profundidad que nunca llegaria a pedirse.  Solo alcanza a quien tiene
         # derecho a elegir (el resto llega con ``chosen is None``), y el techo
         # de cola de abajo sigue acotando el gasto igual que siempre.
-        return JsonResponse({'status': 'already-requested'})
-    if AnalysisTask.objects.filter(state='PENDING', source='USER',
-                                   position__status='UNKNOWN') \
-                           .count() >= REQUEST_QUEUE_MAX:
-        return JsonResponse({'status': 'queue-full'}, status=503)
+        return {'status': 'already-requested'}, 200
+    if _account_queue_full(requested_by):
+        return _queue_full_payload(requested_by)
+    # La ruta se valida AQUI y no antes: replicarla son hasta 64 jugadas contra
+    # el movegen, y ninguna de las salidas de arriba la necesita.  Validarla al
+    # entrar hacia que cada click repetido — que es la salida comun de un
+    # explorador — pagase un rejuego entero para acabar diciendo
+    # 'already-requested'.
+    route = _validated_route_for(raw_route, pos.key)
     # Task creation/promotion and its rate-limit receipt are one commit.  A
     # lock while writing RequestLog must roll the task mutation back as well;
     # otherwise a browser retry could accidentally request the next rung.
-    requested_by = (request.user.username
-                    if request.user.is_authenticated else '')
-    # Ruta declarada por el peticionario (el ?play= de su pagina): validada
-    # entera contra las reglas antes de guardarse.  Una ruta rota no tumba
-    # la peticion — se pide igual y se pinta el linaje canonico.
-    route = ''
-    raw_route = (request.POST.get('route') or '').strip()
-    if raw_route:
-        try:
-            _validated_play_route(raw_route, pos.key)
-            route = raw_route
-        except (PlayRouteError, PlayRouteConflict):
-            route = ''
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
                                           route=route, budget_floor=chosen)
@@ -1493,7 +1727,7 @@ def _api_request_once(request, key):
         ahead = _user_queue_ahead(pos)
         if ahead is not None:
             payload['ahead'] = ahead
-    return JsonResponse(payload)
+    return payload, 200
 
 
 def _user_queue_ahead(pos):
@@ -1543,6 +1777,187 @@ def api_request(request, key):
         response = JsonResponse({'status': 'busy'}, status=503)
         response['Retry-After'] = '2'
         return response
+
+
+# ---------------- API oficial de peticion ----------------
+
+# La puerta programatica NO lleva tope horario (decision del propietario,
+# 17-ago): la web tampoco lo tiene y mantener uno solo aqui era una asimetria
+# que empujaba a la gente a scriptear el click en vez de usar la API.  Lo que
+# gobierna a todo el mundo, por cualquier puerta, es el tope de peticiones
+# encoladas por persona (§ REQUEST_QUEUE_MAX) y el reparto por cuenta del
+# orden de servicio.  Cada llamada sigue dejando su recibo en ApiRequestLog.
+
+
+def _api_request_identity(request):
+    """Quien pide, por la API: ``(usuario, credenciales rotas)``.
+
+    Sin campos de credenciales la llamada es ANONIMA y se sirve, igual que un
+    click sin sesion.  Con credenciales, tienen que valer: mandarlas mal no se
+    degrada a anonimo en silencio, porque quien las manda esta pidiendo que su
+    peticion quede a su nombre — con su afinidad, su aviso y su sitio en el
+    reparto — y servirsela sin nombre seria contestarle que si a otra cosa.
+    """
+    if not request.POST.get('username') and not request.POST.get('password'):
+        return None, False
+    user = _auth(request)
+    return (None, True) if user is None else (user, False)
+
+
+def _api_request_task(pos, username):
+    """La fila viva de esta posicion y si ``username`` figura como respaldo.
+
+    Lo que el que llama necesita saber de vuelta es cual es SU tarea y si su
+    nombre quedo anotado: 'already-queued' a secas no distingue "ya la pediste
+    tu" de "acabas de sumarte a la de otra persona", y esa diferencia es la que
+    decide si va a sonarle la campana cuando el analisis aterrice.
+    """
+    task = (AnalysisTask.objects
+            .filter(position=pos, source=AnalysisTask.Source.USER,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED))
+            .order_by('id').first())
+    if task is None:
+        return None, False
+    backed = bool(username) and username in (task.also_requested_by or [])
+    return task, backed
+
+
+@csrf_exempt
+def api_public_request(request):
+    """API oficial para pedir analisis de una FEN. POST, respuesta JSON.
+
+    Peticion de comunidad (Wolfram): "is there official API for requesting
+    analysis".  Hasta hoy la respuesta honesta era "manda el mismo POST que
+    manda la pagina", y eso no es una API: la ruta del explorador lleva la
+    CLAVE INTERNA de la posicion en vez de una FEN, exige el token CSRF de una
+    pagina abierta, y su cuerpo esta afinado para lo que el boton necesita
+    pintar y no para lo que un programa necesita leer.
+
+    EL CAMINO ES EL DEL CLICK, y no es una manera de hablar: el trabajo lo hace
+    ``_queue_request``, la misma funcion que sirve al boton.  Mismo dedup por
+    ip+posicion, misma escalera de presupuesto (128M -> 512M -> 2B -> 10B),
+    mismo techo de cola, mismo registro de peticionarios que convierte la
+    segunda peticion de una posicion en un respaldo con su aviso, y misma
+    contabilidad por cuenta.  Esta puerta solo pone lo suyo: identidad, tope y
+    recibo.
+
+    LA IDENTIDAD VIAJA EN EL CUERPO Y LA COOKIE DE SESION NO SE MIRA.  Es la
+    unica combinacion segura de las tres cosas que esto tiene que ser a la vez.
+    Tiene que estar EXENTA de CSRF, porque un script no tiene pagina de la que
+    sacar un token.  Tiene que poder ir A NOMBRE de una cuenta, porque la
+    afinidad worker-peticionario, el aviso de vuelta y el reparto justo cuelgan
+    de un nombre.  Y no puede ser explotable desde una pagina de terceros —
+    que es exactamente lo que documentan al reves los endpoints vecinos:
+    "sin csrf_exempt, porque exenta una pagina cualquiera podria gastarle la
+    escalera a quien la visite con la sesion iniciada".  Aqui no se puede poner
+    el token, asi que lo que se quita es la cookie: un navegador que POSTee
+    aqui a espaldas de su usuario llega como ANONIMO, que es lo mismo que
+    cualquiera podia conseguir con curl.  Las credenciales son las del worker
+    (cuenta habilitada), que es como este sitio ya autentica a un cliente sin
+    navegador.
+
+    UNA FEN QUE EL ARBOL NO TIENE SE SIEMBRA, igual que el cajetin de posicion
+    de la portada: es lo que el sitio ya hace con una posicion nueva, y un
+    404 aqui obligaria a todo cliente a pasar antes por un formulario HTML
+    para poder preguntar por su propia partida.  Nace como cualquier semilla —
+    contadores a cero y sin camino a la raiz — y lo que la trabaja es la
+    escalera de peticiones, exactamente igual.
+
+    Campos del POST: ``fen`` (obligatoria), ``budget`` (peldano, opcional y
+    solo para quien tiene derecho a elegirlo), ``username``/``password``
+    (opcionales).
+    """
+    if request.method != 'POST':
+        return JsonResponse({'status': 'refused', 'reason': 'POST only'},
+                            status=405)
+    user, bad_credentials = _api_request_identity(request)
+    if bad_credentials:
+        # Ni recibo ni consumo de cupo: unas credenciales mal escritas no
+        # pueden dejar a nadie fuera de su propia hora.
+        return JsonResponse(
+            {'status': 'refused', 'reason': 'bad credentials'}, status=403)
+    username = user.username if user is not None else ''
+    ip = _client_ip(request)
+    try:
+        fen = _parse_public_fen(request.POST.get('fen', ''))
+    except PublicFenError as error:
+        return JsonResponse({'status': 'refused', 'reason': str(error)},
+                            status=400)
+    except Exception:
+        return JsonResponse(
+            {'status': 'refused', 'reason': 'that FEN could not be read'},
+            status=400)
+    chosen, invalid = depth.chosen_rung_for(request.POST.get('budget'), user)
+    if invalid:
+        return JsonResponse(
+            {'status': 'refused',
+             'reason': 'budget must be one of the ladder rungs: '
+                       + ', '.join(str(rung)
+                                   for rung in ingest.REQUEST_BUDGET_LADDER)},
+            status=400)
+    key = logic.key_of(fen)
+    seeded = False
+    try:
+        with atomic():
+            pos = Position.objects.filter(key=key).first()
+            if pos is None:
+                pos = ingest.get_or_create_position(fen)
+                seeded = True
+                DBEvent.objects.create(kind='SEEDED', payload={
+                    'key': pos.key, 'fen': pos.fen, 'ip': ip, 'via': 'api'})
+            # El recibo se escribe por LLAMADA ATENDIDA, incluidas las que el
+            # dedup rechaza: esas tambien recorren el arbol para decir que no,
+            # y el bucle que hay que acotar es justamente el que pregunta lo
+            # mismo mil veces.
+            ApiRequestLog.objects.create(account=username, ip=ip)
+        payload, status = _queue_request(pos, ip, requested_by=username,
+                                         chosen=chosen)
+    except OperationalError as error:
+        # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
+        # grande puede rechazar la subida a escritura, y ningun efecto quedo
+        # comprometido, asi que reintentar es seguro.
+        message = str(error).lower()
+        if 'database is locked' not in message \
+                and 'database table is locked' not in message:
+            raise
+        response = JsonResponse(
+            {'status': 'refused', 'reason': 'server busy, retry'}, status=503)
+        response['Retry-After'] = '2'
+        return response
+
+    task, backed = _api_request_task(pos, username)
+    payload.update({
+        'key': pos.key,
+        'fen': pos.fen,
+        'seeded': seeded,
+        'task': None if task is None else task.id,
+        'budget_nodes': None if task is None else task.budget_nodes,
+        # Un 'already-queued' con esto a True es "ya estaba pedida y tu nombre
+        # quedo anotado en ella": te avisara cuando aterrice y tu espera cuenta
+        # para adelantarla.
+        'backed': backed,
+    })
+    if payload['status'] in _REQUEST_REFUSALS:
+        payload['reason'] = _REQUEST_REFUSALS[payload['status']]
+    return JsonResponse(payload, status=status)
+
+
+# La frase que acompana a cada negativa que el camino comun puede devolver.
+# El ``status`` sigue siendo el contrato — un cliente decide con el — y esto es
+# para el humano que esta leyendo la respuesta con los ojos.
+_REQUEST_REFUSALS = {
+    'already-requested': 'this address already has a live request on this '
+                         'position; wait for it to land',
+    # El tope es TUYO, y la frase tiene que decirlo: con el techo global, quien
+    # leia "the visitor queue is at its cap" se quedaba esperando a que la cola
+    # de otro bajase.  Lo que hay que hacer es otra cosa — dejar que aterrice
+    # lo tuyo, o vaciarlo (§ ``api_queue_clear``) — y sin esa frase no habia
+    # forma de saberlo desde la API.
+    'queue-full-account': 'you already have the maximum number of requests '
+                          'waiting; let some land or clear your queue',
+    'saturated': 'nothing left to buy here or below it',
+}
 
 
 # ---------------- paginas publicas ----------------
@@ -1617,6 +2032,17 @@ def _backed_source_url(key, ucis=None):
     validada, o ancla de desbordamiento) sigue siendo un enlace pelado.
     """
     base = f'/atomicdb/backed-source/{key}/'
+    return base if ucis is None else base + '?play=' + ','.join(ucis)
+
+
+def _proven_line_end_url(key, ucis=None):
+    """Enlace al final de la linea probada, con la ruta propia del que pincha.
+
+    Misma regla de ruta que ``_backed_source_url``, y por lo mismo: una ruta
+    VACIA tambien viaja, porque cero plies de historia es una historia
+    legitima y omitirla mandaria al destino al linaje canonico.
+    """
+    base = f'/atomicdb/proven-line-end/{key}/'
     return base if ucis is None else base + '?play=' + ','.join(ucis)
 
 
@@ -2025,56 +2451,79 @@ def goto(request, key, uci):
     return redirect(_explore_url(child.key, child_route, child_anchor))
 
 
+def _jump_landing_url(key, ucis, outcome):
+    """Explore URL of a landing, carrying what the walk could not finish.
+
+    The two jumps of the explorer share this so that a chain that closed on
+    itself and a chain that broke read the same on arrival whichever control
+    was clicked.  A completed walk lands with no extra parameter: there is
+    nothing to explain.
+    """
+    url = _explore_url(key, ucis)
+    param = JUMP_OUTCOME_PARAM.get(outcome)
+    if param:
+        url += ('&' if '?' in url else '?') + param + '=1'
+    return url
+
+
 def _walk_backed_spine(pos):
     """Baja por la espina de soporte hasta donde NACE el valor respaldado.
 
-    Devuelve ``(origen, ucis_caminados, repeticion)``.  El valor de un nodo
-    respaldado no es suyo: se lo presta ``backed_move``, y ese hijo puede a su
-    vez estar prestandolo.  Bajar a mano esa cadena es lo que este paseo
-    ahorra.
+    Devuelve ``(origen, ucis_caminados, resultado)``, con el MISMO tercer valor
+    que el paseo de la linea probada (§ ``_walk_proven_line``): cadena vacia
+    cuando se llego al final de la cadena, ``JUMP_REPETITION`` cuando se cerro
+    sobre si misma y ``JUMP_INCOMPLETE`` cuando se rompio antes de acabarse.
+    El valor de un nodo respaldado no es suyo: se lo presta ``backed_move``, y
+    ese hijo puede a su vez estar prestandolo.  Bajar a mano esa cadena es lo
+    que este paseo ahorra.
 
-    PARADAS, todas ellas "este nodo ES el origen":
+    PARADAS QUE SON UNA LLEGADA, todas ellas "este nodo ES el origen":
       * ``status != UNKNOWN``: el valor viene de un cierre PROBADO, y por
         debajo de una prueba no hay nada que buscar.
       * sin ``backed_move``, o ``backed_eval`` a None: no hay espina.
       * ``backed_eval == eval_cp``: la busqueda propia del nodo ancla el
         valor; el respaldo solo coincide con lo que el motor ya dijo aqui.
-    Y dos paradas defensivas, que dejan al visitante donde el paseo llego:
-      * la arista ``backed_move`` no existe (respaldo mas viejo que el grafo).
-      * el hijo ya estaba visitado: el DAG transpone y un ciclo colgaria esto.
-    El tope de ``ingest.BACKED_MAX_PLIES`` es el mismo con el que subio el
-    valor, asi que ninguna espina legitima puede ser mas larga que el.
 
-    Esa ultima parada no es solo defensiva: una espina que vuelve sobre sus
-    pasos no tiene origen que enseñar, tiene una REPETICION — el mismo ciclo
-    que ``ingest._draw_cycling_children`` valora como tablas al subir.  El
-    tercer valor lo dice para que el explorador lo pueda etiquetar en vez de
-    dejar al visitante creyendo que aterrizo en la fuente del numero.
+    PARADAS QUE NO SON UNA LLEGADA, y por eso viajan etiquetadas:
+      * la arista ``backed_move`` no existe (respaldo mas viejo que el grafo).
+        A diferencia de la linea probada, aqui no hay nada que materializar:
+        ``backed_move`` es el soporte de un numero, no un ply demostrado, y
+        crear esa arista seria inventarse el grafo que sostenia el valor.
+      * el hijo ya estaba visitado: el DAG transpone y un ciclo colgaria esto.
+        Una espina que vuelve sobre sus pasos no tiene origen que enseñar,
+        tiene una REPETICION, el mismo ciclo que el respaldo marca al subir y
+        valora como tablas (§ ``ingest._draw_cycling_children``,
+        ``_backed_for``).
+      * el tope de ``ingest.BACKED_MAX_PLIES``, el mismo con el que subio el
+        valor: ninguna espina legitima puede ser mas larga que el, asi que
+        agotarlo es la cadena diciendo algo raro.
 
     Una consulta por paso como mucho.  Es un GET esporadico de un click
     humano, no algo que se pague al pintar una tabla.
     """
     node, walked, seen = pos, [], {pos.key}
-    repetition = False
     for _ in range(ingest.BACKED_MAX_PLIES):
         if node.status != 'UNKNOWN':
-            break
+            return node, walked, ''
         if not node.backed_move or node.backed_eval is None:
-            break
+            return node, walked, ''
         if node.backed_eval == node.eval_cp:
-            break
-        try:
-            edge = (Edge.objects.select_related('child')
-                    .get(parent=node, move_uci=node.backed_move))
-        except Edge.DoesNotExist:
-            break
+            return node, walked, ''
+        edge = (Edge.objects.select_related('child')
+                .filter(parent=node, move_uci=node.backed_move).first())
+        if edge is None:
+            # El respaldo es mas viejo que el grafo que lo sostenia: se
+            # aterriza donde el paseo llego, DICIENDOLO.  Callarlo dejaba al
+            # visitante en un nodo cualquiera con cara de fuente.
+            return node, walked, JUMP_INCOMPLETE
         if edge.child.key in seen:
-            repetition = True
-            break
+            return node, walked, JUMP_REPETITION
         seen.add(edge.child.key)
         walked.append(node.backed_move)
         node = edge.child
-    return node, walked, repetition
+    # El tope corto el descenso con la espina todavia viva: tampoco es un
+    # origen, y el destino lo dice igual que las otras dos paradas raras.
+    return node, walked, JUMP_INCOMPLETE
 
 
 def backed_source(request, key):
@@ -2097,7 +2546,7 @@ def backed_source(request, key):
         route = _validated_play_route(request.GET.get('play'), pos.key)
     except PlayRouteError:
         route = None
-    origin, walked, repetition = _walk_backed_spine(pos)
+    origin, walked, outcome = _walk_backed_spine(pos)
     ucis = None
     if route is not None:
         _top, _line, play_ucis = route
@@ -2108,14 +2557,168 @@ def backed_source(request, key):
     # historia que no llegar.
     if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
         ucis = None
-    url = _explore_url(origin.key, ucis)
-    if repetition:
-        # La espina se cerro sobre si misma: aqui no nace ningun valor.  El
-        # destino lo dice en vez de dejar que el aterrizaje parezca una fuente.
-        url += ('&' if '?' in url else '?') + BACKED_REPETITION_PARAM + '=1'
-    response = redirect(url)
+    response = redirect(_jump_landing_url(origin.key, ucis, outcome))
     # El origen se mueve en cuanto cae analisis nuevo bajo esta posicion: este
     # 302 no es cacheable por nadie.
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+# EL OTRO SALTO DE ESTA PAGINA, y por que no es el de arriba.
+# ``backed_source`` baja hasta donde NACE un numero abierto y por eso se para
+# en cuanto encuentra algo probado: debajo de una prueba no hay busqueda que
+# perseguir.  Una posicion CERRADA tiene la pregunta contraria — no de donde
+# sale el valor, sino donde acaba la linea que lo demuestra — y esa la
+# contesta este paseo.
+# Peticion de Eclipsia en #suggestions: "something clickable to immediately
+# take you to the terminal position".
+#
+# Tope: el MISMO con el que se guardo la linea (``ingest.WON_LINE_MAX_PLIES``),
+# leido de alli y no copiado, para que ninguna linea legitima pueda quedarse a
+# medio recorrer si ese numero se mueve.
+PROVEN_LINE_MAX_PLIES = ingest.WON_LINE_MAX_PLIES
+
+
+def _proven_next_move(pos):
+    """Con que jugada arranca la linea probada de esta posicion, o ``''``.
+
+    La linea GUARDADA manda cuando existe: es literalmente lo que el
+    explorador imprime bajo el veredicto, y un salto que acabase en otro
+    sitio contradiria a la pagina desde la que se pincha.  Un cierre MINIMAX
+    no guarda linea, solo el testigo de cada nodo, y ahi ese testigo es el
+    arranque.
+
+    ``best_move`` de un nodo ABIERTO es una heuristica, no un testigo, asi
+    que una posicion sin cerrar no arranca ninguna linea probada.
+    """
+    if pos.status == 'UNKNOWN':
+        return ''
+    line = (pos.won_line or '').split()
+    return line[0] if line else (pos.best_move or '')
+
+
+def _walk_proven_line(pos, materialise=False):
+    """Walk the proven line of a closed position down to its last node.
+
+    Returns ``(final, walked_ucis, outcome)``, where ``outcome`` is ``''``
+    when the line was walked to its end, ``JUMP_REPETITION`` when it closed
+    back on a position already crossed, and ``JUMP_INCOMPLETE`` when the
+    chain broke before the line ran out.
+
+    WHY A MISSING EDGE IS NOT A STOP, which is the bug this walk was reported
+    with.  A closure records its winning line as TEXT; the chain of positions
+    it names becomes a real tree only when ``ingest.materialise_won_line``
+    runs, and closures older than that helper (or nodes where a visitor
+    clicked the first winning move by hand and nothing else) have the first
+    ply in the tree and nothing below it.  Following edges, the walk landed
+    one ply in and stopped: on a mate in two you were dropped on the position
+    before the mate, which is exactly what Eclipsia reported with the line
+    "Bd7 Bxd7#" printed beside the chip.  The line is proven, so the plies it
+    names are not a guess and materialising them invents nothing: the same
+    helper that the closure path already calls is asked for the chain, once
+    per line and bounded by its own ply cap, and the walk carries on.
+
+    Materialising is for the CLICK only.  A page render never writes, so the
+    default is off and a read-only walk still stops where the tree does.
+
+    THE REAL STOPS, all of them "the proof ends here":
+      * the stored line ran out, or the node declares no continuation.  A
+        stored line is the line the page prints beside the chip, so its end
+        is the end of the trip: walking past it would land the visitor
+        somewhere the page never mentioned.
+      * the witness no longer replays, so not even materialising produces
+        the ply (``materialise_won_line`` cuts at the first illegal move).
+      * the walk comes back to a position it already crossed: the DAG
+        transposes and a cycle would hang this.
+
+    One statement per ply, and only on the click: the page that offers the
+    jump pays nothing for it (see ``explore``, ``proven_end_url``).
+    """
+    if pos.status == 'UNKNOWN':
+        # Un nodo ABIERTO puede llevar ``won_line`` puesta: es el testigo
+        # REFUTADO que guarda ``proof='DISPUTED'``.  Recorrerlo seria pasear
+        # una linea que el propio sistema ya declaro falsa, asi que aqui no
+        # hay nada probado que seguir ni con la URL escrita a mano.
+        return pos, [], ''
+    node, walked, seen = pos, [], {pos.key}
+    line = (pos.won_line or '').split()
+    # Which nodes have already been asked for their chain.  One call per
+    # stored line: the helper builds the WHOLE chain in one go, so asking the
+    # same node twice would only repeat the work of the first call.
+    built = set()
+    for step in range(PROVEN_LINE_MAX_PLIES):
+        if line:
+            # The root's stored line is being followed, so the node that owns
+            # it is the root: its chain is what has to exist.
+            uci, owner = (line[step] if step < len(line) else ''), pos
+        else:
+            # Node by node down a witness chain.  A node that carries its own
+            # stored line owns it from here on.
+            uci = _proven_next_move(node)
+            owner = node if (node.won_line or '').split() else None
+        if not uci:
+            return node, walked, ''
+        edge = (Edge.objects.select_related('child')
+                .filter(parent=node, move_uci=uci).first())
+        if (edge is None and materialise and owner is not None
+                and owner.key not in built):
+            built.add(owner.key)
+            ingest.materialise_won_line(owner)
+            edge = (Edge.objects.select_related('child')
+                    .filter(parent=node, move_uci=uci).first())
+        if edge is None:
+            return node, walked, JUMP_INCOMPLETE
+        if edge.child.key in seen:
+            return node, walked, JUMP_REPETITION
+        seen.add(edge.child.key)
+        walked.append(uci)
+        node = edge.child
+    # The cap cut the walk.  A stored line consumed to its last ply is a
+    # finished trip even when its length is exactly the cap; anything else
+    # here is a witness chain that was still going.
+    if line and len(walked) >= len(line):
+        return node, walked, ''
+    return node, walked, JUMP_INCOMPLETE
+
+
+def proven_line_end(request, key):
+    """Salta al final de la linea probada que esta posicion ensena.
+
+    Lo que este click escribe, y por que puede.  Una linea ganadora se guarda
+    como TEXTO y solo se vuelve arbol cuando ``ingest.materialise_won_line``
+    la recorre, asi que las lineas mas viejas que ese ayudante llegan aqui a
+    medio materializar y el paseo se plantaba en el primer ply que faltaba —
+    en un mate en dos, justo antes del mate.  Los plies de una linea PROBADA
+    no son una conjetura: son lo que el cierre ya afirma, y crearlos no
+    inventa nada.  Se pide la cadena al mismo ayudante del cierre, acotada por
+    su propio tope, y es lo unico que este GET escribe; el ``goto`` de al lado
+    lleva creando una arista por click desde siempre.
+
+    La ruta de ``?play=`` se revalida entera contra la posicion DE PARTIDA y
+    el destino la recibe extendida con los plies caminados, para que el
+    visitante aterrice con SU partida y no con un linaje reconstruido.
+    """
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return render(request, 'atomicdb/missing.html', status=404)
+    try:
+        route = _validated_play_route(request.GET.get('play'), pos.key)
+    except PlayRouteError:
+        route = None
+    end, walked, outcome = _walk_proven_line(pos, materialise=True)
+    ucis = None
+    if route is not None:
+        _top, _line, play_ucis = route
+        ucis = [*play_ucis, *walked]
+    # El destino RECHAZA la ruta que se pasa de largo, y una linea de mate
+    # larga bajo una partida larga desborda: mejor llegar sin historia que
+    # servir una pagina de error desde el propio enlace de la casa.
+    if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
+        ucis = None
+    response = redirect(_jump_landing_url(end.key, ucis, outcome))
+    # El final se mueve en cuanto se certifica una linea mas corta o se
+    # materializa un ply que faltaba: este 302 no lo cachea nadie.
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -2486,17 +3089,51 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             for key in keys if key in payloads}
 
 
-def _line_labels_many(keys, preview_plies=10):
-    resolved = _lines_to_root(keys)
-    labels = {}
-    for key, (top, line) in resolved.items():
+def _opening_name_for_keys(keys):
+    """Last catalogued Atomic opening on an ALREADY replayed line, or ''.
+
+    The same rule the explorer card follows: the catalogue is keyed by
+    position, so a transposition still recognises the opening, and a line
+    that runs past its last named position keeps that name.  Callers hand
+    over the key of every prefix they already walked, which is what spares
+    this a second replay (§ ``openings.match_line_keys_object``).
+
+    Anything the catalogue cannot answer is an empty name and nothing else:
+    a queue row exists to say what was asked for, and it is not allowed to
+    take a page down because a line has no name.
+    """
+    try:
+        match = openings.match_line_keys(keys)
+    except (openings.InvalidOpeningLine, openings.OpeningCatalogError):
+        return ''
+    return '' if match is None else str(match['name'])
+
+
+def _line_readings_many(keys, preview_plies=10):
+    """``{key: (preview, full, opening)}`` from ONE walk per lineage.
+
+    All three come out of the same breadcrumb on purpose.  A row that prints
+    its line in one move order and names its opening from another contradicts
+    itself, and the inherited name really does depend on the order: two routes
+    into the same position can cross differently named ancestors.  Resolving
+    them together is also what keeps a page that shows both from paying the
+    reverse walk twice.
+    """
+    readings = {}
+    for key, (top, line) in _lines_to_root(keys).items():
         full = _format_san_line(top, line, max_plies=512, keep_head=True)
         # Preview con elipsis EN MEDIO: la cabeza dice que apertura es y la
         # cola dice DONDE va — dos posiciones distintas de la misma linea
         # profunda nunca deben compartir label.
         preview = _format_san_line(top, line, max_plies=preview_plies)
-        labels[key] = (preview, full)
-    return labels
+        readings[key] = (preview, full, _opening_name_for_keys(
+            [top.key, *(step['key'] for step in line)]))
+    return readings
+
+
+def _line_labels_many(keys, preview_plies=10):
+    return {key: reading[:2] for key, reading
+            in _line_readings_many(keys, preview_plies).items()}
 
 
 def _line_labels(key, preview_plies=10):
@@ -2510,13 +3147,20 @@ def _route_label_cache_key(route, target_key, preview_plies):
     # promete tratar bien.  El objetivo y el presupuesto de preview van en
     # claro porque son cortos y porque los tres juntos son la identidad: la
     # misma ruta hacia otra posicion es otra etiqueta.
+    #
+    # ``ROUTE_LABEL_VERSION`` es SUYO y no el del linaje: el payload gano un
+    # tercer campo y las entradas viejas ya no encajan, pero invalidar por
+    # eso el linaje entero — que es el paseo caro y el que absorbe las
+    # tormentas de F5 — seria pagar un arranque en frio del sitio por un
+    # rotulo.
     digest = hashlib.sha256(route.encode('utf-8', 'replace')).hexdigest()[:32]
     return (f'atomicdb.routelabel.v{LINEAGE_CACHE_VERSION}'
+            f'.{ROUTE_LABEL_VERSION}'
             f'.{preview_plies}.{target_key}.{digest}')
 
 
 def _route_labels_many(pairs, preview_plies=10):
-    """``{(route, target_key): (preview, full)}`` para varias filas de golpe.
+    """``{(route, target_key): (preview, full, opening)}``, varias de golpe.
 
     ESTO ERA EL GASTO MAYOR DE LA PORTADA.  Cada fila de "Now analyzing" y de
     "Up next" con ruta declarada rejugaba su linea entera con pyffish —
@@ -2571,14 +3215,32 @@ def _route_labels_many(pairs, preview_plies=10):
 
 
 def _walk_route_labels(route, target_key, preview_plies):
-    """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale."""
+    """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale.
+
+    El nombre de apertura sale del MISMO paseo, y por eso viaja aqui dentro:
+    calcularlo aparte costaria un segundo rejuego identico de la misma linea,
+    que es justo lo que la cache de este rotulo existe para no pagar.
+    """
     try:
         top, line, _ucis = _validated_play_route(route, target_key)
     except (PlayRouteError, PlayRouteConflict):
         return None
     full = _format_san_line(top, line, max_plies=512, keep_head=True)
     preview = _format_san_line(top, line, max_plies=preview_plies)
-    return preview, full
+    opening = _opening_name_for_keys(
+        [top.key, *(step['key'] for step in line)])
+    return preview, full, opening
+
+
+def _route_labels_full(route, target_key, preview_plies=10):
+    """(preview, full, opening) de esa RUTA, o None.
+
+    Una sola lectura para las tres cosas a proposito: son la misma linea
+    contada de tres maneras, y pedirlas por separado admite que una entrada
+    caduque en medio y la fila acabe con el rotulo de una ruta y el nombre de
+    otra."""
+    return _route_labels_many([(route, target_key)],
+                              preview_plies).get((route, target_key))
 
 
 def _route_labels(route, target_key, preview_plies=10):
@@ -2589,8 +3251,8 @@ def _route_labels(route, target_key, preview_plies=10):
     guardarse; aqui se re-valida entera (legalidad, llegada al objetivo,
     prefijos materializados) porque el arbol pudo cambiar debajo — ante
     cualquier duda, None y el linaje canonico de siempre."""
-    return _route_labels_many([(route, target_key)],
-                              preview_plies).get((route, target_key))
+    labels = _route_labels_full(route, target_key, preview_plies)
+    return None if labels is None else labels[:2]
 
 
 def _san_line(key, max_plies=16, keep_head=False):
@@ -2636,6 +3298,15 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
+#   * ``SOLVE_LEASE_RECYCLED`` — cuantos arriendos SOLVE muertos devolvio a
+#     la cola una pasada del ciclo (§ ``ingest.recycle_stale_solve_leases``).
+#     Es higiene de cola, no una noticia sobre el arbol: no lleva ``key``, no
+#     concluye nada y hablar de ello en la portada seria contarle al visitante
+#     que se nos murio un worker.
+#   * ``ARM_RATE_BUDGET`` — el recibo de un brazo del walker que alcanzo su
+#     techo de gasto por hora (§ ingest, presupuesto HORARIO de los brazos).
+#     Dice que NO se compro nada, que es lo contrario de una noticia sobre el
+#     arbol, y tampoco lleva ``key``.
 #   * ``SOLVE_REJECTED``, ``TB_REJECTED``, ``SOLVE_DISPUTE_SIGNAL`` — auditoria
 #     de lo que llego y no se acepto, con nombre de maquina dentro.  Que una
 #     submission no colase no es un hecho sobre la posicion.
@@ -2658,6 +3329,7 @@ def _san_line(key, max_plies=16, keep_head=False):
 # kind instrumental nuevo se ve en la portada a la primera y se anade aqui; una
 # noticia que nunca aparece no la echa de menos nadie.
 FEED_HIDDEN_KINDS = {
+    'ARM_RATE_BUDGET',
     'BACKED_GUARD',
     'BREADTH_SWAP',
     'BULK_REQUEST',
@@ -2671,6 +3343,7 @@ FEED_HIDDEN_KINDS = {
     'REVOKE_GUARD',
     'SOLVE_DISPUTE_SIGNAL',
     'SOLVE_GATE_DISAGREE',
+    'SOLVE_LEASE_RECYCLED',
     'SOLVE_REJECTED',
     'SOLVE_VERIFIED',
     'SURVIVE_VERIFIED',
@@ -2982,6 +3655,27 @@ def _line_numbers(pos):
     return numbers
 
 
+def _repetition_moves(pos):
+    """Las jugadas de esta tabla que solo valen TABLAS, cuando hay que decirlo.
+
+    Un nodo que publica un cero de repeticion tiene que enseñar ese cero en la
+    fila de la que sale, o el visitante lee una cabecera a 0 sobre una tabla en
+    la que la mejor jugada dice +9 y no hay forma de saber de donde sale
+    ninguno de los dos (Wolfram, 12-ago: "0 was propagated from repetition
+    somehow but was not displayed at child node").
+
+    La pregunta cuesta un paseo por el grafo, asi que se hace SOLO cuando hay
+    un numero que explicar: el nodo esta abierto y su respaldo son tablas
+    apoyadas en una arista.  Bajo el contrato de ``ingest._backed_for`` ese es
+    exactamente el estado en el que un cero de repeticion puede estar
+    publicado, asi que la puerta no se deja fuera ninguna fila que contradiga a
+    su cabecera; y en el resto de la base — que es toda ella — no cuesta nada.
+    """
+    if pos.status != 'UNKNOWN' or not pos.backed_move or pos.backed_eval != 0:
+        return frozenset()
+    return ingest.repetition_moves(pos)
+
+
 def _child_moves(pos):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
@@ -3031,6 +3725,7 @@ def _child_moves(pos):
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    repeats = _repetition_moves(pos)
     moves = []
     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
     numbers = _proof_numbers_for([edge.child.key for edge in edges])
@@ -3084,6 +3779,25 @@ def _child_moves(pos):
         else:
             # sin analizar: encima de perder, debajo de lo caminado
             score, rank, tier = None, -9_999.5, 1
+        repetition = e.move_uci in repeats
+        if repetition:
+            # LA FILA DICE LO QUE EL PADRE USA (§ ingest, el bloque de la
+            # repeticion).  Por esta arista el respaldo de arriba no usa el
+            # numero del hijo sino las tablas de la repeticion, y la tabla
+            # tiene que enseñar ESE numero: la cabecera publicaba un 0 que
+            # ninguna fila decia mientras esta pintaba el numero circular del
+            # hijo, que es el sintoma (b) del 12-ago.  Pierde ademas el chip
+            # de respaldo: ese chip promete una espina que baja hasta un
+            # origen, y lo que hay debajo es un bucle que vuelve aqui.  El de
+            # repeticion lo dice en su lugar.
+            #
+            # Y el numero deja de contar como conocimiento de motor (tier 2):
+            # de esta jugada el motor habra dicho lo que sea, pero el 0 de la
+            # celda no lo ha medido nadie.  ``walked`` se queda en falso — la
+            # procedencia de este numero no es una linea sembrada sino una
+            # repeticion, y para eso esta su propia marca.
+            score, rank, tier = 0, 0.0, 2
+            backed_plies, backed_light, walked = 0, False, False
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -3116,6 +3830,10 @@ def _child_moves(pos):
                       'backed_plies': backed_plies,
                       'backed': bool(backed_plies),
                       'backed_light': backed_light,
+                      # Esta jugada vuelve a la posicion que la esta valorando
+                      # (§ _repetition_moves): el numero de la celda son las
+                      # tablas que el respaldo de arriba usa por esta arista.
+                      'repetition': repetition,
                       # Lo que decide el tier viaja en la fila: la marca que
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.
@@ -3260,7 +3978,7 @@ def home(request):
         preview, full = labels.get(task.position_id, ('', ''))
         routed = routes.get((task.route, task.position_id))
         if routed is not None:
-            preview, full = routed
+            preview, full = routed[:2]
         analyzing.append({'key': task.position_id,
                           'san': preview or 'start position',
                           'full': full or 'start position',
@@ -3274,7 +3992,7 @@ def home(request):
         source, route = pending_meta.get(key, ('', ''))
         routed = routes.get((route, key))
         if routed is not None:
-            preview, full = routed
+            preview, full = routed[:2]
         upnext.append({'key': key,
                        'san': preview or 'start position',
                        'full': full or 'start position',
@@ -3529,6 +4247,83 @@ def _parse_public_position(raw):
     return _parse_public_pgn(raw)
 
 
+def _analysis_line(line, stm_white):
+    """Una linea del motor tal y como sale por la API. POV del que mueve.
+
+    Misma convencion que el resto del cuerpo (chessdb.cn) y por el mismo
+    motivo: el arbol guarda White-POV, y una respuesta con ``score`` en una
+    perspectiva y las lineas en otra es una trampa para el que la lea.  El
+    signo se le da la vuelta a las DOS puntuaciones, cp y mate, porque las dos
+    salen del mismo sitio y con el mismo criterio (§ engine.analyse).
+
+    ``raw`` viaja tal cual: es literalmente lo que se pidio — la salida cruda
+    del motor, como la ensena una GUI — y lo que este bloque anade al lado son
+    sus numeros ya leidos, para no obligar a nadie a parsear texto otra vez.
+    """
+    eval_cp, mate = line.get('eval_cp'), line.get('mate')
+    row = {
+        'move': line.get('move'),
+        'cp': eval_cp if (stm_white or eval_cp is None) else -eval_cp,
+        'mate': mate if (stm_white or mate is None) else -mate,
+        'pv': line.get('pv') or [],
+        # Una PV recortada al guardarla (§ ingest.STORED_PV_MAX_PLIES) se dice,
+        # para que nadie lea el ultimo ply como el final de la linea.
+        'pv_truncated': bool(line.get('pv_truncated')),
+    }
+    raw = line.get('raw')
+    if isinstance(raw, str) and raw:
+        row['raw'] = raw
+    row.update(ingest.info_fields(raw))
+    return row
+
+
+def _analysis_block(pos, stm_white):
+    """El analisis del motor de una posicion, o ``None`` si no lo hay.
+
+    Peticion de comunidad (Wolfram): "can you add to query result the engine
+    output in position ... number of nodes + all PVs from last pass + all PVs
+    from earlier wider pass ... and preferably all passes that were done in the
+    node, as it is practically useful to know which evaluation engine gave at
+    lower depth".  Las tres mitades de esa frase son las tres claves de aqui.
+
+    ``lines`` es el pase VIGENTE y ``previous`` el anterior cuando sobrevive —
+    y sobrevive exactamente cuando era mas ancho, que es la politica que ya
+    tenia el escaparate desde el 29-jul y que esto no cambia, solo publica.
+
+    ``passes`` es la SERIE: un resumen por pase, del mas nuevo al mas viejo
+    (§ Position.analysis_passes).  Se empezo a guardar el 15-ago, asi que en un
+    nodo analizado antes de esa fecha la serie empieza en su siguiente pase y
+    no antes; ``passes_complete`` lo dice sin que nadie tenga que adivinarlo,
+    comparando la serie con las visitas que la posicion lleva acumuladas.
+
+    ``None`` cuando no hay ni lineas ni serie: una clave vacia en un cuerpo que
+    ya tiene veinte es ruido, y el resto de este endpoint sigue exactamente
+    igual para todo consumidor que existiera antes (§ es ADITIVO).
+    """
+    stored = [line for line in (pos.last_analysis or [])
+              if isinstance(line, dict)]
+    passes = [entry for entry in (pos.analysis_passes or [])
+              if isinstance(entry, dict)]
+    if not stored and not passes:
+        return None
+    current = [line for line in stored if not line.get('prior_pass')]
+    previous = [line for line in stored if line.get('prior_pass')]
+    budget = current[0].get('_budget') if current else None
+    return {
+        'lines': [_analysis_line(line, stm_white) for line in current],
+        'previous': [_analysis_line(line, stm_white) for line in previous],
+        # El presupuesto del pase que escribio las lineas de arriba, que es lo
+        # que las hace comparables con las de ``previous``: un numero de otra
+        # profundidad no dice lo mismo aunque este en la misma unidad.
+        'budget_nodes': budget if isinstance(budget, int) else None,
+        'passes': passes,
+        'passes_complete': len(passes) >= (pos.visits or 0),
+        'visits': pos.visits,
+        'nodes': pos.nodes_invested,
+        'seconds': pos.time_invested,
+    }
+
+
 def api_query(request):
     """API publica de consulta por FEN. Scores en perspectiva del que mueve
     (convencion chessdb.cn); el arbol interno almacena White-POV."""
@@ -3550,17 +4345,30 @@ def api_query(request):
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
+    children = _child_moves(pos)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
               'backed_plies': m['backed_plies'], 'visits': m['visits']}
-             for m in _child_moves(pos)]
+             for m in children]
+    # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
+    # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
+    # mejor conocimiento (backed incluido) y emparejarlo con la PV directa
+    # entrega pares incoherentes — un cliente jugo la segunda mejor creyendo
+    # que llevaba el score de la primera (reporte del propietario, 13-ago;
+    # misma leccion de la flecha del explore, 29-jul).
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'point': point,
-        'backed_plies': pos.backed_plies, 'best_move': pos.best_move,
+        'backed_plies': pos.backed_plies,
+        'best_move': (None if pos.closure == 'TERMINAL'
+                      else _arrow_move(children, pos)),
         'tier': 'PRACTICAL', 'trust': _trust_for(pos),
         'history_scope': 'COUNTERS_AND_REPETITION_IGNORED',
-        'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves})
+        'visits': pos.visits, 'nodes': pos.nodes_invested, 'moves': moves,
+        # ADITIVO: una clave mas al final, ``null`` en las posiciones que
+        # ningun motor ha mirado.  Nada de lo de arriba cambia de forma ni de
+        # nombre, asi que un consumidor anterior no se entera de que existe.
+        'analysis': _analysis_block(pos, stm_white)})
 
 
 def api_frontier(request, key):
@@ -3612,7 +4420,12 @@ def api_live_request(request, key):
     pos = Position.objects.filter(key=key).only('key', 'status').first()
     if pos is None:
         return JsonResponse({'error': 'unknown position'}, status=404)
-    row = live_request.summary(pos)
+    # El mismo texto que pinta la pagina, con el mismo visitante: la linea
+    # dice "N of them yours" solo a quien de verdad las tiene en cola, asi que
+    # el sondeo tiene que saber quien pregunta o devolveria otra frase.
+    row = live_request.summary(
+        pos, username=(request.user.username
+                       if request.user.is_authenticated else ''))
     if row is None:
         return JsonResponse({'live': False})
     return JsonResponse({'live': True, **row})
@@ -3914,6 +4727,45 @@ def _approver_gate(request):
     return None
 
 
+def queue_page(request):
+    """The queue by account, so fairness can be checked and not believed.
+
+    A share of the fleet that nobody can see is a promise, and this page is
+    what turns it into a measurement: who is waiting, how much they have
+    charged, and what fraction of the last hour each account actually
+    received.  The columns are read from the same predicates the ordering
+    uses (§ ``lanes.measure_queue``), so a disagreement between this table
+    and the queue is a bug in one place rather than a difference of opinion
+    between two.
+
+    Public and cached like the rest of the read views: the numbers behind it
+    are two GROUP BY, and one visitor should not pay them for everybody.
+    """
+    table = lanes.queue_table()
+    rows = []
+    for row in table['rows']:
+        rows.append({
+            **row,
+            'name': row['account'] or 'Anonymous',
+            'named': bool(row['account']),
+            'nodes_h': _human(row['nodes']),
+            'served_h': _human(row['served']),
+            'waited': (_ago_text(row['oldest']) if row['oldest'] else ''),
+        })
+    return render(request, 'atomicdb/queue.html', {
+        'account_rows': rows,
+        'served_minutes': table['served_minutes'],
+        'has_served': bool(table['served_total']),
+    })
+
+
+def _ago_text(moment):
+    """"3 hours" for a queue age, in ONE unit.  Same shape the profile uses."""
+    from django.utils.timesince import timesince
+    text = timesince(moment, now=timezone.now(), depth=1)
+    return 'just now' if text.split()[:1] == ['0'] else text
+
+
 def suggestions(request):
     """Moderacion de nombres propuestos. Solo para approvers."""
     denied = _approver_gate(request)
@@ -4010,6 +4862,219 @@ def notifications_page(request):
 
 # ---------------- pagina de contribuidor ----------------
 
+def api_queue_bump(request, task_id):
+    """Adelanta UNA peticion propia al frente de la cola PROPIA.
+
+    Peticion de comunidad (Wolfram): "some checkmark to push smth to the front
+    of my own queue, not to the back, would be nice".  Quien pide cinco cosas
+    seguidas descubre a menudo, con la cuarta ya encolada, que la que de verdad
+    quiere ver es esa; hasta hoy la unica forma de adelantarla era esperar a
+    las tres de delante.
+
+    LO QUE ESTO NO ES: un adelantamiento en la cola de nadie mas.  La fila se
+    coloca en el sitio que la PRIMERA peticion pendiente de esta misma cuenta
+    ya ocupaba (§ ``ingest.front_of_own_queue``), asi que lo que cambia es cual
+    de las tuyas cobra en tu turno.  Las bandas, el estrato nombrado y el
+    reparto justo entre cuentas no se tocan, y lo que ya esta corriendo a tu
+    nombre sigue contando por delante de todo lo que esperas.
+
+    EL MATIZ, PORQUE EL REPARTO CUENTA NODOS Y NO FILAS: con peticiones del
+    mismo peldano — que es como llega casi todo — la secuencia de cuentas
+    servidas es literalmente la misma antes y despues.  Con peldanos
+    distintos, adelantar una barata por delante de una cara adelanta tambien
+    al resto de tu cola, porque ahora tu segunda peticion arranca detras de
+    128M en vez de detras de 10B.  No es una excepcion a tu favor: es la misma
+    regla de siempre leida sobre tu nuevo orden, y lo unico que puede
+    conseguir es servirte lo barato antes y lo caro despues.  Tu deuda total
+    de nodos no se mueve, asi que tu parte del pool tampoco.
+
+    LA CUENTA TIENE QUE SER LA TUYA, y se comprueba aqui: el boton solo sale en
+    la pagina de una posicion que tu has pedido, pero esconder un control no es
+    negarlo.  Sin sesion, al login de OpenBench, que es lo que hace el resto de
+    las paginas personales.
+
+    DE DONDE SE PULSA.  Desde el 15-ago, de la pagina de la POSICION y no de
+    la lista de la cola (§ ``live_request.bump_control``), asi que la vuelta
+    ya no puede ser un destino fijo: ``back`` trae la pagina desde la que se
+    pincho y se acepta solo si es una ruta de este sitio, con la pagina de la
+    cuenta como suelo.  Misma guarda que el boton de marcar avisos vistos.
+
+    SIN ``csrf_exempt``, por lo mismo que ``api_request``: esto lo manda un
+    formulario del explorador, que lleva su token.  Exenta, una pagina de
+    terceros podria reordenar la cola de quien la visitara con sesion abierta.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return redirect(f'/login/?next={quote("/atomicdb/me/")}')
+    with atomic():
+        task = (AnalysisTask.objects.select_for_update()
+                .filter(pk=task_id, source=AnalysisTask.Source.USER,
+                        requested_by=request.user.username,
+                        state=AnalysisTask.TState.PENDING).first())
+        if task is None:
+            # No es tuya, ya se sirvio o no existe.  Las tres se responden
+            # igual a proposito: contestar distinto a "no es tuya" y a "no
+            # existe" convierte esta ruta en un contador de tareas ajenas.
+            status, moved = 'not-yours', False
+        else:
+            seq = ingest.front_of_own_queue(task)
+            if seq is None:
+                status, moved = 'already-first', False
+            else:
+                AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
+                status, moved = 'moved', True
+    back = request.POST.get('back') or ''
+    if back:
+        own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
+        return redirect(back if back.startswith('/atomicdb/') else own_page)
+    return JsonResponse({'status': status, 'moved': moved})
+
+
+def _own_queue_page(request, query=''):
+    """A donde vuelve un boton de la cola, con el recibo de lo que hizo.
+
+    DOS SITIOS DESDE LOS QUE SE PULSA, uno solo al que volver: la lista de la
+    cola y la pagina de una posicion (§ ``live_request.withdraw_control``).  El
+    formulario dice de cual viene en ``back`` y aqui se acepta SOLO si es una
+    ruta de este sitio, con la pagina de la cuenta como suelo — la misma guarda
+    que ``api_queue_bump`` desde que se mudo, y por lo mismo: lo que llega del
+    cliente es una pista, no un destino.
+
+    El recibo viaja en la query pase lo que pase.  Quien retira desde la
+    posicion vuelve a ella, que es donde estaba mirando, y la pagina cuenta
+    ahi lo que acaba de hacer.
+    """
+    own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
+    back = request.POST.get('back') or ''
+    if not back.startswith('/atomicdb/'):
+        back = own_page
+    joiner = '&' if '?' in back else '?'
+    return redirect(back + (joiner + query.lstrip('?') if query else ''))
+
+
+def api_queue_cancel(request, task_id):
+    """Retira UNA peticion propia de la cola, o la devuelve a ella.
+
+    Peticion de comunidad (asfault): "is there a way to cancel requests before
+    they have started - for when you accidentally request analysis for some
+    already deeply analysed line".  El caso es literalmente ese: te das cuenta
+    del error justo despues de pedirlo, y hasta hoy no habia salida — la unica
+    forma de sacar algo de la cola era esperar a que un motor lo buscase, o
+    sea gastar exactamente lo que te acabas de dar cuenta de que sobra.
+
+    PENDING Y SOLO PENDING.  Lo ARRENDADO no se cancela y no es una limitacion
+    tecnica: ahi ya hay un motor buscando, los nodos ya se estan gastando, y
+    lo unico que conseguiria cerrar la fila es tirar el trabajo hecho y perder
+    su resultado.  El propio texto de la peticion lo dice — "before they have
+    started" — y esa frontera es exactamente el estado de la fila.
+
+    SIN CONFIRMACION Y CON DESHACER, que es la pareja que hace segura una
+    accion destructiva de UNA fila: el error se arregla con otro click, y lo
+    que vuelve es la misma peticion con su presupuesto y su sitio
+    (§ ``ingest.restore_cancelled``).  Lo que si lleva confirmacion es vaciar
+    la cola entera (§ ``api_queue_clear``), porque eso no se deshace fila a
+    fila.
+
+    LA CUENTA TIENE QUE SER LA TUYA y se comprueba aqui, igual que al
+    adelantar: el boton solo sale donde la peticion es tuya, pero esconder un
+    control no es negarlo.  "No es tuya", "ya se sirvio" y "no existe"
+    contestan lo mismo a proposito, para que esta ruta no sea un contador de
+    tareas ajenas.
+
+    SIN PETICIONES ANONIMAS.  Una peticion sin nombre no es de nadie — es lo
+    que ya decide el reparto justo con la marea sin sesion — y sin identidad no
+    hay forma de decir que esa fila es tuya y no la de otro visitante que
+    pincho la misma posicion.  Sin sesion, al login, que es lo que hacen todas
+    las paginas personales.
+
+    DE DONDE SE PULSA: de la lista de la cola y de la pagina de la POSICION,
+    igual que el boton de adelantar desde el 15-ago
+    (§ ``live_request.withdraw_control``).  Por eso la vuelta no es un destino
+    fijo: ``back`` trae la pagina desde la que se pincho y solo se acepta si es
+    una ruta de este sitio (§ ``_own_queue_page``).
+
+    SIN ``csrf_exempt``, por lo mismo que ``api_request`` y que el boton de
+    adelantar: esto lo manda un formulario del sitio, que lleva su token.
+    Exenta, una pagina de terceros podria vaciarle la cola a quien la visitara
+    con la sesion iniciada.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return redirect(f'/login/?next={quote("/atomicdb/me/")}')
+    mine = AnalysisTask.objects.filter(pk=task_id,
+                                       source=AnalysisTask.Source.USER,
+                                       requested_by=request.user.username)
+    undo = request.POST.get('undo') == '1'
+    key = ''
+    with atomic():
+        if undo:
+            task = (mine.select_for_update().select_related('position')
+                    .filter(state=AnalysisTask.TState.CANCELLED).first())
+            if task is None:
+                status = 'nothing-to-undo'
+            else:
+                key = task.position_id
+                status = ('restored' if ingest.restore_cancelled(task)
+                          else 'cannot-restore')
+        else:
+            task = (mine.select_for_update()
+                    .filter(state=AnalysisTask.TState.PENDING).first())
+            if task is None:
+                status = 'not-yours'
+            else:
+                key = task.position_id
+                status = ingest.withdraw_requester(task)
+    if request.POST.get('back'):
+        # El recibo viaja en la query y lo pinta la propia pagina: cancelar y
+        # volver a una lista con una fila menos y sin una palabra es
+        # exactamente como se siente un click que no se sabe si conto.
+        return _own_queue_page(request, f'?{status}={task_id}')
+    return JsonResponse({'status': status, 'task': task_id, 'key': key})
+
+
+def api_queue_clear(request):
+    """Vacia de golpe TODO lo que esta cuenta tiene esperando.
+
+    Peticion de comunidad (Eclipsia, dos veces).  Cancelar de una en una
+    resuelve el click equivocado; no resuelve el otro caso, que es el que de
+    verdad duele: una racha larga que ya no se quiere.  El 6-ago una sola
+    cuenta encolo 1.562 peticiones en una hora — deshacer eso con el boton de
+    una fila son 1.562 clicks.
+
+    MISMA SEMANTICA POR FILA que el boton de una (§ ``ingest.clear_own_queue``,
+    § ``ingest.withdraw_requester``): lo que otra persona tambien pidio cambia
+    de dueno y SIGUE en la cola, y solo sale lo que no esperaba nadie mas.
+    Vaciar la cola propia no puede vaciarle la suya a nadie.
+
+    CON CONFIRMACION, y es la unica de las dos que la lleva.  Una fila se
+    deshace con un click; doscientas no — el deshacer de una en una existe
+    porque la fila sabe cual era, y despues de un vaciado no queda ninguna
+    pagina que sepa que habia.  El paso extra lo pone la plantilla (un
+    desplegable que hay que abrir para llegar al boton, sin dialogo y sin
+    depender de JS) y lo EXIGE esta vista: un POST sin ``confirm`` no vacia
+    nada, porque esconder el boton detras de un desplegable no es negarlo.
+
+    IDEMPOTENTE: a la segunda vez no queda ninguna pendiente y se contesta
+    cero, que es la verdad y no un error.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return redirect(f'/login/?next={quote("/atomicdb/me/")}')
+    if request.POST.get('confirm') != '1':
+        return JsonResponse({'status': 'confirm-required',
+                             'cancelled': 0, 'handed_over': 0}, status=400)
+    with atomic():
+        cancelled, handed = ingest.clear_own_queue(request.user.username)
+    if request.POST.get('back'):
+        return _own_queue_page(request,
+                               f'?cleared={cancelled}&handed={handed}')
+    return JsonResponse({'status': 'cleared', 'cancelled': cancelled,
+                         'handed_over': handed})
+
+
 def contributor_me(request):
     """Atajo a tu propia pagina. Sin sesion, al login de OpenBench.
 
@@ -4050,13 +5115,98 @@ def contributor(request, username):
     context = contributors.present(username)
     context.update({
         **_suggestions_badge(request),
+        **_queue_receipt(request, viewer == username),
         'is_self': viewer == username,
+        # P5 (comunidad, 3-0, 28-ago-2026): el interruptor "newest first"
+        # existe solo en el perfil PROPIO — la preferencia es de la cuenta.
+        'lifo_toggle': viewer == username,
+        'lifo_on': bool(viewer == username and ContributorPref.objects.filter(
+            account=viewer, lifo_queue=True).exists()),
         # Los titulos hablan de la persona que se esta mirando: "Your queue"
         # cuando eres tu, "alice's queue" cuando no.  La pagina es publica y
         # tutear al visitante sobre la cola de otro seria mentirle.
         'owner_label': 'Your' if viewer == username else f'{username}’s',
     })
     return render(request, 'atomicdb/contributor.html', context)
+
+
+# Lo que se le dice a quien acaba de tocar su cola, por estado.  ``undo`` marca
+# el unico que ofrece deshacer: retirar UNA fila es lo unico que la pagina
+# siguiente sigue sabiendo reconstruir — despues de un vaciado ya no queda
+# ninguna pagina que sepa que habia, y un traspaso no se puede deshacer sin
+# quitarle a otra persona una peticion que ahora es suya.
+QUEUE_RECEIPTS = {
+    'cancelled': ('Request withdrawn. It is out of the queue and nothing was '
+                  'spent on it.', True),
+    'handed-over': ('You are off that request. Somebody else asked for the '
+                    'same position, so it stays in the queue under them.',
+                    False),
+    'restored': ('Request back in the queue, with the same budget and the '
+                 'same place it had.', False),
+    'cannot-restore': ('That request could not go back: the position already '
+                       'has a verdict.', False),
+    'nothing-to-undo': ('Nothing to put back there.', False),
+    'not-yours': ('Nothing to withdraw: that request is no longer waiting.',
+                  False),
+}
+
+
+def _queue_receipt(request, is_self, back=''):
+    """La frase de lo que acaba de pasarle a la cola propia, o ``{}``.
+
+    Vuelve en la query porque el POST vuelve con un redirect (§ el boton de
+    adelantar, mismo patron): cancelar y aterrizar en una lista con una fila
+    menos y ni una palabra es exactamente como se siente un click del que no se
+    sabe si conto.
+
+    LO PINTAN LAS DOS PAGINAS DESDE LAS QUE SE RETIRA, la lista de la cola y la
+    POSICION, porque el click vuelve a la que lo mando (§ ``_own_queue_page``).
+    Sin esto, retirar desde una posicion dejaba la linea de estado en blanco y
+    ni una palabra — y es justamente ahi donde el deshacer tiene que estar, que
+    es lo que sostiene que retirar sea un click sin confirmacion.
+
+    SOLO PARA QUIEN PUEDE HABERLO HECHO.  La pagina de una cuenta es publica, y
+    una frase en segunda persona sobre una cola ajena — colgada ademas de un
+    parametro que cualquiera puede escribir en un enlace — seria contarle a un
+    visitante algo que no ha hecho.  En la pagina de la cuenta eso es "es la
+    tuya"; en la posicion, que haya sesion.
+
+    ``back`` es a donde vuelve el deshacer, y lo compone la pagina: la posicion
+    quiere volver a si misma con su ruta, no a la lista de la cola.
+
+    El identificador viaja para poder ofrecer deshacer, y no se comprueba aqui:
+    quien decide si esa fila es tuya y si sigue retirada es el endpoint, que lo
+    mira otra vez de todas formas.  Lo unico que se exige es que SEA un numero,
+    para que la query no pueda meter nada raro en el formulario.
+    """
+    if not is_self:
+        return {}
+    cleared = request.GET.get('cleared')
+    if cleared is not None and cleared.isdigit():
+        count, handed = int(cleared), request.GET.get('handed', '')
+        handed = int(handed) if handed.isdigit() else 0
+        if not count and not handed:
+            return {'queue_receipt': 'Nothing was waiting, so nothing '
+                                     'changed.'}
+        parts = []
+        if count:
+            plural = '' if count == 1 else 's'
+            parts.append(f'Withdrew {count} waiting request{plural}.')
+        if handed:
+            those = 'that position' if handed == 1 else 'those positions'
+            parts.append(f'{handed} of them stayed in the queue: somebody '
+                         f'else had asked for {those} too.')
+        return {'queue_receipt': ' '.join(parts)}
+    for status, (text, undo) in QUEUE_RECEIPTS.items():
+        task_id = request.GET.get(status)
+        if task_id is None:
+            continue
+        receipt = {'queue_receipt': text}
+        if undo and task_id.isdigit():
+            receipt['queue_undo_task'] = task_id
+            receipt['queue_undo_back'] = back
+        return receipt
+    return {}
 
 
 # ---------------- campanas de exploracion ----------------
@@ -4502,6 +5652,36 @@ def _pv_verify_plies(pos):
     return min(len(pv), ingest.PV_VERIFY_MAX_PLIES)
 
 
+def _pv_verify_lines(pos):
+    """Que lineas puede elegir el boton aqui: numero, jugada y procedencia.
+
+    LO QUE ARREGLA (Wolfram, 14-ago): "verify PV still completely useless for
+    requesting other lines in PV than second - it always tries to request first
+    line".  El boton caia por la lista y paraba en el primer hueco, asi que
+    mientras la 1 tuviera algo que comprar no habia click que llegara a la 3.
+    Faltaba la mitad de arriba del camino: un sitio donde decir cual.
+
+    LOS NUMEROS SON LOS DEL PASEO, no los de un bucle de plantilla: salen de
+    ``ingest.verify_candidates``, que es la misma lista que caminara el click.
+    Contarlas aqui por separado seria volver a lo mismo por otra puerta: elegir
+    la 3 de una lista y comprar la 3 de otra.
+
+    Y CADA UNA SE NOMBRA POR SU JUGADA, no solo por su numero: en el escaparate
+    de arriba las lineas se leen por lo que juegan, y un desplegable de "1, 2,
+    3" obligaria a contar filas para saber cual es cual.  Las que salen del
+    arbol lo dicen, con las mismas palabras que el recibo (§ _pv_verify_line):
+    no son lo que el motor sostiene hoy sino una jugada que un pase ancho dejo
+    sembrada.
+    """
+    offered = []
+    for index, pv, from_tree in ingest.verify_candidates(pos):
+        san = _move_san(pos.fen, pv[0])
+        offered.append({
+            'index': index, 'san': san, 'from_tree': from_tree,
+            'label': f'{san} (from the tree)' if from_tree else san})
+    return offered
+
+
 def _queued_children(moves):
     """Cuantos de estos hijos tienen analisis EN VUELO, en UNA consulta.
 
@@ -4672,10 +5852,11 @@ def explore(request, key):
             response['Cache-Control'] = 'no-store'
             return response
         return render(request, 'atomicdb/missing.html', status=404)
-    if request.user.is_authenticated:
+    viewer = (request.user.username if request.user.is_authenticated else '')
+    if viewer:
         # Leida = VISITADA: lo que apaga un aviso es llegar a su posicion —
         # desde el propio aviso o por su pie — no abrir el panel.
-        notifications.mark_position_seen(request.user.username, pos.key)
+        notifications.mark_position_seen(viewer, pos.key)
     moves = _child_moves(pos)
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
@@ -4795,6 +5976,35 @@ def explore(request, key):
             'enters_opening': _exact_child_opening(
                 offtree_keys[uci], current_opening, names=community_map),
         })
+    # JUMP TO THE END OF THE PROVEN LINE.  Offered when the first ply of that
+    # line can really be travelled, which is one of two things: the ply is
+    # already an edge of the table below, or the closure can build its chain
+    # on the click (``ingest.won_line_materialisable``, the very rule the
+    # builder applies, asked and not copied).  Being in the tree stopped being
+    # the only condition on 15-ago: an old closure whose chain was never
+    # materialised has a line to walk all the same, and the plies it names are
+    # what the closure already asserts.
+    #
+    # What the ban on a BLOCKED first move protects is the other side, and it
+    # stays: a move this page refuses to make from every other control cannot
+    # be made from this one either.
+    #
+    # Not one statement is spent here.  The walk is paid on the click, and how
+    # far it goes is said by the line printed beside the chip.
+    proven_first = _proven_next_move(pos)
+    proven_first_key, proven_first_walkable = None, False
+    if proven_first:
+        in_tree = [move['key'] for move in moves
+                   if move['uci'] == proven_first]
+        proven_first_key = (in_tree[0] if in_tree
+                            else offtree_keys.get(proven_first))
+        proven_first_walkable = bool(
+            in_tree or ingest.won_line_materialisable(pos))
+    proven_end_url = (
+        _proven_line_end_url(pos.key, active_ucis)
+        if proven_first_walkable and proven_first_key is not None
+        and not (blocked_keys is not None and proven_first_key in blocked_keys)
+        else None)
     numbered = _numbered_line(
         top,
         line,
@@ -4849,6 +6059,11 @@ def explore(request, key):
     # linea caminada ensenaba su eval sembrada tan segura como una de 512M
     # (§ _walked_value).  Mismo predicado que ordena la tabla de abajo.
     eval_walked = eval_stm is not None and _walked_value(pos)
+    # El boton de verificar y su selector se deciden JUNTOS y en este orden:
+    # sin plies que ofrecer no hay boton, y sin boton no hay por que preguntar
+    # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
+    # cuando las lineas vigentes no llenan el tope).
+    pv_plies = _pv_verify_plies(pos)
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
         # Selector de profundidad del boton de peticion: vacio — y por tanto
@@ -4857,9 +6072,23 @@ def explore(request, key):
         # render con selector no se le sirve a nadie mas.
         **depth.context(request, pos),
         # En que va la peticion viva de ESTA posicion: esperando en la cola, o
-        # buscandose ahora y cuanto falta.  Vacio cuando no hay tarea viva, y
-        # entonces la plantilla no pinta ni el hueco (§ live_request.context).
-        **live_request.context(pos),
+        # buscandose ahora y cuanto falta.  Y, junto a esa linea, lo que TU
+        # puedes hacer con tu peticion de aqui: adelantarla
+        # (§ live_request.bump_control) o retirarla
+        # (§ live_request.withdraw_control), que es donde de verdad hacen
+        # falta las dos.  Vacio cuando no hay tarea viva, y entonces la
+        # plantilla no pinta ni el hueco.
+        **live_request.context(
+            pos,
+            username=viewer,
+            back=_explore_url(pos.key, active_ucis, current_anchor)),
+        # Y lo que ese boton acaba de hacer, si se acaba de pulsar: el click
+        # vuelve AQUI, asi que el recibo y su deshacer se pintan aqui
+        # (§ _queue_receipt).  Con sesion basta — el endpoint vuelve a
+        # comprobar de quien es la fila antes de deshacer nada.
+        **_queue_receipt(request, bool(viewer),
+                         back=_explore_url(pos.key, active_ucis,
+                                           current_anchor)),
         'pos': pos, 'moves': moves, 'parents': parents,
         # Las lineas del motor listas para ENSEÑAR: cortadas en su primer
         # cruce consigo mismas (§ _analysis_lines_for_display).  El JSON
@@ -4888,7 +6117,12 @@ def explore(request, key):
         # cuenta aqui y no en la plantilla: con menos de cuatro plies no hay
         # linea que contrastar — es la jugada y su respuesta, que es
         # exactamente lo que el boton de al lado ya compra.
-        'pv_verify_plies': _pv_verify_plies(pos),
+        'pv_verify_plies': pv_plies,
+        # Y CUALES, para que el click pueda nombrar una: sin esta lista el
+        # boton solo sabe caer por la suya y la linea 3 es inalcanzable
+        # (§ _pv_verify_lines).  Con un solo candidato no hay nada que elegir
+        # y la plantilla no pinta el control.
+        'pv_verify_lines': _pv_verify_lines(pos) if pv_plies else [],
         # La flecha apunta al TOP de la misma lista que pinta la tabla (mejor
         # conocimiento, backed incluido), no al best_move de la ultima
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
@@ -4908,6 +6142,20 @@ def explore(request, key):
         # Y si el salto acabo dando la vuelta, se dice: el visitante pincho
         # buscando de donde sale el numero y lo que hay es una repeticion.
         'backed_repetition': bool(request.GET.get(BACKED_REPETITION_PARAM)),
+        # Y si acabo antes de tiempo, tambien: la cadena se rompio y esto no
+        # es el final que el control prometia.  Lo dicen los dos saltos por
+        # igual (§ _jump_landing_url).
+        'jump_incomplete': bool(request.GET.get(JUMP_INCOMPLETE_PARAM)),
+        # El salto al final de la linea probada, o None cuando no hay linea
+        # que recorrer y entonces la plantilla no pinta control ninguno.
+        'proven_end_url': proven_end_url,
+        # CUANTOS PLIES viaja ese salto, dichos ANTES del click.  Es la
+        # longitud de la linea que se imprime justo al lado, que es la unica
+        # cifra que no puede contradecir a la pagina: el control promete
+        # exactamente lo que la pagina enseña.  Sin linea impresa (un cierre
+        # MINIMAX solo guarda el testigo de cada nodo) no hay longitud que
+        # prometer y el chip no la inventa.
+        'proven_end_plies': len((pos.won_line or '').split()) or None,
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.
@@ -4951,6 +6199,32 @@ def explore(request, key):
 
 def method(request):
     return render(request, 'atomicdb/method.html')
+
+
+def docs(request):
+    """Que significa cada numero del explorador, en una sola pagina.
+
+    Peticion de comunidad: "wish there was more verbose documentation".  Lo
+    que faltaba no era el dato sino el sitio: las reglas de respaldo estan en
+    los tooltips de los chips, la repeticion en un comentario de ``ingest``, el
+    reparto de la cola en la cabecera de ``lanes``, y quien no las conoce no
+    sabe que existen para buscarlas.  ``method`` cuenta que CIERRA una
+    posicion; esta cuenta que VALE un numero abierto, que es la mitad que se
+    lee todos los dias.
+
+    El limite que la pagina cita sale de la constante que lo aplica de verdad
+    (§ ``REQUEST_QUEUE_MAX``), por lo mismo que la tabla de la cola lee los
+    predicados del orden: una documentacion que copia un numero a mano es una
+    documentacion que miente en cuanto alguien cambia el numero, y encima con
+    cara de verdad.  El resto del texto es prosa y vive en la plantilla.
+
+    Publica y cacheada como las demas vistas de LECTURA (§ urls): no toca la
+    base y no tiene nada de nadie dentro, asi que lo unico que la cache absorbe
+    aqui son las tormentas de F5 sobre un HTML que no cambia.
+    """
+    return render(request, 'atomicdb/docs.html', {
+        'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
+    })
 
 
 def conquest_map(request):

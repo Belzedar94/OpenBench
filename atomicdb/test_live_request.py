@@ -37,6 +37,14 @@ from .models import AnalysisTask, Position, WorkerPing
 from .test_explore_performance import CACHE_FOR_TESTS, build_explorer_fixture
 from .testing import TestCase
 
+# Lo que cuesta resolver el reparto de carriles con la entrada compartida
+# vacia: los workers que han ENTREGADO dentro de la ventana, y los pares
+# (carril, peticionario) que hay en la banda que espera.  DOS y no tres porque
+# en este fixture no hay ningun worker: sin nombres que comprobar, la consulta
+# de perfiles habilitados no llega a hacerse (§ ``lanes._enabled``).  Escrito
+# aqui una vez para que el dia que cambie se lea el motivo y no un numero.
+LANE_LAYOUT_QUERIES = 2
+
 # El texto de la linea, tal y como sale del minificador (que reordena
 # atributos, asi que no se asume ningun orden).
 _TEXT = re.compile(r'id="livereq-text">([^<]*)</span>')
@@ -494,11 +502,18 @@ class CostTests(TestCase):
         Client().get(self.url)   # almacen de claves caliente, como en produccion
 
     def _queries(self, silent=False):
+        # APAGAR ES APAGAR ``context``, que es lo que el explorador llama y lo
+        # que engloba TODO lo que este modulo le cuesta a la pagina: la linea
+        # de estado y el control de adelantar que cuelga de la misma lectura
+        # (§ live_request.bump_control).  Con la narracion sola apagada, la
+        # lectura de la tarea viva seguiria pagandose en las dos medidas y la
+        # resta ya no mediria nada.  Las cifras que se comparan no cambian:
+        # sin sesion el control no cuesta ni una sentencia.
         alias = settings.ATOMICDB_DATABASE_ALIAS
         with CaptureQueriesContext(connections[alias]) as counted:
             if silent:
-                with mock.patch('atomicdb.live_request.summary',
-                                return_value=None):
+                with mock.patch('atomicdb.live_request.context',
+                                return_value={}):
                     response = Client().get(self.url)
             else:
                 response = Client().get(self.url)
@@ -508,10 +523,24 @@ class CostTests(TestCase):
     def test_finding_out_there_is_nothing_to_say_costs_one_statement(self):
         self.assertEqual(self._queries(), self._queries(silent=True) + 1)
 
-    def test_a_waiting_request_costs_two(self):
+    def test_a_waiting_request_costs_two_plus_the_lane_layout(self):
+        """La cola por delante son DOS, y el reparto de carriles se comparte.
+
+        Las dos de siempre: la tarea viva y el sitio en la cola.  Las tres de
+        mas salen de resolver QUIEN tiene carril y cuanta gente hay en cada uno
+        (§ ``lanes.measure_lane_context``), sin lo cual la cifra que se pinta
+        no seria la del orden que de verdad se sirve — y una cifra que no es la
+        del orden servido es exactamente la mentira que este modulo no comete.
+
+        NO SE PAGAN POR RENDER.  Viven en la entrada compartida de treinta
+        segundos, asi que en produccion las paga UN lector cada medio minuto
+        para todo el sitio y las demas pestanas las leen de la cache; este test
+        mide justo el render que se la encuentra vacia, que es el caro.
+        """
         _waiting(self.pos)
 
-        self.assertEqual(self._queries(), self._queries(silent=True) + 2)
+        self.assertEqual(self._queries(),
+                         self._queries(silent=True) + 2 + LANE_LAYOUT_QUERIES)
 
     def test_a_running_search_costs_two(self):
         _searching(self.pos, started_ago=30)

@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 44 # Client version to send to the Server
+CLIENT_VERSION   = 46 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -103,6 +103,11 @@ HORDE_BIN_V1_SCHEMA_SHA256 = (
 )
 HORDE_RUN6B_SHA256 = (
     'B71108587968AC544EB2E62C2333FECA880DA5ACA52866787F1402163444ADF7'
+)
+# schemas/horde-label-contract-v1.json in the engine tree: the manifest binds
+# the external label contract by name and complete SHA-256 (datagen-v1.md).
+HORDE_LABEL_CONTRACT_V1_SHA256 = (
+    'C299BA9ECD96DEF24363F8F62A8C67B88241AA860FB0735D4558B8EFEA0DCC22'
 )
 HORDE_OPENING_BOOK_SHA256 = (
     '93E97B27D5DF054B8A649B8BE92A0A8B058384DAE35BAD142F9A610896EB6958'
@@ -280,6 +285,24 @@ class Configuration:
             raise ValueError('--atomic-syzygy requires --atomic-syzygy-manifest')
         self.fleet       = args.fleet    if args.fleet    else False
         self.focus       = args.focus    if args.focus    else []
+        self.focus_test  = self.parse_focus_test(args.focus_test)
+
+    @staticmethod
+    def parse_focus_test(value):
+
+        # Opting into a single test is strict on purpose: the Server serves
+        # that test or nothing at all. Without it nothing changes, and work
+        # keeps arriving from the Server's own global priorities
+
+        if value in (None, ''):
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                '--focus-test expects a test id, not "%s"' % (value)
+            )
 
     def init_client(self):
 
@@ -708,14 +731,15 @@ class ServerReporter:
 ## standard chess through cutechess, exactly as before.
 
 VARIANTS = {
-    'SPELL'    : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
-    'ALICE'    : ('uci-pair-runner', 'alice'       ),
-    'HORDE'    : ('cutechess'      , 'horde'       ),
-    'SHATRANJ' : ('cutechess'      , 'shatranj'    ),
-    'ATOMIC'   : ('cutechess'      , 'atomic'      ),
-    'FRC'      : ('cutechess'      , 'fischerandom'),
-    '960'      : ('cutechess'      , 'fischerandom'),
-    'FISCHER'  : ('cutechess'      , 'fischerandom'),
+    'SPELL'     : ('uci-pair-runner', 'spell-chess' ),  # first: wins over FRC/960 in combined names
+    'ALICE'     : ('uci-pair-runner', 'alice'       ),
+    'TERACHESS' : ('uci-pair-runner', 'terachess'   ),
+    'HORDE'     : ('cutechess'      , 'horde'        ),
+    'SHATRANJ'  : ('cutechess'      , 'shatranj'     ),
+    'ATOMIC'    : ('cutechess'      , 'atomic'       ),
+    'FRC'       : ('cutechess'      , 'fischerandom' ),
+    '960'       : ('cutechess'      , 'fischerandom' ),
+    'FISCHER'   : ('cutechess'      , 'fischerandom' ),
 }
 
 # Fallback when the book name carries no token (DATAGEN runs use book='None';
@@ -724,10 +748,21 @@ VARIANTS = {
 ENGINE_VARIANTS = {
     'SPELL-STOCKFISH'                    : ('uci-pair-runner', 'spell-chess'),
     'ALICE-STOCKFISH'                    : ('uci-pair-runner', 'alice'      ),
+    'TERACHESS-STOCKFISH'                : ('uci-pair-runner', 'terachess'  ),
     'HORDE-STOCKFISH'                    : ('cutechess'      , 'horde'      ),
     'FAIRY-STOCKFISH-HORDETEST-BASELINE' : ('cutechess'      , 'horde'      ),
     'ATOMIC-STOCKFISH'                   : ('cutechess'      , 'atomic'     ),
     'FAIRY-STOCKFISH-ATOMIC-BASELINE'    : ('cutechess'      , 'atomic'     ),
+}
+
+# Variant-specific policy for the pure-UCI runner. Keep this separate from the
+# routing table: these flags are not accepted by cutechess-ob. Terachess games
+# average 575 plies and have reached 842 naturally; the project contract rejects
+# caps below 1,000 because they manufacture draws. 1,200 matches the measured
+# no-adjudication pilot and leaves the generic runner default unchanged for all
+# other variants.
+UCI_PAIR_VARIANT_FLAGS = {
+    'terachess': '--max-plies 1200',
 }
 
 # Only contracts the Server can actually emit belong here. OpenBench/config.py
@@ -925,8 +960,12 @@ class Cutechess:
         is_datagen = config.workload['test']['type'] == 'DATAGEN'
         no_reverse = is_datagen and not config.workload['test']['play_reverses']
 
-        # Always include -recover and -variant
-        return ['-repeat', ''][no_reverse] + ' -recover -variant %s' % (variant)
+        # Always include -recover and -variant. Only the custom runner accepts
+        # the policy flags below; never leak them to cutechess-ob.
+        settings = ['-repeat', ''][no_reverse] + ' -recover -variant %s' % (variant)
+        if runner == 'uci-pair-runner' and variant in UCI_PAIR_VARIANT_FLAGS:
+            settings += ' ' + UCI_PAIR_VARIANT_FLAGS[variant]
+        return settings
 
     @staticmethod
     def concurrency_settings(config):
@@ -1812,10 +1851,20 @@ def server_configure_worker(config):
 
 def server_request_workload(config):
 
-    print('\nRequesting Workload from Server...')
+    focus_test = getattr(config, 'focus_test', None)
+
+    if focus_test is None:
+        print('\nRequesting Workload from Server...')
+    else:
+        print('\nRequesting Workload from Server [Test #%d only]...' % (focus_test))
 
     payload  = { 'machine_id' : config.machine_id, 'secret' : config.secret_token, 'blacklist' : config.blacklist }
     target   = url_join(config.server, 'clientGetWorkload')
+
+    # Older Servers ignore the extra field, and older Clients never send it
+    if focus_test is not None:
+        payload['focus_test'] = focus_test
+
     response = requests.post(target, data=payload, timeout=TIMEOUT_HTTP)
 
     # Server errors produce garbage back, which we should not alarm a user with
@@ -1830,6 +1879,16 @@ def server_request_workload(config):
     # The 'error' header is included if there was an issue
     if 'error' in response:
         raise Exception('[Error] %s' % (response['error']))
+
+    # Say out loud what the opt-in did, so an idle worker is never a mystery
+    if focus_test is not None:
+        focus = response.get('focus')
+        if focus is None:
+            print('[Note] This Server does not support --focus-test')
+            print('[Note] Work will be assigned by the Server as usual')
+        elif not focus.get('served'):
+            print('[Note] %s' % (focus.get('message', 'No work for this test')))
+            print('[Note] Waiting for test #%d to become available' % (focus_test))
 
     # Log the start of a new Workload
     if 'workload' in response:
@@ -2975,7 +3034,7 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 'schema', 'schema_sha256', 'format_version', 'header_bytes',
                 'record_bytes', 'record_count', 'byte_order', 'source_commit',
                 'source_dirty', 'network', 'book_sha256', 'producer_sha256',
-                'payload_sha256', 'generation',
+                'payload_sha256', 'label_contract', 'generation',
             ]
             _horde_bin_v1_require(
                 list(manifest) == expected_top_keys,
@@ -3009,6 +3068,16 @@ def validate_horde_bin_v1_output(config, output_path, producer):
                 manifest['book_sha256'] == book_sha256
                 and manifest['producer_sha256'] == producer_sha256,
                 'book or producer identity is invalid',
+            )
+
+            label_contract = manifest['label_contract']
+            _horde_bin_v1_require(
+                isinstance(label_contract, dict)
+                and list(label_contract) == ['schema', 'schema_sha256']
+                and label_contract['schema'] == 'HORDE_LABEL_CONTRACT_V1'
+                and label_contract['schema_sha256']
+                    == HORDE_LABEL_CONTRACT_V1_SHA256,
+                'label contract identity is invalid',
             )
 
             generation = manifest['generation']
@@ -4153,6 +4222,9 @@ def parse_arguments(client_args):
                         help='Atomic Syzygy inventory JSON', required=False)
     p.add_argument(      '--fleet'   , help='Fleet Mode'              , action='store_true')
     p.add_argument(      '--focus'   , help='Prefer certain engine(s)', nargs='+'          )
+    p.add_argument(      '--focus-test',
+                        help='Only run this test id, and idle otherwise',
+                        required=False)
 
     # Ignore unknown arguments ( from client )
     worker_args, unknown = p.parse_known_args()
