@@ -27,9 +27,9 @@ from .conquest_map import map_api
 # abajo.  A partir de la segunda peticion ese visitante ya trae cookie y entra
 # al cache con su propia entrada, que es donde estan las tormentas de F5.
 #
-# ``map`` y ``method`` VARIAN POR COOKIE desde que la cabecera lleva zona de
-# identidad.  Antes no tenian nada por visitante y compartian una sola entrada;
-# ahora su HTML dice quien eres — nombre, campana, recuento — y una entrada
+# ``map``, ``method`` y ``docs`` VARIAN POR COOKIE desde que la cabecera lleva
+# zona de identidad.  Antes no tenian nada por visitante y compartian una sola
+# entrada; ahora su HTML dice quien eres (nombre, campana, recuento) y una
 # compartida seria servirle a un visitante la sesion de otro.  El precio esta
 # medido y es el que ya paga la home: quien NO ha iniciado sesion sigue
 # compartiendo entrada (la cabecera anonima no lleva formulario, asi que no
@@ -68,6 +68,8 @@ _home_cached = page_cache.stale_while_revalidate(
     vary_on_cookie(csrf_protect(views.home)))
 _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
+_docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
+_queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 
 urlpatterns = [
     path('', _home_cached),
@@ -79,7 +81,16 @@ urlpatterns = [
     # el destino se mueve con cada analisis que cae debajo, asi que tampoco
     # lleva cache.
     path('backed-source/<str:key>/', views.backed_source),
+    # Salto al final de la linea PROBADA: camina el testigo y redirige.  Lee
+    # igual que el de arriba, y su destino tambien se mueve — una linea mas
+    # corta certificada, un ply que faltaba — asi que tampoco lleva cache.
+    path('proven-line-end/<str:key>/', views.proven_line_end),
     path('method/', _method_cached),
+    # Que significa cada numero que se lee por ahi: filas, respaldo,
+    # repeticion, cola, API.  Estatica salvo dos constantes que la vista trae
+    # de donde se aplican, asi que entra en la misma cache de lectura que
+    # ``method`` y por las mismas razones.
+    path('docs/', _docs_cached, name='atomicdb-docs'),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
     # Avisos: la lista entera y el POST que los marca vistos, en la misma
@@ -95,6 +106,26 @@ urlpatterns = [
     path('user/<str:username>/', views.contributor,
          name='atomicdb-contributor'),
     path('me/', views.contributor_me, name='atomicdb-me'),
+    # La cola agrupada por CARRIL.  Publica y sin nada personal dentro: sus
+    # agregados ya viven en un snapshot compartido de un minuto (§ lanes),
+    # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
+    path('queue/', _queue_cached, name='atomicdb-queue'),
+    # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de
+    # una sola persona: sin cache, como la pagina desde la que se pulsa.
+    path('queue/bump/<int:task_id>/', views.api_queue_bump,
+         name='atomicdb-queue-bump'),
+    path('api/my-queue/', views.api_my_queue, name='atomicdb-my-queue'),
+    path('queue/lifo/', views.api_pref_lifo, name='atomicdb-pref-lifo'),
+    # Retirar una peticion propia de la cola, y devolverla (``undo=1``).  Las
+    # dos direcciones por la misma ruta porque son la misma fila y el mismo
+    # permiso; escriben, asi que tampoco llevan cache.
+    path('queue/cancel/<int:task_id>/', views.api_queue_cancel,
+         name='atomicdb-queue-cancel'),
+    # Vaciar la cola propia entera.  Sin ``<id>``: lo que identifica lo que
+    # toca es la sesion, y una ruta que aceptara un nombre seria una ruta para
+    # vaciarle la cola a otro.
+    path('queue/clear/', views.api_queue_clear,
+         name='atomicdb-queue-clear'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.
@@ -106,6 +137,12 @@ urlpatterns = [
     path('pv-verify/<str:key>/', views.api_pv_verify),
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),
+    # La API oficial de peticion, hermana de ``api/query``: la de lectura vive
+    # ahi arriba desde el principio y esta es la de escritura, con la misma
+    # forma de direccion (una FEN en el cuerpo, no una clave interna en la
+    # ruta).  Estado vivo y escribe: sin cache, como todo lo de esta lista.
+    path('api/request', views.api_public_request,
+         name='atomicdb-api-request'),
     path('api/frontier/<str:key>/', views.api_frontier),
     path('api/live-request/<str:key>/', views.api_live_request),
     path('api/map/v1', map_api),

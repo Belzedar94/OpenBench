@@ -12,6 +12,7 @@ import heapq
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -120,6 +121,65 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # tiempo online solo compra lo barato.
 ONLINE_MATE_PROOF_SECONDS = 5.0
 _priority_refresh_cache = {'at': 0.0}
+
+
+# Cuantos PASES se recuerdan por posicion (§ ``Position.analysis_passes``).
+# Seis cubre la escalera de peticiones entera — 128M, 512M, 2B, 10B — con dos
+# sitios de sobra para las sondas automaticas que caen entre medias, que es
+# donde esta la lectura que se pidio: como se movio la eval al profundizar.
+# Mas alla de eso lo que se recuerda ya no es una serie, es un archivo, y esto
+# vive en una columna de una tabla de millones de filas.
+PASS_HISTORY_MAX = 6
+# Los campos numericos de una linea ``info`` de UCI que merece la pena leer.
+# El worker guarda la linea CRUDA (``raw``) tal y como la escupio el motor, que
+# es exactamente lo que se pidio poder ver; esto es para quien quiere el numero
+# sin volver a parsear texto por su cuenta.
+_INFO_FIELDS = ('depth', 'seldepth', 'nodes', 'nps', 'time', 'hashfull')
+_INFO_RE = re.compile(r'\b(' + '|'.join(_INFO_FIELDS) + r') (\d+)\b')
+
+
+def info_fields(raw):
+    """Los enteros de una linea ``info`` de UCI: ``{'depth': 34, ...}``.
+
+    Vacio para lo que no traiga linea cruda — un worker antiguo no la manda —
+    y eso NO es un cero: no saber a que profundidad se busco algo y afirmar que
+    fue a profundidad cero son cosas distintas, y la segunda es mentira.
+
+    UN SOLO PARSEADOR para los dos consumidores (el resumen de pase que se
+    guarda y el bloque de analisis que devuelve la API), por lo mismo de
+    siempre: dos lecturas del mismo texto acaban discrepando.
+    """
+    if not isinstance(raw, str) or not raw:
+        return {}
+    return {name: int(value) for name, value in _INFO_RE.findall(raw)}
+
+
+def pass_summary(lines, nodes_budget, best_eval, best_move, restricted,
+                 showcase, now=None):
+    """Lo que se recuerda de UN pase: una linea, sin PVs dentro.
+
+    ``showcase`` dice si este pase se quedo con la foto vigente o si el
+    arbitraje lo dejo fuera por mas corto o mas estrecho (§ ``ingest_analysis``).
+    Es la mitad util del registro: sin ese campo, una serie de evals distintas
+    no distingue "el motor cambio de opinion al profundizar" de "este numero
+    salio de una sonda de 8M que no manda en este nodo".
+    """
+    top = next((ln for ln in lines if isinstance(ln, dict)), None) or {}
+    info = info_fields(top.get('raw'))
+    entry = {
+        'budget': int(nodes_budget or 0),
+        'lines': sum(1 for ln in lines if isinstance(ln, dict)),
+        'eval_cp': best_eval,
+        'move': best_move,
+        'mate': top.get('mate'),
+        'restricted': bool(restricted),
+        'showcase': bool(showcase),
+        'at': (now or timezone.now()).isoformat(),
+    }
+    for name in ('depth', 'seldepth', 'nodes'):
+        if name in info:
+            entry[name] = info[name]
+    return entry
 
 
 def capped_analysis(lines, max_plies=STORED_PV_MAX_PLIES):
@@ -596,6 +656,13 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         pos.visits += 1
         pos.nodes_invested += nodes_budget
+        # Los numeros PROPIOS de este pase, antes de que el arbitraje de abajo
+        # los toque: lo que sigue puede anular ``best_eval``/``best_move`` para
+        # que un pase corto o restringido no mande en la posicion, y eso es una
+        # decision sobre QUIEN DECIDE, no sobre lo que el motor dijo.  El
+        # registro de pases guarda lo segundo — es la pregunta entera de
+        # Wolfram: que evaluacion dio el motor a menos profundidad.
+        pass_eval, pass_move = best_eval, best_move
         # El ESCAPARATE de lineas no se pisa NI hacia abajo NI hacia atras.
         #
         # ANCHURA.  Un visitante pide MultiPV 5 y ve sus cinco lineas; si
@@ -633,8 +700,20 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         stored_budget = (current[0].get('_budget', 0)
                          if current and isinstance(current[0], dict) else 0)
         shallower = bool(current) and nodes_budget < stored_budget
-        if not shallower and (not current or nodes_budget > stored_budget
-                              or len(snapshot) >= len(current)):
+        took_showcase = not shallower and (
+            not current or nodes_budget > stored_budget
+            or len(snapshot) >= len(current))
+        # LA SERIE DE PASES, y se anota SIEMPRE, gane o pierda el arbitraje: el
+        # pase que pierde es exactamente el que responde "que evaluacion dio el
+        # motor a menos profundidad" (Wolfram).  Lo mas nuevo primero, y el
+        # recorte por el otro extremo.
+        pos.analysis_passes = ([pass_summary(lines, nodes_budget, pass_eval,
+                                             pass_move, restricted,
+                                             took_showcase)]
+                               + [entry for entry in (pos.analysis_passes or [])
+                                  if isinstance(entry, dict)]
+                               )[:PASS_HISTORY_MAX]
+        if took_showcase:
             # Un pase mas ANCHO que el nuevo no se tira: sus lineas 3..N
             # llevan informacion que el pase profundo de 2 lineas no repite
             # (peticion de Wolfram).  Se conservan marcadas como pase
@@ -665,7 +744,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # bucle pudo recalcular status/closure/priority de esta misma fila, y
         # un save() completo los pisaria con el snapshot que cargamos antes.
         pos.save(update_fields=['visits', 'nodes_invested', 'last_analysis',
-                                'best_move', 'eval_cp', 'updated'])
+                                'analysis_passes', 'best_move', 'eval_cp',
+                                'updated'])
 
     changed = backup_cascade([pos.key])
     # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
@@ -1104,7 +1184,7 @@ _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
-    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine')
+    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles')
 
     def __init__(self, move, value, quality, plies, key=None, spine=None):
         self.move, self.value = move, value
@@ -1114,6 +1194,11 @@ class _ChildValue:
         # rellena cuando el valor es PRESTADO: un status probado o una eval
         # propia no vienen de ninguna espina y no pueden ciclar.
         self.key, self.spine = key, spine
+        # Lo pone el paseo (§ _draw_cycling_children) y lo VALORA el negamax
+        # (§ _backed_for): el hecho del grafo — esta arista vuelve al padre —
+        # se separa de lo que ese hecho vale, porque cuanto vale depende de
+        # quien mueve y el paseo no tiene perspectiva.
+        self.cycles = False
 
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
@@ -1178,6 +1263,50 @@ def _better_for_mover(value, reference, stm_white):
 # sin ninguna el nodo vale tablas — que es exactamente lo que vale poder
 # repetir.
 #
+# EL CERO ES UNA AFIRMACION, Y HAY QUE TRATARLO COMO TAL (Wolfram, 12-ago).  El
+# primer parche lo escribio como valor libre: el hijo pasaba a valer 0 y se
+# quedaba con el PESO DE BUSQUEDA del numero que acababa de tirar, asi que un
+# paseo de punteros heredaba la autoridad de 128M de nodos de motor.  El
+# residuo que reporto la comunidad son tres cosas en una frase — "eval already
+# updated to 0 sometimes but I think it's buggy ... 0 was propagated from
+# repetition somehow but was not displayed at child node and it was not 0
+# anyway" — y cada una tiene su nombre:
+#
+#   (a) el 0 llegaba al padre, si;
+#   (b) NINGUNA fila lo enseñaba: la tabla pinta el mejor conocimiento del hijo
+#       — el numero circular, +903 — mientras la cabecera publicaba el 0 que el
+#       padre habia usado por esa misma arista.  Dos numeros para una arista es
+#       la definicion de "de donde sale esto";
+#   (c) y no era 0: el que mueve tenia alternativas que nadie habia mirado
+#       ("there were gray moves other than repetition and it was ignored",
+#       11-ago).
+#
+# Lo que vale la LINEA sigue siendo tablas — eso no se toca, es (a) y es la
+# regla del 3-ago.  Lo que cambia es de que esta hecho ese cero: es un hecho
+# sobre un PASEO, no una medida.  Nadie ha buscado nunca si esa repeticion es
+# forzada.  Asi que entra como entra en esta casa todo lo que no tiene motor
+# detras:
+#
+#   * SIN PESO.  Calidad 0, por debajo de cualquier medida de verdad y bajo el
+#     veto de calidad que ya existe.  Unas tablas PROBADAS le ganan el empate a
+#     unas tablas caminadas, que es el orden correcto;
+#   * SIN DECIDIR UN NODO CON COBERTURA PARCIAL.  Un nodo con jugadas que nadie
+#     ha abierto no sabe que lo suyo sean tablas, ni por arriba ni por abajo:
+#     publicar el cero ahi es el sintoma (c) literal.  Con cobertura COMPLETA
+#     el max/min es el minimax de verdad y el cero manda: el que mueve no
+#     tiene nada mejor que repetir y eso es un veredicto.  Sin ella se queda
+#     con su ancla, y sin ancla no publica nada: es la misma aritmetica del
+#     corte del 14-ago ("sin ancla, la derrota no se respalda") aplicada a la
+#     otra mitad del tablero de valores.  Y en los dos casos compra la
+#     desambiguacion (§ _queue_cycle_disambiguation), que es lo que impide que
+#     "no publico nada" se convierta en un silencio permanente.
+#
+# El sintoma (b) se cierra en la vista con la misma regla leida al reves: un
+# nodo que publica tablas por repeticion tiene que enseñar ESAS tablas en la
+# fila de la que salen (§ views._child_moves, ``repetition_moves``).  La
+# cabecera y la tabla dicen el mismo numero o el sitio esta mintiendo en una de
+# las dos.
+#
 # COSTE.  Solo se camina lo que ya esta RESPALDADO (un status probado o una
 # eval propia no vienen de ninguna espina) y el paseo se corta en el primer
 # nodo sin ``backed_move``, que en un arbol normal es el primer paso.  Un ply
@@ -1215,11 +1344,17 @@ class _SpineCache:
 
 
 def _draw_cycling_children(by_parent, cache):
-    """Pone a TABLAS todo hijo cuyo valor vuelve a su propio padre.
+    """MARCA todo hijo cuyo valor vuelve a su propio padre.
 
     Camina la espina del HIJO (``backed_move`` a ``backed_move``) buscando al
     padre que lo esta evaluando.  Si aparece, el valor del hijo esta pasando
-    por X para justificarse en X: es una repeticion y aporta 0.
+    por X para justificarse en X: es una repeticion.
+
+    Marca, no valora.  Un paseo por punteros ``backed_move`` establece un
+    HECHO del grafo — esta arista vuelve aqui — y eso es todo lo que un paseo
+    puede establecer.  Cuanto vale ese hecho, y sobre todo cuanto PESA, lo
+    decide el negamax (§ _backed_for), que es donde vive el resto de la
+    aritmetica.
 
     Paradas, todas ellas "no hay ciclo": la espina se acaba (nodo sin respaldo
     que prestar), la arista del respaldo ya no existe (respaldo mas viejo que
@@ -1253,13 +1388,12 @@ def _draw_cycling_children(by_parent, cache):
                 continue                    # arista perdida: no hay ciclo
             below, status = step
             if below == parent_key:
-                # Repeticion: vale tablas, y la distancia es CERO porque esas
-                # tablas nacen en esta misma arista — no las presta nadie de
-                # mas abajo.  Ademas es lo que hace converger a ``recascade_-
-                # backed``: con la distancia del ciclo, cada pasada le sumaba
-                # un ply a la anterior y la barrida no llegaba nunca a punto
-                # fijo.
-                child.value, child.plies = 0, 0
+                # Repeticion.  La distancia es CERO porque lo que esta arista
+                # aporta nace AQUI — no lo presta nadie de mas abajo — y ademas
+                # es lo que hace converger a ``recascade_backed``: con la
+                # distancia del ciclo, cada pasada le sumaba un ply a la
+                # anterior y la barrida no llegaba nunca a punto fijo.
+                child.cycles, child.plies = True, 0
                 cycled.add((parent_key, child.move))
                 continue
             spine = cache.spines.get(below)
@@ -1290,6 +1424,25 @@ def _resolve_spine_steps(cache, walks):
                          'child__status', 'child__backed_move')):
         cache.steps[(parent_id, move_uci)] = (child_id, status)
         cache.spines[child_id] = spine
+
+
+def repetition_moves(row):
+    """Las jugadas de ``row`` que solo valen TABLAS: su valor vuelve aqui.
+
+    El explorador la llama para poder ENSEÑAR la repeticion en la fila de la
+    que sale (§ views._child_moves): un nodo que publica tablas por repeticion
+    y una tabla en la que ninguna fila dice 0 es el sintoma (b) del reporte del
+    12-ago, y son dos numeros para una misma arista.
+
+    Es el MISMO paseo que usa el respaldo, no una segunda copia del predicado:
+    dos definiciones de "esto cicla" son dos definiciones que se separan, y la
+    que se separa siempre es la de la vista.  Cuesta la consulta de las aristas
+    mas un puñado del paseo, asi que el llamante la pide solo cuando tiene un
+    numero que explicar.
+    """
+    children = _backed_children_by_parent([row.key]).get(row.key, ())
+    cycled = _draw_cycling_children({row.key: children}, _SpineCache())
+    return {move for _key, move in cycled}
 
 
 def coverage_is_partial(row, children):
@@ -1337,7 +1490,8 @@ def _showcase_bound(last_analysis):
     return worst if isinstance(worst, int) else None
 
 
-def _backed_for(row, children, discrepancies=None, bound=None):
+def _backed_for(row, children, discrepancies=None, bound=None,
+                cycle_picks=None):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
@@ -1348,6 +1502,12 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     tolerancia.  Ya no se bloquean (§ abajo), pero siguen siendo preguntas
     abiertas y el llamante las convierte en trabajo: ver
     ``_queue_quality_convergence``.
+
+    ``cycle_picks`` recoge lo mismo para la otra pregunta abierta: el mejor
+    conocimiento del nodo es una REPETICION.  Se apunta la eligiera o no —
+    con cobertura completa manda y con cobertura parcial no decide nada —
+    porque la pregunta ("¿de verdad no hay nada mejor que repetir?") es la
+    misma en los dos casos y se compra igual (§ _queue_cycle_disambiguation).
 
     ``bound`` es la cota del escaparate multipv del PROPIO nodo
     (§ ``_showcase_bound``); el llamante la trae porque esta funcion no
@@ -1360,22 +1520,41 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     informed = [c for c in children if c.value is not None]
     if not informed:
         return None, None, 0, 0
-    # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago).  Los hijos sin
-    # informacion entran al negamax como UN pseudo-hijo con el valor de la
-    # cota del escaparate: es el mejor caso posible de lo desconocido segun
-    # el propio motor, asi que el max/min sobre ``informed`` vuelve a ser el
-    # minimax de verdad sobre la informacion disponible y las guardas de
-    # cobertura parcial dejan de aplicar.  Es lo que baja el +1051 de la
-    # cabecera al +589 del unico hijo mirado (caso Eclipsia, 8-ago) en
-    # cuanto el escaparate afirma que el resto no compite.  Solo entra con
-    # al menos un hijo REAL informado: una cota sin testigo no respalda nada.
-    bounded = False
-    if bound is not None and (len(informed) < len(children)
-                              or coverage_is_partial(row, children)):
-        informed.append(_ChildValue(None, bound,
-                                    row.nodes_invested or 0, 0))
-        bounded = True
     stm_white = row.fen.split()[1] == 'w'
+    for child in informed:
+        if child.cycles:
+            # LO QUE VALE UNA REPETICION (§ el bloque de arriba): tablas, que
+            # es lo que vale la LINEA, y no el numero que el ciclo circula.  Y
+            # sin un gramo de peso: nadie ha buscado jamas si esa repeticion es
+            # forzada — es un hecho sobre un paseo por punteros ``backed_move``
+            # — asi que compite con lo que compite un valor sin motor detras.
+            # Un empate a tablas contra unas tablas PROBADAS lo gana la prueba,
+            # que es exactamente el orden correcto.
+            child.value, child.quality = 0, 0
+    # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago; recortada 15-ago).
+    # La cota del escaparate certifica que NINGUN hijo sin mirar es mejor
+    # para el que mueve que la ultima linea del multipv, asi que con cota
+    # las guardas de cobertura parcial dejan de aplicar y el negamax corre
+    # sobre los hijos informados como si la mesa estuviera completa.  Es lo
+    # que baja el +1051 de la cabecera al +589 del unico hijo mirado (caso
+    # Eclipsia, 8-ago).
+    #
+    # Lo que la cota YA NO HACE (propietario, 15-ago): competir.  Entraba
+    # al negamax como pseudo-hijo y en cuanto su numero era mejor para el
+    # que mueve que TODOS los hijos medidos, ganaba ella — la cabecera
+    # publicaba un valor sin arista (1326/1 con backed_move vacio, caso
+    # 6c0c9151) y el hijo real a 1341 no subia nunca: el gate de
+    # profundidad que se retiro el 8-ago, reintroducido por la puerta de
+    # atras (el pase gordo del padre frenando al hijo de 128M).  La orden
+    # es literal: "me da igual que el padre haya sido analizado por 10B
+    # nodos y el hijo solo 128M, quiero que SIEMPRE se haga backprop".
+    # La cota da PERMISO; el valor lo pone siempre un hijo de verdad, y
+    # la discrepancia pase-del-padre contra hijo-somero ya tiene su canal
+    # (§ _queue_quality_convergence).  Sigue exigiendo un hijo REAL
+    # informado: una cota sin testigo no respalda nada.
+    bounded = (bound is not None
+               and (len(informed) < len(children)
+                    or coverage_is_partial(row, children)))
     # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
     # (menos plies), luego el orden de movegen, para que el resultado sea
     # determinista bajo replay.
@@ -1386,6 +1565,24 @@ def _backed_for(row, children, discrepancies=None, bound=None):
     complete = bounded or not coverage_is_partial(row, children)
     own = row.eval_cp
     own_quality = row.nodes_invested or 0
+    if best.cycles:
+        # El mejor conocimiento de este nodo es repetir.  Es una pregunta
+        # abierta ANTES de mirar si decide algo, y por eso se apunta aqui.
+        if cycle_picks is not None:
+            cycle_picks.append((best.move, row.key, own_quality))
+        if not complete:
+            # UNA REPETICION NO DECIDE UN NODO CON JUGADAS SIN MIRAR (Wolfram,
+            # 11 y 12-ago).  Que la mejor respuesta CONOCIDA sea volver aqui no
+            # dice nada de las que nadie ha abierto — "there were gray moves
+            # other than repetition and it was ignored" — y publicar las tablas
+            # es cerrar por arriba al que mueve con informacion parcial, justo
+            # la direccion que esta casa tiene prohibida.  Se queda con su
+            # ancla; sin ancla no sabe nada de si mismo y no respalda (mismo
+            # corte que el del 14-ago para la derrota sin ancla).  La compra de
+            # arriba es lo que hace que esto no sea un silencio permanente.
+            if own is not None:
+                return own, None, 0, own_quality
+            return None, None, 0, 0
     if (own is not None and best.quality <= 0
             and (bounded or not complete)
             and _better_for_mover(best.value, own, stm_white)):
@@ -1419,6 +1616,25 @@ def _backed_for(row, children, discrepancies=None, bound=None):
             if (best.quality < own_quality * BACKED_QUALITY_TOLERANCE
                     and discrepancies is not None):
                 discrepancies.append((best.move, row.key, own_quality))
+        elif (best.value <= -MATE_BAND if stm_white
+              else best.value >= MATE_BAND):
+            # SIN ANCLA, LA DERROTA NO SE RESPALDA (propietario, 14-ago).
+            # Un nodo sin eval propia ni escaparate cuyo unico conocimiento
+            # es una respuesta que PIERDE no sabe nada de si mismo: el que
+            # mueve tiene el resto de la legalidad por abrir y no va a
+            # elegir su derrota.  Es la misma aritmetica que ya rige los
+            # cierres de status — una hija ganadora basta, la perdida exige
+            # cobertura completa — aplicada al respaldo heuristico.  El
+            # caso real: un mate MINIMAX llego por transposicion a la unica
+            # hija materializada de dos nodos jamas analizados, el min
+            # sobre ese subset de uno les sello backed 10000, y las dos
+            # filas fantasma encabezaron la tabla por encima de la unica
+            # jugada con 2B de motor detras (Nf3 d6, cadena de +1268
+            # congelada).  El corte del 28-jul ya degradaba la CALIDAD de
+            # estas pruebas parciales; el VALOR en banda de mate contra el
+            # que mueve tampoco puede subir.  La ganancia del que mueve
+            # sigue pasando con una sola hija, como siempre.
+            return None, None, 0, 0
     quality = best.quality
     if (not complete or bounded) and quality >= PROVEN_QUALITY:
         # La autoridad de una PRUEBA termina en el primer nodo cuyas
@@ -1465,12 +1681,22 @@ def _queue_cycle_disambiguation(picks):
     el ingest de ese pase siembra a los padres, que es el despertador que a
     este caso le faltaba.  Mismo brazo y mismo cupo que la convergencia de
     calidad: son la misma clase de pregunta abierta.
+
+    DESDE EL 12-AGO SE COMPRA TAMBIEN LO QUE NO DECIDE.  Con cobertura parcial
+    la repeticion ya no publica su cero (§ _backed_for), pero el nodo se queda
+    igual de a oscuras: su mejor respuesta conocida sigue siendo volver por
+    donde vino.  Callar ahi seria cambiar un numero malo por un silencio, que
+    es el mismo clavado con mejor pinta.  La compra es lo que convierte la
+    duda en trabajo, decida o no decida.
     """
     if not picks:
         return 0
+    hourly = _arm_budget_room(QUALITY_ARM)
+    if hourly <= 0:
+        return 0
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=QUALITY_ARM).count()
-    room = max(0, QUALITY_QUEUE_CAP - pending)
+    room = min(hourly, max(0, QUALITY_QUEUE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -1522,11 +1748,18 @@ def _queue_quality_convergence(discrepancies):
     """
     if not discrepancies:
         return 0
+    # El techo de gasto va DELANTE del cupo, y es el mismo para los dos
+    # compradores de este brazo: la desambiguacion de ciclos y la convergencia
+    # corren en la misma pasada de respaldo y gastan de la misma bolsa
+    # (§ presupuesto HORARIO de los brazos).
+    hourly = _arm_budget_room(QUALITY_ARM)
+    if hourly <= 0:
+        return 0
     # Cupo PROPIO: lo que hayan encolado cobertura o la reparacion de dn no es
     # cola de este brazo y no se le cobra (§ cupos por brazo).
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=QUALITY_ARM).count()
-    room = max(0, QUALITY_QUEUE_CAP - pending)
+    room = min(hourly, max(0, QUALITY_QUEUE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -1683,9 +1916,10 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         if not rows:
             break
         children = _backed_children_by_parent([row.key for row in rows])
-        # Antes de que nadie compare: el hijo que se justifica pasando por su
-        # propio padre entra al negamax como TABLAS, no con el numero del ciclo.
-        cycled = _draw_cycling_children(children, spines)
+        # Antes de que nadie compare: queda MARCADO el hijo que se justifica
+        # pasando por su propio padre.  Lo que esa marca vale lo dice el
+        # negamax, que es quien sabe de quien es el turno (§ _backed_for).
+        _draw_cycling_children(children, spines)
         # Los escaparates multipv, UNA consulta por nivel y solo para las
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
@@ -1702,17 +1936,15 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
+            # Las dos preguntas abiertas del respaldo salen por parametro y el
+            # final del nivel las compra.  La del ciclo se apunta aunque la
+            # repeticion no acabe decidiendo nada, y a proposito ANTES del
+            # corte de "sin cambios": un clavado viejo re-intenta la compra en
+            # cada pasada y el dedup de tareas absorbe la repeticion.
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
-                bound=_showcase_bound(showcases.get(row.key)))
-            if move and (row.key, move) in cycled:
-                # El respaldo acaba de decidirse por un hijo que el paseo
-                # anulo: esa decision viaja con su correccion comprada
-                # (§ _queue_cycle_disambiguation).  ANTES del corte de "sin
-                # cambios" a proposito: un clavado viejo re-intenta la
-                # compra en cada pasada y el dedup de tareas absorbe la
-                # repeticion.
-                cycle_picks.append((move, row.key, row.nodes_invested or 0))
+                bound=_showcase_bound(showcases.get(row.key)),
+                cycle_picks=cycle_picks)
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -1795,6 +2027,21 @@ def best_known_eval(pos):
 WON_LINE_MAX_PLIES = 64
 
 
+def won_line_materialisable(pos):
+    """Puede este nodo convertir su linea guardada en arbol?
+
+    La condicion de ``materialise_won_line``, escrita UNA vez porque hay quien
+    necesita saberla sin pagarla: el explorador ofrece el salto al final de la
+    linea sabiendo que el click va a poder construir lo que le falte
+    (§ ``views.explore``), y preguntarselo con una copia de esta regla es como
+    un control acaba prometiendo un viaje que no existe.
+    """
+    return bool(pos.closure == 'MATE_PV'
+                and pos.status in ('WHITE_WIN', 'BLACK_WIN')
+                and pos.proof != 'DISPUTED'
+                and (pos.won_line or '').split())
+
+
 def materialise_won_line(pos, verify=False):
     """Crea la cadena de la ``won_line`` como arbol de verdad.
 
@@ -1809,8 +2056,7 @@ def materialise_won_line(pos, verify=False):
     menos este.  Prefiero subestimar el margen a inventarlo.
     """
     line = (pos.won_line or '').split()
-    if (pos.closure != 'MATE_PV' or pos.status not in ('WHITE_WIN', 'BLACK_WIN')
-            or pos.proof == 'DISPUTED' or not line):
+    if not won_line_materialisable(pos):
         return {'created_edges': 0, 'closed': 0, 'plies': 0}
     if verify and not logic.verify_mate_pv(
             pos.fen, line, pos.status == 'WHITE_WIN'):
@@ -3213,7 +3459,11 @@ def next_tasks(n):
 # el minteo inline y dos leases concurrentes mintean los MISMOS top-4 (el
 # dedup de get_or_create hace que la oferta no escale con los que piden).
 # Valles de utilizacion medidos por la flota de Lesha (28-jul).
-ANALYSIS_POOL_TARGET = 64
+# P6 (comunidad, 3-0, 28-ago-2026): 64 se quedaba seco entre pasadas del
+# selector con una flota grande — lesha con 72 workers vio "no tasks
+# available" en bucle (27-ago).  El colchon son filas, no computo: mintearlo
+# hondo cuesta un bulk_create y ahorra los valles.
+ANALYSIS_POOL_TARGET = 512
 
 
 def top_up_analysis_pool(target=None):
@@ -3240,6 +3490,16 @@ def top_up_analysis_pool(target=None):
 # porcentaje.  Los brazos con cupo cuentan cada uno el SUYO, asi que un valor
 # nuevo aqui no le toca el presupuesto a ninguno.
 CAMPAIGN_ARM = 'campaign'
+# Marca del descenso que ELIGIO el walker de la espina, y la unica de las dos
+# que paga presupuesto horario (§ presupuesto HORARIO de los brazos).  Un
+# descenso que arranca en una campana conserva su marca: la comunidad voto esa
+# linea y su fraccion ya esta acotada aguas arriba al 35% de los descensos
+# (§ ``proof.CAMPAIGN_DESCENT_SHARE``), asi que con campanas saturadas el
+# techo real del walker es ~1/0,65 del presupuesto y sigue siendo del mismo
+# orden.  Cobrarle a ``campaign`` seria peor de lo que arregla: en cuanto el
+# presupuesto se agota el descenso vuelve a df-pn y esas compras siguen
+# marcandose ``campaign``, o sea el brazo se quedaria apagado para siempre.
+VALUE_DESCEND_ARM = 'descend'
 
 # ---------------- presupuestos del descenso por VALOR ----------------
 #
@@ -3267,10 +3527,17 @@ VALUE_EXPLORE_NODES = BUDGET_LADDER[0]         # 8M: la primera mirada
 # La CASCADA del cuello de botella.  Tras analizar un nodo de la espina, sus
 # respuestas sin juzgar se miran baratas: es lo que descubre por donde sigue
 # el cuello, y el propietario lo pidio con esas palabras ("como mucho una
-# cascada rapida a 8M para encontrar el siguiente cuello").  Con CUPO PROPIO,
-# como los demas brazos: un cuarto del colchon, para que la cascada no pueda
-# convertir el reparto en un mar de sondas de 8M — que es exactamente el
-# sintoma del que venimos.
+# cascada rapida a 8M para encontrar el siguiente cuello").
+#
+# DOS TOPES QUE MIDEN COSAS DISTINTAS.  El cupo de abajo es el FRENO DE
+# RAFAGA: un cuarto del colchon de PENDIENTES, para que la cascada no pueda
+# convertir el reparto en un mar de sondas de 8M.  Acota el STOCK, y por eso
+# no acotaba nada el 15-ago: con la flota sirviendo al instante la cola vuelve
+# a cero entre resultado y resultado, el cupo no llega a tocar nunca y cada
+# analisis que aterriza compra el siguiente.  El TECHO DE GASTO por hora
+# (§ presupuesto HORARIO de los brazos) acota el CAUDAL, que es lo que ese dia
+# se fue a 4.551 compras en una hora.  Se quedan los dos: son baratos y
+# ninguno cubre el agujero del otro.
 VALUE_CASCADE_NODES = BUDGET_LADDER[0]
 VALUE_CASCADE_CAP = 16
 VALUE_CASCADE_ARM = 'cascade'
@@ -3313,15 +3580,20 @@ def _queue_value_cascade(pos, cap=VALUE_CASCADE_CAP):
 
     Entra por banda AUTO — trabajo del sistema, no adelanta a nadie — y con
     cupo propio, contando SOLO su propia cola: lo que hayan encolado cobertura
-    o calidad no es suyo y no se le cobra.
+    o calidad no es suyo y no se le cobra.  Encima del cupo va el techo de
+    gasto por hora, que es el que aguanta con la flota rapida
+    (§ presupuesto HORARIO de los brazos).
     """
     if proof.descent_mode() != proof.DESCENT_VALUE:
         return 0
     if pos.status != 'UNKNOWN':
         return 0
+    hourly = _arm_budget_room(VALUE_CASCADE_ARM)
+    if hourly <= 0:
+        return 0
     pending = AnalysisTask.objects.filter(
         state='PENDING', arm=VALUE_CASCADE_ARM).count()
-    room = min(cap, max(0, VALUE_CASCADE_CAP - pending))
+    room = min(cap, hourly, max(0, VALUE_CASCADE_CAP - pending))
     if room <= 0:
         return 0
     made = 0
@@ -3387,7 +3659,15 @@ def _next_tasks_by_proof(n):
     campaigns = proof.active_campaigns()
     if not campaigns:
         return []
-    by_value = proof.descent_mode() == proof.DESCENT_VALUE
+    # EL TECHO DE GASTO SE MIRA UNA VEZ POR LOTE — aqui es puerta y no clip,
+    # porque el lote ya viene acotado por quien pide (el relleno del arriendo
+    # o el hueco del colchon) — y agotarlo NO deja la cola vacia: devuelve el
+    # descenso a df-pn, que es el de siempre y no compra nada por su cuenta.
+    # Asi el goteo del colchon y el arriendo siguen recibiendo tareas — el
+    # presupuesto acota DONDE elige gastar el walker, no si la flota come
+    # (§ presupuesto HORARIO de los brazos).
+    by_value = (proof.descent_mode() == proof.DESCENT_VALUE
+                and _arm_budget_room(VALUE_DESCEND_ARM) > 0)
     roots = proof.campaign_roots()
     base = _task_counter()
     tasks, seen, attempts = [], set(), 0
@@ -3437,7 +3717,8 @@ def _next_tasks_by_proof(n):
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
-                      'arm': CAMPAIGN_ARM if start is not None else '',
+                      'arm': (CAMPAIGN_ARM if start is not None
+                              else VALUE_DESCEND_ARM if by_value else ''),
                       'multipv': multipv_for(pos.visits, budget,
                                              clamp=clamp)})
         if task.state == 'PENDING':
@@ -3499,6 +3780,278 @@ def _completed_max_budget(pos):
         .first())
 
 
+def front_of_own_queue(task):
+    """Sitio de cola que deja a ``task`` la PRIMERA de su propio peticionario.
+
+    Devuelve el valor que hay que escribir en ``queue_seq``, o ``None`` si ya
+    va delante y no hay nada que mover.
+
+    EL SUELO ES LA PRIMERA PENDIENTE DE ESA CUENTA, y ni un sitio mas arriba.
+    Esa es la propiedad entera: la adelantada hereda un sitio que su cuenta YA
+    tenia, asi que el numero de peticiones de esa cuenta por delante de
+    cualquier fila ajena no cambia — mueve LAS SUYAS, no las de los demas.
+
+    Lo ARRENDADO de la misma cuenta no entra en la cuenta del suelo y no hace
+    falta que entre: la ventana del reparto ordena lo que corre por delante de
+    lo que espera (§ ``live_request.fair_share``), asi que ningun valor escrito
+    aqui puede saltarse la deuda de nodos que esa cuenta ya tiene en un motor.
+    Es ahi y no aqui porque ahi es donde se suma.
+
+    Solo mira la banda USER de la misma cuenta: es la particion en la que
+    reparte ``fair_share``, y es la unica dentro de la cual reordenar no le
+    quita el turno a nadie.
+    """
+    # LA PARTICION ES LA DEL REPARTO, NO LA DEL AUTOR.  ``fair_share``
+    # agrupa por ``_effective_account()`` — el carril prestado si lo hay, el
+    # autor si no (§ ``live_request``) — asi que buscar el suelo por
+    # ``requested_by`` a secas leia una cola que el orden de servicio no usa.
+    # En cuanto una fila viaja con carril ajeno (§ ``lanes.effective_account``,
+    # que es lo que compra sumarse a una peticion), el numero calculado aqui
+    # es el frente de OTRA particion y adelantar aterriza donde no hay frente
+    # ninguno.  Hoy no hay ni una fila con carril puesto, asi que esto no
+    # mueve ningun numero: es la misma regla escrita donde ya no puede
+    # discrepar.
+    account = task.lane_account or task.requested_by
+    if not account:
+        return None
+    mine = (AnalysisTask.objects
+            .filter(source=AnalysisTask.Source.USER,
+                    state=AnalysisTask.TState.PENDING)
+            .filter(Q(lane_account=account)
+                    | Q(lane_account='', requested_by=account))
+            .exclude(pk=task.pk))
+    front = mine.order_by('queue_seq', 'id').values_list(
+        'queue_seq', 'id').first()
+    if front is None:
+        return None
+    front_seq, front_id = front
+    if (task.queue_seq, task.pk) < (front_seq, front_id):
+        return None
+    return front_seq - 1
+
+
+def _record_requester(task, username):
+    """Anota que ``username`` TAMBIEN pidio esta tarea. Escribe si hace falta.
+
+    Devuelve True cuando la tarea gana un peticionario NUEVO, que es lo unico
+    que merece adelantarla.
+
+    Reporte de comunidad (Eclipsia): "multiple people asking to analyse the
+    same position should give it more precedence".  El segundo que pide algo
+    ya encolado no recibe tarea propia — seria trabajo duplicado, y hasta hoy
+    era ademas una fila muerta que la absorcion tenia que barrer despues — asi
+    que lo que recibe es sitio en la que ya existe: su nombre en la fila (y
+    con el, el aviso cuando aterrice) y un escalon de precedencia por cada
+    persona que espera (§ ``live_request.SERVICE_KEYS``).
+
+    SIN NOMBRE NO HAY VOTO.  Un click sin sesion no se distingue del anterior
+    — es la misma decision que ya toma el reparto justo con la marea anonima,
+    y por el mismo motivo: lo que no se puede distinguir no se puede contar.
+    Lo que si hace un nombre nuevo sobre una peticion anonima es ADOPTARLA:
+    pasa a ser suya, con su afinidad y su aviso, porque hasta ahora no era de
+    nadie.
+    """
+    if not username or task.state not in (AnalysisTask.TState.PENDING,
+                                          AnalysisTask.TState.LEASED):
+        return False
+    if not task.requested_by:
+        task.requested_by = username
+        task.save(update_fields=['requested_by'])
+        return False
+    if username == task.requested_by or username in (task.also_requested_by
+                                                     or []):
+        return False
+    task.also_requested_by = list(task.also_requested_by or []) + [username]
+    task.backers = len(task.also_requested_by)
+    task.save(update_fields=['also_requested_by', 'backers'])
+    return True
+
+
+def add_requester(task, username):
+    """Suma un peticionario Y le compra el frente de la cola de su autor.
+
+    Las dos mitades del mismo trato, en una sola puerta: quien llama solo
+    tiene que saber que alguien mas pidio esto.  Adelantar es lo que pone la
+    peticion donde el recuento de personas decide de verdad — el escalon de
+    ``backers`` desempata entre las que cobran a la vez, y las que cobran a la
+    vez son las primeras de cada cuenta.
+
+    No es un privilegio nuevo: adelantar una peticion propia ya lo puede hacer
+    su autor con un click (§ ``views.api_queue_bump``), asi que sumarse a una
+    ajena no compra nada que su autor no tuviera.
+
+    Y ADEMAS LE PRESTA SU CARRIL, si el suyo esta mas despejado.  Adelantar
+    dentro de la cola del autor no sirve de nada cuando esa cola entera esta
+    detras de todo el mundo: era el aviso de Eclipsia del 15-ago sobre una
+    peticion de soothdest, con el autor a unas 2.690 filas de profundidad.  El
+    carril se resuelve AQUI y no en el orden de servicio porque los candidatos
+    viven en una lista JSON y sus cargas son agregados sobre la misma tabla que
+    la ventana esta recorriendo: ninguna de las dos cosas cabe en la unica
+    sentencia que el arriendo puede permitirse.  Aqui cuesta un agregado
+    pequeno sobre un click que ya escribe (§ ``lanes.effective_account``).
+    """
+    if not _record_requester(task, username):
+        return False
+    _resolve_lane_account(task)
+    if task.state != AnalysisTask.TState.PENDING:
+        # Ya esta en un motor: el orden de la cola no le dice nada, y lo unico
+        # que faltaba — el aviso cuando aterrice — ya esta anotado.
+        return True
+    seq = front_of_own_queue(task)
+    if seq is not None:
+        task.queue_seq = seq
+        task.save(update_fields=['queue_seq'])
+    return True
+
+
+def withdraw_requester(task, now=None):
+    """Saca a su AUTOR de una peticion pendiente. Devuelve que le paso a la fila.
+
+    Peticion de comunidad (asfault): "is there a way to cancel requests before
+    they have started - for when you accidentally request analysis for some
+    already deeply analysed line".
+
+    DOS FINALES, Y LOS DECIDE QUIEN MAS ESPERA:
+
+    * ``'handed-over'`` — la peticion tenia MAS PETICIONARIOS
+      (§ ``also_requested_by``, desplegado ayer).  Cancelar retira TU parte, no
+      la de los demas: el primero de los que se sumaron pasa a ser el autor y
+      la fila sigue en la cola con su presupuesto y su generacion intactos.
+      Cerrarla seria darle a una persona el poder de tirar la peticion de
+      otras, que es exactamente lo contrario de lo que compro el recuento de
+      personas.
+    * ``'cancelled'`` — no la esperaba nadie mas, asi que la fila sale de la
+      cola con ``CANCELLED`` (§ ``AnalysisTask.TState``, por que ese estado y
+      no la absorcion).
+
+    ``queue_seq`` VUELVE A CERO al cambiar de dueno, y no es un detalle: ese
+    numero es un sitio DENTRO de la cola de un peticionario concreto
+    (§ ``front_of_own_queue``), y heredado tal cual pondria la fila en un lugar
+    de la cola nueva que su dueno nuevo no eligio.  Cero es "nunca se toco",
+    que es literalmente cierto de esta fila en la cola a la que llega.
+
+    Quien llama es el dueno de la transaccion y ya comprobo lo suyo: que la
+    fila es de quien la retira y que sigue PENDING.  LEASED no llega hasta
+    aqui nunca — eso ya esta en un motor y cierra solo, con sus nodos y su
+    maquina.
+    """
+    backers = list(task.also_requested_by or [])
+    if backers:
+        task.requested_by = backers[0]
+        task.also_requested_by = backers[1:]
+        task.backers = len(backers) - 1
+        task.queue_seq = 0
+        task.save(update_fields=['requested_by', 'also_requested_by',
+                                 'backers', 'queue_seq'])
+        # EL CARRIL SE VUELVE A RESOLVER, por lo mismo que ``queue_seq`` vuelve
+        # a cero: la fila cambio de dueno, asi que el prestamo de carril que
+        # tenia hablaba de un reparto de peticionarios que ya no existe.  El
+        # que se marcha puede ser justo el que prestaba el suyo, y el que entra
+        # puede ser el que ya lo prestaba — y entonces el prestamo sobra,
+        # porque prestarse el carril a uno mismo es lo que ya significa el
+        # vacio (§ ``lanes.effective_account``).
+        _resolve_lane_account(task)
+        return 'handed-over'
+    AnalysisTask.objects.filter(pk=task.pk).update(
+        state=AnalysisTask.TState.CANCELLED, completed=now or timezone.now())
+    return 'cancelled'
+
+
+def clear_own_queue(username, now=None):
+    """Retira a ``username`` de TODO lo que tiene esperando.
+
+    Peticion de comunidad (Eclipsia, dos veces): una racha de peticiones que ya
+    no se quieren se deshacia de una en una, y quien encola mil quinientas en
+    una hora no vuelve a pulsar mil quinientas veces.
+
+    Devuelve ``(retiradas, traspasadas)`` con la MISMA semantica por fila que
+    el boton de una sola (§ ``withdraw_requester``): lo que otra persona
+    tambien pidio cambia de dueno y sigue en la cola, y solo lo que no esperaba
+    nadie mas sale de ella.
+
+    DOS SENTENCIAS Y NO UNA POR FILA.  El caso que existe de verdad es el de la
+    racha larga, y recorrerla en Python seria mil quinientos ``UPDATE``.  Lo
+    que se recorre es solo lo que tiene mas peticionarios — cada traspaso va a
+    un nombre distinto, asi que eso no es un ``UPDATE`` en bloque — y eso son
+    unas pocas filas: sumarse a una peticion ajena es raro por construccion
+    (hay que pedir LO MISMO mientras sigue viva).
+
+    ``backers`` es la llave de la particion y no la lista JSON, por lo mismo
+    que la columna existe: contar los elementos de un JSON no se escribe igual
+    en SQLite que en PostgreSQL (§ ``AnalysisTask.backers``).  Es ademas la
+    misma columna con la que el orden de servicio desempata, asi que si alguna
+    vez se desincronizara de la lista, la cola ya estaria mal antes que esto.
+
+    IDEMPOTENTE por construccion: el filtro es ``PENDING``, y a la segunda
+    llamada no queda ninguna.
+    """
+    if not username:
+        return 0, 0
+    now = now or timezone.now()
+    mine = AnalysisTask.objects.filter(source=AnalysisTask.Source.USER,
+                                       requested_by=username,
+                                       state=AnalysisTask.TState.PENDING)
+    handed = withdrawn_by_hand = 0
+    for task in mine.filter(backers__gt=0):
+        # El recuento sale del RESULTADO y no del filtro que la trajo:
+        # ``backers`` es un espejo de la lista, y una fila cuyo contador se
+        # hubiera adelantado a su lista se retira de verdad en vez de
+        # traspasarse.  Contarla como traspasada le diria a su autor que su
+        # peticion sigue viva bajo otro nombre cuando ya no esta.
+        if withdraw_requester(task, now=now) == 'handed-over':
+            handed += 1
+        else:
+            withdrawn_by_hand += 1
+    # ``mine`` se vuelve a evaluar: lo traspasado ya es de otro y no entra.
+    cancelled = mine.filter(backers=0).update(
+        state=AnalysisTask.TState.CANCELLED, completed=now)
+    return cancelled + withdrawn_by_hand, handed
+
+
+def restore_cancelled(task):
+    """Devuelve a la cola una peticion retirada. DESHACER, no pedir de nuevo.
+
+    Es lo que sostiene que cancelar una sola sea un click sin confirmacion: el
+    error se deshace con otro click, y lo que vuelve es LA MISMA fila — su
+    presupuesto, su generacion, su ruta y su sitio en la cola — no una peticion
+    nueva que volveria a entrar por el suelo de la escalera.
+
+    Devuelve False si ya no hay nada que deshacer: la fila volvio por otra via
+    o la posicion se cerro mientras tanto, y resucitar una peticion sobre algo
+    ya decidido crearia justo el zombi que el cierre barre
+    (§ ``_emit_closure_events``).
+    """
+    if task.state != AnalysisTask.TState.CANCELLED:
+        return False
+    if task.position.status != 'UNKNOWN':
+        return False
+    AnalysisTask.objects.filter(pk=task.pk,
+                                state=AnalysisTask.TState.CANCELLED).update(
+        state=AnalysisTask.TState.PENDING, completed=None)
+    return True
+
+
+def _resolve_lane_account(task):
+    """Reescribe ``lane_account`` con el mejor colocado de sus peticionarios.
+
+    Se recalcula cada vez que cambia el CONJUNTO de peticionarios, que es
+    cuando la respuesta puede cambiar.  No se recalcula despues: la asignacion
+    es una foto, y si el respaldo elegido llena luego su propia cola la
+    peticion viaja en un carril que ya no es el mas ligero.  Eso esta acotado
+    — para entonces la peticion ya esta cerca del frente de ese carril — y se
+    ve en la pagina de carriles, que es donde debe tomarse la siguiente
+    decision sobre ella.
+    """
+    from . import lanes
+    names = [name for name in
+             [task.requested_by] + list(task.also_requested_by or []) if name]
+    lane = lanes.effective_account(task.requested_by, task.also_requested_by,
+                                   lanes.charged_loads(names))
+    if lane != task.lane_account:
+        task.lane_account = lane
+        task.save(update_fields=['lane_account'])
+
+
 def ladder_exhausted(pos):
     """True when the visitor ladder has nothing left to buy on ``pos`` itself.
 
@@ -3534,6 +4087,27 @@ def request_ladder_state(pos):
     """
     completed_max = _completed_max_budget(pos)
     return completed_max, _next_rung(completed_max)
+
+
+def _apply_lifo_preference(task, requested_by):
+    """P5 (comunidad, 3-0, 28-ago-2026): "newest first" por cuenta.
+
+    La cuenta que activo la preferencia encola cada peticion nueva al frente
+    de su propia cola, con la misma pieza que el boton Move to front
+    (v. ``front_of_own_queue``): hereda el sitio de su primera pendiente y no
+    mueve a nadie ajeno.  Sin preferencia no cambia un solo byte del camino
+    historico.
+    """
+    if not requested_by:
+        return
+    from .models import ContributorPref
+    if not ContributorPref.objects.filter(account=requested_by,
+                                          lifo_queue=True).exists():
+        return
+    seq = front_of_own_queue(task)
+    if seq is not None:
+        task.queue_seq = seq
+        task.save(update_fields=['queue_seq'])
 
 
 def _request_rung(pos, requested_by='', route='', budget_floor=None):
@@ -3583,6 +4157,35 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
                   'requested_by': requested_by, 'route': route,
                   'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
+        _apply_lifo_preference(task, requested_by)
+        return 'queued'
+    if task.state == AnalysisTask.TState.CANCELLED:
+        # Aqui hubo una peticion y su autor la retiro (§ ``withdraw_requester``).
+        # La unicidad (posicion, generacion) deja el HUECO ocupado por esa fila,
+        # asi que pedir otra vez no puede crear una nueva: o se revive esta, o
+        # la posicion se queda sin poder pedirse nunca mas — que seria convertir
+        # un boton de deshacer en una condena.
+        #
+        # VUELVE COMO UNA PETICION NUEVA, no como la de antes: el peldano se
+        # recalcula (la escalera pudo avanzar mientras tanto), el autor es quien
+        # pide AHORA, y los respaldos y el sitio en la cola arrancan a cero
+        # porque los de la fila vieja eran de una peticion que ya no existe.
+        # Deshacer un arrepentimiento es otra cosa y tiene su propio camino
+        # (§ ``restore_cancelled``), que si devuelve la fila tal y como estaba.
+        task.state = AnalysisTask.TState.PENDING
+        task.completed = None
+        task.budget_nodes = max(task.budget_nodes, floor)
+        task.source = AnalysisTask.Source.USER
+        task.requested_by = requested_by
+        task.also_requested_by = []
+        task.backers = 0
+        task.queue_seq = 0
+        task.route = route
+        task.multipv = multipv_for(pos.visits, task.budget_nodes, clamp=clamp)
+        task.save(update_fields=['state', 'completed', 'budget_nodes',
+                                 'source', 'requested_by', 'also_requested_by',
+                                 'backers', 'queue_seq', 'route', 'multipv'])
+        _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == 'PENDING':
         task.budget_nodes = max(task.budget_nodes, floor)
@@ -3594,6 +4197,12 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
             task.route = route
         task.save(update_fields=['source', 'budget_nodes', 'requested_by',
                                  'route'])
+        # OTRA PERSONA pidiendo lo mismo.  No se crea una fila paralela — dos
+        # motores buscando la misma posicion con el mismo presupuesto es
+        # trabajo tirado, y la fila de mas acababa siendo un zombi que la
+        # absorcion tenia que barrer — pero tampoco se pierde: queda anotada en
+        # la que ya existe, con su aviso y su escalon de precedencia.
+        add_requester(task, requested_by)
         if promoted:
             return 'queued'
     elif task.state == 'LEASED':
@@ -3631,6 +4240,10 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         if task.source != 'USER':
             task.source = 'USER'
             task.save(update_fields=['source'])
+        # Sumarse a algo que YA esta en un motor no cambia ningun orden, pero
+        # sigue habiendo alguien esperando el resultado: sin su nombre en la
+        # fila, la campana solo sonaba para el primero.
+        add_requester(task, requested_by)
     return 'already-queued'
 
 
@@ -4211,6 +4824,52 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
             'certificate_nodes': (report or {}).get('nodes', 0)}
 
 
+# Cuanto silencio convierte un arriendo SOLVE en un arriendo MUERTO.  Vive
+# AQUI, y no en las vistas, desde que el barrido dejo de depender de que
+# alguien pidiese tarea: quien recicla es ``recycle_stale_solve_leases`` y la
+# ventana es suya.  ``views.SOLVE_LEASE_MINUTES`` la reexporta para no tocar
+# ninguna de sus referencias.
+SOLVE_LEASE_MINUTES = 20
+
+
+def recycle_stale_solve_leases(now=None, minutes=SOLVE_LEASE_MINUTES):
+    """Devuelve a PENDING los arriendos SOLVE sin latido.  Cuantos.
+
+    POR QUE ES UNA FUNCION Y NO SEIS LINEAS DENTRO DEL ARRIENDO.  Vivia solo
+    dentro de ``views.api_solve_acquire``, asi que el unico instante en el que
+    una tarea congelada podia volver a la cola era... que alguien pidiese
+    tarea.  Con la flota entera sin un solo worker en modo ``--solve`` eso no
+    pasa nunca: medido el 20-ago, una fila LEASED desde el 29-jul a las 16:02
+    — veintidos dias dentro de un arriendo de veinte minutos — con su posicion
+    retenida y su ``attempts`` congelado, y cero peticiones a
+    ``/api/solve/acquire`` en toda la ventana de logs retenida.  Un arriendo
+    caduca porque pasa el tiempo, no porque llegue una visita.
+
+    SIGUE LLAMANDOSE DESDE EL ARRIENDO, y tiene que seguir: el relevo de un
+    worker reiniciado no puede esperar a la siguiente pasada del selector —
+    son horas — y esa es exactamente la espera que el incidente t24 enseno a
+    no pagar.  Lo que cambia es que ya no es el UNICO sitio; el ciclo
+    periodico (§ ``refresh_selector``) lo llama tambien, y ahi es donde una
+    flota que no pide nada deja de congelar trabajo para siempre.
+
+    El evento se emite SOLO cuando recicla algo: una pasada limpia no tiene
+    nada que contar y un cero por pasada seria ruido en el diario.
+    """
+    from .models import SolveTask
+
+    stale = (now or timezone.now()) - timedelta(minutes=minutes)
+    freed = SolveTask.objects.filter(
+        state='LEASED', leased_at__lt=stale,
+    ).filter(Q(lease_heartbeat_at__isnull=True)
+             | Q(lease_heartbeat_at__lt=stale)).update(
+        state='PENDING', machine='', lease_heartbeat_at=None,
+        lease_token='', lease_session='')
+    if freed:
+        DBEvent.objects.create(kind='SOLVE_LEASE_RECYCLED', payload={
+            'freed': freed, 'minutes': int(minutes)})
+    return freed
+
+
 # Presupuesto del peldano F0 del doc 18: df-pn tactico + telemetria de
 # fortaleza.  Certifica un mate tipico en menos de quince segundos, que es lo
 # que hace viable pasarle la deuda entera a la flota.
@@ -4231,17 +4890,29 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
     mates a este ritmo la deuda crece mas rapido de lo que un cron nocturno la
     absorbe.  Un df-pn a 2M nodos la certifica en segundos.
 
-    BACKPRESSURE.  Solo se rellena hasta ``cap`` tareas SOLVE pendientes en
-    total, contando las de todo el mundo: la deuda es importante pero NUNCA
-    urgente, y una peticion de visitante o un brazo del piloto siempre van
-    delante (ver el orden de ``api_solve_acquire``, que manda ``arm='debt'``
-    al final).
+    BACKPRESSURE, Y EL CUPO ES SUYO.  Solo se rellena hasta ``cap`` tareas
+    pendientes DE ESTE BRAZO.  Contaba la cola SOLVE entera, y eso no era
+    backpressure: era inanicion cruzada.  El brazo fragil tiene su propio cupo
+    de cincuenta (§ ``FRAGILE_QUEUE_CAP``, que promete por escrito que
+    "compartir cap significaria que una purga de deuda mata este brazo o al
+    reves") y esas cincuenta filas se restaban de estas quinientas, asi que
+    con el brazo fragil lleno la deuda se quedaba en ``room=0`` para siempre.
+    Medido el 20-ago en produccion: 550 PENDING contra un cap de 500, los dos
+    brazos parados desde julio y ni un solo ``DEBT_ENQUEUED`` en catorce dias.
+
+    QUE LA DEUDA VAYA LA ULTIMA NO ES COSA DEL CUPO, y por eso separarlos no
+    le quita el turno a nadie: lo decide el ORDEN DE SERVICIO
+    (``views.api_solve_acquire`` ordena por ``is_debt`` antes que por
+    presupuesto), que es donde una peticion de visitante adelanta a la deuda
+    aunque las dos esperen.  Un cupo compartido no priorizaba a nadie —
+    solo apagaba brazos.
 
     Devuelve el numero de tareas creadas.
     """
     from .models import SolveTask
 
-    pending = SolveTask.objects.filter(state='PENDING').count()
+    pending = SolveTask.objects.filter(state='PENDING',
+                                       arm=DEBT_ARM).count()
     room = max(0, int(cap) - pending)
     if limit is not None:
         room = min(room, int(limit))
@@ -4280,6 +4951,64 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
     return len(made)
 
 
+AUTOSOLVE95_ARM = 'autosolve95'
+AUTOSOLVE95_THRESHOLD = 9500
+AUTOSOLVE95_STAGE_NODES = 8_000_000
+
+
+def enqueue_autosolve95(cap):
+    """P9 (comunidad, 4-0, 28-ago-2026): un +-95 se intenta CERRAR.
+
+    Una eval a 95 o mas es "mate encontrado, distancia desconocida"
+    (Eclipsia, 23-ago): gastarle mas analisis heuristico es excavar una
+    pregunta contestada a medias.  Este brazo le compra a cada una un pase
+    de solver F0 de 8M para convertirla en cierre exacto.
+
+    Mismo contrato que los demas brazos con cupo: ``cap`` acota lo PENDING
+    del brazo, una posicion con CUALQUIER SolveTask viva no se toca, y el
+    minteo es un bulk_create acotado con su DBEvent.  Solo posiciones
+    UNKNOWN: una cerrada ya tiene algo mejor que una eval.
+    """
+    pending = SolveTask.objects.filter(
+        arm=AUTOSOLVE95_ARM, state=SolveTask.TState.PENDING).count()
+    room = cap - pending
+    if room <= 0:
+        return 0
+    taken = set(SolveTask.objects.filter(
+        state__in=(SolveTask.TState.PENDING, SolveTask.TState.LEASED))
+        .values_list('position__key', flat=True))
+    th = AUTOSOLVE95_THRESHOLD
+    made = []
+    for goal, cond in (
+            ('WHITE_WIN', Q(eval_cp__gte=th) | Q(backed_eval__gte=th)),
+            ('BLACK_WIN', Q(eval_cp__lte=-th) | Q(backed_eval__lte=-th))):
+        if len(made) >= room:
+            break
+        # SIN ORDEN, a proposito (29-ago): ordenar por extremidad costaba un
+        # sort paralelo de ~1,3M filas estimadas por tick a la escala de 36M
+        # posiciones. Cualquier candidata vale — el cupo es 32 y el brazo
+        # vuelve cada dos minutos — asi que el LIMIT de abajo corta el
+        # escaneo en cuanto junta las primeras coincidencias.
+        candidates = (Position.objects.filter(status='UNKNOWN').filter(cond)
+                      .exclude(key__in=taken).order_by())
+        for position in candidates[:room * 2]:
+            if len(made) >= room:
+                break
+            if position.key in taken:
+                continue
+            taken.add(position.key)
+            made.append(SolveTask(
+                position=position, goal=goal,
+                budget_stage='F0', budget_nodes=AUTOSOLVE95_STAGE_NODES,
+                arm=AUTOSOLVE95_ARM))
+    if not made:
+        return 0
+    SolveTask.objects.bulk_create(made, ignore_conflicts=True)
+    DBEvent.objects.create(kind='AUTOSOLVE95_ENQUEUED', payload={
+        'created': len(made), 'pending_before': pending, 'cap': int(cap)})
+    return len(made)
+
+
 # ---------------- completado de cobertura ----------------
 #
 # EL CASO QUE LO PIDIO (Wolfram, 28-jul).  Un nodo con negras al turno tenia
@@ -4308,6 +5037,11 @@ COVERAGE_DECISIVE_CP = 800
 # lo mismo, pero ahora cada brazo tiene su parte GARANTIZADA en vez de
 # competida.  Cobertura se lleva la mitad porque es el unico que cierra nodos;
 # los otros dos informan.
+#
+# Y MIDEN STOCK, NO CAUDAL.  Un cupo sobre lo PENDIENTE es un FRENO DE RAFAGA:
+# dice cuanto trabajo sin servir puede haber a la vez.  Lo que NO dice es
+# cuanto se compra por hora, y con la flota sirviendo al instante esas dos
+# cosas dejan de parecerse (§ presupuesto HORARIO de los brazos).
 COVERAGE_ARM = 'coverage'
 DN_ARM = 'dn'
 QUALITY_ARM = 'quality'
@@ -4316,6 +5050,108 @@ DN_REPAIR_QUEUE_CAP = 50
 QUALITY_QUEUE_CAP = 50
 COVERAGE_SCAN_ROWS = 2_000
 COVERAGE_SEED_NODES = 8_000_000
+
+
+# ---------------- presupuesto HORARIO de los brazos del walker ---------------
+#
+# LO QUE FALLO (15-ago-2026).  Los cupos de arriba cuentan lo PENDIENTE, y lo
+# pendiente solo se acumula cuando la flota va por detras.  Con la flota
+# sirviendo al instante la cola vuelve a cero entre un resultado y el
+# siguiente, el cupo no llega a tocar NUNCA, y cada analisis que aterriza
+# compra el suyo: 4.551 compras de cascada en una hora, medidas ese dia contra
+# un cupo de 16.  Un tope que solo aprieta cuando el sistema ya va lento no es
+# un tope, es un freno de emergencia — y falla ABIERTO justo el dia que la
+# flota es grande, que es cuando el gasto importa.
+#
+# LOS DOS MECANISMOS SE EXPLICAN EL UNO AL OTRO.  El cupo por cola es el freno
+# de rafaga y se queda donde estaba, porque es barato y porque es lo que
+# protege la cola de los demas brazos.  Esto es el TECHO DE GASTO: cuantas
+# tareas puede CREAR un brazo por hora de reloj, vaya la flota como vaya.  Uno
+# mira el stock, el otro el caudal, y ninguno tapa el agujero del otro.
+#
+# SIN ESTADO NUEVO.  La tabla de tareas ya guarda ``arm`` y ``created``, asi
+# que el presupuesto es un COUNT sobre ella y no hay contador que mantener,
+# que purgar ni que reconciliar tras un reinicio.  Lo unico que hizo falta es
+# que ese COUNT sea una lectura de rango y no un recorrido de todo lo que ese
+# brazo compro desde que existe (§ el indice compuesto de la migracion 0048).
+# Dos procesos de ingesta pueden leer el mismo COUNT y comprar los dos: el
+# rebase esta acotado por su concurrencia, y un lock distribuido para ahorrar
+# unas pocas tareas costaria mas de lo que ahorra.
+#
+# QUIEN PAGA Y QUIEN NO.  Solo los brazos del WALKER, que son los que compran
+# en bucle sobre su propio resultado.  Una peticion de una persona, el goteo
+# del colchon, la siembra de la raiz y el reanalisis por testigo disputado no
+# pasan por aqui y no pueden quedarse sin turno por culpa de un bucle
+# automatico: ninguno de ellos se realimenta.
+ARM_RATE_WINDOW = timedelta(hours=1)
+# UN recibo por brazo y tramo, no uno por compra saltada.  El recibo existe
+# para que el techo se vea en la portada de eventos; escribir uno por cada
+# resultado que aterriza convertiria el arreglo del bucle de compras en un
+# bucle de escrituras, que es el mismo error con otra tabla.
+ARM_RATE_RECEIPT_WINDOW = timedelta(minutes=10)
+ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
+# El numero vive AQUI, al lado de los cupos que completa, y el entorno solo lo
+# pisa (§ OpenSite/settings.py).  La cascada lleva el doble que los otros dos
+# porque compra la mirada mas barata de todas — 8M, un peldano de
+# reconocimiento — y es la que descubre por donde sigue el cuello.
+ARM_RATE_SETTING = {
+    VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),
+    QUALITY_ARM: ('ATOMICDB_ARM_RATE_QUALITY', 120),
+    VALUE_DESCEND_ARM: ('ATOMICDB_ARM_RATE_DESCEND', 120),
+}
+
+
+def arm_rate(arm):
+    """Tareas por hora que ese brazo del walker se permite CREAR.
+
+    ``0`` apaga el brazo entero, que es el rollback sin desplegar nada: una
+    linea en el env file y un reinicio, igual que ``ATOMICDB_DESCENT``.
+
+    Un valor mal escrito NO tumba el proceso ni estrena politica: manda el
+    default.  Es la leccion de siempre con los conmutadores cableados al
+    entorno — el despliegue tiene que poder accionarlos, y equivocarse al
+    teclear uno no puede ser un incidente.
+    """
+    name, default = ARM_RATE_SETTING[arm]
+    raw = str(getattr(settings, name, '')).strip()
+    return int(raw) if raw.isdigit() else default
+
+
+def _arm_budget_room(arm):
+    """Cuantas tareas MAS puede crear este brazo en la hora que corre.
+
+    Cero deja recibo (uno por tramo) y es la respuesta a "salta la compra".
+    Devuelve un HUECO y no un si/no porque un brazo compra en lotes: con la
+    puerta sola, el ultimo lote de la hora entraria entero y el techo seria en
+    realidad "el tope mas un cupo".  Clipando el lote, el techo lo es.
+
+    Se pregunta ANTES de comprar y sobre la ventana movil, no sobre horas de
+    reloj: un tope que se resetea en punto permite el doble del presupuesto a
+    caballo del cambio de hora, y ese doble es exactamente la rafaga que esto
+    existe para cortar.
+    """
+    rate = arm_rate(arm)
+    if rate <= 0:
+        # Apagado a mano no deja recibo: el recibo dice "este brazo alcanzo su
+        # techo", y un brazo apagado no alcanzo nada.  Ademas se ahorra el
+        # COUNT, que es lo unico que cuesta esta comprobacion.
+        return 0
+    made = AnalysisTask.objects.filter(
+        arm=arm, created__gte=timezone.now() - ARM_RATE_WINDOW).count()
+    if made >= rate:
+        _arm_rate_receipt(arm, rate, made)
+        return 0
+    return rate - made
+
+
+def _arm_rate_receipt(arm, rate, made):
+    since = timezone.now() - ARM_RATE_RECEIPT_WINDOW
+    if DBEvent.objects.filter(kind=ARM_RATE_EVENT, ts__gte=since,
+                              payload__arm=arm).exists():
+        return
+    DBEvent.objects.create(kind=ARM_RATE_EVENT, payload={
+        'arm': arm, 'rate': rate, 'made': made,
+        'window_minutes': int(ARM_RATE_WINDOW.total_seconds() // 60)})
 
 
 def _coverage_children(parent_keys):
@@ -4809,23 +5645,38 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
         child_route = ''
         if route and child.key in edges_by_child:
             child_route = route + ',' + edges_by_child[child.key]
-        task, created = AnalysisTask.objects.get_or_create(
+        # La tarea viva se busca por POSICION, no por (posicion, generacion):
+        # el dedup con generacion podia crear una segunda tarea si las visitas
+        # se movieron desde que nacio la primera.  Y sumarse a la de otra
+        # persona pasa por la MISMA puerta que el click individual
+        # (``add_requester``): respaldo anotado, aviso de vuelta y sitio en la
+        # cola — el click masivo era el unico camino que tiraba al segundo
+        # peticionario (reporte de math_god, 17-ago: "it just ignores my
+        # request").  Un respaldo cuenta en el total devuelto: el click de
+        # quien se suma compro exactamente ese analisis, aunque no lo creara.
+        vivo = (AnalysisTask.objects
+                .filter(position=child,
+                        state__in=(AnalysisTask.TState.PENDING,
+                                   AnalysisTask.TState.LEASED))
+                .order_by('id').first())
+        if vivo is not None:
+            respaldado = add_requester(vivo, requested_by)
+            if vivo.state == AnalysisTask.TState.PENDING \
+                    and vivo.source != source:
+                vivo.source = source
+                if child_route and not vivo.route:
+                    vivo.route = child_route
+                vivo.save(update_fields=['source', 'route'])
+                queued += 1
+            elif respaldado:
+                queued += 1
+            continue
+        AnalysisTask.objects.create(
             position=child, generation=child.visits,
-            defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(child.visits, budget,
-                                             clamp=clamp),
-                      'source': source, 'requested_by': requested_by,
-                      'route': child_route})
-        if created:
-            queued += 1
-        elif task.state == 'PENDING' and task.source != source:
-            task.source = source
-            if requested_by and not task.requested_by:
-                task.requested_by = requested_by
-            if child_route and not task.route:
-                task.route = child_route
-            task.save(update_fields=['source', 'requested_by', 'route'])
-            queued += 1
+            budget_nodes=budget,
+            multipv=multipv_for(child.visits, budget, clamp=clamp),
+            source=source, requested_by=requested_by, route=child_route)
+        queued += 1
     return queued
 
 
@@ -5039,7 +5890,12 @@ def _buy_verification(child, requested_by='', route=''):
     pide aun menos, asi que lo respeta con mas razon.
     """
     clamp = _short_mate_clamp(child)
-    budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+    # Verify PV compra la LINEA al grado de peticion, no la escalera de
+    # budget_for: en una posicion muy visitada la escalera llega a 10B y un
+    # click encolaba la PV entera a 10B por nodo (26 tareas, 25-ago). El
+    # clamp de mates cortos sigue mandando porque pide aun menos, y lo
+    # COMPLETADO sigue mandando sobre este suelo mas abajo.
+    budget = (REQUEST_BUDGET_LADDER[0]
               if clamp is None else budget_for(child))
     done = _completed_max_budget(child)
     if done is not None and done >= budget:
@@ -5112,6 +5968,24 @@ def _walk_pv_frontier(pos, pv, requested_by='', route=''):
                                        campaign_id=node.campaign_id)
         Edge.objects.get_or_create(parent=node, move_uci=uci,
                                    defaults={'child': child})
+        if child.status != 'UNKNOWN' and node.status == 'UNKNOWN':
+            # LA MISMA CASCADA QUE EL ``goto`` DEL EXPLORADOR, y por el mismo
+            # motivo (§ ``views.explore_play``, 29-jul): caminar una linea
+            # tambien DESCUBRE terminales — el ultimo ply de una PV de mate
+            # materializa el nodo explotado, que nace ya cerrado en
+            # ``get_or_create_position`` — y sin esta llamada el padre se
+            # queda UNKNOWN con un hijo ganador YA escrito en la tabla,
+            # esperando a que un analisis ajeno toque la familia.  Es el
+            # "delay" que la comunidad reporto en julio, reabierto por la otra
+            # puerta que materializa aristas: el docstring de aqui arriba
+            # promete que una PV "tiene que producir exactamente el mismo
+            # arbol que producirla a mano", y hasta hoy no lo cumplia.
+            #
+            # LA GUARDA SOBRE ``node`` ACOTA EL COSTE a lo que hay que
+            # arreglar: un padre ya cerrado no tiene nada que recalcular, asi
+            # que un paseo por terreno resuelto sigue costando cero.
+            backup_cascade([node.key])
+            backup_backed_evals([node.key])
         if child.priority <= DEAD / 2:
             child.priority = 0.0   # ruta nueva: revive de la lapida
             child.save(update_fields=['priority'])
@@ -5143,7 +6017,18 @@ def _walk_pv_frontier(pos, pv, requested_by='', route=''):
     return counts
 
 
-def enqueue_pv_verification(pos, requested_by='', route=''):
+def verify_candidates(pos):
+    """La lista de ``_verify_candidates``, para quien tiene que OFRECERLA.
+
+    El explorador no puede numerar las lineas por su cuenta.  Si la pagina
+    cuenta una lista y el paseo camina otra, pedir la 3 acaba comprando la que
+    el servidor decida, que es justo lo que hay que cerrar, asi que el selector
+    se pinta con ESTOS numeros y con ningun otro.
+    """
+    return _verify_candidates(pos)
+
+
+def enqueue_pv_verification(pos, requested_by='', route='', line=0):
     """Compra analisis donde la verificacion de la linea FALTA.  Cuantas.
 
     Empieza por la linea VIGENTE de ``last_analysis`` — saltando el escaparate
@@ -5159,6 +6044,21 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     sobre ella tiene que decir "esperando", no comprar la linea siguiente,
     porque si no doblar clicks doblaria la factura.
 
+    ``line`` ELIGE CANDIDATO, y es la otra mitad de aquella peticion (Wolfram,
+    14-ago): "verify PV still completely useless for requesting other lines in
+    PV than second - it always tries to request first line".  El recorrido de
+    arriba es una CAIDA, no una eleccion: para en el primer candidato con
+    hueco, asi que mientras la linea 1 tenga algo que comprar la 3 es
+    inalcanzable por muchos clicks que se le den.  Con ``line=N`` se camina la
+    N y solo la N, sin caer a la siguiente cuando esa no tiene hueco, porque
+    quien la nombro no pidio "la que sea" sino esa.  ``line=0`` sigue siendo la
+    caida de siempre, que es lo que compra el click sin elegir.
+
+    Un ``line`` que no esta en la lista NO se redondea al vecino mas cercano ni
+    se degrada a la caida: vuelve ``unknown_line`` y no compra nada.  Aceptar a
+    ojo un numero que no existe seria reproducir el bug por otra puerta: pedir
+    una linea y pagar otra.
+
     Devuelve un ``VerifyOutcome``: el numero de tareas de siempre, y colgado de
     el lo que hara falta para CONTARLO — la linea que se siguio, si salio
     del arbol o de un analisis vigente, cuantos plies de ella estaban ya
@@ -5167,8 +6067,16 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
     El llamante es dueno de la transaccion, igual que en
     ``enqueue_unexplored_children``.
     """
+    candidates = _verify_candidates(pos)
+    if line:
+        candidates = [cand for cand in candidates if cand[0] == line]
+        if not candidates:
+            return VerifyOutcome(0, line=line, lines_tried=0, from_tree=False,
+                                 covered_plies=0, plies=0, in_flight=0,
+                                 budget=None, move='', move_fen='',
+                                 unknown_line=True)
     covered, walked, tried = 0, 0, 0
-    for index, pv, from_tree in _verify_candidates(pos):
+    for index, pv, from_tree in candidates:
         tried += 1
         walk = _walk_pv_frontier(pos, pv, requested_by=requested_by,
                                  route=route)
@@ -5181,9 +6089,12 @@ def enqueue_pv_verification(pos, requested_by='', route=''):
                 covered_plies=walk['covered_plies'], plies=walk['plies'],
                 in_flight=walk['in_flight'], budget=walk['budget'],
                 move=walk['move'], move_fen=walk['move_fen'])
-    # Sin compra no hay linea que nombrar, pero si hay paseo que contar: lo que
-    # se recorrio es lo que respalda el "ya esta todo verificado" del aviso.
-    return VerifyOutcome(0, line=0, lines_tried=tried, from_tree=False,
+    # Sin compra no hay linea que nombrar CUANDO se cayo por la lista; con una
+    # elegida a mano si la hay, y el aviso tiene que decir SU numero o volvera
+    # a hablar de la linea 1.  Lo caminado se cuenta igual: es lo que respalda
+    # el "ya esta todo verificado".
+    return VerifyOutcome(0, line=line, lines_tried=tried,
+                         from_tree=bool(line) and bool(candidates[0][2]),
                          covered_plies=covered, plies=walked, in_flight=0,
                          budget=None, move='', move_fen='')
 
