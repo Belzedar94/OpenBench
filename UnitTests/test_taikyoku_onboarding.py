@@ -11,6 +11,7 @@ CLIENT_REF = "c1ee4b7fa834cc2c6cec47715123e5e4bb18f735"
 CAMPAIGN = "taikyoku-material-regime-20260812"
 COHORT = "material-n8000-startpos-v1"
 TEACHER = "taikyoku-material-advance-v1"
+PRIORITY = 400
 
 
 def load_json(path):
@@ -87,7 +88,7 @@ class TaikyokuOnboardingTests(unittest.TestCase):
                 self.assertEqual(preset["datagen_teacher_id"], TEACHER)
                 self.assertEqual(preset["datagen_campaign_id"], CAMPAIGN)
                 self.assertEqual(preset["datagen_cohort"], COHORT)
-                self.assertEqual(preset["priority"], 0)
+                self.assertEqual(preset["priority"], PRIORITY)
 
     def test_canary_and_regime_have_distinct_frozen_slots(self):
         canary = self.presets["default"]
