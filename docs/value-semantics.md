@@ -56,7 +56,19 @@ Every position value on the site is in exactly one of four states:
    repetition is worth a draw:
    - *backed*: a child whose spine returns to the parent being evaluated
      contributes a draw, never the number the cycle invents (the
-     2026-08-03 rule);
+     2026-08-03 rule). That draw is an assertion about a *walk* over
+     `backed_move` pointers, not a measurement: nobody has ever searched
+     whether the repetition is forced. So it carries **no search weight**,
+     and it may settle a node **only when that node's coverage is
+     complete**, the one state in which "the mover has nothing better than
+     repeating" is a verdict instead of a guess. A node with answers nobody
+     has opened keeps its own measure, publishes nothing when it has none,
+     and buys the analysis that answers the question either way (2026-08-12,
+     same arithmetic as the anchorless loss of 2026-08-14). Whatever a node
+     does stand on it must be able to show: a node published on a
+     repetition draw renders that same draw on the row it comes from, with
+     the repetition chip. A header quoting a draw no row displays is a bug
+     against this document;
    - *proof numbers*: an edge whose value walks back into the node being
      computed contributes its child's **static leaf estimate** instead of
      the child's stored numbers, because a number that travels the loop is
@@ -118,6 +130,14 @@ partition anything.
   shown only up to its first self-crossing, with the established
   `repetition` chip explaining the cut, and a move that would re-enter the
   current line renders as a disabled row wearing the same chip.
+- A move whose value walks back into the position being displayed shows the
+  draw the backup uses for it, not the number the resulting position claims
+  on its own page, and wears the same `repetition` chip in place of the
+  backed chip: the backed chip promises a spine that ends somewhere, and
+  what is underneath this one is a loop. This is the row half of invariant
+  6, and it is what keeps the header and the table quoting one number per
+  edge (reported 2026-08-12: a header at 0 above a table whose best move
+  said +9, with no way to tell where either number came from).
 
 ## Open questions (seeking the community's preference)
 

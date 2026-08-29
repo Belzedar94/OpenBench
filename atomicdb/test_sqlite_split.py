@@ -422,14 +422,19 @@ class SQLiteSplitCommandTests(TransactionTestCase):
 
             connection = sqlite3.connect(self.destination)
             try:
+                # Las columnas NOT NULL con default de Django hay que darlas a
+                # mano: el default vive en el ORM, no en el esquema (la
+                # migracion lo pone para el ALTER y lo retira despues), asi que
+                # un INSERT crudo que las omita choca contra la restriccion.
                 connection.execute(
                     """
                     INSERT INTO atomicdb_position
                         (key, fen, status, expanded, reachable,
                          depth_invested, nodes_invested, time_invested,
                          visits, priority, backed_plies, backed_nodes,
-                         updated)
-                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0, 0.0, 0, 0.0, 0, 0, ?)
+                         analysis_passes, updated)
+                    VALUES (?, ?, 'UNKNOWN', 0, 0, 0, 0, 0.0, 0, 0.0, 0, 0,
+                            '[]', ?)
                     """,
                     (
                         '2' * 64,

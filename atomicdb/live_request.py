@@ -42,12 +42,19 @@ aterriza.  Asi el conjunto de tareas que te encienden la campana y el conjunto
 de tareas que esta linea narra son el MISMO, y no dos criterios parecidos que
 un dia discrepan.  Una sonda de cobertura de 8M que dura un segundo no sale:
 nadie la pidio y nadie la esta esperando.
+
+AND WHAT YOU CAN DO ABOUT IT, which lives here for the same reason: the
+move-to-front control (§ ``bump_control``) talks about one request on one
+position, reads the same live row this line reads, and reports its place in
+the queue with the very rule that composes the text above.  Two modules
+answering "how much queue is in front of this" is how one page ends up
+contradicting the other.
 """
 
 from datetime import timedelta
 
-from django.db.models import (BigIntegerField, Case, F, IntegerField, Q, Sum,
-                              Value, When, Window)
+from django.db.models import (BigIntegerField, Case, CharField, F,
+                              IntegerField, Q, Sum, Value, When, Window)
 from django.utils import timezone
 
 from .ingest import notification_deserved
@@ -117,9 +124,29 @@ def named_tier(now=None):
             | Q(created__lt=(now or timezone.now()) - STARVED_AFTER))
 
 
+def _effective_account():
+    """La cuenta con la que una fila REPARTE: su autor, o quien le presto carril.
+
+    Vacio en ``lane_account`` significa "el autor", que es lo que dice toda
+    fila que no ha respaldado nadie, asi que esta expresion vale
+    ``requested_by`` en la inmensa mayoria de la cola y la particion es la de
+    siempre (§ ``models.AnalysisTask.lane_account``).
+    """
+    return Case(When(lane_account='', then=F('requested_by')),
+                default=F('lane_account'), output_field=CharField())
+
+
 def fair_share(queryset):
-    """Anota ``fair_ahead``: los NODOS que ese MISMO peticionario ya tiene
+    """Anota ``lane_ahead``: los NODOS que ese mismo peticionario ya tiene
     encolados por delante de cada fila.
+
+    SIN CARRILES DESDE EL 16-AGO.  El multiplicador por tamano de carril que
+    vivio aqui del 10 al 16 de agosto se retiro con los carriles: el umbral
+    binario que los abria era trampeable con un worker de un minuto, y la
+    comunidad prefirio volver al reparto por cuenta a secas (la unica ventaja
+    del contribuidor es la afinidad de su propio worker, § views.choose_pending).
+    El nombre de la columna se queda: cada consumidor del orden lo lee ya y un
+    renombre tocaria cada uno de ellos para no cambiar nada.
 
     QUE ES.  Deficit round-robin ponderado por coste, y es el ultimo escalon
     del orden de servicio: el primero que llega de cada cuenta lleva cero
@@ -150,6 +177,23 @@ def fair_share(queryset):
     FILL manda la prioridad de POSICION, que es la que calcula el selector, y
     este escalon no debe tener ni voz ahi.
 
+    LA VENTANA ORDENA POR ``queue_seq`` Y LUEGO POR ``id``, y con la columna a
+    cero en todas las filas eso ES el orden de llegada de siempre: es lo que
+    hace que adelantar una peticion propia (§ ``views.api_queue_bump``) no
+    necesite un segundo camino de orden.  Adelantar RECOLOCA la suma dentro de
+    la cuenta que adelanta y solo dentro de ella: la particion no cambia, asi
+    que ninguna fila ajena ve moverse su ``fair_ahead``.
+
+    LO ARRENDADO VA DELANTE DE LO PENDIENTE, y eso es lo que impide que
+    adelantar sea un descuento.  Sin esta clave, una peticion adelantada se
+    colocaba tambien por delante del arriendo VIVO de su propia cuenta y
+    heredaba un ``fair_ahead`` de cero: la deuda de nodos que esa cuenta ya
+    tiene contraida — diez mil millones buscandose ahora mismo — dejaba de
+    contar, y bastaba con adelantar antes de cada arriendo para vivir
+    permanentemente en el frente.  Fuera de ese caso no cambia nada: la fila
+    que un worker se lleva es la primera de su cuenta, asi que lo arrendado ya
+    era el prefijo de la particion.
+
     EL QUERYSET QUE ENTRA TIENE QUE LLEVAR ``CHARGED``, no solo lo pendiente:
     una ventana solo ve las filas que sobreviven al WHERE, asi que filtrar
     aqui lo arrendado seria descontarlo de la suma.  Las filas arrendadas
@@ -157,15 +201,29 @@ def fair_share(queryset):
     ``choose_pending`` porque su lote solo bloquea PENDING, ``queue_ahead``
     porque solo cuenta PENDING.
     """
+    running_first = Case(When(state=LEASED, then=Value(0)), default=Value(1),
+                         output_field=IntegerField())
     return (queryset
             .annotate(_fair_cumulative=Window(
                 expression=Sum('budget_nodes'),
-                partition_by=[F('source'), F('requested_by')],
-                order_by=F('id').asc()))
-            .annotate(fair_ahead=Case(
+                partition_by=[F('source'), _effective_account()],
+                order_by=(running_first.asc(), F('queue_seq').asc(),
+                          F('id').asc())))
+            .annotate(lane_ahead=Case(
                 When(source=USER,
                      then=F('_fair_cumulative') - F('budget_nodes')),
-                default=Value(0), output_field=BigIntegerField())))
+                default=Value(0), output_field=BigIntegerField()))
+            # El recuento de personas se lee ACOTADO A LA BANDA USER, por lo
+            # mismo que el reparto: una tarea que nacio de un click puede
+            # acabar DEGRADADA a AUTO (§ ``ingest``, la expansion de
+            # cobertura) conservando lo que ya tenia encima.  Dentro de AUTO
+            # todas las filas empatan a cero en el reparto, asi que un
+            # recuento vivo ahi decidiria por delante de la prioridad de
+            # POSICION — que es lo que el selector calcula precisamente para
+            # mandar en esa banda.
+            .annotate(backer_rank=Case(
+                When(source=USER, then=F('backers')),
+                default=Value(0), output_field=IntegerField())))
 
 
 # Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
@@ -175,7 +233,19 @@ def fair_share(queryset):
 # ``views.choose_pending`` antepone ``-source`` y su own-first (que depende de
 # que worker pregunte, y por eso el estimador no puede tenerlo) y cierra con la
 # prioridad de POSICION; ``queue_ahead`` cierra con el ``id`` y ya.
-SERVICE_KEYS = ('-named_first', 'fair_ahead')
+#
+# ``-backer_rank`` ES EL ESCALON MAS BAJO, y ese sitio es la respuesta entera a
+# "multiple people asking to analyse the same position should give it more
+# precedence" (Eclipsia).  Va DESPUES del reparto justo, no antes: delante, una
+# posicion popular adelantaria a toda la cola y bastaria con dos personas
+# pidiendo lo mismo para dejar sin turno a quien pide solo — la inanicion que
+# el estrato nombrado ya nos enseno a no repetir.  Detras, solo desempata entre
+# filas que YA cobran a la vez, y ahi si decide: la peticion que espera media
+# docena de personas sale antes que la que espera una.  Que las dos se
+# encuentren empatadas no es casualidad — sumarse a una peticion ajena la manda
+# al frente de la cola de SU autor (§ ``ingest.add_requester``), que es justo
+# donde estan los ceros de todo el mundo.
+SERVICE_KEYS = ('-named_first', 'lane_ahead', '-backer_rank')
 
 
 def named_first_rank(now=None, band_only=False):
@@ -225,10 +295,52 @@ def queue_ahead(task):
     es una condicion del momento del reparto, no un sitio en la cola, y quien
     lo tiene puesto ya esta contado delante.  La cifra puede quedarse larga
     por eso, nunca corta, que es el lado por el que esta linea puede errar.
+
+    VEINTE SEGUNDOS DE CACHE COMPARTIDA por tarea (17-ago): con seis mil
+    filas en banda, ordenar la cola entera en cada render frio era el coste
+    dominante de la portada para quien navega con sesion (5-7s medidos), y
+    la posicion inicial la mira todo el mundo.  Un sitio en cola de hace
+    veinte segundos sigue siendo el sitio: la banda avanza a ritmo de
+    analisis, no de renders.  El mapa multi-tarea del perfil queda vivo,
+    que alli una pasada ya sirve veinte filas.
     """
     if task is None:
         return None
-    return queue_ahead_map([task]).get(task.id)
+    place = queue_ahead_pair(task)
+    return None if place is None else place[0]
+
+
+def queue_ahead_pair(task):
+    """``(cuantas cobran antes, cuantas de ellas de esta misma cuenta)``.
+
+    LAS DOS CIFRAS SALEN DE LA MISMA PASADA (§ ``queue_ahead_map``): el bucle
+    que ordena la banda ya recorre cada fila, asi que contar ademas las de una
+    cuenta no cuesta ni una consulta mas.  Es la mitad que le faltaba al panel
+    — ver ``_place_text``, donde esta escrito por que.
+
+    LA CLAVE DE CACHE CAMBIO CON LA FORMA DEL VALOR, y no es cosmetico: la
+    anterior guardaba un entero, y una entrada suya sobreviviendo a un deploy
+    le daria a este codigo un ``int`` donde espera un par.  Veinte segundos de
+    ventana bastan para reventar una portada; una clave nueva no puede.
+    """
+    if task is None:
+        return None
+    from django.core.cache import cache
+    clave = 'atomicdb.qplace.%d' % task.id
+    FUERA_DE_BANDA = (-1, -1)
+    # ``FUERA_DE_BANDA`` codifica el None de "no lo sirve nadie por aqui": un
+    # None a secas en la cache es indistinguible de un fallo y recomputaria en
+    # cada render.  Se NORMALIZA antes de guardar, no solo al guardar: dejar
+    # ``sitio`` en None y cachear el centinela aparte deja las dos ramas
+    # diciendo cosas distintas, que es como un ``tuple(None)`` acaba en la
+    # portada.
+    sitio = cache.get(clave)
+    if sitio is None:
+        sitio = queue_ahead_map([task]).get(task.id)
+        if sitio is None:
+            sitio = FUERA_DE_BANDA
+        cache.set(clave, sitio, 20)
+    return None if tuple(sitio) == FUERA_DE_BANDA else tuple(sitio)
 
 
 def queue_ahead_map(tasks):
@@ -243,20 +355,29 @@ def queue_ahead_map(tasks):
     sitio en la cola porque no la va a servir nadie — y quien pregunte recibe
     ``None`` en vez de un numero inventado.
     """
-    wanted = {task.id for task in tasks
+    wanted = {task.id: (task.lane_account or task.requested_by)
+              for task in tasks
               if task.state == PENDING and task.source == USER}
     if not wanted:
         return {}
     band = (AnalysisTask.objects.filter(source=USER)
             .filter(CHARGED).filter(SERVEABLE))
-    places, ahead = {}, 0
-    for task_id, state in service_order(band).values_list('id', 'state'):
+    # ``mias`` cuenta, POR CUENTA, lo que esa cuenta lleva ya visto en esta
+    # misma pasada.  La clave es la del REPARTO (``lane_account or
+    # requested_by``, § ``_effective_account``), que es la particion de la que
+    # sale el numero, asi que las dos cifras hablan de la misma cola.
+    places, ahead, mias = {}, 0, {}
+    for task_id, state, lane, author in service_order(band).values_list(
+            'id', 'state', 'lane_account', 'requested_by'):
         if task_id in wanted:
-            places[task_id] = ahead
+            places[task_id] = (ahead, mias.get(wanted[task_id], 0))
         # Lo que ya esta corriendo pesa en el reparto pero no es COLA: quien
         # espera quiere saber cuantas PETICIONES le faltan por delante, y la
         # que tiene un worker encima ya no esta esperando a nadie.
-        ahead += state == PENDING
+        if state == PENDING:
+            ahead += 1
+            clave = lane or author
+            mias[clave] = mias.get(clave, 0) + 1
     return places
 
 
@@ -331,6 +452,131 @@ def _left_text(seconds):
     return f'about {seconds / 3600:.1f} h left'
 
 
+# Ventana con la que se mide el RITMO de la banda de visitante.  Diez
+# minutos son los mismos que la portada usa para su ritmo
+# (§ ``metrics.RATE_MINUTES``) y por lo mismo: mas corta la mueve un valle de
+# dos workers, mas larga tarda en enterarse de que la flota se fue a dormir.
+WAIT_RATE_MINUTES = 10
+# Cuantas tareas hacen falta en esa ventana para que el ritmo signifique algo.
+# Con cuatro cierres en diez minutos, "148 por delante" se convierte en horas
+# de promesa construida sobre cuatro medidas: eso no es una estimacion, es una
+# extrapolacion con cara de dato.  Por debajo de esto no se dice ningun
+# tiempo, que es LA regla de este modulo.
+WAIT_RATE_MIN_SAMPLE = 20
+WAIT_RATE_CACHE_SECONDS = 30
+
+
+def _band_rate(now=None):
+    """Peticiones de visitante por segundo que la flota cierra, o ``None``.
+
+    Un COUNT sobre ``atomic_task_state_done`` (el indice ya existe) acotado a
+    la ventana, compartido treinta segundos: esto lo pregunta cada render del
+    explorador y el ritmo de una flota no cambia entre dos.
+
+    Devuelve ``None`` cuando la muestra es demasiado pequena para sostener una
+    cuenta, que es la unica respuesta honesta: sin ritmo medido no hay tiempo
+    que decir.
+    """
+    from django.core.cache import cache
+
+    served = cache.get('atomicdb.bandrate')
+    if served is None:
+        served = AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.COMPLETED, source=USER,
+            completed__gte=(now or timezone.now()) - timedelta(
+                minutes=WAIT_RATE_MINUTES)).count()
+        cache.set('atomicdb.bandrate', served, WAIT_RATE_CACHE_SECONDS)
+    if served < WAIT_RATE_MIN_SAMPLE:
+        return None
+    return served / (WAIT_RATE_MINUTES * 60.0)
+
+
+def _wait_text(ahead, now=None):
+    """' · about 14 min', o '' cuando no hay con que decirlo.
+
+    MISMA REGLA QUE LA CUENTA ATRAS DE UN ARRIENDO, y a proposito: se calla
+    cuando no hay medida (§ ``_band_rate``) y se calla cuando el resultado
+    pasa de ``MAX_PROMISE_SECONDS``, exactamente donde ``_seconds_left`` se
+    calla.  Un puesto en la cola sin tiempo al lado se lee como un castigo;
+    un tiempo inventado es peor que el silencio.
+
+    REDONDEO GRUESO Y SIN "left": esto no es una cuenta atras de algo que ya
+    esta corriendo, es cuanto suele tardar la cola en llegar hasta aqui.
+    """
+    rate = _band_rate(now)
+    if not rate or ahead <= 0:
+        return ''
+    seconds = ahead / rate
+    if seconds > MAX_PROMISE_SECONDS:
+        return ''
+    if seconds < 60:
+        return ' · under a minute'
+    minutes = round(seconds / 60)
+    if minutes < 120:
+        return f' · about {minutes} min'
+    return f' · about {seconds / 3600:.1f} h'
+
+
+def _is_yours(task, username):
+    """Solo se le dicen "tuyas" a la cuenta de la que de verdad son.
+
+    La comparacion es contra la cuenta del REPARTO y no contra el autor: el
+    numero que acompana sale de esa particion (§ ``queue_ahead_map``), asi que
+    con un carril prestado las filas contadas son las del prestamista y
+    llamarlas "tuyas" al autor seria contarle una cola que no es la suya.
+    """
+    return bool(username) and username == (task.lane_account
+                                           or task.requested_by)
+
+
+def _place_text(task, username='', now=None):
+    """"148 requests ahead, 70 of them yours · about 14 min".
+
+    POR QUE TRES PIEZAS Y NO SOLO LA PRIMERA.  El numero a secas era verdad y
+    se leia como un castigo.  opabinia lo reporto el 19-ago: "cientos de
+    peticiones, nada corriendo, y la siguiente aparece en el #148 aunque nadie
+    mas tenga cola".  Reconstruida la banda de aquellos dias, el #148 existia
+    y era correcto — sus filas llegaron a ver hasta el #203 — pero de los 201
+    que una tenia delante 70 eran SUYOS, y la banda tenia 5.883 filas de otras
+    cuatro cuentas.  Ni la cola estaba vacia ni el sitio era un castigo: era
+    un reparto por cuenta haciendo su trabajo.  Las dos cifras que faltaban
+    contestan las dos mitades del reporte y salen del bucle que ya se recorre,
+    sin una consulta mas.
+
+    EL TIEMPO ES LA TERCERA, y es la que convierte un puesto en una espera:
+    aquel #201, al ritmo medido de la flota, eran unos catorce minutos.
+
+    ESTO NO ORDENA NADA.  Es texto: el reparto (§ ``SERVICE_KEYS``) no lo lee
+    y el puesto que se pinta es exactamente el que ya se pintaba.
+    """
+    place = queue_ahead_pair(task)
+    if place is None:
+        # Una tarea de grado peticion que NO va por la banda de visitante
+        # (§ ingest.enqueue_unexplored_children puede degradar a AUTO una
+        # que nacio de un click): cobra despues de todas las de visitante,
+        # asi que su sitio en la cola no es el que cuenta esa cifra y no se
+        # inventa uno.
+        return 'visitor requests are served first'
+    ahead, own = place
+    if not ahead:
+        return 'next up'
+    text = f'{ahead} request{"" if ahead == 1 else "s"} ahead'
+    if own and _is_yours(task, username):
+        text += f', {own} of them yours'
+    return text + _wait_text(ahead, now)
+
+
+def _backers_text(task):
+    """' · 3 people asked for this', o cadena vacia si solo la pidio uno.
+
+    ``backers`` cuenta a los que se SUMARON, asi que el total lleva ademas al
+    autor.  Se dice solo cuando hay algo que decir: "1 person asked for this"
+    debajo de cada peticion seria ruido en todas las filas del sitio.
+    """
+    people = (task.backers or 0) + 1
+    return f' · {people} people asked for this' if people > 1 else ''
+
+
 def _quiet_text(silence, dead):
     """Lo que se dice de un arriendo que no reporta: el hecho, y nada mas.
 
@@ -345,7 +591,7 @@ def _quiet_text(silence, dead):
     return f'{said}, so it goes back in the queue' if dead else said
 
 
-def summary(pos, now=None):
+def summary(pos, now=None, username=''):
     """La linea del explorador para esta posicion, o ``None`` si no hay nada.
 
     ``{'text': ..., 'chip': ...}``, con el texto YA compuesto: la pagina lo
@@ -360,27 +606,31 @@ def summary(pos, now=None):
         # peticion ni existe.  Ademas asi el explorador de una posicion cerrada
         # no paga ni una consulta por esto.
         return None
-    now = now or timezone.now()
-    task = _live_task(pos)
+    return _narrate(pos, _live_task(pos), now=now, username=username)
+
+
+def _narrate(pos, task, now=None, username=''):
+    """The line for ONE already-read task, or ``None`` when there is none.
+
+    Split out of ``summary`` so the page can read the live task ONCE and use
+    it for both things that hang off it: narrating it, and deciding whether
+    the move-to-front control is pointing at that very row
+    (see ``bump_control``).
+    """
     if task is None:
         return None
+    now = now or timezone.now()
     from .views import LEASE_MINUTES, _human
 
     budget = f'{_human(task.budget_nodes)} nodes'
     if task.state == PENDING:
-        ahead = queue_ahead(task)
-        if ahead is None:
-            # Una tarea de grado peticion que NO va por la banda de visitante
-            # (§ ingest.enqueue_unexplored_children puede degradar a AUTO una
-            # que nacio de un click): cobra despues de todas las de visitante,
-            # asi que su sitio en la cola no es el que cuenta esa cifra y no se
-            # inventa uno.
-            place = 'visitor requests are served first'
-        elif ahead:
-            place = f'{ahead} request{"" if ahead == 1 else "s"} ahead'
-        else:
-            place = 'next up'
-        return {'text': f'Waiting for a worker · {budget} · {place}',
+        # Quien pincha en una posicion que ya tiene peticion no recibe tarea
+        # nueva: se suma a la que hay.  Sin decirlo, ese click se veia igual
+        # que un click perdido — la pagina seguia contando la peticion de otro
+        # y nada acusaba recibo de la suya.
+        crowd = _backers_text(task)
+        place = _place_text(task, username, now)
+        return {'text': f'Waiting for a worker · {budget} · {place}{crowd}',
                 'chip': 'cold'}
 
     machine = task.machine or 'a worker'
@@ -406,11 +656,160 @@ def summary(pos, now=None):
             'chip': 'hot'}
 
 
-def context(pos, now=None):
-    """Lo que la plantilla consume: ``{}`` cuando no hay nada que decir.
+def _own_pending(pos, username, live):
+    """The PENDING request of ``username`` on THIS position, or ``None``.
 
-    Mismo patron que ``depth.context`` y que ``views._suggestions_badge`` — sin
-    clave, la plantilla no pinta ni el hueco.
+    Free in the common case: when the row the page is already narrating is
+    the visitor's own and it is waiting, that row IS the answer and no second
+    statement is needed.  And with no live row at all there is nothing to look
+    for: every task in the USER band deserves a notification
+    (see ``ingest.notification_deserved``), so if ``_live_task`` found none
+    then none exists.
+
+    THE TWO CONTROLS OF THIS PAGE HANG OFF THIS ONE LOOKUP: moving your own
+    request to the front and taking it back are the same row, the same
+    permission and the same return address, so asking twice who owns what here
+    would be two answers waiting to disagree.
     """
-    row = summary(pos, now=now)
-    return {'live_request': row} if row is not None else {}
+    if not username or live is None:
+        return None
+    if live.state == PENDING and live.requested_by == username:
+        return live
+    return (AnalysisTask.objects
+            .filter(position=pos, state=PENDING, source=USER,
+                    requested_by=username)
+            .order_by('id').first())
+
+
+def bump_control(pos, username, live=None, back=''):
+    """The move-to-front control for THIS position, or ``{}``.
+
+    WHY IT LIVES HERE AND NOT ON THE ACCOUNT PAGE.  The button was born on
+    the queue list, one per waiting row, and there it was close to useless:
+    a list ordered by turn shows at the top the requests that already went
+    first, while the one somebody actually wants to overtake sits in place
+    one hundred and something, off the page.  "It would be better if the Move
+    to front was on the page of the position, because usually you want to
+    move something that's like hundreds in the queue to the front"
+    (Opabinia); "those buttons clog the interface and essentially useless
+    cause you suggest to move what is already basically in front of the queue
+    to the very front" (Wolfram).  Here there is exactly one request to talk
+    about, the visitor's own on the position in front of them, so there is one
+    control and it sits where the impatience is.
+
+    WHEN IT SHOWS: with a session, and with a PENDING request of your own
+    here.  Whoever JOINED somebody else's request (``also_requested_by``) does
+    not see it, because that row is not theirs and the endpoint would refuse
+    it.  The BUTTON needs one thing more, that the request can really move,
+    which costs one statement and earns it: a button that answers
+    'already-first' is worse than no button.
+
+    THE QUEUE PLACE PAINTED HERE IS THE PLACE OF THIS TASK, counted by the
+    same rule the account page prints beside every waiting row
+    (``queue_ahead``): a control has to show the number it acts on, or the
+    click cannot be read.  The place OUTLIVES the button on purpose, because
+    a click that moves a request also takes that request to the front of its
+    own queue and so takes the button away with it: with the number gone too,
+    the only visible effect of pressing would be that everything disappeared.
+
+    And it is not said TWICE: when the status line above is already narrating
+    this very request, the place is said there and only the button goes here.
+    """
+    return _bump_control_for(_own_pending(pos, username, live), live, back)
+
+
+def _bump_control_for(task, live, back):
+    """``bump_control`` over an ALREADY resolved row (§ ``_own_pending``).
+
+    Existe para que ``context`` pregunte una sola vez de quien es la peticion
+    de esta pagina y sirva con esa respuesta los dos controles.  La puerta
+    publica se queda como estaba: quien solo tiene la cuenta y la posicion
+    sigue llamando a ``bump_control``.
+    """
+    if task is None:
+        return {}
+    from .ingest import front_of_own_queue
+    can_move = front_of_own_queue(task) is not None
+    said = live is not None and live.id == task.id and live.state == PENDING
+    ahead = None if said else queue_ahead(task)
+    # ``None`` when the status line above already says it, and also when the
+    # task left the visitor band and has no place to report: an invented
+    # number here would be worse than none, exactly as in that status line.
+    place = None if ahead is None else ahead + 1
+    if not can_move and place is None:
+        return {}
+    return {'queue_bump': {
+        'task_id': task.id,
+        'can_move': can_move,
+        'place': place,
+        # Where the button comes back to, composed by the page and not echoed
+        # from the request: the endpoint takes it as a hint and refuses
+        # anything that is not a route of this site.
+        'back': back,
+    }}
+
+
+def withdraw_control(pos, username, live=None, back=''):
+    """The take-it-back control for THIS position, or ``{}``.
+
+    Peticion de comunidad (asfault): "is there a way to cancel requests before
+    they have started - for when you accidentally request analysis for some
+    already deeply analysed line".
+
+    VIVE AL LADO DEL DE ADELANTAR, y no por simetria: es que el sitio donde uno
+    se da cuenta del error es este.  Acabas de pedir analisis de esta posicion
+    y la tabla de abajo te esta ensenando que la linea ya estaba vista, asi que
+    la pagina que te lo cuenta es la que tiene que ofrecerte deshacerlo.  Los
+    dos controles hablan ADEMAS de la misma fila — tu peticion pendiente de
+    aqui — con el mismo permiso y la misma vuelta, asi que salen de la misma
+    consulta (§ ``_own_pending``).
+
+    LA CONDICION ES MAS CORTA QUE LA DEL BOTON DE ADELANTAR, y es deliberado:
+    aquel necesita ademas poder moverse, porque un boton que contesta
+    'already-first' no hace nada.  Retirar SIEMPRE hace algo — la peticion sale
+    de la cola — asi que basta con que la fila sea tuya y siga esperando.  La
+    primera de tu cola es justamente la que mas se quiere retirar: es la ultima
+    que pediste.
+
+    ``backers`` viaja para que la pagina pueda decir la verdad antes del click:
+    con mas gente detras, retirar te quita a TI y la peticion sigue viva bajo
+    la siguiente persona (§ ``ingest.withdraw_requester``).
+    """
+    return _withdraw_control_for(_own_pending(pos, username, live), back)
+
+
+def _withdraw_control_for(task, back):
+    """``withdraw_control`` over an ALREADY resolved row (§ ``_own_pending``)."""
+    if task is None:
+        return {}
+    return {'queue_withdraw': {
+        'task_id': task.id,
+        # Cuantas personas MAS esperan esta peticion.  Cero es el caso normal y
+        # entonces retirar la cierra; por encima de cero, retirar es dejar de
+        # esperarla tu.
+        'backers': task.backers or 0,
+        'back': back,
+    }}
+
+
+def context(pos, now=None, username='', back=''):
+    """What the template consumes: ``{}`` when there is nothing to say.
+
+    Same shape as ``depth.context`` and ``views._suggestions_badge``: with no
+    key, the template does not paint even the gap.
+
+    The live task is read ONCE and serves everything that hangs off it: the
+    status line, the move-to-front control and the take-it-back control.  Whose
+    request it is gets asked once too, and the two controls share the answer.
+    """
+    if pos.status != 'UNKNOWN':
+        return {}
+    live = _live_task(pos)
+    out = {}
+    row = _narrate(pos, live, now=now, username=username)
+    if row is not None:
+        out['live_request'] = row
+    own = _own_pending(pos, username, live)
+    out.update(_bump_control_for(own, live, back))
+    out.update(_withdraw_control_for(own, back))
+    return out

@@ -97,12 +97,18 @@
           aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"{% endif %}
           title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}{% if backed_source_url %}. Click to jump to the position this value comes from{% endif %}{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</{% if backed_source_url %}a{% else %}span{% endif %}>{% elif eval_walked %}<span
           class="backed-mark light"
-          title="this value came down a line the engine reported somewhere else. Nothing has searched this position itself yet: a claim, not a verdict">walked</span>{% endif %}{% endif %}{% if backed_repetition %} <span
-          class="backed-mark"
-          title="the line that carries this value returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}
+          title="this value came down a line the engine reported somewhere else. Nothing has searched this position itself yet: a claim, not a verdict">walked</span>{% endif %}{% endif %}
       {% else %}
         {{ pos.status }} <span class="dim">(practical, via {{ pos.closure }})</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}
-      {% endif %}
+      {% endif %}{% comment %}Como llego el visitante, cuando llego por un
+      salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
+      la pagina y viven fuera del if de arriba porque un salto por la linea
+      probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
+      {% endcomment %}{% if backed_repetition %} <span
+          class="backed-mark"
+          title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
+          class="backed-mark"
+          title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
     </div>
     {% comment %}La historia del conocimiento del nodo, antes de los botones:
     cuanto se busco AQUI y de que esta hecha la tabla de abajo.  Un visitante
@@ -128,8 +134,29 @@
       predicado (§ ingest.is_unexplored).{% endcomment %}
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
         title="Queues one engine search for each move in the table that no engine has searched yet">Analyse the {{ unexplored_count }} unanalysed move{{ unexplored_count|pluralize }}</button>{% endif %}
+      {% comment %}El tooltip cuenta las DOS formas de usarlo desde que hay
+      selector: sin elegir sigue moviendose a la linea siguiente cuando la de
+      antes esta entera, y con una elegida camina esa y para ahi.  Prometer lo
+      primero cuando alguien acaba de nombrar la 3 seria contradecir al
+      control que tiene al lado.{% endcomment %}
       {% if pv_verify_plies %}<button class="reqbtn" id="pvbtn"
-        title="Walks down this line and queues engine analysis where it is still missing. Skips what is already verified, and moves to the next line when this one is covered end to end">Verify PV</button>{% endif %}
+        title="Walks down a line and queues engine analysis where it is still missing, skipping what is already verified. With no line picked it moves on to the next one when a line is covered end to end; pick a line and it walks that one only">Verify PV</button>{% endif %}
+      {% comment %}QUE LINEA compra ese boton, y por eso al lado y no debajo:
+      es el argumento del click, no un ajuste posterior.  Sin el, el boton solo
+      sabia caer por la lista y pararse en el primer hueco, asi que mientras la
+      1 tuviera algo que comprar no habia forma de llegar a la 3: "verify PV
+      still completely useless for requesting other lines in PV than second -
+      it always tries to request first line" (Wolfram, 14-ago).
+
+      La primera opcion es lo que el boton ha hecho siempre y sigue siendo la
+      de por defecto: quien solo quiera comprar el hueco mas cercano hace el
+      mismo click de antes.  Las demas son los candidatos del paseo, con SUS
+      numeros y nombradas por su jugada (§ views._pv_verify_lines).
+
+      Con un candidato unico no se pinta: un desplegable de una opcion no es
+      una eleccion, es un adorno que ocupa sitio.{% endcomment %}
+      {% if pv_verify_lines|length > 1 %}<span class="pvlinechoice"><label class="pvlinelab" for="pvline">line</label><select id="pvline" class="pvline"
+        title="Which line of the engine output to walk. The default buys the nearest gap, moving on when a line is covered end to end; pick a line to walk that one and no other"><option value="0">nearest gap</option>{% for cand in pv_verify_lines %}<option value="{{ cand.index }}">{{ cand.index }}. {{ cand.label }}</option>{% endfor %}</select></span>{% endif %}
       <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
@@ -164,6 +191,58 @@
     <p class="livereq" id="livereq"{% if not live_request %} hidden{% endif %}><span
       class="chip {{ live_request.chip }}" id="livereq-chip"></span><span
       id="livereq-text">{{ live_request.text }}</span></p>
+    {% comment %}Adelantar TU peticion de esta posicion, y solo la tuya.  Va
+    aqui y no en la lista de la cola porque aqui es donde se decide: lo que se
+    quiere adelantar es la posicion que se esta mirando, no una fila que hay
+    que ir a buscar a la pagina de la cuenta ("it would be better if the Move
+    to front was on the page of the position", Opabinia).  El sitio de cola
+    que se pinta es el de ESTA peticion, solo sale cuando la linea de arriba
+    no lo ha dicho ya, y SOBREVIVE al boton: adelantar deja la peticion la
+    primera de su cola y con eso se lleva el boton, asi que sin el numero el
+    unico efecto visible del click seria que todo desaparecio
+    (§ live_request.bump_control).{% endcomment %}
+    {% comment %}Y retirarla, en el mismo renglon y por lo mismo: los dos
+    controles hablan de TU peticion de esta posicion, y este es ademas el sitio
+    donde uno se da cuenta del error ("cancel requests before they have started
+    ... when you accidentally request analysis for some already deeply analysed
+    line", asfault) — acabas de pedirla y la tabla de abajo te esta ensenando
+    que la linea ya estaba vista.
+
+    EL RENGLON SALE SI SALE CUALQUIERA DE LOS DOS, y esa condicion no es
+    cosmetica: retirar tiene la condicion mas corta — adelantar necesita ademas
+    tener a donde ir — asi que colgar el renglon de ``queue_bump`` escondia el
+    boton de retirar justo en la peticion que encabeza tu cola, que es la que
+    mas se quiere retirar porque es la ultima que pediste
+    (§ live_request.withdraw_control).{% endcomment %}
+    {% if queue_bump or queue_withdraw %}
+    <div class="livereq">{% if queue_bump.place %}<span class="dim">Your
+      request here is <span title="Place in the visitor queue: how many requests are served before this one">#{{ queue_bump.place }}</span>
+      in the visitor queue</span>{% endif %}{% if queue_bump.can_move %}<form
+      class="queue-bump" method="post"
+      action="/atomicdb/queue/bump/{{ queue_bump.task_id }}/">{% csrf_token %}
+      <input type="hidden" name="back" value="{{ queue_bump.back }}">
+      <button type="submit" title="Serve this one first out of everything you have waiting. It takes the place your own first request already held, so nobody else's request moves.">Move to front</button>
+      </form>{% endif %}{% if queue_withdraw %}<form
+      class="queue-cancel" method="post"
+      action="/atomicdb/queue/cancel/{{ queue_withdraw.task_id }}/">{% csrf_token %}
+      <input type="hidden" name="back" value="{{ queue_withdraw.back }}">
+      <button type="submit" title="{% if queue_withdraw.backers %}Take your name off this request. Other people asked for the same position, so it stays in the queue under them.{% else %}Take this request out of the queue. Nothing has been spent on it yet, and you can put it back.{% endif %}">Withdraw</button>
+      </form>{% endif %}</div>
+    {% endif %}
+    {% comment %}Y el recibo de lo que se acaba de hacer, con su deshacer: el
+    click vuelve AQUI (§ views._own_queue_page), asi que es esta pagina la que
+    tiene que decir que paso.  Sin esto, retirar desde la posicion dejaba la
+    linea en blanco y ni una palabra — que es justo lo que hace insegura una
+    accion de un solo click.{% endcomment %}
+    {% if queue_receipt %}
+    <div class="queue-receipt">{{ queue_receipt }}
+      {% if queue_undo_task %}<form method="post"
+        action="/atomicdb/queue/cancel/{{ queue_undo_task }}/">{% csrf_token %}
+        <input type="hidden" name="back" value="{{ queue_undo_back }}">
+        <input type="hidden" name="undo" value="1">
+        <button type="submit">Undo</button>
+      </form>{% endif %}</div>
+    {% endif %}
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>
@@ -347,6 +426,11 @@
         {% if depth_rungs %}
         const rung = chosenRung();
         if (rung) { body.budget = rung; }
+        // P2 (votada 28-ago): el peldano de 10B pide confirmacion explicita.
+        if (Number(rung) === 10000000000) {
+          if (!window.confirm('This queues a 10,000,000,000-node search. Sure?')) return;
+          body.confirm = '1';
+        }
         {% endif %}
         fetch('/atomicdb/request/{{ pos.key }}/', {
           method: 'POST',
@@ -383,11 +467,15 @@
               'already-requested': 'Already requested, waiting...',
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',
+              // Tu propia cola, no la de todos: desde el tope por
+              // persona lo unico que hay que esperar es lo tuyo.
+              'queue-full-account': 'You have too many requests waiting',
               {% if depth_rungs %}
               // Un peldano que la escalera ya no contiene. La pagina no puede
               // producirlo; si llega, la escalera cambio bajo una pestana
               // abierta y recargar la pone al dia.
               'bad-budget': 'That depth is gone, reload the page',
+              'confirm-10b': '10B requests need the confirmation dialog',
               {% endif %}
               'already-solved': 'Already solved',
               // depth ladder spent here: the request goes one ply deeper,
@@ -489,21 +577,28 @@
       // la segunda linea, y en el recuento a secas esas dos cosas se veian
       // igual.  La frase la compone el servidor, que es quien camino.
       const pvbtn = document.getElementById('pvbtn');
+      const pvline = document.getElementById('pvline');
       if (pvbtn) {
         pvbtn.addEventListener('click', function () {
           pvbtn.disabled = true;
           pvbtn.textContent = 'Queueing...';
           showNote('');   // un click nuevo no hereda el veredicto del anterior
           const pvRoute = new URLSearchParams(location.search).get('play') || '';
+          // La linea elegida viaja CON el click. Sin selector va '0', que es
+          // el hueco mas cercano y lo que el boton compraba antes de que se
+          // pudiera elegir.
+          const line = pvline ? pvline.value : '0';
           fetch('/atomicdb/pv-verify/' + key + '/',
                 {method: 'POST',
                  headers: {'Content-Type': 'application/x-www-form-urlencoded',
                            'X-CSRFToken': csrf()},
-                 body: new URLSearchParams({route: pvRoute}).toString()})
+                 body: new URLSearchParams({route: pvRoute,
+                                            line: line}).toString()})
             .then(r => r.json())
             .then(data => {
               showNote(data.message || '',
-                       data.status === 'nothing-to-do');
+                       data.status === 'nothing-to-do'
+                       || data.status === 'unknown-line');
               if (data.status === 'queued') {
                 const n = data.queued;
                 pvbtn.textContent = 'Queued ' + n + ' analys'
@@ -515,9 +610,22 @@
                   // verificado, o en vuelo desde un click anterior.
                   'nothing-to-do': 'Nothing left to verify here',
                   'queue-full': 'Queue is full, try later',
+              // Tu propia cola, no la de todos: desde el tope por
+              // persona lo unico que hay que esperar es lo tuyo.
+              'queue-full-account': 'You have too many requests waiting',
                   'already-solved': 'Already solved',
+                  // La lista de la pagina ya no es la de la posicion: un pase
+                  // nuevo aterrizo mientras esto estaba abierto.
+                  'unknown-line': 'That line is gone, reload',
                 }[data.status] || 'Something went wrong';
               }
+              // Con selector siempre queda otra linea que pedir, asi que el
+              // boton no se muere con el veredicto de UNA: lo que acaba de
+              // contestar es sobre la elegida, no sobre el nodo entero.
+              // Repetir no cuesta doble, el servidor devuelve "en vuelo"
+              // sobre lo que ya esta encolado.  Sin selector se queda como
+              // siempre: no hay nada mas que pedir desde aqui.
+              if (pvline) { pvbtn.disabled = false; }
             })
             .catch(() => {
               pvbtn.textContent = 'Network error, try again';
@@ -529,12 +637,30 @@
     })();
     </script>
     {% endif %}
+    {% comment %}El chip del final de la linea ES el salto, con la misma
+    forma que el chip de respaldo de la cabecera: un solo elemento, y solo
+    cuando el viaje existe de verdad (§ views, proven_end_url).  La linea que
+    lleva el chip es siempre la que se esta imprimiendo al lado, asi que el
+    aterrizaje no puede contradecir a lo que se lee.{% endcomment %}
+    {% comment %}El chip dice CUANTOS plies viaja antes de que nadie lo
+    pinche, con la misma forma que el chip de respaldo de la cabecera
+    (``backed ·12``).  La cifra es la longitud de la linea impresa al lado, no
+    una segunda medida: un salto que anunciara un numero propio podria
+    contradecir a lo que se esta leyendo.  Un mate en dos que aterrizaba un
+    ply antes del mate, sin decir que iba a hacerlo, es el reporte con el que
+    nacio esto.{% endcomment %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
-      <strong>{{ pos.won_line }}</strong></p>
+      <strong>{{ pos.won_line }}</strong>{% if proven_end_url %} <a
+        class="backed-mark" href="{{ proven_end_url }}"
+        aria-label="jump to the last position of this winning line, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below"
+        title="Follow this line to its end and land on the position it finishes at, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below">end of line ·{{ proven_end_plies }}</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
     <p style="font-size:.85rem"><span class="dim">witness move:</span>
-      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span></p>
+      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
+        class="backed-mark" href="{{ proven_end_url }}"
+        aria-label="jump to the last position this witness leads to"
+        title="Follow the witness move of each position down to where the line ends">end of line</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MATE_PV' and not pos.won_line %}
     <p class="dim" style="font-size:.8rem">closed before line recording was added;
       the mate was verified move by move at closure time</p>
@@ -596,7 +722,9 @@
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
+            class="backed-mark"
+            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
