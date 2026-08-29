@@ -275,7 +275,10 @@ def service_order(queryset, now=None):
 
 
 def _queue_ahead_cache_key(task_id):
-    return 'atomicdb.qahead.%d' % task_id
+    # v2 stores a pair instead of the legacy integer.  A distinct namespace
+    # prevents a pre-deploy value from being decoded with the new shape while
+    # keeping bump invalidation tied to the same helper.
+    return 'atomicdb.qplace.%d' % task_id
 
 
 def invalidate_queue_ahead(task_id):
@@ -316,19 +319,45 @@ def queue_ahead(task):
     """
     if task is None:
         return None
+    place = queue_ahead_pair(task)
+    return None if place is None else place[0]
+
+
+def queue_ahead_pair(task):
+    """``(cuantas cobran antes, cuantas de ellas de esta misma cuenta)``.
+
+    LAS DOS CIFRAS SALEN DE LA MISMA PASADA (§ ``queue_ahead_map``): el bucle
+    que ordena la banda ya recorre cada fila, asi que contar ademas las de una
+    cuenta no cuesta ni una consulta mas.  Es la mitad que le faltaba al panel
+    — ver ``_place_text``, donde esta escrito por que.
+
+    LA CLAVE DE CACHE CAMBIO CON LA FORMA DEL VALOR, y no es cosmetico: la
+    anterior guardaba un entero, y una entrada suya sobreviviendo a un deploy
+    le daria a este codigo un ``int`` donde espera un par.  Veinte segundos de
+    ventana bastan para reventar una portada; una clave nueva no puede.
+    """
+    if task is None:
+        return None
     from django.core.cache import cache
     clave = _queue_ahead_cache_key(task.id)
-    # -1 codifica el None de "fuera de la banda servible": un None a secas en
-    # la cache es indistinguible de un fallo y recomputaria cada render.
+    FUERA_DE_BANDA = (-1, -1)
+    # ``FUERA_DE_BANDA`` codifica el None de "no lo sirve nadie por aqui": un
+    # None a secas en la cache es indistinguible de un fallo y recomputaria en
+    # cada render.  Se NORMALIZA antes de guardar, no solo al guardar: dejar
+    # ``sitio`` en None y cachear el centinela aparte deja las dos ramas
+    # diciendo cosas distintas, que es como un ``tuple(None)`` acaba en la
+    # portada.
     sitio = cache.get(clave)
     if sitio is None:
         sitio = queue_ahead_map([task]).get(task.id)
-        cache.set(clave, -1 if sitio is None else sitio, 20)
-    return None if sitio == -1 else sitio
+        if sitio is None:
+            sitio = FUERA_DE_BANDA
+        cache.set(clave, sitio, 20)
+    return None if tuple(sitio) == FUERA_DE_BANDA else tuple(sitio)
 
 
 def queue_ahead_map(tasks):
-    """``{id: cuantas peticiones cobran antes}`` para varias, UNA consulta.
+    """``{id: (cuantas delante, cuantas propias)}`` en UNA consulta.
 
     El perfil de una cuenta pinta hasta veinte filas de su cola.  Preguntar el
     sitio de cada una por separado seria ordenar la banda entera veinte veces,
@@ -339,20 +368,29 @@ def queue_ahead_map(tasks):
     sitio en la cola porque no la va a servir nadie — y quien pregunte recibe
     ``None`` en vez de un numero inventado.
     """
-    wanted = {task.id for task in tasks
+    wanted = {task.id: (task.lane_account or task.requested_by)
+              for task in tasks
               if task.state == PENDING and task.source == USER}
     if not wanted:
         return {}
     band = (AnalysisTask.objects.filter(source=USER)
             .filter(CHARGED).filter(SERVEABLE))
-    places, ahead = {}, 0
-    for task_id, state in service_order(band).values_list('id', 'state'):
+    # ``mias`` cuenta, POR CUENTA, lo que esa cuenta lleva ya visto en esta
+    # misma pasada.  La clave es la del REPARTO (``lane_account or
+    # requested_by``, § ``_effective_account``), que es la particion de la que
+    # sale el numero, asi que las dos cifras hablan de la misma cola.
+    places, ahead, mias = {}, 0, {}
+    for task_id, state, lane, author in service_order(band).values_list(
+            'id', 'state', 'lane_account', 'requested_by'):
         if task_id in wanted:
-            places[task_id] = ahead
+            places[task_id] = (ahead, mias.get(wanted[task_id], 0))
         # Lo que ya esta corriendo pesa en el reparto pero no es COLA: quien
         # espera quiere saber cuantas PETICIONES le faltan por delante, y la
         # que tiene un worker encima ya no esta esperando a nadie.
-        ahead += state == PENDING
+        if state == PENDING:
+            ahead += 1
+            clave = lane or author
+            mias[clave] = mias.get(clave, 0) + 1
     return places
 
 
@@ -427,6 +465,120 @@ def _left_text(seconds):
     return f'about {seconds / 3600:.1f} h left'
 
 
+# Ventana con la que se mide el RITMO de la banda de visitante.  Diez
+# minutos son los mismos que la portada usa para su ritmo
+# (§ ``metrics.RATE_MINUTES``) y por lo mismo: mas corta la mueve un valle de
+# dos workers, mas larga tarda en enterarse de que la flota se fue a dormir.
+WAIT_RATE_MINUTES = 10
+# Cuantas tareas hacen falta en esa ventana para que el ritmo signifique algo.
+# Con cuatro cierres en diez minutos, "148 por delante" se convierte en horas
+# de promesa construida sobre cuatro medidas: eso no es una estimacion, es una
+# extrapolacion con cara de dato.  Por debajo de esto no se dice ningun
+# tiempo, que es LA regla de este modulo.
+WAIT_RATE_MIN_SAMPLE = 20
+WAIT_RATE_CACHE_SECONDS = 30
+
+
+def _band_rate(now=None):
+    """Peticiones de visitante por segundo que la flota cierra, o ``None``.
+
+    Un COUNT sobre ``atomic_task_state_done`` (el indice ya existe) acotado a
+    la ventana, compartido treinta segundos: esto lo pregunta cada render del
+    explorador y el ritmo de una flota no cambia entre dos.
+
+    Devuelve ``None`` cuando la muestra es demasiado pequena para sostener una
+    cuenta, que es la unica respuesta honesta: sin ritmo medido no hay tiempo
+    que decir.
+    """
+    from django.core.cache import cache
+
+    served = cache.get('atomicdb.bandrate')
+    if served is None:
+        served = AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.COMPLETED, source=USER,
+            completed__gte=(now or timezone.now()) - timedelta(
+                minutes=WAIT_RATE_MINUTES)).count()
+        cache.set('atomicdb.bandrate', served, WAIT_RATE_CACHE_SECONDS)
+    if served < WAIT_RATE_MIN_SAMPLE:
+        return None
+    return served / (WAIT_RATE_MINUTES * 60.0)
+
+
+def _wait_text(ahead, now=None):
+    """' · about 14 min', o '' cuando no hay con que decirlo.
+
+    MISMA REGLA QUE LA CUENTA ATRAS DE UN ARRIENDO, y a proposito: se calla
+    cuando no hay medida (§ ``_band_rate``) y se calla cuando el resultado
+    pasa de ``MAX_PROMISE_SECONDS``, exactamente donde ``_seconds_left`` se
+    calla.  Un puesto en la cola sin tiempo al lado se lee como un castigo;
+    un tiempo inventado es peor que el silencio.
+
+    REDONDEO GRUESO Y SIN "left": esto no es una cuenta atras de algo que ya
+    esta corriendo, es cuanto suele tardar la cola en llegar hasta aqui.
+    """
+    rate = _band_rate(now)
+    if not rate or ahead <= 0:
+        return ''
+    seconds = ahead / rate
+    if seconds > MAX_PROMISE_SECONDS:
+        return ''
+    if seconds < 60:
+        return ' · under a minute'
+    minutes = round(seconds / 60)
+    if minutes < 120:
+        return f' · about {minutes} min'
+    return f' · about {seconds / 3600:.1f} h'
+
+
+def _is_yours(task, username):
+    """Solo se le dicen "tuyas" a la cuenta de la que de verdad son.
+
+    La comparacion es contra la cuenta del REPARTO y no contra el autor: el
+    numero que acompana sale de esa particion (§ ``queue_ahead_map``), asi que
+    con un carril prestado las filas contadas son las del prestamista y
+    llamarlas "tuyas" al autor seria contarle una cola que no es la suya.
+    """
+    return bool(username) and username == (task.lane_account
+                                           or task.requested_by)
+
+
+def _place_text(task, username='', now=None):
+    """"148 requests ahead, 70 of them yours · about 14 min".
+
+    POR QUE TRES PIEZAS Y NO SOLO LA PRIMERA.  El numero a secas era verdad y
+    se leia como un castigo.  opabinia lo reporto el 19-ago: "cientos de
+    peticiones, nada corriendo, y la siguiente aparece en el #148 aunque nadie
+    mas tenga cola".  Reconstruida la banda de aquellos dias, el #148 existia
+    y era correcto — sus filas llegaron a ver hasta el #203 — pero de los 201
+    que una tenia delante 70 eran SUYOS, y la banda tenia 5.883 filas de otras
+    cuatro cuentas.  Ni la cola estaba vacia ni el sitio era un castigo: era
+    un reparto por cuenta haciendo su trabajo.  Las dos cifras que faltaban
+    contestan las dos mitades del reporte y salen del bucle que ya se recorre,
+    sin una consulta mas.
+
+    EL TIEMPO ES LA TERCERA, y es la que convierte un puesto en una espera:
+    aquel #201, al ritmo medido de la flota, eran unos catorce minutos.
+
+    ESTO NO ORDENA NADA.  Es texto: el reparto (§ ``SERVICE_KEYS``) no lo lee
+    y el puesto que se pinta es exactamente el que ya se pintaba.
+    """
+    place = queue_ahead_pair(task)
+    if place is None:
+        # Una tarea de grado peticion que NO va por la banda de visitante
+        # (§ ingest.enqueue_unexplored_children puede degradar a AUTO una
+        # que nacio de un click): cobra despues de todas las de visitante,
+        # asi que su sitio en la cola no es el que cuenta esa cifra y no se
+        # inventa uno.
+        return 'visitor requests are served first'
+    ahead, own = place
+    if not ahead:
+        return 'next up'
+    text = f'{ahead} request{"" if ahead == 1 else "s"} ahead'
+    if own and _is_yours(task, username):
+        text += f', {own} of them yours'
+    return text + _wait_text(ahead, now)
+
+
 def _backers_text(task):
     """' · 3 people asked for this', o cadena vacia si solo la pidio uno.
 
@@ -452,7 +604,7 @@ def _quiet_text(silence, dead):
     return f'{said}, so it goes back in the queue' if dead else said
 
 
-def summary(pos, now=None):
+def summary(pos, now=None, username=''):
     """La linea del explorador para esta posicion, o ``None`` si no hay nada.
 
     ``{'text': ..., 'chip': ...}``, con el texto YA compuesto: la pagina lo
@@ -467,10 +619,10 @@ def summary(pos, now=None):
         # peticion ni existe.  Ademas asi el explorador de una posicion cerrada
         # no paga ni una consulta por esto.
         return None
-    return _narrate(pos, _live_task(pos), now=now)
+    return _narrate(pos, _live_task(pos), now=now, username=username)
 
 
-def _narrate(pos, task, now=None):
+def _narrate(pos, task, now=None, username=''):
     """The line for ONE already-read task, or ``None`` when there is none.
 
     Split out of ``summary`` so the page can read the live task ONCE and use
@@ -490,18 +642,7 @@ def _narrate(pos, task, now=None):
         # que un click perdido — la pagina seguia contando la peticion de otro
         # y nada acusaba recibo de la suya.
         crowd = _backers_text(task)
-        ahead = queue_ahead(task)
-        if ahead is None:
-            # Una tarea de grado peticion que NO va por la banda de visitante
-            # (§ ingest.enqueue_unexplored_children puede degradar a AUTO una
-            # que nacio de un click): cobra despues de todas las de visitante,
-            # asi que su sitio en la cola no es el que cuenta esa cifra y no se
-            # inventa uno.
-            place = 'visitor requests are served first'
-        elif ahead:
-            place = f'{ahead} request{"" if ahead == 1 else "s"} ahead'
-        else:
-            place = 'next up'
+        place = _place_text(task, username, now)
         return {'text': f'Waiting for a worker · {budget} · {place}{crowd}',
                 'chip': 'cold'}
 
@@ -678,7 +819,7 @@ def context(pos, now=None, username='', back=''):
         return {}
     live = _live_task(pos)
     out = {}
-    row = _narrate(pos, live, now=now)
+    row = _narrate(pos, live, now=now, username=username)
     if row is not None:
         out['live_request'] = row
     own = _own_pending(pos, username, live)

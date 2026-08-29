@@ -26,7 +26,7 @@ from .management.commands._atomicdb_sqlite import (
     atomicdb_tables_for_migrations,
     validate_migrations,
 )
-from .models import Position
+from .models import ContributorPref, Position
 from .testing import TransactionTestCase
 
 
@@ -233,6 +233,7 @@ class SQLiteSplitCommandTests(TransactionTestCase):
             eval_cp=17,
             nodes_invested=1234,
         )
+        ContributorPref.objects.create(account='split-owner', lifo_queue=True)
         connections['default'].ensure_connection()
         backup = sqlite3.connect(self.source)
         try:
@@ -285,6 +286,8 @@ class SQLiteSplitCommandTests(TransactionTestCase):
             'atomicdb.0013_progresssnapshot',
         )
         self.assertEqual(payload['tables']['atomicdb_position']['rows'], 1)
+        self.assertEqual(
+            payload['tables']['atomicdb_contributorpref']['rows'], 1)
         self.assertEqual(len(payload['line_id']), 64)
         self.assertEqual(len(payload['origin_snapshot_sha256']), 64)
 
@@ -300,6 +303,12 @@ class SQLiteSplitCommandTests(TransactionTestCase):
                 destination.execute(
                     'SELECT COUNT(*) FROM atomicdb_position').fetchone()[0],
                 1,
+            )
+            self.assertEqual(
+                destination.execute(
+                    'SELECT account, lifo_queue '
+                    'FROM atomicdb_contributorpref').fetchone(),
+                ('split-owner', 1),
             )
             self.assertEqual(
                 destination.execute('PRAGMA journal_mode').fetchone()[0].lower(),

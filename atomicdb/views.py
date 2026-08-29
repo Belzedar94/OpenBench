@@ -34,6 +34,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      DBEvent, Edge, OpeningNameSuggestion, Position,
                      ProgressSnapshot, ProofCampaign, ProofNode, RequestLog,
                      SolveTask, WorkerPing)
+from .models import ContributorPref
 
 LEASE_MINUTES = 10
 LEGACY_LEASE_MINUTES = 24 * 60
@@ -522,6 +523,14 @@ def _locked_in_order(ordered):
                 yield task
 
 
+# P7 (comunidad, 3-0, 28-ago-2026): cuentas de LA CASA.  Su hierro come de
+# la marea de fondo (AUTO/FILL) y de sus propias peticiones; un click de
+# visitante nunca cae en su plato.  La flota comunitaria sigue sirviendolo
+# todo — esto retira al worker de codex de la banda USER ajena, que era lo
+# votado tras la queja de Eclipsia (25-ago).
+HOUSE_ACCOUNTS = frozenset({'codex_local_worker'})
+
+
 @csrf_exempt
 def api_lease(request):
     user = _auth(request)
@@ -667,6 +676,11 @@ def api_lease(request):
                 .filter(live_request.SERVEABLE)
                 .annotate(queue_rank=human_rank, own_first=own_first,
                           named_first=named_first))
+            # P7: la casa no toca peticiones USER ajenas (v. HOUSE_ACCOUNTS).
+            if user.username in HOUSE_ACCOUNTS:
+                ordered = ordered.exclude(
+                    Q(source=AnalysisTask.Source.USER)
+                    & ~Q(requested_by=user.username))
             # Los dos escalones del medio se leen de ``live_request`` — son
             # LOS MISMOS objetos que usa el estimador, no una copia parecida.
             #
@@ -1068,7 +1082,11 @@ def _sha_field(raw):
 # (respuesta perdida tras el commit, proceso zombi con la misma identidad de
 # maquina) y dos patrones distintos serian dos superficies de fallo.
 
-SOLVE_LEASE_MINUTES = 20
+# La ventana la define ``ingest`` desde que el barrido de arriendos muertos
+# dejo de vivir aqui dentro (§ ``ingest.recycle_stale_solve_leases``): un
+# arriendo caduca porque pasa el tiempo, no porque llegue una peticion.  Se
+# reexporta con el mismo nombre para no tocar ninguna de sus referencias.
+SOLVE_LEASE_MINUTES = ingest.SOLVE_LEASE_MINUTES
 MAX_SOLVE_CERTIFICATE_BYTES = solve.MAX_COMPRESSED_BYTES
 
 
@@ -1085,12 +1103,9 @@ def api_solve_acquire(request):
     with atomic():
         now = timezone.now()
         stale = now - timedelta(minutes=SOLVE_LEASE_MINUTES)
-        SolveTask.objects.filter(
-            state='LEASED', leased_at__lt=stale,
-        ).filter(Q(lease_heartbeat_at__isnull=True)
-                 | Q(lease_heartbeat_at__lt=stale)).update(
-            state='PENDING', machine='', lease_heartbeat_at=None,
-            lease_token='', lease_session='')
+        # El mismo barrido de siempre, ahora en ``ingest`` porque el ciclo
+        # periodico tambien tiene que poder hacerlo sin pasar por aqui.
+        ingest.recycle_stale_solve_leases(now=now)
 
         active = (SolveTask.objects.select_for_update()
                   .select_related('position')
@@ -1309,6 +1324,53 @@ def api_request_unexplored(request, key):
             'candidates': len(pending)})
     return JsonResponse({'status': 'queued', 'queued': queued,
                          'candidates': len(pending)})
+
+
+def api_my_queue(request):
+    """La cola PROPIA en JSON: ids, estado y los enlaces para actuar.
+
+    P3 (comunidad, 2-0, 28-ago-2026), peticion de Eclipsia (20-ago): sin los
+    ids una retirada por script era imposible.  Solo GET, solo la cuenta
+    logueada, y las filas en EL MISMO orden que pinta el perfil: lo arrendado
+    delante, luego ``queue_seq`` y llegada.
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET only'}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'login required'}, status=401)
+    running_first = Case(When(state=AnalysisTask.TState.LEASED, then=Value(0)),
+                         default=Value(1), output_field=IntegerField())
+    rows = (AnalysisTask.objects
+            .filter(requested_by=request.user.username,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED))
+            .select_related('position')
+            .annotate(_run=running_first)
+            .order_by('_run', 'queue_seq', 'id'))
+    tasks = [{'task_id': t.id,
+              'position': t.position.key,
+              'fen': t.position.fen,
+              'budget_nodes': t.budget_nodes,
+              'state': t.state,
+              'queue_seq': t.queue_seq,
+              'bump': '/atomicdb/queue/bump/%d/' % t.id,
+              'cancel': '/atomicdb/queue/cancel/%d/' % t.id}
+             for t in rows[:200]]
+    return JsonResponse({'account': request.user.username, 'tasks': tasks})
+
+
+def api_pref_lifo(request):
+    """Interruptor "newest first" del perfil propio (P5).  POST y de vuelta."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'login required'}, status=401)
+    pref, _ = ContributorPref.objects.get_or_create(
+        account=request.user.username)
+    pref.lifo_queue = request.POST.get('lifo') == '1'
+    pref.save(update_fields=['lifo_queue'])
+    own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
+    return redirect(own_page)
 
 
 def api_pv_verify(request, key):
@@ -1560,6 +1622,14 @@ def _api_request_once(request, key):
     chosen, invalid = depth.chosen_rung(request)
     if invalid:
         return JsonResponse({'status': 'bad-budget'}, status=400)
+    # P2 (comunidad, 5-0, 28-ago-2026): el ultimo peldano no entra sin
+    # ``confirm=1``.  Un click accidental de 10B eran horas de flota sin
+    # vuelta atras una vez arrendado (math_god y Eclipsia, 25-ago); el
+    # explorador manda la marca tras un dialogo y un script que de verdad
+    # quiere 10B la escribe a mano.
+    if (chosen == ingest.REQUEST_BUDGET_LADDER[-1]
+            and request.POST.get('confirm') != '1'):
+        return JsonResponse({'status': 'confirm-10b'}, status=400)
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
     payload, status = _queue_request(
@@ -3230,6 +3300,11 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
+#   * ``SOLVE_LEASE_RECYCLED`` — cuantos arriendos SOLVE muertos devolvio a
+#     la cola una pasada del ciclo (§ ``ingest.recycle_stale_solve_leases``).
+#     Es higiene de cola, no una noticia sobre el arbol: no lleva ``key``, no
+#     concluye nada y hablar de ello en la portada seria contarle al visitante
+#     que se nos murio un worker.
 #   * ``ARM_RATE_BUDGET`` — el recibo de un brazo del walker que alcanzo su
 #     techo de gasto por hora (§ ingest, presupuesto HORARIO de los brazos).
 #     Dice que NO se compro nada, que es lo contrario de una noticia sobre el
@@ -3270,6 +3345,7 @@ FEED_HIDDEN_KINDS = {
     'REVOKE_GUARD',
     'SOLVE_DISPUTE_SIGNAL',
     'SOLVE_GATE_DISAGREE',
+    'SOLVE_LEASE_RECYCLED',
     'SOLVE_REJECTED',
     'SOLVE_VERIFIED',
     'SURVIVE_VERIFIED',
@@ -4346,7 +4422,12 @@ def api_live_request(request, key):
     pos = Position.objects.filter(key=key).only('key', 'status').first()
     if pos is None:
         return JsonResponse({'error': 'unknown position'}, status=404)
-    row = live_request.summary(pos)
+    # El mismo texto que pinta la pagina, con el mismo visitante: la linea
+    # dice "N of them yours" solo a quien de verdad las tiene en cola, asi que
+    # el sondeo tiene que saber quien pregunta o devolveria otra frase.
+    row = live_request.summary(
+        pos, username=(request.user.username
+                       if request.user.is_authenticated else ''))
     if row is None:
         return JsonResponse({'live': False})
     return JsonResponse({'live': True, **row})
@@ -5040,6 +5121,11 @@ def contributor(request, username):
         **_suggestions_badge(request),
         **_queue_receipt(request, viewer == username),
         'is_self': viewer == username,
+        # P5 (comunidad, 3-0, 28-ago-2026): el interruptor "newest first"
+        # existe solo en el perfil PROPIO — la preferencia es de la cuenta.
+        'lifo_toggle': viewer == username,
+        'lifo_on': bool(viewer == username and ContributorPref.objects.filter(
+            account=viewer, lifo_queue=True).exists()),
         # Los titulos hablan de la persona que se esta mirando: "Your queue"
         # cuando eres tu, "alice's queue" cuando no.  La pagina es publica y
         # tutear al visitante sobre la cola de otro seria mentirle.

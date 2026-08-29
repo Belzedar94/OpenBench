@@ -71,13 +71,28 @@ class EnqueueDebtTests(TestCase):
         self.assertEqual(ingest.enqueue_engine_debt(), 0)
         self.assertEqual(SolveTask.objects.count(), 1)
 
-    def test_the_cap_is_counted_over_the_WHOLE_pending_queue(self):
-        """A pile of debt must not bury a visitor request."""
+    def test_the_cap_is_counted_over_THIS_ARM_and_no_other(self):
+        """Un cupo compartido no priorizaba a nadie: apagaba brazos.
+
+        Contando la cola SOLVE entera, las cincuenta filas del brazo fragil se
+        restaban de las quinientas de la deuda.  Medido el 20-ago: 550 PENDING
+        contra un cap de 500, los dos brazos en ``room=0`` desde julio.  Que
+        una peticion de visitante no quede enterrada lo defiende el ORDEN DE
+        SERVICIO y no el cupo (§ ``DebtIsServedLastTests``), asi que separar
+        los cupos no le quita el turno a nadie.
+        """
         pos = ingest.get_or_create_position(logic.start_fen())
         SolveTask.objects.create(position=pos, goal='WHITE_WIN',
-                                 budget_nodes=100_000_000)
+                                 budget_nodes=100_000_000,
+                                 arm=ingest.FRAGILE_ARM)
         _engine_debt()
 
+        self.assertEqual(ingest.enqueue_engine_debt(cap=1), 1)
+
+    def test_the_arms_own_pending_rows_still_hold_it_back(self):
+        _engine_debt()
+        self.assertEqual(ingest.enqueue_engine_debt(cap=1), 1)
+        _engine_debt('7k/6p1/8/8/8/1P6/8/Q3K3 w - - 0 1')
         self.assertEqual(ingest.enqueue_engine_debt(cap=1), 0)
 
     def test_the_cap_tops_up_only_the_room_that_is_left(self):
@@ -376,3 +391,137 @@ class PilotRoundTwoTests(TestCase):
             self.assertEqual(task.budget_stage, 'F0')
             self.assertEqual(task.budget_nodes, ingest.DEBT_STAGE_NODES)
             self.assertEqual(task.goal, 'WHITE_WIN')
+
+
+class RecycleStaleSolveLeasesTests(TestCase):
+    """Un arriendo SOLVE caduca porque pasa el tiempo, no porque llegue nadie.
+
+    El barrido vivia SOLO dentro de ``views.api_solve_acquire``.  Con la flota
+    sin un solo worker en modo ``--solve`` — cero peticiones a
+    ``/api/solve/acquire`` en toda la ventana de logs retenida — el unico
+    reloj que podia caducar un arriendo no corria: el 20-ago quedaba una fila
+    LEASED desde el 29-jul a las 16:02, veintidos dias dentro de una ventana
+    de veinte minutos.
+    """
+
+    def _leased(self, minutes_ago):
+        from django.utils import timezone as tz
+        from datetime import timedelta as td_
+
+        pos = ingest.get_or_create_position(logic.start_fen())
+        when = tz.now() - td_(minutes=minutes_ago)
+        return SolveTask.objects.create(
+            position=pos, goal='WHITE_WIN', budget_nodes=2_000_000,
+            arm=ingest.DEBT_ARM, state='LEASED', machine='ghost',
+            leased_at=when, lease_heartbeat_at=when,
+            lease_token='t', lease_session='s')
+
+    def test_a_lease_with_a_dead_heartbeat_goes_back_to_the_queue(self):
+        task = self._leased(ingest.SOLVE_LEASE_MINUTES + 5)
+
+        self.assertEqual(ingest.recycle_stale_solve_leases(), 1)
+
+        task.refresh_from_db()
+        self.assertEqual(task.state, 'PENDING')
+        self.assertEqual(task.machine, '')
+        self.assertEqual(task.lease_token, '')
+        self.assertEqual(task.lease_session, '')
+        self.assertIsNone(task.lease_heartbeat_at)
+
+    def test_a_live_lease_is_left_alone(self):
+        task = self._leased(1)
+
+        self.assertEqual(ingest.recycle_stale_solve_leases(), 0)
+
+        task.refresh_from_db()
+        self.assertEqual(task.state, 'LEASED')
+
+    def test_a_clean_pass_writes_no_event(self):
+        self._leased(1)
+
+        ingest.recycle_stale_solve_leases()
+
+        self.assertFalse(DBEvent.objects.filter(
+            kind='SOLVE_LEASE_RECYCLED').exists())
+
+    def test_recycling_says_so_in_the_diary(self):
+        self._leased(ingest.SOLVE_LEASE_MINUTES + 5)
+
+        ingest.recycle_stale_solve_leases()
+
+        event = DBEvent.objects.get(kind='SOLVE_LEASE_RECYCLED')
+        self.assertEqual(event.payload['freed'], 1)
+
+    def test_the_recycled_row_is_servable_again(self):
+        """Y vuelve a contar para el cupo de SU brazo, no del de al lado."""
+        self._leased(ingest.SOLVE_LEASE_MINUTES + 5)
+
+        ingest.recycle_stale_solve_leases()
+
+        self.assertEqual(SolveTask.objects.filter(
+            state='PENDING', arm=ingest.DEBT_ARM).count(), 1)
+
+
+class Autosolve95Tests(TestCase):
+    """The +-95 arm closes only measured, live candidates and obeys its cap."""
+
+    def _position(self, suffix, **fields):
+        defaults = {
+            'key': f'{suffix:064d}',
+            'fen': logic.start_fen(),
+            'status': 'UNKNOWN',
+            'expanded': False,
+        }
+        defaults.update(fields)
+        return Position.objects.create(**defaults)
+
+    def test_both_signs_get_the_corresponding_goal_and_fixed_f0_budget(self):
+        white = self._position(100, eval_cp=ingest.AUTOSOLVE95_THRESHOLD)
+        black = self._position(
+            101, backed_eval=-(ingest.AUTOSOLVE95_THRESHOLD + 1))
+
+        self.assertEqual(ingest.enqueue_autosolve95(cap=8), 2)
+
+        tasks = {task.position_id: task for task in SolveTask.objects.all()}
+        self.assertEqual(tasks[white.key].goal, 'WHITE_WIN')
+        self.assertEqual(tasks[black.key].goal, 'BLACK_WIN')
+        self.assertEqual({task.arm for task in tasks.values()},
+                         {ingest.AUTOSOLVE95_ARM})
+        self.assertEqual({task.budget_nodes for task in tasks.values()},
+                         {ingest.AUTOSOLVE95_STAGE_NODES})
+
+    def test_closed_weak_and_already_scheduled_positions_are_ignored(self):
+        self._position(110, eval_cp=ingest.AUTOSOLVE95_THRESHOLD - 1)
+        self._position(111, eval_cp=ingest.AUTOSOLVE95_THRESHOLD,
+                       status='WHITE_WIN')
+        taken = self._position(112, eval_cp=ingest.AUTOSOLVE95_THRESHOLD)
+        SolveTask.objects.create(position=taken, goal='WHITE_WIN',
+                                 budget_nodes=2_000_000, arm='visitor')
+
+        self.assertEqual(ingest.enqueue_autosolve95(cap=8), 0)
+        self.assertEqual(SolveTask.objects.count(), 1)
+
+    def test_the_cap_counts_only_this_arm_but_no_position_is_duplicated(self):
+        occupied = self._position(120)
+        existing = self._position(121)
+        candidate = self._position(
+            122, eval_cp=ingest.AUTOSOLVE95_THRESHOLD + 1)
+        SolveTask.objects.create(position=occupied, goal='WHITE_WIN',
+                                 budget_nodes=2_000_000, arm='visitor')
+        SolveTask.objects.create(position=existing, goal='WHITE_WIN',
+                                 budget_nodes=ingest.AUTOSOLVE95_STAGE_NODES,
+                                 arm=ingest.AUTOSOLVE95_ARM)
+
+        self.assertEqual(ingest.enqueue_autosolve95(cap=2), 1)
+        self.assertTrue(SolveTask.objects.filter(
+            position=candidate, arm=ingest.AUTOSOLVE95_ARM).exists())
+        self.assertEqual(SolveTask.objects.filter(position=occupied).count(), 1)
+
+    def test_a_nonempty_pass_writes_one_bounded_receipt(self):
+        self._position(130, eval_cp=ingest.AUTOSOLVE95_THRESHOLD)
+
+        ingest.enqueue_autosolve95(cap=3)
+
+        event = DBEvent.objects.get(kind='AUTOSOLVE95_ENQUEUED')
+        self.assertEqual(event.payload,
+                         {'created': 1, 'pending_before': 0, 'cap': 3})

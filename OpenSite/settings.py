@@ -34,6 +34,40 @@ DEBUG = os.environ.get('OPENBENCH_DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ['*']
 
+# Django's stock logging sends unhandled view exceptions to django.request, and
+# its console handler is gated on require_debug_true. In production that leaves
+# mail_admins as the only handler, and with no mail backend configured a 500 is
+# written down nowhere at all: the worker sees "unable to reach the server", the
+# journal stays silent, and the only evidence left is a status code in nginx.
+# This adds the console back at ERROR so the traceback lands in the journal
+# where journalctl -u openbench can find it. It does not turn DEBUG on and it
+# does not put anything in the response. Django applies this on top of its own
+# defaults rather than in place of them, and propagate stays on, so mail_admins
+# keeps receiving exactly what it received before.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'openbench': {
+            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console_errors': {
+            'class': 'logging.StreamHandler',
+            'level': 'ERROR',
+            'formatter': 'openbench',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console_errors'],
+            'level': 'ERROR',
+            'propagate': True,
+        },
+    },
+}
+
 # The public web goes through an HTTPS tunnel in front of runserver; Django's
 # CSRF origin check needs the tunnel origin trusted or every login/form POST
 # 403s. Comma-separated env override; the default trusts TryCloudflare quick

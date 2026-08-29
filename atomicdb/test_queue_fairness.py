@@ -449,6 +449,7 @@ class FairShareTests(_QueueHarness):
         self.assertEqual(served[2:80], [task.id for task in light[1:79]])
         self.assertEqual(served[80], deep[1].id)
 
+
     def test_the_burst_of_the_sixth_of_august_no_longer_blocks_a_newcomer(self):
         """RECIBO: 1.562 de una cuenta, y detras UNA de un recien llegado."""
         burst = self._queue('soothdest', [self.RUNG] * 1562)
@@ -492,6 +493,56 @@ class FairShareTests(_QueueHarness):
         self.assertEqual(len(served), len(pending))
         self.assertEqual([estimated[task_id] for task_id in served],
                          list(range(len(served))))
+
+
+class HouseWorkerPolicyTests(TestCase):
+    """House iron serves background or its own clicks, never foreign USER."""
+
+    def setUp(self):
+        worker_account('codex_local_worker', 'p')
+        worker_account('community', 'p')
+        self.client = Client()
+
+    def _task(self, suffix, source, requested_by=''):
+        position = Position.objects.create(
+            key=f'{9000 + suffix:064d}', fen=logic.start_fen(),
+            status='UNKNOWN', expanded=False, priority=float(suffix))
+        return AnalysisTask.objects.create(
+            position=position, generation=0, budget_nodes=8_000_000,
+            source=source, requested_by=requested_by,
+            state=AnalysisTask.TState.PENDING)
+
+    def _lease(self, username, machine):
+        return self.client.post('/atomicdb/api/lease', {
+            'username': username, 'password': 'p', 'machine': machine,
+            'worker_build': '2026072203', 'lease_session': machine,
+        }).json()['tasks'][0]
+
+    def test_house_worker_skips_a_foreign_click_for_background_work(self):
+        foreign = self._task(1, AnalysisTask.Source.USER, 'community')
+        background = self._task(2, AnalysisTask.Source.AUTO)
+
+        leased = self._lease('codex_local_worker', 'house-1')
+
+        self.assertEqual(leased['id'], background.id)
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.state, AnalysisTask.TState.PENDING)
+
+    def test_house_worker_may_serve_its_own_click(self):
+        self._task(3, AnalysisTask.Source.USER, 'community')
+        own = self._task(4, AnalysisTask.Source.USER, 'codex_local_worker')
+
+        leased = self._lease('codex_local_worker', 'house-2')
+
+        self.assertEqual(leased['id'], own.id)
+
+    def test_community_worker_still_serves_foreign_clicks(self):
+        foreign = self._task(5, AnalysisTask.Source.USER, 'someone-else')
+        self._task(6, AnalysisTask.Source.AUTO)
+
+        leased = self._lease('community', 'community-1')
+
+        self.assertEqual(leased['id'], foreign.id)
 
 
 class AnonymousBucketTests(_QueueHarness):

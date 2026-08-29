@@ -284,7 +284,8 @@ class ChosenRungTests(TestCase):
         _worker('wolfram', seen_days_ago=2)
 
         response = _signed_in('wolfram').post(
-            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
+            f'/atomicdb/request/{self.pos.key}/',
+            {'budget': LADDER[-1], 'confirm': '1'})
 
         self.assertEqual(response.json()['status'], 'queued')
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[-1])
@@ -296,6 +297,16 @@ class ChosenRungTests(TestCase):
                                     {'budget': LADDER[2]})
 
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[2])
+
+    def test_the_top_rung_requires_an_explicit_confirmation(self):
+        _worker('wolfram', seen_days_ago=1)
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['status'], 'confirm-10b')
+        self.assertFalse(AnalysisTask.objects.exists())
 
     def test_a_choice_below_the_due_rung_cannot_cheapen_the_request(self):
         # 512M es lo que toca; pedir 128M no compra una busqueda mas pobre —
@@ -319,7 +330,7 @@ class ChosenRungTests(TestCase):
         client.post(f'/atomicdb/request/{self.pos.key}/')
 
         client.post(f'/atomicdb/request/{self.pos.key}/',
-                    {'budget': LADDER[-1]})
+                    {'budget': LADDER[-1], 'confirm': '1'})
 
         self.assertEqual(AnalysisTask.objects.filter(position=self.pos)
                          .count(), 1)
@@ -344,7 +355,8 @@ class ChosenRungTests(TestCase):
         Position.objects.filter(pk=self.pos.pk).update(visits=2, eval_cp=30)
 
         response = _signed_in('wolfram').post(
-            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
+            f'/atomicdb/request/{self.pos.key}/',
+            {'budget': LADDER[-1], 'confirm': '1'})
 
         self.assertEqual(response.json()['status'], 'queued')
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[-1])

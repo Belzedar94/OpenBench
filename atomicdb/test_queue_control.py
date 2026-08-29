@@ -1061,8 +1061,23 @@ class DuplicateRequestTests(_DuplicateHarness):
 
         self._ask('wolfram')
 
-        rows = list(AnalysisTask.objects.filter(state='PENDING')
-                    .order_by('queue_seq', 'id')
+        # SE LEE EL ORDEN DE SERVICIO, no ``queue_seq`` a pelo.  Desde que el
+        # reparto particiona por CUENTA EFECTIVA, ordenar la tabla entera por
+        # ``queue_seq`` mezcla sitios de colas distintas y deja de significar
+        # nada: un -1 escrito dentro de la cola de ``eclipsia`` y un 0 en un
+        # carril recien estrenado no se pueden comparar.  Lo que el escalon
+        # promete — y lo unico que le importa a quien espera — es que la
+        # peticion que esperan DOS personas se sirva primero, y eso lo dice
+        # ``service_order``, que es de donde lee ``choose_pending``.
+        #
+        # (Sumarse presta ademas el carril mas despejado, § ``add_requester``,
+        # asi que la fila puede acabar sola en la particion de ``wolfram``:
+        # primera de su cola por construccion, sin que nadie tenga que
+        # escribirle un ``queue_seq``.  El resultado servido es el mismo, y
+        # por eso se comprueba el resultado y no el mecanismo.)
+        band = (AnalysisTask.objects.filter(source=AnalysisTask.Source.USER)
+                .filter(live_request.CHARGED).filter(live_request.SERVEABLE))
+        rows = list(live_request.service_order(band)
                     .values_list('position_id', flat=True))
         self.assertEqual(rows[0], self.target.key)
 
@@ -1336,3 +1351,250 @@ class WithdrawCostsNothingTests(_DuplicateHarness):
         self.assertEqual(response.json()['status'], 'cannot-restore')
         self.assertEqual(AnalysisTask.objects.get(pk=task.pk).state,
                          AnalysisTask.TState.CANCELLED)
+
+
+class BumpReadsTheLaneItActuallyRidesTests(_BumpHarness):
+    """El suelo del adelantamiento se busca en la particion del REPARTO.
+
+    ``fair_share`` agrupa por ``lane_account or requested_by``, que es lo que
+    compra sumarse a la peticion de otra persona (§ ``lanes.effective_account``,
+    el aviso de Eclipsia del 15-ago sobre una peticion de soothdest enterrada
+    a 2.690 filas).  ``front_of_own_queue`` buscaba el frente por
+    ``requested_by`` a secas, o sea en una cola que el orden de servicio no
+    lee: con un carril prestado, adelantar aterrizaba en el frente de otra
+    cola.  Ninguna fila viva lleva carril hoy — por eso esto no cambia ningun
+    numero — pero la regla ya no puede discrepar de la que ordena.
+    """
+
+    def _ride(self, task, account):
+        """La fila viaja con el carril de ``account`` (se sumo a su peticion)."""
+        AnalysisTask.objects.filter(pk=task.pk).update(lane_account=account)
+        return AnalysisTask.objects.get(pk=task.pk)
+
+    def _busy_lane(self):
+        """'a' con dos filas, 'b' con tres y su frente YA adelantado a -5.
+
+        Que el frente de 'b' no este en cero es lo unico que distingue las dos
+        lecturas: con todo a cero las dos devuelven -1 y el bug no se ve.
+        """
+        mine = self._queue('a', [self.RUNG] * 2)
+        theirs = self._queue('b', [self.RUNG] * 3, offset=100)
+        AnalysisTask.objects.filter(pk=theirs[2].pk).update(queue_seq=-5)
+        return mine, theirs
+
+    def test_the_floor_is_the_front_of_the_LANE_not_of_the_author(self):
+        mine, _theirs = self._busy_lane()
+        task = self._ride(mine[1], 'b')
+
+        # Por el AUTOR el suelo seria -1 (el frente de 'a', en cero).  Por el
+        # CARRIL es -6: un sitio por delante del -5 que 'b' ya tenia puesto.
+        self.assertEqual(ingest.front_of_own_queue(task), -6)
+
+    def test_a_row_ahead_in_the_authors_queue_is_not_first_in_its_lane(self):
+        """El caso en el que el boton MENTIA contestando 'already-first'."""
+        mine, _theirs = self._busy_lane()
+        task = self._ride(mine[1], 'b')
+        AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=-1)
+        task = AnalysisTask.objects.get(pk=task.pk)
+
+        # -1 ya va por delante del frente de 'a', asi que leyendo la cola del
+        # autor no habia nada que mover.  En SU carril, el -5 sigue delante.
+        self.assertEqual(ingest.front_of_own_queue(task), -6)
+
+    def test_the_bumped_row_really_leads_the_queue_that_serves_it(self):
+        mine, theirs = self._busy_lane()
+        task = self._ride(mine[1], 'b')
+
+        AnalysisTask.objects.filter(pk=task.pk).update(
+            queue_seq=ingest.front_of_own_queue(task))
+
+        lane = {row.id for row in theirs} | {task.id}
+        served = [tid for tid in self._serve_order(5) if tid in lane]
+        self.assertEqual(served[0], task.id)
+
+    def test_a_row_that_left_for_another_lane_is_not_part_of_the_floor(self):
+        theirs = self._queue('b', [self.RUNG] * 3, offset=100)
+        AnalysisTask.objects.filter(pk=theirs[0].pk).update(
+            lane_account='c', queue_seq=-7)
+        task = AnalysisTask.objects.get(pk=theirs[2].pk)
+
+        # Esa fila reparte YA en la particion de 'c': su -7 no es el frente de
+        # esta cola, y heredarlo colaria esta fila en una cola ajena.
+        self.assertEqual(ingest.front_of_own_queue(task), -1)
+
+    def test_without_a_lane_the_author_still_rules(self):
+        """No-regresion: sin carriles, exactamente el numero de siempre."""
+        mine = self._queue('a', [self.RUNG] * 3)
+
+        self.assertEqual(
+            ingest.front_of_own_queue(
+                AnalysisTask.objects.get(pk=mine[2].pk)),
+            mine[0].queue_seq - 1)
+
+
+class QueuePlaceTextTests(_QueueHarness):
+    """Lo que el panel DICE de una espera.  Solo texto: el orden no se toca.
+
+    El reporte de opabinia (19-ago) no era sobre el reparto — el #148 que vio
+    era correcto — sino sobre lo que el sitio le contaba de el: un puesto a
+    secas, sin decir que parte era su propia racha ni cuanto duraba eso en
+    minutos.  Estas cuatro frases son esas dos mitades.
+    """
+
+    def _served(self, count, minutes_ago=1):
+        """``count`` peticiones de visitante YA cerradas, dentro de la ventana."""
+        from datetime import timedelta
+
+        from django.utils import timezone as tz
+
+        when = tz.now() - timedelta(minutes=minutes_ago)
+        AnalysisTask.objects.bulk_create([
+            AnalysisTask(position=position, generation=0,
+                         budget_nodes=self.RUNG,
+                         source=AnalysisTask.Source.USER, requested_by='w',
+                         state='COMPLETED', completed=when)
+            for position in self._positions(count, offset=500)])
+
+    def test_the_line_says_how_many_of_the_queue_ahead_is_your_own(self):
+        self._queue('b', [self.RUNG] * 3, offset=100)
+        mine = self._queue('a', [self.RUNG] * 3)
+
+        text = live_request._place_text(
+            AnalysisTask.objects.get(pk=mine[2].pk), username='a')
+
+        self.assertIn('requests ahead', text)
+        self.assertIn('2 of them yours', text)
+
+    def test_a_stranger_is_not_told_whose_queue_it_is(self):
+        self._queue('b', [self.RUNG] * 3, offset=100)
+        mine = self._queue('a', [self.RUNG] * 3)
+
+        text = live_request._place_text(
+            AnalysisTask.objects.get(pk=mine[2].pk), username='b')
+
+        self.assertNotIn('yours', text)
+
+    def test_a_measured_fleet_buys_an_about_how_long(self):
+        self._served(60)                       # 60 en 10 min = 6 por minuto
+        mine = self._queue('a', [self.RUNG] * 31)
+
+        text = live_request._place_text(
+            AnalysisTask.objects.get(pk=mine[30].pk), username='a')
+
+        # 30 por delante a 0,1/s son 300 s: "about 5 min", sin decimales.
+        self.assertRegex(text, r'about \d+ min$')
+
+    def test_without_a_measured_fleet_no_time_is_promised(self):
+        """La regla del modulo, tambien aqui: honesta o ausente."""
+        self._served(3)                        # muestra insuficiente
+        mine = self._queue('a', [self.RUNG] * 31)
+
+        text = live_request._place_text(
+            AnalysisTask.objects.get(pk=mine[30].pk), username='a')
+
+        self.assertNotIn('about', text)
+
+    def test_the_front_of_the_queue_still_just_says_next_up(self):
+        mine = self._queue('a', [self.RUNG])
+
+        self.assertEqual(
+            live_request._place_text(
+                AnalysisTask.objects.get(pk=mine[0].pk), username='a'),
+            'next up')
+
+    def test_the_place_itself_is_the_number_that_was_already_painted(self):
+        """NO-REGRESION DE ORDEN: el puesto no se toca, solo se explica."""
+        self._queue('b', [self.RUNG] * 3, offset=100)
+        mine = self._queue('a', [self.RUNG] * 3)
+        task = AnalysisTask.objects.get(pk=mine[2].pk)
+
+        text = live_request._place_text(task, username='a')
+
+        self.assertTrue(text.startswith(
+            f'{live_request.queue_ahead(task)} requests ahead'))
+
+
+class QueueApiAndLifoTests(_QueueHarness):
+    """P3/P5 are account-local and cannot change anybody else's share."""
+
+    def setUp(self):
+        super().setUp()
+        worker_account('alice', 'p')
+        worker_account('bob', 'p')
+
+    def _request(self, owner, count, offset=0):
+        positions = self._positions(count, offset=offset)
+        for position in positions:
+            self.assertEqual(
+                ingest.request_analysis(position, requested_by=owner),
+                'queued')
+        return list(AnalysisTask.objects.filter(
+            position__in=positions).order_by('id'))
+
+    def _toggle(self, enabled, referer='https://evil.example/leave'):
+        self.client.login(username='alice', password='p')
+        response = self.client.post(
+            '/atomicdb/queue/lifo/', {'lifo': '1' if enabled else '0'},
+            HTTP_REFERER=referer)
+        self.client.logout()
+        return response
+
+    def test_lifo_places_each_new_request_at_the_front_of_only_its_queue(self):
+        response = self._toggle(True)
+        mine = self._request('alice', 3)
+        yours = self._queue('bob', [self.RUNG] * 3, offset=100)
+
+        served = self._serve_order(6)
+        owner = {task.id: 'alice' for task in mine}
+        owner.update({task.id: 'bob' for task in yours})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/atomicdb/user/alice/')
+        self.assertEqual([owner[task_id] for task_id in served],
+                         ['alice', 'bob', 'alice', 'bob', 'alice', 'bob'])
+        self.assertEqual([task_id for task_id in served if owner[task_id] == 'alice'],
+                         [mine[2].id, mine[1].id, mine[0].id])
+
+    def test_switching_lifo_off_leaves_the_next_request_at_the_tail(self):
+        self._toggle(True)
+        first = self._request('alice', 2)
+        self._toggle(False)
+        last = self._request('alice', 1, offset=100)[0]
+
+        ordered = list(live_request.service_order(
+            AnalysisTask.objects.filter(source=AnalysisTask.Source.USER)
+        ).values_list('id', flat=True))
+
+        self.assertEqual(ordered, [first[1].id, first[0].id, last.id])
+
+    def test_lifo_endpoint_is_post_only_and_requires_login(self):
+        self.assertEqual(Client().post('/atomicdb/queue/lifo/').status_code,
+                         401)
+        self.client.login(username='alice', password='p')
+        self.assertEqual(self.client.get('/atomicdb/queue/lifo/').status_code,
+                         405)
+
+    def test_my_queue_is_private_ordered_and_actionable(self):
+        mine = self._queue('alice', [self.RUNG] * 2)
+        stranger = self._queue('bob', [self.RUNG], offset=100)[0]
+        AnalysisTask.objects.filter(pk=mine[1].pk).update(
+            state=AnalysisTask.TState.LEASED, machine='box',
+            leased_at=timezone.now(), lease_heartbeat_at=timezone.now())
+        self.client.login(username='alice', password='p')
+
+        payload = self.client.get('/atomicdb/api/my-queue/').json()
+
+        self.assertEqual(payload['account'], 'alice')
+        self.assertEqual([row['task_id'] for row in payload['tasks']],
+                         [mine[1].id, mine[0].id])
+        self.assertNotIn(stranger.id,
+                         {row['task_id'] for row in payload['tasks']})
+        self.assertEqual(payload['tasks'][0]['cancel'],
+                         f'/atomicdb/queue/cancel/{mine[1].id}/')
+
+    def test_my_queue_is_get_only_and_requires_login(self):
+        self.assertEqual(Client().get('/atomicdb/api/my-queue/').status_code,
+                         401)
+        self.client.login(username='alice', password='p')
+        self.assertEqual(self.client.post('/atomicdb/api/my-queue/').status_code,
+                         405)

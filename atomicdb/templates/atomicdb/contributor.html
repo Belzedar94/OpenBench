@@ -43,6 +43,19 @@
 
 <section class="contrib-section">
   <h2>{{ owner_label }} queue</h2>
+  {% if lifo_toggle %}
+  {% comment %} P5 (comunidad, 3-0, 28-ago-2026). Solo en el perfil PROPIO:
+  la vista pasa ``lifo_toggle`` unicamente cuando el visitante mira su
+  propia cola, porque la preferencia es suya y de nadie mas. {% endcomment %}
+  <form method="post" action="/atomicdb/queue/lifo/" class="lifo-toggle">
+    {% csrf_token %}
+    <input type="hidden" name="lifo" value="0">
+    <label><input type="checkbox" name="lifo" value="1"
+      {% if lifo_on %}checked{% endif %} onchange="this.form.submit()">
+      Newest first: each new request of yours starts at the front of your own
+      queue</label>
+  </form>
+  {% endif %}
   {% comment %}El recibo de lo que se acaba de hacer con la cola, y el deshacer
   cuando lo hay (§ views._queue_receipt).  Va POR ENCIMA de todo lo demas y no
   pegado a la lista de espera a proposito: quien vacia su cola entera deja esta

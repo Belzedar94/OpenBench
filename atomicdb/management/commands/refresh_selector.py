@@ -99,6 +99,10 @@ class Command(BaseCommand):
             '--interval', type=float, default=60.0,
             help='Seconds between refreshes when looping (default: 60).')
         parser.add_argument(
+            '--autosolve-cap', type=int, default=32,
+            help='Maximum PENDING autosolve95 SolveTasks (P9): evals at '
+                 'or beyond +-95 get an 8M F0 solver pass')
+        parser.add_argument(
             '--pool-target', type=int, default=ingest.ANALYSIS_POOL_TARGET,
             help='Keep this many PENDING analysis tasks minted so the fleet '
                  'never waits on the lease-path refill (default: '
@@ -114,6 +118,15 @@ class Command(BaseCommand):
         parser.add_argument(
             '--no-coverage', action='store_true',
             help='Do not top up the coverage-completion queue.')
+        parser.add_argument(
+            '--no-priorities', action='store_true',
+            help='Skip the priorities refresh entirely. Emergency lever '
+                 '(29-Aug-2026): at 36M positions the full pass held more '
+                 'than 5.6G of RSS after three hours, pushed the box into '
+                 'swap and starved the interactive site; stale priorities '
+                 'degrade exploration order slowly and break nothing. Every '
+                 'other arm keeps running. The frontier redesign owns the '
+                 'real fix.')
         parser.add_argument(
             '--no-debt', action='store_true',
             help='Refresh priorities only; do not top up the debt queue.')
@@ -206,8 +219,19 @@ class Command(BaseCommand):
             # ``force``: the service's own interval is the only clock that
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
-            step('priorities',
-                 lambda: ingest.refresh_priorities(force=True), None)
+            if not options['no_priorities']:
+                step('priorities',
+                     lambda: ingest.refresh_priorities(force=True), None)
+            # ARRIENDOS SOLVE MUERTOS, DELANTE de los brazos que miran su
+            # cupo: una tarea congelada ocupa un sitio de PENDING que el brazo
+            # cuenta, asi que reciclar primero es lo que hace que el cupo
+            # signifique lo que dice.  Y sobre todo, este es el UNICO reloj que
+            # corre cuando nadie pide tareas SOLVE — que es exactamente lo que
+            # llevaba pasando desde julio: el barrido vivia dentro del
+            # arriendo, asi que una flota sin ningun worker en modo --solve
+            # dejaba las tareas congeladas para siempre
+            # (§ ``ingest.recycle_stale_solve_leases``).
+            step('solve-leases', ingest.recycle_stale_solve_leases)
             # Same process, same timer: the ENGINE debt queue is topped up to
             # its cap here rather than in a cron of its own.  It is bounded
             # work (one bulk_create of at most `cap - pending` rows) and it
@@ -234,6 +258,12 @@ class Command(BaseCommand):
                 fragile = step(
                     'fragile', lambda: ingest.enqueue_fragile_mate_solves(
                         cap=options['fragile_cap']))
+            # P9 (comunidad, 4-0): las evals a +-95 compran su pase de
+            # solver ANTES del colchon, porque cierran nodos en vez de
+            # mirarlos — la misma jerarquia que la cobertura.
+            autosolved = step(
+                'autosolve95', lambda: ingest.enqueue_autosolve95(
+                    cap=options['autosolve_cap']))
             # Colchon de analisis, DETRAS de los brazos con cupo: la flota
             # no debe esperar al minteo inline del lease (4 con cola vacia
             # = valles de utilizacion), pero el colchon tampoco debe
@@ -274,6 +304,7 @@ class Command(BaseCommand):
                       'adversarial': bool(adversarial),
                       'dn_repair_enqueued': repaired,
                       'fragile_enqueued': fragile,
+                      'autosolve95_enqueued': autosolved,
                       'public_counters_published': published}
             if failures:
                 report['failed_steps'] = failures

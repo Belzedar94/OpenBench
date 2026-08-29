@@ -5,6 +5,8 @@ reclama algo, y la unica forma de saber si el arbol la sostiene es mirar las
 posiciones por las que pasa.  Esto es ese recorrido, de un click.
 """
 
+from unittest.mock import patch
+
 from django.test import Client
 
 from . import ingest, logic, views
@@ -939,3 +941,81 @@ class PvLineSelectorTests(TestCase):
 
         self.assertEqual(page.context['pv_verify_lines'], [])
         self.assertNotContains(page, 'id="pvline"')
+
+
+# Un mate en UNO de atomic: la torre captura en e7 y la explosion se lleva el
+# peon capturado, la propia torre y todo lo que no sea peon alrededor —
+# incluido el rey negro de e8.  El hijo NACE cerrado, porque
+# ``get_or_create_position`` le pregunta a ``logic.terminal_status`` al
+# materializarlo: el paseo no tiene que PROBAR nada aqui, solo enterarse.
+MATE_PARENT_FEN = '4k3/4p3/8/8/8/8/4R3/4K3 w - - 0 1'
+MATE_MOVE = 'e2e7'
+
+
+class PvWalkDiscoversATerminalTests(TestCase):
+    """Caminar una PV que acaba en mate CIERRA el nodo que la jugo.
+
+    Es la misma regla que el ``goto`` del explorador aprendio el 29-jul
+    ("navigating onto a terminal closes the parent at once"), y este modulo la
+    prometia por escrito — "una PV es una ruta como cualquier otra y tiene que
+    producir exactamente el mismo arbol que producirla a mano" — sin
+    cumplirla: el paseo materializaba el terminal y seguia, y el padre se
+    quedaba UNKNOWN con el mate en uno ya escrito en la tabla de al lado.
+    Medido el 20-ago en produccion, 648 posiciones asi, con el respaldo ya en
+    +-100 y prioridad de banda de mate: el sitio pintaba "sin resolver" sobre
+    un nodo cuya respuesta ya estaba dentro, y el selector seguia comprandolo.
+    """
+
+    def _parent(self, pv, fen=MATE_PARENT_FEN):
+        pos = ingest.get_or_create_position(fen)
+        Position.objects.filter(key=pos.key).update(last_analysis=[
+            _analysis(pv)])
+        return Position.objects.get(key=pos.key)
+
+    def test_the_last_ply_of_a_mate_pv_closes_the_node_that_played_it(self):
+        parent = self._parent([MATE_MOVE])
+
+        ingest.enqueue_pv_verification(parent, requested_by='ana')
+
+        child_key = logic.key_of(logic.apply_move(MATE_PARENT_FEN, MATE_MOVE))
+        child = Position.objects.get(key=child_key)
+        self.assertEqual(child.status, 'WHITE_WIN')
+        self.assertEqual(child.closure, 'TERMINAL')
+        # LO QUE FALTABA: el padre.  La arista existia, el hijo estaba
+        # cerrado, y el nodo de arriba seguia diciendo UNKNOWN.
+        parent = Position.objects.get(key=parent.key)
+        self.assertEqual(parent.status, 'WHITE_WIN')
+        self.assertEqual(parent.best_move, MATE_MOVE)
+
+    def test_the_value_rides_up_with_the_status_and_not_instead_of_it(self):
+        """El respaldo ya subia solo; era el hecho exacto el que no."""
+        parent = self._parent([MATE_MOVE])
+
+        ingest.enqueue_pv_verification(parent)
+
+        parent = Position.objects.get(key=parent.key)
+        self.assertEqual(parent.status, 'WHITE_WIN')
+        self.assertNotEqual(parent.closure, None)
+
+    def test_a_parent_already_closed_does_not_pay_for_the_cascade(self):
+        parent = self._parent([MATE_MOVE])
+        Position.objects.filter(key=parent.key).update(
+            status='WHITE_WIN', closure='MATE_PV', proof='ENGINE')
+        parent = Position.objects.get(key=parent.key)
+
+        with patch.object(ingest, 'backup_cascade') as cascade:
+            ingest.enqueue_pv_verification(parent)
+
+        cascade.assert_not_called()
+
+    def test_a_walk_over_open_ground_never_touches_the_cascade(self):
+        """El camino comun no paga nada: la guarda solo mira cierres."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        Position.objects.filter(key=root.key).update(
+            last_analysis=[_analysis(LINE)])
+        root = Position.objects.get(key=root.key)
+
+        with patch.object(ingest, 'backup_cascade') as cascade:
+            ingest.enqueue_pv_verification(root)
+
+        cascade.assert_not_called()

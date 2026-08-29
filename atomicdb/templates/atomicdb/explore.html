@@ -426,6 +426,11 @@
         {% if depth_rungs %}
         const rung = chosenRung();
         if (rung) { body.budget = rung; }
+        // P2 (votada 28-ago): el peldano de 10B pide confirmacion explicita.
+        if (Number(rung) === 10000000000) {
+          if (!window.confirm('This queues a 10,000,000,000-node search. Sure?')) return;
+          body.confirm = '1';
+        }
         {% endif %}
         fetch('/atomicdb/request/{{ pos.key }}/', {
           method: 'POST',
@@ -470,6 +475,7 @@
               // producirlo; si llega, la escalera cambio bajo una pestana
               // abierta y recargar la pone al dia.
               'bad-budget': 'That depth is gone, reload the page',
+              'confirm-10b': '10B requests need the confirmation dialog',
               {% endif %}
               'already-solved': 'Already solved',
               // depth ladder spent here: the request goes one ply deeper,

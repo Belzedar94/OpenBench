@@ -299,6 +299,19 @@ class CampaignVote(models.Model):
         return f'vote for campaign {self.campaign_id}'
 
 
+class ContributorPref(models.Model):
+    """Preferencias por cuenta OB.  Una fila por cuenta, nacida al primer uso.
+
+    P5 (comunidad, 3-0, 28-ago-2026): ``lifo_queue`` — cada peticion nueva de
+    la cuenta entra al frente de su PROPIA cola.  Es la misma pieza y las
+    mismas garantias que el boton Move to front
+    (v. ``ingest.front_of_own_queue``): se hereda un sitio que la cuenta ya
+    tenia, nadie ajeno pierde turno.
+    """
+    account    = models.CharField(max_length=64, unique=True)
+    lifo_queue = models.BooleanField(default=False)
+
+
 class AnalysisTask(models.Model):
     class TState(models.TextChoices):
         PENDING   = 'PENDING'

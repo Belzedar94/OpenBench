@@ -334,6 +334,23 @@ def _measure_tree_totals(now):
     garantizaban (el porcentaje resuelto se calculaba con un numerador y un
     denominador medidos en momentos distintos).
     """
+    # LA CAPTURA HORARIA PRIMERO (29-ago-2026).  A 36M de filas este
+    # aggregate costaba 25-45 segundos y lo pagaban el warm de snapshots
+    # cada cinco minutos, los pasos public-counters del selector y el camino
+    # ausente de la web — tres pagadores para el mismo numero.  La captura
+    # (§ ``capture_atomicdb_progress``) ya recorre la tabla una vez por hora
+    # y trae LOS MISMOS tres numeros, exactos: mientras sea reciente, aqui
+    # no se mide nada y el unico pagador es el que ya pagaba.  La portada
+    # ensena la hora del bucket ('counters_at'), asi que la vejez acotada va
+    # dicha en voz alta, que es el trato de siempre: exacto de hace un rato,
+    # nunca estimado.  El barrido queda de RED DE SEGURIDAD para cuando la
+    # captura falte o envejezca (su servicio caido mas de 75 minutos).
+    reciente = _seed_tree_totals(now)
+    if reciente is not None:
+        edad = (now - reciente['measured_at']).total_seconds()
+        if edad < 75 * 60:
+            reciente['bucket_start'] = reciente['measured_at']
+            return reciente
     row = Position.objects.aggregate(
         total=Count('key'),
         closed=Count('key', filter=~Q(status='UNKNOWN')),
@@ -368,10 +385,21 @@ def _seed_tree_totals(now):
 
 
 def tree_totals(*, now=None, force=False):
-    """``{'total', 'closed', 'nodes', 'measured_at'}`` para la portada."""
-    return shared_snapshot(PUBLIC_COUNTERS_KEY, build=_measure_tree_totals,
-                           seed=_seed_tree_totals, required=True, now=now,
-                           force=force)
+    """``{'total', 'closed', 'nodes', 'measured_at'}`` para la portada.
+
+    Cuando la entrada viene de la captura horaria, ``measured_at`` se
+    corrige a la hora del bucket: ``refresh_shared`` estampa la hora de la
+    PUBLICACION, y ensenar esa con numeros de la captura seria vestir de
+    fresco un conteo de hace un rato.  El dato ya viajaba en la entrada
+    (``bucket_start``); esto solo lo pone donde la portada mira.
+    """
+    entry = shared_snapshot(PUBLIC_COUNTERS_KEY, build=_measure_tree_totals,
+                            seed=_seed_tree_totals, required=True, now=now,
+                            force=force)
+    if entry and entry.get('bucket_start'):
+        entry = dict(entry)
+        entry['measured_at'] = entry['bucket_start']
+    return entry
 
 
 def _measure_activity(now):

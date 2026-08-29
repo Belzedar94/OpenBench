@@ -3459,7 +3459,11 @@ def next_tasks(n):
 # el minteo inline y dos leases concurrentes mintean los MISMOS top-4 (el
 # dedup de get_or_create hace que la oferta no escale con los que piden).
 # Valles de utilizacion medidos por la flota de Lesha (28-jul).
-ANALYSIS_POOL_TARGET = 64
+# P6 (comunidad, 3-0, 28-ago-2026): 64 se quedaba seco entre pasadas del
+# selector con una flota grande — lesha con 72 workers vio "no tasks
+# available" en bucle (27-ago).  El colchon son filas, no computo: mintearlo
+# hondo cuesta un bulk_create y ahorra los valles.
+ANALYSIS_POOL_TARGET = 512
 
 
 def top_up_analysis_pool(target=None):
@@ -3797,10 +3801,24 @@ def front_of_own_queue(task):
     reparte ``fair_share``, y es la unica dentro de la cual reordenar no le
     quita el turno a nadie.
     """
+    # LA PARTICION ES LA DEL REPARTO, NO LA DEL AUTOR.  ``fair_share``
+    # agrupa por ``_effective_account()`` — el carril prestado si lo hay, el
+    # autor si no (§ ``live_request``) — asi que buscar el suelo por
+    # ``requested_by`` a secas leia una cola que el orden de servicio no usa.
+    # En cuanto una fila viaja con carril ajeno (§ ``lanes.effective_account``,
+    # que es lo que compra sumarse a una peticion), el numero calculado aqui
+    # es el frente de OTRA particion y adelantar aterriza donde no hay frente
+    # ninguno.  Hoy no hay ni una fila con carril puesto, asi que esto no
+    # mueve ningun numero: es la misma regla escrita donde ya no puede
+    # discrepar.
+    account = task.lane_account or task.requested_by
+    if not account:
+        return None
     mine = (AnalysisTask.objects
             .filter(source=AnalysisTask.Source.USER,
-                    requested_by=task.requested_by,
                     state=AnalysisTask.TState.PENDING)
+            .filter(Q(lane_account=account)
+                    | Q(lane_account='', requested_by=account))
             .exclude(pk=task.pk))
     front = mine.order_by('queue_seq', 'id').values_list(
         'queue_seq', 'id').first()
@@ -4071,6 +4089,27 @@ def request_ladder_state(pos):
     return completed_max, _next_rung(completed_max)
 
 
+def _apply_lifo_preference(task, requested_by):
+    """P5 (comunidad, 3-0, 28-ago-2026): "newest first" por cuenta.
+
+    La cuenta que activo la preferencia encola cada peticion nueva al frente
+    de su propia cola, con la misma pieza que el boton Move to front
+    (v. ``front_of_own_queue``): hereda el sitio de su primera pendiente y no
+    mueve a nadie ajeno.  Sin preferencia no cambia un solo byte del camino
+    historico.
+    """
+    if not requested_by:
+        return
+    from .models import ContributorPref
+    if not ContributorPref.objects.filter(account=requested_by,
+                                          lifo_queue=True).exists():
+        return
+    seq = front_of_own_queue(task)
+    if seq is not None:
+        task.queue_seq = seq
+        task.save(update_fields=['queue_seq'])
+
+
 def _request_rung(pos, requested_by='', route='', budget_floor=None):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
@@ -4118,6 +4157,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
                   'requested_by': requested_by, 'route': route,
                   'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
+        _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == AnalysisTask.TState.CANCELLED:
         # Aqui hubo una peticion y su autor la retiro (§ ``withdraw_requester``).
@@ -4145,6 +4185,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         task.save(update_fields=['state', 'completed', 'budget_nodes',
                                  'source', 'requested_by', 'also_requested_by',
                                  'backers', 'queue_seq', 'route', 'multipv'])
+        _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == 'PENDING':
         task.budget_nodes = max(task.budget_nodes, floor)
@@ -4783,6 +4824,52 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
             'certificate_nodes': (report or {}).get('nodes', 0)}
 
 
+# Cuanto silencio convierte un arriendo SOLVE en un arriendo MUERTO.  Vive
+# AQUI, y no en las vistas, desde que el barrido dejo de depender de que
+# alguien pidiese tarea: quien recicla es ``recycle_stale_solve_leases`` y la
+# ventana es suya.  ``views.SOLVE_LEASE_MINUTES`` la reexporta para no tocar
+# ninguna de sus referencias.
+SOLVE_LEASE_MINUTES = 20
+
+
+def recycle_stale_solve_leases(now=None, minutes=SOLVE_LEASE_MINUTES):
+    """Devuelve a PENDING los arriendos SOLVE sin latido.  Cuantos.
+
+    POR QUE ES UNA FUNCION Y NO SEIS LINEAS DENTRO DEL ARRIENDO.  Vivia solo
+    dentro de ``views.api_solve_acquire``, asi que el unico instante en el que
+    una tarea congelada podia volver a la cola era... que alguien pidiese
+    tarea.  Con la flota entera sin un solo worker en modo ``--solve`` eso no
+    pasa nunca: medido el 20-ago, una fila LEASED desde el 29-jul a las 16:02
+    — veintidos dias dentro de un arriendo de veinte minutos — con su posicion
+    retenida y su ``attempts`` congelado, y cero peticiones a
+    ``/api/solve/acquire`` en toda la ventana de logs retenida.  Un arriendo
+    caduca porque pasa el tiempo, no porque llegue una visita.
+
+    SIGUE LLAMANDOSE DESDE EL ARRIENDO, y tiene que seguir: el relevo de un
+    worker reiniciado no puede esperar a la siguiente pasada del selector —
+    son horas — y esa es exactamente la espera que el incidente t24 enseno a
+    no pagar.  Lo que cambia es que ya no es el UNICO sitio; el ciclo
+    periodico (§ ``refresh_selector``) lo llama tambien, y ahi es donde una
+    flota que no pide nada deja de congelar trabajo para siempre.
+
+    El evento se emite SOLO cuando recicla algo: una pasada limpia no tiene
+    nada que contar y un cero por pasada seria ruido en el diario.
+    """
+    from .models import SolveTask
+
+    stale = (now or timezone.now()) - timedelta(minutes=minutes)
+    freed = SolveTask.objects.filter(
+        state='LEASED', leased_at__lt=stale,
+    ).filter(Q(lease_heartbeat_at__isnull=True)
+             | Q(lease_heartbeat_at__lt=stale)).update(
+        state='PENDING', machine='', lease_heartbeat_at=None,
+        lease_token='', lease_session='')
+    if freed:
+        DBEvent.objects.create(kind='SOLVE_LEASE_RECYCLED', payload={
+            'freed': freed, 'minutes': int(minutes)})
+    return freed
+
+
 # Presupuesto del peldano F0 del doc 18: df-pn tactico + telemetria de
 # fortaleza.  Certifica un mate tipico en menos de quince segundos, que es lo
 # que hace viable pasarle la deuda entera a la flota.
@@ -4803,17 +4890,29 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
     mates a este ritmo la deuda crece mas rapido de lo que un cron nocturno la
     absorbe.  Un df-pn a 2M nodos la certifica en segundos.
 
-    BACKPRESSURE.  Solo se rellena hasta ``cap`` tareas SOLVE pendientes en
-    total, contando las de todo el mundo: la deuda es importante pero NUNCA
-    urgente, y una peticion de visitante o un brazo del piloto siempre van
-    delante (ver el orden de ``api_solve_acquire``, que manda ``arm='debt'``
-    al final).
+    BACKPRESSURE, Y EL CUPO ES SUYO.  Solo se rellena hasta ``cap`` tareas
+    pendientes DE ESTE BRAZO.  Contaba la cola SOLVE entera, y eso no era
+    backpressure: era inanicion cruzada.  El brazo fragil tiene su propio cupo
+    de cincuenta (§ ``FRAGILE_QUEUE_CAP``, que promete por escrito que
+    "compartir cap significaria que una purga de deuda mata este brazo o al
+    reves") y esas cincuenta filas se restaban de estas quinientas, asi que
+    con el brazo fragil lleno la deuda se quedaba en ``room=0`` para siempre.
+    Medido el 20-ago en produccion: 550 PENDING contra un cap de 500, los dos
+    brazos parados desde julio y ni un solo ``DEBT_ENQUEUED`` en catorce dias.
+
+    QUE LA DEUDA VAYA LA ULTIMA NO ES COSA DEL CUPO, y por eso separarlos no
+    le quita el turno a nadie: lo decide el ORDEN DE SERVICIO
+    (``views.api_solve_acquire`` ordena por ``is_debt`` antes que por
+    presupuesto), que es donde una peticion de visitante adelanta a la deuda
+    aunque las dos esperen.  Un cupo compartido no priorizaba a nadie —
+    solo apagaba brazos.
 
     Devuelve el numero de tareas creadas.
     """
     from .models import SolveTask
 
-    pending = SolveTask.objects.filter(state='PENDING').count()
+    pending = SolveTask.objects.filter(state='PENDING',
+                                       arm=DEBT_ARM).count()
     room = max(0, int(cap) - pending)
     if limit is not None:
         room = min(room, int(limit))
@@ -4848,6 +4947,66 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
         return 0
     SolveTask.objects.bulk_create(made, ignore_conflicts=True)
     DBEvent.objects.create(kind='DEBT_ENQUEUED', payload={
+        'created': len(made), 'pending_before': pending, 'cap': int(cap)})
+    return len(made)
+
+
+AUTOSOLVE95_ARM = 'autosolve95'
+AUTOSOLVE95_THRESHOLD = 9500
+AUTOSOLVE95_STAGE_NODES = 8_000_000
+
+
+def enqueue_autosolve95(cap):
+    """P9 (comunidad, 4-0, 28-ago-2026): un +-95 se intenta CERRAR.
+
+    Una eval a 95 o mas es "mate encontrado, distancia desconocida"
+    (Eclipsia, 23-ago): gastarle mas analisis heuristico es excavar una
+    pregunta contestada a medias.  Este brazo le compra a cada una un pase
+    de solver F0 de 8M para convertirla en cierre exacto.
+
+    Mismo contrato que los demas brazos con cupo: ``cap`` acota lo PENDING
+    del brazo, una posicion con CUALQUIER SolveTask viva no se toca, y el
+    minteo es un bulk_create acotado con su DBEvent.  Solo posiciones
+    UNKNOWN: una cerrada ya tiene algo mejor que una eval.
+    """
+    from .models import SolveTask
+
+    pending = SolveTask.objects.filter(
+        arm=AUTOSOLVE95_ARM, state=SolveTask.TState.PENDING).count()
+    room = cap - pending
+    if room <= 0:
+        return 0
+    taken = set(SolveTask.objects.filter(
+        state__in=(SolveTask.TState.PENDING, SolveTask.TState.LEASED))
+        .values_list('position__key', flat=True))
+    th = AUTOSOLVE95_THRESHOLD
+    made = []
+    for goal, cond in (
+            ('WHITE_WIN', Q(eval_cp__gte=th) | Q(backed_eval__gte=th)),
+            ('BLACK_WIN', Q(eval_cp__lte=-th) | Q(backed_eval__lte=-th))):
+        if len(made) >= room:
+            break
+        # SIN ORDEN, a proposito (29-ago): ordenar por extremidad costaba un
+        # sort paralelo de ~1,3M filas estimadas por tick a la escala de 36M
+        # posiciones. Cualquier candidata vale — el cupo es 32 y el brazo
+        # vuelve cada dos minutos — asi que el LIMIT de abajo corta el
+        # escaneo en cuanto junta las primeras coincidencias.
+        candidates = (Position.objects.filter(status='UNKNOWN').filter(cond)
+                      .exclude(key__in=taken).order_by())
+        for position in candidates[:room * 2]:
+            if len(made) >= room:
+                break
+            if position.key in taken:
+                continue
+            taken.add(position.key)
+            made.append(SolveTask(
+                position=position, goal=goal,
+                budget_stage='F0', budget_nodes=AUTOSOLVE95_STAGE_NODES,
+                arm=AUTOSOLVE95_ARM))
+    if not made:
+        return 0
+    SolveTask.objects.bulk_create(made, ignore_conflicts=True)
+    DBEvent.objects.create(kind='AUTOSOLVE95_ENQUEUED', payload={
         'created': len(made), 'pending_before': pending, 'cap': int(cap)})
     return len(made)
 
@@ -5488,23 +5647,38 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
         child_route = ''
         if route and child.key in edges_by_child:
             child_route = route + ',' + edges_by_child[child.key]
-        task, created = AnalysisTask.objects.get_or_create(
+        # La tarea viva se busca por POSICION, no por (posicion, generacion):
+        # el dedup con generacion podia crear una segunda tarea si las visitas
+        # se movieron desde que nacio la primera.  Y sumarse a la de otra
+        # persona pasa por la MISMA puerta que el click individual
+        # (``add_requester``): respaldo anotado, aviso de vuelta y sitio en la
+        # cola — el click masivo era el unico camino que tiraba al segundo
+        # peticionario (reporte de math_god, 17-ago: "it just ignores my
+        # request").  Un respaldo cuenta en el total devuelto: el click de
+        # quien se suma compro exactamente ese analisis, aunque no lo creara.
+        vivo = (AnalysisTask.objects
+                .filter(position=child,
+                        state__in=(AnalysisTask.TState.PENDING,
+                                   AnalysisTask.TState.LEASED))
+                .order_by('id').first())
+        if vivo is not None:
+            respaldado = add_requester(vivo, requested_by)
+            if vivo.state == AnalysisTask.TState.PENDING \
+                    and vivo.source != source:
+                vivo.source = source
+                if child_route and not vivo.route:
+                    vivo.route = child_route
+                vivo.save(update_fields=['source', 'route'])
+                queued += 1
+            elif respaldado:
+                queued += 1
+            continue
+        AnalysisTask.objects.create(
             position=child, generation=child.visits,
-            defaults={'budget_nodes': budget,
-                      'multipv': multipv_for(child.visits, budget,
-                                             clamp=clamp),
-                      'source': source, 'requested_by': requested_by,
-                      'route': child_route})
-        if created:
-            queued += 1
-        elif task.state == 'PENDING' and task.source != source:
-            task.source = source
-            if requested_by and not task.requested_by:
-                task.requested_by = requested_by
-            if child_route and not task.route:
-                task.route = child_route
-            task.save(update_fields=['source', 'requested_by', 'route'])
-            queued += 1
+            budget_nodes=budget,
+            multipv=multipv_for(child.visits, budget, clamp=clamp),
+            source=source, requested_by=requested_by, route=child_route)
+        queued += 1
     return queued
 
 
@@ -5718,7 +5892,12 @@ def _buy_verification(child, requested_by='', route=''):
     pide aun menos, asi que lo respeta con mas razon.
     """
     clamp = _short_mate_clamp(child)
-    budget = (max(REQUEST_BUDGET_LADDER[0], budget_for(child))
+    # Verify PV compra la LINEA al grado de peticion, no la escalera de
+    # budget_for: en una posicion muy visitada la escalera llega a 10B y un
+    # click encolaba la PV entera a 10B por nodo (26 tareas, 25-ago). El
+    # clamp de mates cortos sigue mandando porque pide aun menos, y lo
+    # COMPLETADO sigue mandando sobre este suelo mas abajo.
+    budget = (REQUEST_BUDGET_LADDER[0]
               if clamp is None else budget_for(child))
     done = _completed_max_budget(child)
     if done is not None and done >= budget:
@@ -5791,6 +5970,24 @@ def _walk_pv_frontier(pos, pv, requested_by='', route=''):
                                        campaign_id=node.campaign_id)
         Edge.objects.get_or_create(parent=node, move_uci=uci,
                                    defaults={'child': child})
+        if child.status != 'UNKNOWN' and node.status == 'UNKNOWN':
+            # LA MISMA CASCADA QUE EL ``goto`` DEL EXPLORADOR, y por el mismo
+            # motivo (§ ``views.explore_play``, 29-jul): caminar una linea
+            # tambien DESCUBRE terminales — el ultimo ply de una PV de mate
+            # materializa el nodo explotado, que nace ya cerrado en
+            # ``get_or_create_position`` — y sin esta llamada el padre se
+            # queda UNKNOWN con un hijo ganador YA escrito en la tabla,
+            # esperando a que un analisis ajeno toque la familia.  Es el
+            # "delay" que la comunidad reporto en julio, reabierto por la otra
+            # puerta que materializa aristas: el docstring de aqui arriba
+            # promete que una PV "tiene que producir exactamente el mismo
+            # arbol que producirla a mano", y hasta hoy no lo cumplia.
+            #
+            # LA GUARDA SOBRE ``node`` ACOTA EL COSTE a lo que hay que
+            # arreglar: un padre ya cerrado no tiene nada que recalcular, asi
+            # que un paseo por terreno resuelto sigue costando cero.
+            backup_cascade([node.key])
+            backup_backed_evals([node.key])
         if child.priority <= DEAD / 2:
             child.priority = 0.0   # ruta nueva: revive de la lapida
             child.save(update_fields=['priority'])

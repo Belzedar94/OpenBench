@@ -351,7 +351,11 @@ def _queue_rows(username):
                    .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
     places = live_request.queue_ahead_map(pending)
     for task in pending:
-        task.ahead = places.get(task.id)
+        # El mapa devuelve ``(cuantas delante, cuantas tuyas)``: aqui se pinta
+        # la primera, que es la columna que esta lista ya tenia.  La segunda
+        # la usa el panel de la posicion (§ ``live_request._place_text``).
+        place = places.get(task.id)
+        task.ahead = None if place is None else place[0]
     leased = list(mine.filter(state=LEASED)
                   .order_by('-leased_at', '-id')[:QUEUE_ROWS])
     done = list(mine.filter(state=COMPLETED)

@@ -112,6 +112,54 @@ class RefreshSelectorCommandTests(TestCase):
         self.assertEqual(AnalysisTask.objects.filter(
             state='PENDING').count(), 3)
 
+    def test_no_priorities_keeps_the_other_arms_and_default_pool(self):
+        out = StringIO()
+        with patch.object(ingest, 'refresh_priorities') as priorities:
+            with patch.object(ingest, 'top_up_analysis_pool',
+                              return_value=11) as pool:
+                call_command('refresh_selector', no_priorities=True,
+                             stdout=out)
+
+        priorities.assert_not_called()
+        pool.assert_called_once_with(ingest.ANALYSIS_POOL_TARGET)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['pool_topped_up'], 11)
+        self.assertNotIn('failed_steps', report)
+
+    def test_autosolve_cap_is_forwarded_and_reported(self):
+        out = StringIO()
+        with patch.object(ingest, 'enqueue_autosolve95',
+                          return_value=3) as autosolve:
+            call_command('refresh_selector', autosolve_cap=7, stdout=out)
+
+        autosolve.assert_called_once_with(cap=7)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['autosolve95_enqueued'], 3)
+
+    def test_stale_solve_leases_are_recycled_before_queue_caps(self):
+        order = []
+
+        def mark(name, result=0):
+            def work(*args, **kwargs):
+                del args, kwargs
+                order.append(name)
+                return result
+            return work
+
+        with patch.object(ingest, 'recycle_stale_solve_leases',
+                          side_effect=mark('recycle')):
+            with patch.object(ingest, 'enqueue_engine_debt',
+                              side_effect=mark('debt')):
+                with patch.object(ingest, 'enqueue_coverage_completion',
+                                  side_effect=mark('coverage')):
+                    with patch.object(ingest, 'enqueue_autosolve95',
+                                      side_effect=mark('autosolve')):
+                        call_command('refresh_selector', stdout=StringIO())
+
+        self.assertLess(order.index('recycle'), order.index('debt'))
+        self.assertLess(order.index('recycle'), order.index('coverage'))
+        self.assertLess(order.index('recycle'), order.index('autosolve'))
+
 
 class SelectorCycleResilienceTests(TestCase):
     """Un brazo roto no puede llevarse la pasada entera por delante.

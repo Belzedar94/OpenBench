@@ -114,6 +114,8 @@ urlpatterns = [
     # una sola persona: sin cache, como la pagina desde la que se pulsa.
     path('queue/bump/<int:task_id>/', views.api_queue_bump,
          name='atomicdb-queue-bump'),
+    path('api/my-queue/', views.api_my_queue, name='atomicdb-my-queue'),
+    path('queue/lifo/', views.api_pref_lifo, name='atomicdb-pref-lifo'),
     # Retirar una peticion propia de la cola, y devolverla (``undo=1``).  Las
     # dos direcciones por la misma ruta porque son la misma fila y el mismo
     # permiso; escriben, asi que tampoco llevan cache.
