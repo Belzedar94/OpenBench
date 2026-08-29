@@ -195,6 +195,17 @@ def verify_engine_build(engine_name, conf):
     if conf['private']:
         assert 'play' in artifact_roles
 
+    datagen_provenance = conf['build'].get('datagen_provenance')
+    if datagen_provenance is not None:
+        assert not conf['private']
+        assert 'datagen' in artifact_roles
+        assert type(datagen_provenance) == dict
+        assert set(datagen_provenance) == {'source_tree', 'src_tree'}
+        assert all(
+            type(value) == str and re.fullmatch('[0-9a-f]{40}', value)
+            for value in datagen_provenance.values()
+        )
+
     if conf['private']: # Private engines require a PAT
         fname = 'credentials.%s' % (engine_name.replace(' ', '').lower())
         assert os.path.exists(os.path.join(PROJECT_PATH, 'Config', fname))

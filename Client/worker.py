@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 49 # Client version to send to the Server
+CLIENT_VERSION   = 50 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -3445,10 +3445,16 @@ def render_datagen_command(
         'BOOK_SHA256': (
             'NONE' if not book_raw_sha else str(book_raw_sha).upper()
         ),
+        'BOOK_SHA256_CANONICAL': (
+            'none' if not book_raw_sha else str(book_raw_sha).lower()
+        ),
         'NETWORK': (
             'NONE' if not network_path else network_path.replace('\\', '/')
         ),
         'NETWORK_SHA256': network_sha256 or 'NONE',
+        'NETWORK_SHA256_CANONICAL': (
+            'none' if not network_sha256 else str(network_sha256).lower()
+        ),
         'PRODUCER_SHA256': (
             'NONE' if producer is None else producer['sha256'].lower()
         ),
@@ -4196,6 +4202,13 @@ def safe_download_engine(config, branch, net_path):
         compiler  = config.compilers[engine][0]
 
         try:
+            datagen_provenance = (
+                config.workload['test'][branch]['build'].get(
+                    'datagen_provenance'
+                )
+                if build_role == 'datagen'
+                else None
+            )
             return download_public_engine(
                 engine,
                 net_path,
@@ -4206,6 +4219,7 @@ def safe_download_engine(config, branch, net_path):
                 compiler,
                 commit_sha,
                 build_role,
+                datagen_provenance,
             )
 
         except OpenBenchBuildFailedException as error:

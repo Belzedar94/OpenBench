@@ -483,6 +483,19 @@ class DatagenModeTests(TestCase):
             OpenBench.datagen_publication.validate_publication_request(payload),
             [],
         )
+        canonical_payload = dict(
+            payload,
+            datagen_command=(
+                'datagen {BOOK} {BOOK_SHA256_CANONICAL} {NETWORK} '
+                '{NETWORK_SHA256_CANONICAL}'
+            ),
+        )
+        self.assertEqual(
+            OpenBench.datagen_publication.validate_publication_request(
+                canonical_payload
+            ),
+            [],
+        )
 
         for field in (
             'datagen_campaign_id',
@@ -1237,6 +1250,17 @@ class DatagenModeTests(TestCase):
         )})
         errors = []
         verify_workload.verify_datagen_template(errors, valid, 'datagen_command')
+        self.assertEqual(errors, [])
+
+        canonical = SimpleNamespace(POST={'datagen_command': (
+            'datagen seed {SEED} count {COUNT} threads {THREADS} out {OUT}'
+            ' network {NETWORK} network-sha {NETWORK_SHA256_CANONICAL}'
+            ' book {BOOK} book-sha {BOOK_SHA256_CANONICAL}'
+        )})
+        errors = []
+        verify_workload.verify_datagen_template(
+            errors, canonical, 'datagen_command'
+        )
         self.assertEqual(errors, [])
 
         invalid = SimpleNamespace(POST={'datagen_command': 'datagen {SPELL} {OUT}'})
