@@ -162,7 +162,8 @@ def check_for_engine_binary(out_path):
         return '%s.exe' % (out_path)
 
 def makefile_command(
-    net_path, make_path, out_path, compiler, git_sha_full=None, build_role='play'
+    net_path, make_path, out_path, compiler, git_sha_full=None,
+    build_role='play', datagen_provenance=None,
 ):
 
     # Keep historical unlimited parallelism unless an operator explicitly caps
@@ -180,6 +181,23 @@ def makefile_command(
     # playing engine. Unknown make variables are harmless for existing engines.
     if build_role == 'datagen':
         command += ['OPENBENCH_DATAGEN=1']
+        if datagen_provenance is not None:
+            source_tree = datagen_provenance.get('source_tree')
+            src_tree = datagen_provenance.get('src_tree')
+            identities = (git_sha_full, source_tree, src_tree)
+            if not all(
+                isinstance(value, str)
+                and len(value) == 40
+                and all(character in '0123456789abcdefABCDEF' for character in value)
+                for value in identities
+            ):
+                raise ValueError('Invalid DATAGEN archive provenance identity')
+            command += [
+                'DATAGEN_SOURCE_COMMIT=%s' % git_sha_full.lower(),
+                'DATAGEN_SOURCE_TREE=%s' % source_tree.lower(),
+                'DATAGEN_SRC_TREE=%s' % src_tree.lower(),
+                'DATAGEN_SOURCE_DIRTY=0',
+            ]
 
     # Build with CC/CXX= when using a custom compiler
     if compiler:
@@ -385,6 +403,7 @@ def download_public_engine(
     compiler=None,
     git_sha_full=None,
     build_role='play',
+    datagen_provenance=None,
 ):
 
     # Check to see if we already have the binary
@@ -422,6 +441,7 @@ def download_public_engine(
             compiler,
             git_sha_full,
             build_role,
+            datagen_provenance,
         )
 
         # Build the engine, which will produce a binary to bin_path, to be moved after

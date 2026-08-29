@@ -869,6 +869,27 @@ class DatagenWorkerTests(unittest.TestCase):
             'book_sha256 ' + ('ABCDEF0123456789' * 4), rendered
         )
 
+    def test_template_can_request_canonical_lowercase_asset_identities(self):
+        cfg = config()
+        cfg.workload['test']['book'] = {
+            'name': 'crazyhouse.epd',
+            'sha': '1' * 64,
+            'raw_sha': 'ABCDEF0123456789' * 4,
+            'source': 'https://example.test/crazyhouse.zip',
+        }
+        cfg.workload['test']['datagen']['command'] = (
+            'generate book_sha256 {BOOK_SHA256_CANONICAL} '
+            'network_sha256 {NETWORK_SHA256_CANONICAL} '
+            'out {OUT} seed {SEED} count {COUNT} threads {THREADS}'
+        )
+        rendered = worker.render_datagen_command(
+            cfg, os.path.join('Datagen', 'chunk.bin')
+        )
+        self.assertIn(
+            'book_sha256 ' + ('abcdef0123456789' * 4), rendered
+        )
+        self.assertIn('network_sha256 none', rendered)
+
     def test_tablebase_template_uses_frozen_authenticated_lease(self):
         cfg = tablebase_config()
         rendered = worker.render_datagen_command(
@@ -1935,6 +1956,8 @@ class DatagenWorkerTests(unittest.TestCase):
 
     def test_datagen_build_has_provenance_target_switch_and_separate_cache(self):
         sha = '0123456789abcdef' * 2 + '01234567'
+        source_tree = 'b' * 40
+        src_tree = 'c' * 40
         command = worker.makefile_command(
             os.path.join('Networks', '12345678'),
             '.',
@@ -1942,15 +1965,28 @@ class DatagenWorkerTests(unittest.TestCase):
             'g++',
             sha,
             'datagen',
+            {
+                'source_tree': source_tree,
+                'src_tree': src_tree,
+            },
         )
         self.assertIn('GIT_SHA_FULL=%s' % sha, command)
         self.assertIn('OPENBENCH_DATAGEN=1', command)
+        self.assertIn('DATAGEN_SOURCE_COMMIT=%s' % sha, command)
+        self.assertIn('DATAGEN_SOURCE_TREE=%s' % source_tree, command)
+        self.assertIn('DATAGEN_SRC_TREE=%s' % src_tree, command)
+        self.assertIn('DATAGEN_SOURCE_DIRTY=0', command)
 
         play_command = worker.makefile_command(
             None, '.', 'engine', 'g++', sha
         )
         self.assertIn('GIT_SHA_FULL=%s' % sha, play_command)
         self.assertNotIn('OPENBENCH_DATAGEN=1', play_command)
+        self.assertFalse(any(
+            argument.startswith('DATAGEN_SOURCE_')
+            or argument.startswith('DATAGEN_SRC_TREE=')
+            for argument in play_command
+        ))
 
         play = worker.engine_binary_name(
             'GenericEngine', sha, os.path.join('Networks', '12345678'), False
@@ -1980,6 +2016,8 @@ class DatagenWorkerTests(unittest.TestCase):
 
     def test_safe_download_engine_passes_full_sha_and_datagen_role(self):
         cfg = config()
+        provenance = {'source_tree': 'b' * 40, 'src_tree': 'c' * 40}
+        cfg.workload['test']['dev']['build']['datagen_provenance'] = provenance
         with mock.patch.object(
             worker, 'download_public_engine', return_value='engine.exe'
         ) as download:
@@ -1991,6 +2029,21 @@ class DatagenWorkerTests(unittest.TestCase):
         self.assertTrue(download.call_args.args[5].endswith('-DATAGEN'))
         self.assertEqual(download.call_args.args[7], 'a' * 40)
         self.assertEqual(download.call_args.args[8], 'datagen')
+        self.assertEqual(download.call_args.args[9], provenance)
+
+    def test_datagen_build_rejects_malformed_archive_provenance(self):
+        with self.assertRaisesRegex(
+            ValueError, 'Invalid DATAGEN archive provenance identity'
+        ):
+            worker.makefile_command(
+                None,
+                '.',
+                'engine',
+                'g++',
+                'a' * 40,
+                'datagen',
+                {'source_tree': 'not-a-tree', 'src_tree': 'c' * 40},
+            )
 
     def test_datagen_benches_once_while_play_keeps_worker_concurrency(self):
         cfg = config()

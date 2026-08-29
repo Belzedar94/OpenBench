@@ -1,11 +1,11 @@
 {
   "onboarding_ready": true,
-  "datagen_enabled": false,
+  "datagen_enabled": true,
   "variant_contract": "LICHESS_CRAZYHOUSE_2026_08_12",
   "sha": "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa",
   "raw_sha": "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa",
   "archive_sha256": "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c",
-  "source": "https://raw.githubusercontent.com/Belzedar94/Crazyhouse-Stockfish/5883acbeffd53138d31b278894d1fee451adffe8/openbench/books/CRAZYHOUSE_openings.epd.zip",
+  "source": "https://raw.githubusercontent.com/Belzedar94/Crazyhouse-Stockfish/c48e463b01fc2f17a634fe52b0ba355663804c33/openbench/books/CRAZYHOUSE_openings.epd.zip",
   "source_status": "PUBLISHED_AND_REAUTHENTICATED",
   "positions": 599,
   "unique_roots": 489,
