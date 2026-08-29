@@ -1,0 +1,71 @@
+{
+  "schema": "openbench.threecheck-datagen-public-status-receipt.v1",
+  "observed_utc": "2026-08-29T00:19:41.448Z",
+  "source": "https://belzedar.duckdns.org/datagen/402/",
+  "http_status": 200,
+  "workload_id": 402,
+  "priority": 400,
+  "completed_chunks": 0,
+  "total_chunks": 8,
+  "chunks": [
+    {
+      "idx": 0,
+      "status": "RUNNING",
+      "positions": 12500000,
+      "seed": 202608280001,
+      "attempts": 1
+    },
+    {
+      "idx": 1,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280002,
+      "attempts": 0
+    },
+    {
+      "idx": 2,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280003,
+      "attempts": 0
+    },
+    {
+      "idx": 3,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280004,
+      "attempts": 0
+    },
+    {
+      "idx": 4,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280005,
+      "attempts": 0
+    },
+    {
+      "idx": 5,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280006,
+      "attempts": 0
+    },
+    {
+      "idx": 6,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280007,
+      "attempts": 0
+    },
+    {
+      "idx": 7,
+      "status": "PENDING",
+      "positions": 12500000,
+      "seed": 202608280008,
+      "attempts": 0
+    }
+  ],
+  "worker_identity_collected": false,
+  "worker_process_modified": false,
+  "next_safe_action": "Allow the active claim to run; inspect only public aggregate transitions and freeze chunks only after official completion."
+}
