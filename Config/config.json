@@ -1,7 +1,7 @@
 {
-    "client_version": 50,
+    "client_version": 51,
     "client_repo_url": "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref": "156fc603dbbbf31fe181b723128deff67bd2a58c",
+    "client_repo_ref": "c1ee4b7fa834cc2c6cec47715123e5e4bb18f735",
     "use_cross_approval": false,
     "require_login_to_view": false,
     "require_manual_registration": false,
@@ -53,6 +53,7 @@
         "Horde-Stockfish",
         "Terachess-Stockfish",
         "3Check-Stockfish",
-        "Crazyhouse-Stockfish"
+        "Crazyhouse-Stockfish",
+        "TaikyokuShogi-Stockfish"
     ]
 }

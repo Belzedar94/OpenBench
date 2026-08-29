@@ -1,0 +1,66 @@
+{
+  "onboarding_ready": true,
+  "private": false,
+  "nps": 36000,
+  "source": "https://github.com/Belzedar94/TaikyokuShogi-Stockfish",
+  "build": {
+    "path": ".",
+    "compilers": ["g++"],
+    "cpuflags": [],
+    "systems": ["Windows", "Linux"]
+  },
+  "test_presets": {
+    "default": {}
+  },
+  "tune_presets": {
+    "default": {}
+  },
+  "datagen_presets": {
+    "default": {
+      "both_bench": 9586353,
+      "both_network": "",
+      "dev_branch": "b2014c422f4aae7420636ab17884dfb862cf4c15",
+      "book_name": "NONE",
+      "datagen_command": "datagen teacher_id {TEACHER_ID} source_commit {ENGINE_COMMIT} contract_sha256 {PUBLICATION_CONTRACT_SHA256} producer_sha256 {PRODUCER_SHA256} book {BOOK} book_sha256 {BOOK_SHA256} network {NETWORK} network_sha256 {NETWORK_SHA256} format TK01-v1 nodes 8000 count {COUNT} threads {THREADS} seed {SEED} out {OUT} random_plies 8 write_min_ply 6 eval_limit 10000 max_game_plies 20000",
+      "datagen_total_count": 260000,
+      "datagen_positions_per_chunk": 260000,
+      "datagen_base_seed": 202608120200000,
+      "datagen_teacher_id": "taikyoku-material-advance-v1",
+      "datagen_publication_protocol": "42",
+      "datagen_campaign_id": "taikyoku-material-regime-20260812",
+      "datagen_external_workload_id": "canary-260k",
+      "datagen_role": "canary",
+      "datagen_cohort": "material-n8000-startpos-v1",
+      "priority": 0,
+      "throughput": 1000,
+      "workload_size": 1,
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    },
+    "Material Regime 5.2M": {
+      "both_bench": 9586353,
+      "both_network": "",
+      "dev_branch": "b2014c422f4aae7420636ab17884dfb862cf4c15",
+      "book_name": "NONE",
+      "datagen_command": "datagen teacher_id {TEACHER_ID} source_commit {ENGINE_COMMIT} contract_sha256 {PUBLICATION_CONTRACT_SHA256} producer_sha256 {PRODUCER_SHA256} book {BOOK} book_sha256 {BOOK_SHA256} network {NETWORK} network_sha256 {NETWORK_SHA256} format TK01-v1 nodes 8000 count {COUNT} threads {THREADS} seed {SEED} out {OUT} random_plies 8 write_min_ply 6 eval_limit 10000 max_game_plies 20000",
+      "datagen_total_count": 5200000,
+      "datagen_positions_per_chunk": 260000,
+      "datagen_base_seed": 202608120300000,
+      "datagen_teacher_id": "taikyoku-material-advance-v1",
+      "datagen_publication_protocol": "42",
+      "datagen_campaign_id": "taikyoku-material-regime-20260812",
+      "datagen_external_workload_id": "train-5m2",
+      "datagen_role": "train",
+      "datagen_cohort": "material-n8000-startpos-v1",
+      "priority": 0,
+      "throughput": 1000,
+      "workload_size": 1,
+      "win_adj": "None",
+      "draw_adj": "None",
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED"
+    }
+  }
+}

@@ -1,8 +1,9 @@
 # AGENTS.md — Torre de control OpenBench (guía para agentes)
 
 Guía operativa para cualquier agente de IA (o sesión futura) que use esta instancia de
-OpenBench. It currently serves **six engines**: Spell-Stockfish, Atomic-Stockfish,
-Alice-Stockfish, Horde-Stockfish, Crazyhouse-Stockfish and
+OpenBench. It currently serves **nine engines**: Spell-Stockfish, Atomic-Stockfish,
+Alice-Stockfish, Horde-Stockfish, Terachess-Stockfish, 3Check-Stockfish,
+Crazyhouse-Stockfish, TaikyokuShogi-Stockfish and
 Fairy-Stockfish-Atomic-Baseline (frozen baseline).
 Escrita el 2026-07-12; revisión mayor 2026-08-29. Si algo de aquí contradice el código,
 gana el código — y actualiza este documento.
@@ -392,7 +393,8 @@ Si el orden parece mal, se dice con los números delante y se espera.
 ## 7. Estado (2026-08-29)
 
 - **Servidos**: Spell-Stockfish, Atomic-Stockfish, Alice-Stockfish, Horde-Stockfish,
-  Crazyhouse-Stockfish and Fairy-Stockfish-Atomic-Baseline (plus
+  Terachess-Stockfish, 3Check-Stockfish, Crazyhouse-Stockfish,
+  TaikyokuShogi-Stockfish and Fairy-Stockfish-Atomic-Baseline (plus
   `Fairy-Stockfish-Hordetest-Baseline.json`
   presente pero fuera de la lista, ver §4b.5). Cada motor con su categoría Discord
   y su entrada en `HOOKS`.
