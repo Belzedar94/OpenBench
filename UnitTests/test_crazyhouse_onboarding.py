@@ -16,9 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = "LICHESS_CRAZYHOUSE_2026_08_12"
 ENGINE = "Crazyhouse-Stockfish"
 BOOK = "CRAZYHOUSE_openings.epd"
-ENGINE_COMMIT = "c48e463b01fc2f17a634fe52b0ba355663804c33"
-ENGINE_TREE = "35bf7df9c6aade171ffa0a457ab7576b744d8f14"
-ENGINE_SRC_TREE = "2e0ba8b66317ef3e899a53e752ef9266fc17ac92"
+QUALIFIED_ENGINE_COMMIT = "4e9a6ec4ddd3c577d15e335dbb0bf437443b8945"
+QUALIFIED_ENGINE_TREE = "6bfa42e73829038ac1af0022ab343cf17e7dffa3"
+QUALIFIED_ENGINE_SRC_TREE = "d4bc9065104aef5ccc3e633698622ed741e5e3ee"
+STRENGTH_BASE_COMMIT = "c48e463b01fc2f17a634fe52b0ba355663804c33"
+BOOK_SOURCE_COMMIT = STRENGTH_BASE_COMMIT
 BOOK_SHA256 = "1371e87ce3bdb875d922ad0061c96c4a123bc571daf4ae2bff24e5176287f0fa"
 BOOK_ARCHIVE_SHA256 = "d24bb6d72015af9930f76f9191ba36c016652a6f2708a2cc79e9e2c8ec600d9c"
 NETWORK_SHA256 = "8ebf84784ad20fa33df403e60211818a7486db7cb8c3decfc86a80238d254f43"
@@ -91,10 +93,13 @@ class CrazyhouseActivationTests(unittest.TestCase):
         self.assertEqual(engine["build"]["artifact_roles"], ["play", "datagen"])
         self.assertEqual(
             engine["build"]["datagen_provenance"],
-            {"source_tree": ENGINE_TREE, "src_tree": ENGINE_SRC_TREE},
+            {
+                "source_tree": QUALIFIED_ENGINE_TREE,
+                "src_tree": QUALIFIED_ENGINE_SRC_TREE,
+            },
         )
         defaults = engine["test_presets"]["default"]
-        self.assertEqual(defaults["base_branch"], ENGINE_COMMIT)
+        self.assertEqual(defaults["base_branch"], STRENGTH_BASE_COMMIT)
         self.assertEqual(defaults["both_bench"], 38919)
         self.assertEqual(
             defaults["both_network"],
@@ -116,9 +121,15 @@ class CrazyhouseActivationTests(unittest.TestCase):
             engine["qualified_source"]["official_stockfish_ancestor"],
             "229f6339e537a097a79831cd06dbfdb3e623d4ac",
         )
-        self.assertEqual(engine["qualified_source"]["commit"], ENGINE_COMMIT)
-        self.assertEqual(engine["qualified_source"]["tree"], ENGINE_TREE)
-        self.assertEqual(engine["qualified_source"]["src_tree"], ENGINE_SRC_TREE)
+        self.assertEqual(
+            engine["qualified_source"]["commit"], QUALIFIED_ENGINE_COMMIT
+        )
+        self.assertEqual(
+            engine["qualified_source"]["tree"], QUALIFIED_ENGINE_TREE
+        )
+        self.assertEqual(
+            engine["qualified_source"]["src_tree"], QUALIFIED_ENGINE_SRC_TREE
+        )
         self.assertEqual(
             engine["legacy_evaluator"]["sha256"], NETWORK_SHA256
         )
@@ -134,7 +145,7 @@ class CrazyhouseActivationTests(unittest.TestCase):
         self.assertEqual(
             book["source"],
             "https://raw.githubusercontent.com/Belzedar94/"
-            "Crazyhouse-Stockfish/" + ENGINE_COMMIT
+            "Crazyhouse-Stockfish/" + BOOK_SOURCE_COMMIT
             + "/openbench/books/" + BOOK + ".zip",
         )
 
@@ -158,7 +169,9 @@ class CrazyhouseActivationTests(unittest.TestCase):
         for name, frozen in expected.items():
             with self.subTest(preset=name):
                 preset = presets[name]
-                self.assertEqual(preset["dev_branch"], ENGINE_COMMIT)
+                self.assertEqual(
+                    preset["dev_branch"], QUALIFIED_ENGINE_COMMIT
+                )
                 self.assertEqual(preset["both_bench"], 38919)
                 self.assertEqual(
                     preset["both_network"],
