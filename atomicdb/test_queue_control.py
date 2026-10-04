@@ -26,6 +26,8 @@ las peticiones que se solapan por PRESUPUESTO (dos generaciones sobre la misma
 posicion) no las cubre el dedup del submit y se siguen cerrando al aterrizar.
 """
 
+import json
+
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import Client
@@ -1604,3 +1606,155 @@ class QueueApiAndLifoTests(_QueueHarness):
                          403)
         self.assertEqual(self.client.put('/atomicdb/api/my-queue/').status_code,
                          405)
+
+
+class ScriptedQueueDoorTests(_QueueHarness):
+    """The doors a script uses: credentials in the body, JSON back.
+
+    A script carries neither the session cookie nor the page token of the
+    explorer forms.  ``my-queue``, ``queue-bump`` and ``queue-cancel`` each
+    answer a POST with the OpenBench credentials a worker sends, as form
+    fields or as a JSON body, and apply the rules of the buttons.
+    """
+
+    def setUp(self):
+        super().setUp()
+        worker_account('alice', 'p')
+        worker_account('bob', 'p')
+        # No session, and CSRF enforced: the way a script arrives.
+        self.script = Client(enforce_csrf_checks=True)
+        self.alice = {'username': 'alice', 'password': 'p'}
+
+    def _json(self, path, **body):
+        return self.script.post(path, data=json.dumps(body),
+                                content_type='application/json')
+
+    def _state(self, task):
+        return AnalysisTask.objects.get(pk=task.pk).state
+
+    def test_my_queue_answers_form_credentials_without_a_session(self):
+        mine = self._queue('alice', [self.RUNG] * 2)
+        self._queue('bob', [self.RUNG], offset=100)
+
+        response = self.script.post('/atomicdb/api/my-queue/', self.alice)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['account'], 'alice')
+        self.assertEqual([row['task_id'] for row in payload['tasks']],
+                         [mine[0].id, mine[1].id])
+
+    def test_my_queue_answers_json_credentials(self):
+        mine = self._queue('alice', [self.RUNG])
+
+        response = self._json('/atomicdb/api/my-queue/', **self.alice)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row['task_id'] for row in response.json()['tasks']],
+                         [mine[0].id])
+
+    def test_the_routes_answer_without_the_trailing_slash(self):
+        """A redirect to the slashed route would replay the POST as a GET."""
+        mine = self._queue('alice', [self.RUNG] * 2)
+
+        listed = self.script.post('/atomicdb/api/my-queue', self.alice)
+        bumped = self.script.post(
+            f'/atomicdb/api/queue-bump/{mine[1].id}', self.alice)
+        withdrawn = self.script.post(
+            f'/atomicdb/api/queue-cancel/{mine[0].id}', self.alice)
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(bumped.json(), {'status': 'moved', 'moved': True})
+        self.assertEqual(withdrawn.json(), {'status': 'cancelled'})
+
+    def test_wrong_credentials_and_disabled_accounts_are_refused(self):
+        worker_account('expelled', 'p', enabled=False)
+        mine = self._queue('alice', [self.RUNG] * 2)
+        paths = ('/atomicdb/api/my-queue/',
+                 f'/atomicdb/api/queue-bump/{mine[1].id}/',
+                 f'/atomicdb/api/queue-cancel/{mine[1].id}/')
+
+        for body in ({'username': 'alice', 'password': 'wrong'},
+                     {'username': 'expelled', 'password': 'p'},
+                     {}):
+            for path in paths:
+                response = self.script.post(path, body)
+                self.assertEqual(response.status_code, 403, (path, body))
+                self.assertEqual(response.json(), {'error': 'bad credentials'})
+        self.assertEqual(self._state(mine[1]), AnalysisTask.TState.PENDING)
+        self.assertEqual(AnalysisTask.objects.get(pk=mine[1].pk).queue_seq, 0)
+
+    def test_a_session_alone_does_not_open_the_scripted_actions(self):
+        """They are exempt from CSRF, so the session cookie must not count."""
+        mine = self._queue('alice', [self.RUNG] * 2)
+        self.client.login(username='alice', password='p')
+
+        for path in (f'/atomicdb/api/queue-bump/{mine[1].id}/',
+                     f'/atomicdb/api/queue-cancel/{mine[1].id}/'):
+            self.assertEqual(self.client.post(path).status_code, 403, path)
+        self.assertEqual(self._state(mine[1]), AnalysisTask.TState.PENDING)
+        self.assertEqual(AnalysisTask.objects.get(pk=mine[1].pk).queue_seq, 0)
+
+    def test_the_scripted_actions_are_post_only(self):
+        mine = self._queue('alice', [self.RUNG] * 2)
+
+        for path in (f'/atomicdb/api/queue-bump/{mine[1].id}/',
+                     f'/atomicdb/api/queue-cancel/{mine[1].id}/'):
+            self.assertEqual(self.script.get(path).status_code, 405, path)
+
+    def test_a_scripted_bump_moves_only_the_request_of_its_own_account(self):
+        mine = self._queue('alice', [self.RUNG] * 3)
+        yours = self._queue('bob', [self.RUNG] * 2, offset=100)
+
+        moved = self.script.post(
+            f'/atomicdb/api/queue-bump/{mine[2].id}/', self.alice)
+        foreign = self.script.post(
+            f'/atomicdb/api/queue-bump/{yours[1].id}/', self.alice)
+        again = self._json(
+            f'/atomicdb/api/queue-bump/{mine[2].id}/', **self.alice)
+
+        self.assertEqual(moved.json(), {'status': 'moved', 'moved': True})
+        self.assertEqual(foreign.json(),
+                         {'status': 'not-yours', 'moved': False})
+        self.assertEqual(again.json(),
+                         {'status': 'already-first', 'moved': False})
+        self.assertEqual(AnalysisTask.objects.get(pk=yours[1].pk).queue_seq, 0)
+        self.assertEqual(self._serve_order(5),
+                         [mine[2].id, yours[0].id, mine[0].id, yours[1].id,
+                          mine[1].id])
+
+    def test_a_scripted_cancel_withdraws_and_undo_restores_the_same_row(self):
+        mine = self._queue('alice', [self.RUNG] * 2)
+        path = f'/atomicdb/api/queue-cancel/{mine[1].id}/'
+
+        withdrawn = self.script.post(path, self.alice)
+        self.assertEqual(withdrawn.json(), {'status': 'cancelled'})
+        self.assertEqual(self._state(mine[1]), AnalysisTask.TState.CANCELLED)
+
+        restored = self.script.post(path, {**self.alice, 'undo': '1'})
+        self.assertEqual(restored.json(), {'status': 'restored'})
+        self.assertEqual(self._state(mine[1]), AnalysisTask.TState.PENDING)
+
+        nothing = self.script.post(path, {**self.alice, 'undo': '1'})
+        self.assertEqual(nothing.json(), {'status': 'nothing-to-undo'})
+        self.assertEqual(self._state(mine[1]), AnalysisTask.TState.PENDING)
+
+    def test_a_scripted_cancel_takes_undo_from_a_json_body(self):
+        mine = self._queue('alice', [self.RUNG])
+        path = f'/atomicdb/api/queue-cancel/{mine[0].id}/'
+        self._json(path, **self.alice)
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.CANCELLED)
+
+        restored = self._json(path, undo=True, **self.alice)
+
+        self.assertEqual(restored.json(), {'status': 'restored'})
+        self.assertEqual(self._state(mine[0]), AnalysisTask.TState.PENDING)
+
+    def test_a_scripted_cancel_cannot_touch_the_request_of_a_stranger(self):
+        yours = self._queue('bob', [self.RUNG])
+
+        response = self.script.post(
+            f'/atomicdb/api/queue-cancel/{yours[0].id}/', self.alice)
+
+        self.assertEqual(response.json(), {'status': 'not-yours'})
+        self.assertEqual(self._state(yours[0]), AnalysisTask.TState.PENDING)
