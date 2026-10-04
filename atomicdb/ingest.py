@@ -1796,7 +1796,25 @@ def _backed_for(row, children, discrepancies=None, bound=None,
         # motor que falta y sera el quien lo diga.
         if discrepancies is not None:
             discrepancies.append((best.move, row.key, own_quality))
-        return own, None, 0, own_quality
+        # THE CLAIM IS VETOED; THE CHILDREN AN ENGINE DID MEASURE ARE NOT.
+        # This used to return the node's own number outright, so one
+        # unsearched line at the top of the table silenced every searched
+        # move below it: ``2d39ae6a`` published its own 1207 over a row
+        # searched at 512M that read 1131, because an unsearched h7g7
+        # claimed 1117 ("best move doesnt match eval", Eclipsia, 13-Sep).
+        # And the purchase above is the only way out of that state, so it
+        # lasts exactly as long as that purchase waits in the queue.  The
+        # first rule of the backup is that the best INFORMED child backs
+        # up; a claim nobody searched is not better informed than a search.
+        measured = [c for c in informed
+                    if c.quality > 0
+                    and _better_for_mover(c.value, own, stm_white)]
+        if not measured:
+            return own, None, 0, own_quality
+        best = (max if stm_white else min)(
+            measured,
+            key=lambda c: (c.value, c.quality, -c.plies) if stm_white
+            else (c.value, -c.quality, c.plies))
     if not complete:
         if own is not None:
             # GUARDA DIRECCIONAL (intacta): con cobertura parcial y sin cota
