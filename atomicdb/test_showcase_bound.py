@@ -60,6 +60,36 @@ class ShowcaseBoundTests(TestCase):
         self.assertEqual(p.backed_move, 'c1f4')
         self.assertEqual(p.backed_nodes, 128_000_000)
 
+    def test_bound_gives_permission_but_never_wins_the_negamax(self):
+        """La cota nunca compite: el mejor hijo MEDIDO sube siempre.
+
+        El caso real (15-ago, ``6c0c9151``, negras al turno): el pase de 2B
+        del propio nodo dejo un escaparate cuya peor linea acotaba en 1326,
+        los hijos medidos daban min=1341 via e8c8... y la cabecera publicaba
+        1326/1 SIN arista: el pseudo-hijo de la cota ganaba el min y el 1341
+        no subia nunca — el gate de profundidad retirado el 8-ago,
+        reintroducido por la puerta de atras.  Orden del propietario,
+        literal: "me da igual que el padre haya sido analizado por 10B nodos
+        y el hijo solo 128M, quiero que SIEMPRE se haga backprop".
+        """
+        p = _pos('BP-P', 'b', eval_cp=1287, nodes_invested=2_000_000_000,
+                 expanded=True,
+                 last_analysis=_showcase(1287, 1305, 1327, 1319, 1326))
+        best = _pos('BP-C', 'w', backed_eval=1341, backed_plies=3,
+                    nodes_invested=128_000_000)
+        _edge(p, best, 'e8c8')
+        _edge(p, _pos('BP-C2', 'w', backed_eval=1377, backed_plies=1,
+                      nodes_invested=2_000_000_000), 'a7a6')
+        for i in range(4):
+            _edge(p, _pos(f'BP-U{i}', 'w'))
+
+        ingest.backup_backed_evals([p.key])
+
+        p.refresh_from_db()
+        self.assertEqual(p.backed_eval, 1341)
+        self.assertEqual(p.backed_move, 'e8c8')
+        self.assertEqual(p.backed_plies, 4)
+
     def test_single_line_showcase_gives_no_bound(self):
         # Con una sola linea vigente no hay cota (el PV1 es la eval propia):
         # la guarda direccional sigue mandando y la cabecera no baja mientras

@@ -113,25 +113,50 @@ def _notify_requester(job, task):
     avisar alli mandaria a la persona a una posicion cuyo resultado todavia
     esta en la cola.
 
-    ``requested_by`` es texto libre que viajo desde una sesion, asi que el
-    aviso solo se crea si hay una cuenta con ese nombre.  La comprobacion
-    toca la base de OpenBench, no la de AtomicDB; es una consulta por trabajo
-    y solo en los que alguien pidio — la exploracion autonoma no llega aqui.
+    A TODOS LOS QUE LA PIDIERON, no solo al primero.  Una tarea puede llevar
+    varias cuentas encima desde que sumarse a una peticion ajena sustituye a
+    crear una fila duplicada (§ ``ingest.add_requester``): avisar solo al autor
+    seria cobrarle al segundo la precedencia que su click compro y no darle el
+    resultado.  Devuelve la lista de avisos creados o ya existentes.
+
+    Los nombres son texto libre que viajo desde una sesion, asi que un aviso
+    solo se crea si hay una cuenta con ese nombre.  La comprobacion toca la
+    base de OpenBench, no la de AtomicDB, y va en UNA consulta para todos los
+    peticionarios de la tarea — que casi siempre es uno, y solo en los trabajos
+    que alguien pidio: la exploracion autonoma no llega aqui.
+
+    EL PRECIO, EXPLICITO: la tarea guarda UNA ruta, la del primero que la
+    pidio, asi que todos los avisos de una tarea compartida enlazan por ese
+    orden de jugadas.  La posicion es la misma para todos — es literalmente la
+    que cada uno pidio — y quien llegue por otra transposicion vera la linea
+    del primero en vez de la suya.  Guardar una ruta por persona pide otra
+    tabla; hasta que haga falta, esto es una etiqueta imprecisa, no un enlace
+    equivocado.
     """
-    requested_by = (task or {}).get('requested_by') or ''
-    if not requested_by:
-        return None
-    if not ingest.notification_deserved((task or {}).get('source'),
-                                        (task or {}).get('budget_nodes')):
-        return None
-    if not User.objects.filter(username=requested_by).exists():
-        return None
-    notification, _created = RequestNotification.objects.get_or_create(
-        task_id=job.task_id,
-        defaults={'username': requested_by,
-                  'position_id': job.position_id,
-                  'route': (task or {}).get('route') or ''})
-    return notification
+    task = task or {}
+    wanted, seen = [], set()
+    for name in [task.get('requested_by') or ''] + list(
+            task.get('also_requested_by') or []):
+        if name and name not in seen:
+            seen.add(name)
+            wanted.append(name)
+    if not wanted:
+        return []
+    if not ingest.notification_deserved(task.get('source'),
+                                        task.get('budget_nodes')):
+        return []
+    known = set(User.objects.filter(username__in=wanted)
+                .values_list('username', flat=True))
+    notifications = []
+    for name in wanted:
+        if name not in known:
+            continue
+        notification, _created = RequestNotification.objects.get_or_create(
+            task_id=job.task_id, username=name,
+            defaults={'position_id': job.position_id,
+                      'route': task.get('route') or ''})
+        notifications.append(notification)
+    return notifications
 
 
 def _backoff_seconds(attempts):
@@ -227,7 +252,8 @@ def apply_job(job):
     # lo que decide el aviso al peticionario, que se pregunta lo mismo por la
     # misma fila.
     task = AnalysisTask.objects.filter(pk=job.task_id).values(
-        'source', 'requested_by', 'budget_nodes', 'route').first()
+        'source', 'requested_by', 'also_requested_by', 'budget_nodes',
+        'route').first()
     source = (task or {}).get('source')
 
     with atomic(), ingest.closure_attribution(source):

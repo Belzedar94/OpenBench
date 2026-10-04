@@ -34,6 +34,40 @@ DEBUG = os.environ.get('OPENBENCH_DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ['*']
 
+# Django's stock logging sends unhandled view exceptions to django.request, and
+# its console handler is gated on require_debug_true. In production that leaves
+# mail_admins as the only handler, and with no mail backend configured a 500 is
+# written down nowhere at all: the worker sees "unable to reach the server", the
+# journal stays silent, and the only evidence left is a status code in nginx.
+# This adds the console back at ERROR so the traceback lands in the journal
+# where journalctl -u openbench can find it. It does not turn DEBUG on and it
+# does not put anything in the response. Django applies this on top of its own
+# defaults rather than in place of them, and propagate stays on, so mail_admins
+# keeps receiving exactly what it received before.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'openbench': {
+            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console_errors': {
+            'class': 'logging.StreamHandler',
+            'level': 'ERROR',
+            'formatter': 'openbench',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console_errors'],
+            'level': 'ERROR',
+            'propagate': True,
+        },
+    },
+}
+
 # The public web goes through an HTTPS tunnel in front of runserver; Django's
 # CSRF origin check needs the tunnel origin trusted or every login/form POST
 # 403s. Comma-separated env override; the default trusts TryCloudflare quick
@@ -187,6 +221,16 @@ ATOMICDB_OR_CLAMP = os.environ.get(
 # una linea en el env file del despliegue; quitarla es el rollback entero, sin
 # desplegar nada y sin residuo en la base (§ docs/solver-allocation.md).
 ATOMICDB_DESCENT = os.environ.get('ATOMICDB_DESCENT', 'proof')
+# TECHO DE GASTO POR HORA de cada brazo de compra del walker, en tareas
+# creadas.  Vacio = el default del modulo, que es donde vive el numero
+# (§ ingest.ARM_RATE_SETTING); ``0`` apaga el brazo.  Existen porque los cupos
+# por cola miden lo PENDIENTE y con la flota sirviendo al instante nunca llegan
+# a tocar: el 15-ago-2026 la cascada compro 4.551 analisis en una hora sin
+# rozar su cupo de 16.  Un numero mal escrito no arranca un motor nuevo ni
+# tumba el proceso: se ignora y manda el default (§ ingest.arm_rate).
+ATOMICDB_ARM_RATE_CASCADE = os.environ.get('ATOMICDB_ARM_RATE_CASCADE', '')
+ATOMICDB_ARM_RATE_QUALITY = os.environ.get('ATOMICDB_ARM_RATE_QUALITY', '')
+ATOMICDB_ARM_RATE_DESCEND = os.environ.get('ATOMICDB_ARM_RATE_DESCEND', '')
 
 INSTALLED_APPS = [
     'atomicdb',

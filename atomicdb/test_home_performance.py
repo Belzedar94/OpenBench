@@ -230,7 +230,23 @@ class PublicCounterTests(TestCase):
             key=logic.key_of(logic.start_fen())).update(nodes_invested=1_000)
 
     def test_the_counters_are_the_same_counters(self):
-        """Cacheado o no, el numero que se pinta es el conteo de verdad."""
+        """Cacheado o no, el numero que se pinta es un conteo de verdad.
+
+        Desde el 29-ago-2026 hay UN pagador por hora: con captura fresca se
+        sirven SUS numeros con SU hora — el mismo conteo exacto, hecho por
+        ``capture_atomicdb_progress``.  Sin captura, el barrido de respaldo
+        mide en vivo y lo firma con la hora de ahora.  En ninguna de las dos
+        ramas hay una estimacion.
+        """
+        snapshot = ProgressSnapshot.objects.order_by('-bucket_start').first()
+        totals = metrics.tree_totals(now=self.now, force=True)
+
+        self.assertEqual(totals['total'], snapshot.positions_total)
+        self.assertEqual(totals['closed'], snapshot.positions_closed)
+        self.assertEqual(totals['nodes'], snapshot.engine_nodes_total)
+        self.assertEqual(totals['measured_at'], snapshot.bucket_start)
+
+        ProgressSnapshot.objects.all().delete()
         totals = metrics.tree_totals(now=self.now, force=True)
 
         self.assertEqual(totals['total'], Position.objects.count())
@@ -241,7 +257,9 @@ class PublicCounterTests(TestCase):
         self.assertEqual(totals['measured_at'], self.now)
 
     def test_the_page_shows_what_the_snapshot_published(self):
+        ProgressSnapshot.objects.update(engine_nodes_total=1_000)
         metrics.refresh_public_snapshot(now=self.now)
+        ProgressSnapshot.objects.update(engine_nodes_total=999_000_000)
         Position.objects.filter(
             key=logic.key_of(logic.start_fen())).update(
                 nodes_invested=999_000_000)
@@ -259,7 +277,11 @@ class PublicCounterTests(TestCase):
 
         body = Client().get('/atomicdb/').content.decode()
 
-        stamp = self.now.strftime('%Y-%m-%d %H:%M')
+        # La hora que se pinta es la del DATO: el bucket de la captura, no
+        # el momento de publicarla (29-ago-2026).
+        bucket = (ProgressSnapshot.objects.order_by('-bucket_start')
+                  .first().bucket_start)
+        stamp = bucket.strftime('%Y-%m-%d %H:%M')
         self.assertIn(f'taken at {stamp} UTC', body)
 
     def test_a_second_reader_does_not_recount(self):
@@ -281,7 +303,11 @@ class PublicCounterTests(TestCase):
             totals = metrics.tree_totals(now=self.now)
 
         self.assertEqual(len(captured.captured_queries), 0)
-        self.assertEqual(totals['measured_at'], self.now - timedelta(hours=2))
+        # Lo servido es la publicacion vieja, y su hora es la del dato que
+        # llevaba dentro: el bucket de la captura (29-ago-2026).
+        self.assertEqual(totals['measured_at'],
+                         ProgressSnapshot.objects.order_by('-bucket_start')
+                         .first().bucket_start)
 
     def test_an_empty_cache_falls_back_to_the_hourly_capture(self):
         """Sin nada publicado y con otro midiendo: la captura horaria, con su fecha.

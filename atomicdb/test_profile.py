@@ -220,18 +220,23 @@ class QueueTests(TestCase):
         """CONTRATO CAMBIADO (7-ago, reparto justo): UNA por delante, no dos.
 
         Bob pidio dos y alice una despues.  En el FIFO por id que habia hasta
-        hoy, alice era la tercera y la pagina decia "2 requests ahead".  Con
-        el reparto ponderado, la SEGUNDA de bob espera a que alice haya
-        cobrado la suya, asi que por delante solo tiene una — y esa es la
-        cifra que hay que pintar, porque es la que va a pasar."""
+        hoy, alice era la tercera y la fila decia "#3".  Con el reparto
+        ponderado, la SEGUNDA de bob espera a que alice haya cobrado la suya,
+        asi que por delante solo tiene una y su sitio es el segundo — y ese es
+        el numero que hay que pintar, porque es el que va a pasar.
+
+        La cifra la da el ``#`` y SOLO el ``#``: la frase "N requests ahead"
+        que la repetia se retiro con la sugerencia de Eclipsia, asi que este
+        contrato se comprueba donde ahora vive."""
         _task(self.auto, source=AnalysisTask.Source.USER, requested_by='bob')
         _task(self.theirs, source=AnalysisTask.Source.USER, requested_by='bob')
         _task(self.mine, source=AnalysisTask.Source.USER, requested_by='alice')
 
         body = self._body()
 
-        self.assertIn('1 request ahead', body)
-        self.assertNotIn('2 requests ahead', body)
+        self.assertIn('#2', body)
+        self.assertNotIn('#3', body)
+        self.assertNotIn('request ahead', body)
 
     def test_an_empty_queue_says_so_without_pretending(self):
         _ping('box-atomicdb', 'alice')
@@ -559,3 +564,29 @@ class HeaderCacheTests(TestCase):
 
         for body in (alice, bob):
             self.assertIn('class="identity-user" href="/atomicdb/me/"', body)
+
+
+class QueuePlaceMissingTests(TestCase):
+    """Una pendiente sin sitio en la cola (fuera de la banda servible) se
+    pinta con un guion: el perfil no puede caerse por ella (5-sep, 500 en
+    /atomicdb/user/BManBJ/)."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        self.client = Client()
+        self.mine = _child('a2a3')        # 1.a3
+
+    def test_a_request_without_a_place_still_renders(self):
+        from unittest import mock
+        _task(self.mine, source=AnalysisTask.Source.USER,
+              requested_by='alice')
+
+        with mock.patch.object(contributors.live_request, 'queue_ahead_map',
+                               return_value={}):
+            response = self.client.get('/atomicdb/user/alice/')
+
+        self.assertEqual(response.status_code, 200)
+        raw = response.content.decode()
+        self.assertIn('1. a3', _reading(raw))
+        self.assertNotIn('#None', raw)
+        self.assertIn('No place yet', raw)

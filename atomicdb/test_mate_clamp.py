@@ -326,6 +326,28 @@ class RequestedTaskTests(TestCase):
 class UnexploredChildrenTests(TestCase):
     """El boton masivo sigue comprando sondas de grado peticion."""
 
+    def test_a_lost_race_for_the_same_generation_does_not_break_the_click(self):
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        children = ingest.unexplored_children(parent)
+        child = children[0]
+        # Otra tarea de la misma generacion, ya terminada: (posicion,
+        # generacion) es unica, asi que el insert del click choca igual que
+        # en la carrera real (otro padre por transposicion, o el selector).
+        AnalysisTask.objects.create(
+            position=child, generation=child.visits, budget_nodes=1,
+            state=AnalysisTask.TState.COMPLETED)
+
+        queued = ingest.enqueue_unexplored_children(parent)
+
+        self.assertEqual(queued, len(children) - 1)
+        self.assertEqual(
+            AnalysisTask.objects.filter(position=child).count(), 1)
+        self.assertEqual(
+            AnalysisTask.objects.filter(
+                position_id__in=[c.key for c in children[1:]],
+                state='PENDING').count(), len(children) - 1)
+
     def test_children_without_information_keep_the_request_floor(self):
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)

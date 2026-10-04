@@ -58,6 +58,47 @@ class BackedChainTests(TestCase):
         p.refresh_from_db()
         self.assertEqual(p.backed_move, 'd2d4')
 
+    def test_partial_loss_without_anchor_backs_nothing(self):
+        """Un mate EN CONTRA por la unica hija mirada no respalda al nodo.
+
+        El caso real (14-ago, Nf3 d6): un cierre MINIMAX llego por
+        transposicion a la unica hija materializada de un nodo sin eval
+        propia ni analisis, con 16 respuestas mas por abrir.  El min sobre
+        ese subset de uno sellaba backed 10000 — "las negras estan
+        perdidas" cuando lo unico probado es que UNA de sus 17 respuestas
+        pierde — y la fila fantasma encabezaba la tabla sobre jugadas con
+        motor de verdad detras.  Misma regla que los cierres de status:
+        la derrota exige cobertura completa.
+        """
+        padre = _pos('PLA', 'b', expanded=True)
+        perdida = _pos('PLA-LOSS', 'w', status='WHITE_WIN',
+                       backed_eval=10_000, backed_plies=0)
+        _edge(padre, perdida, 'e8d7')
+        for i in range(3):
+            _edge(padre, _pos(f'PLA-H{i}', 'w'))
+
+        ingest.backup_backed_evals([padre.key])
+
+        padre.refresh_from_db()
+        self.assertIsNone(padre.backed_eval)
+        self.assertIsNone(padre.backed_move)
+
+    def test_partial_win_for_mover_still_backs_up(self):
+        # El espejo legitimo: al que MUEVE le basta una hija ganadora,
+        # exactamente como en el minimax de status.
+        padre = _pos('PWI', 'w', expanded=True)
+        ganada = _pos('PWI-WIN', 'b', status='WHITE_WIN',
+                      backed_eval=10_000, backed_plies=0)
+        _edge(padre, ganada, 'd1h5')
+        for i in range(3):
+            _edge(padre, _pos(f'PWI-H{i}', 'b'))
+
+        ingest.backup_backed_evals([padre.key])
+
+        padre.refresh_from_db()
+        self.assertEqual(padre.backed_eval, 10_000)
+        self.assertEqual(padre.backed_move, 'd1h5')
+
     def test_transposition_updates_every_parent(self):
         # Un DAG tiene varios padres: la transposicion recibe el refinamiento
         # por las dos rutas, no solo por la primera que encuentre el ascenso.
@@ -518,6 +559,38 @@ class BackedDisplayTests(TestCase):
         self.assertEqual(payload['point'], 30)
         self.assertEqual(payload['backed_plies'], 3)
 
+    def test_api_query_best_move_tops_the_same_table_it_returns(self):
+        """``best_move`` y ``score`` salen de la MISMA fuente: el top de la
+        tabla de mejor conocimiento, no la PV de la ultima busqueda propia.
+
+        Caso real (13-ago, ``ce72956a...``): score 562 venia del respaldo via
+        una jugada, ``best_move`` decia OTRA (la PV directa, que valia 494), y
+        un cliente jugo la segunda mejor creyendo que llevaba el 562.  Misma
+        leccion que la flecha del explore (29-jul): tabla y titular se mueven
+        JUNTOS o el payload se contradice a si mismo.
+        """
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        edges = list(Edge.objects.filter(parent=root)[:2])
+        backed_uci, direct_uci = edges[0].move_uci, edges[1].move_uci
+        # El respaldo sostiene 562 via la primera; la busqueda directa dijo
+        # la segunda a 494.  Blancas al turno: White-POV se lee tal cual.
+        Position.objects.filter(key=edges[0].child.key).update(
+            backed_eval=562, backed_plies=1)
+        Position.objects.filter(key=edges[1].child.key).update(
+            eval_cp=494, nodes_invested=128_000_000)
+        Position.objects.filter(key=root.key).update(
+            eval_cp=494, best_move=direct_uci,
+            backed_eval=562, backed_plies=2, expanded=True)
+
+        payload = Client().get('/atomicdb/api/query',
+                               {'fen': root.fen}).json()
+
+        self.assertEqual(payload['score'], 562)
+        self.assertEqual(payload['best_move'], backed_uci)
+        self.assertEqual(payload['moves'][0]['uci'], backed_uci)
+        self.assertEqual(payload['moves'][0]['score'], 562)
+
 
 class ValueOrderTests(TestCase):
     """La tabla ordena por VALOR y solo por valor (§ views._child_moves).
@@ -976,19 +1049,21 @@ class BackedIngestTests(TestCase):
         parent.refresh_from_db()
         self.assertEqual(parent.status, 'WHITE_WIN')
 
-    def test_a_walked_mate_line_loses_proof_weight_at_partial_nodes(self):
+    def test_a_walked_mate_line_stops_at_the_losers_partial_node(self):
         """A proof's authority ends where the unproven alternatives begin.
 
         A visitor WALKED a line to a terminal mate without requesting a
-        single analysis.  The terminal is genuinely proven, but every walked
-        node above it has no eval of its own, so the directional guard had
-        no anchor and the mate-band value climbed the whole chain carrying
-        PROVEN quality — the explorer painted 9994 BACKED over territory no
-        engine ever looked at (Wolfram, 28-jul).  The value may climb (it is
-        the best knowledge), but past a partial-coverage node it carries
-        only that node's own search support: the first evaluated ancestor
-        blocks it, and the convergence purchase sends the ENGINE down the
-        line the human explored.
+        single analysis.  The terminal is genuinely proven, but the walked
+        node above it belongs to the LOSING side, has no eval of its own,
+        and has every alternative reply unopened.  The 28-jul contract let
+        the mate-band value climb with degraded quality (the explorer
+        painted 9994 BACKED over territory no engine ever looked at —
+        Wolfram); 14-ago tightened it after two transposition-fed ghosts
+        headlined a table over a move with 2B of real search (Nf3 d6): a
+        defeat needs full coverage to back up, exactly like status
+        closures, so the loser's partial node now carries NO backed value
+        at all and the evaluated ancestor keeps its own knowledge through
+        its point eval.
         """
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
@@ -1011,16 +1086,14 @@ class BackedIngestTests(TestCase):
 
         walked.refresh_from_db()
         root.refresh_from_db()
-        # The walked node itself may honestly carry the value...
-        self.assertIsNotNone(walked.backed_eval)
-        # ...but WITHOUT proof weight,
-        self.assertLess(walked.backed_nodes, ingest.PROVEN_QUALITY)
-        # so the evaluated ancestor keeps its own knowledge,
-        self.assertEqual(root.backed_eval, 120)
-        self.assertIsNone(root.backed_move)
-        # and the discrepancy buys the walked line an engine analysis.
-        self.assertTrue(AnalysisTask.objects.filter(
-            position=walked, source=AnalysisTask.Source.FILL).exists())
+        # The loser's partial node backs nothing: one refuted reply out of
+        # twenty proves nothing about the node itself.
+        self.assertIsNone(walked.backed_eval)
+        self.assertIsNone(walked.backed_move)
+        # The evaluated ancestor is untouched: no backed value, and its
+        # header still says +120 through the point eval.
+        self.assertIsNone(root.backed_eval)
+        self.assertEqual(ingest.best_known_eval(root), 120)
 
     def test_a_shallow_pass_displaces_and_the_delivery_confirms_it(self):
         """The purchase's delivery route, end to end through submit.
@@ -1310,6 +1383,215 @@ class BackedRepetitionTests(TestCase):
                          f'/atomicdb/explore/{origin_node.key}/')
         body = self.client.get(jump['Location']).content.decode()
         self.assertNotIn('>repetition</span>', body)
+
+
+class RepetitionZeroContractTests(TestCase):
+    """El cero de una repeticion: de que esta hecho y quien puede usarlo.
+
+    Residuo del 12-ago sobre el parche del 11 (Wolfram, literal): "eval already
+    updated to 0 sometimes but I think it's buggy ... 0 was propagated from
+    repetition somehow but was not displayed at child node and it was not 0
+    anyway".  Tres afirmaciones en una sola frase, y aqui hay tests para las
+    tres: el cero llegaba arriba (a), ninguna fila lo decia (b), y no era cero
+    porque al que mueve le quedaban jugadas sin abrir (c).
+    """
+
+    def _shape(self, name, claim=903, ring_expanded=False, **row):
+        """A(blancas) con un hijo que se justifica volviendo a la propia A.
+
+        A -e6c5-> C -x1x1-> D -y1y1-> A.  Es la forma de la posicion del
+        reporte: el unico hijo que no pierde presta su valor de una espina que
+        vuelve a su propio padre, asi que el +9 se sostiene a si mismo.
+
+        ``ring_expanded`` cierra el anillo entero: los tres eslabones con su
+        lista de respuestas completa.  Es la diferencia entre una repeticion
+        DEMOSTRADA — nadie tiene nada mejor en ningun eslabon — y tres nodos a
+        los que les faltan respuestas por abrir, y el contrato trata cada caso
+        de una manera.
+        """
+        a = _pos(f'{name}-A', 'w', **row)
+        c = _pos(f'{name}-C', 'b', eval_cp=claim - 5,
+                 nodes_invested=128_000_000, backed_eval=claim,
+                 backed_move='x1x1', backed_plies=2,
+                 backed_nodes=128_000_000, expanded=ring_expanded)
+        d = _pos(f'{name}-D', 'w', backed_eval=claim, backed_move='y1y1',
+                 backed_plies=1, expanded=ring_expanded)
+        _edge(a, c, 'e6c5')
+        _edge(c, d, 'x1x1')
+        _edge(d, a, 'y1y1')
+        return a, c
+
+    def _losing_sibling(self, parent, name):
+        return _edge(parent, _pos(name, 'b', status='BLACK_WIN',
+                                  closure='MINIMAX'), 'a2a3')
+
+    # ---- (c) el cero no decide un nodo al que le faltan respuestas --------
+
+    def test_a_repetition_does_not_decide_a_node_with_open_moves(self):
+        # "there were gray moves other than repetition and it was ignored".
+        # A no esta expandida: le quedan respuestas por abrir y lo unico que
+        # sabe de si misma es que su mejor jugada CONOCIDA vuelve aqui.  Eso no
+        # es un techo de tablas, es no saber — y no saber se dice callando el
+        # numero, no publicando el de la repeticion.
+        a, c = self._shape('GRAY')
+        self._losing_sibling(a, 'GRAY-L')
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        self.assertIsNone(a.backed_eval)
+        self.assertIsNone(a.backed_move)
+        # Y la duda se compra igual que cuando decidia (§ 11-ago): la regla
+        # cambia lo que se PUBLICA, no lo que se pregunta.
+        task = AnalysisTask.objects.get(position=c)
+        self.assertGreater(task.budget_nodes, 128_000_000)
+        self.assertTrue(DBEvent.objects.filter(
+            kind='CYCLE_DISAMBIGUATION').exists())
+
+    def test_a_repetition_does_not_push_a_node_off_its_own_measure(self):
+        # Misma forma con ANCLA: 128M de motor dicen -300 aqui.  El cero es
+        # mejor para el que mueve, y antes bastaba con eso para desplazar la
+        # medida — el paseo se llevaba puesto el peso del numero que acababa de
+        # tirar.  Un paseo de punteros no desplaza una busqueda.
+        a, c = self._shape('ANCHOR', eval_cp=-300, nodes_invested=128_000_000)
+        self._losing_sibling(a, 'ANCHOR-L')
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        self.assertEqual(a.backed_eval, -300)
+        self.assertIsNone(a.backed_move)
+        self.assertTrue(AnalysisTask.objects.filter(position=c).exists())
+
+    def test_a_real_alternative_better_than_the_draw_wins_the_backup(self):
+        # Cobertura completa y un hermano REAL por encima de las tablas: el
+        # cero del ciclo no le quita el puesto a nadie.  Es el max de siempre,
+        # y aqui se afirma por escrito porque es el sintoma (c) leido del
+        # derecho.
+        a, c = self._shape('BETTER', expanded=True)
+        self._losing_sibling(a, 'BETTER-L')
+        _edge(a, _pos('BETTER-R', 'b', eval_cp=250,
+                      nodes_invested=128_000_000), 'd2d4')
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        self.assertEqual(a.backed_eval, 250)
+        self.assertEqual(a.backed_move, 'd2d4')
+        self.assertFalse(AnalysisTask.objects.filter(position=c).exists())
+
+    def test_with_every_answer_on_the_table_the_draw_is_the_verdict(self):
+        # La otra mitad del contrato, y la razon de que la regla del 3-ago
+        # exista: con el anillo CERRADO el max/min es el minimax de verdad, el
+        # que mueve no tiene nada mejor que repetir en ningun eslabon y las
+        # tablas son el veredicto.  Sin peso, eso si: el respaldo no finge que
+        # alguien haya buscado si esa repeticion es forzada.
+        a, c = self._shape('FULL', expanded=True, ring_expanded=True)
+        self._losing_sibling(a, 'FULL-L')
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        c.refresh_from_db()
+        self.assertEqual(a.backed_eval, 0)
+        self.assertEqual(a.backed_move, 'e6c5')
+        self.assertEqual(a.backed_nodes, 0)
+        self.assertTrue(AnalysisTask.objects.filter(position=c).exists())
+        # Y el anillo entero converge a las mismas tablas, asi que la fila de
+        # la que sale el cero del padre ya dice cero por su cuenta: cabecera y
+        # tabla no pueden discrepar en el punto fijo.
+        self.assertEqual(c.backed_eval, 0)
+
+    def test_a_partial_ring_stops_lending_the_number_it_invented(self):
+        # El anillo ABIERTO no converge a tablas, converge a la unica cifra que
+        # alguien midio.  C se queda con sus 128M propios y deja de prestar la
+        # espina circular, asi que A publica ESA medida por e6c5 en vez de un
+        # +9,03 que solo se sostenia a si mismo — y en vez de unas tablas que
+        # nadie ha demostrado.  Es el reporte del 3-ago cerrado por el otro
+        # lado: la refutacion de fuera del bucle ya puede entrar.
+        a, c = self._shape('OPEN')
+        self._losing_sibling(a, 'OPEN-L')
+
+        ingest.backup_backed_evals([c.key])
+
+        a.refresh_from_db()
+        c.refresh_from_db()
+        self.assertEqual(c.backed_eval, 898)
+        self.assertIsNone(c.backed_move)
+        self.assertEqual(a.backed_eval, 898)
+        self.assertEqual(a.backed_move, 'e6c5')
+
+    def test_proven_draws_win_the_tie_against_a_walked_one(self):
+        # Dos ceros no son el mismo cero: uno lo probo alguien y el otro sale
+        # de un paseo.  El desempate por calidad los ordena solo, y el respaldo
+        # se apoya en el que se puede defender.
+        a, _c = self._shape('TIE', expanded=True, ring_expanded=True)
+        _edge(a, _pos('TIE-PROVEN', 'b', status='DRAW', closure='TERMINAL'),
+              'b2b3')
+
+        ingest.backup_backed_evals([a.key])
+
+        a.refresh_from_db()
+        self.assertEqual(a.backed_eval, 0)
+        self.assertEqual(a.backed_move, 'b2b3')
+
+    # ---- (b) el cero que el nodo usa se ENSEÑA en la fila de la que sale ---
+
+    def test_the_row_shows_the_draw_its_own_header_stands_on(self):
+        # "0 was propagated from repetition somehow but was not displayed at
+        # child node".  La cabecera publicaba 0 y la fila de la que salia ese 0
+        # pintaba el +903 circular del hijo: dos numeros para una arista, y
+        # ninguna forma de saber de donde venia ninguno de los dos.
+        #
+        # El estado se monta A MANO porque es el de la captura: el padre ya
+        # respaldado en tablas por su arista y el hijo todavia publicando su
+        # numero circular.  Una base de 12 millones de nodos vive en estados
+        # asi mientras la barrida los alcanza (§ recascade_backed), y la pagina
+        # tiene que ser honesta en todos ellos, no solo en el punto fijo.  Las
+        # jugadas son LEGALES en el fen sintetico porque esta pagina pinta
+        # tambien la migaja de pan, y esa si replica la linea de verdad.
+        a = _pos('ROW-A', 'w', expanded=True, backed_eval=0,
+                 backed_move='e1e2', backed_plies=1)
+        c = _pos('ROW-C', 'b', eval_cp=898, nodes_invested=128_000_000,
+                 backed_eval=903, backed_move='e8e7', backed_plies=2,
+                 backed_nodes=128_000_000)
+        _edge(a, c, 'e1e2')
+        _edge(c, a, 'e8e7')
+        _edge(a, _pos('ROW-L', 'b', status='BLACK_WIN', closure='MINIMAX'),
+              'e1f1')
+
+        row = next(r for r in views._child_moves(a) if r['uci'] == 'e1e2')
+
+        self.assertEqual(row['score'], a.backed_eval)
+        self.assertEqual(row['score'], 0)
+        self.assertTrue(row['repetition'])
+        # Y sin chip de respaldo: ese chip promete una espina que baja hasta un
+        # origen, y aqui lo que hay debajo es un bucle que vuelve a esta misma
+        # posicion.  Tampoco es una siembra, asi que no lleva el aviso de las
+        # sembradas.
+        self.assertFalse(row['backed'])
+        self.assertIsNone(row['claim'])
+
+        body = Client().get(f'/atomicdb/explore/{a.key}/').content.decode()
+
+        self.assertIn('best line +0cp', body)
+        self.assertIsNotNone(
+            re.search(r'<td>0\s*<span[^>]*>repetition</span>', body))
+
+    def test_a_node_that_is_not_standing_on_a_draw_pays_for_no_walk(self):
+        # La pregunta cuesta un paseo, asi que solo se hace cuando hay un
+        # numero que explicar.  Un nodo normal no paga por una repeticion que
+        # no tiene: ni marca, ni consulta.
+        parent = _pos('NOWALK-P', 'w', expanded=True)
+        _edge(parent, _pos('NOWALK-C', 'b', eval_cp=250,
+                           nodes_invested=1_000), 'd2d4')
+        ingest.backup_backed_evals([parent.key])
+        parent.refresh_from_db()
+
+        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
+            self.assertEqual(views._repetition_moves(parent), frozenset())
+
+        self.assertFalse(views._child_moves(parent)[0]['repetition'])
 
 
 class WalkedChipTests(TestCase):

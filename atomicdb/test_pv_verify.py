@@ -5,6 +5,8 @@ reclama algo, y la unica forma de saber si el arbol la sostiene es mirar las
 posiciones por las que pasa.  Esto es ese recorrido, de un click.
 """
 
+from unittest.mock import patch
+
 from django.test import Client
 
 from . import ingest, logic, views
@@ -648,3 +650,373 @@ class PvVerifyButtonTests(TestCase):
 
         self.assertEqual(views._pv_verify_plies(self.root),
                          ingest.PV_VERIFY_MAX_PLIES)
+
+
+# Cuatro lineas de cuatro plies, con primera jugada distinta cada una: asi una
+# tarea comprada dice por si sola QUE linea se camino, sin desempates.
+SHOWCASE = [
+    ['e2e4', 'e7e5', 'g1f3', 'b8c6'],
+    ['d2d4', 'd7d5', 'c2c4', 'e7e6'],
+    ['g1f3', 'g8f6', 'c2c4', 'e7e6'],
+    ['c2c4', 'e7e5', 'b1c3', 'g8f6'],
+]
+
+
+class ChosenLineTests(TestCase):
+    """Verificar LA LINEA QUE SE PIDE, no la que le toque al recorrido.
+
+    Reporte de comunidad (Wolfram, 14-ago): "verify PV still completely useless
+    for requesting other lines in PV than second - it always tries to request
+    first line".  Y era literal: el click caia por la lista de candidatos y
+    paraba en el PRIMERO con hueco, asi que la unica forma de llegar a la 2 era
+    que la 1 estuviera entera, y a la 3 no se llegaba casi nunca.  El paseo
+    estaba bien; lo que faltaba era poder nombrar por donde.
+    """
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        self.root.last_analysis = [_analysis(pv) for pv in SHOWCASE]
+        self.root.save(update_fields=['last_analysis'])
+        self.root.refresh_from_db()
+
+    def _first_key(self, index):
+        """La clave del hijo que abre la linea ``index`` del escaparate."""
+        return logic.key_of(_line_fens(SHOWCASE[index - 1])[0])
+
+    def _bought(self):
+        """Que lineas del escaparate compro el click, por su numero.
+
+        Cuenta lo PENDIENTE y no toda tarea: el terreno ya verificado de un
+        fixture llega con su tarea COMPLETADA, y eso es lo que el paseo cruza
+        sin gastar, no lo que acaba de comprar.
+        """
+        keys = set(AnalysisTask.objects
+                   .filter(state=AnalysisTask.TState.PENDING)
+                   .values_list('position_id', flat=True))
+        return {index for index in range(1, len(SHOWCASE) + 1)
+                if self._first_key(index) in keys}
+
+    def test_the_third_line_of_the_showcase_is_the_one_that_gets_bought(self):
+        queued = ingest.enqueue_pv_verification(self.root, line=3)
+
+        self.assertEqual(queued, 4)
+        self.assertEqual(queued.detail['line'], 3)
+        self.assertFalse(queued.detail['from_tree'])
+        # La prueba de que fue ESA: la linea 3 entera comprada y las otras
+        # intactas.  Con el bug las cuatro tareas caian en la linea 1.
+        self.assertEqual(self._bought(), {3})
+        for key in [logic.key_of(fen) for fen in _line_fens(SHOWCASE[2])]:
+            self.assertTrue(AnalysisTask.objects.filter(
+                position_id=key, state=AnalysisTask.TState.PENDING).exists(),
+                key)
+
+    def test_the_first_line_still_answers_to_its_own_number(self):
+        queued = ingest.enqueue_pv_verification(self.root, line=1)
+
+        self.assertEqual((queued, queued.detail['line']), (4, 1))
+        self.assertEqual(self._bought(), {1})
+
+    def test_the_default_click_keeps_falling_to_the_nearest_gap(self):
+        """Elegir es lo NUEVO, no lo obligatorio: sin numero el boton compra lo
+        mismo que compraba antes de que se pudiera elegir."""
+        queued = ingest.enqueue_pv_verification(self.root)
+
+        self.assertEqual((queued, queued.detail['line']), (4, 1))
+        self.assertEqual(self._bought(), {1})
+
+    def test_a_chosen_line_does_not_fall_through_to_the_next_one(self):
+        """Quien nombra la 2 no pidio "la que sea": si esa no tiene hueco la
+        respuesta es que no lo tiene, no una factura por la 3."""
+        for fen in _line_fens(SHOWCASE[1]):
+            _covered(fen)
+
+        queued = ingest.enqueue_pv_verification(self.root, line=2)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(queued.detail['line'], 2)
+        self.assertEqual(queued.detail['covered_plies'], 4)
+        self.assertEqual(self._bought(), set())
+
+    def test_a_line_the_walk_does_not_offer_buys_nothing(self):
+        """La cuarta esta en el escaparate pero no en la lista que se camina
+        (``PV_VERIFY_MAX_LINES``), asi que pedirla es pedir lo que no hay."""
+        self.assertEqual(len(SHOWCASE), ingest.PV_VERIFY_MAX_LINES + 1)
+
+        queued = ingest.enqueue_pv_verification(self.root, line=4)
+
+        self.assertEqual(queued, 0)
+        self.assertTrue(queued.detail['unknown_line'])
+        self.assertEqual(AnalysisTask.objects.count(), 0)
+
+    def test_an_impossible_number_is_refused_and_not_rounded(self):
+        """Redondear al vecino mas cercano seria reproducir el bug por otra
+        puerta: pedir una linea y pagar otra."""
+        for line in (99, 7):
+            queued = ingest.enqueue_pv_verification(self.root, line=line)
+
+            self.assertEqual(queued, 0, line)
+            self.assertTrue(queued.detail['unknown_line'], line)
+        self.assertEqual(AnalysisTask.objects.count(), 0)
+
+    def test_a_tree_candidate_answers_to_its_number_too(self):
+        """Los hijos que el escaparate vigente olvido se numeran detras de las
+        lineas (§ ingest._verify_candidates) y se eligen igual que ellas."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        root.last_analysis = [_analysis(['e2e4'])]
+        root.save(update_fields=['last_analysis'])
+        root.refresh_from_db()
+        forgotten = ingest.get_or_create_position(
+            logic.apply_move(root.fen, 'h2h3'))
+        Position.objects.filter(key=forgotten.key).update(eval_cp=40)
+        Edge.objects.get_or_create(parent=root, move_uci='h2h3',
+                                   defaults={'child': forgotten})
+
+        queued = ingest.enqueue_pv_verification(root, line=2)
+
+        self.assertEqual(queued, 1)
+        self.assertEqual((queued.detail['line'], queued.detail['from_tree']),
+                         (2, True))
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=forgotten.key).exists())
+        # Y la 1, que tambien tenia hueco, se queda donde estaba.
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=logic.key_of(_line_fens(['e2e4'])[0])).exists())
+
+
+class ChosenLineEndpointTests(TestCase):
+    """El numero elegido tiene que LLEGAR: plantilla, POST, paseo."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        self.root.last_analysis = [_analysis(pv) for pv in SHOWCASE]
+        self.root.save(update_fields=['last_analysis'])
+        self.url = f'/atomicdb/pv-verify/{self.root.key}/'
+
+    def _first_key(self, index):
+        return logic.key_of(_line_fens(SHOWCASE[index - 1])[0])
+
+    def test_the_post_walks_the_line_it_was_given(self):
+        data = self.client.post(self.url, {'line': '3'}).json()
+
+        self.assertEqual((data['status'], data['line'], data['queued']),
+                         ('queued', 3, 4))
+        self.assertEqual(data['message'],
+                         'Queued 128.0M nodes down line 3, starting after '
+                         'Nf3 (4 positions in all).')
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=self._first_key(3)).exists())
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=self._first_key(1)).exists())
+
+    def test_line_one_goes_through_the_same_door(self):
+        data = self.client.post(self.url, {'line': '1'}).json()
+
+        self.assertEqual((data['status'], data['line'], data['queued']),
+                         ('queued', 1, 4))
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=self._first_key(1)).exists())
+        self.assertFalse(AnalysisTask.objects.filter(
+            position_id=self._first_key(3)).exists())
+
+    def test_a_line_out_of_range_is_refused_without_buying_anything(self):
+        response = self.client.post(self.url, {'line': '4'})
+
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual((data['status'], data['queued']),
+                         ('unknown-line', 0))
+        self.assertEqual(data['message'],
+                         'Line 4 is not one of the lines stored here right '
+                         'now, so nothing was queued. Reload the page to see '
+                         'the current list.')
+        self.assertEqual(AnalysisTask.objects.count(), 0)
+
+    def test_a_line_that_is_not_a_number_is_refused_and_not_ignored(self):
+        """Degradarlo a la caida automatica compraria la linea 1 en silencio
+        despues de que alguien pidiera otra: el fallo se dice donde ocurre."""
+        for raw in ('two', '-1', '3.5'):
+            response = self.client.post(self.url, {'line': raw})
+
+            self.assertEqual(response.status_code, 400, raw)
+            self.assertEqual(response.json()['status'], 'unknown-line', raw)
+        self.assertEqual(AnalysisTask.objects.count(), 0)
+
+    def test_a_chosen_line_already_covered_says_so_by_its_own_number(self):
+        """Y no "line 1", que es lo que decia el aviso cuando el numero de la
+        elegida no viajaba con el."""
+        for fen in _line_fens(SHOWCASE[1]):
+            _covered(fen)
+
+        data = self.client.post(self.url, {'line': '2'}).json()
+
+        self.assertEqual(data['status'], 'nothing-to-do')
+        self.assertEqual(data['message'],
+                         'Everything this button can verify is already '
+                         'analysed: line 2 covered 4 plies down.')
+
+    def test_a_post_without_the_field_is_the_click_of_always(self):
+        data = self.client.post(self.url).json()
+
+        self.assertEqual((data['status'], data['line']), ('queued', 1))
+        self.assertTrue(AnalysisTask.objects.filter(
+            position_id=self._first_key(1)).exists())
+
+    def test_the_declared_route_of_each_task_goes_down_the_chosen_line(self):
+        """La otra prueba de que se camino ESA: la ruta que hereda cada tarea.
+
+        No es adorno.  El aviso de cada nodo comprado vuelve contando SU linea
+        de jugadas, asi que si el numero elegido no llegara hasta aqui el
+        visitante veria la linea 3 pedida y la 1 escrita en el recibo.
+        """
+        root = ingest.get_or_create_position(logic.start_fen())
+        parent = ingest.get_or_create_position(
+            logic.apply_move(root.fen, 'e2e4'))
+        Edge.objects.get_or_create(parent=root, move_uci='e2e4',
+                                   defaults={'child': parent})
+        # Tres lineas desde ahi, cada una con su primera jugada.
+        pvs = [['e7e5', 'g1f3'], ['c7c5', 'g1f3'], ['e7e6', 'd2d4']]
+        parent.last_analysis = [_analysis(pv) for pv in pvs]
+        parent.save(update_fields=['last_analysis'])
+
+        response = self.client.post(f'/atomicdb/pv-verify/{parent.key}/',
+                                    {'route': 'e2e4', 'line': '3'})
+
+        self.assertEqual(response.json()['line'], 3)
+        routes = sorted(AnalysisTask.objects.values_list('route', flat=True))
+        self.assertEqual(routes, ['e2e4,e7e6', 'e2e4,e7e6,d2d4'])
+
+
+class PvLineSelectorTests(TestCase):
+    """Lo que la pagina OFRECE, con los numeros que el paseo va a honrar."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+
+    def _page(self):
+        return self.client.get(f'/atomicdb/explore/{self.root.key}/')
+
+    def _store(self, lines):
+        self.root.last_analysis = lines
+        self.root.save(update_fields=['last_analysis'])
+        self.root.refresh_from_db()
+
+    def test_the_selector_offers_the_walkable_lines_by_their_move(self):
+        self._store([_analysis(pv) for pv in SHOWCASE])
+
+        page = self._page()
+
+        offered = page.context['pv_verify_lines']
+        self.assertEqual([(cand['index'], cand['label']) for cand in offered],
+                         [(1, 'e4'), (2, 'd4'), (3, 'Nf3')])
+        self.assertContains(page, '<option value="3">3. Nf3</option>',
+                            html=True)
+        # La cuarta esta en el escaparate y no en la lista: el tope de lo que
+        # un click camina es el mismo que el de lo que se puede pedir.
+        self.assertNotContains(page, '4. c4')
+
+    def test_the_offer_names_a_tree_candidate_as_such(self):
+        self._store([_analysis(LINE)])
+        forgotten = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'h2h3'))
+        Position.objects.filter(key=forgotten.key).update(eval_cp=40)
+        Edge.objects.get_or_create(parent=self.root, move_uci='h2h3',
+                                   defaults={'child': forgotten})
+
+        offered = self._page().context['pv_verify_lines']
+
+        self.assertEqual([(cand['index'], cand['label']) for cand in offered],
+                         [(1, 'e4'), (2, 'h3 (from the tree)')])
+
+    def test_a_single_candidate_is_not_a_choice_and_gets_no_control(self):
+        self._store([_analysis(LINE)])
+
+        page = self._page()
+
+        self.assertEqual(len(page.context['pv_verify_lines']), 1)
+        self.assertContains(page, 'Verify PV')
+        self.assertNotContains(page, 'id="pvline"')
+
+    def test_without_a_button_nothing_is_offered(self):
+        page = self._page()
+
+        self.assertEqual(page.context['pv_verify_lines'], [])
+        self.assertNotContains(page, 'id="pvline"')
+
+
+# Un mate en UNO de atomic: la torre captura en e7 y la explosion se lleva el
+# peon capturado, la propia torre y todo lo que no sea peon alrededor —
+# incluido el rey negro de e8.  El hijo NACE cerrado, porque
+# ``get_or_create_position`` le pregunta a ``logic.terminal_status`` al
+# materializarlo: el paseo no tiene que PROBAR nada aqui, solo enterarse.
+MATE_PARENT_FEN = '4k3/4p3/8/8/8/8/4R3/4K3 w - - 0 1'
+MATE_MOVE = 'e2e7'
+
+
+class PvWalkDiscoversATerminalTests(TestCase):
+    """Caminar una PV que acaba en mate CIERRA el nodo que la jugo.
+
+    Es la misma regla que el ``goto`` del explorador aprendio el 29-jul
+    ("navigating onto a terminal closes the parent at once"), y este modulo la
+    prometia por escrito — "una PV es una ruta como cualquier otra y tiene que
+    producir exactamente el mismo arbol que producirla a mano" — sin
+    cumplirla: el paseo materializaba el terminal y seguia, y el padre se
+    quedaba UNKNOWN con el mate en uno ya escrito en la tabla de al lado.
+    Medido el 20-ago en produccion, 648 posiciones asi, con el respaldo ya en
+    +-100 y prioridad de banda de mate: el sitio pintaba "sin resolver" sobre
+    un nodo cuya respuesta ya estaba dentro, y el selector seguia comprandolo.
+    """
+
+    def _parent(self, pv, fen=MATE_PARENT_FEN):
+        pos = ingest.get_or_create_position(fen)
+        Position.objects.filter(key=pos.key).update(last_analysis=[
+            _analysis(pv)])
+        return Position.objects.get(key=pos.key)
+
+    def test_the_last_ply_of_a_mate_pv_closes_the_node_that_played_it(self):
+        parent = self._parent([MATE_MOVE])
+
+        ingest.enqueue_pv_verification(parent, requested_by='ana')
+
+        child_key = logic.key_of(logic.apply_move(MATE_PARENT_FEN, MATE_MOVE))
+        child = Position.objects.get(key=child_key)
+        self.assertEqual(child.status, 'WHITE_WIN')
+        self.assertEqual(child.closure, 'TERMINAL')
+        # LO QUE FALTABA: el padre.  La arista existia, el hijo estaba
+        # cerrado, y el nodo de arriba seguia diciendo UNKNOWN.
+        parent = Position.objects.get(key=parent.key)
+        self.assertEqual(parent.status, 'WHITE_WIN')
+        self.assertEqual(parent.best_move, MATE_MOVE)
+
+    def test_the_value_rides_up_with_the_status_and_not_instead_of_it(self):
+        """El respaldo ya subia solo; era el hecho exacto el que no."""
+        parent = self._parent([MATE_MOVE])
+
+        ingest.enqueue_pv_verification(parent)
+
+        parent = Position.objects.get(key=parent.key)
+        self.assertEqual(parent.status, 'WHITE_WIN')
+        self.assertNotEqual(parent.closure, None)
+
+    def test_a_parent_already_closed_does_not_pay_for_the_cascade(self):
+        parent = self._parent([MATE_MOVE])
+        Position.objects.filter(key=parent.key).update(
+            status='WHITE_WIN', closure='MATE_PV', proof='ENGINE')
+        parent = Position.objects.get(key=parent.key)
+
+        with patch.object(ingest, 'backup_cascade') as cascade:
+            ingest.enqueue_pv_verification(parent)
+
+        cascade.assert_not_called()
+
+    def test_a_walk_over_open_ground_never_touches_the_cascade(self):
+        """El camino comun no paga nada: la guarda solo mira cierres."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        Position.objects.filter(key=root.key).update(
+            last_analysis=[_analysis(LINE)])
+        root = Position.objects.get(key=root.key)
+
+        with patch.object(ingest, 'backup_cascade') as cascade:
+            ingest.enqueue_pv_verification(root)
+
+        cascade.assert_not_called()
+

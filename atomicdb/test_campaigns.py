@@ -727,6 +727,55 @@ class SelectorBonusTests(TestCase):
         self.assertEqual(leased['id'], clicked.id)
 
 
+class ProposalsPageTests(TestCase):
+    """La lista entera: lo que la portada recorta sigue siendo alcanzable."""
+
+    THIRD = ['b1c3', 'e2e3', 'd2d3', 'e2e4', 'g2g3', 'h2h3', 'a2a3']
+
+    def setUp(self):
+        self.client = Client()
+        self.proposals = [
+            _campaign_on(_line('g1f3', 'f7f6', uci),
+                         state=Campaign.CState.PROPOSED, votes=votes,
+                         name=f'proposal-{uci}')
+            for votes, uci in enumerate(reversed(self.THIRD))]
+        self.least = min(self.proposals, key=lambda c: c.votes)
+
+    def test_the_front_page_cuts_the_list_but_says_so_and_links_the_rest(self):
+        cache.clear()
+        raw = self.client.get('/atomicdb/').content.decode()
+
+        self.assertNotIn(f'/atomicdb/campaign/{self.least.id}/vote/', raw)
+        self.assertIn(f'Showing the {views.HOME_PROPOSED_CAMPAIGNS} most voted '
+                      f'of {len(self.THIRD)} proposals', _reading(raw))
+        self.assertIn('href="/atomicdb/campaigns/"', raw)
+
+    def test_the_full_list_offers_every_proposal_with_its_vote_button(self):
+        raw = self.client.get('/atomicdb/campaigns/').content.decode()
+
+        for campaign in self.proposals:
+            self.assertIn(f'/atomicdb/campaign/{campaign.id}/vote/', raw)
+        self.assertIn(f'/atomicdb/explore/{self.least.root_id}/', raw)
+        self.assertIn('csrfmiddlewaretoken', raw)
+
+    def test_the_full_list_is_ordered_most_voted_first(self):
+        raw = self.client.get('/atomicdb/campaigns/').content.decode()
+
+        positions = [raw.index(f'/atomicdb/campaign/{c.id}/vote/')
+                     for c in sorted(self.proposals, key=lambda c: -c.votes)]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_voting_from_the_full_list_comes_back_to_it(self):
+        response = self.client.post(
+            f'/atomicdb/campaign/{self.least.id}/vote/', {'back': 'campaigns'})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'],
+                         '/atomicdb/campaigns/?campaign=voted#campaigns')
+        self.least.refresh_from_db()
+        self.assertEqual(self.least.votes, 1)
+
+
 class HomeCampaignTests(TestCase):
     """La portada: la campana viva arriba con sus numeros, y el buzon."""
 

@@ -43,8 +43,9 @@ from django.db import transaction
 def get_workload(request, machine):
 
     # Select a workload from the possible ones, if we can
-    if not (test := select_workload(request, machine)):
-        return {}
+    test, focus = select_workload(request, machine)
+    if not test:
+        return {'focus': focus} if focus else {}
 
     # Resolve the semantic contract before anything is written. It is the only
     # part of serialization that can reject a workload, and doing it after the
@@ -54,6 +55,10 @@ def get_workload(request, machine):
 
     chunk = claim_chunk(test, machine) if is_generic_datagen(test) else None
     if is_generic_datagen(test) and chunk is None:
+        if focus:
+            return {'focus': focus_verdict(
+                test.id, False,
+                'Test #%d has no unassigned work left right now' % (test.id))}
         return {}
 
     # Avoid creating duplicate Result objects
@@ -64,18 +69,30 @@ def get_workload(request, machine):
     machine.mnps = machine.dev_mnps = machine.base_mnps = 0.00
     machine.save(); result.save()
 
-    return {
+    response = {
         'workload' : workload_to_dictionary(
             test, result, machine, chunk, variant_contract
         )
     }
 
+    if focus:
+        response['focus'] = focus
+
+    return response
+
 def select_workload(request, machine):
 
     # Step 1: Refine active workloads to the candidate assignments
-    candidates, has_focus = filter_valid_workloads(request, machine)
+    candidates, has_focus, focus = filter_valid_workloads(request, machine)
+
+    # A worker that opted into a single test is served that test or nothing.
+    # Falling back to the general pool would hand it the very workload it was
+    # trying to avoid, and it would do so after the engines were already built
+    if focus:
+        return (candidates[0] if focus['served'] else None), focus
+
     if not candidates:
-        return None
+        return None, None
 
     # Step 2: Count relevant threads on each candidate test
     worker_dist, engine_freq = compute_resource_distribution(candidates, machine, has_focus)
@@ -99,16 +116,80 @@ def select_workload(request, machine):
     if machine.workload in worker_dist.keys():
         this_ratio = worker_dist[machine.workload]['ratio']
         if min_ratio / fair_ratio > 0.75 and this_ratio / fair_ratio < 1.25:
-            return Test.objects.get(id=machine.workload)
+            return Test.objects.get(id=machine.workload), None
 
     # Step 7: Pick a random test, amongst those who share the min_ratio, weighted by throughput
     choices = [id for id, data in worker_dist.items() if data['ratio'] == min_ratio]
     weights = [data['throughput'] for id, data in worker_dist.items() if data['ratio'] == min_ratio]
-    return Test.objects.get(id=random.choices(choices, weights=weights)[0])
+    return Test.objects.get(id=random.choices(choices, weights=weights)[0]), None
+
+def focus_verdict(test_id, served, message):
+
+    return { 'test_id' : test_id, 'served' : served, 'message' : message }
+
+def requested_focus_test(request):
+
+    # A worker names the single test it is willing to run on every workload
+    # request. An absent or empty value is the historical behaviour, so older
+    # workers keep receiving whatever the global priorities point them at
+
+    raw = request.POST.get('focus_test', '')
+    raw = raw.strip() if isinstance(raw, str) else raw
+
+    if raw in (None, '', 'None'):
+        return None, None
+
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, focus_verdict(
+            None, False, 'Focus test id must be a whole number, not "%s"' % (raw))
+
+def focus_refusal(test_id, machine, blacklisted):
+
+    # Say exactly which gate the focused test failed, so the volunteer can act
+    # on it instead of watching an idle worker. The checks mirror, in order,
+    # the ones every workload passes through in filter_valid_workloads
+
+    if str(test_id) in [str(x) for x in blacklisted]:
+        return 'Test #%d is blacklisted on this worker' % (test_id)
+
+    test = Test.objects.filter(id=test_id).first()
+
+    if test is None or test.deleted:
+        return 'Test #%d does not exist' % (test_id)
+
+    if test.finished:
+        return 'Test #%d has already finished' % (test_id)
+
+    if test.awaiting or not test.approved:
+        return 'Test #%d has not been approved yet' % (test_id)
+
+    for engine in [test.dev_engine, test.base_engine]:
+        if (engine in OPENBENCH_CONFIG['engines']
+                and engine not in machine.info.get('supported', [])):
+            return 'Test #%d needs the %s engine, which this worker cannot run' \
+                % (test_id, engine)
+
+    if not valid_tablebase_assignment(test, machine):
+        return 'Test #%d needs tablebases this worker does not provide' % (test_id)
+
+    if not valid_hardware_assignment(test, machine):
+        return 'Test #%d needs more threads than this worker offers' % (test_id)
+
+    if not has_assignable_chunk(test):
+        return 'Test #%d has no unassigned work left right now' % (test_id)
+
+    return 'Test #%d cannot be served to this worker right now' % (test_id)
 
 def filter_valid_workloads(request, machine):
 
     workloads = OpenBench.utils.get_active_tests()
+
+    # A malformed opt-in is refused before any of the real work is done
+    focus_test, malformed = requested_focus_test(request)
+    if malformed:
+        return [], False, malformed
 
     # Skip engines that the Machine cannot handle
     for engine in OPENBENCH_CONFIG['engines'].keys():
@@ -117,7 +198,8 @@ def filter_valid_workloads(request, machine):
             workloads = workloads.exclude(base_engine=engine)
 
     # Skip workloads that are blacklisted on the machine
-    if blacklisted := request.POST.getlist('blacklist'):
+    blacklisted = request.POST.getlist('blacklist')
+    if blacklisted:
         workloads = workloads.exclude(id__in=blacklisted)
 
     # Skip workloads that we have insufficient threads to play
@@ -128,9 +210,21 @@ def filter_valid_workloads(request, machine):
         and has_assignable_chunk(x)
     ]
 
+    # Serve the single test this worker opted into, or explain why we cannot.
+    # This narrows one request only: global priorities and every other worker
+    # see exactly the pool they saw before
+    if focus_test is not None:
+        chosen = [x for x in options if x.id == focus_test]
+        if not chosen:
+            return [], False, focus_verdict(
+                focus_test, False,
+                focus_refusal(focus_test, machine, blacklisted))
+        return chosen, True, focus_verdict(
+            focus_test, True, 'Serving focused test #%d' % (focus_test))
+
     # Possible that no work exists for the machine
     if not options:
-        return [], False
+        return [], False, None
 
     # Refine to workloads of the highest priority
     priorities = [x.priority for x in options]
@@ -143,7 +237,7 @@ def filter_valid_workloads(request, machine):
     if has_focus:
         candidates = list(filter(lambda x: x.dev_engine in focuses, candidates))
 
-    return candidates, has_focus
+    return candidates, has_focus, None
 
 def required_tablebase_size(setting):
 

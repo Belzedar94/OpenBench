@@ -8,6 +8,14 @@ ascenso solo mira cambios de valor y el backed del hijo no habia cambiado.
 Desde este parche, un respaldo que se decide por un hijo anulado encola en
 el acto un pase mas hondo de ese hijo: el ingest de ese pase re-apunta la
 espina y siembra a los padres, que es el despertador que faltaba.
+
+El 12-ago se afino QUIEN puede quedarse con ese cero (§ ingest, el bloque de
+la repeticion): con el anillo abierto — eslabones a los que les faltan
+respuestas por abrir — el cero ya no decide nada y el anillo se deshace solo
+hasta la unica cifra que alguien midio.  La compra, en cambio, se hace en los
+dos casos, porque la pregunta es la misma.  Por eso el anillo de aqui esta
+CERRADO: es la unica forma en la que una repeticion se queda de titular, que
+es lo que estos tests vienen a vigilar.
 """
 
 import hashlib
@@ -33,14 +41,18 @@ def _edge(parent, child, uci):
 def _wolfram_shape(name):
     """A(max) cuyo unico hijo bueno C presta su valor por una espina que
     vuelve a A; la alternativa es un mate perdido.  El paseo anula a C, el
-    cero gana el negamax (0 > mate perdido) y A queda respaldada en 0."""
+    cero gana el negamax (0 > mate perdido) y A queda respaldada en 0.
+
+    Los tres eslabones con su lista de respuestas COMPLETA: sin eso ninguno
+    de ellos puede quedarse con el cero (§ el docstring de arriba) y el
+    clavado que estos tests vigilan no llega a existir."""
     a = _pos(f'{name}-A', 'w', eval_cp=827, nodes_invested=128_000_000,
              expanded=True)
     c = _pos(f'{name}-C', 'b', eval_cp=898, nodes_invested=128_000_000,
              backed_eval=903, backed_move='x1x1', backed_plies=2,
-             backed_nodes=128_000_000)
+             backed_nodes=128_000_000, expanded=True)
     d = _pos(f'{name}-D', 'w', backed_eval=903, backed_move='y1y1',
-             backed_plies=1)
+             backed_plies=1, expanded=True)
     lost = _pos(f'{name}-L', 'b', status='BLACK_WIN', closure='MINIMAX')
     _edge(a, c, 'e6c5')
     _edge(c, d, 'x1x1')

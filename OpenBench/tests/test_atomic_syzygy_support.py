@@ -42,6 +42,7 @@ class AtomicSyzygyWorkerTests(unittest.TestCase):
             'atomic_syzygy_manifest': 'inventory.json',
             'fleet': False,
             'focus': None,
+            'focus_test': None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)

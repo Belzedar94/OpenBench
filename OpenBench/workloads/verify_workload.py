@@ -414,7 +414,8 @@ def verify_datagen_template(errors, request, field):
 
     allowed = {
         'SEED', 'COUNT', 'OUT', 'THREADS', 'BOOK', 'BOOK_SHA256', 'NETWORK',
-        'NETWORK_SHA256', 'PRODUCER_SHA256', 'SYZYGY',
+        'BOOK_SHA256_CANONICAL', 'NETWORK_SHA256',
+        'NETWORK_SHA256_CANONICAL', 'PRODUCER_SHA256', 'SYZYGY',
         'SYZYGY_MANIFEST_SHA256', 'SYZYGY_MAX', 'TEACHER_MODE',
     }
     required = {'SEED', 'COUNT', 'OUT', 'THREADS'}
@@ -438,7 +439,8 @@ def verify_datagen_template(errors, request, field):
         errors.append(
             'Datagen Command must be one line, use only {SEED}, {COUNT}, '
             '{OUT}, {THREADS}, {BOOK}, {BOOK_SHA256}, {NETWORK}, '
-            '{NETWORK_SHA256}, {PRODUCER_SHA256}, {SYZYGY}, '
+            '{BOOK_SHA256_CANONICAL}, {NETWORK_SHA256}, '
+            '{NETWORK_SHA256_CANONICAL}, {PRODUCER_SHA256}, {SYZYGY}, '
             '{SYZYGY_MANIFEST_SHA256}, {SYZYGY_MAX}, {TEACHER_MODE}, and include '
             'SEED/COUNT/OUT/THREADS'
         )

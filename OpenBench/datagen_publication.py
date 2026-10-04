@@ -108,11 +108,17 @@ def validate_publication_request(post):
         }
     except ValueError:
         fields = set()
-    required = {'BOOK', 'BOOK_SHA256', 'NETWORK', 'NETWORK_SHA256'}
-    if not required.issubset(fields):
+    required_assets = {'BOOK', 'NETWORK'}
+    book_identity = {'BOOK_SHA256', 'BOOK_SHA256_CANONICAL'}
+    network_identity = {'NETWORK_SHA256', 'NETWORK_SHA256_CANONICAL'}
+    if (
+        not required_assets.issubset(fields)
+        or not fields.intersection(book_identity)
+        or not fields.intersection(network_identity)
+    ):
         errors.append(
-            'DATAGEN publication protocol 41 requires {BOOK}, {BOOK_SHA256}, '
-            '{NETWORK}, and {NETWORK_SHA256}'
+            'DATAGEN publication protocol 41 requires {BOOK}, {NETWORK}, '
+            'one book SHA-256 placeholder and one network SHA-256 placeholder'
         )
 
     return errors

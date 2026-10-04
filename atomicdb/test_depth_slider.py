@@ -45,18 +45,27 @@ def _completed(pos, budget):
         state=AnalysisTask.TState.COMPLETED, source=AnalysisTask.Source.USER)
 
 
-def _worker(username, seen_days_ago=0):
-    """Una cuenta con maquina prestada, vista hace ``seen_days_ago`` dias.
+def _worker(username, seen_days_ago=0, delivered=True):
+    """Una cuenta con maquina prestada, que ENTREGO hace ``seen_days_ago`` dias.
 
-    ``last_seen`` es ``auto_now``, asi que la fecha se pone con un UPDATE: un
-    ``create(last_seen=...)`` lo pisaria con la hora actual y el test estaria
+    LA PRUEBA ES LA ENTREGA, no el saludo.  ``last_seen`` es ``auto_now`` y se
+    mueve con cualquier llamada autenticada, asi que un proceso que pide
+    trabajo en bucle y no devuelve un solo analisis lo mantenia tan fresco como
+    una maquina que si busca.  Desde los carriles, el permiso lo compra el
+    trabajo ENTREGADO (§ ``lanes``, y la columna ``WorkerPing.last_result_at``),
+    y esta funcion escribe eso.  ``delivered=False`` construye justamente al que
+    solo saluda.
+
+    La fecha se pone con un UPDATE, como antes: un ``create(...)`` con
+    ``auto_now`` de por medio la pisaria con la hora actual y el test estaria
     comprobando la ventana contra si misma.
     """
     user = worker_account(username)
     ping = WorkerPing.objects.create(machine=f'{username}-box', user=username,
                                      threads=8, hash_mb=1024, os='Linux')
-    WorkerPing.objects.filter(pk=ping.pk).update(
-        last_seen=timezone.now() - timedelta(days=seen_days_ago))
+    if delivered:
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            last_result_at=timezone.now() - timedelta(days=seen_days_ago))
     return user
 
 
@@ -110,10 +119,19 @@ class VisibilityTests(TestCase):
         self.assertNoSlider(
             _signed_in('lesha').get(f'/atomicdb/explore/{self.pos.key}/'))
 
-    def test_a_worker_seen_two_days_ago_is_a_contributor(self):
+    def test_a_worker_that_delivered_two_days_ago_is_a_contributor(self):
         _worker('wolfram', seen_days_ago=2)
 
         self.assertSlider(
+            _signed_in('wolfram').get(f'/atomicdb/explore/{self.pos.key}/'))
+
+    def test_a_worker_that_only_ever_says_hello_is_not(self):
+        # El permiso lo compra el trabajo entregado.  Un proceso que pide
+        # trabajo en bucle y nunca devuelve un analisis mantenia ``last_seen``
+        # tan fresco como una maquina de verdad, y con eso elegia peldano.
+        _worker('wolfram', delivered=False)
+
+        self.assertNoSlider(
             _signed_in('wolfram').get(f'/atomicdb/explore/{self.pos.key}/'))
 
     def test_a_worker_seen_eight_days_ago_is_not(self):
