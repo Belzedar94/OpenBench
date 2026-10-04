@@ -5,7 +5,9 @@ from django.utils import timezone
 
 from OpenBench.models import Profile
 
-from . import ingest, ingest_queue, logic
+from datetime import timedelta
+
+from . import ingest, ingest_queue, logic, views
 from .database import connection
 from .models import AnalysisTask, DBEvent, IngestJob, Position
 from .testing import TestCase, TransactionTestCase, worker_account
@@ -292,3 +294,43 @@ class ExpelledAccountTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()['tasks']), 1)
+
+
+class DeadLeaseOnClosedPositionTests(TestCase):
+    """Un arriendo muerto sobre una posicion YA CERRADA se absorbe en vez de
+    volver a la cola (7-sep: peticiones "colgadas para siempre" en un perfil:
+    el cierre salta las LEASED y el reciclador las devolvia a PENDING)."""
+
+    def setUp(self):
+        worker_account('worker', 'secret')
+        self.credentials = {'username': 'worker', 'password': 'secret',
+                            'machine': 'machine-a', 'lines': '[]',
+                            'worker_build': views.LEASE_TOKEN_BUILD}
+        self.open = ingest.get_or_create_position(logic.start_fen())
+        self.closed = ingest.get_or_create_position(
+            logic.apply_move(self.open.fen, 'g1f3'))
+        Position.objects.filter(key=self.closed.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+    def _dead_lease(self, position):
+        cold = timezone.now() - timedelta(minutes=views.LEASE_MINUTES + 5)
+        return AnalysisTask.objects.create(
+            position=position, generation=AnalysisTask.objects.count(),
+            budget_nodes=1_000, state='LEASED', machine='machine-b',
+            lease_token='tok', leased_at=cold, lease_heartbeat_at=None)
+
+    def test_a_dead_lease_on_a_closed_position_is_absorbed_not_requeued(self):
+        zombie = self._dead_lease(self.closed)
+        alive = self._dead_lease(self.open)
+
+        response = self.client.post('/atomicdb/api/lease', self.credentials)
+
+        self.assertEqual(response.status_code, 200)
+        zombie.refresh_from_db()
+        alive.refresh_from_db()
+        self.assertEqual(zombie.state, 'COMPLETED')
+        self.assertEqual(zombie.nodes_searched, 0)
+        self.assertEqual(zombie.machine, '')
+        # El que si sigue abierto se recicla como siempre (y puede salir
+        # arrendado en esta misma llamada).
+        self.assertIn(alive.state, ('PENDING', 'LEASED'))

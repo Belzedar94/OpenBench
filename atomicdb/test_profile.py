@@ -564,3 +564,29 @@ class HeaderCacheTests(TestCase):
 
         for body in (alice, bob):
             self.assertIn('class="identity-user" href="/atomicdb/me/"', body)
+
+
+class QueuePlaceMissingTests(TestCase):
+    """Una pendiente sin sitio en la cola (fuera de la banda servible) se
+    pinta con un guion: el perfil no puede caerse por ella (5-sep, 500 en
+    /atomicdb/user/BManBJ/)."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        self.client = Client()
+        self.mine = _child('a2a3')        # 1.a3
+
+    def test_a_request_without_a_place_still_renders(self):
+        from unittest import mock
+        _task(self.mine, source=AnalysisTask.Source.USER,
+              requested_by='alice')
+
+        with mock.patch.object(contributors.live_request, 'queue_ahead_map',
+                               return_value={}):
+            response = self.client.get('/atomicdb/user/alice/')
+
+        self.assertEqual(response.status_code, 200)
+        raw = response.content.decode()
+        self.assertIn('1. a3', _reading(raw))
+        self.assertNotIn('#None', raw)
+        self.assertIn('No place yet', raw)

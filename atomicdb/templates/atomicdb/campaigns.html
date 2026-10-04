@@ -1,0 +1,43 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB proposed campaigns{% endblock %}
+{% block content %}
+
+<h2 id="campaigns">Proposed campaigns</h2>
+<p class="dim campaign-lede">Every line anyone has put up, most voted first. The
+  <a href="/atomicdb/#campaigns">overview</a> shows only the {{ home_limit }} most voted;
+  the site owner decides which one the solver actually runs.</p>
+{% if campaign_message %}<p class="campaign-status">{{ campaign_message }}</p>{% endif %}
+{% if campaigns_proposed %}
+<ul class="campaign-list">
+  {% for c in campaigns_proposed %}
+  <li class="campaign-row">
+    <div class="campaign-row-line">
+      <a class="qline" href="/atomicdb/explore/{{ c.root_key }}/">{{ c.title }}</a>
+      {% if c.line_shown %}<div class="campaign-row-san dim">{{ c.line_shown }}</div>{% endif %}
+    </div>
+    <div class="campaign-row-votes dim">proposed by {{ c.proposed_by_h }} · {{ c.votes }} vote{{ c.votes|pluralize }}</div>
+    <div class="campaign-actions">
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/vote/">{% csrf_token %}
+        <input type="hidden" name="back" value="campaigns">
+        <button class="reqbtn">Vote</button>
+      </form>
+      {% if campaign_owner %}
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <input type="hidden" name="action" value="activate">
+        <button class="reqbtn">Activate</button>
+      </form>
+      <form method="post" action="/atomicdb/campaign/{{ c.id }}/state/">{% csrf_token %}
+        <input type="hidden" name="back" value="1">
+        <input type="hidden" name="action" value="pause">
+        <button class="reqbtn ghost">Pause</button>
+      </form>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}<p class="dim">No campaigns proposed yet. Open a line in the explorer
+  and put it up from there.</p>{% endif %}
+
+{% endblock %}

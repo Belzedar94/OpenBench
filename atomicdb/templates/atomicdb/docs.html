@@ -149,6 +149,17 @@ queue behind your back.</p>
 same as the explorer button: what governs both is the per-person cap on queued
 requests above, and the per-account sharing of the service order. Every call
 still leaves a receipt.</p>
+<p><strong>Your queue</strong>: <code>POST /atomicdb/api/my-queue/</code>
+with <code>username</code> and <code>password</code> (your OpenBench
+credentials, same as a worker) returns your PENDING and LEASED requests:
+task ids, position keys, budgets, state, and the <code>bump</code> /
+<code>cancel</code> paths each row accepts. A logged-in browser can simply
+<code>GET</code> it. The ids are what scripted withdraw needed (P3, voted
+28-Aug), and they plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
+and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code> with the same
+credentials (form or JSON; <code>undo=1</code> on cancel restores the row).
+The profile-page buttons are separate, session-guarded routes.</p>
+
 <p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
 the position row (<code>status</code>, <code>closure</code>,
 <code>score</code>, <code>point</code>, <code>backed_plies</code>,

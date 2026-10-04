@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta
 
 from django.conf import settings
+from django.db import IntegrityError, router, transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 
@@ -5673,11 +5674,34 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             elif respaldado:
                 queued += 1
             continue
-        AnalysisTask.objects.create(
-            position=child, generation=child.visits,
-            budget_nodes=budget,
-            multipv=multipv_for(child.visits, budget, clamp=clamp),
-            source=source, requested_by=requested_by, route=child_route)
+        try:
+            # Punto de guardado propio, EN LA CONEXION DE ATOMICDB (sin
+            # ``using`` el savepoint caeria en la base default y el choque
+            # dejaria rota la transaccion real): el llamante va dentro de
+            # una transaccion (el padre bajo select_for_update) y esto no
+            # puede romperla.
+            with transaction.atomic(using=router.db_for_write(AnalysisTask)):
+                AnalysisTask.objects.create(
+                    position=child, generation=child.visits,
+                    budget_nodes=budget,
+                    multipv=multipv_for(child.visits, budget, clamp=clamp),
+                    source=source, requested_by=requested_by,
+                    route=child_route)
+        except IntegrityError:
+            # Carrera perdida: otra tarea de la MISMA generacion (otro padre
+            # por transposicion, o el selector) nacio entre el dedup de
+            # arriba y este insert, y (posicion, generacion) es unica.  Era
+            # un 500 en el boton (reporte de Eclipsia, 6-sep).  Sumarse a
+            # ella es exactamente el brazo del dedup; si ya no esta viva, no
+            # hay nada que comprar.
+            vivo = (AnalysisTask.objects
+                    .filter(position=child,
+                            state__in=(AnalysisTask.TState.PENDING,
+                                       AnalysisTask.TState.LEASED))
+                    .order_by('id').first())
+            if vivo is not None and add_requester(vivo, requested_by):
+                queued += 1
+            continue
         queued += 1
     return queued
 

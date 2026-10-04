@@ -325,11 +325,18 @@ def _auth(request):
     perfil habilitado no hay usuario, y quien llame recibe el mismo 403 que
     quien se equivoca de contrasena.
     """
+    return _auth_pair(request.POST.get('username', ''),
+                      request.POST.get('password', ''))
+
+
+def _auth_pair(username, password):
+    """El criterio de ``_auth``, escrito una sola vez, para cualquier origen
+    de credenciales: el POST de formulario de los workers y el cuerpo JSON
+    que mandan los scripts de la comunidad (my-queue, 30-ago-2026)."""
     # Import local, como en ``_approver_gate``: mantiene a AtomicDB importable
     # sin arrastrar OpenBench.
     from OpenBench.models import Profile
-    user = authenticate(username=request.POST.get('username', ''),
-                        password=request.POST.get('password', ''))
+    user = authenticate(username=username, password=password)
     if user is None:
         return None
     if not Profile.objects.filter(user=user, enabled=True).exists():
@@ -574,6 +581,15 @@ def api_lease(request):
             leased_at__lt=legacy_stale,
         ).update(state='PENDING', machine='', lease_heartbeat_at=None,
                  lease_session='')
+        # Un arriendo muerto sobre una posicion que SE CERRO mientras corria
+        # no vuelve a la cola: el cierre absorbe las PENDING pero salta las
+        # LEASED a proposito (§ ingest.absorb_tasks), y devolverla a PENDING
+        # dejaba un zombi que nadie sirve nunca (choose_pending salta lo
+        # cerrado) — las peticiones "colgadas para siempre" de un perfil,
+        # 7-sep.  La consulta es del tamano de lo reciclado (unas filas).
+        ingest.absorb_tasks(AnalysisTask.objects.filter(
+            state='PENDING', machine='', lease_heartbeat_at__isnull=True,
+            leased_at__isnull=False).exclude(position__status='UNKNOWN'))
 
         # A second process using the same machine identity must not steal a
         # healthy assignment. The per-assignment token below fences old
@@ -1326,22 +1342,38 @@ def api_request_unexplored(request, key):
                          'candidates': len(pending)})
 
 
+@csrf_exempt
 def api_my_queue(request):
     """La cola PROPIA en JSON: ids, estado y los enlaces para actuar.
 
     P3 (comunidad, 2-0, 28-ago-2026), peticion de Eclipsia (20-ago): sin los
-    ids una retirada por script era imposible.  Solo GET, solo la cuenta
-    logueada, y las filas en EL MISMO orden que pinta el perfil: lo arrendado
-    delante, luego ``queue_seq`` y llegada.
+    ids una retirada por script era imposible.  Las filas van en EL MISMO
+    orden que pinta el perfil: lo arrendado delante, luego ``queue_seq`` y
+    llegada.
+
+    DOS PUERTAS, porque los dos lectores existen (reporte de Eclipsia,
+    30-ago: la primera entrega salio solo con la del navegador y el caso de
+    uso era el otro).  Un navegador logueado hace GET con su sesion.  Un
+    script hace POST con ``username`` y ``password`` — las credenciales OB de
+    siempre, por la misma puerta y con el mismo gate de cuenta habilitada que
+    los workers (``_auth``).  ``csrf_exempt`` por lo mismo que sus vecinos de
+    protocolo: un script no tiene token de pagina, y la credencial viaja en
+    el cuerpo, no en la cookie que el CSRF protege.
     """
-    if request.method != 'GET':
-        return JsonResponse({'error': 'GET only'}, status=405)
-    if not request.user.is_authenticated:
+    if request.method == 'POST':
+        account, err = _resolve_script_account(request)
+        if err is not None:
+            return err
+    elif request.method != 'GET':
+        return JsonResponse({'error': 'GET or POST only'}, status=405)
+    elif request.user.is_authenticated:
+        account = request.user.username
+    else:
         return JsonResponse({'error': 'login required'}, status=401)
     running_first = Case(When(state=AnalysisTask.TState.LEASED, then=Value(0)),
                          default=Value(1), output_field=IntegerField())
     rows = (AnalysisTask.objects
-            .filter(requested_by=request.user.username,
+            .filter(requested_by=account,
                     state__in=(AnalysisTask.TState.PENDING,
                                AnalysisTask.TState.LEASED))
             .select_related('position')
@@ -1353,10 +1385,111 @@ def api_my_queue(request):
               'budget_nodes': t.budget_nodes,
               'state': t.state,
               'queue_seq': t.queue_seq,
-              'bump': '/atomicdb/queue/bump/%d/' % t.id,
-              'cancel': '/atomicdb/queue/cancel/%d/' % t.id}
+              'bump': '/atomicdb/api/queue-bump/%d/' % t.id,
+              'cancel': '/atomicdb/api/queue-cancel/%d/' % t.id}
              for t in rows[:200]]
-    return JsonResponse({'account': request.user.username, 'tasks': tasks})
+    return JsonResponse({'account': account, 'tasks': tasks})
+
+
+def _resolve_script_account(request):
+    """Credenciales de script en el cuerpo, form o JSON, criterio unico.
+
+    Los scripts de la comunidad mandan JSON sin pensarlo dos veces, y con
+    ``request.POST`` vacio la respuesta era "bad credentials" con la
+    contrasena buena — indistinguible de equivocarse (Eclipsia, 30-ago).  Se
+    aceptan los dos cuerpos; quien entra lo decide ``_auth_pair``, el mismo
+    criterio de los workers.  Devuelve ``(cuenta, None)`` o ``(None,
+    respuesta)``.
+    """
+    username = request.POST.get('username', '')
+    password = request.POST.get('password', '')
+    if not username and request.content_type == 'application/json':
+        try:
+            cuerpo = json.loads(request.body.decode('utf-8'))
+            username = cuerpo.get('username', '')
+            password = cuerpo.get('password', '')
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            pass
+    user = _auth_pair(username, password)
+    if user is None:
+        return None, JsonResponse({'error': 'bad credentials'}, status=403)
+    return user.username, None
+
+
+@csrf_exempt
+def api_queue_bump_script(request, task_id):
+    """Adelantar por PROTOCOLO: la puerta de scripts de ``api_queue_bump``.
+
+    Reporte de Eclipsia (30-ago): my-queue da los ids "para retirar y
+    adelantar por script", pero los dos controles eran formularios del
+    navegador — sesion y CSRF, como debe ser alli.  Un script no lleva la
+    cookie que el CSRF protege: entra con las credenciales OB de my-queue
+    (§ ``_resolve_script_account``) y recibe JSON, sin recibos ni vueltas de
+    pagina.  La operacion y las guardas son LAS MISMAS: cuenta propia, banda
+    USER, PENDING, y el sitio que se hereda es el de tu primera pendiente
+    (§ ``ingest.front_of_own_queue``).
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    account, err = _resolve_script_account(request)
+    if err is not None:
+        return err
+    with atomic():
+        task = (AnalysisTask.objects.select_for_update()
+                .filter(pk=task_id, source=AnalysisTask.Source.USER,
+                        requested_by=account,
+                        state=AnalysisTask.TState.PENDING).first())
+        if task is None:
+            return JsonResponse({'status': 'not-yours', 'moved': False})
+        seq = ingest.front_of_own_queue(task)
+        if seq is None:
+            return JsonResponse({'status': 'already-first', 'moved': False})
+        AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
+    # Same cache contract as the button (``api_queue_bump``): the cached
+    # place of a request that just moved is forgotten.
+    live_request.invalidate_queue_ahead(task_id)
+    return JsonResponse({'status': 'moved', 'moved': True})
+
+
+@csrf_exempt
+def api_queue_cancel_script(request, task_id):
+    """Retirar (o deshacer) por PROTOCOLO: la puerta de scripts del cancel.
+
+    Mismas guardas y misma pareja que el boton (§ ``api_queue_cancel``):
+    PENDING y solo PENDING, sin confirmacion y CON deshacer — ``undo=1``
+    revive la fila con su presupuesto y su sitio
+    (§ ``ingest.restore_cancelled``).  "No es tuya", "ya se sirvio" y "no
+    existe" contestan lo mismo a proposito, igual que alli.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    account, err = _resolve_script_account(request)
+    if err is not None:
+        return err
+    undo = request.POST.get('undo') == '1'
+    if not undo and request.content_type == 'application/json':
+        try:
+            undo = json.loads(request.body.decode('utf-8')).get('undo') in (
+                '1', 1, True)
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            pass
+    mine = AnalysisTask.objects.filter(pk=task_id,
+                                       source=AnalysisTask.Source.USER,
+                                       requested_by=account)
+    with atomic():
+        if undo:
+            task = (mine.select_for_update()
+                    .filter(state=AnalysisTask.TState.CANCELLED).first())
+            if task is None:
+                return JsonResponse({'status': 'nothing-to-undo'})
+            status = ('restored' if ingest.restore_cancelled(task)
+                      else 'nothing-to-undo')
+            return JsonResponse({'status': status})
+        task = (mine.select_for_update()
+                .filter(state=AnalysisTask.TState.PENDING).first())
+        if task is None:
+            return JsonResponse({'status': 'not-yours'})
+        return JsonResponse({'status': ingest.withdraw_requester(task)})
 
 
 def api_pref_lifo(request):
@@ -5262,9 +5395,12 @@ def _campaign_reply(request, payload, status=200, token=None, minted=False):
     rota.  El campo ``back`` lo pide el formulario a proposito; quien no lo
     manda recibe el JSON tal cual estaba especificado.
     """
-    if request.POST.get('back'):
-        response = redirect(f"/atomicdb/?campaign={payload['status']}"
-                            f"#campaigns")
+    back = request.POST.get('back')
+    if back:
+        # ``back=campaigns``: el boton vive en la lista completa, y volver a
+        # la portada desde alli seria perder la pagina desde la que se voto.
+        page = '/atomicdb/campaigns/' if back == 'campaigns' else '/atomicdb/'
+        response = redirect(f"{page}?campaign={payload['status']}#campaigns")
     else:
         response = JsonResponse(payload, status=status)
     if token is not None and minted:
@@ -5621,18 +5757,45 @@ def _campaign_context(request):
             'resolved': resolved, 'resolved_h': _human(resolved),
             'solved_pct': round(100.0 * resolved / total, 1) if total else 0.0,
         })
-    proposed = [
-        _campaign_identity(campaign)
-        for campaign in Campaign.objects
-        .filter(state=Campaign.CState.PROPOSED)
-        .order_by('-votes', '-created')[:HOME_PROPOSED_CAMPAIGNS]]
+    # Una sola consulta (la lista es corta): el recorte se hace aqui, y lo
+    # que se queda fuera se cuenta para que la portada lo diga y enlace la
+    # lista entera — una propuesta nueva tiene cero votos y sin ese enlace no
+    # aparecia en ningun sitio.
+    waiting = list(Campaign.objects.filter(state=Campaign.CState.PROPOSED)
+                   .order_by('-votes', '-created'))
+    proposed = [_campaign_identity(campaign)
+                for campaign in waiting[:HOME_PROPOSED_CAMPAIGNS]]
+    proposed_total = len(waiting)
     user = getattr(request, 'user', None)
     is_owner = bool(user is not None and user.is_authenticated
                     and user.is_staff)
     outcome = request.GET.get('campaign', '')
     return {'campaign_cards': cards, 'campaigns_proposed': proposed,
+            'campaigns_proposed_total': proposed_total,
             'campaign_owner': is_owner,
             'campaign_message': CAMPAIGN_MESSAGES.get(outcome, '')}
+
+
+def campaigns(request):
+    """La lista ENTERA de campanas propuestas, con los mismos botones.
+
+    La portada recorta el buzon a ``HOME_PROPOSED_CAMPAIGNS`` para no crecer
+    con cada propuesta, y el aviso de Discord mandaba a la portada: una
+    propuesta recien puesta, con cero votos, no salia en ningun sitio y nadie
+    podia llegar a ella para votarla.  Aqui estan todas, mas votadas primero
+    y a igualdad la mas nueva, sin recorte y sin cache (es una consulta).
+    """
+    rows = [_campaign_identity(campaign) for campaign in Campaign.objects
+            .filter(state=Campaign.CState.PROPOSED)
+            .order_by('-votes', '-created')]
+    user = getattr(request, 'user', None)
+    is_owner = bool(user is not None and user.is_authenticated
+                    and user.is_staff)
+    outcome = request.GET.get('campaign', '')
+    return render(request, 'atomicdb/campaigns.html', {
+        'campaigns_proposed': rows, 'campaign_owner': is_owner,
+        'campaign_message': CAMPAIGN_MESSAGES.get(outcome, ''),
+        'home_limit': HOME_PROPOSED_CAMPAIGNS})
 
 
 # Por debajo de esto no hay linea que verificar: son la jugada y su respuesta,
