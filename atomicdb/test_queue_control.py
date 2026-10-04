@@ -1723,6 +1723,15 @@ class ScriptedQueueDoorTests(_QueueHarness):
                          [mine[2].id, yours[0].id, mine[0].id, yours[1].id,
                           mine[1].id])
 
+    def test_a_scripted_bump_forgets_the_cached_place(self):
+        """The cache contract of the button: the next read is a fresh one."""
+        mine = self._queue('alice', [self.RUNG] * 3)
+        self.assertEqual(live_request.queue_ahead(mine[2]), 2)
+
+        self.script.post(f'/atomicdb/api/queue-bump/{mine[2].id}/', self.alice)
+
+        self.assertEqual(live_request.queue_ahead(mine[2]), 0)
+
     def test_a_scripted_cancel_withdraws_and_undo_restores_the_same_row(self):
         mine = self._queue('alice', [self.RUNG] * 2)
         path = f'/atomicdb/api/queue-cancel/{mine[1].id}/'

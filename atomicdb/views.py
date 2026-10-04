@@ -1445,6 +1445,9 @@ def api_queue_bump_script(request, task_id):
         if seq is None:
             return JsonResponse({'status': 'already-first', 'moved': False})
         AnalysisTask.objects.filter(pk=task.pk).update(queue_seq=seq)
+    # Same cache contract as the button (``api_queue_bump``): the cached
+    # place of a request that just moved is forgotten.
+    live_request.invalidate_queue_ahead(task_id)
     return JsonResponse({'status': 'moved', 'moved': True})
 
 
