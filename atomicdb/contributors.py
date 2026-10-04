@@ -549,7 +549,9 @@ def present(username, now=None):
         # (§ ``live_request.bump_control``), y el enlace de la linea es el
         # camino hasta el.
         _presented(task, labels, now,
-                   {'place': task.ahead + 1,
+                   # Sin sitio (fuera de la banda servible, § queue_ahead_map)
+                   # se pinta un guion, no un 500 (reporte de Eclipsia, 5-sep).
+                   {'place': None if task.ahead is None else task.ahead + 1,
                     'when': _ago(task.created, now),
                     # RETIRAR SI SE QUEDA AQUI, y la asimetria con el boton
                     # que se acaba de ir no es un descuido.  Adelantar en esta

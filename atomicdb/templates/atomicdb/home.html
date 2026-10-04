@@ -226,6 +226,7 @@
   </li>
   {% endfor %}
 </ul>
+{% if campaigns_proposed_total > campaigns_proposed|length %}<p class="dim campaign-more">Showing the {{ campaigns_proposed|length }} most voted of {{ campaigns_proposed_total }} proposals · <a href="/atomicdb/campaigns/">see every proposal</a></p>{% endif %}
 {% else %}<p class="dim">No campaigns proposed yet. Open a line in the explorer
   and put it up from there.</p>{% endif %}
 

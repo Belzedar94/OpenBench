@@ -115,6 +115,15 @@ urlpatterns = [
     path('queue/bump/<int:task_id>/', views.api_queue_bump,
          name='atomicdb-queue-bump'),
     path('api/my-queue/', views.api_my_queue, name='atomicdb-my-queue'),
+    # Sin barra tambien (30-ago): el 301 de APPEND_SLASH convertia el POST de
+    # un script en GET anonimo — 401 con la credencial buena (Eclipsia).
+    path('api/my-queue', views.api_my_queue),
+    path('api/queue-bump/<int:task_id>/', views.api_queue_bump_script,
+         name='atomicdb-api-queue-bump'),
+    path('api/queue-bump/<int:task_id>', views.api_queue_bump_script),
+    path('api/queue-cancel/<int:task_id>/', views.api_queue_cancel_script,
+         name='atomicdb-api-queue-cancel'),
+    path('api/queue-cancel/<int:task_id>', views.api_queue_cancel_script),
     path('queue/lifo/', views.api_pref_lifo, name='atomicdb-pref-lifo'),
     # Retirar una peticion propia de la cola, y devolverla (``undo=1``).  Las
     # dos direcciones por la misma ruta porque son la misma fila y el mismo
@@ -129,6 +138,8 @@ urlpatterns = [
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.
+    # La lista entera de propuestas: la portada solo ensena las mas votadas.
+    path('campaigns/', views.campaigns, name='atomicdb-campaigns'),
     path('campaign/propose/', views.campaign_propose),
     path('campaign/<int:campaign_id>/vote/', views.campaign_vote),
     path('campaign/<int:campaign_id>/state/', views.campaign_state),

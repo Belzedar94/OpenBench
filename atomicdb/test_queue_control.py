@@ -1589,12 +1589,18 @@ class QueueApiAndLifoTests(_QueueHarness):
                          [mine[1].id, mine[0].id])
         self.assertNotIn(stranger.id,
                          {row['task_id'] for row in payload['tasks']})
+        self.assertEqual(payload['tasks'][0]['bump'],
+                         f'/atomicdb/api/queue-bump/{mine[1].id}/')
         self.assertEqual(payload['tasks'][0]['cancel'],
-                         f'/atomicdb/queue/cancel/{mine[1].id}/')
+                         f'/atomicdb/api/queue-cancel/{mine[1].id}/')
 
-    def test_my_queue_is_get_only_and_requires_login(self):
+    def test_my_queue_needs_a_session_or_credentials(self):
         self.assertEqual(Client().get('/atomicdb/api/my-queue/').status_code,
                          401)
         self.client.login(username='alice', password='p')
+        # POST is the door for scripts: it reads credentials from the body
+        # and never falls back to the browser session.
         self.assertEqual(self.client.post('/atomicdb/api/my-queue/').status_code,
+                         403)
+        self.assertEqual(self.client.put('/atomicdb/api/my-queue/').status_code,
                          405)
