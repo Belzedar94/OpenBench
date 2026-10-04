@@ -56,7 +56,15 @@ Every position value on the site is in exactly one of four states:
    repetition is worth a draw:
    - *backed*: a child whose spine returns to the parent being evaluated
      contributes a draw, never the number the cycle invents (the
-     2026-08-03 rule). That draw is an assertion about a *walk* over
+     2026-08-03 rule). The draw is scored **where the line returns**:
+     the child is re-read with the line in hand, so a position on the way
+     back that has a better move than returning plays it, and the child is
+     worth that move; and the side that can play the repeating move itself
+     is never worse off there than the draw (2026-10-04; scoring the whole
+     child at 0 handed the losing side a draw the winning side could
+     refuse, took the winning side's best move away, and had no resting
+     state where two loops share positions). That draw is an assertion
+     about a *walk* over
      `backed_move` pointers, not a measurement: nobody has ever searched
      whether the repetition is forced. So it carries **no search weight**,
      and it may settle a node **only when that node's coverage is
