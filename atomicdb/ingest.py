@@ -506,6 +506,32 @@ def _seed_child_eval(child, ev, refresh=True):
     return bool(won)
 
 
+def _seed_audience(child_keys, writer_key):
+    """Everybody who has to hear that these children were just re-seeded.
+
+    The graph transposes, so a child hangs from several parents, and a seed
+    is a claim that any of them may refresh (invariant 2).  The ascent that
+    follows an ingest used to start at the analysed position and its own
+    parents only, so the OTHER parents of a re-seeded child were never told:
+    they kept a backed value standing on the number the child had before.
+    Live on 4-Oct: ``2e4f0bb1`` published ``1116 via d3c2`` while two of its
+    rows had been re-seeded to 1019 from other positions, and ``ce6b2dfe``
+    published ``1818 via b5c6`` over a row that read 1626 (Eclipsia, 13-Sep:
+    "best move doesnt match eval").
+
+    The children go in as seeds too: one that was walked before it was
+    searched carries a backed value anchored on its old claim.  One indexed
+    query, and only when this pass really changed a claim.
+    """
+    if not child_keys:
+        return []
+    audience = list(child_keys)
+    audience.extend(Edge.objects.filter(child_id__in=child_keys)
+                    .exclude(parent_id=writer_key)
+                    .values_list('parent_id', flat=True))
+    return audience
+
+
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     mate_proofs=None, restricted=False):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
@@ -556,6 +582,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         closed_here = 0
         certified_here = 0
         revoked_here = []
+        reseeded = []
         for index, ln in enumerate(lines):
             uci = ln['move']
             try:
@@ -574,7 +601,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                          or (seed_arbitrates
                              and not (child.nodes_invested
                                       or child.backed_nodes)))):
-                _seed_child_eval(child, ev, refresh=seed_arbitrates)
+                previous = child.eval_cp
+                if (_seed_child_eval(child, ev, refresh=seed_arbitrates)
+                        and ev != previous):
+                    reseeded.append(child.key)
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)
             if (child.status != 'UNKNOWN' and prepared_proof is not None
@@ -757,7 +787,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # bloqueado no se enteraba jamas.
     parent_keys = list(Edge.objects.filter(child_id=pos.key)
                        .values_list('parent_id', flat=True))
-    backed = backup_backed_evals([pos.key, *parent_keys])
+    backed = backup_backed_evals([pos.key, *parent_keys,
+                                  *_seed_audience(reseeded, pos.key)])
     uncertainty = _uncertainty_expand([pos.key, *parent_keys])
     refuted = _witness_refuted_revisit(pos, parent_keys)
     # La cascada corta del descenso por valor: el nodo que se acaba de mirar a
@@ -1157,7 +1188,24 @@ def _witness_rank(edge):
 # eval propia: asi un analisis de 128M no pisa lo que respaldo uno de 10B.
 # Un hijo con status PROBADO pesa mas que cualquier busqueda.
 BACKED_MAX_PLIES = 64        # tope de profundidad del ascenso (generoso)
-BACKED_MAX_REVISITS = 2      # el DAG puede volver a un nodo por otro hijo
+# A node can be woken once per LEVEL of the ascent, so the level bound above
+# is already a bound per node.  This used to be 2 ("the DAG may come back to
+# a node through another child"), which was a guess about how many roads
+# lead to a position: the third wake was dropped WITHOUT A TRACE and the node
+# kept what it had computed on its second visit, standing on a value its
+# child no longer held (invariant 5).  Shuffling lines reach one position by
+# many move orders of different lengths, which is why the community read it
+# as a repetition bug: ``903168f5`` kept "490 via d8a5" while d8a5 said 522
+# (Eclipsia, 4-Oct) and ``4e2549a5`` kept 916 under a 1163 (moky, 15-Sep).
+# A sweep suffers it most: a 2000-seed batch shares one visit counter, so
+# ``recascade_backed`` left stale ancestors of its own on every pass.
+#
+# The two bounds that remain, levels and recomputes, both leave a
+# ``BACKED_GUARD`` event.  So does this one, should anybody lower it again.
+# What the cap must never be asked to do again is to stop an ascent that
+# has no resting state: that is a defect of the value being computed, and
+# it is fixed where the value is computed, not by cutting the ascent short.
+BACKED_MAX_REVISITS = BACKED_MAX_PLIES
 BACKED_MAX_NODES = 50_000    # tope duro de recomputos por llamada
 BACKED_EPSILON_CP = 10       # ruido que no merece seguir subiendo
 # TOLERANCIA DE LA GUARDA DE CALIDAD.
@@ -1908,6 +1956,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
     visits, changed_total, processed, plies = {}, 0, 0, 0
+    dropped = []                 # wakes the revisit cap refused
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     while frontier and plies < max_plies:
         plies += 1
@@ -1975,11 +2024,21 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             if seen < BACKED_MAX_REVISITS:
                 visits[key] = seen + 1
                 frontier.append(key)
+            else:
+                dropped.append(key)
     else:
         if frontier:
             DBEvent.objects.create(kind='BACKED_GUARD', payload={
                 'reason': 'ply-guard', 'processed': processed,
                 'plies': plies, 'seed_count': len(seed_keys)})
+    if dropped:
+        # A node the ascent refused to recompute is standing on a value that
+        # nobody backs.  It says so, with enough keys to go and look.
+        DBEvent.objects.create(kind='BACKED_GUARD', payload={
+            'reason': 'revisit-cap', 'dropped': len(dropped),
+            'keys': list(dict.fromkeys(dropped))[:20],
+            'processed': processed, 'plies': plies,
+            'seed_count': len(seed_keys)})
     return changed_total
 
 
