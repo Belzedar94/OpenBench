@@ -150,7 +150,9 @@ new text is not.
 Do not commit credentials or instance data. `.gitignore` already excludes
 `Config/secret.key`, credential files, the SQLite databases and `Media/`.
 
-Some changes need agreement before code:
+Some changes need agreement before code. Discuss them first, in a draft pull
+request or on the Discord server linked under Support in the sidebar of the
+OpenBench pages:
 
 - **Value semantics.** `docs/value-semantics.md` states its own process:
   edits to the semantics land in that document first, then in code.
@@ -158,11 +160,11 @@ Some changes need agreement before code:
   `ATOMICDB_RULESET_ID` in `OpenSite/settings.py`, and its meaning is written
   in the docstring of `atomicdb/logic.py`. Changing closure rules changes
   what every existing closure claims.
-- **Anything under `Client/`.** Workers run the commit named by
-  `client_repo_ref` in `Config/config.json`, and CI requires that commit to
-  carry exactly the `Client/` being merged. `Client/atomicdb_worker.py` also
-  carries `ATOMICDB_WORKER_BUILD`, which must increase with every published
-  change and is never reused. Raise these changes in an issue first.
+- **Anything under `Client/`.** OpenBench workers download and run the
+  commit named by `client_repo_ref` in `Config/config.json`, and CI requires
+  that commit to carry exactly the `Client/` being merged. The AtomicDB
+  worker updates itself from the server and carries `ATOMICDB_WORKER_BUILD`,
+  which must increase with every published change and is never reused.
 - **Opening names.** The catalogue is validated against a digest
   (`manage.py validate_atomic_openings`) and follows
   `docs/atomicdb-opening-authority.md`. Names are proposed through the
