@@ -73,8 +73,13 @@ position. The same position reached by another move order is not a repetition,
 and nothing stored on the position says otherwise. The repetition chip appears
 when the line you are currently playing revisits a position it has already been
 through.</p>
-<p>During a graph walk a cycle contributes exactly <strong>0</strong>, with
-zero quality. Zero is what the line is worth; zero quality is what the claim
+<p>During a graph walk a line that returns to a position it has already been
+through contributes exactly <strong>0</strong> at the point where it returns,
+with zero quality. Every position on the way back still chooses among all of
+its moves: the side that does not want the draw leaves the loop wherever it
+has something better, and the side that can play the repeating move itself
+is never worse off than that draw. Zero is what the line is worth; zero
+quality is what the claim
 deserves, because nobody has ever searched whether the repetition is forced,
 so it is an assertion about a walk over pointers and not a measurement. It can
 never settle a position that is not fully covered: while replies nobody has

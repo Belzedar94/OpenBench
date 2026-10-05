@@ -506,6 +506,32 @@ def _seed_child_eval(child, ev, refresh=True):
     return bool(won)
 
 
+def _seed_audience(child_keys, writer_key):
+    """Everybody who has to hear that these children were just re-seeded.
+
+    The graph transposes, so a child hangs from several parents, and a seed
+    is a claim that any of them may refresh (invariant 2).  The ascent that
+    follows an ingest used to start at the analysed position and its own
+    parents only, so the OTHER parents of a re-seeded child were never told:
+    they kept a backed value standing on the number the child had before.
+    Live on 4-Oct: ``2e4f0bb1`` published ``1116 via d3c2`` while two of its
+    rows had been re-seeded to 1019 from other positions, and ``ce6b2dfe``
+    published ``1818 via b5c6`` over a row that read 1626 (Eclipsia, 13-Sep:
+    "best move doesnt match eval").
+
+    The children go in as seeds too: one that was walked before it was
+    searched carries a backed value anchored on its old claim.  One indexed
+    query, and only when this pass really changed a claim.
+    """
+    if not child_keys:
+        return []
+    audience = list(child_keys)
+    audience.extend(Edge.objects.filter(child_id__in=child_keys)
+                    .exclude(parent_id=writer_key)
+                    .values_list('parent_id', flat=True))
+    return audience
+
+
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     mate_proofs=None, restricted=False):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
@@ -556,6 +582,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         closed_here = 0
         certified_here = 0
         revoked_here = []
+        reseeded = []
         for index, ln in enumerate(lines):
             uci = ln['move']
             try:
@@ -574,7 +601,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                          or (seed_arbitrates
                              and not (child.nodes_invested
                                       or child.backed_nodes)))):
-                _seed_child_eval(child, ev, refresh=seed_arbitrates)
+                previous = child.eval_cp
+                if (_seed_child_eval(child, ev, refresh=seed_arbitrates)
+                        and ev != previous):
+                    reseeded.append(child.key)
             # cierre por mate verificado (§3.2)
             prepared_proof = mate_proofs.get(index)
             if (child.status != 'UNKNOWN' and prepared_proof is not None
@@ -757,7 +787,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # bloqueado no se enteraba jamas.
     parent_keys = list(Edge.objects.filter(child_id=pos.key)
                        .values_list('parent_id', flat=True))
-    backed = backup_backed_evals([pos.key, *parent_keys])
+    backed = backup_backed_evals([pos.key, *parent_keys,
+                                  *_seed_audience(reseeded, pos.key)])
     uncertainty = _uncertainty_expand([pos.key, *parent_keys])
     refuted = _witness_refuted_revisit(pos, parent_keys)
     # La cascada corta del descenso por valor: el nodo que se acaba de mirar a
@@ -1157,7 +1188,24 @@ def _witness_rank(edge):
 # eval propia: asi un analisis de 128M no pisa lo que respaldo uno de 10B.
 # Un hijo con status PROBADO pesa mas que cualquier busqueda.
 BACKED_MAX_PLIES = 64        # tope de profundidad del ascenso (generoso)
-BACKED_MAX_REVISITS = 2      # el DAG puede volver a un nodo por otro hijo
+# A node can be woken once per LEVEL of the ascent, so the level bound above
+# is already a bound per node.  This used to be 2 ("the DAG may come back to
+# a node through another child"), which was a guess about how many roads
+# lead to a position: the third wake was dropped WITHOUT A TRACE and the node
+# kept what it had computed on its second visit, standing on a value its
+# child no longer held (invariant 5).  Shuffling lines reach one position by
+# many move orders of different lengths, which is why the community read it
+# as a repetition bug: ``903168f5`` kept "490 via d8a5" while d8a5 said 522
+# (Eclipsia, 4-Oct) and ``4e2549a5`` kept 916 under a 1163 (moky, 15-Sep).
+# A sweep suffers it most: a 2000-seed batch shares one visit counter, so
+# ``recascade_backed`` left stale ancestors of its own on every pass.
+#
+# The two bounds that remain, levels and recomputes, both leave a
+# ``BACKED_GUARD`` event.  So does this one, should anybody lower it again.
+# What the cap must never be asked to do again is to stop an ascent that
+# has no resting state: that is a defect of the value being computed, and
+# it is fixed where the value is computed, not by cutting the ascent short.
+BACKED_MAX_REVISITS = BACKED_MAX_PLIES
 BACKED_MAX_NODES = 50_000    # tope duro de recomputos por llamada
 BACKED_EPSILON_CP = 10       # ruido que no merece seguir subiendo
 # TOLERANCIA DE LA GUARDA DE CALIDAD.
@@ -1178,6 +1226,11 @@ PROVEN_QUALITY = 1 << 60     # calidad de un valor exacto (gana a toda busqueda)
 # tope de cordura que ``FRONTIER_DESCENT_MAX_PLIES``: una espina mas larga que
 # esto se deja pasar SIN reclamar ciclo, que es el error seguro.
 BACKED_CYCLE_MAX_PLIES = 32
+# How many positions the valuation of ONE returning child may re-read
+# (see _value_on_line).  A loop is a handful of plies and a nest of them a
+# few dozen; past this the walk's own verdict stands and the child is worth
+# the draw, which is what it was worth before this budget existed.
+BACKED_CYCLE_MAX_NODES = 64
 
 _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 
@@ -1344,7 +1397,7 @@ class _SpineCache:
         self.spines[key] = move
 
 
-def _draw_cycling_children(by_parent, cache):
+def _draw_cycling_children(by_parent, cache, line=frozenset()):
     """MARCA todo hijo cuyo valor vuelve a su propio padre.
 
     Camina la espina del HIJO (``backed_move`` a ``backed_move``) buscando al
@@ -1368,11 +1421,24 @@ def _draw_cycling_children(by_parent, cache):
     Devuelve el conjunto ``{(parent_key, move_uci)}`` de hijos anulados: si
     uno de esos ceros acaba GANANDO el negamax de su padre, el llamante le
     compra la desambiguacion (§ _queue_cycle_disambiguation).
+
+    ``line`` is every position the line under evaluation has ALREADY been
+    through above the parent (see _value_on_line).  Coming back to any of
+    them is the same repetition as coming back to the parent, and an edge
+    that lands on one of them directly needs no walk at all.
     """
     cycled = set()
     walks = []
     for parent_key, children in by_parent.items():
         for child in children:
+            if child.key in line:
+                # Whatever that position stores, and even if it stores
+                # nothing: by this path the move repeats, and that much
+                # is known.
+                child.cycles, child.plies = True, 0
+                child.value = 0
+                cycled.add((parent_key, child.move))
+                continue
             if child.value is None or not child.spine:
                 continue          # sin espina propia no hay ciclo que buscar
             walks.append([parent_key, child, child.key, child.spine,
@@ -1388,7 +1454,7 @@ def _draw_cycling_children(by_parent, cache):
             if step is None:
                 continue                    # arista perdida: no hay ciclo
             below, status = step
-            if below == parent_key:
+            if below == parent_key or below in line:
                 # Repeticion.  La distancia es CERO porque lo que esta arista
                 # aporta nace AQUI — no lo presta nadie de mas abajo — y ademas
                 # es lo que hace converger a ``recascade_backed``: con la
@@ -1427,6 +1493,137 @@ def _resolve_spine_steps(cache, walks):
         cache.spines[child_id] = spine
 
 
+def _resolve_returning_children(by_parent, cache, line=frozenset(),
+                                budget=None, only=None):
+    """Value a returning child ON THE LINE THAT RETURNS, not at a flat zero.
+
+    WHAT THE FLAT ZERO GOT WRONG.  The walk establishes one fact: the
+    child's best line comes back to the parent.  Scoring the whole CHILD as
+    a draw says more than that: it says nobody on the way back has anything
+    better to do than return, and nobody checked.  A repetition is a draw
+    for the side that wants one only if the other side cannot leave the
+    loop, and the other side moves at every second ply of it.
+
+    The two faces of the same error, both reported:
+
+      * the side that is WINNING lost its best move.  moky's position
+        (15-Sep, ``f32c7439``): after Rf5+ Kg6 White may repeat with Rf6+
+        or play Rg5+ for +1163.  Because the stored best line happened to
+        repeat, Rf5+ was scored 0 and the node published its second move,
+        g3, at +916: "a good line shown with a lowered eval";
+      * the side that is LOSING was handed a draw.  Eclipsia's position
+        (9-Sep, ``a1b1efea``): Black, down eleven pawns with every reply on
+        the table, was published at 0 because shuffling the queen led back
+        to the same position, as if White were obliged to shuffle along.
+
+    Both were corrected only when the ascent happened to complete a full
+    lap of the loop, so the result depended on where the ascent started.
+
+    AND WHERE TWO LOOPS SHARE POSITIONS IT HAD NO RESTING STATE AT ALL.  The
+    value that goes round a loop is the value of its exit, so the exit and
+    the loop tie; the tie goes to the heavier support, and that is the
+    loop, which inherits every node searched along it; the loop is then
+    scored 0 by the position that closes it; the zero lowers the family,
+    the exit wins again, and the tie is back.  Replayed on the real family
+    of moky's position, with nothing else touching the graph, a sweep was
+    still changing some twenty rows on its sixth pass.  The revisit cap
+    froze that wheel at whatever phase it was in, and each of the three
+    phases is a report: a 0 that is no draw, a second-best move at the top,
+    a parent quoting a number its child no longer holds.
+
+    THE RULE.  A repetition is worth a draw WHERE THE LINE RETURNS, and
+    every position on the way back still chooses among all its moves.  So
+    the returning child is re-evaluated with the line in hand
+    (see _value_on_line): the edge that lands on the line is the draw, a
+    child that would return in turn is valued the same way one ply deeper,
+    and every other child keeps the value it stores.  If that negamax
+    still picks the repetition, the child stays marked and is worth 0,
+    exactly as before; if somebody on the way back has a better move, the
+    child is worth that move.
+
+    ``only`` restricts the work to the parents that will use it: a proven
+    row never looks at its children (see _backed_for).
+    """
+    for parent_key, children in by_parent.items():
+        if only is not None and parent_key not in only:
+            continue
+        played = line | {parent_key}
+        for child in children:
+            if not child.cycles or child.key in played:
+                continue      # not returning, or the repetition itself
+            spent = [BACKED_CYCLE_MAX_NODES] if budget is None else budget
+            seen = _value_on_line(child.key, played, cache, spent)
+            if seen is None:
+                continue      # out of budget: the walk's verdict stands
+            value, quality, plies, spine, repeats = seen
+            if repeats:
+                continue      # a real repetition: stays marked, worth 0
+            child.cycles = False
+            child.value, child.quality = value, quality
+            child.plies, child.spine = plies, spine
+
+
+def _value_on_line(key, played, cache, budget):
+    """What ``key`` is worth to a line that already went through ``played``.
+
+    The same negamax the node would run for itself (see _backed_for), with
+    one difference: its children are read knowing which positions are
+    already on the line.  Returns ``(value, quality, plies, move,
+    repeats)``, where ``repeats`` says the node's best move on this line IS
+    the repetition, or ``None`` when the budget ran out.
+
+    THE DRAW BELONGS TO WHOEVER CAN PLAY THE REPEATING MOVE.  A move of
+    this very position that lands on the line is not a claim about what
+    the other side will do: the mover plays it and the position repeats.
+    So the mover is never worse off here than that draw, whatever is still
+    unopened and however little weight the draw carries.  Above this
+    position it goes back to being what it is for everybody else: a zero
+    with no search behind it, which settles only a fully covered position.
+    opabinia's position (8-Sep, ``30f37471``) is the case.  White's two top
+    moves, both at +86, shuffle the bishop; Black answers either by putting
+    the queen back, and at that point White is not at +86 but at the best
+    move that does not repeat, +68.  Without this the position that closes
+    the loop kept its own +86 on the line, and the header above it read 86
+    over a table whose rows all read 68.
+
+    A node that publishes nothing on this line and cannot repeat by itself
+    is worth its own measure, exactly as it is to any parent that reads it
+    (see _child_contribution); with no measure either it is worth nothing
+    known, and travels as ``None``.
+
+    Nothing is written and nothing is bought from here: this is what the
+    position is worth BY THIS PATH, and a path is not a fact about the
+    position (invariant 6).
+    """
+    if budget[0] <= 0 or len(played) >= BACKED_CYCLE_MAX_PLIES:
+        return None
+    budget[0] -= 1
+    row = (Position.objects.filter(key=key)
+           .only('key', 'fen', 'status', 'expanded', 'eval_cp',
+                 'nodes_invested', 'best_move', 'last_analysis',
+                 *_BACKED_FIELDS).first())
+    if row is None:
+        return None
+    children = _backed_children_by_parent([key])
+    _draw_cycling_children(children, cache, played)
+    _resolve_returning_children(children, cache, played, budget)
+    kids = children.get(key, ())
+    picks = []
+    value, move, plies, quality = _backed_for(
+        row, kids, bound=_showcase_bound(row.last_analysis),
+        cycle_picks=picks)
+    if picks and move is not None and move == picks[0][0]:
+        return 0, 0, 0, move, True
+    own_return = next((c.move for c in kids if c.key in played), None)
+    if own_return is not None and (
+            value is None
+            or _better_for_mover(0, value, row.fen.split()[1] == 'w')):
+        return 0, 0, 0, own_return, True
+    if value is None:
+        return row.eval_cp, row.nodes_invested or 0, 0, None, False
+    return value, max(quality, row.nodes_invested or 0), plies, move, False
+
+
 def repetition_moves(row):
     """Las jugadas de ``row`` que solo valen TABLAS: su valor vuelve aqui.
 
@@ -1441,9 +1638,12 @@ def repetition_moves(row):
     mas un puñado del paseo, asi que el llamante la pide solo cuando tiene un
     numero que explicar.
     """
-    children = _backed_children_by_parent([row.key]).get(row.key, ())
-    cycled = _draw_cycling_children({row.key: children}, _SpineCache())
-    return {move for _key, move in cycled}
+    children = _backed_children_by_parent([row.key])
+    cache = _SpineCache()
+    _draw_cycling_children(children, cache)
+    _resolve_returning_children(children, cache)
+    return {child.move for child in children.get(row.key, ())
+            if child.cycles}
 
 
 def coverage_is_partial(row, children):
@@ -1596,7 +1796,25 @@ def _backed_for(row, children, discrepancies=None, bound=None,
         # motor que falta y sera el quien lo diga.
         if discrepancies is not None:
             discrepancies.append((best.move, row.key, own_quality))
-        return own, None, 0, own_quality
+        # THE CLAIM IS VETOED; THE CHILDREN AN ENGINE DID MEASURE ARE NOT.
+        # This used to return the node's own number outright, so one
+        # unsearched line at the top of the table silenced every searched
+        # move below it: ``2d39ae6a`` published its own 1207 over a row
+        # searched at 512M that read 1131, because an unsearched h7g7
+        # claimed 1117 ("best move doesnt match eval", Eclipsia, 13-Sep).
+        # And the purchase above is the only way out of that state, so it
+        # lasts exactly as long as that purchase waits in the queue.  The
+        # first rule of the backup is that the best INFORMED child backs
+        # up; a claim nobody searched is not better informed than a search.
+        measured = [c for c in informed
+                    if c.quality > 0
+                    and _better_for_mover(c.value, own, stm_white)]
+        if not measured:
+            return own, None, 0, own_quality
+        best = (max if stm_white else min)(
+            measured,
+            key=lambda c: (c.value, c.quality, -c.plies) if stm_white
+            else (c.value, -c.quality, c.plies))
     if not complete:
         if own is not None:
             # GUARDA DIRECCIONAL (intacta): con cobertura parcial y sin cota
@@ -1908,6 +2126,8 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
     visits, changed_total, processed, plies = {}, 0, 0, 0
+    dropped = []                 # wakes the revisit cap refused
+    returning, settling = set(), False   # see the settling look below
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     while frontier and plies < max_plies:
         plies += 1
@@ -1920,7 +2140,17 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # Antes de que nadie compare: queda MARCADO el hijo que se justifica
         # pasando por su propio padre.  Lo que esa marca vale lo dice el
         # negamax, que es quien sabe de quien es el turno (§ _backed_for).
-        _draw_cycling_children(children, spines)
+        # A proven row never reads its children, so only the open ones are
+        # worth the walk that follows.
+        open_rows = {row.key for row in rows
+                     if _status_eval(row.status) is None}
+        returning.update(
+            parent for parent, _move in
+            _draw_cycling_children(children, spines)
+            if parent in open_rows)
+        # And a child that returns is valued on the line that returns, so
+        # the first answer is already the one a full lap would reach.
+        _resolve_returning_children(children, spines, only=open_rows)
         # Los escaparates multipv, UNA consulta por nivel y solo para las
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
@@ -1963,7 +2193,19 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         _queue_quality_convergence(discrepancies)
         _queue_cycle_disambiguation(cycle_picks)
         if not (propagate or standing):
-            break
+            # AT REST, OR ONLY OUT OF NEWS?  A row valued on a returning
+            # line read the pointers of positions further round the loop,
+            # and this ascent may have moved those pointers afterwards
+            # without changing anything the row's own children show, so
+            # nobody woke it.  Before resting, the rows that were valued
+            # that way get one more look; when that look changes nothing
+            # either, the ascent is done.  It costs one level, and only to
+            # an ascent that met a loop.
+            if settling or not returning:
+                break
+            frontier, returning, settling = list(returning), set(), True
+            continue
+        settling = False
         if processed >= BACKED_MAX_NODES:
             DBEvent.objects.create(kind='BACKED_GUARD', payload={
                 'reason': 'node-budget', 'processed': processed,
@@ -1975,11 +2217,21 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             if seen < BACKED_MAX_REVISITS:
                 visits[key] = seen + 1
                 frontier.append(key)
+            else:
+                dropped.append(key)
     else:
         if frontier:
             DBEvent.objects.create(kind='BACKED_GUARD', payload={
                 'reason': 'ply-guard', 'processed': processed,
                 'plies': plies, 'seed_count': len(seed_keys)})
+    if dropped:
+        # A node the ascent refused to recompute is standing on a value that
+        # nobody backs.  It says so, with enough keys to go and look.
+        DBEvent.objects.create(kind='BACKED_GUARD', payload={
+            'reason': 'revisit-cap', 'dropped': len(dropped),
+            'keys': list(dict.fromkeys(dropped))[:20],
+            'processed': processed, 'plies': plies,
+            'seed_count': len(seed_keys)})
     return changed_total
 
 

@@ -1433,7 +1433,7 @@ class RepetitionZeroContractTests(TestCase):
         # sabe de si misma es que su mejor jugada CONOCIDA vuelve aqui.  Eso no
         # es un techo de tablas, es no saber — y no saber se dice callando el
         # numero, no publicando el de la repeticion.
-        a, c = self._shape('GRAY')
+        a, c = self._shape('GRAY', ring_expanded=True)
         self._losing_sibling(a, 'GRAY-L')
 
         ingest.backup_backed_evals([a.key])
@@ -1453,7 +1453,8 @@ class RepetitionZeroContractTests(TestCase):
         # mejor para el que mueve, y antes bastaba con eso para desplazar la
         # medida — el paseo se llevaba puesto el peso del numero que acababa de
         # tirar.  Un paseo de punteros no desplaza una busqueda.
-        a, c = self._shape('ANCHOR', eval_cp=-300, nodes_invested=128_000_000)
+        a, c = self._shape('ANCHOR', ring_expanded=True, eval_cp=-300,
+                           nodes_invested=128_000_000)
         self._losing_sibling(a, 'ANCHOR-L')
 
         ingest.backup_backed_evals([a.key])
@@ -1468,7 +1469,7 @@ class RepetitionZeroContractTests(TestCase):
         # cero del ciclo no le quita el puesto a nadie.  Es el max de siempre,
         # y aqui se afirma por escrito porque es el sintoma (c) leido del
         # derecho.
-        a, c = self._shape('BETTER', expanded=True)
+        a, c = self._shape('BETTER', expanded=True, ring_expanded=True)
         self._losing_sibling(a, 'BETTER-L')
         _edge(a, _pos('BETTER-R', 'b', eval_cp=250,
                       nodes_invested=128_000_000), 'd2d4')
@@ -1554,7 +1555,7 @@ class RepetitionZeroContractTests(TestCase):
                  backed_move='e1e2', backed_plies=1)
         c = _pos('ROW-C', 'b', eval_cp=898, nodes_invested=128_000_000,
                  backed_eval=903, backed_move='e8e7', backed_plies=2,
-                 backed_nodes=128_000_000)
+                 backed_nodes=128_000_000, expanded=True)
         _edge(a, c, 'e1e2')
         _edge(c, a, 'e8e7')
         _edge(a, _pos('ROW-L', 'b', status='BLACK_WIN', closure='MINIMAX'),
