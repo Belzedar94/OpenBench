@@ -56,6 +56,12 @@ Public API, described for users on `/atomicdb/docs/`:
 The explorer page polls `api/query`, `api/frontier/<key>/` and
 `api/live-request/<key>/`.
 
+These endpoints are rate limited by nginx, not by Django: 5 requests a second
+per client address with bursts of 50, answered with `429` and `Retry-After`
+past that. The worker protocol below is deliberately left out of the limit.
+The site configuration that does it is kept in
+`docs/server/nginx-openbench.conf`.
+
 Worker protocol: `api/lease`, `api/heartbeat` and `api/submit` for analysis
 tasks; `api/solve/acquire`, `api/solve/heartbeat` and `api/solve/submit` for
 proof tasks. The worker authenticates with an OpenBench account whose profile

@@ -66,7 +66,9 @@ to everything you have waiting at once, with the same rule for shared requests;
 that one asks for confirmation and has no undo.</p>
 <h2 id="api">API</h2>
 <p>Two endpoints, one to read and one to ask. Both speak FEN and return JSON,
-and both are usable without an account.</p>
+and both are usable without an account. A script may call them 5 times a
+second from one address, with bursts of up to 50; past that the reply is
+<code>429</code> and the call is simply sent again a moment later.</p>
 <p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
 the stored verdict, score and move list. Scores are from the side to move
 (chessdb.cn convention). Unknown positions return 404; use the request
