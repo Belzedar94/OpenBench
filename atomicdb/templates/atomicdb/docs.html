@@ -140,6 +140,14 @@ needs neither: every unsolved position has a request button, and that request
 rides the same queue as everything else.</p>
 
 <h2 id="api">API</h2>
+<p><strong>Pace</strong>: the endpoints a script can call
+(<code>query</code>, <code>request</code>, <code>live-request</code>,
+<code>frontier</code>, <code>my-queue</code>, <code>queue-bump</code>,
+<code>queue-cancel</code> and <code>map</code>) take 5 requests a second from
+one address, with bursts of up to 50. Past that the reply is
+<code>429</code> with a JSON body and a <code>Retry-After</code> header, and
+nothing is lost: wait and send it again. The worker endpoints are not
+limited.</p>
 <p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
 <code>fen</code>. <code>budget</code> picks a rung of the ladder and is
 optional, honoured for the accounts the explorer offers the depth slider to.
@@ -152,7 +160,8 @@ deliberately ignored here, so a page open in your browser cannot spend your
 queue behind your back.</p>
 <p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
 same as the explorer button: what governs both is the per-person cap on queued
-requests above, and the per-account sharing of the service order. Every call
+requests above, and the per-account sharing of the service order. The pace
+above is about calls a second, not about how much you may ask for. Every call
 still leaves a receipt.</p>
 <p><strong>Your queue</strong>: <code>POST /atomicdb/api/my-queue/</code>
 with <code>username</code> and <code>password</code> (your OpenBench
