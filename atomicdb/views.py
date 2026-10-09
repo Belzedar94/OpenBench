@@ -1809,32 +1809,50 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
     recent_same_position = RequestLog.objects.filter(
         ip=ip, created__gte=hour_ago, position=pos,
     ).exists()
-    active_user_request = AnalysisTask.objects.filter(
+    active_user_tasks = AnalysisTask.objects.filter(
         position=pos,
         source=AnalysisTask.Source.USER,
         state__in=(AnalysisTask.TState.PENDING, AnalysisTask.TState.LEASED),
-    ).exists()
+    )
+    active_user_request = active_user_tasks.exists()
     if recent_same_position and not active_user_request \
             and ingest.ladder_exhausted(pos):
         # A frontier expansion puts its tasks on the CHILDREN, so the parent
         # row alone can no longer prove that the previous click is still
         # being served.  One click stays one expansion event.
-        active_user_request = AnalysisTask.objects.filter(
+        active_user_tasks = AnalysisTask.objects.filter(
             position__edges_in__parent=pos,
             source=AnalysisTask.Source.USER,
             state__in=(AnalysisTask.TState.PENDING,
                        AnalysisTask.TState.LEASED),
-        ).exists()
-    if recent_same_position and active_user_request and chosen is None:
-        # Un peldano ELEGIDO no es el mismo click otra vez: es "lo que hay
-        # encolado aqui se me queda corto".  El dedup existe para que un click
-        # repetido no compre dos veces lo mismo, y ``_request_rung`` ya sabe
-        # subirle el presupuesto a la tarea que espera; devolver
-        # 'already-requested' aqui dejaria al selector prometiendo una
-        # profundidad que nunca llegaria a pedirse.  Solo alcanza a quien tiene
-        # derecho a elegir (el resto llega con ``chosen is None``), y el techo
-        # de cola de abajo sigue acotando el gasto igual que siempre.
+        )
+        active_user_request = active_user_tasks.exists()
+    active_budget = (active_user_tasks.order_by('-budget_nodes')
+                     .values_list('budget_nodes', flat=True).first()
+                     if active_user_request else None)
+    if active_user_request:
+        active_since = active_user_tasks.order_by('created').values_list(
+            'created', flat=True).first()
+        if active_since is not None:
+            recent_same_position = RequestLog.objects.filter(
+                ip=ip, created__gte=max(hour_ago, active_since), position=pos,
+            ).exists()
+    if recent_same_position and active_user_request and (
+            chosen is None or (active_budget is not None and chosen <= active_budget)):
+        # Un peldano ELEGIDO mayor que lo encolado no es el mismo click otra
+        # vez: es "lo que hay encolado aqui se me queda corto".  El dedup existe
+        # para que un click repetido no compre dos veces lo mismo, y ``_request_rung``
+        # ya sabe subirle el presupuesto a la tarea que espera.  Pero si el
+        # peldano elegido no supera lo que ya corre (p. ej. peticiones 128M
+        # repetidas), el dedup se mantiene para no agotar la cuota de cola.
         return {'status': 'already-requested'}, 200
+    if pos.status != 'UNKNOWN':
+        return {'status': 'already-solved'}, 200
+    if chosen is not None:
+        completed_max = ingest._completed_max_budget(pos)
+        if completed_max is not None and completed_max >= chosen:
+            return {'status': 'already-analyzed',
+                    'completed_budget': completed_max}, 200
     if _account_queue_full(requested_by):
         return _queue_full_payload(requested_by)
     # La ruta se valida AQUI y no antes: replicarla son hasta 64 jugadas contra
@@ -2092,6 +2110,8 @@ _REQUEST_REFUSALS = {
     'queue-full-account': 'you already have the maximum number of requests '
                           'waiting; let some land or clear your queue',
     'saturated': 'nothing left to buy here or below it',
+    'already-analyzed': 'this position has already been analyzed to the '
+                        'requested budget or deeper',
 }
 
 

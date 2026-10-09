@@ -100,20 +100,23 @@ than queueing a duplicate.</p>
 account, which is what buys the notification when it lands, the affinity with
 your own workers, and your place in the fair share; without them the request is
 anonymous and served like a click without a session. <code>budget</code> picks
-a ladder rung, and is honoured for the same accounts the explorer's depth
-slider is offered to. Session cookies are deliberately ignored here, so a page
-in your browser cannot spend your queue behind your back.</p>
+a ladder rung: 128M is honoured for any caller to cap search depth, while deeper
+rungs are honoured for the same accounts the explorer's depth slider is offered
+to. Session cookies are deliberately ignored here, so a page in your browser
+cannot spend your queue behind your back.</p>
 <p class="dim" style="font-size:.9rem">The reply carries <code>status</code>,
 the position <code>key</code> and canonical <code>fen</code>, the
 <code>task</code> id and its <code>budget_nodes</code> when there is a live one,
 <code>ahead</code> (how many requests are served first), <code>backed</code>
-(true when you joined a request somebody else had already made), and
-<code>seeded</code> when the FEN was not in the tree and was added by this call.
+(true when you joined a request somebody else had already made),
+<code>seeded</code> when the FEN was not in the tree and was added by this call,
+and <code>completed_budget</code> when reporting an already analyzed position.
 <code>status</code> is <code>queued</code>, <code>already-queued</code>,
-<code>already-solved</code>, <code>expanded</code> (the ladder here is spent, so
-the work went to the replies below), <code>saturated</code> (nothing left to buy
-here or below), or <code>refused</code>. A refusal explains itself in
-<code>reason</code>: an unreadable FEN or a bad budget give 400, wrong
+<code>already-solved</code>, <code>already-analyzed</code> (the position already
+meets or exceeds the requested budget), <code>expanded</code> (the ladder here
+is spent, so the work went to the replies below), <code>saturated</code>
+(nothing left to buy here or below), or <code>refused</code>. A refusal explains
+itself in <code>reason</code>: an unreadable FEN or a bad budget give 400, wrong
 credentials 403, too many calls 429, and a full queue or a busy database 503
 with a <code>Retry-After</code>.</p>
 <p class="dim" style="font-size:.9rem">The request endpoint allows 60 calls per

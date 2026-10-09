@@ -101,6 +101,10 @@ def chosen_rung_for(raw, user):
     if budget not in REQUEST_BUDGET_LADDER:
         return None, True
     if not may_choose(user):
+        # El peldano base (128M) no es gastar de mas: esta al alcance de cualquiera
+        # para acotar su peticion y evitar escaladas automaticas no deseadas.
+        if budget == REQUEST_BUDGET_LADDER[0]:
+            return budget, False
         return None, False
     return budget, False
 
