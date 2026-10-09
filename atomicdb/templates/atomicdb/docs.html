@@ -150,7 +150,8 @@ nothing is lost: wait and send it again. The worker endpoints are not
 limited.</p>
 <p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
 <code>fen</code>. <code>budget</code> picks a rung of the ladder and is
-optional, honoured for the accounts the explorer offers the depth slider to.
+optional: 128M is honoured for any caller to cap search depth, while deeper
+rungs are honoured for the accounts the explorer offers the depth slider to.
 <code>username</code> and <code>password</code> put the request on your
 account, which is what buys the notification when it lands, the affinity with
 your own workers and your place in the fair share. Without them the request is

@@ -17,12 +17,14 @@ lo que el sitio sabe se pueda usar sin abrir el navegador:
   no afirme mas de lo que se guardo.
 """
 
+from datetime import timedelta
 from unittest import mock
 
 from django.test import Client
+from django.utils import timezone
 
 from . import ingest, logic
-from .models import AnalysisTask, ApiRequestLog, Position
+from .models import AnalysisTask, ApiRequestLog, Position, RequestLog, WorkerPing
 from .testing import TestCase, worker_account
 
 
@@ -181,6 +183,105 @@ class RequestApiTests(TestCase):
         self.assertEqual(response.json()['status'], 'refused')
         self.assertFalse(AnalysisTask.objects.exists())
 
+    def test_explicit_budget_already_completed_is_reported_as_already_analyzed(self):
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        ingest.ingest_analysis(self.target.key, _lines(self.target.fen),
+                               128_000_000)
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=128_000_000, state=AnalysisTask.TState.COMPLETED,
+            source=AnalysisTask.Source.USER)
+
+        response = self._post(budget='128000000', **self._credentials('wolfram'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], 128_000_000)
+        self.assertIn('already been analyzed', payload['reason'])
+        self.assertFalse(
+            AnalysisTask.objects.filter(
+                position=self.target,
+                state__in=(AnalysisTask.TState.PENDING,
+                           AnalysisTask.TState.LEASED)).exists())
+
+    def test_explicit_budget_above_completed_queues_the_requested_rung(self):
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        ingest.ingest_analysis(self.target.key, _lines(self.target.fen),
+                               128_000_000)
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=128_000_000, state=AnalysisTask.TState.COMPLETED,
+            source=AnalysisTask.Source.USER)
+
+        response = self._post(budget='512000000', **self._credentials('wolfram'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(payload['budget_nodes'], 512_000_000)
+
+    def test_explicit_budget_when_ladder_exhausted_returns_already_analyzed(self):
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        ingest.ingest_analysis(self.target.key, _lines(self.target.fen),
+                               10_000_000_000)
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=10_000_000_000, state=AnalysisTask.TState.COMPLETED,
+            source=AnalysisTask.Source.USER)
+
+        response = self._post(budget='128000000', **self._credentials('wolfram'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], 10_000_000_000)
+        self.assertFalse(
+            AnalysisTask.objects.filter(
+                state__in=(AnalysisTask.TState.PENDING,
+                           AnalysisTask.TState.LEASED)).exists())
+
+    def test_explicit_budget_is_not_inflated_by_high_visits(self):
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        Position.objects.filter(pk=self.target.pk).update(visits=4)
+        self.target.refresh_from_db()
+
+        response = self._post(budget='128000000', **self._credentials('wolfram'))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(payload['budget_nodes'], 128_000_000)
+        self.assertEqual(
+            AnalysisTask.objects.get(position=self.target,
+                                    state=AnalysisTask.TState.PENDING).budget_nodes,
+            128_000_000)
+
+    def test_explicit_128m_budget_preserves_short_mate_clamp(self):
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        self.target.eval_cp = 10_000 - 2  # M2 (3 plies)
+        self.target.save()
+
+        response = self._post(budget='128000000')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['status'], 'queued')
+        task = AnalysisTask.objects.get(position=self.target,
+                                        state=AnalysisTask.TState.PENDING)
+        self.assertEqual(task.budget_nodes, 4 * ingest.MATE_CLAMP_PER_PLY)
+        self.assertEqual(task.multipv, 1)
+
     def test_a_get_queues_nothing(self):
         response = self.client.get('/atomicdb/api/request')
 
@@ -199,6 +300,71 @@ class RequestApiTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()['status'], 'queue-full-account')
         self.assertIn('clear your queue', response.json()['reason'])
+
+    @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
+    def test_already_analyzed_returns_ok_even_when_queue_is_full(self):
+        # Una posicion ya completada al presupuesto pedido no necesita encolar nada,
+        # asi que debe responder 200 already-analyzed incluso con la cola llena.
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+        ingest.ingest_analysis(self.target.key, _lines(self.target.fen),
+                               128_000_000)
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=128_000_000, state=AnalysisTask.TState.COMPLETED,
+            source=AnalysisTask.Source.USER)
+
+        response = self._post(budget='128000000', **self._credentials('wolfram'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+        self.assertEqual(response.json()['completed_budget'], 128_000_000)
+
+    def test_anonymous_retry_with_base_budget_is_deduplicated_when_task_is_live(self):
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=128_000_000, state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.USER)
+        RequestLog.objects.create(ip='10.0.0.1', position=self.target)
+
+        response = self._post(budget='128000000', ip='10.0.0.1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'already-requested')
+
+    def test_contributor_retry_with_higher_budget_bypasses_deduplication(self):
+        task = AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=128_000_000, state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.USER)
+        RequestLog.objects.create(ip='10.0.0.1', position=self.target)
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+
+        response = self._post(budget='512000000', ip='10.0.0.1', **self._credentials('wolfram'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'already-queued')
+        task.refresh_from_db()
+        self.assertEqual(task.budget_nodes, 512_000_000)
+
+    def test_contributor_request_with_matching_budget_joins_live_task_when_receipt_is_from_earlier_run(self):
+        earlier_receipt = RequestLog.objects.create(ip='10.0.0.1', position=self.target)
+        RequestLog.objects.filter(pk=earlier_receipt.pk).update(
+            created=timezone.now() - timedelta(minutes=30))
+        task = AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=512_000_000, state=AnalysisTask.TState.PENDING,
+            source=AnalysisTask.Source.USER, requested_by='other')
+        WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                  threads=8, hash_mb=1024, os='Linux',
+                                  last_result_at=timezone.now())
+
+        response = self._post(budget='512000000', ip='10.0.0.1', **self._credentials('wolfram'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'already-queued')
+        task.refresh_from_db()
+        self.assertIn('wolfram', task.also_requested_by)
 
     def test_the_door_has_no_hourly_gate(self):
         """Decision del propietario (17-ago): paridad con el click de la web.

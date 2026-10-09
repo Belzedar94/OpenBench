@@ -12,6 +12,7 @@ Lo que se fija aqui, en este orden de importancia:
 """
 
 from datetime import timedelta
+from unittest import mock
 
 from django.test import Client, override_settings
 from django.utils import timezone
@@ -308,17 +309,103 @@ class ChosenRungTests(TestCase):
         self.assertEqual(response.json()['status'], 'confirm-10b')
         self.assertFalse(AnalysisTask.objects.exists())
 
-    def test_a_choice_below_the_due_rung_cannot_cheapen_the_request(self):
-        # 512M es lo que toca; pedir 128M no compra una busqueda mas pobre —
-        # una eleccion solo puede SUBIR el suelo.  La plantilla ni siquiera
-        # ofrece ese peldano, asi que esto es la red de abajo.
+    def test_an_explicit_budget_already_completed_is_reported_as_already_analyzed(self):
+        # 128M ya esta completado.  Pedir 128M a mano dice "asegura esta
+        # profundidad", no "compra el siguiente peldano": la posicion ya
+        # cumple lo pedido, asi que no se escala a 512M en silencio.
         _worker('wolfram', seen_days_ago=1)
         _completed(self.pos, LADDER[0])
         Position.objects.filter(pk=self.pos.pk).update(visits=1)
 
-        _signed_in('wolfram').post(f'/atomicdb/request/{self.pos.key}/',
-                                   {'budget': LADDER[0]})
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
 
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self.pos, state=AnalysisTask.TState.PENDING).exists())
+
+    def test_an_explicit_budget_when_ladder_is_exhausted_returns_already_analyzed(self):
+        # Cuando el peldano maximo (10B) ya esta completado, pedir un
+        # presupuesto explicito (p. ej. 128M) debe responder 'already-analyzed'
+        # y no caer a _descend_frontier / encolar hijos.
+        _worker('wolfram', seen_days_ago=1)
+        _completed(self.pos, LADDER[-1])
+        Position.objects.filter(pk=self.pos.pk).update(visits=1)
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
+
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self.pos, state=AnalysisTask.TState.PENDING).exists())
+
+    def test_an_explicit_budget_is_not_inflated_by_high_visits(self):
+        # Una posicion con visitas altas (p. ej. rekey de en passant o sondas
+        # acumuladas) tendria un budget_for(pos) de 2B, pero si el usuario
+        # pide 128M explicitamente, la tarea encolada no debe inflarse a 2B.
+        _worker('wolfram', seen_days_ago=1)
+        Position.objects.filter(pk=self.pos.pk).update(visits=4)
+        self.pos.refresh_from_db()
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
+
+        self.assertEqual(response.json()['status'], 'queued')
+        self.assertEqual(_pending(self.pos).budget_nodes, LADDER[0])
+
+    def test_explicit_128m_budget_preserves_short_mate_clamp(self):
+        # Un mate corto conocido (<= 6 plies) debe verificarse barato (clamp)
+        # incluso si la peticion explicita fija el tope en 128M.
+        _worker('wolfram', seen_days_ago=1)
+        self.pos.eval_cp = 10_000 - 2  # M2 (3 plies)
+        self.pos.save()
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
+
+        self.assertEqual(response.json()['status'], 'queued')
+        task = _pending(self.pos)
+        self.assertEqual(task.budget_nodes, 3 * ingest.MATE_CLAMP_PER_PLY)
+        self.assertEqual(task.multipv, 1)
+
+    def test_already_analyzed_does_not_create_request_log(self):
+        # Un 'already-analyzed' es un no-op y no debe dejar un recibo en RequestLog
+        # que luego bloquee al mismo IP como 'already-requested'.
+        from .models import RequestLog
+        _worker('wolfram', seen_days_ago=1)
+        _completed(self.pos, LADDER[0])
+        Position.objects.filter(pk=self.pos.pk).update(visits=1)
+
+        response = Client().post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
+
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+        self.assertFalse(RequestLog.objects.filter(position=self.pos).exists())
+
+    @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 0)
+    def test_already_analyzed_returns_ok_even_when_queue_is_full(self):
+        # En la web, un presupuesto ya satisfecho no encola nada y debe devolver
+        # 200 already-analyzed en vez de 503 queue-full-account.
+        _worker('wolfram', seen_days_ago=1)
+        _completed(self.pos, LADDER[0])
+        Position.objects.filter(pk=self.pos.pk).update(visits=1)
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+
+    def test_an_explicit_budget_above_completed_queues_the_requested_rung(self):
+        # Con 128M completado, pedir 512M explicitamente si encola los 512M.
+        _worker('wolfram', seen_days_ago=1)
+        _completed(self.pos, LADDER[0])
+        Position.objects.filter(pk=self.pos.pk).update(visits=1)
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[1]})
+
+        self.assertEqual(response.json()['status'], 'queued')
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[1])
 
     def test_a_deeper_choice_lifts_a_request_that_is_still_waiting(self):

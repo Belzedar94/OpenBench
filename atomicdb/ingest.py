@@ -4366,7 +4366,7 @@ def _apply_lifo_preference(task, requested_by):
 def _request_rung(pos, requested_by='', route='', budget_floor=None):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
-    Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
+    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'already-analyzed', o el centinela
     interno _LADDER_EXHAUSTED cuando el ultimo peldano ya esta COMPLETED:
     repetirlo seria gastar 10B en una busqueda que ya tenemos.
     ``requested_by`` y ``route`` viajan a la tarea (afinidad y orden de
@@ -4374,10 +4374,10 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
     conserva autoria y ruta).
 
     ``budget_floor`` es el peldano ELEGIDO por quien tiene derecho a elegirlo
-    (§ ``depth``), ya validado por la vista.  Solo puede SUBIR el suelo, nunca
-    bajarlo: una eleccion no puede abaratar una peticion por debajo de lo que
-    la escalera compraria sola, asi que un peldano ya gastado (o cualquier cosa
-    por debajo del que toca) no cambia absolutamente nada."""
+    (§ ``depth``), ya validado por la vista.  Acota la peticion al presupuesto
+    pedido: si la posicion ya tiene una busqueda completada con al menos esos
+    nodos, devuelve 'already-analyzed' en vez de escalar a ciegas a un peldano
+    mas hondo."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
@@ -4385,25 +4385,33 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
     if pos.status != 'UNKNOWN':
         return 'already-solved'
     completed_max = _completed_max_budget(pos)
+    if (budget_floor is not None and completed_max is not None
+            and completed_max >= budget_floor):
+        return RequestOutcome('already-analyzed', completed_budget=completed_max)
     if (completed_max is not None
             and completed_max >= REQUEST_BUDGET_LADDER[-1]):
         return _LADDER_EXHAUSTED
-    floor = _next_rung(completed_max)
     clamp = _short_mate_clamp(pos)
-    if clamp is not None and clamp[0] > (completed_max or 0):
-        # Un mate corto con distancia conocida se VERIFICA, y una verificacion
-        # no tiene por que entrar por el suelo de la escalera de peticiones: el
-        # click quiere cerrar el nodo, no excavarlo.  La condicion es lo que
-        # impide que esto se vuelva un techo — en cuanto lo ya COMPLETADO
-        # alcanza al clamp, la escalera recupera el mando y el siguiente click
-        # escala como siempre.
-        floor = clamp[0]
-    floor = max(floor, budget_for(pos))
-    if budget_floor:
-        # Va el ULTIMO y es un maximo, asi que gana tambien al carve-out del
-        # mate corto: ese abarata la PRIMERA mirada de un nodo que reclama M2,
-        # y quien elige 10B a mano no esta pidiendo una verificacion barata.
-        floor = max(floor, budget_floor)
+    if budget_floor is not None:
+        if clamp is not None and clamp[0] > (completed_max or 0) \
+                and budget_floor == REQUEST_BUDGET_LADDER[0]:
+            # El peldano base (128M) funciona como tope para peticiones
+            # ordinarias, por lo que no debe anular la verificacion barata
+            # de un mate corto conocido (2–32M).
+            floor = clamp[0]
+        else:
+            floor = budget_floor
+    else:
+        floor = _next_rung(completed_max)
+        if clamp is not None and clamp[0] > (completed_max or 0):
+            # Un mate corto con distancia conocida se VERIFICA, y una verificacion
+            # no tiene por que entrar por el suelo de la escalera de peticiones: el
+            # click quiere cerrar el nodo, no excavarlo.  La condicion es lo que
+            # impide que esto se vuelva un techo — en cuanto lo ya COMPLETADO
+            # alcanza al clamp, la escalera recupera el mando y el siguiente click
+            # escala como siempre.
+            floor = clamp[0]
+        floor = max(floor, budget_for(pos))
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
@@ -4427,7 +4435,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # (§ ``restore_cancelled``), que si devuelve la fila tal y como estaba.
         task.state = AnalysisTask.TState.PENDING
         task.completed = None
-        task.budget_nodes = max(task.budget_nodes, floor)
+        task.budget_nodes = floor if budget_floor is not None else max(task.budget_nodes, floor)
         task.source = AnalysisTask.Source.USER
         task.requested_by = requested_by
         task.also_requested_by = []
@@ -4862,8 +4870,8 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
     el motor me oriente el mejor camino", que es la queja que acoto el swap en
     primer lugar (§ ``_breadth_swap_eligible``).
 
-    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
-    | 'saturated'."""
+    Devuelve 'queued' | 'already-queued' | 'already-solved' | 'already-analyzed'
+    | 'expanded' | 'saturated'."""
     with atomic():
         swapped = False
         if budget_floor is None and _breadth_swap_eligible(pos):
@@ -4880,7 +4888,7 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
                 return outcome
         outcome = _request_rung(pos, requested_by, route, budget_floor)
         if outcome != _LADDER_EXHAUSTED:
-            return RequestOutcome(outcome)
+            return outcome if isinstance(outcome, RequestOutcome) else RequestOutcome(outcome)
         if swapped:
             return RequestOutcome('saturated')
         return _descend_frontier(pos, requested_by=requested_by, route=route)
