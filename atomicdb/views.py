@@ -2076,6 +2076,14 @@ def api_public_request(request):
         'seeded': seeded,
         'task': None if task is None else task.id,
         'budget_nodes': None if task is None else task.budget_nodes,
+        # Waiting in the queue, or already on an engine.  The status word is
+        # 'already-queued' for both, and a script had to make a second call
+        # to tell them apart ("api/request should behave this way", Eclipsia,
+        # 11-Oct).  A field next to the status and not a new status word: a
+        # client that matches on 'already-queued' keeps working.
+        'task_state': None if task is None else (
+            'searching' if task.state == AnalysisTask.TState.LEASED
+            else 'waiting'),
         # Un 'already-queued' con esto a True es "ya estaba pedida y tu nombre
         # quedo anotado en ella": te avisara cuando aterrice y tu espera cuenta
         # para adelantarla.
