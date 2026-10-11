@@ -45,7 +45,9 @@ Public API, described for users on `/atomicdb/docs/`:
 
 - `GET api/query?fen=...` returns the stored row and analysis of a position.
 - `POST api/request` asks for analysis of a FEN. `username` and `password`
-  are optional and put the request on an account.
+  are optional and put the request on an account. `only_if_missing=1` turns
+  the budget into a target: nothing is queued when a search that ran already
+  covers it, and nothing above it otherwise.
 - `POST api/my-queue/` with `username` and `password` lists the pending and
   running requests of that account. A signed-in browser can `GET` it.
 - `POST api/queue-bump/<id>/` and `POST api/queue-cancel/<id>/` move one of

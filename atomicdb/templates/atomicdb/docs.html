@@ -158,6 +158,15 @@ anonymous, which works, and is served like a click without a session. A FEN the
 tree does not have is seeded rather than refused. Session cookies are
 deliberately ignored here, so a page open in your browser cannot spend your
 queue behind your back.</p>
+<p>Asked again after the first search has landed, a request buys the next rung
+of the ladder, exactly as a second click does. A script that only wants a
+position to <em>have</em> a search adds <code>only_if_missing=1</code>: the
+budget becomes a target (the rung you picked, or the first one). If a search
+that ran already covers it the reply is <code>already-analyzed</code> with
+<code>completed_budget</code> and nothing is queued; otherwise the request is
+queued as usual but never above the target. The check and the purchase happen
+together, so two scripts asking for the same position at the same moment
+cannot push it to the next rung.</p>
 <p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
 same as the explorer button: what governs both is the per-person cap on queued
 requests above, and the per-account sharing of the service order. The pace

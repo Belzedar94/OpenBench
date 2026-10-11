@@ -1795,7 +1795,8 @@ def _validated_route_for(raw_route, key):
         return ''
 
 
-def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
+def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
+                   only_if_missing=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -1808,6 +1809,17 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
     Devuelve ``(payload, codigo http)``.  Quien llama pone la envoltura — el
     metodo, la identidad, y lo que su puerta anada al cuerpo — y nada mas.
     """
+    if only_if_missing and pos.status == 'UNKNOWN':
+        # Answered before the dedup and the queue cap: a call with nothing to
+        # buy is not a repeated click and needs no room in the queue.  No lock
+        # here on purpose.  A search that ran stays run, so this yes cannot
+        # turn into a no, and the purchase below asks again under the row
+        # lock (§ ``ingest._request_rung``).
+        searched = ingest.searched_budget(pos)
+        if searched is not None and searched >= (
+                chosen or ingest.REQUEST_BUDGET_LADDER[0]):
+            return {'status': 'already-analyzed',
+                    'completed_budget': searched}, 200
     hour_ago = timezone.now() - timedelta(hours=1)
     # A recent click is only a duplicate while the request it represented is
     # still queued or running.  Once that task has completed, the same visitor
@@ -1856,7 +1868,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
     # otherwise a browser retry could accidentally request the next rung.
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
-                                          route=route, budget_floor=chosen)
+                                          route=route, budget_floor=chosen,
+                                          only_if_missing=only_if_missing)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -2009,7 +2022,15 @@ def api_public_request(request):
 
     Campos del POST: ``fen`` (obligatoria), ``budget`` (peldano, opcional y
     solo para quien tiene derecho a elegirlo), ``username``/``password``
-    (opcionales).
+    (opcionales), ``only_if_missing`` (opcional).
+
+    ``only_if_missing=1`` is for scripts.  Without it this door is the click:
+    asked again once the first search has landed, it buys the next rung.
+    With it the budget is a target (the chosen rung, or the first one): if a
+    search that ran already covers it the answer is ``already-analyzed`` and
+    nothing is queued, and otherwise nothing above the target is queued
+    (§ ``ingest._request_rung``).  Only this door reads it; the explorer
+    button has no use for it.
     """
     if request.method != 'POST':
         return JsonResponse({'status': 'refused', 'reason': 'POST only'},
@@ -2054,8 +2075,10 @@ def api_public_request(request):
             # y el bucle que hay que acotar es justamente el que pregunta lo
             # mismo mil veces.
             ApiRequestLog.objects.create(account=username, ip=ip)
-        payload, status = _queue_request(pos, ip, requested_by=username,
-                                         chosen=chosen)
+        payload, status = _queue_request(
+            pos, ip, requested_by=username, chosen=chosen,
+            only_if_missing=request.POST.get('only_if_missing') in ('1',
+                                                                    'true'))
     except OperationalError as error:
         # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
         # grande puede rechazar la subida a escritura, y ningun efecto quedo

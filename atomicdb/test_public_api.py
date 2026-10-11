@@ -22,7 +22,7 @@ from unittest import mock
 from django.test import Client
 
 from . import ingest, logic
-from .models import AnalysisTask, ApiRequestLog, Position
+from .models import AnalysisTask, ApiRequestLog, Position, RequestLog
 from .testing import TestCase, worker_account
 
 
@@ -228,6 +228,136 @@ class RequestApiTests(TestCase):
         self.assertEqual(payload['status'], 'queued')
         self.assertEqual(
             AnalysisTask.objects.get(position=self.target).requested_by, '')
+
+
+class OnlyIfMissingTests(TestCase):
+    """``only_if_missing``: a script asks for a search to EXIST, not to deepen.
+
+    Torom, 11-Oct: "All I want is for my script not to accidentally trigger a
+    search deeper than 128 MNodes".  Two of his scripts asked for the same
+    position; the second call arrived after the first 128M had landed, the
+    ladder saw that rung spent and bought 512M.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        worker_account('torom', 'p')
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.target = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'e2e4'))
+        self.floor, self.deeper = ingest.REQUEST_BUDGET_LADDER[:2]
+
+    def _post(self, ip='10.0.0.1', **fields):
+        return self.client.post('/atomicdb/api/request',
+                                {'fen': self.target.fen, **fields},
+                                REMOTE_ADDR=ip).json()
+
+    def _landed(self, budget, nodes=None):
+        """A request of ``budget`` that is COMPLETED on the target.
+
+        By default as a submit leaves it, with its nodes.  ``nodes=0`` is the
+        other way a row gets there: absorbed, bought and never searched.
+        """
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=budget, source=AnalysisTask.Source.USER,
+            state=AnalysisTask.TState.COMPLETED,
+            nodes_searched=budget if nodes is None else nodes)
+        Position.objects.filter(key=self.target.key).update(
+            visits=self.target.visits + 1)
+        self.target.refresh_from_db()
+
+    def _pending_budgets(self):
+        return [task.budget_nodes for task in AnalysisTask.objects.filter(
+            position=self.target, state=AnalysisTask.TState.PENDING)]
+
+    def test_the_plain_call_climbs_once_the_first_search_has_landed(self):
+        # What the flag opts out of, pinned so that it stays what the button
+        # does: asked again, the ladder buys the next rung.
+        self._landed(self.floor)
+
+        payload = self._post()
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.deeper])
+
+    def test_with_the_flag_the_same_call_buys_nothing(self):
+        self._landed(self.floor)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], self.floor)
+        self.assertIsNone(payload['task'])
+        self.assertEqual(self._pending_budgets(), [])
+
+    def test_a_missing_search_is_queued_at_the_first_rung(self):
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.floor])
+
+    def test_a_deeper_search_covers_the_first_rung(self):
+        self._landed(self.deeper)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], self.deeper)
+        self.assertEqual(self._pending_budgets(), [])
+
+    def test_a_rung_bought_but_never_searched_does_not_count(self):
+        # Absorbed: COMPLETED with no nodes.  The ladder reads it as a spent
+        # rung and would buy the next one.  The flag neither takes it for a
+        # search nor lets it push the purchase above the target.
+        self._landed(self.floor, nodes=0)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.floor])
+
+    def test_a_live_deeper_request_of_somebody_else_is_joined_as_it_stands(self):
+        ingest.request_analysis(self.target, requested_by='wolfram',
+                                budget_floor=self.deeper)
+
+        payload = self._post(only_if_missing='1', username='torom',
+                             password='p')
+
+        self.assertEqual(payload['status'], 'already-queued')
+        self.assertTrue(payload['backed'])
+        self.assertEqual(self._pending_budgets(), [self.deeper])
+
+    def test_nothing_bought_leaves_no_click_receipt(self):
+        # The per-address receipt is what makes a repeated click a repeat.  A
+        # call that bought nothing must not turn the next real request from
+        # that address into one.
+        self._landed(self.floor)
+
+        self._post(only_if_missing='1')
+
+        self.assertFalse(
+            RequestLog.objects.filter(position=self.target).exists())
+
+    def test_a_decided_position_is_still_reported_as_decided(self):
+        self._landed(self.floor)
+        Position.objects.filter(key=self.target.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-solved')
+
+    def test_the_explorer_button_does_not_read_the_flag(self):
+        # Only the scripted door has it.  A click that carried the field
+        # would still be a click.
+        self._landed(self.floor)
+
+        outcome = ingest.request_analysis(self.target)
+
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual(self._pending_budgets(), [self.deeper])
 
 
 class QueryApiAnalysisTests(TestCase):
