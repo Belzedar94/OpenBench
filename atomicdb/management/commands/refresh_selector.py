@@ -80,12 +80,37 @@ import signal
 import time
 
 from django.core.management.base import BaseCommand
+from django.db import connections
 
 from atomicdb import ingest, metrics
 from atomicdb.database import connection
 from atomicdb.models import Position
 
 logger = logging.getLogger(__name__)
+
+
+def _drop_dead_connections():
+    """Let go of a connection the database has already dropped.
+
+    A web request gets this for free: Django checks its connections when a
+    request starts and ends.  A loop that never ends has nobody to do it, so
+    after the database restarts it keeps the corpse and every query fails
+    with "the connection is closed".  And because each step of the cycle has
+    its own net (see ``step``), nothing ever kills the process either: it
+    stays "active" and does nothing.  On 10-Oct-2026 an unattended upgrade
+    restarted PostgreSQL for four seconds, and the selector then failed
+    every step of every pass for twenty-two hours, until its daily restart.
+
+    Closing is all it takes: the next query opens a fresh connection.  Only
+    a connection that has seen an error is tested, so a healthy pass pays
+    nothing, and one inside a transaction is left to whoever opened it.
+    """
+    for conn in connections.all(initialized_only=True):
+        if (conn.connection is not None and conn.errors_occurred
+                and not conn.in_atomic_block and not conn.is_usable()):
+            logger.warning('refresh_selector: database connection %s was '
+                           'lost, reconnecting', conn.alias)
+            conn.close()
 
 
 class Command(BaseCommand):
@@ -185,6 +210,7 @@ class Command(BaseCommand):
 
         passes = 0
         while not stopping['now']:
+            _drop_dead_connections()
             started = time.monotonic()
             failures = {}
 
