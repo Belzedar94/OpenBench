@@ -383,6 +383,31 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertEqual(illegal['Cache-Control'], 'no-store')
         self.assertEqual(overlong['Cache-Control'], 'no-store')
 
+    def test_an_overlong_route_says_so_instead_of_blaming_a_token(self):
+        # The reported link: every token well formed, the route only longer
+        # than the limit.  It was answered "invalid UCI token".
+        target = self._materialize(['g1f3'])[-1]
+        well_formed = ','.join(['g1f3'] * (views.PLAY_ROUTE_MAX_PLIES + 1))
+        self.assertLessEqual(len(well_formed), views.PLAY_ROUTE_MAX_CHARS)
+
+        response = self.client.get(
+            f'/atomicdb/explore/{target.key}/', {'play': well_formed})
+
+        self.assertEqual(response.status_code, 400)
+        body = response.content.decode()
+        self.assertIn('too long', body)
+        self.assertIn(str(views.PLAY_ROUTE_MAX_PLIES), body)
+        self.assertNotIn('UCI token', body)
+
+    def test_a_malformed_token_is_located(self):
+        target = self._materialize(['g1f3'])[-1]
+
+        response = self.client.get(
+            f'/atomicdb/explore/{target.key}/', {'play': 'g1f3,e7e9,b1c3'})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('invalid UCI token at ply 2', response.content.decode())
+
     def test_named_child_is_marked_as_entering_opening(self):
         ucis = ['g1f3', 'f7f6']
         current = self._materialize(ucis)[-1]
