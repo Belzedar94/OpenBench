@@ -4363,6 +4363,46 @@ def _apply_lifo_preference(task, requested_by):
         task.save(update_fields=['queue_seq'])
 
 
+def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
+                      source=AnalysisTask.Source.USER):
+    """Bring a withdrawn row back as the request being made NOW.
+
+    (position, generation) is unique, so a withdrawn row keeps the slot of its
+    generation and nothing can be created next to it: a later purchase either
+    comes back through this row or does not happen.
+
+    NOTHING OF THE OLD REQUEST SURVIVES.  The author is whoever asks now, the
+    backers and the place in the queue start from zero, and the budget is the
+    one being asked for now.  It used to be the larger of the two, which let a
+    request nobody wanted any more set the price of the next one: a row
+    withdrawn at 512M, 2B or 10B came back at that budget whatever rung the
+    next person picked ("impossible to send a 128M here", Eclipsia, 11-Oct;
+    7,255 positions were in that state that day).  Withdrawing buys nothing
+    and commits nobody (§ ``AnalysisTask.TState``), so there is nothing for
+    the old budget to hold on to.
+
+    Undoing a withdrawal is a different thing and has its own path
+    (§ ``restore_cancelled``), which does return the row exactly as it was.
+
+    Where the row lands in its author's queue is the caller's business, as it
+    is for a row the caller creates: only the single request applies the
+    newest-first preference (§ ``_apply_lifo_preference``).
+    """
+    task.state = AnalysisTask.TState.PENDING
+    task.completed = None
+    task.budget_nodes = budget
+    task.source = source
+    task.requested_by = requested_by
+    task.also_requested_by = []
+    task.backers = 0
+    task.queue_seq = 0
+    task.route = route
+    task.multipv = multipv
+    task.save(update_fields=['state', 'completed', 'budget_nodes',
+                             'source', 'requested_by', 'also_requested_by',
+                             'backers', 'queue_seq', 'route', 'multipv'])
+
+
 def _request_rung(pos, requested_by='', route='', budget_floor=None):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
@@ -4418,26 +4458,9 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # asi que pedir otra vez no puede crear una nueva: o se revive esta, o
         # la posicion se queda sin poder pedirse nunca mas — que seria convertir
         # un boton de deshacer en una condena.
-        #
-        # VUELVE COMO UNA PETICION NUEVA, no como la de antes: el peldano se
-        # recalcula (la escalera pudo avanzar mientras tanto), el autor es quien
-        # pide AHORA, y los respaldos y el sitio en la cola arrancan a cero
-        # porque los de la fila vieja eran de una peticion que ya no existe.
-        # Deshacer un arrepentimiento es otra cosa y tiene su propio camino
-        # (§ ``restore_cancelled``), que si devuelve la fila tal y como estaba.
-        task.state = AnalysisTask.TState.PENDING
-        task.completed = None
-        task.budget_nodes = max(task.budget_nodes, floor)
-        task.source = AnalysisTask.Source.USER
-        task.requested_by = requested_by
-        task.also_requested_by = []
-        task.backers = 0
-        task.queue_seq = 0
-        task.route = route
-        task.multipv = multipv_for(pos.visits, task.budget_nodes, clamp=clamp)
-        task.save(update_fields=['state', 'completed', 'budget_nodes',
-                                 'source', 'requested_by', 'also_requested_by',
-                                 'backers', 'queue_seq', 'route', 'multipv'])
+        _revive_withdrawn(task, floor,
+                          multipv_for(pos.visits, floor, clamp=clamp),
+                          requested_by, route)
         _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == 'PENDING':
@@ -5951,7 +5974,24 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
                             state__in=(AnalysisTask.TState.PENDING,
                                        AnalysisTask.TState.LEASED))
                     .order_by('id').first())
-            if vivo is not None and add_requester(vivo, requested_by):
+            if vivo is not None:
+                if add_requester(vivo, requested_by):
+                    queued += 1
+                continue
+            # No race at all: the slot is held by a request somebody
+            # WITHDREW.  The single click revives that row
+            # (§ ``_revive_withdrawn``); this one used to skip the move in
+            # silence, so the button kept counting a reply it could never
+            # queue.
+            withdrawn = (AnalysisTask.objects
+                         .filter(position=child, generation=child.visits,
+                                 state=AnalysisTask.TState.CANCELLED)
+                         .first())
+            if withdrawn is not None:
+                _revive_withdrawn(
+                    withdrawn, budget,
+                    multipv_for(child.visits, budget, clamp=clamp),
+                    requested_by, child_route, source=source)
                 queued += 1
             continue
         queued += 1
@@ -6186,6 +6226,14 @@ def _buy_verification(child, requested_by='', route=''):
                   'requested_by': requested_by,
                   'route': route})
     if created:
+        return 'queued', budget
+    if task.state == AnalysisTask.TState.CANCELLED:
+        # A withdrawn request is not work in flight: nothing is queued and
+        # nothing will be.  Taken for live work, the walk moved on and that
+        # position was never searched however often the button was pressed.
+        _revive_withdrawn(task, budget,
+                          multipv_for(child.visits, budget, clamp=clamp),
+                          requested_by, route)
         return 'queued', budget
     if task.state == 'PENDING' and task.source != AnalysisTask.Source.USER:
         task.source = AnalysisTask.Source.USER

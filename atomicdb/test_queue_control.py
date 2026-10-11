@@ -1317,6 +1317,63 @@ class WithdrawCostsNothingTests(_DuplicateHarness):
         self.assertEqual(page['queue_pending'], [])
         self.assertEqual(page['requests_total_h'], '0')
 
+    def test_asking_again_does_not_inherit_the_withdrawn_rung(self):
+        """Eclipsia, 11-Oct: "impossible to send a 128M here".
+
+        The row had been withdrawn at 512M, and every later request for the
+        position came back at 512M whatever rung was picked: the revival kept
+        the larger of the two budgets.
+        """
+        floor, deep = ingest.REQUEST_BUDGET_LADDER[:2]
+        ingest.request_analysis(self.target, requested_by='asfault',
+                                budget_floor=deep)
+        task = AnalysisTask.objects.get(position=self.target)
+        self.assertEqual(task.budget_nodes, deep)
+        self._withdraw(task)
+
+        self.assertEqual(self._ask('wolfram'), 'queued')
+
+        again = AnalysisTask.objects.get(pk=task.pk)
+        self.assertEqual(again.budget_nodes, floor)
+        self.assertEqual(again.requested_by, 'wolfram')
+
+    def test_a_deeper_rung_can_still_be_picked_on_the_way_back(self):
+        """The budget of the revived row is the one asked for, both ways."""
+        floor, deep = ingest.REQUEST_BUDGET_LADDER[:2]
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        self.assertEqual(task.budget_nodes, floor)
+        self._withdraw(task)
+
+        ingest.request_analysis(self.target, requested_by='wolfram',
+                                budget_floor=deep)
+
+        self.assertEqual(
+            AnalysisTask.objects.get(pk=task.pk).budget_nodes, deep)
+
+    def test_the_bulk_button_can_buy_a_withdrawn_reply(self):
+        """A withdrawn request used to make its move unbuyable in bulk.
+
+        The insert collided with the withdrawn row, no live task was found,
+        and the move was skipped without a word: the button went on counting
+        a reply it could never queue.
+        """
+        self._ask('asfault')
+        task = AnalysisTask.objects.get(position=self.target)
+        self._withdraw(task)
+        offered = len(ingest.unexplored_children(self.root))
+
+        queued = ingest.enqueue_unexplored_children(
+            self.root, requested_by='wolfram')
+
+        self.assertEqual(queued, offered)
+        again = AnalysisTask.objects.get(pk=task.pk)
+        self.assertEqual(again.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(again.requested_by, 'wolfram')
+        self.assertEqual(again.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertEqual(
+            AnalysisTask.objects.filter(position=self.target).count(), 1)
+
     def test_undo_puts_it_back_exactly_where_it_was(self):
         self._ask('asfault')
         task = AnalysisTask.objects.get(position=self.target)

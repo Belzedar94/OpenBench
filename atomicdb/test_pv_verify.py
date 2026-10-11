@@ -87,6 +87,30 @@ class EnqueuePvVerificationTests(TestCase):
                 parent_id=parent, move_uci=uci, child_id=child).exists(),
                 f'{uci} sin arista')
 
+    def test_a_withdrawn_request_on_the_line_is_bought_again(self):
+        """A withdrawn row is not work in flight.
+
+        The walk met the row of a request somebody had withdrawn, took it for
+        live work and moved on, so that position was never searched however
+        often the button was pressed.
+        """
+        self._store([_analysis(LINE)])
+        second = ingest.get_or_create_position(_line_fens(LINE)[1])
+        withdrawn = AnalysisTask.objects.create(
+            position=second, generation=second.visits,
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[1],
+            source=AnalysisTask.Source.USER, requested_by='moky',
+            state=AnalysisTask.TState.CANCELLED)
+
+        queued = ingest.enqueue_pv_verification(self.root, requested_by='ana')
+
+        self.assertEqual(queued, 4)
+        withdrawn.refresh_from_db()
+        self.assertEqual(withdrawn.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(withdrawn.requested_by, 'ana')
+        self.assertEqual(withdrawn.budget_nodes,
+                         ingest.REQUEST_BUDGET_LADDER[0])
+
     def test_the_budget_is_the_request_floor_not_a_coverage_seed(self):
         self._store([_analysis(LINE)])
 
