@@ -1238,11 +1238,17 @@ _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
-    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles')
+    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles',
+                 'floor')
 
-    def __init__(self, move, value, quality, plies, key=None, spine=None):
+    def __init__(self, move, value, quality, plies, key=None, spine=None,
+                 floor=False):
         self.move, self.value = move, value
         self.quality, self.plies = quality, plies
+        # The child never had a search of its own and BORROWED this number
+        # from the replies somebody opened (see is_floor).  What that is
+        # worth to the parent is decided by the negamax, same as ``cycles``.
+        self.floor = floor
         # Lo que necesita el paseo de repeticion: a donde lleva esta arista y
         # por donde sigue el hijo prestandose el valor.  ``spine`` solo se
         # rellena cuando el valor es PRESTADO: un status probado o una eval
@@ -1280,7 +1286,8 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
         # debe verlo con el peso de todo lo que lo corrobora.
         return _ChildValue(move_uci, backed_eval,
                            max(backed_nodes or 0, nodes_invested or 0),
-                           backed_plies or 0, child_key, backed_move)
+                           backed_plies or 0, child_key, backed_move,
+                           floor=is_floor(status, nodes_invested, backed_eval))
     if eval_cp is not None:
         return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0,
                            child_key)
@@ -1289,6 +1296,94 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
 
 def _better_for_mover(value, reference, stm_white):
     return value > reference if stm_white else value < reference
+
+
+# ---------------- the floor: a borrowed number is not a value ----------------
+#
+# THE CASE (Eclipsia, 5-Oct).  After 1. e3 d6 2. Nc3 the position had 648M
+# nodes of its own, two current lines, and said -743 with ...e5.  Its header
+# read -363 through ...Bh3: a move outside both lines, which nobody had
+# searched, and whose position knew ONE of White's thirty replies, valued from
+# an 8M search two plies further down.  "The best move after Nc3 was b5, which
+# is completely wrong and dangerous to include as the best line for either
+# color."  Searched at 128M, ...Bh3 came back at +1491.
+#
+# WHAT WENT WRONG IS A DIRECTION, NOT A WEIGHT.  A position that was never
+# searched and knows only some of its replies does not have a value.  Its
+# number is the best of the replies somebody happened to open: what its mover
+# gets AT LEAST, a floor, and every reply nobody opened may be better for that
+# mover.  One ply up the same number is read from the other side of the
+# board, and there it is a CEILING on what the move can bring.
+#
+# AND THE PARENT'S OWN SEARCH HAD ALREADY SPOKEN.  Two or more current lines
+# are the engine's word that no move outside them is better for the mover
+# than the last of them (see _showcase_bound).  That certificate is what lets
+# a table with unopened moves be read as complete; here a move it covers came
+# back claiming to beat it, on the strength of one opened reply.
+#
+# THE RULE.  The certificate holds against a floor.  A move outside the
+# position's current lines that nobody has searched is not taken at a number
+# better for the mover than the last of those lines.  It is read as what the
+# certificate already calls it, a move nobody has valued, and the question is
+# bought like every other open one (see _queue_quality_convergence).
+#
+# WHAT THIS DOES NOT TOUCH.  A child an engine searched backs up against any
+# parent, as ordered on 8-Aug and 15-Aug: 128M moves 10B.  A move that heads
+# one of the current lines refines its line however it is supported, which is
+# the reported case of 28-Jul (369 in the header under a row at 416).  And a
+# position with no certificate, a single line or none, has nothing to hold
+# against anybody: a walked line shows what it leads to, as before.
+
+
+def is_floor(status, nodes_invested, backed_eval):
+    """This position's number is a floor for its mover, not a value.
+
+    Never searched, not proven, and standing on a number borrowed from the
+    replies somebody opened.  A seeded claim is not this: it is what an
+    engine said of a line through here, it carries no weight, and the
+    unsearched-claim veto already deals with it (see _backed_for).
+    """
+    return (backed_eval is not None and not (nodes_invested or 0)
+            and _status_eval(status) is None)
+
+
+def _showcase_lines(last_analysis):
+    """The moves that head the current lines of a showcase, or none.
+
+    Empty exactly when _showcase_bound is ``None``: without a bound there is
+    no certificate, and without a certificate nobody is outside of it.
+    """
+    if _showcase_bound(last_analysis) is None:
+        return frozenset()
+    moves = set()
+    for line in last_analysis:
+        if not isinstance(line, dict) or line.get('prior_pass'):
+            continue
+        pv = line.get('pv')
+        move = line.get('move') or (pv[0] if isinstance(pv, list) and pv
+                                    else None)
+        if move:
+            moves.add(move)
+    return frozenset(moves)
+
+
+def _beats_certificate(floor, value, move, bound, lines, stm_white):
+    """A floor, outside the lines, better for the mover than their last."""
+    return (floor and bound is not None and move not in lines
+            and _better_for_mover(value, bound, stm_white))
+
+
+def refuses_floor(row, child, move_uci):
+    """``row`` does not take ``child``'s number through ``move_uci``.
+
+    The explorer asks this of every row it paints, with the two positions in
+    hand, and it is the question _backed_for answers for the backup: one
+    predicate, or the table and the header tell two stories again.
+    """
+    return _beats_certificate(
+        is_floor(child.status, child.nodes_invested, child.backed_eval),
+        child.backed_eval, move_uci, _showcase_bound(row.last_analysis),
+        _showcase_lines(row.last_analysis), row.fen.split()[1] == 'w')
 
 
 # ---------------- repeticion: el hijo que vuelve a su propio padre ----------
@@ -1611,7 +1706,7 @@ def _value_on_line(key, played, cache, budget):
     picks = []
     value, move, plies, quality = _backed_for(
         row, kids, bound=_showcase_bound(row.last_analysis),
-        cycle_picks=picks)
+        cycle_picks=picks, lines=_showcase_lines(row.last_analysis))
     if picks and move is not None and move == picks[0][0]:
         return 0, 0, 0, move, True
     own_return = next((c.move for c in kids if c.key in played), None)
@@ -1692,7 +1787,7 @@ def _showcase_bound(last_analysis):
 
 
 def _backed_for(row, children, discrepancies=None, bound=None,
-                cycle_picks=None):
+                cycle_picks=None, lines=frozenset()):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
@@ -1713,6 +1808,9 @@ def _backed_for(row, children, discrepancies=None, bound=None,
     ``bound`` es la cota del escaparate multipv del PROPIO nodo
     (§ ``_showcase_bound``); el llamante la trae porque esta funcion no
     debe tocar la base de datos.
+
+    ``lines`` are the moves that head that showcase (see _showcase_lines):
+    a floor outside them does not beat the bound.
     """
     exact = _status_eval(row.status)
     if exact is not None:
@@ -1732,6 +1830,30 @@ def _backed_for(row, children, discrepancies=None, bound=None,
             # Un empate a tablas contra unas tablas PROBADAS lo gana la prueba,
             # que es exactamente el orden correcto.
             child.value, child.quality = 0, 0
+    own = row.eval_cp
+    own_quality = row.nodes_invested or 0
+    # THE CERTIFICATE HOLDS AGAINST A FLOOR (see the block above is_floor).
+    # The move is read as one nobody has valued: it stops being informed for
+    # everything below, exactly like the unopened moves the bound vouches for.
+    floors = {id(c) for c in informed
+              if not c.cycles and _beats_certificate(
+                  c.floor, c.value, c.move, bound, lines, stm_white)}
+    if floors:
+        if discrepancies is not None:
+            # What settles a floor is a search of the move itself, of any
+            # size: a searched child backs up against any parent.  So the
+            # purchase is the rung a visitor's click buys and no deeper,
+            # not the parent's own depth as for a weakly supported value.
+            rung = min(own_quality, REQUEST_BUDGET_LADDER[0])
+            discrepancies.extend((c.move, row.key, rung)
+                                 for c in informed if id(c) in floors)
+        children = [_ChildValue(c.move, None, 0, 0, c.key)
+                    if id(c) in floors else c for c in children]
+        informed = [c for c in children if c.value is not None]
+        if not informed:
+            if own is None:
+                return None, None, 0, 0
+            return own, None, 0, own_quality
     # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago; recortada 15-ago).
     # La cota del escaparate certifica que NINGUN hijo sin mirar es mejor
     # para el que mueve que la ultima linea del multipv, asi que con cota
@@ -1764,8 +1886,6 @@ def _backed_for(row, children, discrepancies=None, bound=None,
         key=lambda c: (c.value, c.quality, -c.plies) if stm_white
         else (c.value, -c.quality, c.plies))
     complete = bounded or not coverage_is_partial(row, children)
-    own = row.eval_cp
-    own_quality = row.nodes_invested or 0
     if best.cycles:
         # El mejor conocimiento de este nodo es repetir.  Es una pregunta
         # abierta ANTES de mirar si decide algo, y por eso se apunta aqui.
@@ -2155,9 +2275,11 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
         # que a proposito no arrastra el JSON del escaparate por cada nodo.
+        # A floor is judged against the bound (see is_floor), so its row
+        # needs the showcase as much as a row with a gap does.
         gaps = [row.key for row in rows
                 if not row.expanded
-                or any(c.value is None
+                or any(c.value is None or c.floor
                        for c in children.get(row.key, ()))]
         showcases = (dict(Position.objects.filter(key__in=gaps)
                           .values_list('key', 'last_analysis'))
@@ -2175,7 +2297,8 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
                 bound=_showcase_bound(showcases.get(row.key)),
-                cycle_picks=cycle_picks)
+                cycle_picks=cycle_picks,
+                lines=_showcase_lines(showcases.get(row.key)))
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):

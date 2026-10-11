@@ -108,6 +108,37 @@ Every position value on the site is in exactly one of four states:
    Open nodes whose pn/dn sit at saturation are *not* frontier (there is
    no effort left to estimate in a saturated number) but they never leave
    the books silently: the health panel counts them apart.
+7. **A position nobody has searched holds a floor, and the multipv
+   certificate holds against a floor.** A position with
+   `nodes_invested = 0` whose value is borrowed from below (`backed_eval`
+   set) knows only the replies somebody opened. Its number is the best of
+   those replies: what its mover can get *at least*, a floor, and the
+   replies nobody opened may be better for that mover. One ply up the same
+   number is read from the other side of the board, where it is a ceiling
+   on what that move can bring. Meanwhile a parent whose last analysis
+   published two or more current lines holds the engine's word that no
+   move outside those lines is better for the mover than the last of them,
+   the same bound that lets a table with unopened moves be read as
+   complete. So a floor on a move **outside the current lines** is never
+   taken at a value that **beats that bound**: the move is read as one
+   nobody has valued, which is what the certificate already calls it, the
+   parent stands on its other moves, and the analysis that would turn the
+   floor into a value is queued.
+
+   What this leaves alone, on purpose. A child an engine searched backs up
+   against any parent, whatever the two budgets (2026-08-08 and
+   2026-08-15: 128M moves 10B). A move that heads one of the current lines
+   refines its line however it is supported, which is the reported case of
+   2026-07-28 (a header at 369 under a row at 416). A parent with a single
+   line or none has no certificate to hold against anybody, so a walked
+   line still shows what it leads to.
+
+   The case that set the rule (Eclipsia, 2026-10-05): after 1. e3 d6
+   2. Nc3 the position's own 648M search, two lines, said −743 with ...e5,
+   and the header read −363 through ...Bh3, a move outside both lines that
+   nobody had searched, whose only opened reply was valued from an 8M
+   search two plies further down. One reply out of thirty said "White has
+   at least +363"; a 128M search of ...Bh3 itself said +1491.
 
 ## Ordering (the rule that was wrong until 2026-08-04)
 
@@ -146,6 +177,13 @@ partition anything.
   6, and it is what keeps the header and the table quoting one number per
   edge (reported 2026-08-12: a header at 0 above a table whose best move
   said +9, with no way to tell where either number came from).
+- A move whose number is a floor the position does not take (invariant 7)
+  keeps its place in the table, because the table orders by value and
+  nothing else, and shows that number muted and italic with the reason in
+  the tooltip. It is never the recommended move: the board arrow and the
+  API `best_move` go to the first move the position does stand on, so the
+  recommendation and the headline value always describe the same move. The
+  API marks the row with `floor: true`.
 
 ## Open questions (seeking the community's preference)
 
