@@ -210,3 +210,76 @@ class SelectorCycleResilienceTests(TestCase):
 
         self.assertIn('priorities', report['failed_steps'])
         self.assertIn('pool_topped_up', report)
+
+
+class _Wire:
+    """Just enough of a database wrapper for the reconnect check."""
+
+    def __init__(self, errors, usable, in_block=False, opened=True):
+        self.alias = 'atomicdb'
+        self.connection = object() if opened else None
+        self.errors_occurred = errors
+        self.in_atomic_block = in_block
+        self._usable = usable
+        self.asked = 0
+        self.closed = 0
+
+    def is_usable(self):
+        self.asked += 1
+        return self._usable
+
+    def close(self):
+        self.closed += 1
+
+
+class SelectorReconnectTests(TestCase):
+    """A database restart must not leave the selector spinning on a corpse.
+
+    Live on 10-Oct-2026: an unattended upgrade restarted PostgreSQL for four
+    seconds.  The selector kept its dead connection, every step of every pass
+    failed with "the connection is closed", each inside its own net, and the
+    service stayed "active" doing nothing for twenty-two hours.
+    """
+
+    def setUp(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+
+    def _pass_over(self, *wires):
+        from .management.commands import refresh_selector
+        with patch.object(refresh_selector, 'connections') as handler:
+            handler.all.return_value = list(wires)
+            out = StringIO()
+            call_command('refresh_selector', stdout=out)
+        return json.loads(out.getvalue())
+
+    def test_a_connection_the_database_dropped_is_let_go(self):
+        dead = _Wire(errors=True, usable=False)
+
+        report = self._pass_over(dead)
+
+        self.assertEqual(dead.closed, 1)
+        # And the pass that follows runs: nothing failed on its account.
+        self.assertNotIn('failed_steps', report)
+
+    def test_a_healthy_connection_is_not_even_tested(self):
+        healthy = _Wire(errors=False, usable=True)
+
+        self._pass_over(healthy)
+
+        self.assertEqual((healthy.asked, healthy.closed), (0, 0))
+
+    def test_an_error_on_a_live_connection_does_not_close_it(self):
+        scratched = _Wire(errors=True, usable=True)
+
+        self._pass_over(scratched)
+
+        self.assertEqual((scratched.asked, scratched.closed), (1, 0))
+
+    def test_a_connection_inside_a_transaction_is_left_alone(self):
+        busy = _Wire(errors=True, usable=False, in_block=True)
+        never_opened = _Wire(errors=True, usable=False, opened=False)
+
+        self._pass_over(busy, never_opened)
+
+        self.assertEqual((busy.closed, never_opened.closed), (0, 0))
