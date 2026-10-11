@@ -215,6 +215,14 @@ CHILD_KEY_CACHE_SECONDS = 3600
 PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
+# What a link is told when its route is over the replay limit.  A route of
+# perfectly legal moves that was only too long used to be answered "invalid
+# UCI token", which sent the reader looking for a typo that was not there
+# ("invalid UCI token somewhere (cant tell where) in completely valid URL",
+# Eclipsia, 6-Oct: 76 plies).
+PLAY_ROUTE_TOO_LONG = (
+    f'move path is too long: a link carries at most {PLAY_ROUTE_MAX_PLIES} '
+    'plies. Open the position without ?play= instead')
 OPENING_ANCHOR_PARAM = 'opening'
 # WHAT A JUMP REPORTS WHEN IT DOES NOT ARRIVE, and why the two jumps of this
 # page report it the same way.  Both walks descend a chain the database
@@ -2391,11 +2399,14 @@ def _validated_play_route(raw, target_key):
     if raw is None:
         return None
     if len(raw) > PLAY_ROUTE_MAX_CHARS:
-        raise PlayRouteError('move path exceeds the supported length')
+        raise PlayRouteError(PLAY_ROUTE_TOO_LONG)
     ucis = [] if raw == '' else raw.split(',')
-    if len(ucis) > PLAY_ROUTE_MAX_PLIES or any(
-            not PLAY_UCI_RE.fullmatch(uci) for uci in ucis):
-        raise PlayRouteError('move path contains an invalid UCI token')
+    if len(ucis) > PLAY_ROUTE_MAX_PLIES:
+        raise PlayRouteError(PLAY_ROUTE_TOO_LONG)
+    for ply, uci in enumerate(ucis, start=1):
+        if not PLAY_UCI_RE.fullmatch(uci):
+            raise PlayRouteError(
+                f'move path contains an invalid UCI token at ply {ply}')
 
     import pyffish as pf
 
