@@ -126,7 +126,9 @@ in `Documentation/` show the commands:
   (`atomicdb-ingest.service`). `--once` drains what is ready and exits.
 - `manage.py refresh_selector --loop` recomputes the exploration priorities
   (`atomicdb-selector.service`). Setting `ATOMICDB_INLINE_SELECTOR=1` makes
-  the web process do it inline.
+  the web process do it inline. Production bounds its reserve of automatic
+  tasks with a drop-in kept in `docs/server/atomicdb-selector.service.d/`;
+  `docs/operations.md` says why.
 - `manage.py warm_public_snapshot` and `manage.py recascade_backed` run on
   timers.
 

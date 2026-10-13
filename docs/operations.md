@@ -233,6 +233,31 @@ that joins the production profile-default branch with the v41 DATAGEN branch.
   de la **misma** función (`atomicdb/live_request.py`, `service_order`), y un
   test del CI lo fija: si divergen, no lo descubre un usuario en Discord.
 
+## The selector's reserve of automatic tasks (`--pool-target 64`, since 2026-10-11)
+
+Production runs the selector with `--pool-target 64`, set by the systemd
+drop-in `/etc/systemd/system/atomicdb-selector.service.d/70-reserva-acotada.conf`;
+a byte-for-byte copy is kept in `docs/server/atomicdb-selector.service.d/`.
+The reserve is the stock of automatic 8M-node tasks that `refresh_selector`
+tops up at the end of every pass so that a worker never finds the queue empty
+(`ingest.top_up_analysis_pool`; the default, `ANALYSIS_POOL_TARGET`, is 512).
+That number bounds the stock and not the flow. With no visitor requests
+waiting, a fast fleet finishes 512 such tasks in seconds, the next pass mints
+512 more, and results arrive faster than the ingest processes write them,
+which is between one and two a second. On 8 and 11 October 2026 that put 50 to
+80 minutes of delay on the write queue and `api/lease` stopped answering the
+workers in time. At 64 per pass, with a pass about every two minutes, the
+reserve feeds roughly one task every two seconds, which the ingest keeps up
+with. The price is the one that raised the default to 512 in August: when
+nobody is asking for anything, a large fleet runs out of automatic work
+between passes. It was applied as an emergency on 11 October and the owner
+ratified it afterwards; the comment at the head of the file was written before
+that. The drop-in restates the whole command line of `60-sin-prioridades.conf`,
+because a drop-in can only replace `ExecStart` as a whole, so the two files
+change together. To remove it: delete the file, `systemctl daemon-reload`,
+`systemctl restart atomicdb-selector` (the restart waits for the pass in
+progress to finish).
+
 ## Caché compartida (Redis) de la web
 
 La portada de AtomicDB y el explorador cachean cosas caras y públicas: la
