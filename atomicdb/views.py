@@ -3733,6 +3733,14 @@ def _claim_note(line_no):
             'time); no direct search yet')
 
 
+_FLOOR_NOTE = ('nothing has searched this move and only some of the replies '
+               'to it are known, so this number is what the side replying '
+               'gets at least, not what the move is worth. The search of '
+               'this position rated every move outside its lines no better '
+               'than the last of them, so it does not use this number until '
+               'the move itself is searched')
+
+
 def _move_css(status, score, win_status):
     """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
     if status == 'DRAW':
@@ -3975,6 +3983,14 @@ def _child_moves(pos):
             # repeticion, y para eso esta su propia marca.
             score, rank, tier = 0, 0.0, 2
             backed_plies, backed_light, walked = 0, False, False
+        # THE ROW SAYS WHAT THE POSITION DOES WITH IT (see ingest.is_floor).
+        # A move nobody searched, valued from the replies somebody opened,
+        # holds a floor; when it lies outside this position's current lines
+        # and claims to beat the last of them, the backup does not take it,
+        # and neither does the arrow.  The number stays where its value puts
+        # it, because the table orders by value and by nothing else, and the
+        # ink and the tooltip say the rest.
+        floor = not repetition and ingest.refuses_floor(pos, c, e.move_uci)
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -4024,8 +4040,13 @@ def _child_moves(pos):
                       # suya", para el tooltip de la celda del eval.  Existe
                       # exactamente donde antes iba el chip mudo de la fila:
                       # caminado y sin respaldo que lo explique por su cuenta.
-                      'claim': (_claim_note(line_numbers.get(e.move_uci))
+                      'claim': (_FLOOR_NOTE if floor else
+                                _claim_note(line_numbers.get(e.move_uci))
                                 if walked and not backed_plies else None),
+                      # A floor this position does not take: never the
+                      # recommended move (§ _arrow_move), and flagged in the
+                      # API so a client that sorts the rows itself can tell.
+                      'floor': floor,
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
@@ -4525,7 +4546,8 @@ def api_query(request):
     children = _child_moves(pos)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
-              'backed_plies': m['backed_plies'], 'visits': m['visits']}
+              'backed_plies': m['backed_plies'], 'visits': m['visits'],
+              'floor': m['floor']}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
@@ -5921,10 +5943,14 @@ def _arrow_move(moves, pos):
     fila bloqueada por repeticion no puede ser la recomendacion, y si el
     ``best_move`` almacenado es justo la jugada bloqueada, la flecha calla en
     vez de contradecir al bloqueo.
+
+    A floor the position does not take (§ ingest.refuses_floor) is passed
+    over the same way: the arrow goes to the first row the backup can stand
+    on, so the move recommended and the number quoted are one pair.
     """
     blocked = {m['uci'] for m in moves if m.get('blocked')}
     for move in moves:
-        if move.get('blocked'):
+        if move.get('blocked') or move.get('floor'):
             continue
         if move.get('score') is not None or move.get('mate') is not None:
             return move['uci']
