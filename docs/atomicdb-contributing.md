@@ -67,7 +67,9 @@ The site configuration that does it is kept in
 Worker protocol: `api/lease`, `api/heartbeat` and `api/submit` for analysis
 tasks; `api/solve/acquire`, `api/solve/heartbeat` and `api/solve/submit` for
 proof tasks. The worker authenticates with an OpenBench account whose profile
-is enabled.
+is enabled. It sends a heartbeat every 60 seconds while it searches; an
+analysis lease that goes `LEASE_MINUTES` (in `atomicdb/views.py`) without one
+is given to the next worker that asks.
 
 ## Running the tests
 
