@@ -1219,6 +1219,62 @@ class AbsorptionStillWorksTests(TestCase):
         waiting.refresh_from_db()
         self.assertEqual(waiting.state, AnalysisTask.TState.PENDING)
 
+    def test_the_position_can_still_be_requested_after_an_absorption(self):
+        """The absorbed row sits on the slot the next request needs.
+
+        Landing the first search moves the visit count onto the generation of
+        the row it has just absorbed.  Every later request then met that row,
+        was answered "already queued" and queued nothing: 97 open positions in
+        production on 11-Oct, the shape below (a 128M search landing over a
+        128M task of the selector waiting on the next generation).
+        """
+        served = AnalysisTask.objects.create(
+            position=self.target, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w')
+        shadowed = AnalysisTask.objects.create(
+            position=self.target, generation=1, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.AUTO)
+        job, _created = ingest_queue.enqueue(served, {
+            'lines': _lines_for(self.target), 'nodes': 128_000_000,
+            'elapsed': 1.0, 'machine': 'm1', 'username': 'w'})
+        AnalysisTask.objects.filter(pk=served.pk).update(
+            state=AnalysisTask.TState.COMPLETED, completed=timezone.now(),
+            machine='m1', nodes_searched=128_000_000)
+        ingest_queue.process_job(job)
+        self.target.refresh_from_db()
+        shadowed.refresh_from_db()
+        self.assertTrue(ingest.is_absorbed(shadowed))
+        self.assertEqual(shadowed.generation, self.target.visits)
+
+        outcome = ingest.request_analysis(self.target, requested_by='w')
+
+        self.assertEqual(outcome, 'queued')
+        again = AnalysisTask.objects.get(pk=shadowed.pk)
+        self.assertEqual(again.state, AnalysisTask.TState.PENDING)
+        self.assertEqual(again.budget_nodes, ingest.REQUEST_BUDGET_LADDER[1])
+        self.assertEqual(again.source, AnalysisTask.Source.USER)
+        self.assertEqual(again.requested_by, 'w')
+        self.assertIsNone(again.completed)
+
+    def test_a_delivered_search_still_to_be_applied_is_not_a_dead_row(self):
+        # COMPLETED with its nodes and its machine, the visit count not moved
+        # yet: that result is on its way in.  Reviving it would search the
+        # same thing twice.
+        landed = AnalysisTask.objects.create(
+            position=self.target, generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='w',
+            state=AnalysisTask.TState.COMPLETED, completed=timezone.now(),
+            machine='m1', nodes_searched=128_000_000)
+
+        outcome = ingest.request_analysis(self.target, requested_by='w')
+
+        self.assertEqual(outcome, 'already-queued')
+        landed.refresh_from_db()
+        self.assertEqual(landed.state, AnalysisTask.TState.COMPLETED)
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self.target,
+            state=AnalysisTask.TState.PENDING).exists())
+
 
 class EndToEndClickTests(TestCase):
     """El circuito publico entero, con dos visitantes y dos direcciones IP."""

@@ -2643,6 +2643,17 @@ def absorb_tasks(queryset):
                     completed=timezone.now(), nodes_searched=0))
 
 
+def is_absorbed(task):
+    """COMPLETED without a search: absorbed, not delivered (§ ``absorb_tasks``).
+
+    The machine is what tells the two apart.  A row a worker delivered always
+    carries the machine that ran it; an absorbed row never had a lease to get
+    one from.
+    """
+    return (task.state == AnalysisTask.TState.COMPLETED
+            and not task.nodes_searched and not task.machine)
+
+
 def _emit_closure_events(pos, **extra):
     """El UNICO emisor de ``NODE_CLOSED``.
 
@@ -4387,6 +4398,9 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
     Where the row lands in its author's queue is the caller's business, as it
     is for a row the caller creates: only the single request applies the
     newest-first preference (§ ``_apply_lifo_preference``).
+
+    An ABSORBED row (§ ``is_absorbed``) comes back through here as well.  It
+    is the same dead row on the same slot, reached by a different road.
     """
     task.state = AnalysisTask.TState.PENDING
     task.completed = None
@@ -4458,6 +4472,27 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # asi que pedir otra vez no puede crear una nueva: o se revive esta, o
         # la posicion se queda sin poder pedirse nunca mas — que seria convertir
         # un boton de deshacer en una condena.
+        _revive_withdrawn(task, floor,
+                          multipv_for(pos.visits, floor, clamp=clamp),
+                          requested_by, route)
+        _apply_lifo_preference(task, requested_by)
+        return 'queued'
+    if is_absorbed(task):
+        # AN ABSORBED ROW HOLDS THE SLOT TOO, and it did worse than a withdrawn
+        # one: this function fell through to 'already-queued', so the page
+        # said "queued" and nothing was.  It happens to an OPEN position when
+        # it has a second task waiting on the next generation and the search
+        # that lands first covers that task's budget
+        # (§ ``ingest_queue._absorb_shadowed``).  The landing moves the visit
+        # count onto the very generation the absorbed row sits on, and from
+        # then on every request for the position met that row (97 open
+        # positions on 11-Oct, the oldest from 12-Aug).
+        #
+        # It comes back through the same row for the same reason a withdrawn
+        # one does, and the next generation is not a way out: the search that
+        # completed there would be sitting on the slot the visit count points
+        # at after it lands, and the position would be stuck again one search
+        # later.
         _revive_withdrawn(task, floor,
                           multipv_for(pos.visits, floor, clamp=clamp),
                           requested_by, route)
