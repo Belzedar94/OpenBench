@@ -5869,6 +5869,20 @@ def is_unexplored(child):
     Un hijo con RESPALDO si cuenta como explorado: su numero viene de
     busqueda real en su subarbol, no de una linea de paso.
 
+    A BACKED NUMBER WITH NO NODES BEHIND IT IS NOT THAT.  A line a visitor
+    walked carries a number up without a single engine node, and the page
+    says so itself with the ``walked`` chip; a seeded reply somebody stepped
+    into gets its own seeded number written back as its backing, with no
+    nodes either.  This predicate used to ask for ``backed_eval is None`` as
+    well, so any backed number exempted the move, measured or not: on
+    ``82ec7537`` the button queued thirteen moves and skipped six that nobody
+    had ever searched, five walked (Nd7 at -29 among them, -1417 once it was
+    searched) and one seeded, which is the request of 8-Aug left half done
+    ("the analyse all unanalysed button doesnt request the old walked
+    nodes", Eclipsia, 11-Oct).  The discriminant is the one stated at the
+    top, and only that: no search of its own and no search weight in its
+    backing.
+
     Vive aqui, con nombre, porque la pagina tiene que ETIQUETAR con el mismo
     criterio con el que el boton CUENTA: mientras fueron dos predicados, el
     boton ofrecia "analizar 20 respuestas sin explorar" encima de una tabla
@@ -5876,8 +5890,7 @@ def is_unexplored(child):
     """
     return (child.status == 'UNKNOWN'
             and not (child.nodes_invested or 0)
-            and not (child.backed_nodes or 0)
-            and child.backed_eval is None)
+            and not (child.backed_nodes or 0))
 
 
 def unexplored_children(pos):
