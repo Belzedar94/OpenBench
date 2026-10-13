@@ -83,6 +83,32 @@ class RequestApiTests(TestCase):
         self.assertEqual(task.requested_by, 'wolfram')
         self.assertEqual(task.source, AnalysisTask.Source.USER)
 
+    def test_the_reply_says_whether_the_request_is_waiting_or_running(self):
+        first = self._post(**self._credentials('wolfram')).json()
+
+        self.assertEqual(first['status'], 'queued')
+        self.assertEqual(first['task_state'], 'waiting')
+
+        # A worker takes it.  Somebody else asking now gets the same status
+        # word as before, and the state that tells the two cases apart.
+        AnalysisTask.objects.filter(position=self.target).update(
+            state=AnalysisTask.TState.LEASED, machine='m1')
+        second = self._post(ip='10.0.0.2',
+                            **self._credentials('eclipsia')).json()
+
+        self.assertEqual(second['status'], 'already-queued')
+        self.assertEqual(second['task'], first['task'])
+        self.assertEqual(second['task_state'], 'searching')
+
+    def test_without_a_live_request_there_is_no_state(self):
+        Position.objects.filter(key=self.target.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        payload = self._post(**self._credentials('wolfram')).json()
+
+        self.assertIsNone(payload['task'])
+        self.assertIsNone(payload['task_state'])
+
     def test_it_buys_the_same_ladder_rung_the_button_buys(self):
         self._post(**self._credentials('wolfram'))
 
