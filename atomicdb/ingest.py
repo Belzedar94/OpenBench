@@ -4044,6 +4044,24 @@ def _completed_max_budget(pos):
         .first())
 
 
+def searched_budget(pos):
+    """The largest budget a search of ``pos`` has actually RUN, or ``None``.
+
+    Not ``_completed_max_budget``.  That one answers "which rung has been
+    bought", and a rung can be bought without anybody searching: a waiting
+    request whose work something else did (the position closed, or another
+    row covered it) is absorbed as COMPLETED with no nodes
+    (§ ``absorb_tasks``).  This one answers "has an engine looked this deep
+    here", which is the question of a caller who wants a search only if it is
+    missing (§ ``_request_rung``, ``only_if_missing``).
+    """
+    return (AnalysisTask.objects.filter(
+        position=pos, state=AnalysisTask.TState.COMPLETED,
+        nodes_searched__gt=0)
+        .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
+        .first())
+
+
 def front_of_own_queue(task):
     """Sitio de cola que deja a ``task`` la PRIMERA de su propio peticionario.
 
@@ -4417,7 +4435,8 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
                              'backers', 'queue_seq', 'route', 'multipv'])
 
 
-def _request_rung(pos, requested_by='', route='', budget_floor=None):
+def _request_rung(pos, requested_by='', route='', budget_floor=None,
+                  only_if_missing=False):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
@@ -4431,15 +4450,41 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
     (§ ``depth``), ya validado por la vista.  Solo puede SUBIR el suelo, nunca
     bajarlo: una eleccion no puede abaratar una peticion por debajo de lo que
     la escalera compraria sola, asi que un peldano ya gastado (o cualquier cosa
-    por debajo del que toca) no cambia absolutamente nada."""
+    por debajo del que toca) no cambia absolutamente nada.
+
+    ``only_if_missing`` IS THE OTHER QUESTION, and it is opt-in.  The ladder
+    answers "search this deeper than last time": asked twice, it climbs.  A
+    script that wants a position to HAVE a 128M search cannot ask that without
+    risking the climb, because the first search can land between its look and
+    its request, and then the same call buys 512M ("All I want is for my
+    script not to accidentally trigger a search deeper than 128 MNodes",
+    Torom, 11-Oct).  With the flag the budget is a target, the chosen rung or
+    the first one:
+
+    * a search that actually ran already covers it: nothing is bought and the
+      answer is ``already-analyzed``, with the budget that covers it;
+    * otherwise the purchase is made as always but never above the target,
+      whatever the ladder, the visit count or a bought-but-unsearched rung
+      would have asked for.
+
+    Both are decided after the row lock below, so two callers cannot slip
+    past each other.  A live request somebody else made at a larger budget is
+    joined as it stands: it is theirs, and this call did not cause it."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
     pos = Position.objects.select_for_update().get(pk=pos.pk)
     if pos.status != 'UNKNOWN':
         return 'already-solved'
+    target = None
+    if only_if_missing:
+        target = budget_floor or REQUEST_BUDGET_LADDER[0]
+        searched = searched_budget(pos)
+        if searched is not None and searched >= target:
+            return RequestOutcome('already-analyzed',
+                                  completed_budget=searched)
     completed_max = _completed_max_budget(pos)
-    if (completed_max is not None
+    if (target is None and completed_max is not None
             and completed_max >= REQUEST_BUDGET_LADDER[-1]):
         return _LADDER_EXHAUSTED
     floor = _next_rung(completed_max)
@@ -4458,6 +4503,8 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # mate corto: ese abarata la PRIMERA mirada de un nodo que reclama M2,
         # y quien elige 10B a mano no esta pidiendo una verificacion barata.
         floor = max(floor, budget_floor)
+    if target is not None:
+        floor = min(floor, target)
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
@@ -4898,7 +4945,8 @@ def _breadth_swap_eligible(pos):
     return completed is not None and completed >= REQUEST_BUDGET_LADDER[1]
 
 
-def request_analysis(pos, requested_by='', route='', budget_floor=None):
+def request_analysis(pos, requested_by='', route='', budget_floor=None,
+                     only_if_missing=False):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -4920,11 +4968,16 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
     el motor me oriente el mejor camino", que es la queja que acoto el swap en
     primer lugar (§ ``_breadth_swap_eligible``).
 
+    ``only_if_missing`` (§ ``_request_rung``) asks about THIS node and
+    nothing else, so it turns the swap off as well and never falls through to
+    an expansion.
+
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
-    | 'saturated'."""
+    | 'saturated', y 'already-analyzed' solo con ``only_if_missing``."""
     with atomic():
         swapped = False
-        if budget_floor is None and _breadth_swap_eligible(pos):
+        if budget_floor is None and not only_if_missing \
+                and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
                                         route=route)
@@ -4936,7 +4989,10 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
                                                   {}).items()
                        if isinstance(value, (int, str))}})
                 return outcome
-        outcome = _request_rung(pos, requested_by, route, budget_floor)
+        outcome = _request_rung(pos, requested_by, route, budget_floor,
+                                only_if_missing)
+        if isinstance(outcome, RequestOutcome):
+            return outcome      # it carries its own detail
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
         if swapped:
