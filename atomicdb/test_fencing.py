@@ -339,10 +339,12 @@ class DeadLeaseOnClosedPositionTests(TestCase):
 class LeaseWindowTests(TestCase):
     """How long a silent lease is kept: ``views.LEASE_MINUTES``, on purpose.
 
-    A worker beats every 60 seconds, so four minutes is three missed beats
-    and a margin.  The window was ten minutes until 13-Oct-2026.  In the week
-    before, 106 of 206,375 analyses needed a second lease, and each of them
-    waited those ten minutes before another machine could take it.
+    A worker beats every 60 seconds and gives each beat 30 seconds to be
+    answered, so inside four minutes a lease survives two beats lost outright
+    or one that times out; the try after that falls on the boundary.  The
+    window was ten minutes until 13-Oct-2026.  In the week before, 106 of
+    206,375 analyses needed a second lease, and each of them waited those ten
+    minutes before another machine could take it.
 
     The number is a decision about every machine of the fleet.  It is pinned
     here so that it changes because somebody decided it, with this test
@@ -383,9 +385,9 @@ class LeaseWindowTests(TestCase):
         self.assertEqual(self._holder(task), ('LEASED', 'machine-b', 2))
         self.assertNotEqual(task.lease_token, 'token-a')
 
-    def test_three_missed_beats_do_not(self):
-        # Slow is not gone: three beats may be lost to a network drop or to a
-        # server that answers late, and the search behind them is still good.
+    def test_three_and_a_half_silent_minutes_do_not(self):
+        # Slow is not gone.  At this point three beats were lost outright and
+        # the fourth is still to come; the search behind them is still good.
         task = self._silent_for(minutes=3, seconds=30)
 
         self.client.post('/atomicdb/api/lease', self.other_machine)
