@@ -7,7 +7,7 @@ from OpenBench.models import Profile
 
 from datetime import timedelta
 
-from . import ingest, ingest_queue, logic, views
+from . import ingest, ingest_queue, live_request, logic, views
 from .database import connection
 from .models import AnalysisTask, DBEvent, IngestJob, Position
 from .testing import TestCase, TransactionTestCase, worker_account
@@ -334,3 +334,89 @@ class DeadLeaseOnClosedPositionTests(TestCase):
         # El que si sigue abierto se recicla como siempre (y puede salir
         # arrendado en esta misma llamada).
         self.assertIn(alive.state, ('PENDING', 'LEASED'))
+
+
+class LeaseWindowTests(TestCase):
+    """How long a silent lease is kept: ``views.LEASE_MINUTES``, on purpose.
+
+    A worker beats every 60 seconds and gives each beat 30 seconds to be
+    answered, so inside four minutes a lease survives two beats lost outright
+    or one that times out; the try after that falls on the boundary.  The
+    window was ten minutes until 13-Oct-2026.  In the week before, 106 of
+    206,375 analyses needed a second lease, and each of them waited those ten
+    minutes before another machine could take it.
+
+    The number is a decision about every machine of the fleet.  It is pinned
+    here so that it changes because somebody decided it, with this test
+    changed in the same commit, and never as a side effect.
+    """
+
+    def setUp(self):
+        worker_account('worker', 'secret')
+        self.other_machine = {
+            'username': 'worker', 'password': 'secret', 'machine': 'machine-b',
+            'tb': '1', 'worker_build': views.LEASE_TOKEN_BUILD,
+            'lease_session': 'session-b'}
+        self.position = ingest.get_or_create_position(logic.start_fen())
+
+    def _silent_for(self, **silence):
+        """A lease an hour old whose last heartbeat is ``silence`` ago."""
+        now = timezone.now()
+        return AnalysisTask.objects.create(
+            position=self.position, generation=0, budget_nodes=128_000_000,
+            state='LEASED', machine='machine-a', attempts=1,
+            leased_at=now - timedelta(hours=1),
+            lease_heartbeat_at=now - timedelta(**silence),
+            lease_token='token-a', lease_session='session-a')
+
+    def _holder(self, task):
+        task.refresh_from_db()
+        return task.state, task.machine, task.attempts
+
+    def test_the_window_is_four_minutes(self):
+        self.assertEqual(views.LEASE_MINUTES, 4)
+
+    def test_five_silent_minutes_give_the_task_to_somebody_else(self):
+        # Under the window of ten minutes this lease was kept for five more.
+        task = self._silent_for(minutes=5)
+
+        self.client.post('/atomicdb/api/lease', self.other_machine)
+
+        self.assertEqual(self._holder(task), ('LEASED', 'machine-b', 2))
+        self.assertNotEqual(task.lease_token, 'token-a')
+
+    def test_three_and_a_half_silent_minutes_do_not(self):
+        # Slow is not gone.  At this point three beats were lost outright and
+        # the fourth is still to come; the search behind them is still good.
+        task = self._silent_for(minutes=3, seconds=30)
+
+        self.client.post('/atomicdb/api/lease', self.other_machine)
+
+        self.assertEqual(self._holder(task), ('LEASED', 'machine-a', 1))
+        self.assertEqual(task.lease_token, 'token-a')
+
+    def test_the_edge_is_the_constant_and_nothing_else(self):
+        # Whatever the number is, one minute past it recycles and one minute
+        # short of it does not: no second copy of the window decides this.
+        inside = self._silent_for(minutes=views.LEASE_MINUTES - 1)
+        self.client.post('/atomicdb/api/lease', self.other_machine)
+        self.assertEqual(self._holder(inside), ('LEASED', 'machine-a', 1))
+
+        AnalysisTask.objects.filter(pk=inside.pk).update(
+            lease_heartbeat_at=timezone.now() - timedelta(
+                minutes=views.LEASE_MINUTES + 1))
+        self.client.post('/atomicdb/api/lease', self.other_machine)
+        self.assertEqual(self._holder(inside), ('LEASED', 'machine-b', 2))
+
+    def test_a_restarted_worker_is_relieved_before_a_stranger_is(self):
+        # The same machine coming back under a new session takes its own dead
+        # lease after RESTART_RECYCLE_MINUTES (§ views.api_lease).  That
+        # shortcut only means something while it is the shorter of the two.
+        self.assertLess(views.RESTART_RECYCLE_MINUTES, views.LEASE_MINUTES)
+
+    def test_a_request_is_called_quiet_before_it_is_called_lost(self):
+        # The explorer first says "nothing reported for N min" and only past
+        # the lease window "so it goes back in the queue"
+        # (§ live_request._narrate).  The first has to come first.
+        self.assertLess(live_request.PROMISE_FRESH_SECONDS,
+                        views.LEASE_MINUTES * 60)

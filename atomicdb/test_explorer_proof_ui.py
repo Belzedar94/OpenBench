@@ -118,13 +118,59 @@ class UnexploredButtonTests(TestCase):
             position=measured).exists())
 
     def test_a_backed_reply_counts_as_known(self):
+        # Backed by a real search somewhere below it: that is knowledge, and
+        # the button is for the gaps.
         backed = Edge.objects.filter(parent=self.root).first().child
         backed.backed_eval = -400
+        backed.backed_nodes = 128_000_000
         backed.save()
 
         self.assertNotIn(backed.key,
                          [c.key for c in
                           ingest.unexplored_children(self.root)])
+
+    def test_a_walked_number_does_not_exempt_a_reply(self):
+        # Eclipsia, 11-Oct: Nd7 carried a walked -29 with no engine node
+        # behind it, nobody had ever searched it, and the button skipped it.
+        # A number a visitor walked up a line is not a measure either.
+        walked = Edge.objects.filter(parent=self.root).first().child
+        walked.backed_eval = -29
+        walked.backed_plies = 1
+        walked.save()
+
+        self.assertIn(walked.key,
+                      [c.key for c in ingest.unexplored_children(self.root)])
+
+        self.client.post(f'/atomicdb/request-unexplored/{self.root.key}/')
+
+        self.assertTrue(AnalysisTask.objects.filter(position=walked).exists())
+
+    def test_a_seeded_number_backed_by_itself_does_not_exempt_a_reply(self):
+        # Same page, sixth move: Na6 had a seeded -628 and, because somebody
+        # had stepped into it, that same number as its backing.  Zero nodes
+        # of any kind, and the button skipped it as well.
+        seeded = Edge.objects.filter(parent=self.root).first().child
+        seeded.eval_cp = 628
+        seeded.backed_eval = 628
+        seeded.save()
+
+        self.client.post(f'/atomicdb/request-unexplored/{self.root.key}/')
+
+        self.assertTrue(AnalysisTask.objects.filter(position=seeded).exists())
+
+    def test_the_row_and_the_button_agree_on_a_walked_reply(self):
+        # The table labels with the predicate the button counts with: the row
+        # of a walked reply has to read "unexplored", not "unsolved".
+        walked = Edge.objects.filter(parent=self.root).first().child
+        walked.backed_eval = -29
+        walked.backed_plies = 1
+        walked.save()
+
+        row = next(m for m in _child_moves(self.root)
+                   if m['key'] == walked.key)
+
+        self.assertTrue(row['unexplored'])
+        self.assertTrue(row['walked'])
 
     def test_the_click_is_capped(self):
         queued = ingest.enqueue_unexplored_children(self.root, cap=3)

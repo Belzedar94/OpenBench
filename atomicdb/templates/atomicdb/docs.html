@@ -33,7 +33,7 @@ available as own search context in the tooltip and in the API
 <code>point</code> field. One position, one number.</p>
 
 <h2 id="backing">How a backed value is built</h2>
-<p>Backing is a negamax over the graph, and it runs under four rules.</p>
+<p>Backing is a negamax over the graph, and it runs under five rules.</p>
 <ul style="margin:.8rem 0 .8rem 1.4rem">
 <li><strong>The best informed child always backs up.</strong> There is no depth
   gate between a parent and its children: a child analysed at 128M nodes moves
@@ -51,6 +51,18 @@ available as own search context in the tooltip and in the API
   whose only known reply loses knows nothing about itself: the mover still has
   the rest of the legal moves unopened and is not going to choose that loss. A
   gain for the mover still travels on a single child, as always.</li>
+<li><strong>A move nobody has searched cannot beat the lines of the position
+  above it.</strong> A position that was never searched and knows only the
+  replies somebody opened does not have a value yet. Its number is the best of
+  those replies: what the side to move there gets at least, a floor. Seen from
+  the position above, that same number is a ceiling on what the move can bring.
+  And when the position above published two or more lines, its own search
+  already said that no move outside them is better for the mover than the last
+  one. So an unsearched move outside those lines is not taken at a number that
+  beats them: the position stands on its other moves, and an analysis of that
+  move is queued to settle it. A move an engine did search always backs up, a
+  move that heads one of the lines refines its line as before, and a position
+  with fewer than two lines still shows what a walked line leads to.</li>
 <li><strong>Every backed value terminates in a real engine analysis, never in
   a loop.</strong> That terminating analysis is the anchor, and where the chip
   on the value is a link, the link goes to it.</li>
@@ -154,10 +166,23 @@ optional, honoured for the accounts the explorer offers the depth slider to.
 <code>username</code> and <code>password</code> put the request on your
 account, which is what buys the notification when it lands, the affinity with
 your own workers and your place in the fair share. Without them the request is
-anonymous, which works, and is served like a click without a session. A FEN the
+anonymous, which works, and is served like a click without a session. The
+reply names the live request on that position: <code>task</code>, its
+<code>budget_nodes</code>, and <code>task_state</code>, which is
+<code>waiting</code> while it is in the queue and <code>searching</code> once
+an engine has it. A FEN the
 tree does not have is seeded rather than refused. Session cookies are
 deliberately ignored here, so a page open in your browser cannot spend your
 queue behind your back.</p>
+<p>Asked again after the first search has landed, a request buys the next rung
+of the ladder, exactly as a second click does. A script that only wants a
+position to <em>have</em> a search adds <code>only_if_missing=1</code>: the
+budget becomes a target (the rung you picked, or the first one). If a search
+that ran already covers it the reply is <code>already-analyzed</code> with
+<code>completed_budget</code> and nothing is queued; otherwise the request is
+queued as usual but never above the target. The check and the purchase happen
+together, so two scripts asking for the same position at the same moment
+cannot push it to the next rung.</p>
 <p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
 same as the explorer button: what governs both is the per-person cap on queued
 requests above, and the per-account sharing of the service order. The pace
@@ -184,6 +209,12 @@ yet. Inside that block, <code>lines</code> is the current pass,
 one that replaced it, and <code>passes</code> is a compact summary per pass,
 newest first, which is what shows how the evaluation moved as the search went
 deeper. A position the tree does not have returns 404 here.</p>
+<p class="dim" style="font-size:.9rem">Each entry of <code>moves</code> carries
+<code>floor</code>. It is <code>true</code> for a move nobody has searched,
+outside the position's current lines, whose number would beat the last of
+those lines: the position does not use that number, and
+<code>best_move</code> never points at such a move. A client that picks from
+<code>moves</code> itself should skip those rows the same way.</p>
 <p class="dim" style="font-size:.9rem">A request nobody has started yet is
 still yours to take back. <strong>Withdraw</strong> sits on the position and on
 every waiting row of your contributor page, and <strong>Clear my
@@ -209,6 +240,11 @@ the request stays in the queue under them.</p>
   worth no more than 0 whatever its own page claims. In the header, the chain
   that leads here returns to a position it has already been through. On a
   disabled row, the move would re-enter the line you are playing.</li>
+<li>A <strong>muted, italic number that still carries a backed chip</strong>
+  is a floor the position does not take: nothing has searched that move, only
+  some replies to it are known, and its number would beat the lines the search
+  of the position you are looking at published. It keeps its place in the
+  table, the board arrow passes over it, and searching the move settles it.</li>
 <li>A plain number with no chip is the position's own analysis: an engine
   searched this position itself, and that is what it reported.</li>
 </ul>

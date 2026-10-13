@@ -19,10 +19,10 @@ lo que el sitio sabe se pueda usar sin abrir el navegador:
 
 from unittest import mock
 
-from django.test import Client
+from django.test import Client, override_settings
 
 from . import ingest, logic
-from .models import AnalysisTask, ApiRequestLog, Position
+from .models import AnalysisTask, ApiRequestLog, Position, RequestLog
 from .testing import TestCase, worker_account
 
 
@@ -82,6 +82,32 @@ class RequestApiTests(TestCase):
         self.assertFalse(payload['seeded'])
         self.assertEqual(task.requested_by, 'wolfram')
         self.assertEqual(task.source, AnalysisTask.Source.USER)
+
+    def test_the_reply_says_whether_the_request_is_waiting_or_running(self):
+        first = self._post(**self._credentials('wolfram')).json()
+
+        self.assertEqual(first['status'], 'queued')
+        self.assertEqual(first['task_state'], 'waiting')
+
+        # A worker takes it.  Somebody else asking now gets the same status
+        # word as before, and the state that tells the two cases apart.
+        AnalysisTask.objects.filter(position=self.target).update(
+            state=AnalysisTask.TState.LEASED, machine='m1')
+        second = self._post(ip='10.0.0.2',
+                            **self._credentials('eclipsia')).json()
+
+        self.assertEqual(second['status'], 'already-queued')
+        self.assertEqual(second['task'], first['task'])
+        self.assertEqual(second['task_state'], 'searching')
+
+    def test_without_a_live_request_there_is_no_state(self):
+        Position.objects.filter(key=self.target.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        payload = self._post(**self._credentials('wolfram')).json()
+
+        self.assertIsNone(payload['task'])
+        self.assertIsNone(payload['task_state'])
 
     def test_it_buys_the_same_ladder_rung_the_button_buys(self):
         self._post(**self._credentials('wolfram'))
@@ -228,6 +254,287 @@ class RequestApiTests(TestCase):
         self.assertEqual(payload['status'], 'queued')
         self.assertEqual(
             AnalysisTask.objects.get(position=self.target).requested_by, '')
+
+
+class OnlyIfMissingTests(TestCase):
+    """``only_if_missing``: a script asks for a search to EXIST, not to deepen.
+
+    Torom, 11-Oct: "All I want is for my script not to accidentally trigger a
+    search deeper than 128 MNodes".  Two of his scripts asked for the same
+    position; the second call arrived after the first 128M had landed, the
+    ladder saw that rung spent and bought 512M.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        worker_account('torom', 'p')
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.target = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'e2e4'))
+        self.floor, self.deeper = ingest.REQUEST_BUDGET_LADDER[:2]
+
+    def _post(self, ip='10.0.0.1', **fields):
+        return self.client.post('/atomicdb/api/request',
+                                {'fen': self.target.fen, **fields},
+                                REMOTE_ADDR=ip).json()
+
+    def _landed(self, budget, nodes=None):
+        """A request of ``budget`` that is COMPLETED on the target.
+
+        By default as a submit leaves it, with its nodes.  ``nodes=0`` is the
+        other way a row gets there: absorbed, bought and never searched.
+        """
+        AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=budget, source=AnalysisTask.Source.USER,
+            state=AnalysisTask.TState.COMPLETED,
+            nodes_searched=budget if nodes is None else nodes)
+        Position.objects.filter(key=self.target.key).update(
+            visits=self.target.visits + 1)
+        self.target.refresh_from_db()
+
+    def _pending_budgets(self):
+        return [task.budget_nodes for task in AnalysisTask.objects.filter(
+            position=self.target, state=AnalysisTask.TState.PENDING)]
+
+    def test_the_plain_call_climbs_once_the_first_search_has_landed(self):
+        # What the flag opts out of, pinned so that it stays what the button
+        # does: asked again, the ladder buys the next rung.
+        self._landed(self.floor)
+
+        payload = self._post()
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.deeper])
+
+    def test_with_the_flag_the_same_call_buys_nothing(self):
+        self._landed(self.floor)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], self.floor)
+        self.assertIsNone(payload['task'])
+        self.assertEqual(self._pending_budgets(), [])
+
+    def test_a_missing_search_is_queued_at_the_first_rung(self):
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.floor])
+
+    def test_a_deeper_search_covers_the_first_rung(self):
+        self._landed(self.deeper)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], self.deeper)
+        self.assertEqual(self._pending_budgets(), [])
+
+    def test_a_rung_bought_but_never_searched_does_not_count(self):
+        # Absorbed: COMPLETED with no nodes.  The ladder reads it as a spent
+        # rung and would buy the next one.  The flag neither takes it for a
+        # search nor lets it push the purchase above the target.
+        self._landed(self.floor, nodes=0)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(self._pending_budgets(), [self.floor])
+
+    def test_a_live_deeper_request_of_somebody_else_is_joined_as_it_stands(self):
+        ingest.request_analysis(self.target, requested_by='wolfram',
+                                budget_floor=self.deeper)
+
+        payload = self._post(only_if_missing='1', username='torom',
+                             password='p')
+
+        self.assertEqual(payload['status'], 'already-queued')
+        self.assertTrue(payload['backed'])
+        self.assertEqual(self._pending_budgets(), [self.deeper])
+
+    def test_nothing_bought_leaves_no_click_receipt(self):
+        # The per-address receipt is what makes a repeated click a repeat.  A
+        # call that bought nothing must not turn the next real request from
+        # that address into one.
+        self._landed(self.floor)
+
+        self._post(only_if_missing='1')
+
+        self.assertFalse(
+            RequestLog.objects.filter(position=self.target).exists())
+
+    def test_a_decided_position_is_still_reported_as_decided(self):
+        self._landed(self.floor)
+        Position.objects.filter(key=self.target.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-solved')
+
+    def test_the_explorer_button_does_not_read_the_flag(self):
+        # Only the scripted door has it.  A click that carried the field
+        # would still be a click.
+        self._landed(self.floor)
+
+        outcome = ingest.request_analysis(self.target)
+
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual(self._pending_budgets(), [self.deeper])
+
+
+class OnlyIfMissingOnAnAbsorbedSlotTests(TestCase):
+    """``only_if_missing`` meeting an absorbed row that holds the slot.
+
+    Two changes decide inside ``ingest._request_rung`` and were written apart.
+    One brings an absorbed row back as the request being made now, because
+    (position, generation) is unique and nothing can be queued next to it.
+    The other turns the budget into a target and answers ``already-analyzed``
+    when a search that ran covers it.  Together:
+
+    * the flag is asked first.  A search that ran answers the call, and the
+      absorbed row is left as dead as it was;
+    * when the call does buy, it buys through that row, and at the target:
+      never above it, whatever the ladder made of the rung the absorbed row
+      bought without searching.
+
+    The reply names the row that came back and says it is waiting
+    (``task_state``), like any other request that was just queued.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        worker_account('torom', 'p')
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.target = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'e2e4'))
+        self.floor, self.deeper, self.deepest = \
+            ingest.REQUEST_BUDGET_LADDER[:3]
+
+    def _post(self, **fields):
+        return self.client.post('/atomicdb/api/request',
+                                {'fen': self.target.fen, **fields},
+                                REMOTE_ADDR='10.0.0.1').json()
+
+    def _absorbed_on_the_slot(self, ran=None, bought=None):
+        """An absorbed row on the generation the visit count points at.
+
+        ``ran`` is the budget of a search that did land before it, the shape
+        of the 97 positions of 11-Oct; without it the absorbed row is all the
+        position has.  ``bought`` is the budget of the absorbed row itself.
+        """
+        if ran:
+            AnalysisTask.objects.create(
+                position=self.target, generation=self.target.visits,
+                budget_nodes=ran, source=AnalysisTask.Source.USER,
+                state=AnalysisTask.TState.COMPLETED, machine='m1',
+                nodes_searched=ran)
+            Position.objects.filter(key=self.target.key).update(
+                visits=self.target.visits + 1)
+            self.target.refresh_from_db()
+        row = AnalysisTask.objects.create(
+            position=self.target, generation=self.target.visits,
+            budget_nodes=bought or self.floor,
+            source=AnalysisTask.Source.AUTO,
+            state=AnalysisTask.TState.COMPLETED)
+        self.assertTrue(ingest.is_absorbed(row))
+        return row
+
+    def _live(self):
+        return list(AnalysisTask.objects.filter(
+            position=self.target,
+            state__in=(AnalysisTask.TState.PENDING,
+                       AnalysisTask.TState.LEASED)))
+
+    def test_a_search_that_ran_answers_and_the_absorbed_row_stays_dead(self):
+        row = self._absorbed_on_the_slot(ran=self.floor)
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'already-analyzed')
+        self.assertEqual(payload['completed_budget'], self.floor)
+        self.assertIsNone(payload['task'])
+        self.assertIsNone(payload['task_state'])
+        self.assertEqual(self._live(), [])
+        row.refresh_from_db()
+        self.assertTrue(ingest.is_absorbed(row))
+
+    def test_the_purchase_under_the_lock_gives_the_same_answer(self):
+        # The view answers that call before it reaches the purchase.  The
+        # purchase asks again under the row lock, and there the absorbed row
+        # is one step away: the flag has to be read before the row is.
+        row = self._absorbed_on_the_slot(ran=self.floor)
+
+        outcome = ingest.request_analysis(self.target, only_if_missing=True)
+
+        self.assertEqual(outcome, 'already-analyzed')
+        self.assertEqual(outcome.detail, {'completed_budget': self.floor})
+        row.refresh_from_db()
+        self.assertTrue(ingest.is_absorbed(row))
+
+    def test_without_the_flag_the_same_position_gets_its_next_rung(self):
+        # The other half of the pair, through the same door: the plain call
+        # is the click, and the click climbs.
+        row = self._absorbed_on_the_slot(ran=self.floor)
+
+        payload = self._post()
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(payload['task'], row.id)
+        self.assertEqual(payload['budget_nodes'], self.deeper)
+        self.assertEqual(payload['task_state'], 'waiting')
+
+    def test_a_rung_bought_and_never_searched_comes_back_at_the_first_rung(self):
+        # Nothing ever ran here: the absorbed row is the whole history, and
+        # it sits on the slot.  The ladder reads it as a spent rung and would
+        # bring it back one rung up.  The flag neither takes it for a search
+        # nor lets it raise the price.
+        row = self._absorbed_on_the_slot()
+
+        payload = self._post(only_if_missing='1')
+
+        self.assertEqual(payload['status'], 'queued')
+        self.assertEqual(payload['task'], row.id)
+        self.assertEqual(payload['task_state'], 'waiting')
+        self.assertEqual([task.id for task in self._live()], [row.id])
+        row.refresh_from_db()
+        self.assertEqual(row.budget_nodes, self.floor)
+        self.assertEqual(row.source, AnalysisTask.Source.USER)
+
+    def test_a_target_above_what_ran_brings_the_row_back_at_the_target(self):
+        # 128M ran and a 512M rung was bought without a search, so the ladder
+        # counts 512M as spent and its next rung is 2B.  A caller who asks
+        # for 512M to exist gets 512M, on the row that was holding the slot.
+        row = self._absorbed_on_the_slot(ran=self.floor, bought=self.deeper)
+
+        outcome = ingest.request_analysis(
+            self.target, requested_by='torom', budget_floor=self.deeper,
+            only_if_missing=True)
+
+        self.assertEqual(outcome, 'queued')
+        self.assertEqual([task.id for task in self._live()], [row.id])
+        row.refresh_from_db()
+        self.assertEqual(row.budget_nodes, self.deeper)
+        self.assertLess(row.budget_nodes, self.deepest)
+        self.assertEqual(row.requested_by, 'torom')
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=False)
+    def test_the_same_shape_without_the_flag_climbs_past_the_bought_rung(self):
+        # What the flag opted out of in the test above, pinned next to it.
+        # (With the breadth swap on, a plain call past the 512M rung buys
+        # the replies instead of the next rung; the ladder is what is being
+        # compared here.)
+        row = self._absorbed_on_the_slot(ran=self.floor, bought=self.deeper)
+
+        outcome = ingest.request_analysis(self.target, requested_by='torom')
+
+        self.assertEqual(outcome, 'queued')
+        row.refresh_from_db()
+        self.assertEqual(row.budget_nodes, self.deepest)
 
 
 class QueryApiAnalysisTests(TestCase):

@@ -45,7 +45,9 @@ Public API, described for users on `/atomicdb/docs/`:
 
 - `GET api/query?fen=...` returns the stored row and analysis of a position.
 - `POST api/request` asks for analysis of a FEN. `username` and `password`
-  are optional and put the request on an account.
+  are optional and put the request on an account. `only_if_missing=1` turns
+  the budget into a target: nothing is queued when a search that ran already
+  covers it, and nothing above it otherwise.
 - `POST api/my-queue/` with `username` and `password` lists the pending and
   running requests of that account. A signed-in browser can `GET` it.
 - `POST api/queue-bump/<id>/` and `POST api/queue-cancel/<id>/` move one of
@@ -65,7 +67,9 @@ The site configuration that does it is kept in
 Worker protocol: `api/lease`, `api/heartbeat` and `api/submit` for analysis
 tasks; `api/solve/acquire`, `api/solve/heartbeat` and `api/solve/submit` for
 proof tasks. The worker authenticates with an OpenBench account whose profile
-is enabled.
+is enabled. It sends a heartbeat every 60 seconds while it searches; an
+analysis lease that goes `LEASE_MINUTES` (in `atomicdb/views.py`) without one
+is given to the next worker that asks.
 
 ## Running the tests
 
@@ -122,7 +126,9 @@ in `Documentation/` show the commands:
   (`atomicdb-ingest.service`). `--once` drains what is ready and exits.
 - `manage.py refresh_selector --loop` recomputes the exploration priorities
   (`atomicdb-selector.service`). Setting `ATOMICDB_INLINE_SELECTOR=1` makes
-  the web process do it inline.
+  the web process do it inline. Production bounds its reserve of automatic
+  tasks with a drop-in kept in `docs/server/atomicdb-selector.service.d/`;
+  `docs/operations.md` says why.
 - `manage.py warm_public_snapshot` and `manage.py recascade_backed` run on
   timers.
 

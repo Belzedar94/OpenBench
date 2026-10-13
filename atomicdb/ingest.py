@@ -1238,11 +1238,17 @@ _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
-    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles')
+    __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles',
+                 'floor')
 
-    def __init__(self, move, value, quality, plies, key=None, spine=None):
+    def __init__(self, move, value, quality, plies, key=None, spine=None,
+                 floor=False):
         self.move, self.value = move, value
         self.quality, self.plies = quality, plies
+        # The child never had a search of its own and BORROWED this number
+        # from the replies somebody opened (see is_floor).  What that is
+        # worth to the parent is decided by the negamax, same as ``cycles``.
+        self.floor = floor
         # Lo que necesita el paseo de repeticion: a donde lleva esta arista y
         # por donde sigue el hijo prestandose el valor.  ``spine`` solo se
         # rellena cuando el valor es PRESTADO: un status probado o una eval
@@ -1280,7 +1286,8 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
         # debe verlo con el peso de todo lo que lo corrobora.
         return _ChildValue(move_uci, backed_eval,
                            max(backed_nodes or 0, nodes_invested or 0),
-                           backed_plies or 0, child_key, backed_move)
+                           backed_plies or 0, child_key, backed_move,
+                           floor=is_floor(status, nodes_invested, backed_eval))
     if eval_cp is not None:
         return _ChildValue(move_uci, eval_cp, nodes_invested or 0, 0,
                            child_key)
@@ -1289,6 +1296,94 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
 
 def _better_for_mover(value, reference, stm_white):
     return value > reference if stm_white else value < reference
+
+
+# ---------------- the floor: a borrowed number is not a value ----------------
+#
+# THE CASE (Eclipsia, 5-Oct).  After 1. e3 d6 2. Nc3 the position had 648M
+# nodes of its own, two current lines, and said -743 with ...e5.  Its header
+# read -363 through ...Bh3: a move outside both lines, which nobody had
+# searched, and whose position knew ONE of White's thirty replies, valued from
+# an 8M search two plies further down.  "The best move after Nc3 was b5, which
+# is completely wrong and dangerous to include as the best line for either
+# color."  Searched at 128M, ...Bh3 came back at +1491.
+#
+# WHAT WENT WRONG IS A DIRECTION, NOT A WEIGHT.  A position that was never
+# searched and knows only some of its replies does not have a value.  Its
+# number is the best of the replies somebody happened to open: what its mover
+# gets AT LEAST, a floor, and every reply nobody opened may be better for that
+# mover.  One ply up the same number is read from the other side of the
+# board, and there it is a CEILING on what the move can bring.
+#
+# AND THE PARENT'S OWN SEARCH HAD ALREADY SPOKEN.  Two or more current lines
+# are the engine's word that no move outside them is better for the mover
+# than the last of them (see _showcase_bound).  That certificate is what lets
+# a table with unopened moves be read as complete; here a move it covers came
+# back claiming to beat it, on the strength of one opened reply.
+#
+# THE RULE.  The certificate holds against a floor.  A move outside the
+# position's current lines that nobody has searched is not taken at a number
+# better for the mover than the last of those lines.  It is read as what the
+# certificate already calls it, a move nobody has valued, and the question is
+# bought like every other open one (see _queue_quality_convergence).
+#
+# WHAT THIS DOES NOT TOUCH.  A child an engine searched backs up against any
+# parent, as ordered on 8-Aug and 15-Aug: 128M moves 10B.  A move that heads
+# one of the current lines refines its line however it is supported, which is
+# the reported case of 28-Jul (369 in the header under a row at 416).  And a
+# position with no certificate, a single line or none, has nothing to hold
+# against anybody: a walked line shows what it leads to, as before.
+
+
+def is_floor(status, nodes_invested, backed_eval):
+    """This position's number is a floor for its mover, not a value.
+
+    Never searched, not proven, and standing on a number borrowed from the
+    replies somebody opened.  A seeded claim is not this: it is what an
+    engine said of a line through here, it carries no weight, and the
+    unsearched-claim veto already deals with it (see _backed_for).
+    """
+    return (backed_eval is not None and not (nodes_invested or 0)
+            and _status_eval(status) is None)
+
+
+def _showcase_lines(last_analysis):
+    """The moves that head the current lines of a showcase, or none.
+
+    Empty exactly when _showcase_bound is ``None``: without a bound there is
+    no certificate, and without a certificate nobody is outside of it.
+    """
+    if _showcase_bound(last_analysis) is None:
+        return frozenset()
+    moves = set()
+    for line in last_analysis:
+        if not isinstance(line, dict) or line.get('prior_pass'):
+            continue
+        pv = line.get('pv')
+        move = line.get('move') or (pv[0] if isinstance(pv, list) and pv
+                                    else None)
+        if move:
+            moves.add(move)
+    return frozenset(moves)
+
+
+def _beats_certificate(floor, value, move, bound, lines, stm_white):
+    """A floor, outside the lines, better for the mover than their last."""
+    return (floor and bound is not None and move not in lines
+            and _better_for_mover(value, bound, stm_white))
+
+
+def refuses_floor(row, child, move_uci):
+    """``row`` does not take ``child``'s number through ``move_uci``.
+
+    The explorer asks this of every row it paints, with the two positions in
+    hand, and it is the question _backed_for answers for the backup: one
+    predicate, or the table and the header tell two stories again.
+    """
+    return _beats_certificate(
+        is_floor(child.status, child.nodes_invested, child.backed_eval),
+        child.backed_eval, move_uci, _showcase_bound(row.last_analysis),
+        _showcase_lines(row.last_analysis), row.fen.split()[1] == 'w')
 
 
 # ---------------- repeticion: el hijo que vuelve a su propio padre ----------
@@ -1611,7 +1706,7 @@ def _value_on_line(key, played, cache, budget):
     picks = []
     value, move, plies, quality = _backed_for(
         row, kids, bound=_showcase_bound(row.last_analysis),
-        cycle_picks=picks)
+        cycle_picks=picks, lines=_showcase_lines(row.last_analysis))
     if picks and move is not None and move == picks[0][0]:
         return 0, 0, 0, move, True
     own_return = next((c.move for c in kids if c.key in played), None)
@@ -1692,7 +1787,7 @@ def _showcase_bound(last_analysis):
 
 
 def _backed_for(row, children, discrepancies=None, bound=None,
-                cycle_picks=None):
+                cycle_picks=None, lines=frozenset()):
     """(valor, arista, plies, calidad) respaldados para ``row``.
 
     ``children`` son ``_ChildValue`` de TODAS las aristas del nodo (las que
@@ -1713,6 +1808,9 @@ def _backed_for(row, children, discrepancies=None, bound=None,
     ``bound`` es la cota del escaparate multipv del PROPIO nodo
     (§ ``_showcase_bound``); el llamante la trae porque esta funcion no
     debe tocar la base de datos.
+
+    ``lines`` are the moves that head that showcase (see _showcase_lines):
+    a floor outside them does not beat the bound.
     """
     exact = _status_eval(row.status)
     if exact is not None:
@@ -1732,6 +1830,30 @@ def _backed_for(row, children, discrepancies=None, bound=None,
             # Un empate a tablas contra unas tablas PROBADAS lo gana la prueba,
             # que es exactamente el orden correcto.
             child.value, child.quality = 0, 0
+    own = row.eval_cp
+    own_quality = row.nodes_invested or 0
+    # THE CERTIFICATE HOLDS AGAINST A FLOOR (see the block above is_floor).
+    # The move is read as one nobody has valued: it stops being informed for
+    # everything below, exactly like the unopened moves the bound vouches for.
+    floors = {id(c) for c in informed
+              if not c.cycles and _beats_certificate(
+                  c.floor, c.value, c.move, bound, lines, stm_white)}
+    if floors:
+        if discrepancies is not None:
+            # What settles a floor is a search of the move itself, of any
+            # size: a searched child backs up against any parent.  So the
+            # purchase is the rung a visitor's click buys and no deeper,
+            # not the parent's own depth as for a weakly supported value.
+            rung = min(own_quality, REQUEST_BUDGET_LADDER[0])
+            discrepancies.extend((c.move, row.key, rung)
+                                 for c in informed if id(c) in floors)
+        children = [_ChildValue(c.move, None, 0, 0, c.key)
+                    if id(c) in floors else c for c in children]
+        informed = [c for c in children if c.value is not None]
+        if not informed:
+            if own is None:
+                return None, None, 0, 0
+            return own, None, 0, own_quality
     # COBERTURA COMPLETA-CON-COTA (propietario, 8-ago; recortada 15-ago).
     # La cota del escaparate certifica que NINGUN hijo sin mirar es mejor
     # para el que mueve que la ultima linea del multipv, asi que con cota
@@ -1764,8 +1886,6 @@ def _backed_for(row, children, discrepancies=None, bound=None,
         key=lambda c: (c.value, c.quality, -c.plies) if stm_white
         else (c.value, -c.quality, c.plies))
     complete = bounded or not coverage_is_partial(row, children)
-    own = row.eval_cp
-    own_quality = row.nodes_invested or 0
     if best.cycles:
         # El mejor conocimiento de este nodo es repetir.  Es una pregunta
         # abierta ANTES de mirar si decide algo, y por eso se apunta aqui.
@@ -2155,9 +2275,11 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # filas con huecos (aristas sin valor, o nodo sin expandir): son las
         # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
         # que a proposito no arrastra el JSON del escaparate por cada nodo.
+        # A floor is judged against the bound (see is_floor), so its row
+        # needs the showcase as much as a row with a gap does.
         gaps = [row.key for row in rows
                 if not row.expanded
-                or any(c.value is None
+                or any(c.value is None or c.floor
                        for c in children.get(row.key, ()))]
         showcases = (dict(Position.objects.filter(key__in=gaps)
                           .values_list('key', 'last_analysis'))
@@ -2175,7 +2297,8 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             value, move, below, quality = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
                 bound=_showcase_bound(showcases.get(row.key)),
-                cycle_picks=cycle_picks)
+                cycle_picks=cycle_picks,
+                lines=_showcase_lines(showcases.get(row.key)))
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -2641,6 +2764,17 @@ def absorb_tasks(queryset):
     return (queryset.filter(state=AnalysisTask.TState.PENDING)
             .update(state=AnalysisTask.TState.COMPLETED,
                     completed=timezone.now(), nodes_searched=0))
+
+
+def is_absorbed(task):
+    """COMPLETED without a search: absorbed, not delivered (§ ``absorb_tasks``).
+
+    The machine is what tells the two apart.  A row a worker delivered always
+    carries the machine that ran it; an absorbed row never had a lease to get
+    one from.
+    """
+    return (task.state == AnalysisTask.TState.COMPLETED
+            and not task.nodes_searched and not task.machine)
 
 
 def _emit_closure_events(pos, **extra):
@@ -4033,6 +4167,24 @@ def _completed_max_budget(pos):
         .first())
 
 
+def searched_budget(pos):
+    """The largest budget a search of ``pos`` has actually RUN, or ``None``.
+
+    Not ``_completed_max_budget``.  That one answers "which rung has been
+    bought", and a rung can be bought without anybody searching: a waiting
+    request whose work something else did (the position closed, or another
+    row covered it) is absorbed as COMPLETED with no nodes
+    (§ ``absorb_tasks``).  This one answers "has an engine looked this deep
+    here", which is the question of a caller who wants a search only if it is
+    missing (§ ``_request_rung``, ``only_if_missing``).
+    """
+    return (AnalysisTask.objects.filter(
+        position=pos, state=AnalysisTask.TState.COMPLETED,
+        nodes_searched__gt=0)
+        .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
+        .first())
+
+
 def front_of_own_queue(task):
     """Sitio de cola que deja a ``task`` la PRIMERA de su propio peticionario.
 
@@ -4387,6 +4539,9 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
     Where the row lands in its author's queue is the caller's business, as it
     is for a row the caller creates: only the single request applies the
     newest-first preference (§ ``_apply_lifo_preference``).
+
+    An ABSORBED row (§ ``is_absorbed``) comes back through here as well.  It
+    is the same dead row on the same slot, reached by a different road.
     """
     task.state = AnalysisTask.TState.PENDING
     task.completed = None
@@ -4403,7 +4558,8 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
                              'backers', 'queue_seq', 'route', 'multipv'])
 
 
-def _request_rung(pos, requested_by='', route='', budget_floor=None):
+def _request_rung(pos, requested_by='', route='', budget_floor=None,
+                  only_if_missing=False):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
@@ -4417,15 +4573,41 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
     (§ ``depth``), ya validado por la vista.  Solo puede SUBIR el suelo, nunca
     bajarlo: una eleccion no puede abaratar una peticion por debajo de lo que
     la escalera compraria sola, asi que un peldano ya gastado (o cualquier cosa
-    por debajo del que toca) no cambia absolutamente nada."""
+    por debajo del que toca) no cambia absolutamente nada.
+
+    ``only_if_missing`` IS THE OTHER QUESTION, and it is opt-in.  The ladder
+    answers "search this deeper than last time": asked twice, it climbs.  A
+    script that wants a position to HAVE a 128M search cannot ask that without
+    risking the climb, because the first search can land between its look and
+    its request, and then the same call buys 512M ("All I want is for my
+    script not to accidentally trigger a search deeper than 128 MNodes",
+    Torom, 11-Oct).  With the flag the budget is a target, the chosen rung or
+    the first one:
+
+    * a search that actually ran already covers it: nothing is bought and the
+      answer is ``already-analyzed``, with the budget that covers it;
+    * otherwise the purchase is made as always but never above the target,
+      whatever the ladder, the visit count or a bought-but-unsearched rung
+      would have asked for.
+
+    Both are decided after the row lock below, so two callers cannot slip
+    past each other.  A live request somebody else made at a larger budget is
+    joined as it stands: it is theirs, and this call did not cause it."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B/10B request cannot accidentally target the completed rung.
     pos = Position.objects.select_for_update().get(pk=pos.pk)
     if pos.status != 'UNKNOWN':
         return 'already-solved'
+    target = None
+    if only_if_missing:
+        target = budget_floor or REQUEST_BUDGET_LADDER[0]
+        searched = searched_budget(pos)
+        if searched is not None and searched >= target:
+            return RequestOutcome('already-analyzed',
+                                  completed_budget=searched)
     completed_max = _completed_max_budget(pos)
-    if (completed_max is not None
+    if (target is None and completed_max is not None
             and completed_max >= REQUEST_BUDGET_LADDER[-1]):
         return _LADDER_EXHAUSTED
     floor = _next_rung(completed_max)
@@ -4444,6 +4626,8 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # mate corto: ese abarata la PRIMERA mirada de un nodo que reclama M2,
         # y quien elige 10B a mano no esta pidiendo una verificacion barata.
         floor = max(floor, budget_floor)
+    if target is not None:
+        floor = min(floor, target)
     task, created = AnalysisTask.objects.get_or_create(
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
@@ -4458,6 +4642,27 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None):
         # asi que pedir otra vez no puede crear una nueva: o se revive esta, o
         # la posicion se queda sin poder pedirse nunca mas — que seria convertir
         # un boton de deshacer en una condena.
+        _revive_withdrawn(task, floor,
+                          multipv_for(pos.visits, floor, clamp=clamp),
+                          requested_by, route)
+        _apply_lifo_preference(task, requested_by)
+        return 'queued'
+    if is_absorbed(task):
+        # AN ABSORBED ROW HOLDS THE SLOT TOO, and it did worse than a withdrawn
+        # one: this function fell through to 'already-queued', so the page
+        # said "queued" and nothing was.  It happens to an OPEN position when
+        # it has a second task waiting on the next generation and the search
+        # that lands first covers that task's budget
+        # (§ ``ingest_queue._absorb_shadowed``).  The landing moves the visit
+        # count onto the very generation the absorbed row sits on, and from
+        # then on every request for the position met that row (97 open
+        # positions on 11-Oct, the oldest from 12-Aug).
+        #
+        # It comes back through the same row for the same reason a withdrawn
+        # one does, and the next generation is not a way out: the search that
+        # completed there would be sitting on the slot the visit count points
+        # at after it lands, and the position would be stuck again one search
+        # later.
         _revive_withdrawn(task, floor,
                           multipv_for(pos.visits, floor, clamp=clamp),
                           requested_by, route)
@@ -4863,7 +5068,8 @@ def _breadth_swap_eligible(pos):
     return completed is not None and completed >= REQUEST_BUDGET_LADDER[1]
 
 
-def request_analysis(pos, requested_by='', route='', budget_floor=None):
+def request_analysis(pos, requested_by='', route='', budget_floor=None,
+                     only_if_missing=False):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -4885,11 +5091,16 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
     el motor me oriente el mejor camino", que es la queja que acoto el swap en
     primer lugar (§ ``_breadth_swap_eligible``).
 
+    ``only_if_missing`` (§ ``_request_rung``) asks about THIS node and
+    nothing else, so it turns the swap off as well and never falls through to
+    an expansion.
+
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
-    | 'saturated'."""
+    | 'saturated', y 'already-analyzed' solo con ``only_if_missing``."""
     with atomic():
         swapped = False
-        if budget_floor is None and _breadth_swap_eligible(pos):
+        if budget_floor is None and not only_if_missing \
+                and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
                                         route=route)
@@ -4901,7 +5112,10 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None):
                                                   {}).items()
                        if isinstance(value, (int, str))}})
                 return outcome
-        outcome = _request_rung(pos, requested_by, route, budget_floor)
+        outcome = _request_rung(pos, requested_by, route, budget_floor,
+                                only_if_missing)
+        if isinstance(outcome, RequestOutcome):
+            return outcome      # it carries its own detail
         if outcome != _LADDER_EXHAUSTED:
             return RequestOutcome(outcome)
         if swapped:
@@ -5834,6 +6048,20 @@ def is_unexplored(child):
     Un hijo con RESPALDO si cuenta como explorado: su numero viene de
     busqueda real en su subarbol, no de una linea de paso.
 
+    A BACKED NUMBER WITH NO NODES BEHIND IT IS NOT THAT.  A line a visitor
+    walked carries a number up without a single engine node, and the page
+    says so itself with the ``walked`` chip; a seeded reply somebody stepped
+    into gets its own seeded number written back as its backing, with no
+    nodes either.  This predicate used to ask for ``backed_eval is None`` as
+    well, so any backed number exempted the move, measured or not: on
+    ``82ec7537`` the button queued thirteen moves and skipped six that nobody
+    had ever searched, five walked (Nd7 at -29 among them, -1417 once it was
+    searched) and one seeded, which is the request of 8-Aug left half done
+    ("the analyse all unanalysed button doesnt request the old walked
+    nodes", Eclipsia, 11-Oct).  The discriminant is the one stated at the
+    top, and only that: no search of its own and no search weight in its
+    backing.
+
     Vive aqui, con nombre, porque la pagina tiene que ETIQUETAR con el mismo
     criterio con el que el boton CUENTA: mientras fueron dos predicados, el
     boton ofrecia "analizar 20 respuestas sin explorar" encima de una tabla
@@ -5841,8 +6069,7 @@ def is_unexplored(child):
     """
     return (child.status == 'UNKNOWN'
             and not (child.nodes_invested or 0)
-            and not (child.backed_nodes or 0)
-            and child.backed_eval is None)
+            and not (child.backed_nodes or 0))
 
 
 def unexplored_children(pos):

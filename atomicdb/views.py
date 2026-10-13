@@ -36,7 +36,29 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
 
-LEASE_MINUTES = 10
+# How long a lease lives without a heartbeat before the next ``api/lease``
+# gives the task to somebody else.  A worker beats every 60 seconds and gives
+# each beat 30 seconds to be answered (§ Client/atomicdb_worker
+# ``_heartbeat_loop``).  Inside four minutes a lease therefore survives two
+# beats lost outright, or one that times out; the try after that falls on the
+# boundary.  That covers a short network drop or one slow answer, and a search
+# whose machine went away is not left waiting for it.  It was 10 until
+# 13-Oct-2026.  In the week before, 106 of 206,375 analyses needed a second
+# lease and sat out that window before another machine could take them, and
+# three heartbeats of 100,812 went unanswered.
+#
+# NOBODY COPIES THIS NUMBER.  The recycle in ``api_lease``, the leases the
+# front page lists as running, the "no recent heartbeat" mark of the
+# contributor page (§ contributors.present) and the explorer line that says a
+# silent request "goes back in the queue" (§ live_request._narrate) all read
+# it from here, so the sentence and the server cannot drift apart.
+#
+# TWO ORDERINGS HOLD IT IN PLACE, and ``LeaseWindowTests`` pins both with the
+# value: it stays above ``RESTART_RECYCLE_MINUTES``, because a restarted
+# worker takes its own dead lease back sooner than a stranger is given it,
+# and above ``live_request.PROMISE_FRESH_SECONDS``, because a request is
+# called quiet before it is called lost.
+LEASE_MINUTES = 4
 LEGACY_LEASE_MINUTES = 24 * 60
 POST_DEPLOY_LEGACY_LEASE_MINUTES = 60
 # Relevo tras reinicio: una peticion con la MISMA identidad de maquina, OTRA
@@ -1795,7 +1817,8 @@ def _validated_route_for(raw_route, key):
         return ''
 
 
-def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
+def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
+                   only_if_missing=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -1808,6 +1831,17 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
     Devuelve ``(payload, codigo http)``.  Quien llama pone la envoltura — el
     metodo, la identidad, y lo que su puerta anada al cuerpo — y nada mas.
     """
+    if only_if_missing and pos.status == 'UNKNOWN':
+        # Answered before the dedup and the queue cap: a call with nothing to
+        # buy is not a repeated click and needs no room in the queue.  No lock
+        # here on purpose.  A search that ran stays run, so this yes cannot
+        # turn into a no, and the purchase below asks again under the row
+        # lock (§ ``ingest._request_rung``).
+        searched = ingest.searched_budget(pos)
+        if searched is not None and searched >= (
+                chosen or ingest.REQUEST_BUDGET_LADDER[0]):
+            return {'status': 'already-analyzed',
+                    'completed_budget': searched}, 200
     hour_ago = timezone.now() - timedelta(hours=1)
     # A recent click is only a duplicate while the request it represented is
     # still queued or running.  Once that task has completed, the same visitor
@@ -1856,7 +1890,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route=''):
     # otherwise a browser retry could accidentally request the next rung.
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
-                                          route=route, budget_floor=chosen)
+                                          route=route, budget_floor=chosen,
+                                          only_if_missing=only_if_missing)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -2009,7 +2044,15 @@ def api_public_request(request):
 
     Campos del POST: ``fen`` (obligatoria), ``budget`` (peldano, opcional y
     solo para quien tiene derecho a elegirlo), ``username``/``password``
-    (opcionales).
+    (opcionales), ``only_if_missing`` (opcional).
+
+    ``only_if_missing=1`` is for scripts.  Without it this door is the click:
+    asked again once the first search has landed, it buys the next rung.
+    With it the budget is a target (the chosen rung, or the first one): if a
+    search that ran already covers it the answer is ``already-analyzed`` and
+    nothing is queued, and otherwise nothing above the target is queued
+    (§ ``ingest._request_rung``).  Only this door reads it; the explorer
+    button has no use for it.
     """
     if request.method != 'POST':
         return JsonResponse({'status': 'refused', 'reason': 'POST only'},
@@ -2054,8 +2097,10 @@ def api_public_request(request):
             # y el bucle que hay que acotar es justamente el que pregunta lo
             # mismo mil veces.
             ApiRequestLog.objects.create(account=username, ip=ip)
-        payload, status = _queue_request(pos, ip, requested_by=username,
-                                         chosen=chosen)
+        payload, status = _queue_request(
+            pos, ip, requested_by=username, chosen=chosen,
+            only_if_missing=request.POST.get('only_if_missing') in ('1',
+                                                                    'true'))
     except OperationalError as error:
         # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
         # grande puede rechazar la subida a escritura, y ningun efecto quedo
@@ -2076,6 +2121,14 @@ def api_public_request(request):
         'seeded': seeded,
         'task': None if task is None else task.id,
         'budget_nodes': None if task is None else task.budget_nodes,
+        # Waiting in the queue, or already on an engine.  The status word is
+        # 'already-queued' for both, and a script had to make a second call
+        # to tell them apart ("api/request should behave this way", Eclipsia,
+        # 11-Oct).  A field next to the status and not a new status word: a
+        # client that matches on 'already-queued' keeps working.
+        'task_state': None if task is None else (
+            'searching' if task.state == AnalysisTask.TState.LEASED
+            else 'waiting'),
         # Un 'already-queued' con esto a True es "ya estaba pedida y tu nombre
         # quedo anotado en ella": te avisara cuando aterrice y tu espera cuenta
         # para adelantarla.
@@ -3702,6 +3755,14 @@ def _claim_note(line_no):
             'time); no direct search yet')
 
 
+_FLOOR_NOTE = ('nothing has searched this move and only some of the replies '
+               'to it are known, so this number is what the side replying '
+               'gets at least, not what the move is worth. The search of '
+               'this position rated every move outside its lines no better '
+               'than the last of them, so it does not use this number until '
+               'the move itself is searched')
+
+
 def _move_css(status, score, win_status):
     """Color RELATIVO AL QUE MUEVE: su victoria en verde, su derrota en rojo."""
     if status == 'DRAW':
@@ -3944,6 +4005,14 @@ def _child_moves(pos):
             # repeticion, y para eso esta su propia marca.
             score, rank, tier = 0, 0.0, 2
             backed_plies, backed_light, walked = 0, False, False
+        # THE ROW SAYS WHAT THE POSITION DOES WITH IT (see ingest.is_floor).
+        # A move nobody searched, valued from the replies somebody opened,
+        # holds a floor; when it lies outside this position's current lines
+        # and claims to beat the last of them, the backup does not take it,
+        # and neither does the arrow.  The number stays where its value puts
+        # it, because the table orders by value and by nothing else, and the
+        # ink and the tooltip say the rest.
+        floor = not repetition and ingest.refuses_floor(pos, c, e.move_uci)
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -3993,8 +4062,13 @@ def _child_moves(pos):
                       # suya", para el tooltip de la celda del eval.  Existe
                       # exactamente donde antes iba el chip mudo de la fila:
                       # caminado y sin respaldo que lo explique por su cuenta.
-                      'claim': (_claim_note(line_numbers.get(e.move_uci))
+                      'claim': (_FLOOR_NOTE if floor else
+                                _claim_note(line_numbers.get(e.move_uci))
                                 if walked and not backed_plies else None),
+                      # A floor this position does not take: never the
+                      # recommended move (§ _arrow_move), and flagged in the
+                      # API so a client that sorts the rows itself can tell.
+                      'floor': floor,
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
@@ -4494,7 +4568,8 @@ def api_query(request):
     children = _child_moves(pos)
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
-              'backed_plies': m['backed_plies'], 'visits': m['visits']}
+              'backed_plies': m['backed_plies'], 'visits': m['visits'],
+              'floor': m['floor']}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
@@ -5890,10 +5965,14 @@ def _arrow_move(moves, pos):
     fila bloqueada por repeticion no puede ser la recomendacion, y si el
     ``best_move`` almacenado es justo la jugada bloqueada, la flecha calla en
     vez de contradecir al bloqueo.
+
+    A floor the position does not take (§ ingest.refuses_floor) is passed
+    over the same way: the arrow goes to the first row the backup can stand
+    on, so the move recommended and the number quoted are one pair.
     """
     blocked = {m['uci'] for m in moves if m.get('blocked')}
     for move in moves:
-        if move.get('blocked'):
+        if move.get('blocked') or move.get('floor'):
             continue
         if move.get('score') is not None or move.get('mate') is not None:
             return move['uci']

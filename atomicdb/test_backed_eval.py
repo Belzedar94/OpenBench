@@ -304,7 +304,12 @@ class BackedPropagationCostTests(TestCase):
         # tiene ``backed_move`` y hay espina que mirar.  Cuesta UNA sentencia
         # por ply caminado y la comparten todos los hijos del nivel, asi que
         # tampoco crece con la anchura — que es lo que este test vigila.
-        with self.assertNumQueries(9, using=settings.ATOMICDB_DATABASE_ALIAS):
+        #
+        # The tenth is the showcase of the second level: ``grand`` stands on
+        # a child nobody searched, and a floor is judged against the lines of
+        # the position above it (see ingest.is_floor).  One statement for the
+        # whole level, like the bound of a row with unopened moves.
+        with self.assertNumQueries(10, using=settings.ATOMICDB_DATABASE_ALIAS):
             ingest.backup_backed_evals([parent.key])
         grand.refresh_from_db()
         self.assertIsNotNone(grand.backed_eval)
