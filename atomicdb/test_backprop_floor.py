@@ -171,3 +171,114 @@ class FloorRowTests(TestCase):
 
         self.assertFalse(by_move['c8h3']['floor'])
         self.assertEqual(views._arrow_move(rows, node), 'c8h3')
+
+
+class FloorAndTheBulkButtonTests(TestCase):
+    """Two predicates about "nobody searched this", and where they part.
+
+    The floor rule asks whether the MOVE was searched (``ingest.is_floor``:
+    no nodes of its own).  The bulk button asks whether ANYTHING was searched
+    there (``ingest.is_unexplored``: no nodes of its own and no search weight
+    in its backing).  A number a visitor walked up a line satisfies both.  A
+    floor that stands on a search further down satisfies only the first: the
+    button leaves it out, as it leaves out every reply backed by a real
+    search, and the rule is what buys the search of the move.
+
+    Neither may leave such a move without its search, and together they must
+    not buy it twice.
+    """
+
+    def test_a_floor_standing_on_a_search_is_bought_by_the_rule(self):
+        # The reported shape: the unsearched move knows one reply, which an
+        # engine searched at 8M.  The button does not count it...
+        node, floor = _family('ENGINE')
+
+        self.assertTrue(ingest.refuses_floor(node, floor, 'c8h3'))
+        self.assertFalse(ingest.is_unexplored(floor))
+        self.assertNotIn(floor.key,
+                         [c.key for c in ingest.unexplored_children(node)])
+        # ...and it is not left without a search: the rule queued one, at the
+        # rung a click buys, as automatic work.
+        task = AnalysisTask.objects.get(position=floor)
+        self.assertEqual(task.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertEqual(task.source, AnalysisTask.Source.FILL)
+        self.assertEqual(task.arm, ingest.QUALITY_ARM)
+
+        # A click on the button then buys the move nobody opened and leaves
+        # that task as it is.
+        queued = ingest.enqueue_unexplored_children(node, requested_by='w')
+
+        self.assertEqual(queued, 1)
+        task.refresh_from_db()
+        self.assertEqual(task.source, AnalysisTask.Source.FILL)
+        self.assertEqual(AnalysisTask.objects.filter(position=floor).count(),
+                         1)
+
+    def test_the_row_says_both_things_about_it(self):
+        node, floor = _family('ENGINE-ROW')
+
+        row = next(m for m in views._child_moves(node)
+                   if m['uci'] == 'c8h3')
+
+        # Not "unexplored": a search stands below it.  And a floor all the
+        # same: the number is muted and the reason is in the tooltip.
+        self.assertFalse(row['unexplored'])
+        self.assertTrue(row['floor'])
+        self.assertEqual(row['claim'], views._FLOOR_NOTE)
+
+    def _walked_family(self, name):
+        """Like ``_family``, with no engine node anywhere below the move.
+
+        The reply carries a seeded number, so what the move borrows is a
+        walked one: zero nodes of its own and zero weight in its backing.
+        """
+        node = _pos(f'{name}-N', 'b', eval_cp=743, nodes_invested=648_000_000,
+                    expanded=True, last_analysis=_SHOWCASE)
+        walked = _pos(f'{name}-walked', 'w')
+        _edge(node, walked, 'c8h3')
+        _edge(walked, _pos(f'{name}-reply', 'b', eval_cp=363), 'c3e4')
+        _edge(node, _pos(f'{name}-searched', 'w', eval_cp=776,
+                         nodes_invested=136_000_000), 'e7e5')
+        ingest.backup_backed_evals([walked.key])
+        node.refresh_from_db()
+        walked.refresh_from_db()
+        return node, walked
+
+    def test_a_walked_floor_is_refused_and_counted_and_bought_once(self):
+        node, walked = self._walked_family('WALKED')
+
+        # Both predicates hold, and the position stands on the searched move.
+        self.assertEqual((walked.backed_eval, walked.backed_nodes), (363, 0))
+        self.assertTrue(ingest.is_unexplored(walked))
+        self.assertTrue(ingest.refuses_floor(node, walked, 'c8h3'))
+        self.assertEqual((node.backed_eval, node.backed_move), (776, 'e7e5'))
+        # The rule already bought its search, at the first request rung and
+        # not at the 648M of the position above.
+        task = AnalysisTask.objects.get(position=walked)
+        self.assertEqual(task.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertEqual(task.source, AnalysisTask.Source.FILL)
+
+        # The button counts the move, finds that task and makes it the
+        # visitor's request.  One search, not two.
+        queued = ingest.enqueue_unexplored_children(node, requested_by='w')
+
+        self.assertEqual(queued, 1)
+        task.refresh_from_db()
+        self.assertEqual(task.source, AnalysisTask.Source.USER)
+        self.assertEqual(task.budget_nodes, ingest.REQUEST_BUDGET_LADDER[0])
+        self.assertEqual(AnalysisTask.objects.filter(position=walked).count(),
+                         1)
+
+    def test_the_row_of_a_walked_floor_is_unexplored_and_muted(self):
+        node, walked = self._walked_family('WALKED-ROW')
+        rows = views._child_moves(node)
+        row = next(m for m in rows if m['uci'] == 'c8h3')
+
+        self.assertTrue(row['unexplored'])
+        self.assertTrue(row['walked'])
+        self.assertTrue(row['floor'])
+        # One tooltip, and it is the floor's: it says why the position does
+        # not use the number, which the walked note alone would not.
+        self.assertEqual(row['claim'], views._FLOOR_NOTE)
+        # The arrow goes to the move the header stands on.
+        self.assertEqual(views._arrow_move(rows, node), 'e7e5')
