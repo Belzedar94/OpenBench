@@ -285,14 +285,22 @@ class NoPromiseTests(TestCase):
         self.assertFalse(_has_a_number(self._line()), self._line())
 
     def test_a_lease_that_stopped_reporting_promises_nothing(self):
-        """El worker cayo: el arriendo sigue puesto y el motor ya no existe."""
-        _searching(self.pos, started_ago=400, silent_for=360)
+        """El worker cayo: el arriendo sigue puesto y el motor ya no existe.
+
+        Quiet, not yet lost: past ``PROMISE_FRESH_SECONDS`` and still inside
+        the server's lease window.  That band is one minute wide since the
+        window is four minutes (it was seven with a window of ten), so the
+        silence here is 200 seconds and not the 360 it used to be, which is
+        now past the deadline and belongs to the next test.
+        """
+        _searching(self.pos, started_ago=400, silent_for=200)
         _ping()
 
         line = self._line()
 
         self.assertIn('Sent to box0#1', line)
-        self.assertIn('nothing reported for 6 min', line)
+        self.assertIn('nothing reported for 3 min', line)
+        self.assertNotIn('goes back in the queue', line)
         self.assertNotIn('left', line)
 
     def test_a_lease_past_its_deadline_says_it_goes_back_to_the_queue(self):

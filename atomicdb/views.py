@@ -36,7 +36,27 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
 
-LEASE_MINUTES = 10
+# How long a lease lives without a heartbeat before the next ``api/lease``
+# gives the task to somebody else.  A worker beats every 60 seconds
+# (§ Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS), so four minutes is
+# three missed beats and a margin: a slow answer or a short network drop does
+# not cost a healthy search, and a search whose machine went away is not left
+# waiting for it.  It was 10 until 13-Oct-2026.  In the week before, 106 of
+# 206,375 analyses needed a second lease, and every one of them sat out the
+# whole window before anybody else could take it.
+#
+# NOBODY COPIES THIS NUMBER.  The recycle in ``api_lease``, the leases the
+# front page lists as running, the "no recent heartbeat" mark of the
+# contributor page (§ contributors.present) and the explorer line that says a
+# silent request "goes back in the queue" (§ live_request._narrate) all read
+# it from here, so the sentence and the server cannot drift apart.
+#
+# TWO ORDERINGS HOLD IT IN PLACE, and ``LeaseWindowTests`` pins both with the
+# value: it stays above ``RESTART_RECYCLE_MINUTES``, because a restarted
+# worker takes its own dead lease back sooner than a stranger is given it,
+# and above ``live_request.PROMISE_FRESH_SECONDS``, because a request is
+# called quiet before it is called lost.
+LEASE_MINUTES = 4
 LEGACY_LEASE_MINUTES = 24 * 60
 POST_DEPLOY_LEGACY_LEASE_MINUTES = 60
 # Relevo tras reinicio: una peticion con la MISMA identidad de maquina, OTRA
