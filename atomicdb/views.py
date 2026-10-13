@@ -37,13 +37,15 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
 from .models import ContributorPref
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
-# gives the task to somebody else.  A worker beats every 60 seconds
-# (§ Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS), so four minutes is
-# three missed beats and a margin: a slow answer or a short network drop does
-# not cost a healthy search, and a search whose machine went away is not left
-# waiting for it.  It was 10 until 13-Oct-2026.  In the week before, 106 of
-# 206,375 analyses needed a second lease, and every one of them sat out the
-# whole window before anybody else could take it.
+# gives the task to somebody else.  A worker beats every 60 seconds and gives
+# each beat 30 seconds to be answered (§ Client/atomicdb_worker
+# ``_heartbeat_loop``).  Inside four minutes a lease therefore survives two
+# beats lost outright, or one that times out; the try after that falls on the
+# boundary.  That covers a short network drop or one slow answer, and a search
+# whose machine went away is not left waiting for it.  It was 10 until
+# 13-Oct-2026.  In the week before, 106 of 206,375 analyses needed a second
+# lease and sat out that window before another machine could take them, and
+# three heartbeats of 100,812 went unanswered.
 #
 # NOBODY COPIES THIS NUMBER.  The recycle in ``api_lease``, the leases the
 # front page lists as running, the "no recent heartbeat" mark of the
