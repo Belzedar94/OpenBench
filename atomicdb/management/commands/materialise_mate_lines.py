@@ -117,6 +117,8 @@ class Command(BaseCommand):
                 counts['plies_walked'] += result['plies']
                 if result['closed'] or result['created_edges']:
                     seeds.append(row.key)
+                    # The chain nodes it closed may have other parents.
+                    seeds.extend(result['closed_keys'])
                 else:
                     counts['skipped'] += 1
             if options['sleep'] > 0:
