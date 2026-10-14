@@ -2862,7 +2862,11 @@ def _walk_proven_line(pos, materialise=False):
         if (edge is None and materialise and owner is not None
                 and owner.key not in built):
             built.add(owner.key)
-            ingest.materialise_won_line(owner)
+            closed = ingest.materialise_won_line(owner)['closed_keys']
+            if closed:
+                # A chain node closed here may hang from other parents too.
+                ingest.backup_cascade(closed)
+                ingest.backup_backed_evals(closed)
             edge = (Edge.objects.select_related('child')
                     .filter(parent=node, move_uci=uci).first())
         if edge is None:
