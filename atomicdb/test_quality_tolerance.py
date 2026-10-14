@@ -193,6 +193,59 @@ class QualityConvergenceTests(TestCase):
         self.assertEqual(ingest._rung_at_least(10 ** 12),
                          ingest.BUDGET_LADDER[-1])
 
+    def test_the_engines_overshoot_still_matches_its_own_rung(self):
+        """A 512M search stops a few nodes past 512M; that is still 512M."""
+        self.assertEqual(ingest._rung_matching(512_000_099), 512_000_000)
+        self.assertEqual(ingest._rung_matching(2_000_000_950), 2_000_000_000)
+        # A support well between two rungs still rounds up, as before.
+        self.assertEqual(ingest._rung_matching(640_000_000), 2_000_000_000)
+        self.assertEqual(ingest._rung_matching(200_000_000), 512_000_000)
+
+    def test_a_parent_searched_at_512m_buys_its_child_512m_not_2b(self):
+        """Task 2475551: a 2B pass bought over a parent's 512,000,099 nodes."""
+        parent = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(parent)
+        parent.eval_cp = 369
+        parent.nodes_invested = 512_000_099
+        parent.save()
+        child = Edge.objects.get(parent=parent, move_uci='d2d4').child
+        child.backed_eval = 416
+        child.backed_nodes = 8_000_000
+        child.nodes_invested = 8_000_000
+        child.save()
+
+        ingest.backup_backed_evals([parent.key])
+
+        task = AnalysisTask.objects.get(position=child)
+        self.assertEqual(task.arm, ingest.QUALITY_ARM)
+        self.assertEqual(task.budget_nodes, 512_000_000)
+
+    def _overshoot_pair(self, child_nodes):
+        parent = _pos('overshoot-parent', 'w', nodes_invested=512_000_099)
+        child = _pos('overshoot-child', 'b', nodes_invested=child_nodes)
+        Edge.objects.create(parent=parent, move_uci='d2d4', child=child)
+        return parent, child
+
+    def test_a_child_searched_at_the_parents_rung_is_not_re_bought(self):
+        parent, child = self._overshoot_pair(child_nodes=512_000_099)
+
+        made = ingest._queue_quality_convergence(
+            [('d2d4', parent.key, 512_000_099)])
+
+        self.assertEqual(made, 0)
+        self.assertFalse(AnalysisTask.objects.filter(position=child).exists())
+
+    def test_the_cycle_disambiguation_still_buys_one_rung_deeper(self):
+        """It wants a pass deeper than the child's own: no tolerance there."""
+        parent, child = self._overshoot_pair(child_nodes=128_000_099)
+
+        made = ingest._queue_cycle_disambiguation(
+            [('d2d4', parent.key, 8_000_000)])
+
+        self.assertEqual(made, 1)
+        self.assertEqual(AnalysisTask.objects.get(position=child).budget_nodes,
+                         512_000_000)
+
     def _blocked_parent_and_child(self):
         parent = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(parent)

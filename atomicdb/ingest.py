@@ -2000,6 +2000,23 @@ def _rung_at_least(nodes):
     return BUDGET_LADDER[-1]
 
 
+# A search stops a few nodes past its budget (512,000,099 for 512M), so a
+# support at most this fraction over a rung counts as that rung.
+RUNG_OVERSHOOT_TOLERANCE = 0.01
+
+
+def _rung_matching(nodes):
+    """The rung that equals this support, the engine's overshoot included.
+
+    _rung_at_least would round 512,000,099 nodes up to 2B, four times the
+    search they measure.  A support further over a rung still rounds up.
+    """
+    for rung in BUDGET_LADDER:
+        if nodes <= rung * (1 + RUNG_OVERSHOOT_TOLERANCE):
+            return rung
+    return BUDGET_LADDER[-1]
+
+
 def _queue_cycle_disambiguation(picks):
     """Compra el analisis que deshace un respaldo decidido por un ciclo.
 
@@ -2112,7 +2129,7 @@ def _queue_quality_convergence(discrepancies):
         child = edge.child
         if child.status != 'UNKNOWN':
             continue
-        budget = _rung_at_least(own_quality)
+        budget = _rung_matching(own_quality)
         if (child.nodes_invested or 0) >= budget:
             continue                  # ya se le compro esa profundidad
         task, created = AnalysisTask.objects.get_or_create(
