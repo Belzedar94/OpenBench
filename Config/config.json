@@ -1,7 +1,7 @@
 {
-    "client_version": 51,
+    "client_version": 53,
     "client_repo_url": "https://github.com/Belzedar94/OpenBench",
-    "client_repo_ref": "c1ee4b7fa834cc2c6cec47715123e5e4bb18f735",
+    "client_repo_ref": "a3748864ae870b50c3dfbed66a98c21e703a493c",
     "use_cross_approval": false,
     "require_login_to_view": false,
     "require_manual_registration": false,
