@@ -180,7 +180,9 @@ class ProductionRootTests(TestCase):
     def test_with_the_switch_off_the_queue_is_the_one_from_yesterday(self):
         tasks = ingest._next_tasks_by_proof(1)
         self.assertEqual(tasks[0].position_id, self.e3.key)
-        self.assertEqual(tasks[0].budget_nodes, ingest.BUDGET_LADDER[0])
+        # The df-pn ladder still asks for 8M; server-picked work is minted at
+        # SERVER_PICKED_MIN_NODES (test_idle_pool_budget).
+        self.assertEqual(tasks[0].budget_nodes, ingest.SERVER_PICKED_MIN_NODES)
 
 
 @override_settings(**VALUE)
@@ -507,14 +509,15 @@ class ValueCascadeTests(TestCase):
             _edge(self.node, child, f'c{index}')
 
     @override_settings(**VALUE)
-    def test_the_cascade_is_capped_and_cheap_and_marked(self):
+    def test_the_cascade_is_capped_floored_and_marked(self):
         made = ingest._queue_value_cascade(self.node)
 
         self.assertEqual(made, ingest.VALUE_CASCADE_CAP)
         tasks = AnalysisTask.objects.filter(arm=ingest.VALUE_CASCADE_ARM)
         self.assertEqual(tasks.count(), ingest.VALUE_CASCADE_CAP)
+        # Its own 8M price is lifted to the server-picked floor.
         self.assertEqual({task.budget_nodes for task in tasks},
-                         {ingest.VALUE_CASCADE_NODES})
+                         {ingest.SERVER_PICKED_MIN_NODES})
         self.assertTrue(DBEvent.objects.filter(kind='VALUE_CASCADE').exists())
 
     @override_settings(**VALUE)

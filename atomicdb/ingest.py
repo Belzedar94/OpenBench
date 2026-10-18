@@ -315,6 +315,46 @@ def multipv_for(visits, budget_nodes=None, seeding=False, clamp=None):
     return 5 if visits < 3 else 3
 
 
+# ---------------- server-picked work: never below the first request rung ----
+#
+# Community poll, closed 5-0 in October 2026: when nobody is requesting
+# analysis, the workers search the open positions the server picks at 128M
+# nodes instead of the tiny searches (8M) behind the write floods of 8 and 11
+# October.  Measured overnight before this rule: about 40 results a minute,
+# almost all of them AUTO 8M and FILL 8M probes, with the five ingest writers
+# saturated (p95 write wait of 2 to 4.5 minutes).
+#
+# ONE RULE, APPLIED WHERE EACH SUCH TASK IS CREATED.  Every task the server
+# mints on its own (source AUTO or FILL, whatever the arm) goes through
+# ``server_picked_budget``.  The arms still decide WHERE to look and quote
+# their own price (``budget_for``, ``value_budget``, the arm constants); this
+# only lifts that price to the floor, so a rung above it (512M, 2B, 10B) is
+# untouched, and the hourly arm rates and the pool target go on counting
+# tasks exactly as before.
+#
+# A CLAMP THAT IS THE PURCHASE KEEPS ITS BUDGET.  A short-mate verification
+# (``_short_mate_clamp``) and the look at a sibling the proof no longer needs
+# (``proof.proved_or_clamp``) are cheap on purpose, for the reasons written
+# where they are defined.  The test is the one ``multipv_for`` uses to give
+# them a single line: a budget at or below the clamp IS the clamp.  When the
+# visit ladder already asks for more, the task is an ordinary look and the
+# floor applies.
+#
+# Rolling back is setting this to 0: every arm then mints what it did before.
+SERVER_PICKED_MIN_NODES = REQUEST_BUDGET_LADDER[0]
+
+
+def server_picked_budget(budget, clamp=None):
+    """The budget of a task the server mints on its own (AUTO or FILL).
+
+    ``clamp`` is the ``(budget_nodes, multipv)`` pair the caller hands to
+    ``multipv_for`` for the same task, if any.
+    """
+    if clamp is not None and budget <= clamp[0]:
+        return budget
+    return max(budget, SERVER_PICKED_MIN_NODES)
+
+
 @functools.lru_cache(maxsize=1)
 def root_key():
     """La clave de la posicion inicial, calculada una vez por proceso.
@@ -2068,6 +2108,7 @@ def _queue_cycle_disambiguation(picks):
             continue
         budget = _rung_at_least(max(floor_quality,
                                     (child.nodes_invested or 0) + 1))
+        budget = server_picked_budget(budget)
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
@@ -2132,6 +2173,8 @@ def _queue_quality_convergence(discrepancies):
         budget = _rung_matching(own_quality)
         if (child.nodes_invested or 0) >= budget:
             continue                  # ya se le compro esa profundidad
+        # After the check: the floor deepens a purchase, it never adds one.
+        budget = server_picked_budget(budget)
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
@@ -3846,12 +3889,13 @@ def next_tasks(n):
             pos.priority = DEAD   # lapida (refresh_priorities la respeta)
             pos.save(update_fields=['priority'])
             continue
-        budget = budget_for(pos)
+        clamp = _short_mate_clamp(pos)
+        budget = server_picked_budget(budget_for(pos), clamp)
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
                       'multipv': multipv_for(pos.visits, budget,
-                                             clamp=_short_mate_clamp(pos))})
+                                             clamp=clamp)})
         if task.state == 'PENDING':
             tasks.append(task)
     return tasks
@@ -3945,6 +3989,8 @@ VALUE_EXPLORE_NODES = BUDGET_LADDER[0]         # 8M: la primera mirada
 VALUE_CASCADE_NODES = BUDGET_LADDER[0]
 VALUE_CASCADE_CAP = 16
 VALUE_CASCADE_ARM = 'cascade'
+# The prices above are what each arm asks for; a task is minted at no less
+# than SERVER_PICKED_MIN_NODES (128M), the community poll of October 2026.
 
 
 def value_budget(target):
@@ -4000,15 +4046,15 @@ def _queue_value_cascade(pos, cap=VALUE_CASCADE_CAP):
     room = min(cap, hourly, max(0, VALUE_CASCADE_CAP - pending))
     if room <= 0:
         return 0
+    budget = server_picked_budget(VALUE_CASCADE_NODES)
     made = 0
     for child in unjudged_children(pos):
         if made >= room:
             break
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
-            defaults={'budget_nodes': VALUE_CASCADE_NODES,
-                      'multipv': multipv_for(child.visits,
-                                             VALUE_CASCADE_NODES),
+            defaults={'budget_nodes': budget,
+                      'multipv': multipv_for(child.visits, budget),
                       'source': AnalysisTask.Source.AUTO,
                       'arm': VALUE_CASCADE_ARM})
         if created:
@@ -4118,6 +4164,7 @@ def _next_tasks_by_proof(n):
             # todavia le importa a la prueba; este dice que a la prueba ya no
             # le importa el nodo.  Cerrarlo exacto no compra nada.
             budget, clamp = min(budget, or_clamp[0]), or_clamp
+        budget = server_picked_budget(budget, clamp)
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
@@ -5009,6 +5056,7 @@ def _witness_refuted_revisit(pos, parent_keys):
         if not refuted:
             continue
         budget = max(BUDGET_LADDER[1], budget_for(parent))
+        budget = server_picked_budget(budget)
         task, created = AnalysisTask.objects.get_or_create(
             position=parent, generation=parent.visits,
             defaults={'budget_nodes': budget, 'multipv': DEPTH_MULTIPV,
@@ -5558,6 +5606,7 @@ COVERAGE_QUEUE_CAP = 100
 DN_REPAIR_QUEUE_CAP = 50
 QUALITY_QUEUE_CAP = 50
 COVERAGE_SCAN_ROWS = 2_000
+# The arm's own price; minted at no less than SERVER_PICKED_MIN_NODES.
 COVERAGE_SEED_NODES = 8_000_000
 
 
@@ -5750,8 +5799,8 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
                 continue
             task, created = AnalysisTask.objects.get_or_create(
                 position_id=child_id, generation=child.visits,
-                defaults={'budget_nodes': max(COVERAGE_SEED_NODES,
-                                              budget_for(child)),
+                defaults={'budget_nodes': server_picked_budget(
+                              max(COVERAGE_SEED_NODES, budget_for(child))),
                           'multipv': DEPTH_MULTIPV,
                           'source': AnalysisTask.Source.FILL,
                           'arm': COVERAGE_ARM})
@@ -5889,6 +5938,7 @@ def enqueue_dn_repair(cap=DN_REPAIR_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
                 if made >= room:
                     break
                 budget = max(DN_REPAIR_SEED_NODES, budget_for(child))
+                budget = server_picked_budget(budget)
                 task, created = AnalysisTask.objects.get_or_create(
                     position=child, generation=child.visits,
                     defaults={'budget_nodes': budget,
@@ -6164,6 +6214,9 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             # ``budget_for`` ya trae la escalera por visitas, que sigue
             # mandando cuando pide mas que el clamp.
             budget = budget_for(child)
+        if source != AnalysisTask.Source.USER:
+            # A system arm (the uncertainty expansion) mints through here.
+            budget = server_picked_budget(budget, clamp)
         child_route = ''
         if route and child.key in edges_by_child:
             child_route = route + ',' + edges_by_child[child.key]
