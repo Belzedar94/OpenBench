@@ -391,5 +391,6 @@ class OrClampMintingTests(TestCase):
     def test_without_a_proven_sibling_the_ladder_still_rules(self):
         tasks = self._mint()
 
-        self.assertEqual(tasks[0].budget_nodes, ingest.BUDGET_LADDER[0])
+        # The ladder's 8M first look, lifted to the server-picked floor.
+        self.assertEqual(tasks[0].budget_nodes, ingest.SERVER_PICKED_MIN_NODES)
         self.assertEqual(tasks[0].multipv, 5)
