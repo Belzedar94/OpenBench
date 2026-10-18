@@ -77,7 +77,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 50 # Client version to send to the Server
+CLIENT_VERSION   = 52 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -3962,6 +3962,27 @@ def available_commit_mb():
         return None
 
 
+MEMORY_MARGIN_MIN_MB  = 2048 # Leave at least this much memory free,
+MEMORY_MARGIN_RAM_DIV = 8    # or installed RAM / this, whichever is larger
+
+def memory_margin_mb(ram_total_mb):
+
+    ## What the worker leaves free for everything else when it sizes its games:
+    ## 2 GB, or an eighth of installed RAM once that is more (4 GB at 32 GB,
+    ## 8 GB at 64 GB).
+    ##
+    ## The 2 GB is the slack the free-memory term of the old rule already kept,
+    ## so a machine of up to 16 GB that was limited by its free memory keeps
+    ## the budget it had. The eighth makes the margin grow with the machine,
+    ## because everything it protects grows with it: the programs of whoever
+    ## sits at the desktop while the worker plays, the system's file cache,
+    ## and the error in the per-engine figure. That figure comes from a short
+    ## probe which a long game can outgrow, and the error now multiplies over
+    ## enough engines to fill nearly all of the RAM.
+
+    return max(MEMORY_MARGIN_MIN_MB, ram_total_mb // MEMORY_MARGIN_RAM_DIV)
+
+
 def memory_capped_concurrency(config, dev_name, base_name,
                               cutechess_cnt, concurrency_per):
 
@@ -3980,15 +4001,23 @@ def memory_capped_concurrency(config, dev_name, base_name,
 
         # This is somebody's desktop, not a server: leave them their machine.
         #
-        # A third of installed RAM is the standing ceiling, and free memory
-        # only ever pulls it DOWN. Sizing off free memory alone is unstable in
-        # the one direction that matters: the check runs while the previous
-        # workload is still winding down, so the worker sees the hole its own
-        # engines are making and throttles itself for it. The last floor stops
-        # a momentarily busy desktop from cutting the worker to nothing.
+        # The budget is the memory that is free right now, minus a margin that
+        # stays free for everything else. It is read afresh for every workload,
+        # just before its games start -- the previous workload's engines are
+        # dead by then and this one's benches have exited -- and never in the
+        # middle of one: concurrency is fixed once the games start, so a
+        # desktop that gets busy shrinks the NEXT workload, and one that frees
+        # up gets the room back with it.
+        #
+        # Until client 52 the budget was also capped at 40% of installed RAM
+        # and floored at a sixth of it. Under that cap most of a big machine's
+        # memory sat idle whatever -T said, and the volunteers voted to replace
+        # it with this rule (Discord poll, October 2026). The floor went with
+        # it, because it overrode the margin exactly when the desktop was busy.
+        # The minimum is still one game per copy, below.
         available_mb = psutil.virtual_memory().available // (1024 ** 2)
-        budget_mb    = min(config.ram_total_mb * 2 // 5,
-                           max(available_mb - 2048, config.ram_total_mb // 6))
+        margin_mb    = memory_margin_mb(config.ram_total_mb)
+        budget_mb    = max(0, available_mb - margin_mb)
 
         # Physical RAM is not what Windows enforces. Allocations die against
         # the COMMIT limit (RAM + pagefile), and the two can disagree wildly:
@@ -4014,9 +4043,11 @@ def memory_capped_concurrency(config, dev_name, base_name,
               % (concurrency_per, capped))
         print('[Note]   %s needs %d MB, %s needs %d MB, %d MB per game'
               % (dev_name, dev_mb, base_name, base_mb, per_game_mb))
-        print('[Note]   budget %d MB of %d MB total (%d MB free, %s MB commit)'
-              % (budget_mb, config.ram_total_mb, available_mb,
-                 commit_mb if commit_mb is not None else '?'))
+        print('[Note]   budget %d MB (%d MB free, %d MB margin, %s MB commit, '
+              '%d MB RAM)'
+              % (budget_mb, available_mb, margin_mb,
+                 commit_mb if commit_mb is not None else '?',
+                 config.ram_total_mb))
         return capped
 
     except Exception as error:              # noqa: BLE001 - never block work
