@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE_NAME = "TaikyokuShogi-Stockfish"
 ENGINE_REF = "b2014c422f4aae7420636ab17884dfb862cf4c15"
-CLIENT_REF = "c1ee4b7fa834cc2c6cec47715123e5e4bb18f735"
+CLIENT_REF = "a3748864ae870b50c3dfbed66a98c21e703a493c"
 CAMPAIGN = "taikyoku-material-regime-20260812"
 COHORT = "material-n8000-startpos-v1"
 TEACHER = "taikyoku-material-advance-v1"
@@ -26,7 +26,7 @@ class TaikyokuOnboardingTests(unittest.TestCase):
         self.presets = self.engine["datagen_presets"]
 
     def test_public_engine_identity_and_build_are_frozen(self):
-        self.assertEqual(self.general["client_version"], 51)
+        self.assertEqual(self.general["client_version"], 53)
         self.assertEqual(self.general["client_repo_ref"], CLIENT_REF)
         self.assertIn(ENGINE_NAME, self.general["engines"])
         self.assertTrue(self.engine["onboarding_ready"])
