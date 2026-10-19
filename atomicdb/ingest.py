@@ -1303,6 +1303,14 @@ BACKED_CYCLE_MAX_PLIES = 32
 # few dozen; past this the walk's own verdict stands and the child is worth
 # the draw, which is what it was worth before this budget existed.
 BACKED_CYCLE_MAX_NODES = 64
+# A wall-clock cap on the same valuation, per top-level call (CYCLE_DEADLINE_1019).
+# The node budget above does not count the spine walks that every re-read
+# position runs (_draw_cycling_children), and on 19-Oct-2026 a family full of
+# loops turned that product into ten-minute ingests that held row locks and
+# stalled the other writers.  Past the deadline the walk's verdict stands,
+# exactly as when the node budget runs out.
+BACKED_CYCLE_MAX_SECONDS = 1.0
+_cycle_deadline = [0.0]
 
 _BACKED_FIELDS = ['backed_eval', 'backed_move', 'backed_plies', 'backed_nodes']
 
@@ -1739,6 +1747,8 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
     ``only`` restricts the work to the parents that will use it: a proven
     row never looks at its children (see _backed_for).
     """
+    if budget is None:
+        _cycle_deadline[0] = time.monotonic() + BACKED_CYCLE_MAX_SECONDS
     for parent_key, children in by_parent.items():
         if only is not None and parent_key not in only:
             continue
@@ -1790,7 +1800,8 @@ def _value_on_line(key, played, cache, budget):
     position is worth BY THIS PATH, and a path is not a fact about the
     position (invariant 6).
     """
-    if budget[0] <= 0 or len(played) >= BACKED_CYCLE_MAX_PLIES:
+    if (budget[0] <= 0 or len(played) >= BACKED_CYCLE_MAX_PLIES
+            or time.monotonic() > _cycle_deadline[0]):
         return None
     budget[0] -= 1
     row = (Position.objects.filter(key=key)
