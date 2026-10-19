@@ -29,6 +29,15 @@ ON DEMAND (``--keys``).  One ascent seeded at the keys given and nothing
 else: what a report of "this position shows a stale number" needs, in
 milliseconds and without touching the rest of the graph.
 
+A WHOLE FAMILY (``--keys-file``, ``--until-rest``).  One ascent from a
+handful of keys recomputes them and what stands on them, and can stop in a
+state that a look at the rest of the family would still change: on 19 Oct
+it left cz_eclipsia's loop standing.  A family is the cure, and too many
+keys for one argument (2,734 positions are 178 KB, and Linux caps a single
+argument at 128 KB), so they come from a file, one per line or comma
+separated, are seeded ``--chunk`` at a time, and ``--until-rest`` repeats
+the pass until it changes nothing, at most ``--max-passes`` times.
+
 OPEN ONLY (``--open-only``).  A proven position headlines its status and
 its parents read that status, never its backed value (see
 ingest._child_contribution), so recomputing it repairs nothing anybody
@@ -69,6 +78,14 @@ class Command(BaseCommand):
             '--keys', default='',
             help='Comma separated position keys: recompute these and '
                  'whatever stands on them, then stop')
+        parser.add_argument(
+            '--keys-file', default='',
+            help='File of position keys, one per line or comma separated, '
+                 'added to --keys')
+        parser.add_argument(
+            '--until-rest', action='store_true',
+            help='With keys: repeat the pass until it changes nothing '
+                 '(at most --max-passes)')
 
     @staticmethod
     def _slices(chars, key_from, key_to):
@@ -96,10 +113,25 @@ class Command(BaseCommand):
         valve = opts['max_changes']
         # Solo nodos con hijos: una hoja sin aristas no tiene respaldo que
         # recalcular (y si lo tuviera escrito, el primer padre la recoge).
-        if opts['keys']:
-            keys = [key for key in opts['keys'].split(',') if key]
-            self.stdout.write('%d filas cambiadas desde %d claves' % (
-                ingest.backup_backed_evals(keys), len(keys)))
+        keys = [key for key in opts['keys'].split(',') if key]
+        if opts['keys_file']:
+            with open(opts['keys_file']) as handle:
+                keys += handle.read().replace(',', ' ').split()
+        if keys:
+            keys = list(dict.fromkeys(keys))
+            for n in range(1, (cap if opts['until_rest'] else 1) + 1):
+                changed = sum(ingest.backup_backed_evals(keys[i:i + chunk])
+                              for i in range(0, len(keys), chunk))
+                self.stdout.write('%d filas cambiadas desde %d claves'
+                                  % (changed, len(keys)))
+                if not opts['until_rest']:
+                    return
+                if changed == 0:
+                    self.stdout.write(self.style.SUCCESS(
+                        'punto fijo en la pasada %d' % n))
+                    return
+            self.stdout.write(self.style.WARNING(
+                'tope de pasadas (%d) sin punto fijo' % cap))
             return
         with_kids = Position.objects.filter(
             Exists(Edge.objects.filter(parent_id=OuterRef('key'))))

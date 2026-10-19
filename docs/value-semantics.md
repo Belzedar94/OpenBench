@@ -76,9 +76,16 @@ Every position value on the site is in exactly one of four states:
      Rd8-f8 published 1200 at all four positions, each standing on the
      next, because the returning line carried more search than the way out
      it borrowed its value from; following the best move went round for
-     ever and the family never came to rest). A loop every one of whose
-     positions strictly prefers going round is left as it is: opening it
-     would change a value. That draw is an assertion
+     ever and the family never came to rest). The tie is graded by where
+     each move's chain of pointers goes: **to a source** (an own search, a
+     proven position, a leaf) **beats into a loop elsewhere, which beats
+     back to this position**, and a loop is only opened with a move that
+     reaches a source. Without the middle grade the positions around a
+     loop could stand on it and make it protect itself: every same-value
+     move of the loop's own positions then ran back into it through them
+     (2026-10-19, the same loop after the fix went live, at 1208). A loop
+     every one of whose positions strictly prefers going round is left as
+     it is: opening it would change a value. That draw is an assertion
      about a *walk* over
      `backed_move` pointers, not a measurement: nobody has ever searched
      whether the repetition is forced. So it carries **no search weight**,

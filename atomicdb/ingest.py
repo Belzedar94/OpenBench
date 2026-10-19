@@ -1311,7 +1311,7 @@ class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
     __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles',
-                 'floor', 'returns', 'exact')
+                 'floor', 'returns', 'exact', 'circular')
 
     def __init__(self, move, value, quality, plies, key=None, spine=None,
                  floor=False, exact=False):
@@ -1340,6 +1340,10 @@ class _ChildValue:
         # write that loop (see _open_pointer_loops).  It only loses ties
         # (see _best_child).
         self.returns = False
+        # The child's pointers run into a loop that does not pass through
+        # the parent: its number is not shown to come from anywhere.  Set by
+        # the walk of backup_backed_evals; it too only loses ties.
+        self.circular = False
 
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
@@ -1574,7 +1578,8 @@ class _SpineCache:
         self.spines[key] = move
 
 
-def _draw_cycling_children(by_parent, cache, line=frozenset()):
+def _draw_cycling_children(by_parent, cache, line=frozenset(),
+                           circular=None):
     """MARCA todo hijo cuyo valor vuelve a su propio padre.
 
     Camina la espina del HIJO (``backed_move`` a ``backed_move``) buscando al
@@ -1603,6 +1608,12 @@ def _draw_cycling_children(by_parent, cache, line=frozenset()):
     through above the parent (see _value_on_line).  Coming back to any of
     them is the same repetition as coming back to the parent, and an edge
     that lands on one of them directly needs no walk at all.
+
+    ``circular``, when given, collects ``(parent_key, move_uci)`` of the
+    children whose spine closes on itself without passing through the
+    parent.  That is no repetition here and stays unmarked, but it says the
+    child's number is not shown to come from anywhere (see the block above
+    _best_child).
     """
     cycled = set()
     walks = []
@@ -1644,7 +1655,11 @@ def _draw_cycling_children(by_parent, cache, line=frozenset()):
                 cycled.add((parent_key, child.move))
                 continue
             spine = cache.spines.get(below)
-            if below in seen or not spine or status != 'UNKNOWN':
+            if below in seen:
+                if circular is not None:
+                    circular.add((parent_key, child.move))
+                continue
+            if not spine or status != 'UNKNOWN':
                 continue
             seen.add(below)
             walk[2], walk[3] = below, spine
@@ -1931,6 +1946,29 @@ def _showcase_bound(last_analysis):
 # repetition, worth 0.  It cannot strictly prefer that, so it has another
 # move worth the same; below zero the same with Black.
 #
+# A LOOP THAT PROTECTS ITSELF (19-Oct, the same ring once the two parts
+# above were live).  Parts 1 and 2 only look at loops through the position
+# being recomputed, so the positions AROUND a loop were still free to stand
+# on it: for them the loop's move is no repetition, it just ties with a move
+# to a real source and carries more search.  Once they all drain into the
+# loop, every same-value alternative of the loop's own positions runs back
+# into it through them, each one is flagged as coming back, part 2 has no
+# move to open with, and the loop rests.  Replayed on the complete region
+# below the report (2,734 open positions, nothing frozen at a boundary), a
+# `recascade_backed --keys` over the ring ended that way in 4 of 20 physical
+# row orders, and one of them is exactly the ring production kept at 1208
+# (d6f6, f8d8, f6d6, d8f8).
+#
+# So part 1 grades a tie by where the chain of pointers of each move goes
+# (see _grounding): to a source (an own search, a proven position, a leaf,
+# or a chain the walk could not follow to its end), into a loop that does
+# not pass through this position, or back to this position, in that order
+# of preference.  A position stands on a loop only when nothing that reaches
+# a source is worth as much, so the positions around a loop drain to the
+# sources at equal value, and the loop's own positions get a way out that
+# does not come back.  Part 2 opens a loop only with a move that reaches a
+# source.
+#
 # WHAT IT LEAVES ALONE.  A loop at 0 is the repetition draw, already marked
 # as one and shown with the repetition chip.  A loop no position of the
 # level can open without a worse value wakes its other positions once, so
@@ -1949,18 +1987,29 @@ def _showcase_bound(last_analysis):
 # and the same transaction.
 
 
+def _grounding(child):
+    """Where the move's chain of pointers goes, as a tie-break: higher wins.
+
+    2: to a source, or not known to loop; 1: into a loop that does not pass
+    through the parent; 0: back to the parent (see the block above).
+    """
+    if child.returns:
+        return 0
+    return 1 if child.circular else 2
+
+
 def _best_child(children, stm_white):
     """The child the side to move stands on, among informed ``children``.
 
-    Best value for the mover; among equal values, a move that would close a
-    loop of pointers loses (``returns``, see the block above); then the
-    heavier support, then the shallower chain, then movegen order, so that
-    a replay decides the same.
+    Best value for the mover; among equal values, the move whose chain of
+    pointers is better grounded (see _grounding); then the heavier support,
+    then the shallower chain, then movegen order, so that a replay decides
+    the same.
     """
     if stm_white:
-        return max(children, key=lambda c: (c.value, not c.returns,
+        return max(children, key=lambda c: (c.value, _grounding(c),
                                             c.quality, -c.plies))
-    return min(children, key=lambda c: (c.value, c.returns,
+    return min(children, key=lambda c: (c.value, -_grounding(c),
                                         -c.quality, c.plies))
 
 
@@ -2070,8 +2119,8 @@ def _open_pointer_loops(rows, children, decided, cache, showcases):
                 loop_child.returns = was
             out = next((c for c in kids if c.move == again[1]), None)
             if (again[0] == value and out is not None and out.move != move
-                    and not out.returns):
-                # The same value through a move that does not come back.
+                    and _grounding(out) == 2):
+                # The same value through a move that reaches a source.
                 decided[key] = again
                 cache.wrote(key, again[1])
                 opened = True
@@ -2575,16 +2624,19 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # worth the walk that follows.
         open_rows = {row.key for row in rows
                      if _status_eval(row.status) is None}
+        elsewhere = set()
         returning.update(
             parent for parent, _move in
-            _draw_cycling_children(children, spines)
+            _draw_cycling_children(children, spines, circular=elsewhere)
             if parent in open_rows)
-        # A move that comes back here loses the ties of THIS level (see the
-        # block above _best_child); the valuation of the returning line
-        # itself, one ply deeper, is left as it was.
-        for kids in children.values():
+        # A move that comes back here, or runs into a loop anywhere, loses
+        # the ties of THIS level (see the block above _best_child); the
+        # valuation of the returning line itself, one ply deeper, is left as
+        # it was.
+        for parent, kids in children.items():
             for kid in kids:
                 kid.returns = kid.cycles
+                kid.circular = (parent, kid.move) in elsewhere
         # And a child that returns is valued on the line that returns, so
         # the first answer is already the one a full lap would reach.
         _resolve_returning_children(children, spines, only=open_rows)

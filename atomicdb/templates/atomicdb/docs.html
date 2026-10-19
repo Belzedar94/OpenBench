@@ -90,13 +90,15 @@ through contributes exactly <strong>0</strong> at the point where it returns,
 with zero quality. Every position on the way back still chooses among all of
 its moves: the side that does not want the draw leaves the loop wherever it
 has something better, and the side that can play the repeating move itself
-is never worse off than that draw. Between two moves worth the same, the one
-whose line comes back never wins, and no position is left standing round a
-loop that one of its positions can leave for the same value: a returning line
-is only worth its value because somebody leaves the loop later, so the move
-that leaves is the one a position stands on and recommends, and following the
-best move does not go round a loop it could leave. Zero is what the line is
-worth; zero quality is what the claim
+is never worse off than that draw. Between two moves worth the same, a move
+whose chain of backed moves reaches a real analysis wins over one whose chain
+runs into a loop, and that one over a move that comes back to the position
+itself; no position is left standing round a loop that one of its positions
+can leave for the same value. A returning line is only worth its value
+because somebody leaves the loop later, so the move that leaves is the one a
+position stands on and recommends, and following the best move does not go
+round a loop it could leave. Zero is what the line is worth; zero quality is
+what the claim
 deserves, because nobody has ever searched whether the repetition is forced,
 so it is an assertion about a walk over pointers and not a measurement. It can
 never settle a position that is not fully covered: while replies nobody has
