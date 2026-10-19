@@ -724,7 +724,7 @@
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
             title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
             class="backed-mark"
-            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim">not analysed</span>{% endif %}</td>
+            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
@@ -738,7 +738,7 @@
           title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
-        <td><span class="dim">-</span></td>
+        <td><span class="dim" data-fold>-</span></td>
         <td class="dim proofnums"></td>
         <td class="dim">-</td>
       </tr>
@@ -747,6 +747,45 @@
       <tr><td colspan="6" class="dim">Terminal position: the game ended here.</td></tr>
       {% endif %}
     </table>
+    {% comment %}Pliegue de las jugadas sin nada que ensenar.  En casi todas
+    las posiciones la mayoria de filas dicen "not analysed" (ni busqueda
+    propia, ni linea sembrada, ni respaldo) o "not in tree", y empujan fuera
+    de la pantalla las jugadas exploradas y las ya probadas.  Ojo: una fila
+    "unexplored" PUEDE traer numero (linea sembrada, respaldo); esas se
+    quedan a la vista.  La marca es data-fold en la celda vacia, no una clase
+    en el <tr>: los tests leen las filas del arbol como <tr><td><span
+    class="chip.  Con seis o mas, se esconden tras un boton puesto en el
+    sitio de la primera, y el navegador recuerda si el visitante las prefiere
+    abiertas.  Sin JavaScript la tabla sale entera, como antes.{% endcomment %}
+    <script>
+    (function () {
+      const rows = Array.from(document.querySelectorAll('span[data-fold]'), function (s) { return s.closest('tr'); });
+      if (rows.length < 6) return;
+      const KEY = 'atomicdb.showUnexplored';
+      let open = false;
+      try { open = localStorage.getItem(KEY) === '1'; } catch (e) {}
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      const btn = document.createElement('button');
+      cell.colSpan = 6;
+      btn.type = 'button';
+      btn.className = 'reqbtn';
+      cell.appendChild(btn);
+      row.appendChild(cell);
+      rows[0].parentNode.insertBefore(row, rows[0]);
+      function show(v) {
+        open = v;
+        rows.forEach(function (r) { r.style.display = v ? '' : 'none'; });
+        btn.textContent = (v ? 'Hide the ' : 'Show the ') + rows.length + ' moves with no analysis yet';
+        btn.setAttribute('aria-expanded', v ? 'true' : 'false');
+      }
+      btn.addEventListener('click', function () {
+        show(!open);
+        try { localStorage.setItem(KEY, open ? '1' : '0'); } catch (e) {}
+      });
+      show(open);
+    })();
+    </script>
   </div>
 </div>
 
