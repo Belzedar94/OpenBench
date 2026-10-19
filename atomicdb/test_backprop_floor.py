@@ -172,6 +172,16 @@ class FloorRowTests(TestCase):
         self.assertFalse(by_move['c8h3']['floor'])
         self.assertEqual(views._arrow_move(rows, node), 'c8h3')
 
+    def test_a_backed_move_onto_a_refused_floor_is_passed_over(self):
+        # A backed move older than the rule that refuses its floor: the arrow
+        # keeps away from the floor all the same.
+        node, floor = _family('STALE')
+        Position.objects.filter(key=node.key).update(backed_move='c8h3')
+        node.refresh_from_db()
+
+        self.assertEqual(
+            views._arrow_move(views._child_moves(node), node), 'e7e5')
+
 
 class FloorAndTheBulkButtonTests(TestCase):
     """Two predicates about "nobody searched this", and where they part.

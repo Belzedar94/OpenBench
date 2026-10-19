@@ -188,3 +188,10 @@ class ArrowTests(KnightLoopFixture):
         self.p3.save(update_fields=['best_move'])
         response = self._explore(self.p3.key, play=','.join(self.route))
         self.assertNotEqual(response.context['best_move'], 'f6g8')
+
+    def test_arrow_never_points_at_a_blocked_backed_move(self):
+        # Not even when the header's number comes through it: the block wins.
+        Position.objects.filter(key=self.p3.key).update(
+            backed_eval=35, backed_move='f6g8', backed_plies=1)
+        response = self._explore(self.p3.key, play=','.join(self.route))
+        self.assertIsNone(response.context['best_move'])

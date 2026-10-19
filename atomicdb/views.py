@@ -4613,6 +4613,7 @@ def api_query(request):
     # entrega pares incoherentes — un cliente jugo la segunda mejor creyendo
     # que llevaba el score de la primera (reporte del propietario, 13-ago;
     # misma leccion de la flecha del explore, 29-jul).
+    # The top row yields to the move ``score`` comes from (§ _arrow_move).
     return JsonResponse({
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'point': point,
@@ -5994,7 +5995,16 @@ def _queued_children(moves):
 
 
 def _arrow_move(moves, pos):
-    """La jugada de la flecha del tablero: el TOP no bloqueado de la tabla.
+    """The move of the board arrow: the one the header's number comes from.
+
+    An open position quotes its backed value, which comes through
+    ``backed_move``, or its own search when the backup settled there
+    (§ ingest._backed_for returns no move then), which is ``best_move``.
+    The top row need not be that move: an unsearched claim can top the
+    table and still be vetoed by the backup (1bbe0b3e, 14-Oct: the arrow on
+    g4h5, seeded at 1179, under a header of 1224 through g8h8).  The rule
+    below decides when there is no such move (a proven position, nothing
+    backed yet) or it is blocked, a refused floor or not a row.
 
     Mismo contrato que tenia el inline de ``explore`` — la primera fila con
     valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
@@ -6007,6 +6017,14 @@ def _arrow_move(moves, pos):
     on, so the move recommended and the number quoted are one pair.
     """
     blocked = {m['uci'] for m in moves if m.get('blocked')}
+    header_move = None
+    if pos.status == 'UNKNOWN' and pos.backed_eval is not None:
+        header_move = pos.backed_move or (
+            pos.best_move if pos.backed_eval == pos.eval_cp else None)
+    for move in moves:
+        if (move['uci'] == header_move
+                and not (move.get('blocked') or move.get('floor'))):
+            return header_move
     for move in moves:
         if move.get('blocked') or move.get('floor'):
             continue
@@ -6423,6 +6441,8 @@ def explore(request, key):
         # reportado 29-jul; misma leccion de la fuente unica de verdad).
         # Y nunca a una fila BLOQUEADA por repeticion: recomendar lo que no
         # se puede pinchar es contradecir el bloqueo con la flecha.
+        # The top row yields to the move the header's number comes from
+        # (§ _arrow_move).
         'best_move': (None if pos.closure == 'TERMINAL'
                       else _arrow_move(moves, pos)),
         'stm': 'White' if stm_white else 'Black',
