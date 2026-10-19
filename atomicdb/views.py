@@ -3765,7 +3765,7 @@ def _own_search(point, nodes):
     return f'own search: {point:+d} @ {_human(nodes)} nodes'
 
 
-def _claim_note(line_no):
+def _claim_note(line_no, line_score=None, score=None):
     """De donde sale un numero que NINGUNA busqueda suya avala.
 
     Es lo que decia el chip de la fila — ``line N`` cuando la jugada encabeza
@@ -3783,7 +3783,21 @@ def _claim_note(line_no):
     Las dos redacciones son las que ya se habian afinado para el tooltip del
     chip; lo unico que cambia es que ahora son TODO lo que se dice, asi que
     dicen la historia entera y no la mitad que no cabia en dos palabras.
+
+    Una posicion a la que se llega por dos ordenes de jugadas guarda UN solo
+    numero: el ultimo que alguien sembro en ella.  Si lo sembro otro padre, la
+    fila pinta ese numero y la linea de este nodo dice otro, y "from engine
+    line N" atribuiria a esta linea un numero que no es suyo (reporte de
+    comunidad del 19-oct-2026: h4 a 809 bajo una linea 2 que decia 589).
+    Entonces el aviso dice los dos.  ``line_score`` y ``score`` van desde el
+    bando que mueve, como la celda (§ ``_line_value``).
     """
+    if line_no and line_score is not None and score is not None \
+            and line_score != score:
+        return (f"engine line {line_no} of this node's current analysis has "
+                f"this move at {line_score}; the number shown is the latest "
+                'value stored for the resulting position, seeded from another '
+                'line or move order; no direct search of it yet')
     if line_no:
         return (f"from engine line {line_no} of this node's current analysis"
                 '; no direct search of the resulting position yet')
@@ -3855,6 +3869,23 @@ def _child_keys(pos, ucis):
     if missing and CHILD_KEY_CACHE_SECONDS > 0:
         cache.set(cache_key, keys, CHILD_KEY_CACHE_SECONDS)
     return {uci: keys[uci] for uci in wanted}
+
+
+def _line_value(pos, line_no, stm_white):
+    """Lo que dice de su jugada la linea VIGENTE ``line_no`` de este nodo, en
+    centipeones desde el bando que mueve; None si no hay tal linea o si trae
+    mate.  Cuenta las lineas igual que ``_line_numbers``: el mismo ordinal."""
+    if not line_no:
+        return None
+    current = [line for line in (pos.last_analysis or [])
+               if isinstance(line, dict) and not line.get('prior_pass')]
+    if line_no > len(current):
+        return None
+    line = current[line_no - 1]
+    value = line.get('eval_cp')
+    if value is None or line.get('mate') is not None:
+        return None
+    return value if stm_white else -value
 
 
 def _line_numbers(pos):
@@ -4099,7 +4130,11 @@ def _child_moves(pos):
                       # exactamente donde antes iba el chip mudo de la fila:
                       # caminado y sin respaldo que lo explique por su cuenta.
                       'claim': (_FLOOR_NOTE if floor else
-                                _claim_note(line_numbers.get(e.move_uci))
+                                _claim_note(line_numbers.get(e.move_uci),
+                                            _line_value(pos,
+                                                        line_numbers.get(e.move_uci),
+                                                        stm_white),
+                                            score)
                                 if walked and not backed_plies else None),
                       # A floor this position does not take: never the
                       # recommended move (§ _arrow_move), and flagged in the
