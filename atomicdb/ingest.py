@@ -1311,12 +1311,15 @@ class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
     __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles',
-                 'floor')
+                 'floor', 'returns', 'exact')
 
     def __init__(self, move, value, quality, plies, key=None, spine=None,
-                 floor=False):
+                 floor=False, exact=False):
         self.move, self.value = move, value
         self.quality, self.plies = quality, plies
+        # The child's status is decided: its value is the truth, borrowed
+        # from nobody, and no loop of pointers can pass through it.
+        self.exact = exact
         # The child never had a search of its own and BORROWED this number
         # from the replies somebody opened (see is_floor).  What that is
         # worth to the parent is decided by the negamax, same as ``cycles``.
@@ -1331,6 +1334,12 @@ class _ChildValue:
         # se separa de lo que ese hecho vale, porque cuanto vale depende de
         # quien mueve y el paseo no tiene perspectiva.
         self.cycles = False
+        # The parent's pointer through this move would close a loop: the
+        # walk found the value coming back (set by backup_backed_evals,
+        # kept when the returning line is valued), or the level is about to
+        # write that loop (see _open_pointer_loops).  It only loses ties
+        # (see _best_child).
+        self.returns = False
 
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
@@ -1344,7 +1353,8 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
     """
     exact = _status_eval(status)
     if exact is not None:
-        return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0, child_key)
+        return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0, child_key,
+                           exact=True)
     if backed_eval is not None:
         # La calidad del mejor conocimiento del hijo es TODO lo invertido en
         # el, no solo el soporte de la hoja que respaldo el valor.  Con solo
@@ -1608,6 +1618,9 @@ def _draw_cycling_children(by_parent, cache, line=frozenset()):
                 continue
             if child.value is None or not child.spine:
                 continue          # sin espina propia no hay ciclo que buscar
+            # The pointer the child stores, before a returning line replaces
+            # ``spine`` (see _open_pointer_loops, which walks it again).
+            cache.spines.setdefault(child.key, child.spine)
             walks.append([parent_key, child, child.key, child.spine,
                           {child.key}])
     for _ in range(BACKED_CYCLE_MAX_PLIES):
@@ -1858,6 +1871,216 @@ def _showcase_bound(last_analysis):
     return worst if isinstance(worst, int) else None
 
 
+# ---------------- a loop of pointers is not progress ----------------
+#
+# THE CASE (cz_eclipsia, 18-Oct).  "Starting from this node, there's no way
+# to avoid an infinite loop while keeping the eval the same."  At 909727fb,
+# White to move, Rd6-f6 Rf8-d8 Rf6-d6 Rd8-f8 comes back to the same position,
+# and the four positions of that loop all published 1200, each one on the
+# move to the next.  Following the best move went round for ever, and the
+# backed chip of all four jumped to "repetition" instead of to the analysis
+# the number comes from.
+#
+# THE MECHANISM.  A move whose value comes back to the parent is valued on
+# the line that returns (see _resolve_returning_children), and what that
+# line is worth is somebody's way OUT of the loop: the loop and the way out
+# tie.  The tie went to the heavier support, and a returning line carries
+# the heaviest search of every position it passes through, so it beat the
+# very way out it was borrowing its value from.  Each position of the loop
+# then stood on the next, the published line repeated, and since each
+# recompute re-reads pointers the previous one had just moved, the family
+# never came to rest: replayed on a copy of the real one (674 open
+# positions), forty sweeps of the old rule were still rewriting rows, with
+# phases where Black, twelve pawns down, was published at 0.
+#
+# THE RULE, in two parts with one purpose: the published line never goes
+# round a loop that a position on it can leave for the same value.
+#
+#   1. Between moves of equal value, a move whose value comes back to the
+#      position being recomputed never wins.  It is the side that wants
+#      more than a draw that needs this: a returning line is worth its
+#      value only because somebody leaves the loop later, so of two moves
+#      worth the same, the one that does not come back is the progress.  A
+#      move that returns still wins whenever it is strictly better (moky's
+#      Rf5+, opabinia's queen: see the block above), and how the returning
+#      line is valued one ply deeper is left exactly as it was.
+#
+#   2. A level never writes a loop of ``backed_move`` pointers at a value
+#      other than 0.  Part 1 alone over-opens: when every position of a
+#      loop is recomputed in the same level (a sweep, or the settling look
+#      below), each one sees the loop and each one leaves it; one level
+#      later none of them returns any more, the loop's heavier moves win the
+#      ties again and all of them come back.  A wheel of period two, found
+#      on a sampled family (fcb828cc, Rb8-c8 / Kb7-c7, all of it at 9500):
+#      256 rows rewritten on every sweep.  So once a level has decided what
+#      its positions stand on, those moves are followed through the moves
+#      stored below them, and a loop that comes back to a position of the
+#      level is opened at ONE of its positions: the first by key that has
+#      another move worth the same.  The others keep standing round the
+#      loop towards it, and that is the line to the way out.
+#
+# Neither part changes a value, so nothing anybody publishes moves by a
+# centipawn.  What changes is the move a position stands on: the move the
+# explorer recommends, the API's ``best_move``, and the spine the backed
+# chip and the proof manager's value descent (proof._walk_spine) follow.
+#
+# WHY A LOOP CAN BE OPENED.  For every position of a loop to stand on the
+# next, every one of them must strictly prefer going round.  Above zero,
+# take the White position whose own way out is the best of the loop's:
+# going round reaches the other ways out, none better than its own, or the
+# repetition, worth 0.  It cannot strictly prefer that, so it has another
+# move worth the same; below zero the same with Black.
+#
+# WHAT IT LEAVES ALONE.  A loop at 0 is the repetition draw, already marked
+# as one and shown with the repetition chip.  A loop no position of the
+# level can open without a worse value wakes its other positions once, so
+# that they get a look; when none of them can either, it stays.  That does
+# happen: where the Black positions of a loop still have replies nobody
+# opened, their own searches act as ways out, every position strictly
+# prefers going round and the values around the loop differ (2e0b6263,
+# 1117 and 1133 in turn).  Opening it would take a worse move somewhere,
+# which is a value change and not this rule.  A loop longer than
+# BACKED_CYCLE_MAX_PLIES is not seen, the same bound as the repetition walk.
+#
+# COST.  The walk that marks returning moves already runs.  Part 2 walks the
+# moves a level has just decided through the steps that walk has already
+# read; it asks the database only for steps nobody had read, one query per
+# ply.  No new lock: only rows of the level change, in the same bulk_update
+# and the same transaction.
+
+
+def _best_child(children, stm_white):
+    """The child the side to move stands on, among informed ``children``.
+
+    Best value for the mover; among equal values, a move that would close a
+    loop of pointers loses (``returns``, see the block above); then the
+    heavier support, then the shallower chain, then movegen order, so that
+    a replay decides the same.
+    """
+    if stm_white:
+        return max(children, key=lambda c: (c.value, not c.returns,
+                                            c.quality, -c.plies))
+    return min(children, key=lambda c: (c.value, c.returns,
+                                        -c.quality, c.plies))
+
+
+def _resolve_level_steps(cache, pairs, decided):
+    """One query for the pointer steps the cache does not know yet.
+
+    Like _resolve_spine_steps, except that a position of the level keeps the
+    move the level has just decided for it, not the one still stored.
+    """
+    unknown = {(node, move) for node, move in pairs
+               if move and (node, move) not in cache.steps}
+    if not unknown:
+        return
+    for parent_id, move_uci, child_id, status, spine in (
+            Edge.objects.filter(
+                parent_id__in={node for node, _m in unknown},
+                move_uci__in={move for _n, move in unknown})
+            .values_list('parent_id', 'move_uci', 'child_id',
+                         'child__status', 'child__backed_move')):
+        cache.steps[(parent_id, move_uci)] = (child_id, status)
+        if child_id not in decided:
+            cache.spines[child_id] = spine
+
+
+def _loop_still_closed(cache, members):
+    """Every position of ``members`` still stands on the next one."""
+    for index, key in enumerate(members):
+        move = cache.spines.get(key)
+        step = cache.steps.get((key, move)) if move else None
+        if step is None or step[0] != members[(index + 1) % len(members)]:
+            return False
+    return True
+
+
+def _open_pointer_loops(rows, children, decided, cache, showcases):
+    """Open the loops of pointers this level is about to write.
+
+    ``decided`` maps every position of the level to the ``(value, move,
+    plies, quality)`` it is about to be written with; ``cache`` already
+    holds those moves (see _SpineCache.wrote).  A decided position may be
+    replaced here by the same value through another move (see the block
+    above).  Returns the positions of a loop nobody here could open, which
+    are not in this level: the caller gives them a look.
+    """
+    by_key = {row.key: row for row in rows}
+    starts = sorted(key for key, (value, move, _p, _q) in decided.items()
+                    if move and value and _status_eval(by_key[key].status)
+                    is None)
+    if not starts:
+        return set()
+    # The first step of every walk is known without asking: it is one of the
+    # children this level has just read.
+    for key in starts:
+        move = decided[key][1]
+        child = next((c for c in children.get(key, ()) if c.move == move),
+                     None)
+        if child is not None:
+            status = 'EXACT' if child.exact else 'UNKNOWN'
+            cache.steps.setdefault((key, move), (child.key, status))
+    loops = {}
+    walkers = [[key, key, [key]] for key in starts]
+    for _ in range(BACKED_CYCLE_MAX_PLIES):
+        if not walkers:
+            break
+        _resolve_level_steps(
+            cache, [(node, cache.spines.get(node))
+                    for _start, node, _path in walkers], decided)
+        alive = []
+        for walker in walkers:
+            start, node, path = walker
+            move = cache.spines.get(node)
+            step = cache.steps.get((node, move)) if move else None
+            if step is None:
+                continue                  # the line ends: no loop
+            below, status = step
+            if status != 'UNKNOWN':
+                continue                  # a proven value is nobody's echo
+            if below == start:
+                loops.setdefault(frozenset(path), path)
+                continue
+            if below in path:
+                continue                  # a loop that does not pass here
+            path.append(below)
+            walker[1] = below
+            alive.append(walker)
+        walkers = alive
+    wake = set()
+    for members in sorted(loops.values()):
+        if not _loop_still_closed(cache, members):
+            continue                      # opened at a loop it shares
+        ring = members + members[:1]
+        opened = False
+        for key in sorted(k for k in members if k in by_key):
+            value, move = decided[key][:2]
+            kids = children.get(key, ())
+            loop_child = next((c for c in kids if c.move == move
+                               and c.key == ring[ring.index(key) + 1]), None)
+            if loop_child is None:
+                continue
+            was, loop_child.returns = loop_child.returns, True
+            try:
+                showcase = showcases.get(key)
+                again = _backed_for(by_key[key], kids,
+                                    bound=_showcase_bound(showcase),
+                                    lines=_showcase_lines(showcase))
+            finally:
+                loop_child.returns = was
+            out = next((c for c in kids if c.move == again[1]), None)
+            if (again[0] == value and out is not None and out.move != move
+                    and not out.returns):
+                # The same value through a move that does not come back.
+                decided[key] = again
+                cache.wrote(key, again[1])
+                opened = True
+                break
+        if not opened:
+            wake.update(key for key in members if key not in by_key)
+    return wake
+
+
 def _backed_for(row, children, discrepancies=None, bound=None,
                 cycle_picks=None, lines=frozenset()):
     """(valor, arista, plies, calidad) respaldados para ``row``.
@@ -1950,13 +2173,11 @@ def _backed_for(row, children, discrepancies=None, bound=None,
     bounded = (bound is not None
                and (len(informed) < len(children)
                     or coverage_is_partial(row, children)))
-    # Empates de valor: gana el respaldo mas pesado, luego el mas superficial
-    # (menos plies), luego el orden de movegen, para que el resultado sea
-    # determinista bajo replay.
-    best = (max if stm_white else min)(
-        informed,
-        key=lambda c: (c.value, c.quality, -c.plies) if stm_white
-        else (c.value, -c.quality, c.plies))
+    # Empates de valor: gana la jugada que no vuelve aqui, luego el respaldo
+    # mas pesado, luego el mas superficial (menos plies), luego el orden de
+    # movegen, para que el resultado sea determinista bajo replay
+    # (see _best_child).
+    best = _best_child(informed, stm_white)
     complete = bounded or not coverage_is_partial(row, children)
     if best.cycles:
         # El mejor conocimiento de este nodo es repetir.  Es una pregunta
@@ -2003,10 +2224,7 @@ def _backed_for(row, children, discrepancies=None, bound=None,
                     and _better_for_mover(c.value, own, stm_white)]
         if not measured:
             return own, None, 0, own_quality
-        best = (max if stm_white else min)(
-            measured,
-            key=lambda c: (c.value, c.quality, -c.plies) if stm_white
-            else (c.value, -c.quality, c.plies))
+        best = _best_child(measured, stm_white)
     if not complete:
         if own is not None:
             # GUARDA DIRECCIONAL (intacta): con cobertura parcial y sin cota
@@ -2340,6 +2558,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     visits, changed_total, processed, plies = {}, 0, 0, 0
     dropped = []                 # wakes the revisit cap refused
     returning, settling = set(), False   # see the settling look below
+    looked = set()               # woken once for a loop (_open_pointer_loops)
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     while frontier and plies < max_plies:
         plies += 1
@@ -2360,6 +2579,12 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             parent for parent, _move in
             _draw_cycling_children(children, spines)
             if parent in open_rows)
+        # A move that comes back here loses the ties of THIS level (see the
+        # block above _best_child); the valuation of the returning line
+        # itself, one ply deeper, is left as it was.
+        for kids in children.values():
+            for kid in kids:
+                kid.returns = kid.cycles
         # And a child that returns is valued on the line that returns, so
         # the first answer is already the one a full lap would reach.
         _resolve_returning_children(children, spines, only=open_rows)
@@ -2378,6 +2603,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                      if gaps else {})
         dirty, propagate, standing, discrepancies = [], [], [], []
         cycle_picks = []
+        decided = {}
         for row in rows:
             processed += 1
             spines.wrote(row.key, row.backed_move)
@@ -2386,11 +2612,17 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             # repeticion no acabe decidiendo nada, y a proposito ANTES del
             # corte de "sin cambios": un clavado viejo re-intenta la compra en
             # cada pasada y el dedup de tareas absorbe la repeticion.
-            value, move, below, quality = _backed_for(
+            decided[row.key] = _backed_for(
                 row, children.get(row.key, ()), discrepancies,
                 bound=_showcase_bound(showcases.get(row.key)),
                 cycle_picks=cycle_picks,
                 lines=_showcase_lines(showcases.get(row.key)))
+            spines.wrote(row.key, decided[row.key][1])
+        # Before anything is written: no loop of pointers through this level
+        # (see the block above _best_child).
+        wake = _open_pointer_loops(rows, children, decided, spines, showcases)
+        for row in rows:
+            value, move, below, quality = decided[row.key]
             if _backed_stored(row, value, move, below, quality):
                 continue
             if _backed_worth_propagating(row, value, move):
@@ -2407,6 +2639,13 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
             changed_total += len(dirty)
         _queue_quality_convergence(discrepancies)
         _queue_cycle_disambiguation(cycle_picks)
+        # The other positions of a loop this level could not open get one
+        # look per ascent: one of them may have the move that opens it.
+        wake = [key for key in sorted(wake) if key not in looked]
+        looked.update(wake)
+        if not (propagate or standing) and wake:
+            frontier = wake
+            continue
         if not (propagate or standing):
             # AT REST, OR ONLY OUT OF NEWS?  A row valued on a returning
             # line read the pointers of positions further round the loop,
@@ -2427,7 +2666,8 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                 'plies': plies, 'seed_count': len(seed_keys)})
             break
         frontier = []
-        for key in _parents_to_wake(propagate, standing):
+        for key in dict.fromkeys([*_parents_to_wake(propagate, standing),
+                                  *wake]):
             seen = visits.get(key, 0)
             if seen < BACKED_MAX_REVISITS:
                 visits[key] = seen + 1

@@ -63,7 +63,22 @@ Every position value on the site is in exactly one of four states:
      is never worse off there than the draw (2026-10-04; scoring the whole
      child at 0 handed the losing side a draw the winning side could
      refuse, took the winning side's best move away, and had no resting
-     state where two loops share positions). That draw is an assertion
+     state where two loops share positions). **Between moves of equal
+     value, a move whose value comes back to the position never wins, and
+     no recompute writes a loop of `backed_move` pointers at a value other
+     than 0**: a loop it would close is opened at one of its positions,
+     the first by key that has another move worth the same. A returning
+     line is worth its value only because somebody leaves the loop later,
+     and of two moves worth the same the one that leaves is the progress.
+     Values do not change; the move a position stands on does, and with it
+     the recommended move, the API `best_move` and the spine of the backed
+     chip (2026-10-19, cz_eclipsia: at `909727fb` Rd6-f6 Rf8-d8 Rf6-d6
+     Rd8-f8 published 1200 at all four positions, each standing on the
+     next, because the returning line carried more search than the way out
+     it borrowed its value from; following the best move went round for
+     ever and the family never came to rest). A loop every one of whose
+     positions strictly prefers going round is left as it is: opening it
+     would change a value. That draw is an assertion
      about a *walk* over
      `backed_move` pointers, not a measurement: nobody has ever searched
      whether the repetition is forced. So it carries **no search weight**,
