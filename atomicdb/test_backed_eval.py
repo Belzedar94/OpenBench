@@ -1755,7 +1755,8 @@ class LineProvenanceTests(TestCase):
 
     def test_the_line_number_lives_in_the_tooltip_not_in_the_row(self):
         parent = self._parent(self._lines('d7d5', 'e7e6'))
-        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+        # El hijo guarda lo que sembro su linea (``_lines`` las pone a 40).
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=40), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
@@ -1769,10 +1770,31 @@ class LineProvenanceTests(TestCase):
             body,
             r'<td><em class="dim eval-claim"[^>]*'
             r'title="from engine line 2 of this node\S+s current analysis; '
-            r'no direct search of the resulting position yet"[^>]*>30</em>')
+            r'no direct search of the resulting position yet"[^>]*>40</em>')
         # Y ni "line 2" ni "walked" ocupan sitio en la fila.
         self.assertNotIn('>line 2</span>', body)
         self.assertNotIn('>walked</span>', body)
+
+    def test_a_number_its_line_did_not_seed_says_both(self):
+        """Transposicion: la posicion tras e7e6 tambien cuelga de otro padre,
+        cuya busqueda mas reciente la sembro a 30, mientras la linea 2 de este
+        nodo dice 40.  El aviso no puede atribuir el 30 a la linea 2."""
+        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        child = _pos('LINE-T', 'b', eval_cp=30)
+        _edge(parent, child, 'e7e6')
+        _edge(_pos('LINE-Q', 'w', expanded=True), child, 'f8b4')
+
+        body = Client().get(f'/atomicdb/explore/{parent.key}/') \
+                       .content.decode()
+
+        self.assertRegex(
+            body,
+            r'<td><em class="dim eval-claim"[^>]*'
+            r'title="engine line 2 of this node\S+s current analysis has this '
+            r'move at 40; the number shown is the latest value stored for the '
+            r'resulting position, seeded from another line or move order; no '
+            r'direct search of it yet"[^>]*>30</em>')
+        self.assertNotIn('title="from engine line 2', body)
 
     def test_a_seed_with_no_line_left_says_it_came_from_an_older_pass(self):
         """La siembra de un pase ANTERIOR ya no es el veredicto de nadie, y su
