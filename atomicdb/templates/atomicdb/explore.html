@@ -686,7 +686,7 @@
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
         <th>visits</th></tr>
       {% for m in moves %}
-      <tr{% if m.unexplored %} class="row-unexplored"{% endif %}>
+      <tr>
         <td><span class="chip {{ m.css }}"></span></td>
         {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
         conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
@@ -724,13 +724,13 @@
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
             title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
             class="backed-mark"
-            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" style="white-space:nowrap">not analysed</span>{% endif %}</td>
+            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         <td class="dim">{{ m.visits }}</td>
       </tr>
       {% endfor %}
       {% for u in offtree %}
-      <tr class="row-unexplored">
+      <tr>
         <td><span class="chip cold"></span></td>
         <td>{% if u.blocked %}<strong>{{ u.uci }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
@@ -738,7 +738,7 @@
           title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
-        <td><span class="dim">-</span></td>
+        <td><span class="dim" data-fold>-</span></td>
         <td class="dim proofnums"></td>
         <td class="dim">-</td>
       </tr>
@@ -747,17 +747,19 @@
       <tr><td colspan="6" class="dim">Terminal position: the game ended here.</td></tr>
       {% endif %}
     </table>
-    {% comment %}Pliegue de las jugadas sin explorar.  En casi todas las
-    posiciones la mayoria de filas son "unexplored / not analysed": no dicen
-    nada y empujan fuera de la pantalla las jugadas exploradas y las ya
-    probadas.  Con seis o mas, se esconden tras un boton puesto en el sitio
-    de la primera, y el navegador recuerda si el visitante las prefiere
-    abiertas.  Sin JavaScript la tabla sale entera, como antes.  La clase
-    row-unexplored es solo el gancho de este script: no tiene estilo en
-    atomicdb.css (que ademas no mueve el ?v= de base.html).{% endcomment %}
+    {% comment %}Pliegue de las jugadas sin nada que ensenar.  En casi todas
+    las posiciones la mayoria de filas dicen "not analysed" (ni busqueda
+    propia, ni linea sembrada, ni respaldo) o "not in tree", y empujan fuera
+    de la pantalla las jugadas exploradas y las ya probadas.  Ojo: una fila
+    "unexplored" PUEDE traer numero (linea sembrada, respaldo); esas se
+    quedan a la vista.  La marca es data-fold en la celda vacia, no una clase
+    en el <tr>: los tests leen las filas del arbol como <tr><td><span
+    class="chip.  Con seis o mas, se esconden tras un boton puesto en el
+    sitio de la primera, y el navegador recuerda si el visitante las prefiere
+    abiertas.  Sin JavaScript la tabla sale entera, como antes.{% endcomment %}
     <script>
     (function () {
-      const rows = document.querySelectorAll('tr.row-unexplored');
+      const rows = Array.from(document.querySelectorAll('span[data-fold]'), function (s) { return s.closest('tr'); });
       if (rows.length < 6) return;
       const KEY = 'atomicdb.showUnexplored';
       let open = false;
@@ -774,7 +776,7 @@
       function show(v) {
         open = v;
         rows.forEach(function (r) { r.style.display = v ? '' : 'none'; });
-        btn.textContent = (v ? 'Hide the ' : 'Show the ') + rows.length + ' unexplored moves';
+        btn.textContent = (v ? 'Hide the ' : 'Show the ') + rows.length + ' moves with no analysis yet';
         btn.setAttribute('aria-expanded', v ? 'true' : 'false');
       }
       btn.addEventListener('click', function () {
