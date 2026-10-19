@@ -25,9 +25,10 @@ from django.db.models import (Case, Count, F, FloatField, IntegerField,
                               OuterRef, Q, Subquery, Value, When, Window)
 from django.db.models.functions import Coalesce, RowNumber
 
-from . import (community_names, contributors, depth, ingest, ingest_queue,
-               lanes, live_request, logic, metrics, notifications, openings,
-               proof, revalidate, solve, solve_estimate)
+from . import (community_names, contributors, depth, engine_policy, ingest,
+               ingest_queue, lanes, live_request, logic, metrics,
+               notifications, openings, proof, revalidate, solve,
+               solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
@@ -999,6 +1000,37 @@ def api_submit(request):
         return JsonResponse({'error': 'stale-lease'}, status=409)
     if snapshot.state == 'COMPLETED':
         return JsonResponse({'ok': True, 'dup': True})
+
+    # Reference engine only (§ engine_policy), and only once the policy file
+    # turns the gate on; without it nothing changes.  This sits AFTER the
+    # lease checks so nobody can push someone else's lease back to the queue
+    # by sending an arbitrary sha.  The task goes back to the queue now rather
+    # than when its lease times out, and the worker prints the body of a 4xx,
+    # so whoever runs it reads the reason in their console.
+    if engine_policy.rejects(engine_sha, tablebase=parsed_wdl is not None):
+        with atomic():
+            released = AnalysisTask.objects.filter(
+                id=task_id, state='LEASED', machine=machine,
+                attempts=snapshot.attempts, leased_at=snapshot.leased_at,
+                lease_token=snapshot.lease_token,
+            ).update(state='PENDING', machine='', lease_heartbeat_at=None,
+                     lease_token='', lease_session='')
+            if released:
+                WorkerPing.objects.filter(
+                    machine=machine, user=user.username,
+                ).update(current_task_id=None)
+                # The position may have closed during the search; then the
+                # returned row buys nothing and is absorbed here, as the
+                # api_lease recycler does, instead of lingering as a zombie.
+                ingest.absorb_tasks(AnalysisTask.objects.filter(
+                    id=task_id, state='PENDING',
+                ).exclude(position__status='UNKNOWN'))
+        logger.warning(
+            'AtomicDB submit refused task=%s machine=%s user=%s engine=%s',
+            task_id, machine, user.username, engine_sha[:12] or '-')
+        return JsonResponse({'error': 'engine-not-accepted',
+                             'detail': engine_policy.REJECTION_DETAIL},
+                            status=403)
 
     # A partir de aqui el submit solo RECLAMA y ENCOLA: la parte cara (probar
     # mates, expandir, aristas, cascadas, retropropagacion) la hace despues
