@@ -572,6 +572,23 @@ def _seed_audience(child_keys, writer_key):
     return audience
 
 
+def _other_parents(closed_keys, writer_key):
+    """Parents of the positions an ingest closed that nobody told.
+
+    ``backup_cascade`` climbs from its seeds' parents, so seeding it with the
+    analysed position alone left every OTHER parent of a closed child (the
+    DAG transposes) UNKNOWN beside a proven winning child.  A won line is a
+    chain whose links hang from the link before them, already closed, so the
+    closed keys and the writer are left out: what remains are exactly the
+    transpositions, found with one indexed query.
+    """
+    if not closed_keys:
+        return []
+    return list(Edge.objects.filter(child_id__in=closed_keys)
+                .exclude(parent_id__in=[writer_key, *closed_keys])
+                .values_list('parent_id', flat=True).distinct())
+
+
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     mate_proofs=None, restricted=False):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
@@ -623,6 +640,9 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         certified_here = 0
         revoked_here = []
         reseeded = []
+        # Every position whose closure this pass writes.  The DAG transposes,
+        # so ALL their parents re-evaluate below, not only ``pos``.
+        closed_keys = []
         for index, ln in enumerate(lines):
             uci = ln['move']
             try:
@@ -659,9 +679,11 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     revoked_here.extend(revoked_keys)
                     child.refresh_from_db()
             if (child.status != 'UNKNOWN' and prepared_proof is not None
-                    and prepared_proof[2] == 'PROVEN'
-                    and _adopt_certified_line(child, pos, prepared_proof)):
-                certified_here += 1
+                    and prepared_proof[2] == 'PROVEN'):
+                adopted = _adopt_certified_line(child, pos, prepared_proof)
+                if adopted:
+                    certified_here += 1
+                    closed_keys.extend(adopted)
             if child.status == 'UNKNOWN' and prepared_proof is not None:
                 winner_white, pv_rest, proof_result, worst_run = prepared_proof
                 if proof_result == 'NO_MATE':
@@ -718,7 +740,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                 # La linea ganadora deja de ser una cadena de texto y pasa a
                 # ser arbol navegable: sin esto el explorador enseña el cierre
                 # en la cabecera y "unexplored" en todas las filas.
-                materialise_won_line(child)
+                closed_keys.append(child.key)
+                closed_keys.extend(materialise_won_line(child)['closed_keys'])
                 closed_here += 1
             if ev is not None and (best_eval is None
                                    or (stm_white and ev > best_eval)
@@ -818,7 +841,11 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                                 'analysis_passes', 'best_move', 'eval_cp',
                                 'updated'])
 
-    changed = backup_cascade([pos.key])
+    # The OTHER parents of what this pass closed (transpositions) are neither
+    # ``pos`` nor above it, so the ascent starts at them too.  Without them
+    # they stayed UNKNOWN beside a proven winning child.
+    others = _other_parents(closed_keys, pos.key)
+    changed = backup_cascade([pos.key, *others])
     # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
     # cambia necesariamente el backed de este nodo (un autoeco bloqueado se
     # queda igual y no propaga), pero SI cambia ``nodes_invested`` — que es
@@ -827,7 +854,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # bloqueado no se enteraba jamas.
     parent_keys = list(Edge.objects.filter(child_id=pos.key)
                        .values_list('parent_id', flat=True))
-    backed = backup_backed_evals([pos.key, *parent_keys,
+    # ``others`` too: their value stands on a child that is exact now.
+    backed = backup_backed_evals([pos.key, *parent_keys, *others,
                                   *_seed_audience(reseeded, pos.key)])
     uncertainty = _uncertainty_expand([pos.key, *parent_keys])
     refuted = _witness_refuted_revisit(pos, parent_keys)
@@ -910,12 +938,17 @@ def _revoke_contradicted_mate(child, parent, prepared_proof):
 # ``recertify_mates`` aplica en diferido, aplicada donde el certificado ya
 # estaba en la mano.  De propina saca al nodo de la cola de deuda.
 def _adopt_certified_line(child, parent, prepared_proof):
-    """Un certificado exhaustivo sustituye a un testigo sin certificar."""
+    """Un certificado exhaustivo sustituye a un testigo sin certificar.
+
+    Returns the keys whose closure changed (the child, whose proof and
+    distance its parents inherit, and whatever its new line closed), or an
+    empty list when nothing was adopted.
+    """
     winner_white, pv_rest, _verdict, worst_run = prepared_proof
     want = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
     if (child.status != want or child.closure != 'MATE_PV'
             or child.proof == 'ANDOR' or not pv_rest):
-        return False
+        return []
     was = {'proof': child.proof, 'mate_in': child.mate_in,
            'won_line': child.won_line}
     child.proof = 'ANDOR'
@@ -934,8 +967,7 @@ def _adopt_certified_line(child, parent, prepared_proof):
         'was_proof': was['proof'],
         'line_changed': was['won_line'] != child.won_line})
     # La linea nueva tambien tiene que ser navegable, igual que en el cierre.
-    materialise_won_line(child)
-    return True
+    return [child.key, *materialise_won_line(child)['closed_keys']]
 
 
 def backup_cascade(seed_keys):
@@ -2490,18 +2522,24 @@ def materialise_won_line(pos, verify=False):
     construccion: la racha reversible que le queda a un sufijo no puede ser
     mayor que la del arbol entero, asi que el slack real del sufijo es al
     menos este.  Prefiero subestimar el margen a inventarlo.
+
+    ``closed_keys`` lists the nodes this call closed.  A chain node can hang
+    from other parents too (transpositions), and the caller has those parents
+    re-evaluated: the line is not their only way in.
     """
     line = (pos.won_line or '').split()
     if not won_line_materialisable(pos):
-        return {'created_edges': 0, 'closed': 0, 'plies': 0}
+        return {'created_edges': 0, 'closed': 0, 'plies': 0,
+                'closed_keys': []}
     if verify and not logic.verify_mate_pv(
             pos.fen, line, pos.status == 'WHITE_WIN'):
         return {'created_edges': 0, 'closed': 0, 'plies': 0,
-                'rejected': 'witness-does-not-verify'}
+                'closed_keys': [], 'rejected': 'witness-does-not-verify'}
 
     grade = pos.proof if pos.proof in ('ANDOR', 'ENGINE') else None
     slack = pos.clock_slack
     created_edges = closed = 0
+    closed_keys = []
     node, walked = pos, 0
     for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
         if uci not in logic.legal_moves(node.fen):
@@ -2538,8 +2576,10 @@ def materialise_won_line(pos, verify=False):
             if claimed:
                 _emit_closure_events(child)
                 closed += 1
+                closed_keys.append(child.key)
         node = child
-    return {'created_edges': created_edges, 'closed': closed, 'plies': walked}
+    return {'created_edges': created_edges, 'closed': closed, 'plies': walked,
+            'closed_keys': closed_keys}
 
 
 def _child_is_verified(child):
