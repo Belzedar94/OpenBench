@@ -8,11 +8,12 @@ next, so following the best move went round for ever.
 
 The fixture is that loop, with its real positions, keys and moves, and one
 way out at each position.  White can leave at ``909727fb`` (Rh6) and at
-``e5866b4e`` (Rf7) for the value the family holds, 1199; those two ways out
-were searched less deeply than the positions of the loop, which is what let
-the loop win the tie.  Black's ways out (Re8 from both Black positions) are
-worse for Black than going round.  The stored state is the one production
-held: all four at 1200, each on the move to the next.
+``e5866b4e`` (Rf7) for 1199, what a recompute of the real family gives.
+Here those two ways out were searched less deeply than the positions of the
+loop: a returning line carries the heaviest search it passes through, and
+that is how the loop won the tie.  Black's ways out (Re8 from both Black
+positions) are worse for Black than going round.  The stored state is the
+one production held: all four at 1200, each on the move to the next.
 """
 
 import types
