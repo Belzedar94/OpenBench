@@ -134,7 +134,9 @@ in `Documentation/` show the commands:
 
 The worker's own usage line is
 `python atomicdb_worker.py -U user -P pass -S https://server -T 8`; `--engine`
-points it at a local engine build.
+points it at a local engine build. Without `--engine` it downloads the
+reference engine and moves to a newly published one while it runs;
+`--no-engine-update` turns that off.
 
 A local instance is for disposable testing. `docs/operations.md` sets the
 rule: never point a development worker at production, and never run workers
@@ -176,7 +178,12 @@ OpenBench pages:
   commit named by `client_repo_ref` in `Config/config.json`, and CI requires
   that commit to carry exactly the `Client/` being merged. The AtomicDB
   worker updates itself from the server and carries `ATOMICDB_WORKER_BUILD`,
-  which must increase with every published change and is never reused.
+  which must increase with every published change and is never reused. A
+  worker installs only a file with its own `ATOMICDB_WORKER_UPDATE_PROTOCOL`,
+  so raising the protocol leaves every older copy on its build until its
+  owner downloads the new file by hand. `Scripts/deploy.sh` publishes
+  `Client/atomicdb_worker.py` on every deploy, so the file in the repository
+  has to be the build the server serves.
 - **Opening names.** The catalogue is validated against a digest
   (`manage.py validate_atomic_openings`) and follows
   `docs/atomicdb-opening-authority.md`. Names are proposed through the

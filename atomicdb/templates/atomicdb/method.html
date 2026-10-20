@@ -135,12 +135,20 @@ file, keeps the previous version as a backup, and restarts itself without
 interrupting a search or an uncertain result submission. Use
 <code>--no-auto-update</code> only if you intentionally maintain a custom
 worker file.</p>
-<p class="dim" style="font-size:.9rem">Existing copies from before build
-<code>2026072201</code> need one final manual download because they do not yet
-contain the updater. From that build onward, no repeated download is needed.</p>
+<p class="dim" style="font-size:.9rem">Copies older than build
+<code>2026102001</code> need one manual download: that build changed how the
+worker restarts itself after an update, and older copies do not install it on
+their own. From that build onward, updates install themselves.</p>
+<p class="dim" style="font-size:.9rem">The downloaded engine is kept current
+too: while it runs, the worker checks for a newly published engine, downloads
+it next to the one in use, verifies its sha256, runs a short check search with
+it, and switches to it between tasks. Use
+<code>--no-engine-update</code> to stay on the engine it started with until the
+next restart.</p>
 <p class="dim" style="font-size:.9rem">Have your own
 <a href="https://github.com/Belzedar94/Atomic-Stockfish">Atomic-Stockfish</a>
-build? Point at it with <code>--engine path/to/binary</code>.</p>
+build? Point at it with <code>--engine path/to/binary</code>; an engine given
+this way is never replaced.</p>
 <p class="dim" style="font-size:.9rem">-T is the engine thread count per task
 (any number, no need to be a multiple of anything) and --hash is the engine
 hash in MB. Memory does <em>not</em> scale with the node budget: the
