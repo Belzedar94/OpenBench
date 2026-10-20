@@ -375,11 +375,18 @@ def _auth_pair(username, password):
     return user
 
 
+# What a worker says about its own threads cannot be checked, and it is only shown
+# (the "cores" total, the contributor page), never used to hand out work.  The
+# engine cannot use more than this, so nothing above it is believable.
+MAX_REPORTED_THREADS = 1024
+
+
 def _touch_worker(request, user):
     """Refresh capacity without changing, extending or reclaiming any lease."""
     machine = request.POST.get('machine', user.username)[:64]
     try:
-        threads = max(0, int(request.POST.get('threads', 0) or 0))
+        threads = min(MAX_REPORTED_THREADS,
+                      max(0, int(request.POST.get('threads', 0) or 0)))
         hash_mb = max(0, int(request.POST.get('hash', 0) or 0))
     except ValueError:
         threads, hash_mb = 0, 0
