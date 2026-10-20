@@ -115,7 +115,9 @@ class AtomicOnboardingTests(unittest.TestCase):
             self.assertIn('"Use NNUE=', preset["both_options"], name)
             self.assertNotIn("Use NNUE=pure", preset["both_options"], name)
 
-    def test_four_fixed_game_syzygy_presets(self):
+    def test_two_fixed_game_syzygy_presets(self):
+        # Atomic-Stockfish is NNUE-only since Atomic-Stockfish#76 (20 Oct 2026):
+        # the two classical Syzygy presets went with the classical evaluation.
         presets = {
             name: data
             for name, data in self.engine["test_presets"].items()
@@ -124,8 +126,6 @@ class AtomicOnboardingTests(unittest.TestCase):
         expected = {
             "Syzygy STC NNUE": ("8.0+0.08", "Hash=32", "Use NNUE=true"),
             "Syzygy LTC NNUE": ("40.0+0.4", "Hash=128", "Use NNUE=true"),
-            "Syzygy STC classical": ("8.0+0.08", "Hash=32", "Use NNUE=false"),
-            "Syzygy LTC classical": ("40.0+0.4", "Hash=128", "Use NNUE=false"),
         }
         self.assertEqual(set(presets), set(expected))
 
