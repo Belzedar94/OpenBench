@@ -656,6 +656,23 @@ class RequestTests(TestCase):
 
 class MachineVisibilityTests(TestCase):
 
+    def test_reported_threads_are_capped_at_what_the_engine_can_use(self):
+        """A worker can claim any number of threads; the server keeps at most
+        what the engine can use, so the "cores" total stays believable."""
+        import json
+        from . import metrics
+        from .models import WorkerPing
+        worker_account('u', 'p')
+        ingest.get_or_create_position(logic.start_fen())
+        lease = self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'u-big',
+            'threads': 10 ** 9, 'hash': 1024, 'os': 'TestOS'})
+        self.assertEqual(len(json.loads(lease.content)['tasks']), 1)
+        self.assertEqual(WorkerPing.objects.get(machine='u-big').threads, 1024)
+        # A row stored before the cap still counts at most 1024.
+        WorkerPing.objects.filter(machine='u-big').update(threads=10 ** 9)
+        self.assertEqual(metrics.worker_metrics(force=True)['cores'], 1024)
+
     def test_lease_and_submit_update_ping(self):
         import json
         from .models import WorkerPing

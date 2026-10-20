@@ -48,7 +48,8 @@ def _compute(now):
     pings = list(WorkerPing.objects.filter(last_seen__gte=live_since)
                  .values('threads', 'current_task_id', 'last_nps',
                          'nps_updated'))
-    cores = sum(max(0, row['threads'] or 0) for row in pings)
+    # Rows written before views.MAX_REPORTED_THREADS existed are capped here too.
+    cores = sum(min(1024, max(0, row['threads'] or 0)) for row in pings)
     # A fresh lease resets the rate, heartbeats then publish the current one.
     # Requiring a current task prevents an idle lease poll from reviving the
     # completed task's historical NPS.  NPS has its own freshness timestamp:
