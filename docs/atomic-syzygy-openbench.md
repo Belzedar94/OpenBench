@@ -78,14 +78,16 @@ golden vectors, and a local A/B format check are green.
 
 ## Four fixed-game measurements
 
-Run the four named Syzygy presets as ordinary `GAMES` workloads, each targeting
+Atomic-Stockfish is NNUE-only since Atomic-Stockfish#76 (20 Oct 2026), so the
+two classical presets this page used to list are gone with the classical
+evaluation; an explicit `Use NNUE=false` is now ignored by the engine.
+
+Run the two named Syzygy presets as ordinary `GAMES` workloads, each targeting
 2,000 games. Applying a preset sets `test_max_games=2000` and selects `GAMES`
 automatically; do not change the test mode afterwards.
 
 | Evaluation | Control | Time control | Hash |
 | --- | --- | --- | --- |
-| Classical | STC | `8.0+0.08` | 32 MB |
-| Classical | LTC | `40.0+0.4` | 128 MB |
 | NNUE | STC | `8.0+0.08` | 32 MB |
 | NNUE | LTC | `40.0+0.4` | 128 MB |
 
@@ -96,22 +98,21 @@ Common settings:
 - `Threads=1`, `syzygy_wdl=6-MAN`, `syzygy_adj=DISABLED`;
 - `SyzygyProbeDepth=1 Syzygy50MoveRule=true` on both sides;
 - dev has `SyzygyProbeLimit=6`, base has `SyzygyProbeLimit=0`;
-- classical adds `Use NNUE=false` on both sides;
 - NNUE adds `Use NNUE=true` on both sides and assigns the same frozen network;
 - never use `Use NNUE=pure` in playing tests; `pure` is data-generation only;
 - use an opening book whose configured filename contains `ATOMIC`, so the
   worker selects cutechess-ob's Atomic referee.
 
-The exact preset names are `Syzygy STC NNUE`, `Syzygy LTC NNUE`,
-`Syzygy STC classical`, and `Syzygy LTC classical`. They inherit the current
+The exact preset names are `Syzygy STC NNUE` and `Syzygy LTC NNUE`. They
+inherit the current
 Atomic defaults (`[1.00, 6.00]` bounds and `movecount=4 score=800` win
 adjudication), but fixed-game completion -- not SPRT or LOS -- determines when
-these four measurements finish.
+these two measurements finish.
 
 Use the current OpenBench priority controls normally; no special result gate or
 ordered-pair upload path exists. Engine-level conformance must already have
 verified WDL/DTZ decoding, probe-limit behavior, non-zero `tbhits`, and oracle
-positions against this same inventory. These four matches measure playing
+positions against this same inventory. These two matches measure playing
 impact and do not replace that conformance evidence.
 
 ## Deployment
