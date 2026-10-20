@@ -353,7 +353,8 @@ class StartupOrderTests(SimpleTestCase):
         text = (pathlib.Path(__file__).resolve().parent.parent / 'Client'
                 / 'atomicdb_worker.py').read_text(encoding='utf-8')
         body = text.split('def main():', 1)[1]
-        restart = body.index('_restart_updated_worker()')
+        # By name only: the call passes ``once`` since build 2026102001.
+        restart = body.index('_restart_updated_worker(')
         resolve = body.index('resolve_syzygy(')
         self.assertLess(restart, resolve,
                         'the set must be resolved after a self-update restart, '

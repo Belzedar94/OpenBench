@@ -8,6 +8,10 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 --jobs K corre K analisis a la vez repartiendo -T entre ellos.
 
 --engine ruta/binario permite usar una build propia en su lugar.
+
+El motor descargado se renueva sin parar el worker: cada 15 min se relee el
+manifest y, si hay un binario nuevo, se descarga junto al actual, se comprueba
+y cada analisis lo toma entre tareas (--no-engine-update lo desactiva).
 """
 
 import argparse
@@ -16,6 +20,8 @@ import gzip
 import hashlib
 import json
 import os
+import queue
+import random
 import re
 import secrets
 import stat
@@ -34,9 +40,39 @@ from urllib3.util.retry import Retry
 
 # Bump this integer for every published change to this worker.  It is the
 # downgrade/replay guard used by the self-updater; do not reuse a build number.
-ATOMICDB_WORKER_UPDATE_PROTOCOL = 1
-ATOMICDB_WORKER_BUILD = 2026081802
+#
+# Protocol 2 changes how a self-update restarts on Windows (see
+# ``_restart_updated_worker``).  A protocol-1 worker restarts with os.execv,
+# which on Windows passes the command line unquoted: with a space in its
+# Python, script or arguments the old process exits and the new one cannot
+# start.  Such a worker refuses any file that does not speak its protocol,
+# so it never installs this build and never takes that path because of it.
+ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
+ATOMICDB_WORKER_BUILD = 2026102001
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
+# Windows restart: how long the new worker must stay up before this one
+# hands over and exits.  Failures of the restart itself (a mangled command
+# line, an import error) show up well within it.
+WORKER_RESTART_GRACE_SECONDS = 5
+# Engine hot swap: how often a running worker re-reads the engine manifest
+# (jittered by +-20 % so a fleet does not download a new binary in the same
+# second), and how long a job whose switch failed waits before retrying.
+ENGINE_UPDATE_INTERVAL_SECONDS = 15 * 60
+ENGINE_UPDATE_MIN_SECONDS = 60
+ENGINE_UPDATE_JITTER = 0.2
+# A published binary that failed here is retried at the next check, then
+# after 4, 16... intervals, never less often than once a day: a file the
+# server serves wrong, or that an antivirus keeps removing, must not be
+# downloaded again every quarter of an hour by the whole fleet.
+ENGINE_UPDATE_MAX_BACKOFF_SECONDS = 24 * 3600
+ENGINE_SWITCH_RETRY_SECONDS = 15 * 60
+# A job whose hot-swapped engine fails this many searches in a row takes it
+# back: every job returns to the engine that ran before, and that sha is not
+# offered again until another binary is published.
+ENGINE_FAILURE_LIMIT = 3
+ENGINE_DOWNLOAD_READ_TIMEOUT_SECONDS = 600
+ENGINE_PROBE_TIMEOUT_SECONDS = 120
+ENGINE_PROBE_NODES = 20000
 HTTP_CONNECT_TIMEOUT_SECONDS = 3
 HTTP_CONNECT_RETRIES = 2
 WORKER_UPDATE_CONNECT_TIMEOUT_SECONDS = HTTP_CONNECT_TIMEOUT_SECONDS
@@ -54,6 +90,12 @@ LEASE_RETRY_MAX_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_NPS = 10 ** 12
+# Fallos de motor SEGUIDOS tras los que el hilo SOLVE se apaga solo.  Se
+# reintenta un par de veces por si el fallo era transitorio (memoria, fichero
+# bloqueado, disco lleno) y se abandona: un binario sin el comando ``solve``
+# no aprende a resolverlo esperando, y seguir pidiendo tareas solo las pasea
+# por un arriendo de veinte minutos para devolverlas intactas.
+SOLVER_ENGINE_FAILURE_LIMIT = 3
 
 # Each HTTP-calling thread keeps its own Session.  This reuses a healthy TLS
 # connection without sharing requests.Session concurrently between threads.
@@ -87,6 +129,14 @@ def _http_session():
 
 class WorkerUpdateError(Exception):
     pass
+
+
+class EngineUpdateError(Exception):
+    """A published engine could not be installed; the running one stays."""
+
+
+class EngineExited(Exception):
+    """The engine process ended in the middle of a search."""
 
 
 class LeaseRequestError(Exception):
@@ -403,22 +453,96 @@ def _install_worker_update(server, script_path=None):
         return False
 
 
-def _restart_updated_worker(script_path=None):
+def _restart_updated_worker(script_path=None, once=False):
     """Exec the installed worker; keep running old code if exec itself fails.
+
+    POSIX replaces the process image with ``os.execv``.  Windows has no exec:
+    its C runtime emulates one by starting a new process and exiting, and it
+    joins the arguments WITHOUT quoting them, so a Python, a script or an
+    argument with a space reached the new process in pieces -- the old
+    worker was already gone and the new one could not even open its script.
+    There ``_spawn_replacement`` starts the new worker itself and this one
+    exits only once the new one is running.  ``once`` is ``--once``: the run
+    is a single pass that the new worker then does in full.
 
     The validated new file stays on disk and ``.previous`` remains available
     for manual recovery. Automatic rollback here would race with another
     process that already restarted successfully from the shared script.
     """
     script = Path(script_path or __file__).resolve()
+    argv = [sys.executable, str(script), *sys.argv[1:]]
+    if os.name == 'nt':
+        return _spawn_replacement(argv, once=once)
     try:
-        os.execv(sys.executable,
-                 [sys.executable, str(script), *sys.argv[1:]])
+        os.execv(sys.executable, argv)
     except OSError as exc:
         print(f'AtomicDB worker restart failed: {exc}; the validated update '
               'is installed and will load on the next start', flush=True)
         return False
     return True
+
+
+def _inheritable_stdio(stream):
+    """What a replacement process should get for ``stream``.
+
+    Its own descriptor, so a console or a redirected log keeps receiving the
+    output.  Without one (pythonw.exe, some services) the child gets DEVNULL:
+    left to its defaults it would be handed a dead pipe and die on its first
+    print.
+    """
+    try:
+        if stream is not None:
+            stream.flush()
+            return stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        pass
+    return subprocess.DEVNULL
+
+
+def _spawn_replacement(argv, grace=WORKER_RESTART_GRACE_SECONDS,
+                       exit_process=os._exit, once=False):
+    """Windows restart: start ``argv`` as a new worker, then leave.
+
+    The list form of ``subprocess`` quotes every argument, spaces included.
+    This process exits (``os._exit``: every job ends at once, exactly as an
+    exec would end them) only after the new one has stayed up for ``grace``
+    seconds; a new worker that ends sooner -- a bad command line, a missing
+    module, job threads that all crashed (which still exits 0) -- leaves this
+    one running the old build, as a failed exec does.  With ``once`` the run
+    is a single pass: this process waits for the new worker's pass and ends
+    with its exit code, and a pass already finished cleanly within the grace
+    counts as done.
+    """
+    try:
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL,
+            stdout=_inheritable_stdio(sys.stdout),
+            stderr=_inheritable_stdio(sys.stderr))
+    except OSError as exc:
+        print(f'AtomicDB worker restart failed: {exc}; the validated update '
+              'is installed and will load on the next start', flush=True)
+        return False
+    try:
+        code = child.wait(timeout=grace)
+        handed_over = once and code == 0
+    except subprocess.TimeoutExpired:
+        print(f'AtomicDB worker restarted as process {child.pid}', flush=True)
+        code = child.wait() if once else 0
+        handed_over = True
+    if handed_over:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (AttributeError, OSError, ValueError):
+                pass
+        # A Windows status (0xC000013A after Ctrl+C) does not fit the C int
+        # of os._exit; its two's complement exits with the same status.
+        exit_process(code - 2 ** 32 if code >= 2 ** 31 else code)
+        return True     # reached only when a test replaces exit_process
+    print(f'AtomicDB worker restart failed: the new process exited with code '
+          f'{code}; this one keeps running the previous build. The validated '
+          'update is installed and will load on the next start', flush=True)
+    return False
 
 
 def _submit_until_definitive(server, payload, task_id):
@@ -519,17 +643,21 @@ class Engine:
         if syzygy:
             self._send(f'setoption name SyzygyPath value {syzygy}')
         self._send('isready')
-        self._wait('readyok')
+        # False when the engine closed its output before answering: it died.
+        self.ready = self._wait('readyok')
 
     def _send(self, line):
         self.p.stdin.write(line + '\n')
         self.p.stdin.flush()
 
     def _wait(self, token):
+        """Read up to a line starting with ``token``: True, or False at EOF."""
         while True:
             line = self.p.stdout.readline()
-            if not line or line.startswith(token):
-                return
+            if not line:
+                return False
+            if line.startswith(token):
+                return True
 
     def analyse(self, fen, nodes, multipv, searchmoves=None, progress=None):
         """Devuelve lines=[{'move','eval_cp','mate','pv','raw'}] White-POV.
@@ -548,7 +676,15 @@ class Engine:
         while True:
             line = self.p.stdout.readline()
             if not line:
-                break
+                # Output ended without ``bestmove``: the process died (a
+                # crash, a kill, Ctrl+C on the shared console).  What came
+                # before is a truncated search, never a result to submit.
+                try:
+                    code = self.p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    code = 'unknown'
+                raise EngineExited('the engine stopped in the middle of a '
+                                   f'search (exit code {code})')
             if line.startswith('bestmove'):
                 break
             if progress:
@@ -840,60 +976,204 @@ def resolve_syzygy(args, server, log=print, script_path=None, get=None):
     return str(fetched) if fetched else ''
 
 
+def _engine_platform_key():
+    """Key of this machine's prebuilt engine in the manifest."""
+    import platform
+
+    key = f'{platform.system().lower()}-{platform.machine().lower()}'
+    return {'windows-amd64': 'windows-x86_64',
+            'linux-amd64': 'linux-x86_64'}.get(key, key)
+
+
+def _engine_entry(entry, what):
+    """A manifest file entry, checked before any of it reaches the disk.
+
+    ``file`` becomes a path, so it must be a bare name in the target
+    directory; ``sha256`` is what the download is held to.
+    """
+    if not isinstance(entry, dict):
+        raise EngineUpdateError(f'{what}: manifest entry is not an object')
+    name = entry.get('file')
+    if (not isinstance(name, str) or not name or name.startswith('.')
+            or '/' in name or '\\' in name or ':' in name
+            or Path(name).name != name):
+        raise EngineUpdateError(f'{what}: unsafe file name {name!r}')
+    digest = entry.get('sha256')
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(c not in '0123456789abcdefABCDEF' for c in digest)):
+        raise EngineUpdateError(f'{what}: bad sha256 in the manifest')
+    return dict(entry, sha256=digest.lower())
+
+
+def _manifest_engine(man, key):
+    """(binary entry, net entry or None) for platform ``key``."""
+    binaries = man.get('binaries') if isinstance(man, dict) else None
+    if not isinstance(binaries, dict):
+        raise EngineUpdateError('the manifest lists no binaries')
+    if key not in binaries:
+        raise EngineUpdateError(f'no prebuilt engine for {key}')
+    binary = _engine_entry(binaries[key], key)
+    net = None
+    if binary.get('needs_net') and 'net' in man:
+        net = _engine_entry(man['net'], 'net')
+    return binary, net
+
+
+def _manifest_bench(man, binary):
+    """The NNUE bench signature the manifest gives this binary, or None.
+
+    ``"bench": {"nnue": 438711}`` (a bare integer is read the same way), in
+    the platform entry or else at the top level.  Absent means no bench
+    gate at all; present but unreadable is refused rather than ignored,
+    since the publisher meant the binary to be checked.
+    """
+    raw = binary.get('bench', man.get('bench'))
+    if isinstance(raw, dict):
+        if 'nnue' not in raw:
+            return None
+        raw = raw['nnue']
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise EngineUpdateError(
+            f'unreadable bench signature in the manifest: {raw!r}')
+    return raw
+
+
+def _engine_local_name(entry):
+    """Where a downloaded binary lives in ``Engines``: its published name
+    plus the first 12 hex digits of its sha256.
+
+    A local path then always holds the same bytes.  A release that reuses a
+    file name gets its own file, so no binary is ever replaced under a
+    process that runs it -- which POSIX allows silently, and which would let
+    a restart of that process run new bytes under the old signature -- and
+    the swap does not depend on how releases are named.
+    """
+    name, digest = entry['file'], entry['sha256'][:12]
+    if name.lower().endswith('.exe'):
+        return f'{name[:-4]}-{digest}{name[-4:]}'
+    return f'{name}-{digest}'
+
+
+def _download_verified(server, entry, dest):
+    """Put one manifest file at ``dest``, sha256-verified BEFORE it gets that
+    name; a local copy that already matches is reused.
+
+    The bytes are streamed to a sibling ``.part`` file and renamed into place
+    only once they match, so a half-written binary never carries a real name
+    and a file in use is never written over in place.  Returns True when
+    something was downloaded.  Raises EngineUpdateError on a mismatch; HTTP
+    and disk errors propagate.
+    """
+    entry = _engine_entry(entry, str(dest))
+    dest = Path(dest)
+    # Partial downloads of this same file that an interrupted run left behind
+    # (Ctrl+C, a crash, a restart mid-download).  An hour without a write
+    # keeps clear of a download another worker sharing the folder has under
+    # way.  Swept before the reuse check: the usual case is a file that was
+    # completed later and is only ever reused from then on.
+    for stale in dest.parent.glob(dest.name + '.*.part'):
+        try:
+            if time.time() - stale.stat().st_mtime > 3600:
+                stale.unlink()
+        except OSError:
+            pass
+    if dest.is_file() and _file_sha256(dest) == entry['sha256']:
+        return False
+    print(f"downloading {entry['file']} ({entry.get('size_mb', '?')} MB)...",
+          flush=True)
+    response = _http_session().get(
+        server.rstrip('/') + '/atomicdb/engines/' + entry['file'],
+        stream=True,
+        timeout=(HTTP_CONNECT_TIMEOUT_SECONDS,
+                 ENGINE_DOWNLOAD_READ_TIMEOUT_SECONDS))
+    try:
+        response.raise_for_status()
+        fd, temp_name = tempfile.mkstemp(prefix=dest.name + '.',
+                                         suffix='.part', dir=str(dest.parent))
+        temp = Path(temp_name)
+        try:
+            digest = hashlib.sha256()
+            with os.fdopen(fd, 'wb') as stream:
+                for block in response.iter_content(chunk_size=1 << 20):
+                    if block:
+                        digest.update(block)
+                        stream.write(block)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if digest.hexdigest() != entry['sha256']:
+                raise EngineUpdateError(
+                    f"download of {entry['file']} failed the sha256 check")
+            if os.name != 'nt':
+                os.chmod(temp, 0o755)
+            for attempt in range(5):
+                try:
+                    os.replace(temp, dest)
+                    break
+                except OSError:
+                    # Another worker sharing this folder may have put the
+                    # same file there -- and started it -- in the meantime.
+                    if (dest.is_file()
+                            and _file_sha256(dest) == entry['sha256']):
+                        return False
+                    # An antivirus still scanning the fresh file holds it
+                    # for a moment.
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.5 * (attempt + 1))
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+    finally:
+        response.close()
+    return True
+
+
 def _fetch_verified(server, entry, dest):
     """Descarga un archivo del manifest con sha256 verificado; reutiliza la
     copia local si ya coincide."""
-    import hashlib
-    import os
-    import stat
-
-    dest = Path(dest)
-
-    def _ok():
-        with open(dest, 'rb') as f:
-            return hashlib.sha256(f.read()).hexdigest() == entry['sha256']
-
-    if not (dest.exists() and _ok()):
-        print(f"downloading {entry['file']} ({entry['size_mb']} MB)...",
-              flush=True)
-        r = _http_session().get(
-            server + '/atomicdb/engines/' + entry['file'],
-            timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 600))
-        r.raise_for_status()
-        if hashlib.sha256(r.content).hexdigest() != entry['sha256']:
-            sys.exit(f"download of {entry['file']} failed the sha256 check")
-        with open(dest, 'wb') as f:
-            f.write(r.content)
-        if os.name != 'nt':
-            os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC)
+    try:
+        _download_verified(server, entry, dest)
+    except EngineUpdateError as exc:
+        sys.exit(str(exc))
 
 
 def provision_engine(server):
     """Descarga el motor de referencia (y su red NNUE si el binario no la
     lleva embebida), todo sha256-verificado."""
-    import platform
+    return _provision_engine(server)['path']
 
-    key = f'{platform.system().lower()}-{platform.machine().lower()}'
-    key = {'windows-amd64': 'windows-x86_64',
-           'linux-amd64': 'linux-x86_64'}.get(key, key)
+
+def _provision_engine(server):
+    """``provision_engine`` plus the net entry the engine loads (None when
+    the binary embeds its net), so the provenance can name it exactly."""
+    key = _engine_platform_key()
     man = _http_session().get(
         server + '/atomicdb/engines/manifest.json',
         timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 60)).json()
     if key not in man['binaries']:
         sys.exit(f'no prebuilt engine for {key}: pass --engine with your own '
                  f'build (prebuilts: {", ".join(sorted(man["binaries"]))})')
-    b = man['binaries'][key]
+    try:
+        b = _engine_entry(man['binaries'][key], key)
+    except EngineUpdateError as exc:
+        sys.exit(str(exc))
     Path('Engines').mkdir(exist_ok=True)
-    dest = Path('Engines') / b['file']
+    dest = Path('Engines') / _engine_local_name(b)
     _fetch_verified(server, b, dest)
+    net = None
     if b.get('needs_net') and 'net' in man:
         # la red va al cwd del worker: el default EvalFile del motor la
         # resuelve desde ahi
-        _fetch_verified(server, man['net'], man['net']['file'])
+        net = man['net']
+        _fetch_verified(server, net, net['file'])
     print(f'engine ready: {dest}', flush=True)
     # str en el contrato: quien llama lo pasa a subprocess y telemetria tal
     # cual llevaba anos recibiendolo; pathlib es de puertas adentro.
-    return str(dest)
+    return {'path': str(dest), 'net': net}
 
 
 def _file_sha256(path):
@@ -932,6 +1212,339 @@ def _net_sha256(engine_path):
     return ''
 
 
+# ---------------------------------------------------------------------------
+# Engine hot swap
+# ---------------------------------------------------------------------------
+#
+# A volunteer should not have to stop a worker to get a newly published
+# engine.  A background thread re-reads the manifest, installs a changed
+# binary NEXT TO the one in use (the old files stay: they are the fallback),
+# runs it once to prove it plays on this machine, and only then offers it.
+# Each job switches its own engine process between tasks and the solver
+# between proofs; the offer carries path and provenance together, so every
+# result is signed with the sha of the binary that produced it.
+
+
+_BENCH_NODES = re.compile(r'Nodes searched\s*:\s*(\d+)')
+
+
+def _probe_engine(path, timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
+                  nodes=ENGINE_PROBE_NODES, bench=None):
+    """Run a candidate engine once, beside the working ones, and check that
+    it plays: ``uci``, ``isready`` and a short search from the start position
+    must all answer within ``timeout`` seconds.
+
+    The sha256 proves the file is the published one, not that it runs HERE:
+    a CPU without the instructions it was built for, or a net it cannot find
+    -- which this engine reports with ``info string ERROR`` and ``bestmove
+    (none)`` while staying alive.  One thread and a small hash, so the live
+    searches do not notice.  With ``bench`` (the manifest's signature) the
+    default ``bench`` must also report exactly that many nodes: well under a
+    second, and it proves the binary searches as its build did.  Returns the
+    engine's ``id name``; raises EngineUpdateError otherwise.
+    """
+    try:
+        process = subprocess.Popen(
+            [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except OSError as exc:
+        raise EngineUpdateError(f'cannot start {path}: {exc}') from exc
+    lines = queue.Queue()
+
+    def pump():
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        except (OSError, ValueError):
+            pass
+        lines.put(None)
+
+    reader = threading.Thread(target=pump, name='atomicdb-engine-probe',
+                              daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    seen = []
+
+    def send(command):
+        process.stdin.write(command + '\n')
+        process.stdin.flush()
+
+    def expect(token):
+        """The next line whose first word is ``token`` (or that matches it,
+        for a compiled pattern)."""
+        label = getattr(token, 'pattern', token)
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise queue.Empty
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                raise EngineUpdateError(
+                    f'no {label!r} within {timeout:g}s') from None
+            if line is None:
+                raise EngineUpdateError(
+                    f'it exited before {label!r}: '
+                    + (' | '.join(seen[-3:]) or 'no output'))
+            line = line.strip()
+            if not line:
+                continue
+            seen.append(line[:200])
+            if line.startswith('info string ERROR'):
+                raise EngineUpdateError(line[:300])
+            if (token.match(line) if hasattr(token, 'match')
+                    else line.split()[0] == token):
+                return line
+
+    try:
+        send('uci')
+        expect('uciok')
+        name = next((line[len('id name '):] for line in seen
+                     if line.startswith('id name ')), Path(path).name)
+        send('setoption name Threads value 1')
+        send('setoption name Hash value 16')
+        send('isready')
+        expect('readyok')
+        send('position startpos')
+        send(f'go nodes {int(nodes)}')
+        best = expect('bestmove').split()
+        if len(best) < 2 or best[1] in ('(none)', '0000'):
+            raise EngineUpdateError(
+                'no move from the start position: ' + ' | '.join(seen[-3:]))
+        if bench is not None:
+            send('bench')
+            found = int(_BENCH_NODES.match(expect(_BENCH_NODES)).group(1))
+            if found != bench:
+                raise EngineUpdateError(
+                    f'bench signature {found} does not match the manifest '
+                    f'({bench})')
+    except (OSError, ValueError) as exc:
+        raise EngineUpdateError(f'it stopped answering: {exc}') from exc
+    finally:
+        # quit, then end of input for a binary that only stops at EOF.
+        for step in (lambda: send('quit'), process.stdin.close):
+            try:
+                step()
+            except (OSError, ValueError):
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        reader.join(timeout=5)
+        if not reader.is_alive():
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+    return name
+
+
+class EngineUpdater:
+    """The engine every job should run, kept in step with the manifest.
+
+    ``run`` (one daemon thread) re-reads the manifest every ``interval``
+    seconds.  Only the binary decides: a net ships with the binary that
+    loads it by name, so a manifest whose binary sha256 is the one in use
+    needs nothing.  A different binary is downloaded beside the old files
+    exactly as provisioning does, with its net when it needs one, and run
+    once by ``probe``; only then does it become the next generation.  Any
+    failure leaves the generation alone -- the running engine stays -- and
+    that binary is tried again at the next check, then ever less often
+    (ENGINE_UPDATE_MAX_BACKOFF_SECONDS); a newly published one is tried at
+    once.
+
+    The jobs and the solver read ``current()`` between tasks.  A generation
+    is (number, path, provenance), assigned at once and never edited, so a
+    reader cannot pair one binary with another binary's sha.  A job whose
+    newly offered engine keeps failing in real searches calls ``reject``:
+    the engine that ran before it comes back as the next generation.
+    """
+
+    def __init__(self, server, path, provenance,
+                 interval=ENGINE_UPDATE_INTERVAL_SECONDS, probe=None,
+                 directory='Engines', log=print):
+        self.server = server
+        self.interval = interval
+        self.directory = Path(directory)
+        self._probe = probe or _probe_engine
+        self._log = log
+        self._lock = threading.Lock()
+        self._current = (0, str(path), dict(provenance))
+        # binary sha256 -> (consecutive failures, monotonic time of next try)
+        self._failures = {}
+        # generation -> (path, provenance) of the engine it replaced
+        self._before = {}
+        # shas taken back after failing in use; offered again never, until
+        # the manifest names some other binary
+        self._rejected = set()
+
+    def current(self):
+        """(generation, engine path, provenance) the jobs should run."""
+        with self._lock:
+            return self._current
+
+    def check_once(self):
+        """One manifest check.  True when a new engine was offered."""
+        generation, path, provenance = self.current()
+        try:
+            response = _http_session().get(
+                self.server + '/atomicdb/engines/manifest.json',
+                timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, 60))
+            response.raise_for_status()
+            manifest = response.json()
+            binary, net = _manifest_engine(manifest, _engine_platform_key())
+            bench = _manifest_bench(manifest, binary)
+        except Exception as exc:
+            self._log(f'engine update check skipped: {exc}', flush=True)
+            return False
+        if binary['sha256'] == provenance.get('engine_sha'):
+            return False
+        if binary['sha256'] in self._rejected:
+            return False
+        failures, next_try = self._failures.get(binary['sha256'], (0, 0.0))
+        if time.monotonic() < next_try:
+            return False
+        try:
+            new_path = self._install(binary, net, path)
+            engine_sha = _file_sha256(new_path)
+            if engine_sha != binary['sha256']:
+                raise EngineUpdateError(f'{new_path} changed after its check')
+            name = self._probe(new_path, bench=bench)
+        except Exception as exc:
+            failures += 1
+            delay = (0 if failures == 1 else
+                     min(self.interval * 4 ** min(failures - 1, 8),
+                         ENGINE_UPDATE_MAX_BACKOFF_SECONDS))
+            self._failures[binary['sha256']] = (failures,
+                                                time.monotonic() + delay)
+            self._log(f"engine update to {binary['file']} failed: {exc}; "
+                      f'still running {path}, next try in about '
+                      f'{max(delay, self.interval) / 60:.0f} min', flush=True)
+            return False
+        self._failures.pop(binary['sha256'], None)
+        new_provenance = {
+            'engine_sha': engine_sha,
+            'net_sha': net['sha256'] if net else _net_sha256(new_path)}
+        with self._lock:
+            # Numbered from what is current NOW: a job may have taken an
+            # engine back while this one was downloading.
+            number, before_path, before_provenance = self._current
+            self._before[number + 1] = (before_path, before_provenance)
+            self._current = (number + 1, new_path, new_provenance)
+        checked = f', bench {bench}' if bench is not None else ''
+        self._log(f'engine update: {before_path} -> {new_path} ({name}'
+                  f'{checked}); every job switches to it when its current '
+                  'task ends', flush=True)
+        return True
+
+    def reject(self, generation, reason):
+        """Take back a newly offered engine that keeps failing in use.
+
+        The engine that ran before it becomes the next generation -- every
+        job and the solver return to it between tasks -- and its sha is not
+        offered again until the manifest names another binary.  True when
+        this call took it back; False when ``generation`` is no longer
+        current (another job did it, or a newer one arrived) or there is
+        nothing to go back to (the engine the worker started with, or one
+        that is itself a taken-back return).
+        """
+        with self._lock:
+            number, path, provenance = self._current
+            if number != generation or number not in self._before:
+                return False
+            back_path, back_provenance = self._before.pop(number)
+            self._rejected.add(provenance.get('engine_sha', ''))
+            self._current = (number + 1, back_path, back_provenance)
+        self._log(f'engine update: {path} taken back after {reason}; every '
+                  f'job returns to {back_path}, and this binary is not '
+                  'offered again until another one is published', flush=True)
+        return True
+
+    def _install(self, binary, net, running):
+        self.directory.mkdir(exist_ok=True)
+        dest = self.directory / _engine_local_name(binary)
+        if dest.resolve() == Path(running).resolve():
+            # Only if the running file no longer matches its own name.
+            raise EngineUpdateError(
+                f'{dest} is the running engine; it is not overwritten in use')
+        _download_verified(self.server, binary, dest)
+        if net is not None:
+            net_dest = Path(net['file'])
+            if (net_dest.is_file()
+                    and _file_sha256(net_dest) != net['sha256']):
+                raise EngineUpdateError(
+                    f'{net_dest} exists with other content and an engine in '
+                    'use may load it; the new net loads at the next start')
+            _download_verified(self.server, net, net_dest)
+        return str(dest)
+
+    def run(self, stop):
+        """Check until ``stop`` is set.  Never raises."""
+        while not stop.wait(self.interval * (
+                1 + ENGINE_UPDATE_JITTER * (2 * random.random() - 1))):
+            try:
+                self.check_once()
+            except Exception as exc:  # the thread must survive anything
+                self._log(f'engine update check failed: {exc}', flush=True)
+
+
+def _switch_engine(slot, eng, old_path, new_path, threads, a):
+    """Move one job to ``new_path`` between tasks: (engine, switched).
+
+    The old process is closed first, so two hash tables of one job never
+    coexist; when the new binary does not come up, the old one -- still on
+    disk -- is started again and the job carries on as before.
+    """
+    try:
+        eng.close()
+    except Exception:
+        pass
+    try:
+        new = Engine(new_path, threads=threads, hash_mb=a.hash,
+                     syzygy=a.syzygy)
+        if not new.ready:
+            new.close()
+            raise EngineUpdateError('it did not answer isready')
+    except Exception as exc:
+        print(f'[{slot}] engine switch to {new_path} failed: {exc}; back on '
+              f'{old_path}', flush=True)
+        # A moment of memory pressure or an antivirus scan must not end the
+        # job; a binary that stays unstartable still ends it, loudly, as a
+        # failed restart after an engine crash always has.
+        for attempt in range(3):
+            try:
+                return Engine(old_path, threads=threads, hash_mb=a.hash,
+                              syzygy=a.syzygy), False
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(5 * (attempt + 1))
+    print(f'[{slot}] engine switched to {new_path}', flush=True)
+    return new, True
+
+
+class SolverEngineFailure(Exception):
+    """El motor no BUSCO: no hay resultado que enviar, ni siquiera UNKNOWN.
+
+    UNKNOWN es un veredicto -- "busque hasta agotar el presupuesto y no pude
+    cerrar" -- y no un cajon de sastre para "este binario no sabe resolver".
+    Confundirlos es lo que quemo 64 tareas el 21-ago: el build publicado en
+    ``/atomicdb/engines`` no traia el comando ``solve``, contesto ``Unknown
+    command`` en 0,6 s, y el cliente convirtio ese fallo del motor en un
+    resultado que el servidor acepto de buena fe y marco COMPLETED.
+
+    La regla que impone esta excepcion: una tarea solo se consume cuando el
+    solver ha buscado de verdad.  Un fallo de motor suelta el arriendo en
+    silencio y deja que caduque, porque una tarea caducada se reintenta y una
+    tarea enviada como UNKNOWN esta cerrada para siempre.
+    """
+
+
 class Solver:
     """Drives the engine's `solve` command over a fresh process each time.
 
@@ -940,9 +1553,54 @@ class Solver:
     or wedges must not take the analysis worker down with it.
     """
 
-    def __init__(self, path, hash_mb=256):
+    def __init__(self, path, hash_mb=256, build_sha=''):
         self.path = path
         self.hash_mb = hash_mb
+        # sha256 del binario que firma CADA resultado enviado.  El servidor ya
+        # tenia el campo -- ``api_solve_submit`` lee ``solver_build`` y lo
+        # sanea con ``_sha_field`` -- pero el cliente nunca lo rellenaba, asi
+        # que las 4602 filas historicas dicen ''.  Sin esa firma la pregunta
+        # "que build produjo este resultado" no se contesta desde la base de
+        # datos, y por eso el fallo de hoy fue invisible ahi dentro.
+        self.build_sha = build_sha or ''
+
+    @staticmethod
+    def _first_signal(process):
+        """La primera linea util de la salida, para que el error DIGA algo.
+
+        El banner del motor es siempre la primera linea y nunca es la noticia;
+        lo interesante viene detras (``Unknown command: 'solve ...'``).
+        """
+        for stream in (process.stdout, process.stderr):
+            for line in (stream or '').splitlines():
+                line = line.strip()
+                if line and not line.startswith('Atomic-Stockfish '):
+                    return line[:300]
+        return '(no output)'
+
+    def _assert_searched(self, process, reported, engine_error, outcome, nodes):
+        """Levanta si lo que volvio NO es una busqueda. No devuelve nada."""
+        if process.returncode != 0:
+            raise SolverEngineFailure(
+                f'the engine exited with code {process.returncode}: '
+                f'{self._first_signal(process)}')
+        if engine_error:
+            # `solve error: invalid FEN (...)`: el motor entendio el comando y
+            # se nego.  Es un fallo con nombre, no un veredicto.
+            raise SolverEngineFailure(
+                f'the engine refused the task: {engine_error[:300]}')
+        if not reported:
+            # El caso del 21-ago.  Un build sin el comando no imprime una sola
+            # linea `solve outcome`, asi que el parser se queda con su tupla
+            # inicial y devuelve un UNKNOWN que nadie ha calculado.
+            raise SolverEngineFailure(
+                'the engine printed no `solve outcome` line, so this build '
+                f'has no solver: {self._first_signal(process)}')
+        if outcome == 'UNKNOWN' and nodes <= 0:
+            # Para poder decir "no cerre" hay que haber buscado.  Cero nodos
+            # es un solver que no llego a arrancar.
+            raise SolverEngineFailure(
+                'the engine returned UNKNOWN without searching a single node')
 
     def solve(self, fen, goal, budget_nodes, movetime_ms=0):
         """Return (outcome, pn, dn, nodes, elapsed, certificate, telemetry).
@@ -950,21 +1608,30 @@ class Solver:
         ``telemetry`` carries the fortress indicators the solver reports.  It
         is advisory scheduling information: the server stores it and never
         lets it near a verdict.
+
+        Raises ``SolverEngineFailure`` when the engine did not search at all.
+        Devolver un UNKNOWN inventado seria mas comodo aqui y carisimo tres
+        capas mas arriba, donde ya no se distingue de un veredicto real.
         """
         command = (f'solve {fen} goal {goal} nodes {int(budget_nodes)} '
                    f'hash {int(self.hash_mb)}')
         if movetime_ms:
             command += f' movetime {int(movetime_ms)}'
         started = time.time()
+        # stderr se CAPTURA (antes iba a DEVNULL): cuando el motor falla, su
+        # queja suele ser lo unico que explica por que, y tirarla obliga a
+        # diagnosticar a ciegas.  Se lee aparte, nunca se parsea como salida.
         process = subprocess.run(
             [self.path], input=command + '\nquit\n', text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         elapsed = time.time() - started
 
         outcome, pn, dn, nodes = 'UNKNOWN', None, None, 0
         telemetry = {}
         certificate = []
         in_certificate = False
+        reported = False
+        engine_error = ''
         for line in process.stdout.splitlines():
             if in_certificate:
                 certificate.append(line)
@@ -981,6 +1648,9 @@ class Solver:
             name, value = parts[1], parts[2]
             if name == 'outcome':
                 outcome = value
+                reported = True
+            elif name == 'error:':
+                engine_error = line
             elif name == 'pn':
                 pn = None if value == 'INF' else int(value)
             elif name == 'dn':
@@ -993,6 +1663,7 @@ class Solver:
                 except ValueError:
                     pass
         text = '\n'.join(certificate) + '\n' if certificate else ''
+        self._assert_searched(process, reported, engine_error, outcome, nodes)
         return outcome, pn, dn, nodes, elapsed, text, telemetry
 
 
@@ -1078,11 +1749,28 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
     if current_task is not None:
         current_task.start(task['id'], task.get('lease_token', ''))
     try:
-        outcome, pn, dn, nodes, elapsed, certificate, telemetry = solver.solve(
-            task['fen'], task.get('goal', 'WHITE_WIN'), task['budget_nodes'])
+        try:
+            outcome, pn, dn, nodes, elapsed, certificate, telemetry = \
+                solver.solve(task['fen'], task.get('goal', 'WHITE_WIN'),
+                             task['budget_nodes'])
+        except SolverEngineFailure as exc:
+            # NO se envia NADA.  El arriendo se suelta al salir (el ``finally``
+            # para el latido) y el servidor devuelve la tarea a PENDING cuando
+            # caduque, a los ``SOLVE_LEASE_MINUTES``.  Perder una tarea por
+            # caducidad cuesta veinte minutos de espera; enviarla como UNKNOWN
+            # la cierra en COMPLETED para siempre.  Esa asimetria es toda la
+            # razon de ser de esta rama.
+            print(f"solve task {task['id']} ENGINE FAILURE, nothing submitted "
+                  f'(the task returns to the queue when its lease expires): '
+                  f'{exc}', flush=True)
+            raise
         payload = {**auth, 'task_id': task['id'], 'outcome': outcome,
                    'nodes': nodes, 'elapsed': f'{elapsed:.2f}',
                    'lease_token': task.get('lease_token', ''), **telemetry}
+        if solver.build_sha:
+            # Procedencia, igual que ``provenance`` en las rutas de analisis:
+            # cada resultado queda firmado por el binario que lo produjo.
+            payload['solver_build'] = solver.build_sha
         if pn is not None:
             payload['pn'] = pn
         if dn is not None:
@@ -1109,12 +1797,17 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
     return True
 
 
-def _solve_loop(server, auth, solver, stop_event):
+def _solve_loop(server, auth, solver, stop_event, engines=None):
     """Proof thread. The solver is single-threaded, so it runs BESIDE the
     analysis engine instead of in front of it: one core proves while the
     engine's threads keep the analysis queue (and visitor requests) moving.
     A fortress-stratum attempt can hold this thread for many minutes; that
-    must never freeze the analysis loop again."""
+    must never freeze the analysis loop again.
+
+    With ``engines`` (an EngineUpdater) the solver takes a newly published
+    engine between proofs.  This thread is the only one that touches
+    ``solver.path`` and ``solver.build_sha``, and only between tasks, so a
+    proof is always signed by the binary that ran it."""
     current_task = SolveLeaseState()
     threading.Thread(
         target=_solve_heartbeat_loop,
@@ -1126,14 +1819,67 @@ def _solve_loop(server, auth, solver, stop_event):
     # asignacion pudo commitear y perderse la respuesta) y se renueva solo
     # cuando el servidor ya ha contestado algo que cierra la peticion.
     lease_session = secrets.token_urlsafe(24)
+    engine_failures = 0
+    generation = 0
+    proven = None      # (path, sha) of the last binary that really solved
     while not stop_event.is_set():
+        if engines is not None:
+            offered, path, provenance = engines.current()
+            if offered != generation:
+                generation = offered
+                solver.path = path
+                solver.build_sha = provenance.get('engine_sha', '')
+                engine_failures = 0
+                print(f'solve: engine switched to {path}', flush=True)
         did = False
         try:
             did = _solve_once(server, auth, solver, lease_session,
                               current_task)
             lease_session = secrets.token_urlsafe(24)
+            engine_failures = 0
+            if did:
+                proven = (solver.path, solver.build_sha)
         except SolveAcquireAmbiguous:
             pass                       # misma sesion en el reintento
+        except SolverEngineFailure:
+            # Ya se ha impreso arriba con el detalle que dio el motor.  Se
+            # reintenta un par de veces por si el fallo era transitorio y
+            # luego se APAGA el modo SOLVE: un binario que no sabe resolver
+            # no cambia de opinion, y seguir pidiendo tareas para soltarlas
+            # solo pasea la cola por arriendos de veinte minutos.  El analisis
+            # sigue intacto; este hilo es el unico que se retira.
+            lease_session = secrets.token_urlsafe(24)
+            engine_failures += 1
+            if engine_failures >= SOLVER_ENGINE_FAILURE_LIMIT:
+                if engines is None:
+                    print(f'solve DISABLED after {engine_failures} '
+                          f'consecutive engine failures: {solver.path} cannot '
+                          'solve. No solve task was consumed; analysis keeps '
+                          'running. Check that this build answers the `solve` '
+                          'command.', flush=True)
+                    return
+                # A newly published binary without the solver must not stop
+                # the proofs the previous one -- still on disk -- was doing.
+                # Path and signature go back together; the next engine
+                # published is tried again.
+                if (proven is not None
+                        and proven != (solver.path, solver.build_sha)):
+                    print(f'solve: {solver.path} cannot solve; proofs go '
+                          f'back to {proven[0]} until another engine is '
+                          'published', flush=True)
+                    solver.path, solver.build_sha = proven
+                    engine_failures = 0
+                    continue
+                # Same reasoning as above, but a newly published engine may
+                # well solve: wait for one instead of retiring for good.
+                print(f'solve PAUSED after {engine_failures} consecutive '
+                      f'engine failures: {solver.path} cannot solve. No solve '
+                      'task was consumed; analysis keeps running. Proofs '
+                      'resume when a new engine is published.', flush=True)
+                while not stop_event.wait(60):
+                    if engines.current()[0] != generation:
+                        break
+                continue
         except Exception as exc:  # the thread must survive anything
             print(f'solve loop error: {exc}', flush=True)
             lease_session = secrets.token_urlsafe(24)
@@ -1171,7 +1917,7 @@ def probe_tb(tb, fen):
 
 
 def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
-                   owns_updates):
+                   owns_updates, engines=None):
     """One independent leaseholder: its own engine, lease and heartbeat.
 
     A slot is a worker in every sense the server cares about.  It has its own
@@ -1180,9 +1926,31 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     lost response -- applies per slot with nothing added to the protocol and
     nothing added to the schema.  That is the whole reason the slot lives in
     the identity rather than in a new column.
+
+    With ``engines`` (an EngineUpdater) the slot takes a newly published
+    engine between batches; ``engine_path`` and ``provenance`` always change
+    together, so each result names the binary that analysed it.  The slot
+    starts on the engine main() provisioned (generation 0) and reaches any
+    later one only through ``_switch_engine``, which can fall back.
     """
-    eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
+    engine_path = a.engine
+    generation = 0
+    eng = Engine(engine_path, threads=engine_threads, hash_mb=a.hash,
                  syzygy=a.syzygy)
+    failed_offer, engine_retry_at = None, 0.0
+    engine_failures = 0        # consecutive failed searches of this engine
+
+    def pending_offer():
+        """The other engine this job should move to now, if any."""
+        if engines is None:
+            return None
+        offered = engines.current()
+        if offered[0] == generation:
+            return None
+        if offered[0] == failed_offer and time.monotonic() < engine_retry_at:
+            return None
+        return offered
+
     current_task = CurrentTaskState()
     threading.Thread(
         target=_heartbeat_loop, args=(a.S, auth, current_task, stop),
@@ -1206,8 +1974,22 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             if _install_worker_update(a.S):
                 eng.close()
                 if not _restart_updated_worker():
-                    eng = Engine(a.engine, threads=engine_threads,
+                    eng = Engine(engine_path, threads=engine_threads,
                                  hash_mb=a.hash, syzygy=a.syzygy)
+        # A newly published engine is taken here, between batches: never in
+        # the middle of a search.  A failed switch keeps the old engine and
+        # waits before trying that same offer again.
+        offered = pending_offer()
+        if offered is not None:
+            eng, switched = _switch_engine(slot, eng, engine_path,
+                                           offered[1], engine_threads, a)
+            if switched:
+                generation, engine_path, provenance = offered
+                engine_failures = 0
+            else:
+                failed_offer = offered[0]
+                engine_retry_at = (time.monotonic()
+                                   + ENGINE_SWITCH_RETRY_SECONDS)
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
         except LeaseRequestError as e:
@@ -1259,16 +2041,46 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     progress=current_task.progress,
                 )
             except Exception as e:
+                # Nothing is submitted: the task comes back by itself when
+                # its lease expires, instead of a truncated search being
+                # stored as if it were a result.
+                current_task.clear()
+                engine_failures += 1
+                if stop.is_set():      # Ctrl+C reaches the engines too
+                    print(f'[{slot}] engine failure: {e}', flush=True)
+                    break
+                # A newly offered engine that keeps failing real searches is
+                # taken back for every job (no-op for the engine the worker
+                # started with, or one that already is a return).
+                if (engines is not None
+                        and engine_failures >= ENGINE_FAILURE_LIMIT):
+                    engines.reject(generation,
+                                   f'{engine_failures} failed searches in a '
+                                   f'row ({e})')
+                offered = pending_offer()
+                if offered is not None:
+                    print(f'[{slot}] engine failure: {e}; moving to '
+                          f'{offered[1]}', flush=True)
+                    eng, switched = _switch_engine(
+                        slot, eng, engine_path, offered[1], engine_threads, a)
+                    if switched:
+                        generation, engine_path, provenance = offered
+                        engine_failures = 0
+                    else:
+                        failed_offer = offered[0]
+                        engine_retry_at = (time.monotonic()
+                                           + ENGINE_SWITCH_RETRY_SECONDS)
+                    continue   # la tarea vuelve sola al caducar su lease
                 print(f'[{slot}] engine failure: {e}; restarting the engine',
                       flush=True)
                 try:
                     eng.close()
                 except Exception:
                     pass
-                eng = Engine(a.engine, threads=engine_threads, hash_mb=a.hash,
-                             syzygy=a.syzygy)
-                current_task.clear()
+                eng = Engine(engine_path, threads=engine_threads,
+                             hash_mb=a.hash, syzygy=a.syzygy)
                 continue   # la tarea vuelve sola al caducar su lease
+            engine_failures = 0
             searched = 0
             for ln in lines:
                 m = re.search(r' nodes (\d+)', ln.get('raw', ''))
@@ -1350,6 +2162,14 @@ def main():
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='do not update this file from the official server')
+    ap.add_argument('--no-engine-update', action='store_true',
+                    help='do not switch to a newly published engine while '
+                         'running (it is still picked up at the next start)')
+    ap.add_argument('--engine-update-minutes', type=float,
+                    default=ENGINE_UPDATE_INTERVAL_SECONDS / 60,
+                    help='minutes between checks for a newly published '
+                         'engine (default %(default)g, minimum '
+                         f'{ENGINE_UPDATE_MIN_SECONDS // 60})')
     ap.add_argument('--solve', action='store_true',
                     help='also serve SOLVE tasks (exhaustive proofs) besides '
                          'analysis; without this flag the worker behaves '
@@ -1357,7 +2177,7 @@ def main():
     a = ap.parse_args()
 
     if not a.no_auto_update and _install_worker_update(a.S):
-        _restart_updated_worker()
+        _restart_updated_worker(once=a.once)
 
     # Deliberately AFTER the self-update: a restarted worker re-enters main()
     # from the top, so the set is re-verified on every start rather than only
@@ -1387,8 +2207,10 @@ def main():
                   f'({error})', flush=True)
 
     import platform
+    provisioned = None
     if not a.engine:
-        a.engine = provision_engine(a.S)
+        provisioned = _provision_engine(a.S)
+        a.engine = provisioned['path']
 
     # --once keeps the historical smoke semantics, which are single-slot.
     if a.once:
@@ -1418,15 +2240,32 @@ def main():
                  'os': f'{platform.system()} {platform.release()}',
                  'worker_build': ATOMICDB_WORKER_BUILD}
     # Additive provenance: an older server simply ignores these POST fields.
+    # A downloaded engine that loads its net from disk names exactly the net
+    # the manifest gave it; the directory scan is the fallback for the rest.
     provenance = {'engine_sha': _file_sha256(a.engine),
-                  'net_sha': _net_sha256(a.engine)}
+                  'net_sha': (provisioned['net']['sha256'].lower()
+                              if provisioned and provisioned['net']
+                              else _net_sha256(a.engine))}
 
     stop = threading.Event()
-    solver = Solver(a.engine, hash_mb=a.hash) if a.solve else None
+    # Only the downloaded reference engine follows the manifest: a binary
+    # given with --engine is the contributor's choice and stays.
+    engines = None
+    if provisioned is not None and not a.once and not a.no_engine_update:
+        engines = EngineUpdater(
+            a.S, a.engine, provenance,
+            interval=min(max(ENGINE_UPDATE_MIN_SECONDS,
+                             a.engine_update_minutes * 60), 24 * 3600))
+        threading.Thread(target=engines.run, args=(stop,),
+                         name='atomicdb-engine-update', daemon=True).start()
+    solver = (Solver(a.engine, hash_mb=a.hash,
+                     build_sha=provenance['engine_sha'])
+              if a.solve else None)
     if solver is not None and not a.once:
         threading.Thread(
             target=_solve_loop,
-            args=(a.S, dict(auth_base, machine=machines[0]), solver, stop),
+            args=(a.S, dict(auth_base, machine=machines[0]), solver, stop,
+                  engines),
             name='atomicdb-solver', daemon=True).start()
 
     spread = ('x'.join(str(n) for n in sorted(set(slot_threads), reverse=True))
@@ -1435,6 +2274,10 @@ def main():
           f'{spread} threads ({sum(slot_threads) + solver_cores} in total)'
           + (f' + {solver_cores} solver' if solver_cores else '')
           + f' -> {a.S}', flush=True)
+    if engines is not None:
+        print(f'engine updates: a newly published engine is installed while '
+              f'running (checked every {engines.interval / 60:g} min; '
+              '--no-engine-update turns this off)', flush=True)
 
     if a.once:
         solved = False
@@ -1443,9 +2286,12 @@ def main():
                 solved = _solve_once(a.S,
                                      dict(auth_base, machine=machines[0]),
                                      solver, secrets.token_urlsafe(24))
-            except SolveAcquireAmbiguous:
-                # Una sola pasada no reintenta nada: aqui el acquire roto es
-                # simplemente "no hubo prueba", y se baja al analisis.
+            except (SolveAcquireAmbiguous, SolverEngineFailure):
+                # Una sola pasada no reintenta nada: aqui tanto el acquire
+                # roto como el motor sin solver son "no hubo prueba", y se
+                # baja al analisis.  El fallo de motor ya se ha impreso con su
+                # detalle; lo que NO puede hacer es tumbar el smoke entero,
+                # que existe precisamente para comprobar el resto del camino.
                 solved = False
         if solved:
             stop.set()
@@ -1462,7 +2308,7 @@ def main():
             args=(slot, a, tb,
                   dict(auth_base, machine=machines[slot],
                        threads=slot_threads[slot]),
-                  provenance, slot_threads[slot], stop, slot == 0),
+                  provenance, slot_threads[slot], stop, slot == 0, engines),
             name=f'atomicdb-analysis-{slot}')
         thread.start()
         threads.append(thread)
