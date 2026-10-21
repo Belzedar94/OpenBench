@@ -88,10 +88,10 @@ SERVEABLE = Q(position__status='UNKNOWN')
 CHARGED = Q(state__in=(PENDING, LEASED))
 # Cuanto silencio invalida una PROMESA de tiempo.  Tres intervalos de heartbeat
 # del worker (60s, § Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS) y
-# exactamente la ventana con la que los medidores de la portada deciden si una
-# lectura de nps sigue viva (§ metrics.LIVE_SECONDS).  Se reusa el mismo numero
-# a proposito: la cuenta atras se construye con ese nps, asi que solo debe
-# existir cuando el sitio ya considera esa velocidad una medida actual.
+# exactamente la ventana con la que § metrics decide si una lectura de nps
+# sigue viva (``LIVE_SECONDS``, la de ``nps_reported``).  Se reusa el mismo
+# numero a proposito: la cuenta atras se construye con ese nps, asi que solo
+# debe existir cuando el sitio ya considera esa velocidad una medida actual.
 PROMISE_FRESH_SECONDS = 180
 # Cuanto silencio convierte el arriendo en un arriendo MUERTO no se escribe
 # aqui: son ``views.LEASE_MINUTES``, los mismos con los que el servidor lo

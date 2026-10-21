@@ -109,6 +109,22 @@ class ProgressCaptureTests(TestCase):
              snapshot.trust_unclassified),
             (2, 1, 1, 1, 1))
 
+    def test_active_nps_stays_the_reported_heartbeat_sum(self):
+        """Not the home page "nodes / sec", which is now the delivered rate.
+
+        Six billion nodes completed a minute ago would read 10M nodes/s on
+        the home page.  This column keeps what the busy worker reported, so
+        the hourly series does not change meaning halfway through.
+        """
+        AnalysisTask.objects.create(
+            position=Position.objects.get(key='unknown-two'), generation=1,
+            budget_nodes=6_000_000_000, nodes_searched=6_000_000_000,
+            state='COMPLETED', completed=self.now - timedelta(minutes=1))
+
+        snapshot, _created = capture_progress(now=self.now)
+
+        self.assertEqual(snapshot.active_nps, 1_000_000)
+
     def test_same_hour_is_idempotent_and_never_rewrites_history(self):
         first, created = capture_progress(now=self.now)
         self.assertTrue(created)
