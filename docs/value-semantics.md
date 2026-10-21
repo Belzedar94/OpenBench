@@ -48,6 +48,15 @@ Every position value on the site is in exactly one of four states:
    bounded error, and the nightly sweep of invariant 4 is what closes it.
    A cut that could exceed that bound is a bug against this document.
 
+   The same holds inside one level of the ascent: **a level never writes
+   a number it read from a child that the same level rewrites.** Such a
+   node keeps what it stored and is decided again one level later, from
+   the child's new number (2026-10-21). Otherwise an old number travels
+   round a cycle of positions one position per level, always one step
+   ahead of its correction, for ever and one ply longer at every step:
+   the recascades of cz_eclipsia's rook ending that never came to rest,
+   1208 everywhere and the plies growing by 64 a pass (2026-10-20). This
+   changes when a write happens, never what is written at rest.
 6. **Position identity erases the counters, so repetition lives in path
    space, never on a node.** Deduplication canonicalises every FEN to
    `0 1`; the graph therefore *cannot* say "this position occurred twice"

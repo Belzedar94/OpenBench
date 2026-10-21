@@ -23,6 +23,7 @@ import hashlib
 import os
 import tempfile
 import time
+import types
 from io import StringIO
 from unittest import mock
 
@@ -547,3 +548,118 @@ class BoundTests(TestCase):
                           (1199, 'k4', 4)])
         self.assertFalse(_loops())
 
+
+def _wheel():
+    """Four positions, sides alternating, as a replay of random loop
+    families drew them (family 402 of seed 32): N0-N1-N2-N3 round, Black's
+    ways out at N1 (-150 and 50) and N3 (-150), and the numbers an old pass
+    left behind.  Every position is worth -150.
+    """
+    stm = {'N0': 'w', 'N1': 'b', 'N2': 'w', 'N3': 'b'}
+    kids = {'N0': ['N1'], 'N1': ['N2', 'N1L0', 'N1L1'], 'N2': ['N3'],
+            'N3': ['N0', 'N3L0']}
+    leaves = {'N1L0': -150, 'N1L1': 50, 'N3L0': -150}
+    stored = {'N0': (900, 'N1', 4), 'N1': (1208, 'N1L0', 4),
+              'N2': (-1208, 'N3', 4), 'N3': (0, 'N3L0', FAR)}
+    for leaf, value in leaves.items():
+        _leaf(f'X-{leaf}', 'w', value)
+    for node, (value, move, plies) in stored.items():
+        _pos(f'X-{node}', stm[node], expanded=True, nodes_invested=ENGINE,
+             backed_eval=value, backed_move=f'{node}>{move}',
+             backed_plies=plies, backed_nodes=HEAVY)
+    for node, children in kids.items():
+        for child in children:
+            Edge.objects.create(parent_id=_key(f'X-{node}'),
+                                move_uci=f'{node}>{child}',
+                                child_id=_key(f'X-{child}'))
+    return [_key(f'X-{node}') for node in stm]
+
+
+def _row(key, value, move, plies=1, nodes=ENGINE):
+    return types.SimpleNamespace(key=key, backed_eval=value,
+                                 backed_move=move, backed_plies=plies,
+                                 backed_nodes=nodes)
+
+
+def _kid(move, key, returns=False):
+    child = ingest._ChildValue(move, 0, ENGINE, 0, key)
+    child.returns = child.cycles = returns
+    return child
+
+
+class WaitingTests(TestCase):
+    """A level never writes a number it is rewriting."""
+
+    def test_the_wheel_of_the_report_in_miniature(self):
+        # Before: an old number goes round for ever, one position ahead of
+        # its correction, and its distance grows by one at every level, 64
+        # plies a pass.  That is the recascade that never came to rest.
+        keys = _wheel()
+        with _without_the_rule(), mock.patch.object(
+                ingest, '_rows_that_wait', return_value=set()):
+            plies = []
+            for _ in range(3):
+                self.assertGreater(ingest.backup_backed_evals(keys), 0)
+                plies.append(_state('X-N2')[0][2])
+            self.assertEqual(_state('X-N2')[0][0], -1208)
+            self.assertEqual([b - a for a, b in zip(plies, plies[1:])],
+                             [64, 64])
+
+    def test_waiting_alone_brings_the_miniature_to_rest(self):
+        # It is the waiting that ends this wheel, not the loop rule: no loop
+        # of pointers is ever written here, the old number just moves on.
+        keys = _wheel()
+
+        with _without_the_rule():
+            ingest.backup_backed_evals(keys)
+            self.assertEqual(ingest.backup_backed_evals(keys), 0)
+
+        self.assertEqual(_moves('X-N0', 'X-N1', 'X-N2', 'X-N3'),
+                         [(-150, 'N0>N1', 2), (-150, 'N1>N1L0', 1),
+                          (-150, 'N2>N3', 2), (-150, 'N3>N3L0', 1)])
+        self.assertFalse(_loops())
+
+    def test_the_miniature_comes_to_rest_at_its_value(self):
+        keys = _wheel()
+
+        ingest.backup_backed_evals(keys)
+
+        self.assertEqual(ingest.backup_backed_evals(keys), 0)
+        self.assertEqual(_values('X-N0', 'X-N1', 'X-N2', 'X-N3'),
+                         [-150] * 4)
+        self.assertFalse(_loops())
+
+    def test_a_chain_alternates_from_the_bottom(self):
+        # A stands on B, B on C, C on a child outside the level; all three
+        # get a new number.  C writes, B read C's old number and waits, A
+        # read B's number, which stays, and writes.
+        rows = [_row('A', 10, 'ab'), _row('B', 10, 'bc'), _row('C', 10, 'cl')]
+        children = {'A': [_kid('ab', 'B')], 'B': [_kid('bc', 'C')],
+                    'C': [_kid('cl', 'L')]}
+        decided = {'A': (20, 'ab', 1, ENGINE), 'B': (20, 'bc', 1, ENGINE),
+                   'C': (20, 'cl', 1, ENGINE)}
+
+        self.assertEqual(ingest._rows_that_wait(rows, children, decided),
+                         {'B'})
+        # A row the loop rule decided is written whatever it stands on.
+        self.assertEqual(
+            ingest._rows_that_wait(rows, children, decided, ruled={'B'}),
+            {'A'})
+
+    def test_what_does_not_wait(self):
+        rows = [_row('A', 10, 'ab'), _row('B', 10, 'ba'), _row('C', 10, 'cd'),
+                _row('D', 10, 'dx'), _row('E', 10, 'ef'), _row('F', 10, 'f1')]
+        children = {'A': [_kid('ab', 'B')], 'B': [_kid('ba', 'A')],
+                    'C': [_kid('cd', 'D', returns=True)],
+                    'D': [_kid('dx', 'X')], 'E': [_kid('ef', 'F')],
+                    'F': [_kid('f1', 'G'), _kid('f2', 'H')]}
+        decided = {
+            # A ring of rewrites is written as before.
+            'A': (20, 'ab', 1, ENGINE), 'B': (20, 'ba', 1, ENGINE),
+            # A child valued on a line that returns is not its stored number.
+            'C': (20, 'cd', 1, ENGINE), 'D': (20, 'dx', 1, ENGINE),
+            # A child whose number stays (only its move changes).
+            'E': (20, 'ef', 1, ENGINE), 'F': (10, 'f2', 1, ENGINE)}
+
+        self.assertEqual(ingest._rows_that_wait(rows, children, decided),
+                         set())

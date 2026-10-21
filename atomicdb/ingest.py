@@ -2064,7 +2064,7 @@ def _loop_still_closed(cache, members):
 
 
 def _open_pointer_loops(rows, children, decided, cache, showcases,
-                        cycle_picks=None, budget=None):
+                        cycle_picks=None, budget=None, ruled=None):
     """Open the loops of pointers this level is about to write.
 
     ``decided`` maps every position of the level to the ``(value, move,
@@ -2078,7 +2078,8 @@ def _open_pointer_loops(rows, children, decided, cache, showcases,
 
     ``cycle_picks`` collects the repetition questions of the positions the
     loop rule decides; ``budget`` is the ``[seconds]`` that rule may still
-    spend in this ascent (a fresh BACKED_LOOP_MAX_SECONDS when omitted).
+    spend in this ascent (a fresh BACKED_LOOP_MAX_SECONDS when omitted);
+    ``ruled`` collects the positions of the level it decided.
     """
     if budget is None:
         budget = [BACKED_LOOP_MAX_SECONDS]
@@ -2166,6 +2167,8 @@ def _open_pointer_loops(rows, children, decided, cache, showcases,
                         if key in by_key and worth[key] != decided[key]:
                             decided[key] = worth[key]
                             cache.wrote(key, worth[key][1])
+                            if ruled is not None:
+                                ruled.add(key)
                     if cycle_picks is not None:
                         cycle_picks.extend(pick for pick in picks
                                            if pick[1] in by_key)
@@ -2239,7 +2242,8 @@ def _open_pointer_loops(rows, children, decided, cache, showcases,
 #     sides alternate round the loop.
 #   * Positions that drain into a loop are not decided here: they stand on a
 #     position of the loop, their child, and the normal backup wakes them
-#     when it changes.
+#     when it changes (without writing the old number meanwhile, see the
+#     block above _rows_that_wait).
 #   * Exact closures: a proven position is never on a loop of pointers (the
 #     walks stop there) and counts as a way out at its exact value; nothing
 #     here writes status, closure or proof.
@@ -2427,6 +2431,87 @@ def _loop_at_best_exit(members, by_key, decided, cache, deadline, picks=None):
                                 seen[seen.index(node):]):
             return None
     return worth
+
+
+# ---------------- a level never writes a number it is rewriting ----------------
+#
+# THE WHEEL (the same family, the same day).  Its recascades never came to
+# rest either: thousands of rows rewritten on every pass, the 1208 still
+# there and the plies still growing.  Replayed on small families full of
+# loops, the old backup does that in about one family in a hundred, and every
+# time the step is the same.  A position of a level reads a child's stored
+# number while the same level is rewriting that child, and writes the old
+# number; in the next level the position above it reads that, while it is
+# itself being corrected; and so on round a cycle of positions, the old
+# number always one position ahead of its correction, for ever, one ply
+# longer at every step (64 plies a pass, one per level).  A loop of pointers
+# is one snapshot of that wheel; where it stands at the end of a pass is
+# where the loops show up.
+#
+# THE RULE.  A position whose decision stands on a child that its own level
+# rewrites (a new value, distance or support) does not write that decision:
+# it keeps what it stored, and the next level, which reads the child's new
+# number, decides it again.  The position above one that waits read a
+# number that stays, so it writes; along a chain they alternate.  A ring of
+# rewrites, every one standing on the next, is written as before, and so are
+# the positions the loop rule decided: their numbers come from the loop
+# itself, not from a stored child.
+#
+# WHAT IT CHANGES.  When a write happens, never what is written at rest: a
+# position that waits is decided again one level later from fresher numbers,
+# and an ascent can only write fewer rows.  It does not end every wheel.
+# Repetitions are seen only along the moves positions stand on, so round a
+# cycle several numbers can all be consistent, and the backup can still
+# swing between two of them.  Replayed on 8,900 random loop families, the
+# ones that never came to rest fell from 82 to 15.  A family that does not
+# come to rest is left at a recascade's pass limit, as before.
+
+
+def _rows_that_wait(rows, children, decided, ruled=frozenset()):
+    """The rows of a level that do not write now (see the block above).
+
+    ``decided`` is what the level is about to write; ``ruled`` are the rows
+    the loop rule decided.  A row waits when the child it stands on (not a
+    returning one: a repetition or a line valued for it alone) gets a new
+    value, distance or support in this same level and is written.
+    """
+    stored = {row.key: (row.backed_eval, row.backed_move, row.backed_plies,
+                        row.backed_nodes) for row in rows}
+    changed = {key for key, verdict in decided.items()
+               if verdict != stored[key]}
+    moved = {key for key in changed
+             if (decided[key][0], decided[key][2], decided[key][3])
+             != (stored[key][0], stored[key][2], stored[key][3])}
+    stands_on = {}
+    for row in rows:
+        key = row.key
+        move = decided[key][1]
+        if key not in changed or not move or key in ruled:
+            continue
+        child = next((c for c in children.get(key, ()) if c.move == move),
+                     None)
+        if (child is not None and child.key in moved and not child.cycles
+                and not child.returns):
+            stands_on[key] = child.key
+    writes = {}
+    for start in sorted(stands_on):
+        chain, node = [], start
+        while (node in stands_on and node not in writes
+               and node not in chain):
+            chain.append(node)
+            node = stands_on[node]
+        if node in chain:
+            # A ring of rewrites: written as before.
+            for key in chain[chain.index(node):]:
+                writes[key] = True
+            chain = chain[:chain.index(node)]
+            below = True
+        else:
+            below = writes.get(node, True)
+        for key in reversed(chain):
+            below = not below
+            writes[key] = below
+    return {key for key, write in writes.items() if not write}
 
 
 def _backed_for(row, children, discrepancies=None, bound=None,
@@ -2974,9 +3059,16 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # (see the block above _best_child), and a loop nobody here can
         # open for the same value is worth its best exit (see the block
         # above _loop_at_best_exit).
+        ruled = set()
         wake = _open_pointer_loops(rows, children, decided, spines, showcases,
-                                   cycle_picks, loop_budget)
+                                   cycle_picks, loop_budget, ruled)
+        # And nothing is written from a number this level is rewriting
+        # (see the block above _rows_that_wait).
+        waiting = _rows_that_wait(rows, children, decided, ruled)
         for row in rows:
+            if row.key in waiting:
+                spines.wrote(row.key, row.backed_move)
+                continue
             value, move, below, quality = decided[row.key]
             if _backed_stored(row, value, move, below, quality):
                 continue
@@ -2998,6 +3090,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # look per ascent: one of them may have the move that opens it.
         wake = [key for key in sorted(wake) if key not in looked]
         looked.update(wake)
+        wake += sorted(waiting)
         if not (propagate or standing) and wake:
             frontier = wake
             continue
