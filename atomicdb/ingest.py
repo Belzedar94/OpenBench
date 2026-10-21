@@ -1813,7 +1813,16 @@ def _value_on_line(key, played, cache, budget):
     children = _backed_children_by_parent([key])
     _draw_cycling_children(children, cache, played)
     _resolve_returning_children(children, cache, played, budget)
-    kids = children.get(key, ())
+    return _line_verdict(row, children.get(key, ()), played)
+
+
+def _line_verdict(row, kids, played):
+    """The negamax of _value_on_line once ``kids`` are valued on the line.
+
+    ``row`` carries ``last_analysis``.  Returns ``(value, quality, plies,
+    move, repeats)`` as _value_on_line does; the loop valuation of
+    _loop_at_best_exit runs the same verdict on every position of a lap.
+    """
     picks = []
     value, move, plies, quality = _backed_for(
         row, kids, bound=_showcase_bound(row.last_analysis),
@@ -1982,13 +1991,12 @@ def _showcase_bound(last_analysis):
 #
 # WHAT IT LEAVES ALONE.  A loop at 0 is the repetition draw, already marked
 # as one and shown with the repetition chip.  A loop no position of the
-# level can open without a worse value wakes its other positions once, so
-# that they get a look; when none of them can either, it stays.  That does
-# happen: where the Black positions of a loop still have replies nobody
-# opened, their own searches act as ways out, every position strictly
-# prefers going round and the values around the loop differ (2e0b6263,
-# 1117 and 1133 in turn).  Opening it would take a worse move somewhere,
-# which is a value change and not this rule.  A loop longer than
+# level can open at the same value used to stay as it was, because opening
+# it changes a value (2e0b6263: the Black positions' own searches acted as
+# ways out, every position strictly preferred going round, and the loop
+# held 1117 and 1133 in turn); since 21-Oct-2026 such a loop is worth its
+# best exit (see the block above _loop_at_best_exit), and its other
+# positions are still woken once for a look.  A loop longer than
 # BACKED_CYCLE_MAX_PLIES is not seen, the same bound as the repetition walk.
 #
 # COST.  The walk that marks returning moves already runs.  Part 2 walks the
@@ -2055,16 +2063,26 @@ def _loop_still_closed(cache, members):
     return True
 
 
-def _open_pointer_loops(rows, children, decided, cache, showcases):
+def _open_pointer_loops(rows, children, decided, cache, showcases,
+                        cycle_picks=None, budget=None, ruled=None):
     """Open the loops of pointers this level is about to write.
 
     ``decided`` maps every position of the level to the ``(value, move,
     plies, quality)`` it is about to be written with; ``cache`` already
     holds those moves (see _SpineCache.wrote).  A decided position may be
     replaced here by the same value through another move (see the block
-    above).  Returns the positions of a loop nobody here could open, which
-    are not in this level: the caller gives them a look.
+    above), or, when no position of the level can do that, by what the
+    loop is worth at its best exit (see _loop_at_best_exit).  Returns the
+    positions of such a loop that are not in this level: the caller gives
+    them a look.
+
+    ``cycle_picks`` collects the repetition questions of the positions the
+    loop rule decides; ``budget`` is the ``[seconds]`` that rule may still
+    spend in this ascent (a fresh BACKED_LOOP_MAX_SECONDS when omitted);
+    ``ruled`` collects the positions of the level it decided.
     """
+    if budget is None:
+        budget = [BACKED_LOOP_MAX_SECONDS]
     by_key = {row.key: row for row in rows}
     starts = sorted(key for key, (value, move, _p, _q) in decided.items()
                     if move and value and _status_eval(by_key[key].status)
@@ -2137,8 +2155,363 @@ def _open_pointer_loops(rows, children, decided, cache, showcases):
                 opened = True
                 break
         if not opened:
+            if budget[0] > 0:
+                # Nobody here leaves it for the same value: the loop is
+                # worth its best exit.
+                started, picks = time.monotonic(), []
+                worth = _loop_at_best_exit(members, by_key, decided, cache,
+                                           started + budget[0], picks)
+                budget[0] -= time.monotonic() - started
+                if worth is not None:
+                    for key in members:
+                        if key in by_key and worth[key] != decided[key]:
+                            decided[key] = worth[key]
+                            cache.wrote(key, worth[key][1])
+                            if ruled is not None:
+                                ruled.add(key)
+                    if cycle_picks is not None:
+                        cycle_picks.extend(pick for pick in picks
+                                           if pick[1] in by_key)
             wake.update(key for key in members if key not in by_key)
     return wake
+
+
+# ---------------- a loop of pointers is worth its best exit ----------------
+#
+# THE CASE (cz_eclipsia's family, 20-Oct, once #69 and #70 were live).  In
+# the rook ending below 795ffd96 (2,734 open positions) three loops of
+# pointers, 16 positions with 34 more draining into them, held 1208: more
+# than any move that leaves them brings, so there was no tie for the rules
+# above to break and every position of them strictly preferred going round.
+# Each recascade also added plies, since each position counts its distance
+# through the next one, round and round (about 2,110 by then).
+#
+# WHY THE RULES ABOVE DO NOT CATCH IT.  A move that comes back is valued on
+# the line that returns, and that line is worth what its ways out bring, but
+# a way out is read at the number it stores, and a way out can store the
+# loop's own number: a move whose chain of pointers runs back into the loop
+# hands the loop its value back.  Read that way the loop is a fixed point of
+# its own numbers that nothing outside can lower: the defect of the 3-Aug
+# report, on a longer circle.  And the valuation of a returning line is a
+# search with a budget (see _value_on_line), which a family full of loops
+# runs out of.
+#
+# THE RULE (owner, 21-Oct-2026).  A loop of pointers is worth its best exit.
+# When a level is about to write a loop of backed_move pointers at a value
+# other than 0, and none of its positions in the level can open it at the
+# same value with a move that reaches a source (part 2 above), the loop is
+# valued from the moves that leave it:
+#
+#   * the moves that keep play inside the loop bring no number of their own:
+#     the moves between its positions, and the ways out whose chain of
+#     pointers comes back into it, which only carry the loop's own number.
+#     Each position chooses between its best way out and going on round, and
+#     a full lap is the repetition, worth 0.  So a position is worth what the
+#     side that wants to leave gets where it can, and a loop nobody wants to
+#     leave is a draw;
+#   * a way out whose chain runs into a loop elsewhere counts at the value
+#     that loop holds, and loses ties (see _grounding).  That loop is worth
+#     its own best exit when it is recomputed, and what drains into it
+#     follows through the normal backup;
+#   * the distance is counted from the way out: a position that goes round
+#     is one ply further from the exit than the next one, and no stored
+#     distance of the loop is read.
+#
+# Every position is valued on its own lap, starting from itself, by the same
+# negamax and guards as the returning line of a single position
+# (_line_verdict): coverage, floors, quality, and the draw belongs to whoever
+# can play the repeating move.  So a position with replies nobody opened
+# still keeps its own measure instead of a repetition, as before.
+#
+# EDGE CASES.
+#   * No way out at all: everybody goes round and the loop is the
+#     repetition, worth 0 with zero quality (a partially covered position
+#     keeps its own measure instead).
+#   * Overlapping and nested loops.  Pointers make at most one loop through
+#     a position, but the move graph may have loops that share positions
+#     with it.  Their moves are moves between positions of this loop, valued
+#     on the lap (back to a position already on the lap is the repetition),
+#     or ways out whose chain comes back, which keep play inside.  When a way
+#     back holds an exit of its own further down, the loop is first worth
+#     what it is worth without it; the way back stands on the loop, so the
+#     normal backup wakes it, it finds that exit, and the loop's position
+#     above it follows a level or two later in the same ascent.  A loop of
+#     pointers elsewhere is that loop's business.
+#   * Side to move: the position's own FEN.  Values stay in White's
+#     perspective, max for White and min for Black, and nothing assumes the
+#     sides alternate round the loop.
+#   * Positions that drain into a loop are not decided here: they stand on a
+#     position of the loop, their child, and the normal backup wakes them
+#     when it changes (without writing the old number meanwhile, see the
+#     block above _rows_that_wait).
+#   * Exact closures: a proven position is never on a loop of pointers (the
+#     walks stop there) and counts as a way out at its exact value; nothing
+#     here writes status, closure or proof.
+#   * Every other position backs up as before: the rule only runs on a loop
+#     a level is about to write.
+#
+# COST.  One walk for the ways out, through the steps the level has already
+# read and one query per ply for the rest (BACKED_CYCLE_MAX_PLIES at most),
+# two reads for the positions of the loop (at most BACKED_CYCLE_MAX_PLIES of
+# them), and arithmetic for the laps; the whole rule spends at most
+# BACKED_LOOP_MAX_SECONDS per ascent.  Past any bound the loop is left as it
+# is, as before.  Only rows of the level change, in the same bulk_update and
+# transaction; the other positions of the loop are woken for a look, as
+# part 2 already did.
+BACKED_LOOP_MAX_SECONDS = 1.0
+
+
+def _region_children(parent_keys, by_key, decided):
+    """Children of ``parent_keys``; a child of the level counts as decided.
+
+    Like _backed_children_by_parent, except that a child the level has just
+    decided counts with what it is about to be written with: a loop is
+    valued at the end of its level, from what that level says.
+    """
+    children = _backed_children_by_parent(parent_keys)
+    for kids in children.values():
+        for index, kid in enumerate(kids):
+            row = by_key.get(kid.key)
+            if row is None or kid.key not in decided:
+                continue
+            value, move, plies, quality = decided[kid.key]
+            kids[index] = _child_contribution(
+                kid.move, row.status, row.eval_cp, value, quality,
+                row.nodes_invested, plies, kid.key, move)
+    return children
+
+
+def _loop_ways_out(members, children, cache, decided):
+    """Sort the moves of a loop's positions by where they lead.
+
+    Returns ``(inside, out, back)``, per position: the moves to positions of
+    the loop, as ``(move, key)``; the ways out, counted at their own number
+    (``circular`` set on one whose chain runs into a loop elsewhere); and the
+    ways out whose chain of pointers comes back into the loop, as ``(child,
+    chain)``, ``chain`` being the positions of the way out before it
+    re-enters.  The last ones keep play inside the loop (see the block
+    above).  One query per ply of the walk for the steps nobody has read.
+    """
+    ring = set(members)
+    inside = {key: [] for key in members}
+    out = {key: [] for key in members}
+    back = {key: [] for key in members}
+    walkers = []
+    for key in members:
+        for child in children.get(key, ()):
+            if child.key in ring:
+                inside[key].append((child.move, child.key))
+                continue
+            if child.spine:
+                cache.spines.setdefault(child.key, child.spine)
+            if (child.exact or child.value is None
+                    or not cache.spines.get(child.key)):
+                out[key].append(child)          # a source, or nothing known
+                continue
+            walkers.append([key, child, child.key, [child.key]])
+    for _ in range(BACKED_CYCLE_MAX_PLIES):
+        if not walkers:
+            break
+        _resolve_level_steps(
+            cache, [(node, cache.spines.get(node))
+                    for _key, _child, node, _chain in walkers], decided)
+        alive = []
+        for walker in walkers:
+            key, child, node, chain = walker
+            move = cache.spines.get(node)
+            step = cache.steps.get((node, move)) if move else None
+            if step is None:
+                out[key].append(child)          # the chain ends: a source
+                continue
+            below, status = step
+            if below in ring:
+                back[key].append((child, chain))
+                continue
+            if status != 'UNKNOWN' or not cache.spines.get(below):
+                out[key].append(child)          # a proven position, a source
+                continue
+            if below in chain:
+                child.circular = True           # a loop elsewhere
+                out[key].append(child)
+                continue
+            chain.append(below)
+            walker[2] = below
+            alive.append(walker)
+        walkers = alive
+    for key, child, _node, _chain in walkers:
+        out[key].append(child)    # longer than the walk: as a source, as ever
+    return inside, out, back
+
+
+def _loop_at_best_exit(members, by_key, decided, cache, deadline, picks=None):
+    """What every position of a loop of pointers is worth at its best exit.
+
+    ``members`` is the loop in pointer order: each one stands on the next
+    (``cache.spines``) and the last on the first.  ``by_key`` and
+    ``decided`` are the rows of the level and what it is about to write.
+    Returns ``{key: (value, move, plies, quality)}`` for every member, as
+    _backed_for decides it over the member's ways out and the lap that goes
+    round (see the block above), or ``None`` when a bound is hit: then the
+    loop is left as it is.  ``picks`` collects the repetition questions of
+    the members (see _queue_cycle_disambiguation).  Nothing is written.
+    """
+    if time.monotonic() > deadline:
+        return None
+    size = len(members)
+    index = {key: number for number, key in enumerate(members)}
+    inside, out, _back = _loop_ways_out(
+        members, _region_children(members, by_key, decided), cache, decided)
+    if time.monotonic() > deadline:
+        return None
+    rows = {row.key: row for row in Position.objects.filter(
+        key__in=members).only(
+            'key', 'fen', 'status', 'expanded', 'eval_cp', 'nodes_invested',
+            'best_move', 'last_analysis', *_BACKED_FIELDS)}
+    if any(key not in rows or _status_eval(rows[key].status) is not None
+           for key in members):
+        return None                   # the loop moved under us: leave it
+
+    def repeated(move, key):
+        child = _ChildValue(move, 0, 0, 0, key)
+        child.cycles = child.returns = True
+        return child
+
+    def member(move, key, start, here, lap):
+        """``key``'s move seen from lap position ``here``.
+
+        Back to a position already on the lap is the repetition; ahead, it is
+        what that position is worth on the rest of the lap.  Either way it
+        keeps play inside the loop, so it loses ties to a way out.
+        """
+        position = (index[key] - start) % size
+        if position <= here:
+            return repeated(move, key)
+        value, quality, plies, spine, repeats = lap[position]
+        if repeats:
+            return repeated(move, key)
+        child = _ChildValue(move, value, quality, plies, key, spine,
+                            floor=is_floor(rows[key].status,
+                                           rows[key].nodes_invested,
+                                           value if spine else None))
+        child.returns = True
+        return child
+
+    worth = {}
+    for start in range(size):
+        if time.monotonic() > deadline:
+            return None
+        lap = {}
+        for here in range(size - 1, 0, -1):
+            key = members[(start + here) % size]
+            kids = list(out[key]) + [member(move, other, start, here, lap)
+                                     for move, other in inside[key]]
+            lap[here] = _line_verdict(rows[key], kids, {
+                members[(start + step) % size] for step in range(here)})
+        key = members[start]
+        kids = list(out[key]) + [member(move, other, start, 0, lap)
+                                 for move, other in inside[key]]
+        row, asked = rows[key], []
+        worth[key] = _backed_for(row, kids,
+                                 bound=_showcase_bound(row.last_analysis),
+                                 cycle_picks=asked,
+                                 lines=_showcase_lines(row.last_analysis))
+        if picks is not None:
+            picks.extend(asked)
+    # By construction the lap ends in the repetition, so positions that all
+    # go round are worth 0.  Anything else is a loop this rule did not
+    # understand, and it is left as it is.
+    onward = {key: other for key in members for move, other in inside[key]
+              if move == worth[key][1]}
+    for key in members:
+        seen, node = [], key
+        while node in onward and node not in seen:
+            seen.append(node)
+            node = onward[node]
+        if node in seen and any(worth[other][0] for other in
+                                seen[seen.index(node):]):
+            return None
+    return worth
+
+
+# ---------------- a level never writes a number it is rewriting ----------------
+#
+# THE WHEEL (the same family, the same day).  Its recascades never came to
+# rest either: thousands of rows rewritten on every pass, the 1208 still
+# there and the plies still growing.  Replayed on small families full of
+# loops, the old backup does that in about one family in a hundred, and every
+# time the step is the same.  A position of a level reads a child's stored
+# number while the same level is rewriting that child, and writes the old
+# number; in the next level the position above it reads that, while it is
+# itself being corrected; and so on round a cycle of positions, the old
+# number always one position ahead of its correction, for ever, one ply
+# longer at every step (64 plies a pass, one per level).  A loop of pointers
+# is one snapshot of that wheel; where it stands at the end of a pass is
+# where the loops show up.
+#
+# THE RULE.  A position whose decision stands on a child that its own level
+# rewrites (a new value, distance or support) does not write that decision:
+# it keeps what it stored, and the next level, which reads the child's new
+# number, decides it again.  The position above one that waits read a
+# number that stays, so it writes; along a chain they alternate.  A ring of
+# rewrites, every one standing on the next, is written as before, and so are
+# the positions the loop rule decided: their numbers come from the loop
+# itself, not from a stored child.
+#
+# WHAT IT CHANGES.  When a write happens, never what is written at rest: a
+# position that waits is decided again one level later from fresher numbers,
+# and an ascent can only write fewer rows.  It does not end every wheel.
+# Repetitions are seen only along the moves positions stand on, so round a
+# cycle several numbers can all be consistent, and the backup can still
+# swing between two of them.  Replayed on 8,900 random loop families, the
+# ones that never came to rest fell from 82 to 15.  A family that does not
+# come to rest is left at a recascade's pass limit, as before.
+
+
+def _rows_that_wait(rows, children, decided, ruled=frozenset()):
+    """The rows of a level that do not write now (see the block above).
+
+    ``decided`` is what the level is about to write; ``ruled`` are the rows
+    the loop rule decided.  A row waits when the child it stands on (not a
+    returning one: a repetition or a line valued for it alone) gets a new
+    value, distance or support in this same level and is written.
+    """
+    stored = {row.key: (row.backed_eval, row.backed_move, row.backed_plies,
+                        row.backed_nodes) for row in rows}
+    changed = {key for key, verdict in decided.items()
+               if verdict != stored[key]}
+    moved = {key for key in changed
+             if (decided[key][0], decided[key][2], decided[key][3])
+             != (stored[key][0], stored[key][2], stored[key][3])}
+    stands_on = {}
+    for row in rows:
+        key = row.key
+        move = decided[key][1]
+        if key not in changed or not move or key in ruled:
+            continue
+        child = next((c for c in children.get(key, ()) if c.move == move),
+                     None)
+        if (child is not None and child.key in moved and not child.cycles
+                and not child.returns):
+            stands_on[key] = child.key
+    writes = {}
+    for start in sorted(stands_on):
+        chain, node = [], start
+        while (node in stands_on and node not in writes
+               and node not in chain):
+            chain.append(node)
+            node = stands_on[node]
+        if node in chain:
+            # A ring of rewrites: written as before.
+            for key in chain[chain.index(node):]:
+                writes[key] = True
+            chain = chain[:chain.index(node)]
+            below = True
+        else:
+            below = writes.get(node, True)
+        for key in reversed(chain):
+            below = not below
+            writes[key] = below
+    return {key for key, write in writes.items() if not write}
 
 
 def _backed_for(row, children, discrepancies=None, bound=None,
@@ -2619,6 +2992,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     dropped = []                 # wakes the revisit cap refused
     returning, settling = set(), False   # see the settling look below
     looked = set()               # woken once for a loop (_open_pointer_loops)
+    loop_budget = [BACKED_LOOP_MAX_SECONDS]   # see _loop_at_best_exit
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     while frontier and plies < max_plies:
         plies += 1
@@ -2682,9 +3056,19 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
                 lines=_showcase_lines(showcases.get(row.key)))
             spines.wrote(row.key, decided[row.key][1])
         # Before anything is written: no loop of pointers through this level
-        # (see the block above _best_child).
-        wake = _open_pointer_loops(rows, children, decided, spines, showcases)
+        # (see the block above _best_child), and a loop nobody here can
+        # open for the same value is worth its best exit (see the block
+        # above _loop_at_best_exit).
+        ruled = set()
+        wake = _open_pointer_loops(rows, children, decided, spines, showcases,
+                                   cycle_picks, loop_budget, ruled)
+        # And nothing is written from a number this level is rewriting
+        # (see the block above _rows_that_wait).
+        waiting = _rows_that_wait(rows, children, decided, ruled)
         for row in rows:
+            if row.key in waiting:
+                spines.wrote(row.key, row.backed_move)
+                continue
             value, move, below, quality = decided[row.key]
             if _backed_stored(row, value, move, below, quality):
                 continue
@@ -2706,6 +3090,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
         # look per ascent: one of them may have the move that opens it.
         wake = [key for key in sorted(wake) if key not in looked]
         looked.update(wake)
+        wake += sorted(waiting)
         if not (propagate or standing) and wake:
             frontier = wake
             continue

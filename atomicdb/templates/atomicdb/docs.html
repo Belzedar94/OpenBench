@@ -97,7 +97,11 @@ itself; no position is left standing round a loop that one of its positions
 can leave for the same value. A returning line is only worth its value
 because somebody leaves the loop later, so the move that leaves is the one a
 position stands on and recommends, and following the best move does not go
-round a loop it could leave. Zero is what the line is worth; zero quality is
+round a loop it could leave. Nor is a loop ever worth more than its best way
+out: the moves that only go round it bring no value of their own, nor does a
+move whose line runs straight back into it, a loop nobody wants to leave is a
+draw, and the distance shown is counted from the way out.
+Zero is what the line is worth; zero quality is
 what the claim
 deserves, because nobody has ever searched whether the repetition is forced,
 so it is an assertion about a walk over pointers and not a measurement. It can
