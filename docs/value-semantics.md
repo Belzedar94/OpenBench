@@ -47,6 +47,7 @@ Every position value on the site is in exactly one of four states:
    leaves the argmax stale by strictly less than the epsilon — a real but
    bounded error, and the nightly sweep of invariant 4 is what closes it.
    A cut that could exceed that bound is a bug against this document.
+
 6. **Position identity erases the counters, so repetition lives in path
    space, never on a node.** Deduplication canonicalises every FEN to
    `0 1`; the graph therefore *cannot* say "this position occurred twice"
@@ -83,9 +84,21 @@ Every position value on the site is in exactly one of four states:
      reaches a source. Without the middle grade the positions around a
      loop could stand on it and make it protect itself: every same-value
      move of the loop's own positions then ran back into it through them
-     (2026-10-19, the same loop after the fix went live, at 1208). A loop
-     every one of whose positions strictly prefers going round is left as
-     it is: opening it would change a value. That draw is an assertion
+     (2026-10-19, the same loop after the fix went live, at 1208). **A
+     loop of pointers is worth its best exit** (owner, 2026-10-21): when
+     no position can open a loop for the same value, the moves that keep
+     play inside it bring no number of their own. Every position chooses
+     between its best way out and going on round, and a full lap is the
+     repetition, worth 0; a way out whose chain of pointers comes back
+     into the loop keeps play inside it too, since all it carries is the
+     loop's own number; a way out into a loop elsewhere counts at what
+     that loop holds; and the distance is counted from the way out, never
+     through the loop. A loop nobody wants to leave is the repetition
+     draw. Positions that drain into a loop take its new value through the
+     normal backup, and a proven position is never on a loop and counts at
+     its exact value (2026-10-20: three loops in cz_eclipsia's rook ending
+     held 1208, above every way out, and gained plies on every
+     recascade). That draw is an assertion
      about a *walk* over
      `backed_move` pointers, not a measurement: nobody has ever searched
      whether the repetition is forced. So it carries **no search weight**,
