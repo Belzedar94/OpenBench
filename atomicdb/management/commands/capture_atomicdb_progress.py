@@ -112,7 +112,13 @@ def _snapshot_values(observed_at):
             kind='TB_REJECTED').count(),
         'active_workers': live['workers'],
         'active_threads': live['cores'],
-        'active_nps': live['nps'],
+        # The reported heartbeat sum, which is what this column has always
+        # held and what the glossary says it holds.  The home page's
+        # "nodes / sec" is now the delivered rate (``live['nps']``); writing
+        # that here would change the meaning of an append-only series halfway
+        # through, and the delivered rate is already derivable from the
+        # ``engine_nodes_total`` deltas between rows.
+        'active_nps': live['nps_reported'],
         'root_pn': 0 if root_pn is None else int(root_pn),
         'root_dn': 0 if root_dn is None else int(root_dn),
         'frontier_and_nodes': frontier.get('and_nodes', 0),

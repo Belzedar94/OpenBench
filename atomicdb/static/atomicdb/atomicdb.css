@@ -1877,6 +1877,20 @@ html.theme-ready .tile {
   vertical-align: top;
 }
 
+/* La linea "searching" de una maquina, con tope ABSOLUTO dentro de esta
+   tabla.  El de .qline, min(26rem, 100%), lleva un porcentaje, y en una
+   tabla de reparto automatico ese 100% es el ancho que se esta calculando:
+   al medir la columna el navegador lo descarta entero, y la linea, que no se
+   parte, pone su ancho completo como minimo de Machine.  Medido: 507-635px
+   de 1062 en escritorio, y con una linea larga la tabla se salia de su caja
+   desde 768px, con State, Last 24h, All time y Speed detras del scroll.  Un
+   tope en rem si cuenta al medir: la columna deja de depender de lo larga que
+   sea la linea, los puntos suspensivos hacen el resto y la linea entera
+   sigue en el title. */
+.contrib-workers .qline {
+  max-width: 14rem;
+}
+
 /* Nodos por dia, sin una sola linea de JavaScript: catorce rectangulos y una
    linea de base.  ``preserveAspectRatio: none`` deja que se estire a lo ancho
    del sitio que haya — es una FORMA, no una lectura de valores exactos, y
@@ -1948,6 +1962,14 @@ html.theme-ready .tile {
   .contrib-workers .contrib-spec,
   .contrib-names .contrib-spec {
     font-size: .74rem;
+  }
+
+  /* En un telefono, mas corta: con 14rem la linea sola se lleva 232 de los
+     337px de una pantalla de 375 y la tabla vuelve a salirse.  Con 7.5rem
+     las cinco columnas caben enteras hasta 360px (medido); por debajo queda
+     el desplazamiento de .contrib-scroll, que para eso esta. */
+  .contrib-workers .qline {
+    max-width: 7.5rem;
   }
 }
 

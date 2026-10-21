@@ -55,7 +55,7 @@ are data-quality warnings, not work to hide.
 | `lease_retries_total` | Sum of `max(attempts - 1, 0)` over all tasks. A lost/recycled lease increments this; an HTTP replay of the same fenced lease does not. |
 | `recorded_rejections_total` | Persisted `TB_REJECTED` events only. Stateless malformed, authentication and stale-fence HTTP rejections are not persisted today and are intentionally excluded. |
 | `active_workers` / `active_threads` | Worker pings seen during the existing 180-second live window, and their declared non-negative thread capacity. |
-| `active_nps` | Sum of fresh NPS from live workers that report a current task. Idle or stale rates are excluded by the dashboard's existing honesty rules. |
+| `active_nps` | Sum of fresh NPS from live workers that report a current task (`worker_metrics()['nps_reported']`). Idle or stale rates are excluded. This is what the workers report, not the home page "nodes / sec", which is the delivered rate: nodes of the analyses completed in the last 10 minutes, per second. That rate can be derived from `engine_nodes_total` deltas between rows. |
 | `closure_*` | Disjoint counts among closed positions by `TERMINAL`, `TB`, `MATE_PV`, `MINIMAX`, or any currently unclassified closure. |
 | `trust_*` | Disjoint counts among closed positions. `TERMINAL`/`TB` are `verified`; remaining rows are classified by `ANDOR`, `ENGINE`, `DISPUTED`, or `unclassified`. |
 | `frontier_and_nodes` | Size of the AND part of the proof frontier at capture time (see below). |
