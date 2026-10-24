@@ -1,0 +1,47 @@
+# OpenBench gameplay PGN archiver — example systemd unit.
+#
+# The production web application runs under Gunicorn, so the custom Django
+# development server cannot own the PGN watcher. Install exactly one copy:
+#
+#     sudo cp Documentation/openbench-pgns.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now openbench-pgns
+#     journalctl -u openbench-pgns -f
+#
+# Existing unprocessed rows are drained automatically on first start. To run a
+# bounded manual recovery before enabling the service:
+#
+#     .venv/bin/python manage.py process_pgns --once
+
+[Unit]
+Description=OpenBench gameplay PGN archiver
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target openbench.service
+Wants=network-online.target
+PartOf=openbench.service
+
+[Service]
+Type=simple
+User=openbench
+Group=openbench
+WorkingDirectory=/opt/openbench
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+
+ExecStart=/opt/openbench/.venv/bin/python -u manage.py process_pgns \
+    --idle-seconds 15
+
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=5
+
+# This process updates the database and writes Media/PGNs. Run one instance.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
