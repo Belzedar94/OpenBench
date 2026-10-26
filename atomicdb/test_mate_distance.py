@@ -103,11 +103,16 @@ class ReportedShapeTests(TestCase):
         self.assertEqual(parent.best_move, 'f3e5')
 
     def test_the_backfill_repairs_the_row_already_written(self):
-        """El mecanismo arreglado no toca lo ya escrito; esto si."""
+        """El mecanismo arreglado no toca lo ya escrito; esto si.
+
+        A distance that has to GROW is not the default repair (that one only
+        shortens, § backfill_mate_distance), so this is the full recompute.
+        """
         parent, _child = self._reported_graph()
         out = StringIO()
 
-        call_command('backfill_mate_distance', stdout=out, stderr=out)
+        call_command('backfill_mate_distance', '--all', stdout=out,
+                     stderr=out)
 
         parent.refresh_from_db()
         self.assertEqual(parent.mate_in, 5)
@@ -119,16 +124,28 @@ class ReportedShapeTests(TestCase):
             DBEvent.objects.filter(kind='MATE_DISTANCE_BACKFILL').exists())
 
         again = StringIO()
-        call_command('backfill_mate_distance', stdout=again, stderr=again)
+        call_command('backfill_mate_distance', '--all', stdout=again,
+                     stderr=again)
 
         self.assertIn('written=0', again.getvalue())   # idempotente
+
+    def test_the_default_repair_leaves_a_distance_that_must_grow(self):
+        """Only distances that are too long are the default repair."""
+        parent, _child = self._reported_graph()
+        out = StringIO()
+
+        call_command('backfill_mate_distance', stdout=out, stderr=out)
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 3)
+        self.assertIn('rows_changed=0', out.getvalue())
 
     def test_the_backfill_dry_run_writes_nothing(self):
         parent, _child = self._reported_graph()
         out = StringIO()
 
-        call_command('backfill_mate_distance', '--dry-run', stdout=out,
-                     stderr=out)
+        call_command('backfill_mate_distance', '--all', '--dry-run',
+                     stdout=out, stderr=out)
 
         parent.refresh_from_db()
         self.assertEqual(parent.mate_in, 3)          # intacto
@@ -168,7 +185,8 @@ class BackfillCycleTests(TestCase):
                     key=logic.key_of(child_fen))})
         out = StringIO()
 
-        call_command('backfill_mate_distance', stdout=out, stderr=out)
+        call_command('backfill_mate_distance', '--all', stdout=out,
+                     stderr=out)
 
         report = out.getvalue()
         self.assertIn('frozen=4', report)
@@ -558,7 +576,9 @@ class BackfillDoesNotOverwriteLiveWorkTests(TestCase):
             return original(command, pending, origin)
 
         with patch.object(backfill_mate_distance.Command, '_write', writing):
-            call_command('backfill_mate_distance', stdout=out, stderr=out)
+            # The fixture's distance has to grow: the full recompute.
+            call_command('backfill_mate_distance', '--all', stdout=out,
+                         stderr=out)
         return out.getvalue()
 
     def test_a_cascade_that_lands_first_keeps_its_number(self):

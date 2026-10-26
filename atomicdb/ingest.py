@@ -845,7 +845,16 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # ``pos`` nor above it, so the ascent starts at them too.  Without them
     # they stayed UNKNOWN beside a proven winning child.
     others = _other_parents(closed_keys, pos.key)
-    changed = backup_cascade([pos.key, *others])
+    # And the closed positions THEMSELVES.  Each was closed with the length
+    # of its own part of the line as its distance, the links of a
+    # materialised chain included, and the cascade only re-derives the nodes
+    # it visits, which were their parents.  A position that already had a
+    # faster mate below it (another proven child) kept the longer distance
+    # for good: live on 26-Oct, a page sample put it at about 0.15% of the
+    # closed positions, some of them 20 plies or more too long.  Seeding them
+    # lets ``mate_distance_refresh`` compare each with all its children, and
+    # a change climbs the chain from there as any other does.
+    changed = backup_cascade([pos.key, *closed_keys, *others])
     # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
     # cambia necesariamente el backed de este nodo (un autoeco bloqueado se
     # queda igual y no propaga), pero SI cambia ``nodes_invested`` — que es
