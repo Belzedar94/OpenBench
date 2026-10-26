@@ -3537,6 +3537,9 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``CASCADE_GUARD``, ``BACKED_GUARD``, ``REVOKE_GUARD``, ``PROOF_GUARD`` —
 #     topes de recorrido que saltaron.  Son literalmente "esta pasada se paro
 #     antes de tiempo": una alarma nuestra, no una noticia.
+#   * ``BACKED_SWEEP`` — el recibo de una pasada de ``sweep_stale_backed``:
+#     cuantos respaldos encontro viejos y reescribio, y por donde empieza la
+#     siguiente.  Mantenimiento con una lista de claves dentro, no una noticia.
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
@@ -3573,6 +3576,7 @@ def _san_line(key, max_plies=16, keep_head=False):
 FEED_HIDDEN_KINDS = {
     'ARM_RATE_BUDGET',
     'BACKED_GUARD',
+    'BACKED_SWEEP',
     'BREADTH_SWAP',
     'BULK_REQUEST',
     'CASCADE_GUARD',

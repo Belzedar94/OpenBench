@@ -30,9 +30,25 @@ Every position value on the site is in exactly one of four states:
    this is the rule.)
 4. Backed values are recomputed by the cycle-aware cascade; repetition
    cycles contribute a draw bound, never a free win. Freshness is not left
-   to luck: a periodic global sweep (`recascade_backed`, nightly) drives
-   every backed value to the fixed point of the rules in force, so a node
-   nobody's family has touched in weeks still obeys today's guards.
+   to luck: a periodic sweep (`sweep_stale_backed`, every 15 minutes) reads
+   the whole table once a week and repairs every open position that one
+   level of the backup would rewrite, so a node nobody's family has touched
+   in weeks still obeys today's guards. It repairs only what is still stale
+   when it looks again minutes later, with the ordinary ascent, and never
+   writes a proven position. Two things it also covers, which the cascade
+   alone cannot (2026-10-26):
+   - an ascent stops after `BACKED_MAX_PLIES` levels, and the main line is
+     deeper than that. The `BACKED_GUARD` event of a cut ascent carries the
+     frontier it left, and the sweep carries the ascent on from there, a
+     bounded number of times;
+   - two ingests in flight at once each compute a shared ancestor without
+     the other's uncommitted change, and the one that commits last can leave
+     it on a number no child holds. The sweep looks first where overlapping
+     ingests meet.
+
+   The nightly global pass this invariant used to name (`recascade_backed`)
+   stopped fitting in a night and has been off since 2026-10-05; it remains
+   the tool for a deliberate recascade after a change of rule.
 5. **A node's `backed_eval` is the minimax of its children's *current*
    best-known values, and no propagation cut may leave a node standing on
    a value no child holds any more.** A cut may silence a change upward
@@ -45,7 +61,7 @@ Every position value on the site is in exactly one of four states:
    it than is enforced: a sibling the node is *not* standing on may drift
    under `BACKED_EPSILON_CP` and quietly become the better edge. That
    leaves the argmax stale by strictly less than the epsilon — a real but
-   bounded error, and the nightly sweep of invariant 4 is what closes it.
+   bounded error, and the sweep of invariant 4 is what closes it.
    A cut that could exceed that bound is a bug against this document.
 
    The same holds inside one level of the ascent: **a level never writes

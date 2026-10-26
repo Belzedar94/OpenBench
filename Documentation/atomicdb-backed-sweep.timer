@@ -1,0 +1,23 @@
+# Companion of atomicdb-backed-sweep.service.
+#
+# EVERY FIFTEEN MINUTES, and not once a night.  The slice of the table a run
+# reads follows from the time since the last run (--rotation-days 7), so the
+# cadence spreads the same work evenly instead of putting it in one burst,
+# and an ascent cut by a guard is carried on within the quarter of an hour
+# instead of the next morning: the top of the main line is what visitors
+# open first.
+#
+# No Persistent=: a run missed to a reboot is not owed, the next one reads a
+# larger slice by itself (at most a day's worth).
+
+[Unit]
+Description=AtomicDB sweep of stale backed values every 15 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+AccuracySec=1min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

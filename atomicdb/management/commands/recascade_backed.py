@@ -42,9 +42,20 @@ OPEN ONLY (``--open-only``).  A proven position headlines its status and
 its parents read that status, never its backed value (see
 ingest._child_contribution), so recomputing it repairs nothing anybody
 reads.  Four out of five positions with edges are proven.
+
+LOCK CONFLICTS.  The ascents run outside any transaction, one short write
+per level, next to the ingest writers.  On 26-Oct-2026 a recascade of the 61
+keys of the main line died on a deadlock against one of them, with the levels
+before it already committed.  A deadlock or a lock wait past lock_timeout is
+now tried again from the level that was rolled back
+(ingest.backup_backed_evals_retrying), and a chunk that still cannot get
+through is reported and skipped instead of ending the run: its frontier is on
+record in a BACKED_GUARD event ("aborted"), where sweep_stale_backed picks it
+up.
 """
 
 from django.core.management.base import BaseCommand
+from django.db import OperationalError
 from django.db.models import Exists, OuterRef
 
 from atomicdb import ingest
@@ -108,7 +119,37 @@ class Command(BaseCommand):
             yield (max(lo, key_from),
                    min(hi, key_to) if hi and key_to else hi or key_to)
 
+    def _ascend(self, keys):
+        """One ascent from ``keys``, tried again after a lock conflict.
+
+        Returns the rows it changed.  A chunk that still meets a conflict
+        after the retries is reported and skipped (see the module docstring).
+        """
+        report = {}
+        try:
+            return ingest.backup_backed_evals_retrying(keys, report=report)
+        except OperationalError as error:
+            if not ingest.is_lock_conflict(error):
+                raise
+            self.skipped += 1
+            self.stdout.write(self.style.ERROR(
+                'conflicto de bloqueo tras %d reintentos, %d claves '
+                'saltadas: %s' % (report.get('retries', 0), len(keys),
+                                  str(error).splitlines()[0])))
+            return report.get('changed', 0)
+
     def handle(self, *args, **opts):
+        self.skipped = 0
+        try:
+            self._run(opts)
+        finally:
+            if self.skipped:
+                self.stdout.write(self.style.WARNING(
+                    '%d trozos saltados por conflictos de bloqueo: su frontera '
+                    'queda en eventos BACKED_GUARD (aborted) para '
+                    'sweep_stale_backed' % self.skipped))
+
+    def _run(self, opts):
         chunk, cap = opts['chunk'], opts['max_passes']
         valve = opts['max_changes']
         # Solo nodos con hijos: una hoja sin aristas no tiene respaldo que
@@ -120,7 +161,7 @@ class Command(BaseCommand):
         if keys:
             keys = list(dict.fromkeys(keys))
             for n in range(1, (cap if opts['until_rest'] else 1) + 1):
-                changed = sum(ingest.backup_backed_evals(keys[i:i + chunk])
+                changed = sum(self._ascend(keys[i:i + chunk])
                               for i in range(0, len(keys), chunk))
                 self.stdout.write('%d filas cambiadas desde %d claves'
                                   % (changed, len(keys)))
@@ -152,10 +193,10 @@ class Command(BaseCommand):
                 for key in keys:
                     batch.append(key)
                     if len(batch) >= chunk:
-                        changed += ingest.backup_backed_evals(batch)
+                        changed += self._ascend(batch)
                         batch = []
                 if batch:
-                    changed += ingest.backup_backed_evals(batch)
+                    changed += self._ascend(batch)
                 if opts['slice_chars'] and opts['verbosity'] > 1:
                     # The resume point, should the run be stopped here.
                     self.stdout.write('  pasada %d: hasta %s, %d filas'
