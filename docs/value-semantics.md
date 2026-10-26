@@ -183,6 +183,34 @@ Every position value on the site is in exactly one of four states:
    nobody had searched, whose only opened reply was valued from an 8M
    search two plies further down. One reply out of thirty said "White has
    at least +363"; a 128M search of ...Bh3 itself said +1491.
+8. **Among moves of equal value, a position never stands on a proven loss
+   while a move is still open, and the order is the same on every replay.**
+   Ties go first by where each move's chain of pointers goes (invariant 6);
+   then to a proven win, the soonest mate first; then to every move still
+   open, and to a proven draw; then to a proven loss, the latest mate
+   first; then to the heavier support, the shorter chain, the position's
+   own search move (the one the explorer lists first among equal rows) and
+   the move's name. Only the move a position stands on changes, with its
+   distance and support, not its value (2026-10-26: at `1725116b`, Black to
+   move and every known move lost, the backup stood on ...f4, a mate in
+   one, while ...Nc6 was still open at the same number: proven moves
+   carried the heaviest weight and no distance, and the first edge in
+   storage order won).
+9. **A claim the backup refuses is set aside, not obeyed.** A favourable
+   number nobody searched never displaces a position's own search, but it
+   does not freeze that search either: the position is decided over its
+   other moves exactly as it would be without the claim, and the claim's
+   analysis is queued. Under partial coverage no value changes (the own
+   number stands unless a move beats it); where a multipv bound vouches for
+   the moves nobody opened, the searched moves decide, below the own number
+   too (2026-10-26: `d2501a13` held its own 1282 over ...Nc5 at 1285 and
+   ...Bg7 at 1295, because ...Rb8, seeded at 1216 by another line, topped
+   its table). Two refused numbers keep the own number as before, unless a
+   searched move beats it: a claim on the own search's own move, because
+   that search is the move's value until the move itself is searched (a
+   claim on it only says another line thought more of it), and a
+   repetition, which is no claim: invariant 6 has a position with replies
+   nobody opened keep its own number with one.
 
 ## Ordering (the rule that was wrong until 2026-08-04)
 
