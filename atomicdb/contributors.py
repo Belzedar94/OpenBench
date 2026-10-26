@@ -449,9 +449,10 @@ def _badges(nodes_total):
     return []
 
 
-def _labels(keys):
+def _labels(keys, opening=True):
     from . import views
-    return views._line_readings_many([key for key in keys if key])
+    return views._line_readings_many([key for key in keys if key],
+                                     opening=opening)
 
 
 def _presented(task, labels, now, extra=None):
@@ -523,9 +524,12 @@ def present(username, now=None):
                                                 machine__in=machines):
             running.setdefault(task.machine, task)
 
+    # Only a waiting row prints the opening of its line, and naming one reads
+    # the community map: without waiting rows there is nothing to name.
     labels = _labels([task.position_id for task in pending + leased + done]
                      + [task.position_id for task in running.values()]
-                     + [row.position_id for row in suggestions])
+                     + [row.position_id for row in suggestions],
+                     opening=bool(pending))
 
     lease_cutoff = now - timedelta(minutes=views.LEASE_MINUTES)
     leased_rows = []

@@ -26,10 +26,14 @@ Lo que fijan estos tests, en orden de importancia:
 """
 
 import re
+from contextlib import ExitStack
 from unittest import mock
 
-from django.core.cache import cache
+from django.conf import settings
+from django.core.cache import cache, caches
+from django.db import connections
 from django.test import Client, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from . import community_names, logic, openings, views
@@ -395,6 +399,80 @@ class ExplorerWorkBudgetTests(TestCase):
         self.assertEqual(counts['apply_move'], 0)
         self.assertEqual(counts['legal_moves'], 1)
         self.assertEqual(counts['match_line'], 0)
+
+    def _route_position(self, ply):
+        """The position ``ply`` plies down the declared route, and a sibling."""
+        top, line, ucis = views._validated_play_route(self.route, self.leaf)
+        keys = views._route_prefix_keys(top, line, ucis)
+        on_route = Position.objects.get(key=keys[ply])
+        aside = (Edge.objects.filter(parent_id=keys[ply - 1])
+                 .exclude(child_id=keys[ply]).first().child)
+        for position in (on_route, aside):
+            self.assertIsNone(openings.lookup_key(position.key))
+        return on_route, aside
+
+    @staticmethod
+    def _approve(position, name):
+        OpeningNameSuggestion.objects.create(
+            position=position, proposed_name=name, ip='10.0.0.9',
+            status=OpeningNameSuggestion.SState.APPROVED,
+            resolved_by='boss', resolved_at=timezone.now())
+        community_names.invalidate()
+
+    def _queries_and_cache_calls(self, url):
+        """Statements on both databases and calls into the cache backend."""
+        backend = caches['default']
+        calls = ('get', 'get_many', 'set', 'set_many', 'add', 'delete',
+                 'delete_many', 'touch', 'incr', 'has_key')
+        with ExitStack() as stack:
+            spies = [stack.enter_context(mock.patch.object(
+                backend, name, wraps=getattr(backend, name)))
+                for name in calls]
+            statements = [stack.enter_context(CaptureQueriesContext(
+                connections[alias]))
+                for alias in ('default', settings.ATOMICDB_DATABASE_ALIAS)]
+            response = Client().get(url)
+        self.assertEqual(response.status_code, 200)
+        return (response, sum(len(captured) for captured in statements),
+                sum(spy.call_count for spy in spies))
+
+    def test_a_name_inherited_from_the_route_keeps_the_movegen_budget(self):
+        """The inherited community name reads the map the page already has."""
+        named, _aside = self._route_position(5)
+        self._approve(named, 'Route Gambit')
+        cache.clear()
+
+        counts = self._counted(self.url)
+
+        self.assertEqual(counts['apply_move'],
+                         len(self.route.split(',')) + len(self.offtree))
+        self.assertEqual(counts['legal_moves'], 1)
+        self.assertEqual(counts['match_line'], 0)
+        self.assertEqual(counts['approved_map'], 1)
+
+    def test_a_name_inherited_from_the_route_costs_no_query_or_cache_call(
+            self):
+        """A page that inherits a community name costs what one that does
+        not costs: the same statements and the same trips to the cache."""
+        named, aside = self._route_position(5)
+        self._approve(aside, 'Sideline Gambit')
+        Client().get(self.url)
+        plain, plain_queries, plain_cache = self._queries_and_cache_calls(
+            self.url)
+
+        self._approve(named, 'Route Gambit')
+        Client().get(self.url)
+        inherited, queries, cache_calls = self._queries_and_cache_calls(
+            self.url)
+
+        self.assertFalse((plain.context['opening'] or {}).get('community'))
+        self.assertEqual(inherited.context['opening']['name'], 'Route Gambit')
+        self.assertFalse(inherited.context['opening']['exact'])
+        # Both renders really are counted: each reads at least the map.
+        self.assertGreater(plain_queries, 0)
+        self.assertGreater(plain_cache, 0)
+        self.assertEqual(queries, plain_queries)
+        self.assertEqual(cache_calls, plain_cache)
 
     def test_navigating_no_longer_replays_the_route_either(self):
         """``goto`` pagaba el mismo rejuego, y en cada click."""

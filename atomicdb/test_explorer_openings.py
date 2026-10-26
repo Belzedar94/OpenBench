@@ -4,9 +4,10 @@ from urllib.parse import parse_qs, urlsplit
 from unittest import mock
 
 from django.core import signing
+from django.utils import timezone
 
-from . import ingest, logic, views
-from .models import Edge
+from . import community_names, ingest, logic, views
+from .models import Edge, OpeningNameSuggestion
 from .testing import TestCase
 
 
@@ -303,6 +304,46 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertEqual(
             child.context['opening']['name'], 'Villager Defense')
         self.assertEqual(child.context['opening']['matched_ply'], 2)
+
+    def test_the_signed_anchor_stays_catalogue_only(self):
+        """A community name carries down a ``play`` route, not past it.
+
+        Inside the replay limit the route's keys are at hand and an approved
+        community name on the way is inherited like a catalogued one.  Past
+        it the route travels as a signed anchor, and the anchor signs the
+        catalogued opening and nothing else, so the page names what it named
+        before: the catalogue's answer.
+        """
+        route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 1)
+        positions = self._materialize(route[:views.PLAY_ROUTE_MAX_PLIES])
+        OpeningNameSuggestion.objects.create(
+            position=positions[4], proposed_name='Villager Defense, Long Walk',
+            ip='10.0.0.1', status=OpeningNameSuggestion.SState.APPROVED,
+            resolved_by='boss', resolved_at=timezone.now())
+        community_names.invalidate()
+        self.addCleanup(community_names.invalidate)
+        current = positions[-1]
+
+        inside = self.client.get(
+            f'/atomicdb/explore/{current.key}/',
+            {'play': ','.join(route[:views.PLAY_ROUTE_MAX_PLIES])},
+        )
+        overflow = self.client.get(
+            f'/atomicdb/goto/{current.key}/{route[64]}/',
+            {'play': ','.join(route[:64])},
+        )
+        query = parse_qs(urlsplit(overflow['Location']).query)
+        payload = signing.loads(query[views.OPENING_ANCHOR_PARAM][0],
+                                salt=views.OPENING_ANCHOR_SALT)
+        anchored = self.client.get(overflow['Location'])
+
+        self.assertEqual(inside.context['opening']['name'],
+                         'Villager Defense, Long Walk')
+        self.assertEqual(payload['opening'], positions[2].key)
+        self.assertIsNone(anchored.context['active_play'])
+        self.assertEqual(anchored.context['opening']['name'],
+                         'Villager Defense')
+        self.assertFalse(anchored.context['opening'].get('community', False))
 
     def test_opening_anchor_tampering_and_target_reuse_fail_closed(self):
         route = self._long_villager_route(views.PLAY_ROUTE_MAX_PLIES + 1)

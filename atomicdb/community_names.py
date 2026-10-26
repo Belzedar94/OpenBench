@@ -19,6 +19,10 @@ Reglas:
   de nombre auditado;
 * la sustitucion es por POSICION, igual que el catalogo, asi que las
   transposiciones lo reciben gratis;
+* y a lo largo de una linea un nombre comunitario en vigor HEREDA igual que
+  uno auditado: una posicion sin nombre propio lleva el de la posicion con
+  nombre mas profunda de su ruta, sea cual sea la capa que la nombro
+  (``deepest_on_line``);
 * fallo abierto: si esta capa no puede leerse, el explorador se comporta
   exactamente como antes de existir.
 
@@ -151,6 +155,28 @@ def name_for(position_key, names=None):
     return None if entry is None else entry['name']
 
 
+def deepest_on_line(position_keys, names=None, floor=0):
+    """``(ply, entry)`` of the deepest community name in force on a line, or
+    ``(None, None)``.
+
+    ``position_keys[i]`` is the position after ``i`` plies of a line the
+    caller already replayed, the shape ``openings.match_line_keys`` reads.
+    Only the plies from ``floor`` on are asked: the caller passes the ply its
+    catalogue match names, and a community name shallower than that loses to
+    it.  At ``floor`` itself only an approved EDIT can answer, because a NEW
+    name never stands where the catalogue names the position (``in_force``),
+    and that is how a correction goes on replacing the name it corrects
+    further down the line.
+    """
+    if names is None:
+        names = approved_map()
+    for ply in range(len(position_keys) - 1, max(floor, 0) - 1, -1):
+        entry = in_force(position_keys[ply], names=names)
+        if entry is not None:
+            return ply, entry
+    return None, None
+
+
 def catalog_names(position_key):
     """True si el catalogo AUDITADO ya nombra exactamente esta posicion."""
     return catalog_name(position_key) is not None
@@ -183,6 +209,33 @@ def opening_for(position_key, fen='', names=None):
     entry = in_force(position_key, names=names)
     if entry is None:
         return None
+    return _record(position_key, entry, fen)
+
+
+def inherited_opening(position_key, entry, *, current_key, matched_ply,
+                      line_uci=(), line_san=''):
+    """The record of the name of ``position_key``, read further down a line.
+
+    The shape ``opening_for`` gives, with what a catalogue match carries when
+    the page is past its named position: ``exact`` is False, ``current_key``
+    is the page and ``matched_ply`` the ply of the named position.  The
+    reference line is the route's own way into that position, the only line a
+    community name has.  ``entry`` is what ``deepest_on_line`` returned for
+    that position.
+    """
+    record = _record(position_key, entry)
+    record.update({
+        'reference_line_uci': list(line_uci),
+        'reference_line_san': line_san,
+        'ply': matched_ply,
+        'matched_ply': matched_ply,
+        'current_key': current_key,
+        'exact': False,
+    })
+    return record
+
+
+def _record(position_key, entry, fen=''):
     return {
         'position_key': position_key,
         'fen': fen,
