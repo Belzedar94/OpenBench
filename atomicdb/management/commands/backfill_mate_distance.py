@@ -9,6 +9,22 @@ ganador a 4 plies — el padre enseñaba "≤M2" cuando lo que sus propios hijos
 sostienen es M3 (1+4 = 5 plies).  Arreglado el mecanismo, las filas ya escritas
 siguen mintiendo hasta que alguien las recorra: esto es ese recorrido.
 
+WHAT IT REPAIRS BY DEFAULT, since 26-Oct: the distances that are too LONG.
+A position closed with the length of its own part of a won line, and never
+re-derived from its other children, can show a distance longer than those
+children allow: live, a node read "≤M13" while its child Kh1 already mated
+faster, and a page sample put such rows at about 0.15% of the closed set (the
+side that mates with a faster child, and the side that is mated when every
+reply is known and all of them mate sooner).  The cause was the post-ingest
+cascade, which visited the parents of what a pass closed and never the
+closed positions themselves (fixed in ``ingest.ingest_analysis``).  So the
+first pass keeps only the rows whose distance the recurrence SHORTENS, and
+the passes after it re-derive whatever stands on them, up to the fixed point.
+A row the recurrence would only lengthen, name or clear is left as it is
+unless it stands on a shortened row.  ``--all`` is the full recompute
+described above, the Wolfram case included.  Either way a witness swapped
+for another one just as good is not a change (§ ``_equivalent_witness``).
+
 LA RECURRENCIA (la misma funcion que usa la cascada, ``mate_distance_refresh``,
 para que las dos converjan al MISMO punto fijo y no a dos parecidos):
 
@@ -54,10 +70,26 @@ TODO O NADA.  Las filas nuevas se acumulan en memoria y se escriben en un solo
 UPDATE por lotes AL FINAL, y solo si hubo punto fijo.  Una pasada a medias
 dejaria numeros relajados a medias, que es peor que el rancio que ya hay.
 
+ON A LIVE SERVER.  The fixed point is still reached before anything is
+written, but it is written in chunks of ``--write-batch`` rows, one short
+transaction each: a single transaction over every row kept their locks until
+the last one was written, and the live cascade waited on them.  Each row is
+still filtered by the snapshot it was read with (§ ``_write``), and a run cut
+short during the writes leaves only fixed-point values behind; running it
+again finishes the job.  Reads are short statements of ``--batch-size`` keys
+with no long-running snapshot, and ``--pause`` sleeps after every batch read
+and every chunk written.  ``--dry-run`` reads exactly what the real run reads
+and writes nothing.  At low priority, for instance:
+``nice -n 19 python manage.py backfill_mate_distance --dry-run --pause 0.05``,
+then the same without ``--dry-run``.  The pause is what spares the database,
+which does the reading; ``nice`` only lowers this process.
+
 MEMORIA.  No carga el arbol: recorre por lotes ordenados por clave y lee los
 hijos con un solo JOIN por lote.  En memoria quedan solo las filas que
 CAMBIAN, una fraccion pequeña del cierre.
 """
+
+import time
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -105,14 +137,49 @@ class _Edge:
         self.child = child
 
 
+def _equivalent_witness(node, edges, new_move):
+    """True when ``new_move`` is a witness exactly as good as the stored one.
+
+    The recurrence picks its witness with ``min`` over the winning children,
+    so between two of the same rank (same distance, same verification) it
+    takes whichever edge the database returned first: a mate in one with
+    several replies that explode the king, for instance.  Swapping one for
+    the other repairs nothing, and writing it would only move the witness
+    back and forth with the storage order.
+    """
+    ranks = {edge.move_uci: ingest._witness_rank(edge) for edge in edges
+             if edge.child.status == node.status
+             and edge.child.mate_in is not None}
+    return (node.best_move in ranks and new_move in ranks
+            and ranks[node.best_move] == ranks[new_move])
+
+
 class Command(BaseCommand):
     help = ('Recompute mate_in bottom-up over the closed subgraph with the '
-            'corrected OR/AND recurrence. Idempotent; --dry-run reports only.')
+            'corrected OR/AND recurrence. By default only the distances that '
+            'are too long and what stands on them; --all for every row. '
+            'Idempotent; --dry-run reports only.')
 
     def add_arguments(self, parser):
         parser.add_argument(
+            '--all', action='store_true', dest='all_rows',
+            help='Repair every closed row whose distance differs from what '
+                 'its children give it (lengthened, named and cleared ones '
+                 'too), not only the distances that are too long and the '
+                 'rows that stand on them.')
+        parser.add_argument(
             '--batch-size', type=int, default=2_000,
             help='Closed positions read per query (default: 2000).')
+        parser.add_argument(
+            '--write-batch', type=int, default=500,
+            help='Rows written per transaction once the fixed point is '
+                 'reached (default: 500). Short transactions keep the live '
+                 'cascade from waiting on this command.')
+        parser.add_argument(
+            '--pause', type=float, default=0.0,
+            help='Seconds to sleep after every batch read and every chunk '
+                 'written (default: 0). On a live server something like '
+                 '0.05 leaves the site its share of the database.')
         parser.add_argument(
             '--max-passes', type=int, default=200,
             help='Cap on passes before giving up on the fixed point '
@@ -143,6 +210,11 @@ class Command(BaseCommand):
                  '(default: 0 = unlimited). Safety valve for running the '
                  'real pass straight after a differently-shaped dry run.')
         parser.add_argument(
+            '--count-orphans', action='store_true',
+            help='Also count UNKNOWN rows that still carry a mate_in '
+                 '(revocation leftovers, never touched here). It reads every '
+                 'open row, so leave it off on a live server.')
+        parser.add_argument(
             '--sample', type=int, default=10,
             help='Rows printed per kind of change (default: 10).')
         parser.add_argument(
@@ -157,8 +229,14 @@ class Command(BaseCommand):
         max_write = options['max_write']
         sample = options['sample']
         dry_run = options['dry_run']
+        all_rows = options['all_rows']
+        scope = 'all' if all_rows else 'too-long'
         if batch_size <= 0:
             raise ValueError('--batch-size must be positive')
+        if options['write_batch'] <= 0:
+            raise ValueError('--write-batch must be positive')
+        if options['pause'] < 0:
+            raise ValueError('--pause must be non-negative')
         if max_passes <= 0:
             raise ValueError('--max-passes must be positive')
         if max_climbs <= 0:
@@ -171,6 +249,8 @@ class Command(BaseCommand):
             raise ValueError('--max-write must be non-negative')
         if sample < 0:
             raise ValueError('--sample must be non-negative')
+        self._write_batch = options['write_batch']
+        self._pause = options['pause']
 
         connection.ensure_connection()
         if connection.vendor == 'sqlite':
@@ -181,16 +261,19 @@ class Command(BaseCommand):
         # calculan al final, comparando el valor original de cada fila con el
         # que quedo tras el punto fijo.  ``transitions`` es aparte y solo mide
         # cuanto costo converger (una fila se mueve varias veces mientras la
-        # correccion sube por la cadena).
-        counts = {'scanned': 0, 'raised': 0, 'lowered': 0, 'cleared': 0,
-                  'named': 0, 'witness_only': 0, 'frozen': 0,
+        # correccion sube por la cadena).  ``seeds`` are the rows the first
+        # pass changed: by default, the distances that were too long.
+        counts = {'scanned': 0, 'seeds': 0, 'raised': 0, 'lowered': 0,
+                  'cleared': 0, 'named': 0, 'witness_only': 0, 'frozen': 0,
                   'rows_changed': 0, 'transitions': 0}
         # Valor vigente de lo que se va a escribir.  Se mantiene en memoria
         # durante TODAS las pasadas (tambien fuera de --dry-run) y solo se
         # persiste al final: si el punto fijo no llega, la base se queda como
         # estaba en vez de con numeros a medio relajar.
         overlay = {}
-        origin = {}         # key -> (mate_in original, etiqueta legible)
+        # key -> (mate_in original, best_move original, etiqueta legible,
+        #         cierre)
+        origin = {}
         climbs = {}         # key -> pasadas CONSECUTIVAS subiendo
         flips = {}          # key -> pasadas TOTALES cambiando de valor
         frozen = set()
@@ -206,10 +289,15 @@ class Command(BaseCommand):
 
         while passes < max_passes:
             passes += 1
+            # Only the first pass picks its rows by scope; the frontier
+            # passes re-derive whatever stands on what moved, whatever way
+            # the recurrence moves it.
             pending, scanned = self._one_pass(
-                batch_size, overlay, frozen, origin, keys=frontier)
+                batch_size, overlay, frozen, origin, keys=frontier,
+                shorter_only=frontier is None and not all_rows)
             if passes == 1:
                 counts['scanned'] = scanned
+                counts['seeds'] = len(pending)
             self.stdout.write(
                 f'pass {passes}: {len(pending)} row(s) to change '
                 f'over {scanned} closed position(s)')
@@ -239,11 +327,14 @@ class Command(BaseCommand):
         else:
             unstable = True
 
-        samples = self._classify(overlay, origin, counts, sample)
+        samples, by_closure = self._classify(overlay, origin, counts, sample)
         counts['frozen'] = len(frozen)
         counts['rows_changed'] = len(overlay)
-        orphans = Position.objects.filter(
+        # Opt-in: it reads every open row of the table, which on the live
+        # base is most of it.
+        orphans = (Position.objects.filter(
             status='UNKNOWN', mate_in__isnull=False).count()
+            if options['count_orphans'] else 0)
         overflow = bool(max_write and len(overlay) > max_write)
         written, skipped = 0, 0
         if overlay and not dry_run and not unstable and not overflow:
@@ -254,12 +345,22 @@ class Command(BaseCommand):
                 self.stdout.write(f'{kind.upper()} {line}')
         for key in sorted(frozen)[:sample]:
             self.stdout.write(f'FROZEN {key} (no fixed point; left as stored)')
+        if by_closure:
+            self.stdout.write(
+                'backfill_mate_distance: rows to change by closure: '
+                + ' '.join(f'{closure}={count}'
+                           for closure, count in sorted(by_closure.items())))
         self.stdout.write(
             'backfill_mate_distance: '
             + ' '.join(f'{name}={value}' for name, value in counts.items())
             + f' passes={passes} written={written} skipped={skipped}'
+            + f' scope={scope}'
             + f' dry_run={bool(dry_run)}'
             + f' fixed_point={not unstable}')
+        if dry_run:
+            self.stdout.write(
+                f'backfill_mate_distance: dry run, {len(overlay)} row(s) '
+                'would change; nothing was written')
         if orphans:
             self.stdout.write(
                 f'backfill_mate_distance: {orphans} UNKNOWN row(s) still '
@@ -276,13 +377,14 @@ class Command(BaseCommand):
         if written:
             DBEvent.objects.create(kind='MATE_DISTANCE_BACKFILL', payload={
                 key: value for key, value in counts.items()
-            } | {'passes': passes, 'written': written,
+            } | {'passes': passes, 'written': written, 'scope': scope,
                  'orphan_unknown_mate_in': orphans,
                  'frozen_sample': sorted(frozen)[:16]})
 
     # ---------------- una pasada completa ----------------
 
-    def _one_pass(self, batch_size, overlay, frozen, origin, keys=None):
+    def _one_pass(self, batch_size, overlay, frozen, origin, keys=None,
+                  shorter_only=False):
         """Devuelve ``({key: (mate_in, best_move)}, filas_leidas)``.
 
         Con ``keys`` (la frontera) solo se relee ese subconjunto; los filtros
@@ -290,7 +392,12 @@ class Command(BaseCommand):
         vista Gauss-Seidel: lo recien calculado se usa YA dentro de la misma
         pasada (cuando el orden de claves acompaña, una cadena entera colapsa
         de golpe), mientras que ``overlay`` — la referencia contra la que el
-        llamante cuenta subidas y congela — no se toca desde aqui."""
+        llamante cuenta subidas y congela — no se toca desde aqui.
+
+        ``shorter_only`` keeps only the rows whose distance the recurrence
+        shortens: the seeds of the default repair.  Either way a witness
+        swapped for an equivalent one is not a change
+        (§ ``_equivalent_witness``)."""
         pending = {}
         scanned = 0
         live = dict(overlay)
@@ -333,6 +440,14 @@ class Command(BaseCommand):
                         node, out_edges)
                     if (new_mate, new_move) == current:
                         continue
+                    if (new_mate == current[0]
+                            and _equivalent_witness(node, out_edges,
+                                                    new_move)):
+                        continue
+                    if shorter_only and not (
+                            new_mate is not None and current[0] is not None
+                            and new_mate < current[0]):
+                        continue
                     pending[row['key']] = (new_mate, new_move)
                     live[row['key']] = (new_mate, new_move)
                     # La FOTO con la que se leyo la fila, no solo su etiqueta:
@@ -341,8 +456,15 @@ class Command(BaseCommand):
                     origin.setdefault(row['key'], (
                         row['mate_in'], row['best_move'],
                         f"{row['key'][:16]} {row['status']} {row['closure']} "
-                        f"| {row['fen']}"))
+                        f"| {row['fen']}", row['closure']))
+                self._rest()
         return pending, scanned
+
+    def _rest(self):
+        """Leave the live site its share of the database between batches."""
+        pause = getattr(self, '_pause', 0.0)
+        if pause:
+            time.sleep(pause)
 
     def _parents_of(self, keys, batch_size):
         """Frontera de la siguiente pasada: padres CERRADOS de lo movido."""
@@ -355,10 +477,15 @@ class Command(BaseCommand):
         return parents
 
     def _classify(self, overlay, origin, counts, sample):
-        """Cuentas y muestras del cambio NETO de cada fila superviviente."""
+        """Cuentas y muestras del cambio NETO de cada fila superviviente.
+
+        Also how many of them each closure holds, to tell the links of the
+        won lines (``MATE_PV``) from the positions above them."""
         samples = {'raised': [], 'lowered': [], 'cleared': [], 'named': []}
+        by_closure = {}
         for key, (new, _move) in overlay.items():
-            old, _stored_move, label = origin[key]
+            old, _stored_move, label, closure = origin[key]
+            by_closure[str(closure)] = by_closure.get(str(closure), 0) + 1
             if old == new:
                 counts['witness_only'] += 1
                 continue
@@ -374,7 +501,7 @@ class Command(BaseCommand):
             if len(samples[kind]) < sample:
                 head, _, fen = label.partition('|')
                 samples[kind].append(f'{head}mate_in {old} -> {new} |{fen}')
-        return samples
+        return samples, by_closure
 
     def _edges_by_parent(self, keys):
         """Hijos con su valor ALMACENADO: el vigente lo pone la vista live."""
@@ -398,18 +525,28 @@ class Command(BaseCommand):
         origen, y la que ya no encaje se queda como esta — su valor lo puso
         alguien con informacion mas fresca que la nuestra.
 
+        In chunks of ``--write-batch`` rows, one short transaction each: a
+        single transaction over every row held their locks until the last
+        one was written, and the live cascade waited on them.
+
         Devuelve ``(escritas, saltadas)``.
         """
         now = timezone.now()
         written, skipped = 0, 0
-        with atomic():
-            for key, (mate_in, best_move) in pending.items():
-                stored_mate, stored_move, _label = origin[key]
-                changed = Position.objects.filter(
-                    key=key, mate_in=stored_mate, best_move=stored_move,
-                ).update(mate_in=mate_in, best_move=best_move, updated=now)
-                if changed:
-                    written += 1
-                else:
-                    skipped += 1
+        items = list(pending.items())
+        step = getattr(self, '_write_batch', 500)
+        for start in range(0, len(items), step):
+            with atomic():
+                for key, (mate_in, best_move) in items[start:start + step]:
+                    stored_mate, stored_move = origin[key][:2]
+                    changed = Position.objects.filter(
+                        key=key, mate_in=stored_mate, best_move=stored_move,
+                    ).update(mate_in=mate_in, best_move=best_move,
+                             updated=now)
+                    if changed:
+                        written += 1
+                    else:
+                        skipped += 1
+            if start + step < len(items):
+                self._rest()
         return written, skipped
