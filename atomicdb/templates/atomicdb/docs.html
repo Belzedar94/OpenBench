@@ -75,8 +75,14 @@ available as own search context in the tooltip and in the API
 <p class="dim" style="font-size:.9rem">One value never displaces another for
 free. While a position still has replies nobody has analysed, a favourable
 value with no engine nodes behind it, the band of a line a visitor walked, does
-not push aside a measured evaluation: the position keeps its own number and the
-analysis that would settle it is queued. The same when a favourable child
+not push aside a measured evaluation, and the analysis that would settle it is
+queued. It is set aside, not obeyed: the position is decided over its other
+moves as if that value were not there. So it keeps its own number unless a
+searched move beats it, except where a multipv bound vouches for the moves
+nobody opened: there its searched moves decide, even below its own number.
+When the value sits on the very move the position's own search chose, that
+search still values the move, and the position keeps its own number as
+before. The same when a favourable child
 carries far less search than the pass that produced the parent's own
 evaluation: the value propagates, the gap is recorded as an open question, and
 a deeper pass is bought for that child.</p>

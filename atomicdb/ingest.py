@@ -2704,12 +2704,48 @@ def _backed_for(row, children, discrepancies=None, bound=None,
         # lasts exactly as long as that purchase waits in the queue.  The
         # first rule of the backup is that the best INFORMED child backs
         # up; a claim nobody searched is not better informed than a search.
-        measured = [c for c in informed
+        #
+        # SO A VETOED CLAIM IS SET ASIDE, NOT OBEYED (26-Oct-2026).  The
+        # other moves decide exactly as they would without it, also when
+        # what they say is worse for the mover than the node's own number.
+        # Keeping that number whenever no searched move beat it froze the
+        # header at a search its own table refuted: ``d2501a13`` (Black to
+        # move) held its own 1282 from ...Bg7 while ...Bg7, searched on its
+        # own, read 1295 and ...Nc5 1285, because ...Rb8, seeded at 1216 by
+        # another line, topped the table (``e214fcc0`` the same, 1304
+        # instead of 1413).  Under partial coverage no value changes: the
+        # directional guard below still keeps the own number unless a move
+        # beats it.
+        #
+        # Two vetoed numbers are not set aside, and the node keeps its own
+        # number as before unless a searched move beats it:
+        #   * a claim on the own search's own move.  That search is the
+        #     value of its move until the move is searched; a claim on it
+        #     only says another line thought more of it.  Setting the move
+        #     aside would value the node without its best move: on a
+        #     sample of production (26-Oct), 26 of the 40 positions the
+        #     rule changed without this exception were of this kind,
+        #     ``2bd63fd6`` dropping from its own 1137 to its second line's
+        #     873 and ``f8481e63`` from -118 to a loss;
+        #   * a repetition.  It is no claim but a line that comes back
+        #     here, a draw by the rules of the game (see _value_on_line),
+        #     and a node with replies nobody opened keeps its own number
+        #     with one (docs/value-semantics.md, invariant 6).
+        vetoed = [c for c in informed
+                  if c.quality <= 0
+                  and _better_for_mover(c.value, own, stm_white)]
+        if any(c.cycles or c.move == row.best_move for c in vetoed):
+            rest = [c for c in informed
                     if c.quality > 0
                     and _better_for_mover(c.value, own, stm_white)]
-        if not measured:
+        else:
+            rest = [c for c in informed if c not in vetoed]
+        if not rest:
             return own, None, 0, own_quality
-        best = _best_child(measured, stm_white)
+        best = _best_child(rest, stm_white)
+        if best.cycles and cycle_picks is not None:
+            # A repetition the claim was hiding: the question is the same.
+            cycle_picks.append((best.move, row.key, own_quality))
     if not complete:
         if own is not None:
             # GUARDA DIRECCIONAL (intacta): con cobertura parcial y sin cota
