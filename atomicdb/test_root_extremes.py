@@ -5,7 +5,9 @@ each first move have ever had, from White's side and with the time, catching
 every change ("the value should be logged every time it changes"), and log
 the main line from the start position so its evolution can be followed
 (migration 0050); then follow the three main replies to 1.Nf3 and every
-position the opening catalogue names the same way (migration 0051).
+position the opening catalogue names the same way (migration 0051); then
+every position a community name is approved for, from its approval on
+(migration 0052: the watch list becomes a table).
 
 On PostgreSQL a row trigger keeps the extremes, and the tests marked so run
 against it in the PostgreSQL CI job.  Everywhere else the hourly capture
@@ -26,14 +28,18 @@ from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.test import SimpleTestCase
 
-from . import ingest, logic, openings, roots, views
+from OpenBench.models import Profile
+
+from . import community_names, ingest, logic, openings, roots, views
 from .database import atomic, connection
-from .models import Edge, MainLineSnapshot, Position, RootExtreme
-from .testing import TestCase
+from .models import (Edge, MainLineSnapshot, OpeningNameSuggestion, Position,
+                     RootExtreme, WatchedKey)
+from .testing import TestCase, worker_account
 
 UTC = datetime_timezone.utc
 MIGRATION = importlib.import_module('atomicdb.migrations.0050_root_extremes')
 OPENINGS = importlib.import_module('atomicdb.migrations.0051_watch_openings')
+WATCHED = importlib.import_module('atomicdb.migrations.0052_watched_keys')
 POSTGRES = connection.vendor == 'postgresql'
 T0 = datetime(2026, 10, 26, 10, 7, tzinfo=UTC)
 
@@ -107,17 +113,51 @@ def _watch_function_exists():
         return cursor.fetchone()[0]
 
 
+def _watch_function_source():
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT prosrc, provolatile FROM pg_proc '
+                       'WHERE oid = to_regprocedure(%s)',
+                       [f'{roots.WATCH_FUNCTION}(text)'])
+        return cursor.fetchone()
+
+
+def _is_watched(key):
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT {roots.WATCH_FUNCTION}(%s)', [key])
+        return cursor.fetchone()[0]
+
+
+def _approver(name='belzedar'):
+    user = worker_account(name)
+    Profile.objects.filter(user=user).update(approver=True)
+    return user
+
+
+def _suggest(pos, name, kind=OpeningNameSuggestion.SKind.NEW, **fields):
+    return OpeningNameSuggestion.objects.create(
+        position=pos, proposed_name=name, kind=kind, ip='127.0.0.1',
+        **fields)
+
+
 class WatchedKeysTests(SimpleTestCase):
 
     def test_the_trigger_watches_the_keys_the_tree_computes(self):
         """The migrations spell the keys out; the move generator and the
-        catalogue derive them.  If either moves, this is what says so: a new
-        catalogue needs a new migration."""
-        self.assertEqual(list(OPENINGS.WATCHED_KEYS), roots.watched_keys())
+        catalogue derive them.  If either moves, this is what says so."""
+        self.assertEqual(list(OPENINGS.WATCHED_KEYS), roots.standing_keys())
         self.assertEqual(
             list(MIGRATION.WATCHED_KEYS),
             [row.key for row in roots.first_table()
              if row.kind in ('start', 'move')])
+
+    def test_0052_gives_every_standing_key_the_source_the_code_does(self):
+        self.assertEqual(WATCHED._standing_sources(),
+                         {key: str(source) for key, source
+                          in roots.standing_sources().items()})
+        counts = {}
+        for source in roots.standing_sources().values():
+            counts[source] = counts.get(source, 0) + 1
+        self.assertEqual(counts, {'root': 21, 'reply': 3, 'catalog': 341})
 
     def test_the_first_table_is_the_start_moves_and_three_replies(self):
         table = roots.first_table()
@@ -147,7 +187,7 @@ class WatchedKeysTests(SimpleTestCase):
 
     def test_every_catalogue_opening_is_watched_once(self):
         catalogue = openings.load_catalog()
-        keys = roots.watched_keys()
+        keys = roots.standing_keys()
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(len(roots.named_openings()), len(catalogue))
         self.assertTrue(set(catalogue) <= set(keys))
@@ -158,6 +198,8 @@ class WatchedKeysTests(SimpleTestCase):
         self.assertEqual(roots.TRIGGER, MIGRATION.TRIGGER)
         self.assertEqual(roots.TRIGGER, OPENINGS.TRIGGER)
         self.assertEqual(roots.WATCH_FUNCTION, OPENINGS.WATCH_FUNCTION)
+        self.assertIn(f'FUNCTION {roots.WATCH_FUNCTION}(',
+                      WATCHED.WATCH_FUNCTION)
         self.assertEqual(roots.PLAY_LINK_MAX_PLIES,
                          views.PLAY_ROUTE_MAX_PLIES)
 
@@ -257,6 +299,19 @@ class FoldTests(TestCase):
             set(RootExtreme.objects.values_list('key', flat=True)),
             {e4.key, opening.key})
 
+    def test_a_community_named_position_is_folded_too(self):
+        ingest.expand(self.root)
+        pos = _unwatched_child(_child(self.root, 'e2e4'))
+        _set(pos, eval_cp=150)
+        _suggest(pos, 'Rhaxier Gambit',
+                 status=OpeningNameSuggestion.SState.APPROVED)
+        _set(pos, eval_cp=90)
+
+        roots.fold_extremes(now=T0)
+
+        self.assertEqual(_summary(_row(pos)),
+                         (150, 'UNKNOWN', 90, 'UNKNOWN', 90, 1))
+
 
 class MigrationSeedTests(TestCase):
 
@@ -331,6 +386,58 @@ class MigrationSeedTests(TestCase):
                                                               flat=True)),
                          [self.root.key])
 
+    def _before_0052(self, value=150):
+        """A tree as 0052 finds it: an approved name, no watch list."""
+        pos = _unwatched_child(_child(self.root, 'e2e4'))
+        _set(pos, eval_cp=value)
+        _suggest(pos, 'Rhaxier Gambit',
+                 status=OpeningNameSuggestion.SState.APPROVED)
+        WatchedKey.objects.all().delete()
+        RootExtreme.objects.all().delete()
+        return pos
+
+    def test_0052_lists_the_standing_keys_and_the_approved_names(self):
+        pos = self._before_0052()
+        _set(self.root, eval_cp=545)
+        editor = self._editor()
+        editor.execute = self.fail
+
+        WATCHED.install(django_apps, editor)
+
+        sources = dict(WatchedKey.objects.values_list('key', 'source'))
+        self.assertEqual(len(sources), 365 + 1)
+        nf3_f6 = next(row.key for row in roots.first_table()
+                      if row.label == '1... f6')
+        catalogue_only = next(row.key for row in roots.named_openings()
+                              if row.key not in roots.standing_keys()[:24])
+        self.assertEqual(
+            [sources[key] for key in (self.root.key, nf3_f6, catalogue_only,
+                                      pos.key)],
+            ['root', 'reply', 'catalog', 'community'])
+        # Only the newly watched position is seeded: the others already had
+        # their rows from 0050 and 0051 (here, none: their values are new).
+        self.assertEqual(list(RootExtreme.objects.values_list('key',
+                                                              flat=True)),
+                         [pos.key])
+        self.assertEqual(_row(pos).last_value, 150)
+
+    def test_0052_on_sqlite_reverses_to_what_0051_watches(self):
+        pos = self._before_0052()
+        editor = self._editor()
+        editor.execute = self.fail
+        WATCHED.install(django_apps, editor)
+        RootExtreme.objects.create(
+            key=self.root.key, best_value=1, best_status='UNKNOWN',
+            best_at=T0, worst_value=1, worst_status='UNKNOWN', worst_at=T0,
+            last_value=1, last_status='UNKNOWN', changed_at=T0, since=T0)
+
+        WATCHED.uninstall(django_apps, editor)
+
+        self.assertEqual(list(RootExtreme.objects.values_list('key',
+                                                              flat=True)),
+                         [self.root.key])
+        self.assertFalse(RootExtreme.objects.filter(key=pos.key).exists())
+
 
 @skipUnless(POSTGRES, 'the trigger exists on PostgreSQL only')
 class TriggerTests(TestCase):
@@ -352,15 +459,33 @@ class TriggerTests(TestCase):
         # rebuilds for every statement.
         self.assertLess(len(definition), 1000)
 
-    def test_the_watch_function_knows_every_key_and_nothing_else(self):
+    def test_the_watch_function_reads_the_watch_list(self):
+        keys = roots.watched_keys()
+        self.assertGreaterEqual(len(keys), 365)
         with connection.cursor() as cursor:
             cursor.execute(
                 f'SELECT count(*) FILTER (WHERE {roots.WATCH_FUNCTION}(k)),'
-                ' count(*) FROM unnest(%s::text[]) AS k',
-                [roots.watched_keys()])
-            self.assertEqual(cursor.fetchone(), (365, 365))
-            cursor.execute(f'SELECT {roots.WATCH_FUNCTION}(%s)', ['f' * 64])
-            self.assertFalse(cursor.fetchone()[0])
+                ' count(*) FROM unnest(%s::text[]) AS k', [keys])
+            self.assertEqual(cursor.fetchone(), (len(keys), len(keys)))
+        self.assertFalse(_is_watched('f' * 64))
+        source, volatility = _watch_function_source()
+        self.assertIn('atomicdb_watchedkey', source)
+        # VOLATILE: a fresh snapshot per call, so an UPDATE that waited for
+        # an approval sees the key that approval just added.
+        self.assertEqual(volatility, 'v')
+
+    def test_a_key_added_to_the_list_is_watched_from_that_moment(self):
+        pos = _unwatched_child(self.e4)
+        _set(pos, eval_cp=200)
+        self.assertFalse(RootExtreme.objects.filter(key=pos.key).exists())
+
+        WatchedKey.objects.create(key=pos.key,
+                                  source=WatchedKey.Source.COMMUNITY)
+        self.assertTrue(_is_watched(pos.key))
+        _set(pos, eval_cp=230)
+
+        self.assertEqual(_summary(_row(pos)),
+                         (230, 'UNKNOWN', 230, 'UNKNOWN', 230, 0))
 
     def test_every_change_is_caught_not_a_sample(self):
         _set(self.e4, eval_cp=185)          # the first value starts the row
@@ -489,8 +614,33 @@ class TriggerMigrationTests(TestCase):
             MIGRATION.install(django_apps, editor)   # and again: no error
         self.assertTrue(roots.trigger_installed())
 
+    def test_0052_reverses_to_0051_and_replays(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        pos = _unwatched_child(_child(root, 'e2e4'))
+        _set(pos, eval_cp=150)
+        _suggest(pos, 'Rhaxier Gambit',
+                 status=OpeningNameSuggestion.SState.APPROVED)
+        self.assertTrue(RootExtreme.objects.filter(key=pos.key).exists())
+
+        with connection.schema_editor() as editor:
+            WATCHED.uninstall(django_apps, editor)
+        source, volatility = _watch_function_source()
+        self.assertIn(MIGRATION.START_KEY, source)        # 0051's constant
+        self.assertEqual(volatility, 's')
+        self.assertFalse(_is_watched(pos.key))
+        self.assertFalse(RootExtreme.objects.filter(key=pos.key).exists())
+
+        with connection.schema_editor() as editor:
+            WATCHED.install(django_apps, editor)
+            WATCHED.install(django_apps, editor)   # and again: no error
+        source, volatility = _watch_function_source()
+        self.assertIn('atomicdb_watchedkey', source)
+        self.assertTrue(_is_watched(pos.key))
+        self.assertEqual(_row(pos).last_value, 150)
+
     def test_with_the_trigger_the_capture_leaves_the_extremes_to_it(self):
-        _snapshot, _created, folded = roots.capture(now=T0)
+        _snapshot, _created, folded, _added = roots.capture(now=T0)
         self.assertIsNone(folded)
 
 
@@ -617,6 +767,7 @@ class CaptureCommandTests(TestCase):
         self.assertEqual(MainLineSnapshot.objects.count(), 1)
         kept_by = 'trigger' if POSTGRES else 'capture'
         self.assertEqual(first['extremes']['kept_by'], kept_by)
+        self.assertEqual(first['extremes']['watch_added'], 0)
         # Kept one way or the other, the row is there.
         self.assertEqual(_row(self.root).last_value, 1243)
 
@@ -751,6 +902,39 @@ class RootsPageTests(TestCase):
         body = self._page()
         self.assertIn('not in the tree yet', body)
 
+    def test_a_community_named_position_is_listed_by_its_name(self):
+        e4 = _child(self.root, 'e2e4')
+        pos = _unwatched_child(e4)
+        _set(pos, eval_cp=150)
+        _suggest(pos, 'Rhaxier Gambit',
+                 status=OpeningNameSuggestion.SState.APPROVED)
+        if not POSTGRES:
+            roots.fold_extremes(now=T0)
+
+        response = self._get('?sort=now')
+        rows = response.context['openings']
+        row = next(row for row in rows if row['key'] == pos.key)
+        self.assertEqual(
+            (row['label'], row['community'], row['now_h'], row['best_h'],
+             row['line_san']),
+            ('Rhaxier Gambit', True, '+1.50', '+1.50', ''))
+        self.assertEqual(row['url'], f'/atomicdb/explore/{pos.key}/')
+        self.assertEqual(len(rows), len(openings.load_catalog()) + 1)
+        self.assertIn('community name', response.content.decode())
+
+    def test_an_approved_correction_renames_a_catalogue_row(self):
+        (pos, watched), = _catalogue_positions()
+        _suggest(pos, 'Corrected Name', kind=OpeningNameSuggestion.SKind.EDIT,
+                 previous_name=watched.label,
+                 status=OpeningNameSuggestion.SState.APPROVED)
+
+        rows = roots.page_context(now=T0)['openings']
+
+        row = next(row for row in rows if row['key'] == pos.key)
+        self.assertEqual((row['label'], row['community'], row['line_san']),
+                         ('Corrected Name', True, watched.line_san))
+        self.assertEqual(len(rows), len(openings.load_catalog()))
+
     def test_the_main_line_and_its_history_by_day(self):
         _set(self.root, eval_cp=545, backed_eval=1243, backed_move='g1f3')
         _set(self.nf3, best_move='f7f6')
@@ -801,3 +985,173 @@ class RootsPageTests(TestCase):
     def test_the_front_page_links_here(self):
         body = self.client.get('/atomicdb/').content.decode()
         self.assertIn('href="/atomicdb/roots/"', body)
+
+
+class ApprovalHookTests(TestCase):
+    """Approving a name on the moderation page puts its position on the watch
+    list, with its first value, in the approval's own transaction."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.pos = _unwatched_child(_child(self.root, 'e2e4'))
+        _set(self.pos, eval_cp=150)
+        self.client.force_login(_approver())
+
+    def _decide(self, suggestion, action):
+        response = self.client.post('/atomicdb/suggestions/', {
+            'action': action, 'suggestion': suggestion.id})
+        self.assertEqual(response.status_code, 302)
+        suggestion.refresh_from_db()
+        return suggestion
+
+    def test_a_pending_name_is_not_watched(self):
+        _suggest(self.pos, 'Rhaxier Gambit')
+        self.assertFalse(WatchedKey.objects.filter(key=self.pos.key).exists())
+
+    def test_approving_a_name_watches_its_position_from_its_value(self):
+        suggestion = self._decide(_suggest(self.pos, 'Rhaxier Gambit'),
+                                  'approve')
+
+        self.assertEqual(suggestion.status,
+                         OpeningNameSuggestion.SState.APPROVED)
+        watched = WatchedKey.objects.get(key=self.pos.key)
+        self.assertEqual(watched.source, WatchedKey.Source.COMMUNITY)
+        row = _row(self.pos)
+        self.assertEqual(_summary(row),
+                         (150, 'UNKNOWN', 150, 'UNKNOWN', 150, 0))
+        self.assertEqual(row.since, watched.added)
+        if POSTGRES:
+            # From here on the trigger sees every change.
+            _set(self.pos, eval_cp=175)
+            self.assertEqual(_summary(_row(self.pos)),
+                             (175, 'UNKNOWN', 150, 'UNKNOWN', 175, 1))
+
+    def test_the_watch_rolls_back_with_the_approval(self):
+        suggestion = _suggest(self.pos, 'Rhaxier Gambit')
+        try:
+            with atomic():
+                suggestion.status = OpeningNameSuggestion.SState.APPROVED
+                suggestion.save(update_fields=['status'])
+                self.assertTrue(WatchedKey.objects.filter(
+                    key=self.pos.key).exists())
+                raise RuntimeError('the approval fails after the save')
+        except RuntimeError:
+            pass
+
+        self.assertFalse(WatchedKey.objects.filter(key=self.pos.key).exists())
+        self.assertFalse(RootExtreme.objects.filter(key=self.pos.key)
+                         .exists())
+
+    def test_a_rejected_name_is_not_watched(self):
+        self._decide(_suggest(self.pos, 'Rhaxier Gambit'), 'reject')
+
+        self.assertFalse(WatchedKey.objects.filter(key=self.pos.key).exists())
+
+    def test_a_later_rejection_or_edit_keeps_the_position_and_its_history(
+            self):
+        self._decide(_suggest(self.pos, 'Rhaxier Gambit'), 'approve')
+        self._decide(_suggest(self.pos, 'Something Else',
+                              kind=OpeningNameSuggestion.SKind.EDIT,
+                              previous_name='Rhaxier Gambit'), 'reject')
+        self._decide(_suggest(self.pos, "Rhaxier's Gambit",
+                              kind=OpeningNameSuggestion.SKind.EDIT,
+                              previous_name='Rhaxier Gambit'), 'approve')
+
+        self.assertEqual(WatchedKey.objects.filter(key=self.pos.key).count(),
+                         1)
+        self.assertTrue(RootExtreme.objects.filter(key=self.pos.key)
+                        .exists())
+        row = next(row for row in roots.page_context(now=T0)['openings']
+                   if row['key'] == self.pos.key)
+        self.assertEqual(row['label'], "Rhaxier's Gambit")
+
+    def test_a_name_withdrawn_later_keeps_its_row_under_a_plain_label(self):
+        suggestion = self._decide(_suggest(self.pos, 'Rhaxier Gambit'),
+                                  'approve')
+        # The moderation page decides pending names only: withdrawing an
+        # approved one is done by hand.
+        suggestion.status = OpeningNameSuggestion.SState.REJECTED
+        suggestion.save(update_fields=['status'])
+        community_names.invalidate()
+
+        self.assertTrue(WatchedKey.objects.filter(key=self.pos.key).exists())
+        self.assertEqual(_row(self.pos).last_value, 150)
+        row = next(row for row in roots.page_context(now=T0)['openings']
+                   if row['key'] == self.pos.key)
+        self.assertEqual((row['label'], row['community'], row['now_h']),
+                         ('Unnamed position', False, '+1.50'))
+
+    def test_a_failing_watch_never_blocks_the_approval(self):
+        with mock.patch.object(roots, 'watch',
+                               side_effect=RuntimeError('broken')), \
+                self.assertLogs('atomicdb.roots', level='ERROR'):
+            suggestion = self._decide(_suggest(self.pos, 'Rhaxier Gambit'),
+                                      'approve')
+
+        self.assertEqual(suggestion.status,
+                         OpeningNameSuggestion.SState.APPROVED)
+        self.assertFalse(WatchedKey.objects.filter(key=self.pos.key).exists())
+        # The hourly capture puts it right.
+        self.assertEqual(roots.sync_watched_keys(now=T0), 1)
+        self.assertEqual(WatchedKey.objects.get(key=self.pos.key).source,
+                         WatchedKey.Source.COMMUNITY)
+        self.assertEqual(_row(self.pos).last_value, 150)
+
+
+class SyncTests(TestCase):
+    """The hourly capture adds whatever should be watched and is not."""
+
+    def setUp(self):
+        _trigger_off()
+        self.root = ingest.get_or_create_position(logic.start_fen())
+
+    def test_a_complete_list_adds_nothing(self):
+        self.assertEqual(roots.sync_watched_keys(now=T0), 0)
+        self.assertEqual(set(roots.watched_keys()),
+                         set(roots.standing_keys()))
+
+    def test_missing_keys_come_back_with_their_source_and_value(self):
+        _set(self.root, eval_cp=545)
+        ingest.expand(self.root)
+        pos = _unwatched_child(_child(self.root, 'e2e4'))
+        _set(pos, eval_cp=150)
+        _suggest(pos, 'Rhaxier Gambit',
+                 status=OpeningNameSuggestion.SState.APPROVED)
+        WatchedKey.objects.filter(key__in=[self.root.key, pos.key]).delete()
+        RootExtreme.objects.all().delete()
+
+        _snapshot, _created, _folded, added = roots.capture(now=T0)
+
+        self.assertEqual(added, 2)
+        self.assertEqual(
+            dict(WatchedKey.objects.filter(key__in=[self.root.key, pos.key])
+                 .values_list('key', 'source')),
+            {self.root.key: 'root', pos.key: 'community'})
+        self.assertEqual(_row(self.root).last_value, 545)
+        self.assertEqual(_row(pos).last_value, 150)
+
+    def test_a_failing_sync_does_not_cost_the_main_line(self):
+        _set(self.root, eval_cp=545)
+        with mock.patch.object(roots, 'sync_watched_keys',
+                               side_effect=RuntimeError('broken')), \
+                self.assertRaises(RuntimeError):
+            roots.capture(now=T0)
+
+        self.assertEqual(MainLineSnapshot.objects.get().value, 545)
+
+    def test_an_existing_key_keeps_its_source_and_its_history(self):
+        _set(self.root, eval_cp=545)
+        RootExtreme.objects.create(
+            key=self.root.key, best_value=1310, best_status='UNKNOWN',
+            best_at=T0, worst_value=310, worst_status='UNKNOWN', worst_at=T0,
+            last_value=545, last_status='UNKNOWN', changed_at=T0, changes=7,
+            since=T0)
+
+        self.assertEqual(
+            roots.watch({self.root.key: WatchedKey.Source.COMMUNITY}), 0)
+
+        self.assertEqual(WatchedKey.objects.get(key=self.root.key).source,
+                         'root')
+        self.assertEqual(_summary(_row(self.root)),
+                         (1310, 'UNKNOWN', 310, 'UNKNOWN', 545, 7))

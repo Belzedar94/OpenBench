@@ -3,9 +3,14 @@
 Community requests: keep the best and the worst value the start position and
 each of its first moves have ever had, and log how the main line from the
 start position evolves (0050); then the three main replies to 1.Nf3 and every
-position the opening catalogue names (0051).  Two records feed the public
-page ``/atomicdb/roots/``:
+position the opening catalogue names (0051); then every position a community
+name is approved for, from the moment it is approved (0052).  Three records
+feed the public page ``/atomicdb/roots/``:
 
+* ``WatchedKey``: the watch list.  The first table and the catalogue are put
+  there by migration, an approved community name by its approval
+  (``watch_approved``), and the hourly capture adds whatever is missing
+  (``sync_watched_keys``).  Nothing is ever taken off it.
 * ``RootExtreme``: per watched position, the highest and the lowest headline
   value since tracking began, and when.  On PostgreSQL a row trigger keeps it,
   so every change counts, the cascade's ``bulk_update`` included.  Without
@@ -29,13 +34,14 @@ from django.utils import timezone
 
 from . import community_names, ingest, logic, openings
 from .database import atomic, connection
-from .models import Edge, MainLineSnapshot, Position, RootExtreme
+from .models import (Edge, MainLineSnapshot, OpeningNameSuggestion, Position,
+                     RootExtreme, WatchedKey)
 
 logger = logging.getLogger(__name__)
 
 UTC = datetime_timezone.utc
 
-# The names migrations 0050/0051 give the trigger, its function, and the
+# The names migrations 0050-0052 give the trigger, its function, and the
 # function its WHEN clause asks whether a key is watched.
 TRIGGER = 'atomicdb_root_extremes'
 WATCH_FUNCTION = 'atomicdb_watched_key'
@@ -60,6 +66,7 @@ _PROVEN = {'WHITE_WIN': 'White win', 'BLACK_WIN': 'Black win',
 _MINUS = '−'
 _NONE = '—'
 _NBSP = chr(0xA0)
+_UNNAMED = 'Unnamed position'
 
 
 @dataclass(frozen=True)
@@ -112,8 +119,8 @@ def named_openings():
     """Every position the opening catalogue names, in catalogue order.
 
     Fail-open like every other reader of the catalogue: if it cannot load,
-    the page and the capture go on without this list (the trigger keeps its
-    own copy of the keys, written into migration 0051).
+    the page and the capture go on without this list (the trigger reads the
+    watch list, which already holds the catalogue's keys).
     """
     try:
         return _catalogue_rows()
@@ -122,10 +129,96 @@ def named_openings():
         return ()
 
 
+def standing_sources():
+    """``{key: source}`` the code itself wants watched: the first table, then
+    the catalogue.  The list of migration 0051, kept equal to it by a test."""
+    sources = {}
+    for row in first_table():
+        sources.setdefault(row.key, (WatchedKey.Source.REPLY
+                                     if row.kind == 'reply'
+                                     else WatchedKey.Source.ROOT))
+    for row in named_openings():
+        sources.setdefault(row.key, WatchedKey.Source.CATALOG)
+    return sources
+
+
+def standing_keys():
+    return list(standing_sources())
+
+
+def approved_positions():
+    """Every position with an approved community name, any kind."""
+    return list(OpeningNameSuggestion.objects
+                .filter(status=OpeningNameSuggestion.SState.APPROVED)
+                .values_list('position_id', flat=True).distinct())
+
+
 def watched_keys():
-    """Every watched key once: the first table, then the catalogue."""
-    return list(dict.fromkeys(
-        row.key for row in first_table() + named_openings()))
+    """Every key on the watch list, the one the trigger reads."""
+    return list(WatchedKey.objects.values_list('key', flat=True))
+
+
+def watch(sources, now=None):
+    """Put ``{key: source}`` on the watch list; how many keys were new.
+
+    A key already watched keeps its source and its history.  A new one has
+    its extremes row started at today's value, read after locking the
+    position row: a writer already in flight finishes first, and one that
+    comes later waits for this transaction and then finds the key watched
+    (the WHEN's lookup is VOLATILE, so it reads a fresh snapshot).
+    """
+    at = now or timezone.now()
+    with atomic():
+        have = set(WatchedKey.objects.filter(key__in=list(sources))
+                   .values_list('key', flat=True))
+        new = {key: source for key, source in sources.items()
+               if key not in have}
+        if not new:
+            return 0
+        WatchedKey.objects.bulk_create(
+            [WatchedKey(key=key, source=source, added=at)
+             for key, source in new.items()],
+            ignore_conflicts=True)
+        rows = []
+        for key, status, backed_eval, eval_cp in (
+                Position.objects.select_for_update()
+                .filter(key__in=list(new)).order_by('key')
+                .values_list('key', 'status', 'backed_eval', 'eval_cp')):
+            value = value_of(status, backed_eval, eval_cp)
+            if value is not None:
+                rows.append(start_row(key, value, status, at))
+        RootExtreme.objects.bulk_create(rows, ignore_conflicts=True)
+    return len(new)
+
+
+def watch_approved(key):
+    """An approved name puts its position on the watch list.
+
+    Called from the ``post_save`` of ``OpeningNameSuggestion`` (``apps``),
+    which the moderation view fires inside its own ``atomic()``, so the key
+    and its first value land in the approval's transaction.  In a savepoint
+    of its own, and never in the way: if this fails the approval stands, the
+    error is logged, and the next hourly capture adds the key
+    (``sync_watched_keys``).
+    """
+    try:
+        with atomic():
+            return watch({key: WatchedKey.Source.COMMUNITY})
+    except Exception:
+        logger.exception('could not watch the approved position %s', key)
+        return 0
+
+
+def sync_watched_keys(now=None):
+    """Add what should be watched and is not; how many keys were added.
+
+    The hourly capture's half of the list: the safety net under
+    ``watch_approved``, and how a new catalogue or reply joins it.
+    """
+    wanted = standing_sources()
+    for key in approved_positions():
+        wanted.setdefault(key, WatchedKey.Source.COMMUNITY)
+    return watch(wanted, now=now)
 
 
 def value_of(status, backed_eval, eval_cp):
@@ -147,7 +240,7 @@ def value_text(value, status='UNKNOWN'):
 # --------------------------------------------------------------- extremes ---
 
 def trigger_installed():
-    """Is the extremes trigger (migrations 0050/0051) there, and enabled?"""
+    """Is the extremes trigger (migrations 0050-0052) there, and enabled?"""
     if connection.vendor != 'postgresql':
         return False
     with connection.cursor() as cursor:
@@ -309,12 +402,18 @@ def capture_main_line(*, now=None):
 
 
 def capture(*, now=None):
-    """The hourly part of the capture command: the main line, and the
-    extremes where no trigger keeps them."""
+    """The hourly part of the capture command: the main line, what is
+    missing from the watch list, and the extremes where no trigger keeps
+    them.  ``(snapshot, created, folded, added)``.
+
+    The main line goes first, in its own transaction: whatever happens to
+    the watch list cannot cost this hour's line.
+    """
     now = now or timezone.now()
     snapshot, created = capture_main_line(now=now)
+    added = sync_watched_keys(now=now)
     folded = None if trigger_installed() else fold_extremes(now=now)
-    return snapshot, created, folded
+    return snapshot, created, folded, added
 
 
 # ------------------------------------------------------------------- page ---
@@ -393,11 +492,12 @@ def _daily_history(now, days=HISTORY_DAYS):
 
 
 _RECORDS_SQL = (
-    'SELECT p.key, p.status, p.backed_eval, p.eval_cp,'
+    'SELECT w.key, w.source, p.key, p.status, p.backed_eval, p.eval_cp,'
     ' r.best_value, r.best_status, r.best_at,'
     ' r.worst_value, r.worst_status, r.worst_at, r.changes, r.since'
-    ' FROM {positions} p LEFT JOIN {extremes} r ON r.key = p.key'
-    ' WHERE p.key IN ({params})')
+    ' FROM {watched} w'
+    ' LEFT JOIN {positions} p ON p.key = w.key'
+    ' LEFT JOIN {extremes} r ON r.key = w.key')
 
 
 def _aware(moment):
@@ -407,24 +507,27 @@ def _aware(moment):
     return moment
 
 
-def _records(keys):
-    """Current value and record of every watched key, in ONE query.
+def _records():
+    """Source, current value and record of every watched key, in ONE query.
 
-    A position the tree does not have yet is simply absent from the result.
+    ``present`` is False for a watched position the tree does not have yet.
     """
-    if not keys:
-        return {}
-    sql = _RECORDS_SQL.format(positions=Position._meta.db_table,
-                              extremes=RootExtreme._meta.db_table,
-                              params=', '.join(['%s'] * len(keys)))
+    sql = _RECORDS_SQL.format(watched=WatchedKey._meta.db_table,
+                              positions=Position._meta.db_table,
+                              extremes=RootExtreme._meta.db_table)
     with connection.cursor() as cursor:
-        cursor.execute(sql, list(keys))
+        cursor.execute(sql)
         rows = cursor.fetchall()
     records = {}
-    for (key, status, backed_eval, eval_cp, best_value, best_status, best_at,
-         worst_value, worst_status, worst_at, changes, since) in rows:
+    for (key, source, position, status, backed_eval, eval_cp, best_value,
+         best_status, best_at, worst_value, worst_status, worst_at, changes,
+         since) in rows:
+        present = position is not None
         records[key] = {
-            'value': value_of(status, backed_eval, eval_cp), 'status': status,
+            'source': source, 'present': present,
+            'value': (value_of(status, backed_eval, eval_cp) if present
+                      else None),
+            'status': status or 'UNKNOWN',
             'best_value': best_value, 'best_status': best_status,
             'best_at': _aware(best_at), 'worst_value': worst_value,
             'worst_status': worst_status, 'worst_at': _aware(worst_at),
@@ -439,7 +542,7 @@ def _explore_url(row):
     return url
 
 
-def _row(watched, record, label=None):
+def _row(watched, record, label=None, community=False):
     record = record or {}
     tracked = record.get('best_value') is not None
     return {
@@ -447,7 +550,9 @@ def _row(watched, record, label=None):
         'label': label or watched.label,
         'line_san': watched.line_san,
         'url': _explore_url(watched),
-        'present': bool(record),
+        # The name shown comes from an approved community suggestion.
+        'community': community,
+        'present': record.get('present', False),
         'value': record.get('value'),
         'now_h': value_text(record.get('value'),
                             record.get('status', 'UNKNOWN')),
@@ -528,11 +633,29 @@ def _sorted(rows, sort):
 
 
 def _opening_rows(records, sort):
+    """Every named position on the watch list, by the name the explorer
+    shows: the catalogue's, or the community's where one is in force."""
     names = community_names.approved_map()
     rows = []
+    catalogued = set()
     for watched in named_openings():
-        label = community_names.name_for(watched.key, names=names)
-        rows.append(_row(watched, records.get(watched.key), label=label))
+        catalogued.add(watched.key)
+        entry = community_names.in_force(watched.key, names=names)
+        rows.append(_row(watched, records.get(watched.key),
+                         label=entry['name'] if entry else None,
+                         community=entry is not None))
+    # Then the positions only the community names.  A key watched for a
+    # community name keeps its row even if that name is withdrawn later: its
+    # history stays where it is, under a plain label.
+    for key, record in records.items():
+        if key in catalogued:
+            continue
+        entry = community_names.in_force(key, names=names)
+        if entry is None and record['source'] != WatchedKey.Source.COMMUNITY:
+            continue
+        rows.append(_row(Watched(key, 'opening',
+                                 entry['name'] if entry else _UNNAMED),
+                         record, community=entry is not None))
     rows, column, descending = _sorted(rows, sort)
     # Each header sorts by its column; the column in force flips instead.
     links = {}
@@ -549,7 +672,7 @@ def _opening_rows(records, sort):
 
 def page_context(now=None, sort=DEFAULT_SORT):
     now = now or timezone.now()
-    records = _records(watched_keys())
+    records = _records()
     first_rows = _first_table_rows(records)
     opening_rows, sort_links, sort_arrows = _opening_rows(records, sort)
     latest = MainLineSnapshot.objects.order_by('-bucket_start').first()
