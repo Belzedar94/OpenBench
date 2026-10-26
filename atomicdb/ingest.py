@@ -2054,7 +2054,11 @@ def _grounding(child):
 #      to move resists longest;
 #   3. the heavier support, so a proven draw still beats an open 0;
 #   4. the shallower chain;
-#   5. the move itself, alphabetically, so a replay decides the same
+#   5. the position's own search move (``best_move``): among moves nothing
+#      above tells apart, the one its engine chose, which is also the move
+#      the explorer puts first among rows of equal rank (see
+#      views._child_moves);
+#   6. the move itself, alphabetically, so a replay decides the same
 #      whatever order the database returns the edges in.
 #
 # Only ties change, so values stay where they were, and so does the
@@ -2080,18 +2084,20 @@ def _proof_rank(child, stm_white):
     return (1, -child.mate_in) if wins else (-1, child.mate_in)
 
 
-def _best_child(children, stm_white):
+def _best_child(children, stm_white, own_move=None):
     """The child the side to move stands on, among informed ``children``.
 
     Best value for the mover; among equal values, the order of the block
-    above: grounding, proof rank, heavier support, shallower chain, and the
-    move alphabetically, so that a replay decides the same.
+    above: grounding, proof rank, heavier support, shallower chain, the
+    position's own search move (``own_move``), and the move alphabetically,
+    so that a replay decides the same.
     """
     sign = 1 if stm_white else -1
     return max(sorted(children, key=lambda c: c.move or ''),
                key=lambda c: (sign * c.value, _grounding(c),
                               _proof_rank(c, stm_white), c.quality,
-                              -c.plies))
+                              -c.plies,
+                              own_move is not None and c.move == own_move))
 
 
 def _resolve_level_steps(cache, pairs, decided):
@@ -2669,9 +2675,10 @@ def _backed_for(row, children, discrepancies=None, bound=None,
                and (len(informed) < len(children)
                     or coverage_is_partial(row, children)))
     # Empates de valor: el orden del bloque de arriba de _best_child (que no
-    # vuelva aqui, la prueba, el respaldo mas pesado, la cadena mas corta y
-    # la jugada), para que el resultado sea determinista bajo replay.
-    best = _best_child(informed, stm_white)
+    # vuelva aqui, la prueba, el respaldo mas pesado, la cadena mas corta, la
+    # jugada de la busqueda propia y la jugada), para que el resultado sea
+    # determinista bajo replay.
+    best = _best_child(informed, stm_white, row.best_move)
     complete = bounded or not coverage_is_partial(row, children)
     if best.cycles:
         # El mejor conocimiento de este nodo es repetir.  Es una pregunta
@@ -2751,7 +2758,7 @@ def _backed_for(row, children, discrepancies=None, bound=None,
             rest = [c for c in informed if c not in vetoed]
         if not rest:
             return own, None, 0, own_quality
-        best = _best_child(rest, stm_white)
+        best = _best_child(rest, stm_white, row.best_move)
         if best.cycles and cycle_picks is not None:
             # A repetition the claim was hiding: the question is the same.
             cycle_picks.append((best.move, row.key, own_quality))

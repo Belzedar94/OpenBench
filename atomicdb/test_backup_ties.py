@@ -7,7 +7,8 @@ counted as a flat 10,000 with the heaviest support there is and no distance,
 so among moves worth the same a proven loss beat every move still open, and
 among proven moves the first edge the database returned won.  At 1725116b
 (Black to move, every known move lost) the position stood on ...f4, a mate
-in one, while ...Nc6 was still open at the same number.
+in one, while ...Nc6 was still open at the same number.  What no key tells
+apart now goes to the position's own search move, then to the move's name.
 
 G2. The claim veto (see ingest._backed_for).  A favourable number nobody
 searched does not displace the position's own search, and that stays.  But
@@ -171,6 +172,35 @@ class TieOrderTests(TestCase):
                 self.assertEqual(
                     ingest._best_child(claims, stm_white).move, 'a7a5')
 
+    def test_a_full_tie_goes_to_the_own_search_move_first(self):
+        for stm_white in (True, False):
+            moves = ['f5f4', 'a7a5', 'e8f8']
+            for order in (moves, moves[::-1]):
+                children = [_proven(move, 10_000, 3) for move in order]
+                self.assertEqual(ingest._best_child(
+                    children, stm_white, own_move='f5f4').move, 'f5f4')
+                claims = [_open(move, 120, 0, plies=0) for move in order]
+                self.assertEqual(ingest._best_child(
+                    claims, stm_white, own_move='e8f8').move, 'e8f8')
+                # An own move that is not among them changes nothing.
+                self.assertEqual(ingest._best_child(
+                    claims, stm_white, own_move='h7h6').move, 'a7a5')
+
+    def test_the_own_move_only_breaks_full_ties(self):
+        # Every key above it still decides first: the proof, the support,
+        # the chain.
+        for stm_white, lost in ((True, -10_000), (False, 10_000)):
+            loss, still = _proven('loss', lost, 1), _open('open', lost)
+            self.assertIs(ingest._best_child([loss, still], stm_white,
+                                             own_move='loss'), still)
+            heavy, light = _open('heavy', 50, DEEP), _open('light', 50, ENGINE)
+            self.assertIs(ingest._best_child([light, heavy], stm_white,
+                                             own_move='light'), heavy)
+            short, deep = (_open('short', 50, plies=1),
+                           _open('deep', 50, plies=4))
+            self.assertIs(ingest._best_child([deep, short], stm_white,
+                                             own_move='deep'), short)
+
     def test_the_record_of_the_defect(self):
         # The children of 1725116b in the order production returned them.
         children = [_proven('f5f4', 10_000, 1), _proven('e8f8', 10_000, 11),
@@ -234,6 +264,23 @@ class LostPositionTests(TestCase):
         ingest.backup_backed_evals([node.key])
 
         self.assertEqual(_backed(node), (10_000, 'h1h8', 1, PROVEN))
+
+    def test_a_full_tie_stands_on_the_engines_move(self):
+        # Black to move, own 1324 through ...Bf8, whose position carries
+        # the same 1324 as ...Bc8 (11c9e029, 26-Oct): nothing tells the two
+        # apart but the engine's choice, and the arrow already names it.
+        node = _pos('FULL-N', 'b', expanded=True, eval_cp=1324,
+                    best_move='g7f8', nodes_invested=ENGINE)
+        _edge(node, _pos('FULL-a6c8', 'w', eval_cp=1324), 'a6c8')
+        _edge(node, _pos('FULL-g7f8', 'w', eval_cp=1324), 'g7f8')
+        _edge(node, _pos('FULL-h7h6', 'w', eval_cp=1500,
+                         nodes_invested=ENGINE), 'h7h6')
+
+        ingest.backup_backed_evals([node.key])
+
+        self.assertEqual(_backed(node), (1324, 'g7f8', 1, 0))
+        rows = views._child_moves(node)
+        self.assertEqual(views._arrow_move(rows, node), 'g7f8')
 
 
 class VetoedClaimTests(TestCase):
