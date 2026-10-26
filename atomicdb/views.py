@@ -6239,6 +6239,136 @@ def _node_story(pos):
             f'{passes} pass{"" if passes == 1 else "es"})')
 
 
+# How many parents of a proven position the provenance line reads.  The one
+# whose search closed it carries a stored line, and a position has few such
+# parents; the cap keeps a page on a crossroads of transpositions to one
+# bounded read.
+PROVENANCE_MAX_PARENTS = 8
+
+
+def _join_moves(ucis, shown=3):
+    """``a``, ``a and b``, ``a, b and c``, ``a, b, c and 2 more``."""
+    if len(ucis) <= 1:
+        return ''.join(ucis)
+    if len(ucis) <= shown:
+        return ', '.join(ucis[:-1]) + ' and ' + ucis[-1]
+    return ', '.join(ucis[:shown]) + f' and {len(ucis) - shown} more'
+
+
+def _mate_pv_provenance(pos, active_ucis=None, route_keys=None):
+    """Which search produced this MATE_PV closure, when the page can show it.
+
+    A MATE_PV page printed its winning line and nothing about where it came
+    from.  The line is the PV of a search one ply up: the ingest closes the
+    child the line enters and materialises the rest of it as a chain, every
+    link closed by the line's suffix (§ ingest.ingest_analysis,
+    ingest.materialise_won_line).  So the evidence is checked, not assumed:
+    a parent whose CURRENT stored lines (not an earlier wider pass) contain
+    exactly the move into this position plus this position's winning line
+    is the search that proved it.  A parent searched again since may no
+    longer show that line, and then nothing is claimed.
+
+    A link deeper in a chain has no such parent: the link above it is
+    closed by the same line and was never searched.  That parent is named
+    instead, by the same equality on its winning line, so a visitor can
+    climb the chain to the search a link at a time.
+
+    One query, bounded by ``PROVENANCE_MAX_PARENTS``, and no move
+    generation: the move is shown as stored.
+    """
+    line = (pos.won_line or '').split()
+    if not line:
+        return None
+    rows = (Edge.objects.filter(child=pos)
+            .filter(Q(parent__last_analysis__isnull=False)
+                    | Q(parent__closure='MATE_PV'))
+            .order_by('parent_id', 'move_uci')
+            .values_list('parent_id', 'move_uci', 'parent__last_analysis',
+                         'parent__closure', 'parent__won_line')
+            [:PROVENANCE_MAX_PARENTS])
+    searched = chained = None
+    for parent_key, uci, analysis, closure, won_line in rows:
+        wanted = [uci, *line]
+        stored = analysis if isinstance(analysis, list) else []
+        if searched is None and any(
+                isinstance(entry, dict) and not entry.get('prior_pass')
+                and entry.get('pv') == wanted for entry in stored):
+            searched = (parent_key, uci)
+        if (chained is None and closure == 'MATE_PV'
+                and (won_line or '').split() == wanted):
+            chained = (parent_key, uci)
+    parent_key, uci = searched or chained or (None, None)
+    if parent_key is None:
+        return None
+    # The parent the visitor came from keeps the visitor's route, one ply
+    # shorter; any other parent is linked bare.
+    on_route = bool(active_ucis and route_keys is not None
+                    and len(route_keys) >= 2
+                    and route_keys[-2] == parent_key
+                    and active_ucis[-1] == uci)
+    return {
+        'text': ('proven by the search of' if searched
+                 else 'proven as part of the winning line of'),
+        'link_text': f'the position before {uci}',
+        'url': _explore_url(parent_key,
+                            active_ucis[:-1] if on_route else None),
+    }
+
+
+def _minimax_provenance(pos, moves):
+    """What proves a MINIMAX closure: the replies, named from the table.
+
+    A closure by minimax can land at any moment, for instance when a
+    visitor steps into a child that was already proven and the parent is
+    re-derived on the spot (§ goto).  On the page it looked like any other
+    verdict, which read as a closure out of nowhere.  The line says what
+    carries it: the winning replies, the drawing ones, or all of them when
+    every reply loses.
+
+    It is read from the rows the table already loaded, so it costs nothing.
+    """
+    stm_white = pos.fen.split()[1] == 'w'
+    win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    lead = 'proven by minimax from its replies'
+    if pos.status == win:
+        winners = [move['uci'] for move in moves if move['status'] == win]
+        if pos.best_move in winners:
+            # The witness the closure exports goes first.
+            winners.remove(pos.best_move)
+            winners.insert(0, pos.best_move)
+        if winners:
+            verb = 'wins' if len(winners) == 1 else 'win'
+            return {'text': f'{lead}: {_join_moves(winners)} {verb}'}
+    elif pos.status == 'DRAW':
+        draws = [move['uci'] for move in moves if move['status'] == 'DRAW']
+        if draws:
+            verb = 'draws' if len(draws) == 1 else 'draw'
+            return {'text': f'{lead}: {_join_moves(draws)} {verb}, '
+                            'none wins'}
+    elif moves and all(move['status'] == loss for move in moves):
+        if len(moves) == 1:
+            return {'text': f"{lead}: its only reply, {moves[0]['uci']}, "
+                            'loses'}
+        return {'text': f'{lead}: all {len(moves)} lose'}
+    return {'text': lead}
+
+
+def _provenance(pos, moves, active_ucis=None, route_keys=None):
+    """The short line under a verdict saying where the proof came from.
+
+    ``None`` for an open position and for the closures that already say it
+    themselves (a terminal position, a tablebase, a certificate).
+    """
+    if pos.status == 'UNKNOWN':
+        return None
+    if pos.closure == 'MATE_PV':
+        return _mate_pv_provenance(pos, active_ucis, route_keys)
+    if pos.closure == 'MINIMAX':
+        return _minimax_provenance(pos, moves)
+    return None
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -6560,6 +6690,10 @@ def explore(request, key):
         # MINIMAX solo guarda el testigo de cada nodo) no hay longitud que
         # prometer y el chip no la inventa.
         'proven_end_plies': len((pos.won_line or '').split()) or None,
+        # Where the proof of a closed position came from: the search whose
+        # line it is, or the replies minimax closed it from
+        # (§ _provenance).  None on an open page, at no cost there.
+        'provenance': _provenance(pos, moves, active_ucis, route_keys),
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.
