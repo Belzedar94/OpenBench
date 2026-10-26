@@ -1319,15 +1319,19 @@ class _ChildValue:
     """Lo que un hijo aporta al negamax del padre."""
 
     __slots__ = ('move', 'value', 'quality', 'plies', 'key', 'spine', 'cycles',
-                 'floor', 'returns', 'exact', 'circular')
+                 'floor', 'returns', 'exact', 'circular', 'mate_in')
 
     def __init__(self, move, value, quality, plies, key=None, spine=None,
-                 floor=False, exact=False):
+                 floor=False, exact=False, mate_in=None):
         self.move, self.value = move, value
         self.quality, self.plies = quality, plies
         # The child's status is decided: its value is the truth, borrowed
         # from nobody, and no loop of pointers can pass through it.
         self.exact = exact
+        # A decided win or loss: the plies to mate from the child, when
+        # somebody counted them (``Position.mate_in``).  Only ties read it
+        # (see _proof_rank).
+        self.mate_in = mate_in
         # The child never had a search of its own and BORROWED this number
         # from the replies somebody opened (see is_floor).  What that is
         # worth to the parent is decided by the negamax, same as ``cycles``.
@@ -1356,7 +1360,7 @@ class _ChildValue:
 
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
                         nodes_invested, backed_plies, child_key=None,
-                        backed_move=None):
+                        backed_move=None, mate_in=None):
     """Valor y calidad de un hijo, en perspectiva blanca.
 
     Un status resuelto entra con su valor de VERDAD (mate/tablas) y calidad
@@ -1366,7 +1370,7 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
     exact = _status_eval(status)
     if exact is not None:
         return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0, child_key,
-                           exact=True)
+                           exact=True, mate_in=mate_in)
     if backed_eval is not None:
         # La calidad del mejor conocimiento del hijo es TODO lo invertido en
         # el, no solo el soporte de la hoja que respaldo el valor.  Con solo
@@ -2017,19 +2021,68 @@ def _grounding(child):
     return 1 if child.circular else 2
 
 
+# ---------------- ties between moves of equal value ----------------
+#
+# THE CASE (1725116b, reported 25-Oct-2026).  Black to move, and every known
+# move lost: most of them were proven losses, ...f4 a mate in one, while
+# ...Nc6 and ...b6 were still open at the same number.  The position stood on
+# ...f4, so the arrow and the published line went straight into the mate.
+#
+# WHY.  A proven child counted as a flat 10,000 with the heaviest support
+# there is and no distance.  It beat every open move worth the same on
+# weight, and among the proven ones the first edge the database returned
+# won: the order rows happen to have on disk, not the movegen order this
+# function's docstring promised.
+#
+# THE ORDER, among moves of equal value, best first:
+#   1. where the move's chain of pointers goes (see _grounding): a move that
+#      comes back here or runs into a loop elsewhere still loses its ties,
+#      even to a proven loss, exactly as before;
+#   2. how its proof ranks (see _proof_rank): a proven win, the soonest mate
+#      first; then every move still open, together with a proven draw; then
+#      a proven loss, the latest mate first.  An open move may still hold a
+#      defence and a proven loss holds none, and among lost moves the side
+#      to move resists longest;
+#   3. the heavier support, so a proven draw still beats an open 0;
+#   4. the shallower chain;
+#   5. the move itself, alphabetically, so a replay decides the same
+#      whatever order the database returns the edges in.
+#
+# Only ties change, so values stay where they were, and so does the
+# grounding of a tie.  What moves is the move a position stands on, with its
+# distance and support, and through them the arrow, the API ``best_move``
+# and the chain the backed chip follows.
+_UNCOUNTED = float('-inf')
+
+
+def _proof_rank(child, stm_white):
+    """How a decided move ranks among moves of equal value: higher wins.
+
+    ``(1, -mate_in)`` for a proven win of the side to move, ``(-1,
+    mate_in)`` for a proven loss, ``(0, 0)`` for a move still open and for
+    a proven draw.  A distance nobody counted ranks last of its kind, as in
+    the explorer's table (see views._child_moves).
+    """
+    if not child.exact or not child.value:
+        return 0, 0
+    wins = (child.value > 0) == stm_white
+    if child.mate_in is None:
+        return (1 if wins else -1), _UNCOUNTED
+    return (1, -child.mate_in) if wins else (-1, child.mate_in)
+
+
 def _best_child(children, stm_white):
     """The child the side to move stands on, among informed ``children``.
 
-    Best value for the mover; among equal values, the move whose chain of
-    pointers is better grounded (see _grounding); then the heavier support,
-    then the shallower chain, then movegen order, so that a replay decides
-    the same.
+    Best value for the mover; among equal values, the order of the block
+    above: grounding, proof rank, heavier support, shallower chain, and the
+    move alphabetically, so that a replay decides the same.
     """
-    if stm_white:
-        return max(children, key=lambda c: (c.value, _grounding(c),
-                                            c.quality, -c.plies))
-    return min(children, key=lambda c: (c.value, -_grounding(c),
-                                        -c.quality, c.plies))
+    sign = 1 if stm_white else -1
+    return max(sorted(children, key=lambda c: c.move or ''),
+               key=lambda c: (sign * c.value, _grounding(c),
+                              _proof_rank(c, stm_white), c.quality,
+                              -c.plies))
 
 
 def _resolve_level_steps(cache, pairs, decided):
@@ -2277,7 +2330,7 @@ def _region_children(parent_keys, by_key, decided):
             value, move, plies, quality = decided[kid.key]
             kids[index] = _child_contribution(
                 kid.move, row.status, row.eval_cp, value, quality,
-                row.nodes_invested, plies, kid.key, move)
+                row.nodes_invested, plies, kid.key, move, kid.mate_in)
     return children
 
 
@@ -2606,10 +2659,9 @@ def _backed_for(row, children, discrepancies=None, bound=None,
     bounded = (bound is not None
                and (len(informed) < len(children)
                     or coverage_is_partial(row, children)))
-    # Empates de valor: gana la jugada que no vuelve aqui, luego el respaldo
-    # mas pesado, luego el mas superficial (menos plies), luego el orden de
-    # movegen, para que el resultado sea determinista bajo replay
-    # (see _best_child).
+    # Empates de valor: el orden del bloque de arriba de _best_child (que no
+    # vuelva aqui, la prueba, el respaldo mas pesado, la cadena mas corta y
+    # la jugada), para que el resultado sea determinista bajo replay.
     best = _best_child(informed, stm_white)
     complete = bounded or not coverage_is_partial(row, children)
     if best.cycles:
@@ -2960,13 +3012,15 @@ def _backed_children_by_parent(parent_keys):
     rows = Edge.objects.filter(parent_id__in=parent_keys).values_list(
         'parent_id', 'move_uci', 'child__status', 'child__eval_cp',
         'child__backed_eval', 'child__backed_nodes', 'child__nodes_invested',
-        'child__backed_plies', 'child_id', 'child__backed_move')
+        'child__backed_plies', 'child_id', 'child__backed_move',
+        'child__mate_in')
     by_parent = {}
     for (parent_id, move_uci, status, eval_cp, backed_eval, backed_nodes,
-         nodes_invested, backed_plies, child_id, backed_move) in rows:
+         nodes_invested, backed_plies, child_id, backed_move,
+         mate_in) in rows:
         by_parent.setdefault(parent_id, []).append(_child_contribution(
             move_uci, status, eval_cp, backed_eval, backed_nodes,
-            nodes_invested, backed_plies, child_id, backed_move))
+            nodes_invested, backed_plies, child_id, backed_move, mate_in))
     return by_parent
 
 
