@@ -1,14 +1,16 @@
-"""The start position and its first moves, over time.
+"""The start position, its first moves and the named openings, over time.
 
-Community request: keep the best and the worst value the start position and
+Community requests: keep the best and the worst value the start position and
 each of its first moves have ever had, and log how the main line from the
-start position evolves.  Two records feed the public page ``/atomicdb/roots/``:
+start position evolves (0050); then the three main replies to 1.Nf3 and every
+position the opening catalogue names (0051).  Two records feed the public
+page ``/atomicdb/roots/``:
 
 * ``RootExtreme``: per watched position, the highest and the lowest headline
-  value since tracking began, and when.  On PostgreSQL a row trigger keeps it
-  (migration 0050), so every change counts, the cascade's ``bulk_update``
-  included.  Without the trigger, ``fold_extremes`` folds the current values
-  in at the hourly capture.
+  value since tracking began, and when.  On PostgreSQL a row trigger keeps it,
+  so every change counts, the cascade's ``bulk_update`` included.  Without
+  the trigger, ``fold_extremes`` folds the current values in at the hourly
+  capture.
 * ``MainLineSnapshot``: the main line once per UTC hour, written by
   ``capture_atomicdb_progress`` beside its own row.
 
@@ -18,19 +20,28 @@ value, then the point eval.
 """
 
 import functools
+import logging
+from dataclasses import dataclass
 from datetime import timedelta, timezone as datetime_timezone
 
 from django.shortcuts import render
 from django.utils import timezone
 
-from . import ingest, logic
+from . import community_names, ingest, logic, openings
 from .database import atomic, connection
 from .models import Edge, MainLineSnapshot, Position, RootExtreme
 
+logger = logging.getLogger(__name__)
+
 UTC = datetime_timezone.utc
 
-# The name migration 0050 gives the trigger and its function.
+# The names migrations 0050/0051 give the trigger, its function, and the
+# function its WHEN clause asks whether a key is watched.
 TRIGGER = 'atomicdb_root_extremes'
+WATCH_FUNCTION = 'atomicdb_watched_key'
+# The replies the first table also follows, indented under their first move.
+# Community request (Torom): the three main answers to 1.Nf3.
+REPLIES = {'g1f3': ('f7f6', 'e7e5', 'd7d6')}
 # The main line is followed this far, like the query it was specified with.
 MAIN_LINE_MAX_PLIES = 120
 # The explorer replays a ``play`` route of at most this many plies
@@ -51,25 +62,70 @@ _NONE = '—'
 _NBSP = chr(0xA0)
 
 
+@dataclass(frozen=True)
+class Watched:
+    """One watched position, as the page lists it."""
+
+    key: str
+    kind: str            # 'start', 'move', 'reply' or 'opening'
+    label: str           # 'Start position', '1. e4', '1... f6', or a name
+    line: tuple = ()     # UCI moves from the start position
+    line_san: str = ''   # the same line in numbered SAN
+    parent: str = ''     # for a reply, the first move it answers
+
+
 @functools.lru_cache(maxsize=1)
-def watched_positions():
-    """``(uci, san, key)``: the start position (blank move) and each first move.
+def first_table():
+    """The start position, each first move, and the replies of ``REPLIES``.
 
     Computed with the move generator, so it is the same canonical identity the
-    tree uses.  Migration 0050 spells the same 21 keys out for the trigger.
+    tree uses.  Each reply comes right after the move it answers.
     """
     import pyffish as pf
 
     start = logic.start_fen()
-    rows = [('', '', logic.key_of(start))]
+    rows = [Watched(logic.key_of(start), 'start', 'Start position')]
     for uci in sorted(logic.legal_moves(start)):
-        rows.append((uci, pf.get_san(logic.VARIANT, start, uci),
-                     logic.key_of(logic.apply_move(start, uci))))
+        fen = logic.apply_move(start, uci)
+        san = pf.get_san(logic.VARIANT, start, uci)
+        rows.append(Watched(logic.key_of(fen), 'move', f'1. {san}', (uci,),
+                            f'1. {san}'))
+        for reply in REPLIES.get(uci, ()):
+            reply_san = pf.get_san(logic.VARIANT, fen, reply)
+            rows.append(Watched(
+                logic.key_of(logic.apply_move(fen, reply)), 'reply',
+                f'1... {reply_san}', (uci, reply), f'1. {san} {reply_san}',
+                parent=uci))
     return tuple(rows)
 
 
+@functools.lru_cache(maxsize=1)
+def _catalogue_rows():
+    return tuple(
+        Watched(opening.position_key, 'opening', opening.name,
+                tuple(opening.reference_line_uci),
+                opening.reference_line_san)
+        for opening in openings.load_catalog().values())
+
+
+def named_openings():
+    """Every position the opening catalogue names, in catalogue order.
+
+    Fail-open like every other reader of the catalogue: if it cannot load,
+    the page and the capture go on without this list (the trigger keeps its
+    own copy of the keys, written into migration 0051).
+    """
+    try:
+        return _catalogue_rows()
+    except openings.OpeningCatalogError:
+        logger.exception('opening catalogue unavailable')
+        return ()
+
+
 def watched_keys():
-    return [key for _uci, _san, key in watched_positions()]
+    """Every watched key once: the first table, then the catalogue."""
+    return list(dict.fromkeys(
+        row.key for row in first_table() + named_openings()))
 
 
 def value_of(status, backed_eval, eval_cp):
@@ -91,7 +147,7 @@ def value_text(value, status='UNKNOWN'):
 # --------------------------------------------------------------- extremes ---
 
 def trigger_installed():
-    """Is the trigger of migration 0050 there, and enabled?"""
+    """Is the extremes trigger (migrations 0050/0051) there, and enabled?"""
     if connection.vendor != 'postgresql':
         return False
     with connection.cursor() as cursor:
@@ -336,45 +392,176 @@ def _daily_history(now, days=HISTORY_DAYS):
     return rows
 
 
-def page_context(now=None):
-    now = now or timezone.now()
-    watched = watched_positions()
-    keys = [key for _uci, _san, key in watched]
-    current = {key: (status, backed_eval, eval_cp)
-               for key, status, backed_eval, eval_cp in
-               Position.objects.filter(key__in=keys)
-               .values_list('key', 'status', 'backed_eval', 'eval_cp')}
-    extremes = RootExtreme.objects.in_bulk(keys)
-    start, moves = None, []
-    for uci, san, key in watched:
-        status, backed_eval, eval_cp = current.get(key, ('UNKNOWN', None, None))
-        value = value_of(status, backed_eval, eval_cp)
-        extreme = extremes.get(key)
-        row = {
-            'key': key,
-            'label': f'1. {san}' if uci else 'Start position',
-            'value': value,
-            'now_h': value_text(value, status),
-            'best_h': (value_text(extreme.best_value, extreme.best_status)
-                       if extreme else _NONE),
-            'best_at': extreme.best_at if extreme else None,
-            'worst_h': (value_text(extreme.worst_value, extreme.worst_status)
-                        if extreme else _NONE),
-            'worst_at': extreme.worst_at if extreme else None,
-            'changes': extreme.changes if extreme else 0,
-        }
-        if uci:
-            moves.append(row)
-        else:
+_RECORDS_SQL = (
+    'SELECT p.key, p.status, p.backed_eval, p.eval_cp,'
+    ' r.best_value, r.best_status, r.best_at,'
+    ' r.worst_value, r.worst_status, r.worst_at, r.changes, r.since'
+    ' FROM {positions} p LEFT JOIN {extremes} r ON r.key = p.key'
+    ' WHERE p.key IN ({params})')
+
+
+def _aware(moment):
+    # SQLite hands a raw cursor naive UTC datetimes; PostgreSQL aware ones.
+    if moment is not None and timezone.is_naive(moment):
+        return timezone.make_aware(moment, UTC)
+    return moment
+
+
+def _records(keys):
+    """Current value and record of every watched key, in ONE query.
+
+    A position the tree does not have yet is simply absent from the result.
+    """
+    if not keys:
+        return {}
+    sql = _RECORDS_SQL.format(positions=Position._meta.db_table,
+                              extremes=RootExtreme._meta.db_table,
+                              params=', '.join(['%s'] * len(keys)))
+    with connection.cursor() as cursor:
+        cursor.execute(sql, list(keys))
+        rows = cursor.fetchall()
+    records = {}
+    for (key, status, backed_eval, eval_cp, best_value, best_status, best_at,
+         worst_value, worst_status, worst_at, changes, since) in rows:
+        records[key] = {
+            'value': value_of(status, backed_eval, eval_cp), 'status': status,
+            'best_value': best_value, 'best_status': best_status,
+            'best_at': _aware(best_at), 'worst_value': worst_value,
+            'worst_status': worst_status, 'worst_at': _aware(worst_at),
+            'changes': changes, 'since': _aware(since)}
+    return records
+
+
+def _explore_url(row):
+    url = f'/atomicdb/explore/{row.key}/'
+    if row.line and len(row.line) <= PLAY_LINK_MAX_PLIES:
+        url += '?play=' + ','.join(row.line)
+    return url
+
+
+def _row(watched, record, label=None):
+    record = record or {}
+    tracked = record.get('best_value') is not None
+    return {
+        'key': watched.key,
+        'label': label or watched.label,
+        'line_san': watched.line_san,
+        'url': _explore_url(watched),
+        'present': bool(record),
+        'value': record.get('value'),
+        'now_h': value_text(record.get('value'),
+                            record.get('status', 'UNKNOWN')),
+        'best_value': record.get('best_value'),
+        'best_h': (value_text(record['best_value'], record['best_status'])
+                   if tracked else _NONE),
+        'best_at': record.get('best_at'),
+        'worst_value': record.get('worst_value'),
+        'worst_h': (value_text(record['worst_value'], record['worst_status'])
+                    if tracked else _NONE),
+        'worst_at': record.get('worst_at'),
+        'changes': record.get('changes'),
+        'indent': watched.kind == 'reply',
+    }
+
+
+def _by_value(rows, descending):
+    """Highest value first (or lowest), rows with no value last."""
+    known = [row for row in rows if row['value'] is not None]
+    known.sort(key=lambda row: row['value'], reverse=descending)
+    return known + [row for row in rows if row['value'] is None]
+
+
+def _first_table_rows(records):
+    """Start position, then White's first moves best first, each followed by
+    the replies it has, Black's best reply first."""
+    start, moves, replies = None, [], {}
+    for watched in first_table():
+        row = _row(watched, records.get(watched.key))
+        if watched.kind == 'start':
             start = row
-    # White's best first move on top, the way the front page orders them;
-    # moves with no value yet go last.
-    moves.sort(key=lambda row: (row['value'] is None, -(row['value'] or 0),
-                                row['label']))
+        elif watched.kind == 'move':
+            moves.append((watched, row))
+        else:
+            replies.setdefault(watched.parent, []).append(row)
+    ordered = [start]
+    for watched, row in sorted(moves, key=lambda item: (
+            item[1]['value'] is None, -(item[1]['value'] or 0),
+            item[1]['label'])):
+        ordered.append(row)
+        ordered += _by_value(replies.get(watched.line[0], []),
+                             descending=False)
+    return ordered
+
+
+# Columns of the named-openings table: the sort key, and whether the column
+# sorts highest first when clicked.  ``-`` before a column flips it.
+SORTS = {
+    'name': (lambda row: (row['label'].casefold(), row['line_san']), False),
+    'now': (lambda row: row['value'], True),
+    'best': (lambda row: row['best_value'], True),
+    'worst': (lambda row: row['worst_value'], False),
+    'changes': (lambda row: row['changes'], True),
+}
+DEFAULT_SORT = 'name'
+
+
+def _sorted(rows, sort):
+    """Rows in the order ``sort`` asks for; unknown values sort by name.
+
+    Rows without the sorted value go last either way, and ties keep name
+    order (the sort is stable over a list already ordered by name).
+    """
+    column = sort.lstrip('-')
+    if column not in SORTS or sort.count('-') > 1:
+        column, sort = DEFAULT_SORT, DEFAULT_SORT
+    key, descending = SORTS[column]
+    if sort.startswith('-'):
+        descending = not descending
+    rows = sorted(rows, key=SORTS['name'][0])
+    if column == 'name':
+        ordered = list(reversed(rows)) if descending else rows
+    else:
+        known = [row for row in rows if key(row) is not None]
+        known.sort(key=key, reverse=descending)
+        ordered = known + [row for row in rows if key(row) is None]
+    return ordered, column, descending
+
+
+def _opening_rows(records, sort):
+    names = community_names.approved_map()
+    rows = []
+    for watched in named_openings():
+        label = community_names.name_for(watched.key, names=names)
+        rows.append(_row(watched, records.get(watched.key), label=label))
+    rows, column, descending = _sorted(rows, sort)
+    # Each header sorts by its column; the column in force flips instead.
+    links = {}
+    for name, (_key, default_descending) in SORTS.items():
+        if name != column:
+            links[name] = name
+        else:
+            links[name] = (('-' + name) if descending == default_descending
+                           else name)
+    arrows = {name: '' for name in SORTS}
+    arrows[column] = ' ▾' if descending else ' ▴'
+    return rows, links, arrows
+
+
+def page_context(now=None, sort=DEFAULT_SORT):
+    now = now or timezone.now()
+    records = _records(watched_keys())
+    first_rows = _first_table_rows(records)
+    opening_rows, sort_links, sort_arrows = _opening_rows(records, sort)
     latest = MainLineSnapshot.objects.order_by('-bucket_start').first()
     return {
-        'rows': [start] + moves,
-        'since': min((row.since for row in extremes.values()), default=None),
+        'rows': first_rows,
+        'since': min((records[row['key']]['since'] for row in first_rows
+                      if row['key'] in records
+                      and records[row['key']]['since'] is not None),
+                     default=None),
+        'openings': opening_rows,
+        'sort_links': sort_links,
+        'sort_arrows': sort_arrows,
         'line': _line_context(latest) if latest else None,
         'max_plies': MAIN_LINE_MAX_PLIES,
         'history': _daily_history(now),
@@ -383,6 +570,8 @@ def page_context(now=None):
 
 
 def roots_page(request):
-    """Public page: the start position and first moves, best and worst, and
-    the main line.  Cached in ``urls`` like the other read views."""
-    return render(request, 'atomicdb/roots.html', page_context())
+    """Public page: the start position, first moves and named openings with
+    their best and worst, and the main line.  Cached in ``urls`` like the
+    other read views; the sort order is part of the URL."""
+    return render(request, 'atomicdb/roots.html',
+                  page_context(sort=request.GET.get('sort', DEFAULT_SORT)))

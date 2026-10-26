@@ -1,9 +1,11 @@
-"""The start position and its first moves over time (``roots``, 0050).
+"""The start position, first moves and named openings over time (``roots``).
 
-Community request: keep the best and the worst value the start position and
+Community requests: keep the best and the worst value the start position and
 each first move have ever had, from White's side and with the time, catching
 every change ("the value should be logged every time it changes"), and log
-the main line from the start position so its evolution can be followed.
+the main line from the start position so its evolution can be followed
+(migration 0050); then follow the three main replies to 1.Nf3 and every
+position the opening catalogue names the same way (migration 0051).
 
 On PostgreSQL a row trigger keeps the extremes, and the tests marked so run
 against it in the PostgreSQL CI job.  Everywhere else the hourly capture
@@ -24,13 +26,14 @@ from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.test import SimpleTestCase
 
-from . import ingest, logic, roots, views
+from . import ingest, logic, openings, roots, views
 from .database import atomic, connection
 from .models import Edge, MainLineSnapshot, Position, RootExtreme
 from .testing import TestCase
 
 UTC = datetime_timezone.utc
 MIGRATION = importlib.import_module('atomicdb.migrations.0050_root_extremes')
+OPENINGS = importlib.import_module('atomicdb.migrations.0051_watch_openings')
 POSTGRES = connection.vendor == 'postgresql'
 T0 = datetime(2026, 10, 26, 10, 7, tzinfo=UTC)
 
@@ -55,6 +58,32 @@ def _child(parent, uci):
     return Edge.objects.get(parent=parent, move_uci=uci).child
 
 
+def _unwatched_child(parent):
+    """A child of ``parent`` that nothing watches (expanding it first)."""
+    ingest.expand(parent)
+    watched = set(roots.watched_keys())
+    for edge in (Edge.objects.filter(parent=parent).select_related('child')
+                 .order_by('move_uci')):
+        if edge.child.key not in watched:
+            return edge.child
+    raise AssertionError('every child is watched')
+
+
+def _catalogue_positions(count=1):
+    """Put ``count`` catalogue-only openings in the tree; ``[(pos, row)]``."""
+    first = {row.key for row in roots.first_table()}
+    catalogue = openings.load_catalog()
+    made = []
+    for row in roots.named_openings():
+        if row.key in first:
+            continue
+        made.append((ingest.get_or_create_position(catalogue[row.key].fen),
+                     row))
+        if len(made) == count:
+            return made
+    raise AssertionError('not enough catalogue openings')
+
+
 def _row(pos):
     return RootExtreme.objects.get(key=pos.key)
 
@@ -64,26 +93,71 @@ def _summary(row):
             row.worst_status, row.last_value, row.changes)
 
 
+def _trigger_definition():
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_get_triggerdef(oid) FROM pg_trigger '
+                       'WHERE tgname = %s', [roots.TRIGGER])
+        return cursor.fetchone()[0]
+
+
+def _watch_function_exists():
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT to_regprocedure(%s) IS NOT NULL',
+                       [f'{roots.WATCH_FUNCTION}(text)'])
+        return cursor.fetchone()[0]
+
+
 class WatchedKeysTests(SimpleTestCase):
 
     def test_the_trigger_watches_the_keys_the_tree_computes(self):
-        """The migration spells the keys out; the move generator derives
-        them.  If the canonical identity ever moves, this is what says so."""
-        self.assertEqual(list(MIGRATION.WATCHED_KEYS), roots.watched_keys())
+        """The migrations spell the keys out; the move generator and the
+        catalogue derive them.  If either moves, this is what says so: a new
+        catalogue needs a new migration."""
+        self.assertEqual(list(OPENINGS.WATCHED_KEYS), roots.watched_keys())
+        self.assertEqual(
+            list(MIGRATION.WATCHED_KEYS),
+            [row.key for row in roots.first_table()
+             if row.kind in ('start', 'move')])
 
-    def test_the_start_position_and_its_twenty_first_moves(self):
-        watched = roots.watched_positions()
-        self.assertEqual(len(watched), 21)
-        self.assertEqual(watched[0], ('', '', ingest.root_key()))
+    def test_the_first_table_is_the_start_moves_and_three_replies(self):
+        table = roots.first_table()
+        self.assertEqual(len(table), 24)
+        self.assertEqual((table[0].key, table[0].label),
+                         (ingest.root_key(), 'Start position'))
         self.assertEqual(MIGRATION.START_KEY, ingest.root_key())
         self.assertEqual(
-            sorted(san for _uci, san, _key in watched[1:]),
-            sorted(['a3', 'a4', 'Na3', 'Nc3', 'b3', 'b4', 'c3', 'c4', 'd3',
-                    'd4', 'e3', 'e4', 'f3', 'f4', 'Nf3', 'Nh3', 'g3', 'g4',
-                    'h3', 'h4']))
+            sorted(row.label for row in table if row.kind == 'move'),
+            sorted(f'1. {san}' for san in (
+                'a3', 'a4', 'Na3', 'Nc3', 'b3', 'b4', 'c3', 'c4', 'd3', 'd4',
+                'e3', 'e4', 'f3', 'f4', 'Nf3', 'Nh3', 'g3', 'g4', 'h3', 'h4')))
+        nf3 = next(index for index, row in enumerate(table)
+                   if row.label == '1. Nf3')
+        replies = table[nf3 + 1:nf3 + 4]
+        self.assertEqual([(row.kind, row.label, row.line, row.parent)
+                          for row in replies],
+                         [('reply', '1... f6', ('g1f3', 'f7f6'), 'g1f3'),
+                          ('reply', '1... e5', ('g1f3', 'e7e5'), 'g1f3'),
+                          ('reply', '1... d6', ('g1f3', 'd7d6'), 'g1f3')])
+        for row in replies:
+            self.assertEqual(
+                row.key,
+                logic.key_of(logic.apply_move(
+                    logic.apply_move(logic.start_fen(), 'g1f3'),
+                    row.line[1])))
 
-    def test_names_shared_with_the_migration_and_the_explorer(self):
+    def test_every_catalogue_opening_is_watched_once(self):
+        catalogue = openings.load_catalog()
+        keys = roots.watched_keys()
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(len(roots.named_openings()), len(catalogue))
+        self.assertTrue(set(catalogue) <= set(keys))
+        first = {row.key for row in roots.first_table()}
+        self.assertEqual(len(keys), len(first | set(catalogue)))
+
+    def test_names_shared_with_the_migrations_and_the_explorer(self):
         self.assertEqual(roots.TRIGGER, MIGRATION.TRIGGER)
+        self.assertEqual(roots.TRIGGER, OPENINGS.TRIGGER)
+        self.assertEqual(roots.WATCH_FUNCTION, OPENINGS.WATCH_FUNCTION)
         self.assertEqual(roots.PLAY_LINK_MAX_PLIES,
                          views.PLAY_ROUTE_MAX_PLIES)
 
@@ -172,15 +246,16 @@ class FoldTests(TestCase):
     def test_only_the_watched_positions_are_recorded(self):
         ingest.expand(self.root)
         e4 = _child(self.root, 'e2e4')
-        ingest.expand(e4)
         _set(e4, eval_cp=185)
-        _set(_child(e4, 'e7e5'), eval_cp=200)
+        _set(_unwatched_child(e4), eval_cp=200)
+        (opening, _row_), = _catalogue_positions()
+        _set(opening, eval_cp=321)
 
         roots.fold_extremes(now=T0)
 
-        self.assertEqual(list(RootExtreme.objects.values_list('key',
-                                                              flat=True)),
-                         [e4.key])
+        self.assertEqual(
+            set(RootExtreme.objects.values_list('key', flat=True)),
+            {e4.key, opening.key})
 
 
 class MigrationSeedTests(TestCase):
@@ -219,6 +294,43 @@ class MigrationSeedTests(TestCase):
         self.assertTrue(RootExtreme.objects.filter(key=self.root.key)
                         .exists())
 
+    def test_0051_seeds_the_new_rows_and_keeps_the_history_of_the_old(self):
+        RootExtreme.objects.create(
+            key=self.root.key, best_value=1310, best_status='UNKNOWN',
+            best_at=T0, worst_value=310, worst_status='UNKNOWN', worst_at=T0,
+            last_value=1243, last_status='UNKNOWN', changed_at=T0, changes=7,
+            since=T0)
+        _set(self.root, eval_cp=545)
+        nf3 = _child(self.root, 'g1f3')
+        ingest.expand(nf3)
+        d6 = _child(nf3, 'd7d6')
+        _set(d6, backed_eval=444)
+        (opening, _watched), = _catalogue_positions()
+        _set(opening, eval_cp=321)
+
+        OPENINGS.seed(django_apps, self._editor())
+
+        self.assertEqual(_summary(_row(self.root)),
+                         (1310, 'UNKNOWN', 310, 'UNKNOWN', 1243, 7))
+        self.assertEqual(_summary(_row(d6)),
+                         (444, 'UNKNOWN', 444, 'UNKNOWN', 444, 0))
+        self.assertEqual(_row(opening).last_value, 321)
+
+    def test_0051_on_sqlite_seeds_and_its_reverse_keeps_the_0050_rows(self):
+        editor = self._editor()
+        editor.execute = self.fail
+        _set(self.root, eval_cp=545)
+        (opening, _watched), = _catalogue_positions()
+        _set(opening, eval_cp=321)
+
+        OPENINGS.install(django_apps, editor)
+        self.assertEqual(RootExtreme.objects.count(), 2)
+        OPENINGS.uninstall(django_apps, editor)
+
+        self.assertEqual(list(RootExtreme.objects.values_list('key',
+                                                              flat=True)),
+                         [self.root.key])
+
 
 @skipUnless(POSTGRES, 'the trigger exists on PostgreSQL only')
 class TriggerTests(TestCase):
@@ -229,17 +341,26 @@ class TriggerTests(TestCase):
         ingest.expand(self.root)
         self.e4 = _child(self.root, 'e2e4')
 
-    def test_the_trigger_is_installed_and_names_the_watch_list(self):
+    def test_the_trigger_asks_the_watch_function(self):
         self.assertTrue(roots.trigger_installed())
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT pg_get_triggerdef(oid) FROM pg_trigger '
-                           'WHERE tgname = %s', [roots.TRIGGER])
-            definition = cursor.fetchone()[0]
+        definition = _trigger_definition()
         self.assertIn('AFTER UPDATE OF', definition)
         for column in ('status', 'backed_eval', 'eval_cp'):
             self.assertIn(column, definition)
-        for key in roots.watched_keys():
-            self.assertIn(key, definition)
+        self.assertIn(f'{roots.WATCH_FUNCTION}(', definition)
+        # The list lives in the function, not in the WHEN that PostgreSQL
+        # rebuilds for every statement.
+        self.assertLess(len(definition), 1000)
+
+    def test_the_watch_function_knows_every_key_and_nothing_else(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'SELECT count(*) FILTER (WHERE {roots.WATCH_FUNCTION}(k)),'
+                ' count(*) FROM unnest(%s::text[]) AS k',
+                [roots.watched_keys()])
+            self.assertEqual(cursor.fetchone(), (365, 365))
+            cursor.execute(f'SELECT {roots.WATCH_FUNCTION}(%s)', ['f' * 64])
+            self.assertFalse(cursor.fetchone()[0])
 
     def test_every_change_is_caught_not_a_sample(self):
         _set(self.e4, eval_cp=185)          # the first value starts the row
@@ -249,6 +370,19 @@ class TriggerTests(TestCase):
 
         self.assertEqual(_summary(_row(self.e4)),
                          (401, 'UNKNOWN', 120, 'UNKNOWN', 300, 3))
+
+    def test_a_reply_to_nf3_and_a_named_opening_are_watched(self):
+        nf3 = _child(self.root, 'g1f3')
+        ingest.expand(nf3)
+        d6 = _child(nf3, 'd7d6')
+        _set(d6, backed_eval=444)
+        (opening, _watched), = _catalogue_positions()
+        _set(opening, eval_cp=321)
+        _set(opening, eval_cp=280)
+
+        self.assertEqual(_row(d6).last_value, 444)
+        self.assertEqual(_summary(_row(opening)),
+                         (321, 'UNKNOWN', 280, 'UNKNOWN', 280, 1))
 
     def test_the_cascades_bulk_update_is_seen(self):
         """No signal fires for these writes; the reason it is a trigger."""
@@ -281,8 +415,7 @@ class TriggerTests(TestCase):
                          (10_000, 'WHITE_WIN', 'WHITE_WIN'))
 
     def test_unwatched_positions_are_left_alone(self):
-        ingest.expand(self.e4)
-        _set(_child(self.e4, 'e7e5'), eval_cp=200, backed_eval=210)
+        _set(_unwatched_child(self.e4), eval_cp=200, backed_eval=210)
 
         self.assertFalse(RootExtreme.objects.exists())
 
@@ -321,7 +454,32 @@ class TriggerTests(TestCase):
 @skipUnless(POSTGRES, 'the trigger exists on PostgreSQL only')
 class TriggerMigrationTests(TestCase):
 
-    def test_the_migration_reverses_and_replays(self):
+    def test_0051_reverses_to_0050_and_replays(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        for key in (root.key, OPENINGS.WATCHED_KEYS[-1]):
+            RootExtreme.objects.create(
+                key=key, best_value=1, best_status='UNKNOWN', best_at=T0,
+                worst_value=1, worst_status='UNKNOWN', worst_at=T0,
+                last_value=1, last_status='UNKNOWN', changed_at=T0, since=T0)
+
+        with connection.schema_editor() as editor:
+            OPENINGS.uninstall(django_apps, editor)
+        definition = _trigger_definition()
+        self.assertIn(MIGRATION.START_KEY, definition)    # 0050's own WHEN
+        self.assertNotIn(roots.WATCH_FUNCTION, definition)
+        self.assertFalse(_watch_function_exists())
+        self.assertEqual(list(RootExtreme.objects.values_list('key',
+                                                              flat=True)),
+                         [root.key])
+
+        with connection.schema_editor() as editor:
+            OPENINGS.install(django_apps, editor)
+            OPENINGS.install(django_apps, editor)   # and again: no error
+        self.assertIn(roots.WATCH_FUNCTION, _trigger_definition())
+        self.assertTrue(_watch_function_exists())
+        self.assertTrue(roots.trigger_installed())
+
+    def test_0050_still_reverses_and_replays(self):
         with connection.schema_editor() as editor:
             MIGRATION.uninstall(django_apps, editor)
         self.assertFalse(roots.trigger_installed())
@@ -483,17 +641,24 @@ class RootsPageTests(TestCase):
         ingest.expand(self.nf3)
         self.f6 = _child(self.nf3, 'f7f6')
 
-    def _page(self):
-        response = self.client.get('/atomicdb/roots/')
+    def _get(self, query=''):
+        response = self.client.get('/atomicdb/roots/' + query)
         self.assertEqual(response.status_code, 200)
-        return response.content.decode()
+        return response
+
+    def _page(self):
+        return self._get().content.decode()
 
     def test_an_empty_record_says_so(self):
-        body = self._page()
+        response = self._get()
+        body = response.content.decode()
 
         self.assertIn('Start position', body)
         self.assertIn('1. Nf3', body)
         self.assertEqual(body.count('Nothing recorded yet.'), 2)
+        self.assertIn('id="openings"', body)
+        self.assertEqual(len(response.context['openings']),
+                         len(openings.load_catalog()))
 
     def test_the_table_quotes_now_best_and_worst_from_whites_side(self):
         best_at = datetime(2026, 10, 20, 8, 14, tzinfo=UTC)
@@ -515,6 +680,77 @@ class RootsPageTests(TestCase):
         self.assertIn('2026-07-28 09:00', body)
         self.assertIn('since 2026-07-28', body)
 
+    def test_the_replies_to_nf3_follow_it_indented_black_best_first(self):
+        _set(self.nf3, eval_cp=541)
+        _set(self.f6, eval_cp=1300)
+        _set(_child(self.nf3, 'e7e5'), eval_cp=1500)
+        _set(_child(self.nf3, 'd7d6'), eval_cp=900)
+
+        rows = roots.page_context(now=T0)['rows']
+
+        self.assertEqual(len(rows), 24)
+        at = [row['label'] for row in rows].index('1. Nf3')
+        self.assertEqual([(row['label'], row['indent'])
+                          for row in rows[at:at + 4]],
+                         [('1. Nf3', False), ('1... d6', True),
+                          ('1... f6', True), ('1... e5', True)])
+        self.assertTrue(rows[at + 1]['url'].endswith('?play=g1f3,d7d6'))
+        self.assertIn('padding-left', self._page())
+
+    def test_named_openings_carry_their_line_and_sort_by_any_column(self):
+        made = _catalogue_positions(3)
+        for (pos, _watched), value in zip(made, (500, 1500, -200)):
+            _set(pos, eval_cp=value)
+        keys = [pos.key for pos, _watched in made]
+        if not POSTGRES:
+            roots.fold_extremes(now=T0)
+
+        by_name = roots.page_context(now=T0)['openings']
+        names = [(row['label'].casefold(), row['line_san'])
+                 for row in by_name]
+        self.assertEqual(names, sorted(names))
+        row = next(row for row in by_name if row['key'] == keys[0])
+        self.assertEqual(row['line_san'], made[0][1].line_san)
+        self.assertTrue(row['url'].endswith(
+            '?play=' + ','.join(made[0][1].line)))
+        self.assertEqual((row['now_h'], row['best_h'], row['changes']),
+                         ('+5.00', '+5.00', 0))
+
+        def first_three(sort):
+            return [row['key'] for row in
+                    roots.page_context(now=T0, sort=sort)['openings'][:3]]
+
+        self.assertEqual(first_three('now'), [keys[1], keys[0], keys[2]])
+        self.assertEqual(first_three('-now'), [keys[2], keys[0], keys[1]])
+        self.assertEqual(first_three('best'), [keys[1], keys[0], keys[2]])
+        self.assertEqual(first_three('worst'), [keys[2], keys[0], keys[1]])
+        # Openings with no value yet go last whichever way.
+        tail = roots.page_context(now=T0, sort='-now')['openings'][3:]
+        self.assertTrue(all(row['value'] is None for row in tail))
+        # Nonsense sorts by name.
+        self.assertEqual(
+            [row['key'] for row in
+             roots.page_context(now=T0, sort='--bogus')['openings']],
+            [row['key'] for row in by_name])
+
+    def test_the_headers_flip_the_column_in_force(self):
+        context = roots.page_context(now=T0)
+        self.assertEqual(context['sort_links']['name'], '-name')
+        self.assertEqual(context['sort_links']['now'], 'now')
+        self.assertEqual(context['sort_arrows']['name'], ' ▴')
+
+        context = roots.page_context(now=T0, sort='now')
+        self.assertEqual(context['sort_links']['now'], '-now')
+        self.assertEqual(context['sort_arrows']['now'], ' ▾')
+        self.assertEqual(context['sort_arrows']['name'], '')
+
+        body = self._get('?sort=-now').content.decode()
+        self.assertIn('href="?sort=now#openings"', body)
+
+    def test_an_opening_not_in_the_tree_says_so(self):
+        body = self._page()
+        self.assertIn('not in the tree yet', body)
+
     def test_the_main_line_and_its_history_by_day(self):
         _set(self.root, eval_cp=545, backed_eval=1243, backed_move='g1f3')
         _set(self.nf3, best_move='f7f6')
@@ -531,14 +767,17 @@ class RootsPageTests(TestCase):
                           for row in context['history']],
                          [('2026-10-26', '+12.19'), ('2026-10-25', '+11.00')])
 
-        body = self._page()
-        self.assertIn('1. Nf3 f6', body)
+        response = self._get()
+        self.assertEqual(response.context['line']['text'], '1. Nf3 f6')
+        body = response.content.decode()
         self.assertIn('2 plies', body)
         self.assertIn('ends at a position not analysed yet', body)
         self.assertIn(f'/atomicdb/explore/{self.f6.key}/?play=g1f3,f7f6',
                       body)
 
     def test_the_page_costs_a_fixed_handful_of_queries(self):
+        """One read for every watched position of both tables, one for the
+        community names, one for the latest line and two for its history."""
         _set(self.root, eval_cp=545, backed_move='g1f3')
         roots.capture(now=T0)
         roots.capture(now=T0 + timedelta(days=1))
@@ -547,6 +786,17 @@ class RootsPageTests(TestCase):
         with self.assertNumQueries(
                 5, using=settings.ATOMICDB_DATABASE_ALIAS):
             roots.page_context(now=T0 + timedelta(days=1))
+
+    def test_without_the_catalogue_the_page_goes_on(self):
+        with mock.patch.object(
+                roots, '_catalogue_rows',
+                side_effect=openings.OpeningCatalogError('broken')), \
+                self.assertLogs('atomicdb.roots', level='ERROR'):
+            body = self._page()
+
+        self.assertIn('Start position', body)
+        self.assertIn('The opening catalogue is not available right now.',
+                      body)
 
     def test_the_front_page_links_here(self):
         body = self.client.get('/atomicdb/').content.decode()
