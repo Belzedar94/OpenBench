@@ -152,11 +152,15 @@ value (White's side), the length and why the line ended. As with the progress
 row, an hour already recorded is reused and never rewritten; the receipt
 reports it under `main_line`.
 
-`RootExtreme` keeps, for the start position and the twenty positions one move
-away, the highest and the lowest headline value since tracking began, and
-when. On PostgreSQL the row trigger `atomicdb_root_extremes` (migration 0050)
-keeps it on every change and the receipt says
-`"extremes":{"kept_by":"trigger"}`. Without the trigger (SQLite, or the
+`RootExtreme` keeps, for the start position, the twenty positions one move
+away, the replies 1.Nf3 f6, 1.Nf3 e5 and 1.Nf3 d6, and every position the
+opening catalogue names (365 keys), the highest and the lowest headline value
+since tracking began, and when. On PostgreSQL the row trigger
+`atomicdb_root_extremes` (migrations 0050 and 0051) keeps it on every change
+and the receipt says `"extremes":{"kept_by":"trigger"}`. Its WHEN asks
+`atomicdb_watched_key(key)` whether a key is watched, so a change to the list
+(a new catalogue) is a migration that replaces that function and seeds the new
+keys, with no lock on `atomicdb_position`. Without the trigger (SQLite, or the
 trigger dropped or disabled) the run folds the current values in instead,
 `"kept_by":"capture"`, and the extremes are hourly samples.
 

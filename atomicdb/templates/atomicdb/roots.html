@@ -1,5 +1,5 @@
 {% extends "atomicdb/base.html" %}
-{% block title %}AtomicDB, start position and first moves{% endblock %}
+{% block title %}AtomicDB, start position and openings{% endblock %}
 {% block content %}
 
 <h2 style="margin-top:0">Start position and first moves</h2>
@@ -8,7 +8,8 @@
   win, Black win or Draw. {% if since %}Best and worst are the highest and
   lowest value each position has had since {{ since|date:"Y-m-d" }}, with the
   time it first got there (UTC).{% else %}Best and worst start with the first
-  values recorded.{% endif %}</p>
+  values recorded.{% endif %} The same for every
+  <a href="#openings">named opening</a> further down.</p>
 <div class="contrib-scroll">
 <table class="lb-table">
   <tr><th>Position</th><th class="n">Now</th><th class="n">Best</th>
@@ -16,11 +17,11 @@
       title="How many times the value has changed">Changes</th></tr>
   {% for r in rows %}
   <tr>
-    <td><a href="/atomicdb/explore/{{ r.key }}/">{% if forloop.first %}<strong>{{ r.label }}</strong>{% else %}{{ r.label }}{% endif %}</a></td>
+    <td{% if r.indent %} style="padding-left:1.6rem"{% endif %}><a href="{{ r.url }}">{% if forloop.first %}<strong>{{ r.label }}</strong>{% else %}{{ r.label }}{% endif %}</a></td>
     <td class="n">{{ r.now_h }}</td>
     <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
     <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
-    <td class="n dim">{{ r.changes }}</td>
+    <td class="n dim">{% if r.changes is not None %}{{ r.changes }}{% else %}—{% endif %}</td>
   </tr>
   {% endfor %}
 </table>
@@ -58,6 +59,37 @@
 </div>
 {% else %}
 <p class="dim">Nothing recorded yet.</p>
+{% endif %}
+
+<h2 id="openings">Named openings</h2>
+<p class="dim campaign-lede">Every position the opening catalogue names{% if openings %},
+  {{ openings|length }} of them{% endif %}, followed the same way: the value the
+  explorer shows, from White's side, and the highest and lowest it has had
+  since it was first recorded. Click a column to sort.</p>
+{% if openings %}
+<div class="contrib-scroll">
+<table class="lb-table">
+  <tr>
+    <th style="width:40%"><a href="?sort={{ sort_links.name }}#openings">Opening</a>{{ sort_arrows.name }}</th>
+    <th class="n"><a href="?sort={{ sort_links.now }}#openings">Now</a>{{ sort_arrows.now }}</th>
+    <th class="n"><a href="?sort={{ sort_links.best }}#openings">Best</a>{{ sort_arrows.best }}</th>
+    <th class="n"><a href="?sort={{ sort_links.worst }}#openings">Worst</a>{{ sort_arrows.worst }}</th>
+    <th class="n"><a href="?sort={{ sort_links.changes }}#openings"
+      title="How many times the value has changed">Changes</a>{{ sort_arrows.changes }}</th>
+  </tr>
+  {% for r in openings %}
+  <tr>
+    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if not r.present %} · not in the tree yet{% endif %}</div></td>
+    <td class="n">{{ r.now_h }}</td>
+    <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
+    <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
+    <td class="n dim">{% if r.changes is not None %}{{ r.changes }}{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="dim">The opening catalogue is not available right now.</p>
 {% endif %}
 
 {% endblock %}
