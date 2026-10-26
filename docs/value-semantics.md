@@ -211,6 +211,19 @@ Every position value on the site is in exactly one of four states:
    claim on it only says another line thought more of it), and a
    repetition, which is no claim: invariant 6 has a position with replies
    nobody opened keep its own number with one.
+10. **An echo is no value.** A backed distance counts the plies of the
+    chain of pointers down to the analysis the number comes from, and that
+    chain never repeats a position. A distance past `BACKED_ECHO_PLIES`
+    (256) was counted round a cycle by a number that outlived its source;
+    the backup reads such a move as if its position had no backed value
+    (its own search, or nothing). On 2026-10-26 the only positions past 128
+    plies in a 10 % page sample of production were 17 holding the 1208 of
+    cz_eclipsia's rook ending at up to 3,365 plies: the number the loop of
+    2026-10-20 held, still passed between 63 positions a week later, each
+    one taking it from a neighbour one ply further at every recompute. It
+    fooled the repetition walk too: the top of the family, `795ffd96`
+    (own search 1234), read its searched moves as lines coming back to it
+    and published a draw.
 
 ## Ordering (the rule that was wrong until 2026-08-04)
 

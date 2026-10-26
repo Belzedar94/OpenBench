@@ -1367,6 +1367,35 @@ class _ChildValue:
         self.circular = False
 
 
+# ---------------- an echo is no value ----------------
+#
+# THE CASE (cz_eclipsia's rook ending below 795ffd96, 26-Oct-2026).  The 1208
+# that a loop of pointers held on 20-Oct was still there after #77 and #80:
+# 63 positions stood on each other at 1208, at distances that grew from
+# about 2,500 to 3,365 plies, and an 8-pass recascade did not end it.  No
+# loop of pointers held it at rest, so the loop rule had nothing to value:
+# whenever one of them was recomputed it took the 1208 of a neighbour that
+# had not been yet, one ply further, and the neighbour did the same a level
+# later.  The number outlived its source by a week, and on the way it fooled
+# the repetition walk: the top, 795ffd96 (own search 1234), read its three
+# searched moves as lines that come back to it and published a draw.
+#
+# THE RULE.  A distance counts the plies of the chain of pointers that leads
+# to the analysis a number comes from, and such a chain never repeats a
+# position.  In a 10% page sample of production the same day, the only
+# distances past 128 plies were this family's 1208; the ascent itself is
+# BACKED_MAX_PLIES levels deep.  A distance past BACKED_ECHO_PLIES was
+# counted round a cycle by a number that kept travelling after its source
+# was gone: an echo.  An echo is no value.  The position stands for its own
+# measure, like any position nobody has backed, and the next recompute of it
+# writes what its moves are worth today.
+#
+# Nothing below that distance changes.  A position does not need this rule
+# to forget its own echo: what it writes comes from its children, each of
+# them read through this rule.
+BACKED_ECHO_PLIES = 4 * BACKED_MAX_PLIES
+
+
 def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
                         nodes_invested, backed_plies, child_key=None,
                         backed_move=None, mate_in=None):
@@ -1380,7 +1409,7 @@ def _child_contribution(move_uci, status, eval_cp, backed_eval, backed_nodes,
     if exact is not None:
         return _ChildValue(move_uci, exact, PROVEN_QUALITY, 0, child_key,
                            exact=True, mate_in=mate_in)
-    if backed_eval is not None:
+    if backed_eval is not None and (backed_plies or 0) <= BACKED_ECHO_PLIES:
         # La calidad del mejor conocimiento del hijo es TODO lo invertido en
         # el, no solo el soporte de la hoja que respaldo el valor.  Con solo
         # ``backed_nodes`` la cadena quedaba clavada en la hoja mas debil:
