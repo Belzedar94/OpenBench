@@ -50,23 +50,40 @@ def _compute(now):
                          'nps_updated'))
     # Rows written before views.MAX_REPORTED_THREADS existed are capped here too.
     cores = sum(min(1024, max(0, row['threads'] or 0)) for row in pings)
-    # A fresh lease resets the rate, heartbeats then publish the current one.
-    # Requiring a current task prevents an idle lease poll from reviving the
-    # completed task's historical NPS.  NPS has its own freshness timestamp:
-    # a worker heartbeat can remain live after engine progress has stopped.
-    nps = sum(max(0, row['last_nps'] or 0) for row in pings
-              if (row['current_task_id'] is not None
-                  and row['nps_updated'] is not None
-                  and row['nps_updated'] >= live_since))
-    completed = AnalysisTask.objects.filter(
+    # What the workers SAY their engines run at: the latest speed each live
+    # worker reported.  A fresh lease resets the rate, heartbeats then publish
+    # the current one.  Requiring a current task prevents an idle lease poll
+    # from reviving the completed task's historical NPS.  NPS has its own
+    # freshness timestamp: a worker heartbeat can remain live after engine
+    # progress has stopped.
+    #
+    # Not the public "nodes / sec" any more.  A build that does not send
+    # ``nps`` in its heartbeat, or a worker between two tasks, adds zero here
+    # while it is serving at full speed, so the home page jumped between 0.0
+    # and a few million while one contributor alone served about 56M nodes/s.
+    # The hourly capture still stores it, because its ``active_nps`` column is
+    # documented as exactly this sum (§ capture_atomicdb_progress).
+    nps_reported = sum(max(0, row['last_nps'] or 0) for row in pings
+                       if (row['current_task_id'] is not None
+                           and row['nps_updated'] is not None
+                           and row['nps_updated'] >= live_since))
+    # What the fleet DELIVERED: the nodes of the analyses completed in the
+    # window, per second.  Every worker that returns results counts, whatever
+    # it reports in between, and the number does not fall to zero while the
+    # machines are mid-search.  A long search lands all of its nodes when it
+    # completes, so a ten-minute window is lumpier than the engines are; over
+    # time the two agree.  Same aggregate as the completed count, so the home
+    # page pays no extra query for it.
+    delivered = AnalysisTask.objects.filter(
         state='COMPLETED',
         completed__gte=now - timedelta(minutes=RATE_MINUTES),
-    ).count()
+    ).aggregate(completed=Count('id'), nodes=Sum('nodes_searched'))
     return {
         'workers': len(pings),
         'cores': cores,
-        'nps': nps,
-        'positions_per_minute': completed / RATE_MINUTES,
+        'nps': round((delivered['nodes'] or 0) / (RATE_MINUTES * 60)),
+        'nps_reported': nps_reported,
+        'positions_per_minute': delivered['completed'] / RATE_MINUTES,
         'live_seconds': LIVE_SECONDS,
         'rate_minutes': RATE_MINUTES,
     }
