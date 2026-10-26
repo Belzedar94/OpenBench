@@ -665,6 +665,9 @@
     <p class="dim" style="font-size:.8rem">closed before line recording was added;
       the mate was verified move by move at closure time</p>
     {% endif %}
+    {% if provenance %}
+    <p class="dim provenance" style="font-size:.8rem">{{ provenance.text }}{% if provenance.url %} <a href="{{ provenance.url }}">{{ provenance.link_text }}</a>{% endif %}</p>
+    {% endif %}
     <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
       nodes {{ nodes_h }} · {{ time_str }}</p>

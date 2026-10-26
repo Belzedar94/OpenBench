@@ -3972,6 +3972,9 @@ def _child_moves(pos):
     del todo, derrota probada abajo del todo, y "sin analizar" justo encima de
     la derrota.  Entre esos extremos no hay particiones: una jugada abierta se
     ordena por su mejor valor conocido y da igual de donde salga el numero.
+    Rows of equal rank are a tie, and the tie goes to the arrow's move and
+    then to the move itself (§ _first_among_equals), never to the order the
+    database returns the edges in.
 
     Hubo una particion por procedencia — un ``tier`` que ponia lo buscado por
     encima de lo sembrado — y duro dos dias.  Rompia la tabla justo donde mas
@@ -4152,7 +4155,14 @@ def _child_moves(pos):
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
-    moves.sort(key=lambda m: -m['rank'])
+    # Value first and nothing else decides the order; what follows only
+    # breaks ties (§ _first_among_equals).  Among equal ranks a row the
+    # backup refuses goes after the ones it can stand on, and the arrow's
+    # move leads the rest, so the top row and the arrow are the same move
+    # whenever the top is a tie.
+    first = _first_among_equals(moves, pos)
+    moves.sort(key=lambda m: (-m['rank'], m['floor'], m['uci'] != first,
+                              m['uci']))
     return moves
 
 
@@ -6036,17 +6046,59 @@ def _queued_children(moves):
             .values('position_id').distinct().count())
 
 
+def _header_move(pos):
+    """The move the header's number comes from, or None.
+
+    An open position quotes its backed value, which comes through
+    ``backed_move``, or its own search when the backup settled there
+    (§ ingest._backed_for returns no move then), which is ``best_move``.
+    A proven position quotes its verdict, not a backed value, so a backed
+    move left over from before the closure names nothing, and neither does
+    a backed value that is not the own search's and has no move behind it.
+    """
+    if pos.status != 'UNKNOWN' or pos.backed_eval is None:
+        return None
+    return pos.backed_move or (
+        pos.best_move if pos.backed_eval == pos.eval_cp else None)
+
+
+def _first_among_equals(moves, pos):
+    """The move that goes first among rows of the same rank.
+
+    The table orders by value, and rows of equal value are a tie it still
+    has to break.  It used to be broken by the order the edges came back in,
+    which on PostgreSQL is physical storage order: on a tie the top row was
+    whichever edge happened to be read first, and the arrow, which names the
+    header's move, pointed somewhere else.  Live on 26-Oct, Black to move in
+    ``rnb1k1nr/2p2p1p/4p1p1/3p4/p3B3/N1P2P2/1P1P1bPP/R1BQ1K1R``: four moves
+    at 0.00, the arrow and ``best_move`` on c8a6, the top row h7h5.
+
+    So the tie goes to the move ``_arrow_move`` picks for this position: the
+    header's move when it is a row the backup can stand on, otherwise the
+    position's own ``best_move``, which is where the arrow falls when no row
+    carries a number.  Any other tie is broken by the move itself, so the
+    order no longer depends on how the database stores the edges.
+    """
+    header = _header_move(pos)
+    if header is not None and any(
+            move['uci'] == header and not move.get('floor')
+            for move in moves):
+        return header
+    return pos.best_move
+
+
 def _arrow_move(moves, pos):
     """The move of the board arrow: the one the header's number comes from.
 
     An open position quotes its backed value, which comes through
     ``backed_move``, or its own search when the backup settled there
-    (§ ingest._backed_for returns no move then), which is ``best_move``.
-    The top row need not be that move: an unsearched claim can top the
-    table and still be vetoed by the backup (1bbe0b3e, 14-Oct: the arrow on
-    g4h5, seeded at 1179, under a header of 1224 through g8h8).  The rule
-    below decides when there is no such move (a proven position, nothing
-    backed yet) or it is blocked, a refused floor or not a row.
+    (§ _header_move).  The top row need not be that move: an unsearched
+    claim can top the table and still be vetoed by the backup (1bbe0b3e,
+    14-Oct: the arrow on g4h5, seeded at 1179, under a header of 1224
+    through g8h8).  The rule below decides when there is no such move (a
+    proven position, nothing backed yet) or it is blocked, a refused floor
+    or not a row.  On a tie of value the table puts this same move first
+    (§ _first_among_equals), so the arrow and the top row agree.
 
     Mismo contrato que tenia el inline de ``explore`` — la primera fila con
     valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
@@ -6059,10 +6111,7 @@ def _arrow_move(moves, pos):
     on, so the move recommended and the number quoted are one pair.
     """
     blocked = {m['uci'] for m in moves if m.get('blocked')}
-    header_move = None
-    if pos.status == 'UNKNOWN' and pos.backed_eval is not None:
-        header_move = pos.backed_move or (
-            pos.best_move if pos.backed_eval == pos.eval_cp else None)
+    header_move = _header_move(pos)
     for move in moves:
         if (move['uci'] == header_move
                 and not (move.get('blocked') or move.get('floor'))):
@@ -6188,6 +6237,136 @@ def _node_story(pos):
         return f'This position: analysed ({_human(nodes)} nodes)'
     return (f'This position: analysed ({_human(nodes)} nodes across '
             f'{passes} pass{"" if passes == 1 else "es"})')
+
+
+# How many parents of a proven position the provenance line reads.  The one
+# whose search closed it carries a stored line, and a position has few such
+# parents; the cap keeps a page on a crossroads of transpositions to one
+# bounded read.
+PROVENANCE_MAX_PARENTS = 8
+
+
+def _join_moves(ucis, shown=3):
+    """``a``, ``a and b``, ``a, b and c``, ``a, b, c and 2 more``."""
+    if len(ucis) <= 1:
+        return ''.join(ucis)
+    if len(ucis) <= shown:
+        return ', '.join(ucis[:-1]) + ' and ' + ucis[-1]
+    return ', '.join(ucis[:shown]) + f' and {len(ucis) - shown} more'
+
+
+def _mate_pv_provenance(pos, active_ucis=None, route_keys=None):
+    """Which search produced this MATE_PV closure, when the page can show it.
+
+    A MATE_PV page printed its winning line and nothing about where it came
+    from.  The line is the PV of a search one ply up: the ingest closes the
+    child the line enters and materialises the rest of it as a chain, every
+    link closed by the line's suffix (§ ingest.ingest_analysis,
+    ingest.materialise_won_line).  So the evidence is checked, not assumed:
+    a parent whose CURRENT stored lines (not an earlier wider pass) contain
+    exactly the move into this position plus this position's winning line
+    is the search that proved it.  A parent searched again since may no
+    longer show that line, and then nothing is claimed.
+
+    A link deeper in a chain has no such parent: the link above it is
+    closed by the same line and was never searched.  That parent is named
+    instead, by the same equality on its winning line, so a visitor can
+    climb the chain to the search a link at a time.
+
+    One query, bounded by ``PROVENANCE_MAX_PARENTS``, and no move
+    generation: the move is shown as stored.
+    """
+    line = (pos.won_line or '').split()
+    if not line:
+        return None
+    rows = (Edge.objects.filter(child=pos)
+            .filter(Q(parent__last_analysis__isnull=False)
+                    | Q(parent__closure='MATE_PV'))
+            .order_by('parent_id', 'move_uci')
+            .values_list('parent_id', 'move_uci', 'parent__last_analysis',
+                         'parent__closure', 'parent__won_line')
+            [:PROVENANCE_MAX_PARENTS])
+    searched = chained = None
+    for parent_key, uci, analysis, closure, won_line in rows:
+        wanted = [uci, *line]
+        stored = analysis if isinstance(analysis, list) else []
+        if searched is None and any(
+                isinstance(entry, dict) and not entry.get('prior_pass')
+                and entry.get('pv') == wanted for entry in stored):
+            searched = (parent_key, uci)
+        if (chained is None and closure == 'MATE_PV'
+                and (won_line or '').split() == wanted):
+            chained = (parent_key, uci)
+    parent_key, uci = searched or chained or (None, None)
+    if parent_key is None:
+        return None
+    # The parent the visitor came from keeps the visitor's route, one ply
+    # shorter; any other parent is linked bare.
+    on_route = bool(active_ucis and route_keys is not None
+                    and len(route_keys) >= 2
+                    and route_keys[-2] == parent_key
+                    and active_ucis[-1] == uci)
+    return {
+        'text': ('proven by the search of' if searched
+                 else 'proven as part of the winning line of'),
+        'link_text': f'the position before {uci}',
+        'url': _explore_url(parent_key,
+                            active_ucis[:-1] if on_route else None),
+    }
+
+
+def _minimax_provenance(pos, moves):
+    """What proves a MINIMAX closure: the replies, named from the table.
+
+    A closure by minimax can land at any moment, for instance when a
+    visitor steps into a child that was already proven and the parent is
+    re-derived on the spot (§ goto).  On the page it looked like any other
+    verdict, which read as a closure out of nowhere.  The line says what
+    carries it: the winning replies, the drawing ones, or all of them when
+    every reply loses.
+
+    It is read from the rows the table already loaded, so it costs nothing.
+    """
+    stm_white = pos.fen.split()[1] == 'w'
+    win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
+    loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    lead = 'proven by minimax from its replies'
+    if pos.status == win:
+        winners = [move['uci'] for move in moves if move['status'] == win]
+        if pos.best_move in winners:
+            # The witness the closure exports goes first.
+            winners.remove(pos.best_move)
+            winners.insert(0, pos.best_move)
+        if winners:
+            verb = 'wins' if len(winners) == 1 else 'win'
+            return {'text': f'{lead}: {_join_moves(winners)} {verb}'}
+    elif pos.status == 'DRAW':
+        draws = [move['uci'] for move in moves if move['status'] == 'DRAW']
+        if draws:
+            verb = 'draws' if len(draws) == 1 else 'draw'
+            return {'text': f'{lead}: {_join_moves(draws)} {verb}, '
+                            'none wins'}
+    elif moves and all(move['status'] == loss for move in moves):
+        if len(moves) == 1:
+            return {'text': f"{lead}: its only reply, {moves[0]['uci']}, "
+                            'loses'}
+        return {'text': f'{lead}: all {len(moves)} lose'}
+    return {'text': lead}
+
+
+def _provenance(pos, moves, active_ucis=None, route_keys=None):
+    """The short line under a verdict saying where the proof came from.
+
+    ``None`` for an open position and for the closures that already say it
+    themselves (a terminal position, a tablebase, a certificate).
+    """
+    if pos.status == 'UNKNOWN':
+        return None
+    if pos.closure == 'MATE_PV':
+        return _mate_pv_provenance(pos, active_ucis, route_keys)
+    if pos.closure == 'MINIMAX':
+        return _minimax_provenance(pos, moves)
+    return None
 
 
 def explore(request, key):
@@ -6511,6 +6690,10 @@ def explore(request, key):
         # MINIMAX solo guarda el testigo de cada nodo) no hay longitud que
         # prometer y el chip no la inventa.
         'proven_end_plies': len((pos.won_line or '').split()) or None,
+        # Where the proof of a closed position came from: the search whose
+        # line it is, or the replies minimax closed it from
+        # (§ _provenance).  None on an open page, at no cost there.
+        'provenance': _provenance(pos, moves, active_ucis, route_keys),
         # Respaldo SIN peso de busqueda en territorio SIN busqueda propia: el
         # valor subio por una linea que un visitante camino, asi que es una
         # cota sin verificar, no un veredicto del motor.  El chip lo dice.
