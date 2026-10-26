@@ -152,17 +152,20 @@ value (White's side), the length and why the line ended. As with the progress
 row, an hour already recorded is reused and never rewritten; the receipt
 reports it under `main_line`.
 
-`RootExtreme` keeps, for the start position, the twenty positions one move
-away, the replies 1.Nf3 f6, 1.Nf3 e5 and 1.Nf3 d6, and every position the
-opening catalogue names (365 keys), the highest and the lowest headline value
-since tracking began, and when. On PostgreSQL the row trigger
-`atomicdb_root_extremes` (migrations 0050 and 0051) keeps it on every change
+`RootExtreme` keeps, for every position on the watch list (`WatchedKey`: the
+start position, the twenty positions one move away, the replies 1.Nf3 f6,
+1.Nf3 e5 and 1.Nf3 d6, every position the opening catalogue names, and every
+position a community name has been approved for), the highest and the lowest
+headline value since tracking began, and when. On PostgreSQL the row trigger
+`atomicdb_root_extremes` (migrations 0050 to 0052) keeps it on every change
 and the receipt says `"extremes":{"kept_by":"trigger"}`. Its WHEN asks
-`atomicdb_watched_key(key)` whether a key is watched, so a change to the list
-(a new catalogue) is a migration that replaces that function and seeds the new
-keys, with no lock on `atomicdb_position`. Without the trigger (SQLite, or the
-trigger dropped or disabled) the run folds the current values in instead,
-`"kept_by":"capture"`, and the extremes are hourly samples.
+`atomicdb_watched_key(key)`, an indexed lookup in `atomicdb_watchedkey`,
+whether a key is watched. Approving a name on the moderation page adds its
+position in the same transaction; each run then adds whatever should be on
+the list and is not, and says how many under `"watch_added"`. Nothing is ever
+taken off the list. Without the trigger (SQLite, or the trigger dropped or
+disabled) the run folds the current values in instead, `"kept_by":"capture"`,
+and the extremes are hourly samples.
 
 Both are public at `/atomicdb/roots/`.
 

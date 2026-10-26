@@ -1115,20 +1115,20 @@ class ProgressSnapshot(models.Model):
 class RootExtreme(models.Model):
     """The best and the worst value one watched position has headlined.
 
-    Watched: the start position and the twenty positions one move away
-    (``roots.watched_positions``).  The value is the number the explorer
-    header and the API ``score`` stand on, from White's side and in the same
-    scale: a proven status as +10000, -10000 or 0, otherwise the backed value,
-    otherwise the point eval (``ingest.known_eval_of``).  Best is the highest,
-    worst the lowest.
+    Watched: every key of ``WatchedKey``.  The value is the number the
+    explorer header and the API ``score`` stand on, from White's side and in
+    the same scale: a proven status as +10000, -10000 or 0, otherwise the
+    backed value, otherwise the point eval (``ingest.known_eval_of``).  Best
+    is the highest, worst the lowest.
 
     EVERY CHANGE, NOT AN HOURLY SAMPLE.  On PostgreSQL a row trigger keeps
-    this table (migration 0050), so a value that lasts five minutes between
-    two captures still counts.  It is a trigger and not a signal because the
-    writes that move these numbers are mostly the cascade's ``bulk_update``,
-    which sends no signal at all.  A database without the trigger (SQLite)
-    folds the current values in at the hourly capture instead
-    (``roots.fold_extremes``), and there the extremes are hourly samples.
+    this table (migrations 0050-0052), so a value that lasts five minutes
+    between two captures still counts.  It is a trigger and not a signal
+    because the writes that move these numbers are mostly the cascade's
+    ``bulk_update``, which sends no signal at all.  A database without the
+    trigger (SQLite) folds the current values in at the hourly capture
+    instead (``roots.fold_extremes``), and there the extremes are hourly
+    samples.
 
     FORWARD ONLY.  ``since`` is when tracking of the row began.  Nothing older
     was recorded, so nothing older is reconstructed: best and worst are "since
@@ -1153,6 +1153,37 @@ class RootExtreme(models.Model):
     def __str__(self):
         return (f'{self.key[:12]} best={self.best_value} '
                 f'worst={self.worst_value}')
+
+
+class WatchedKey(models.Model):
+    """A position ``RootExtreme`` follows.  The trigger asks this table.
+
+    On PostgreSQL the WHEN of the extremes trigger calls
+    ``atomicdb_watched_key(key)``, which since migration 0052 is an indexed
+    lookup here, so the list grows without a migration: an approved community
+    name adds its position the moment it is approved
+    (``roots.watch_approved``), and the hourly capture adds whatever the
+    first table, the catalogue or an approval should have added and did not
+    (``roots.sync_watched_keys``).
+
+    A key is never removed.  A name that is rejected later or edited away
+    leaves the position watched and its history in place.
+    """
+
+    class Source(models.TextChoices):
+        ROOT = 'root'            # the start position or a first move
+        REPLY = 'reply'          # a reply the first table follows
+        CATALOG = 'catalog'      # named by the opening catalogue
+        COMMUNITY = 'community'  # named by an approved community suggestion
+
+    key = models.CharField(max_length=64, primary_key=True)
+    source = models.CharField(max_length=10, choices=Source.choices)
+    # A default and not auto_now_add: the code that adds a key passes the
+    # same instant it starts the key's extremes row with.
+    added = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f'{self.key[:12]} ({self.source})'
 
 
 class MainLineSnapshot(models.Model):

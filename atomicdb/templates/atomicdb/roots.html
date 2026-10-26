@@ -62,10 +62,12 @@
 {% endif %}
 
 <h2 id="openings">Named openings</h2>
-<p class="dim campaign-lede">Every position the opening catalogue names{% if openings %},
-  {{ openings|length }} of them{% endif %}, followed the same way: the value the
+<p class="dim campaign-lede">Every position the opening catalogue names, and
+  every position a community name has been approved for{% if openings %},
+  {{ openings|length }} in all{% endif %}, followed the same way: the value the
   explorer shows, from White's side, and the highest and lowest it has had
-  since it was first recorded. Click a column to sort.</p>
+  since it was first recorded. A name approved here joins the list as soon as
+  it is approved. Click a column to sort.</p>
 {% if openings %}
 <div class="contrib-scroll">
 <table class="lb-table">
@@ -79,7 +81,7 @@
   </tr>
   {% for r in openings %}
   <tr>
-    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if not r.present %} · not in the tree yet{% endif %}</div></td>
+    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if r.community %}{% if r.line_san %} · {% endif %}community name{% endif %}{% if not r.present %}{% if r.line_san or r.community %} · {% endif %}not in the tree yet{% endif %}</div></td>
     <td class="n">{{ r.now_h }}</td>
     <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
     <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>

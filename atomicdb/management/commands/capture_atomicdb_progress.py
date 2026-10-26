@@ -179,11 +179,14 @@ def _main_line_payload(line, created):
             'end_reason': line.end_reason}
 
 
-def _extremes_payload(folded):
-    # ``None``: the trigger keeps them and the capture had nothing to do.
+def _extremes_payload(folded, added):
+    # ``folded`` is ``None`` where the trigger keeps them and the capture had
+    # nothing to fold.  ``watch_added``: keys the capture put on the watch
+    # list because nothing else had.
     if folded is None:
-        return {'kept_by': 'trigger'}
-    return {'kept_by': 'capture', 'new': folded[0], 'changed': folded[1]}
+        return {'kept_by': 'trigger', 'watch_added': added}
+    return {'kept_by': 'capture', 'new': folded[0], 'changed': folded[1],
+            'watch_added': added}
 
 
 class Command(BaseCommand):
@@ -221,10 +224,10 @@ class Command(BaseCommand):
         snapshot, created = capture_progress(now=now)
         # After the progress row has committed, and in its own transactions:
         # whatever happens to the main line cannot cost this hour's counters.
-        line, line_created, folded = roots.capture(now=now)
+        line, line_created, folded, added = roots.capture(now=now)
         payload = _payload(snapshot, created)
         payload['main_line'] = _main_line_payload(line, line_created)
-        payload['extremes'] = _extremes_payload(folded)
+        payload['extremes'] = _extremes_payload(folded, added)
         if options['json']:
             self.stdout.write(json.dumps(
                 payload, sort_keys=True, separators=(',', ':')))
@@ -246,3 +249,5 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"root extremes: folded new={extremes['new']} "
                 f"changed={extremes['changed']}")
+        if added:
+            self.stdout.write(f'watch list: added {added}')
