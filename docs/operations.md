@@ -258,6 +258,32 @@ change together. To remove it: delete the file, `systemctl daemon-reload`,
 `systemctl restart atomicdb-selector` (the restart waits for the pass in
 progress to finish).
 
+## Stale backed values: `sweep_stale_backed` (written 2026-10-26)
+
+The nightly `atomicdb-recascade.timer` has been stopped since 5 October: a
+pass over every position with edges no longer fits in a night. Its job, that
+no backed value stays behind the rules and the children it stands on
+(invariant 4 of `docs/value-semantics.md`), goes to
+`Documentation/atomicdb-backed-sweep.service` and `.timer`, every 15 minutes:
+
+- each run carries on the ascents that `BACKED_MAX_PLIES` cut since the last
+  run (their frontier is in the `BACKED_GUARD` event), checks the positions
+  where overlapping ingests met, and reads a slice of the table in physical
+  order, sized so that the whole table is read every 7 days;
+- what one level of the backup would rewrite is checked again 5 minutes
+  later and repaired only if it is still stale with the same stored numbers
+  and no ingest of its own is pending, with the ordinary ascent, in short
+  transactions, never on a proven position;
+- per run at most 10,000 rows written, 3 repair ascents cut by a guard and
+  600 s; a rotation slice with more than 20% stale is reported, not repaired
+  (that is a change of rule: run `recascade_backed` deliberately instead);
+- the receipt of every run is a `BACKED_SWEEP` event (counts, examples, the
+  cursors of the next run), hidden from the public feed.
+
+To look without writing: `manage.py sweep_stale_backed --dry-run`. To stop
+it: `systemctl disable --now atomicdb-backed-sweep.timer`; nothing else
+depends on it.
+
 ## Caché compartida (Redis) de la web
 
 La portada de AtomicDB y el explorador cachean cosas caras y públicas: la

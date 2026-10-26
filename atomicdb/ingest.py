@@ -17,12 +17,13 @@ import time
 from datetime import datetime, timedelta
 
 from django.conf import settings
-from django.db import IntegrityError, router, transaction
+from django.db import (DatabaseError, IntegrityError, OperationalError, router,
+                       transaction)
 from django.db.models import Max, Q
 from django.utils import timezone
 
 from . import logic, proof, solve_estimate, tb
-from .database import atomic
+from .database import atomic, connection
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
@@ -3105,7 +3106,128 @@ def _backed_children_by_parent(parent_keys):
     return by_parent
 
 
-def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
+# ---------------- what a capped ascent leaves behind ----------------
+#
+# THE CASE (26-Oct-2026).  The top of the main line, 7e11bbf6 after 1.Nf3 f6
+# 2.Nc3 c6, read 1183 over a best child at 1177, and that child read 1177
+# over a child at 1213.  The chain of pointers below 7e11bbf6 was 77 plies
+# long that evening: a number that changes at its bottom needs 77 levels to
+# reach it, and an ascent stops after BACKED_MAX_PLIES = 64.  Every one of the
+# 749 BACKED_GUARD events on record is that cut ("ply-guard"); 32 came from
+# ingests that day, each one rewriting a median of a thousand rows of the
+# family cz_eclipsia was analysing.  The parents of what the last level
+# changed were never recomputed, and nothing would come back for them.
+#
+# THE RULE.  The cut stays: an ingest holds its transaction, and its row
+# locks, for its whole ascent.  What the cut leaves is no longer lost.  The
+# BACKED_GUARD event carries the frontier the next level would have read,
+# and ``sweep_stale_backed`` seeds a later ascent with it, outside the
+# ingest and in short transactions.  ``generation`` counts how many times a
+# frontier has been carried that way, so a family whose ascents never come
+# to rest is followed a bounded number of times and then left, with its keys
+# on record, to a person.
+BACKED_GUARD_KEYS = 2_000
+
+
+def _guard_event(reason, keys, processed, plies, seed_keys, generation,
+                 **extra):
+    """The BACKED_GUARD event of an ascent that stopped with work left."""
+    keys = sorted(set(keys))
+    DBEvent.objects.create(kind='BACKED_GUARD', payload={
+        'reason': reason, 'processed': processed, 'plies': plies,
+        'seed_count': len(seed_keys), 'generation': generation,
+        'left': len(keys), 'keys': keys[:BACKED_GUARD_KEYS], **extra})
+
+
+class _LevelDecision:
+    """One level of the backup, decided and not yet written."""
+
+    __slots__ = ('children', 'decided', 'waiting', 'wake', 'returning',
+                 'discrepancies', 'cycle_picks')
+
+
+def _decide_level(rows, spines, loop_budget):
+    """What one level of the backup writes for ``rows``, without writing it.
+
+    The body of every level of backup_backed_evals, and the check of
+    ``sweep_stale_backed``: a position the sweep calls stale is one the
+    backup would rewrite, because both ask this one function.  Nothing is
+    written or bought here.  ``spines`` hears every decision, as the
+    cascade needs, and ``loop_budget`` is the ``[seconds]`` the loop rule
+    may still spend (see _loop_at_best_exit).
+    """
+    level = _LevelDecision()
+    children = _backed_children_by_parent([row.key for row in rows])
+    # Antes de que nadie compare: queda MARCADO el hijo que se justifica
+    # pasando por su propio padre.  Lo que esa marca vale lo dice el
+    # negamax, que es quien sabe de quien es el turno (§ _backed_for).
+    # A proven row never reads its children, so only the open ones are
+    # worth the walk that follows.
+    open_rows = {row.key for row in rows
+                 if _status_eval(row.status) is None}
+    elsewhere = set()
+    level.returning = {
+        parent for parent, _move in
+        _draw_cycling_children(children, spines, circular=elsewhere)
+        if parent in open_rows}
+    # A move that comes back here, or runs into a loop anywhere, loses
+    # the ties of THIS level (see the block above _best_child); the
+    # valuation of the returning line itself, one ply deeper, is left as
+    # it was.
+    for parent, kids in children.items():
+        for kid in kids:
+            kid.returns = kid.cycles
+            kid.circular = (parent, kid.move) in elsewhere
+    # And a child that returns is valued on the line that returns, so
+    # the first answer is already the one a full lap would reach.
+    _resolve_returning_children(children, spines, only=open_rows)
+    # Los escaparates multipv, UNA consulta por nivel y solo para las
+    # filas con huecos (aristas sin valor, o nodo sin expandir): son las
+    # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
+    # que a proposito no arrastra el JSON del escaparate por cada nodo.
+    # A floor is judged against the bound (see is_floor), so its row
+    # needs the showcase as much as a row with a gap does.
+    gaps = [row.key for row in rows
+            if not row.expanded
+            or any(c.value is None or c.floor
+                   for c in children.get(row.key, ()))]
+    showcases = (dict(Position.objects.filter(key__in=gaps)
+                      .values_list('key', 'last_analysis'))
+                 if gaps else {})
+    discrepancies = []
+    cycle_picks = []
+    decided = {}
+    for row in rows:
+        spines.wrote(row.key, row.backed_move)
+        # Las dos preguntas abiertas del respaldo salen por parametro y el
+        # final del nivel las compra.  La del ciclo se apunta aunque la
+        # repeticion no acabe decidiendo nada, y a proposito ANTES del
+        # corte de "sin cambios": un clavado viejo re-intenta la compra en
+        # cada pasada y el dedup de tareas absorbe la repeticion.
+        decided[row.key] = _backed_for(
+            row, children.get(row.key, ()), discrepancies,
+            bound=_showcase_bound(showcases.get(row.key)),
+            cycle_picks=cycle_picks,
+            lines=_showcase_lines(showcases.get(row.key)))
+        spines.wrote(row.key, decided[row.key][1])
+    # Before anything is written: no loop of pointers through this level
+    # (see the block above _best_child), and a loop nobody here can
+    # open for the same value is worth its best exit (see the block
+    # above _loop_at_best_exit).
+    ruled = set()
+    wake = _open_pointer_loops(rows, children, decided, spines, showcases,
+                               cycle_picks, loop_budget, ruled)
+    # And nothing is written from a number this level is rewriting
+    # (see the block above _rows_that_wait).
+    waiting = _rows_that_wait(rows, children, decided, ruled)
+    level.children, level.decided = children, decided
+    level.waiting, level.wake = waiting, wake
+    level.discrepancies, level.cycle_picks = discrepancies, cycle_picks
+    return level
+
+
+def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
+                        open_only=False, generation=0, report=None):
     """Recalcula el valor respaldado y lo sube por el DAG hasta que deje de
     importar.
 
@@ -3121,6 +3243,15 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     APOYADOS en la arista que cambio, porque el valor de esos ES el del hijo y
     no puede quedarse atras ni un centipeon.  El corte de ruido solo silencia
     hacia arriba mientras ningun ancestro este de pie sobre lo que se movio.
+
+    ``open_only`` leaves proven positions out of every level: their parents
+    read their status, never their backed value (see _child_contribution),
+    so no reader loses anything, and the sweep never writes a proven row.
+    ``generation`` goes into any BACKED_GUARD event (see the block above
+    BACKED_GUARD_KEYS).  ``report``, a dict, is filled with how the ascent
+    ended: ``levels``, ``processed``, ``changed``, the ``guard`` that cut
+    it (or None) and how many keys it ``left``; and, when a database error
+    stops it, ``aborted`` and the ``frontier`` a retry has to start from.
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
     visits, changed_total, processed, plies = {}, 0, 0, 0
@@ -3129,148 +3260,207 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES):
     looked = set()               # woken once for a loop (_open_pointer_loops)
     loop_budget = [BACKED_LOOP_MAX_SECONDS]   # see _loop_at_best_exit
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
-    while frontier and plies < max_plies:
-        plies += 1
-        rows = list(Position.objects.filter(key__in=frontier).only(
-            'key', 'fen', 'status', 'expanded', 'eval_cp', 'nodes_invested',
-            'best_move', *_BACKED_FIELDS))
-        if not rows:
-            break
-        children = _backed_children_by_parent([row.key for row in rows])
-        # Antes de que nadie compare: queda MARCADO el hijo que se justifica
-        # pasando por su propio padre.  Lo que esa marca vale lo dice el
-        # negamax, que es quien sabe de quien es el turno (§ _backed_for).
-        # A proven row never reads its children, so only the open ones are
-        # worth the walk that follows.
-        open_rows = {row.key for row in rows
-                     if _status_eval(row.status) is None}
-        elsewhere = set()
-        returning.update(
-            parent for parent, _move in
-            _draw_cycling_children(children, spines, circular=elsewhere)
-            if parent in open_rows)
-        # A move that comes back here, or runs into a loop anywhere, loses
-        # the ties of THIS level (see the block above _best_child); the
-        # valuation of the returning line itself, one ply deeper, is left as
-        # it was.
-        for parent, kids in children.items():
-            for kid in kids:
-                kid.returns = kid.cycles
-                kid.circular = (parent, kid.move) in elsewhere
-        # And a child that returns is valued on the line that returns, so
-        # the first answer is already the one a full lap would reach.
-        _resolve_returning_children(children, spines, only=open_rows)
-        # Los escaparates multipv, UNA consulta por nivel y solo para las
-        # filas con huecos (aristas sin valor, o nodo sin expandir): son las
-        # unicas donde la cota decide algo, y ``rows`` viene de un ``only()``
-        # que a proposito no arrastra el JSON del escaparate por cada nodo.
-        # A floor is judged against the bound (see is_floor), so its row
-        # needs the showcase as much as a row with a gap does.
-        gaps = [row.key for row in rows
-                if not row.expanded
-                or any(c.value is None or c.floor
-                       for c in children.get(row.key, ()))]
-        showcases = (dict(Position.objects.filter(key__in=gaps)
-                          .values_list('key', 'last_analysis'))
-                     if gaps else {})
-        dirty, propagate, standing, discrepancies = [], [], [], []
-        cycle_picks = []
-        decided = {}
-        for row in rows:
-            processed += 1
-            spines.wrote(row.key, row.backed_move)
-            # Las dos preguntas abiertas del respaldo salen por parametro y el
-            # final del nivel las compra.  La del ciclo se apunta aunque la
-            # repeticion no acabe decidiendo nada, y a proposito ANTES del
-            # corte de "sin cambios": un clavado viejo re-intenta la compra en
-            # cada pasada y el dedup de tareas absorbe la repeticion.
-            decided[row.key] = _backed_for(
-                row, children.get(row.key, ()), discrepancies,
-                bound=_showcase_bound(showcases.get(row.key)),
-                cycle_picks=cycle_picks,
-                lines=_showcase_lines(showcases.get(row.key)))
-            spines.wrote(row.key, decided[row.key][1])
-        # Before anything is written: no loop of pointers through this level
-        # (see the block above _best_child), and a loop nobody here can
-        # open for the same value is worth its best exit (see the block
-        # above _loop_at_best_exit).
-        ruled = set()
-        wake = _open_pointer_loops(rows, children, decided, spines, showcases,
-                                   cycle_picks, loop_budget, ruled)
-        # And nothing is written from a number this level is rewriting
-        # (see the block above _rows_that_wait).
-        waiting = _rows_that_wait(rows, children, decided, ruled)
-        for row in rows:
-            if row.key in waiting:
-                spines.wrote(row.key, row.backed_move)
-                continue
-            value, move, below, quality = decided[row.key]
-            if _backed_stored(row, value, move, below, quality):
-                continue
-            if _backed_worth_propagating(row, value, move):
-                propagate.append(row.key)
-            else:
-                # Ruido: solo lo veran los padres apoyados en esta arista.
-                standing.append(row.key)
-            row.backed_eval, row.backed_move = value, move
-            row.backed_plies, row.backed_nodes = below, quality
-            spines.wrote(row.key, move)     # la cache no se queda vieja
-            dirty.append(row)
-        if dirty:
-            Position.objects.bulk_update(dirty, _BACKED_FIELDS, batch_size=500)
-            changed_total += len(dirty)
-        _queue_quality_convergence(discrepancies)
-        _queue_cycle_disambiguation(cycle_picks)
-        # The other positions of a loop this level could not open get one
-        # look per ascent: one of them may have the move that opens it.
-        wake = [key for key in sorted(wake) if key not in looked]
-        looked.update(wake)
-        wake += sorted(waiting)
-        if not (propagate or standing) and wake:
-            frontier = wake
-            continue
-        if not (propagate or standing):
-            # AT REST, OR ONLY OUT OF NEWS?  A row valued on a returning
-            # line read the pointers of positions further round the loop,
-            # and this ascent may have moved those pointers afterwards
-            # without changing anything the row's own children show, so
-            # nobody woke it.  Before resting, the rows that were valued
-            # that way get one more look; when that look changes nothing
-            # either, the ascent is done.  It costs one level, and only to
-            # an ascent that met a loop.
-            if settling or not returning:
+    guard, left = None, []       # why the ascent stopped with work left
+    written = []                 # what the current level has committed
+    try:
+        while frontier and plies < max_plies:
+            plies += 1
+            written = []
+            rows = Position.objects.filter(key__in=frontier)
+            if open_only:
+                rows = rows.filter(status='UNKNOWN')
+            rows = list(rows.only(
+                'key', 'fen', 'status', 'expanded', 'eval_cp', 'nodes_invested',
+                'best_move', *_BACKED_FIELDS))
+            if not rows:
                 break
-            frontier, returning, settling = list(returning), set(), True
-            continue
-        settling = False
-        if processed >= BACKED_MAX_NODES:
-            DBEvent.objects.create(kind='BACKED_GUARD', payload={
-                'reason': 'node-budget', 'processed': processed,
-                'plies': plies, 'seed_count': len(seed_keys)})
-            break
-        frontier = []
-        for key in dict.fromkeys([*_parents_to_wake(propagate, standing),
-                                  *wake]):
-            seen = visits.get(key, 0)
-            if seen < BACKED_MAX_REVISITS:
-                visits[key] = seen + 1
-                frontier.append(key)
-            else:
-                dropped.append(key)
-    else:
-        if frontier:
-            DBEvent.objects.create(kind='BACKED_GUARD', payload={
-                'reason': 'ply-guard', 'processed': processed,
-                'plies': plies, 'seed_count': len(seed_keys)})
+            processed += len(rows)
+            level = _decide_level(rows, spines, loop_budget)
+            returning.update(level.returning)
+            decided, waiting = level.decided, level.waiting
+            dirty, propagate, standing = [], [], []
+            for row in rows:
+                if row.key in waiting:
+                    spines.wrote(row.key, row.backed_move)
+                    continue
+                value, move, below, quality = decided[row.key]
+                if _backed_stored(row, value, move, below, quality):
+                    continue
+                if _backed_worth_propagating(row, value, move):
+                    propagate.append(row.key)
+                else:
+                    # Ruido: solo lo veran los padres apoyados en esta arista.
+                    standing.append(row.key)
+                row.backed_eval, row.backed_move = value, move
+                row.backed_plies, row.backed_nodes = below, quality
+                spines.wrote(row.key, move)     # la cache no se queda vieja
+                dirty.append(row)
+            if dirty:
+                Position.objects.bulk_update(dirty, _BACKED_FIELDS,
+                                             batch_size=500)
+                changed_total += len(dirty)
+                written = [row.key for row in dirty]
+            _queue_quality_convergence(level.discrepancies)
+            _queue_cycle_disambiguation(level.cycle_picks)
+            # The other positions of a loop this level could not open get one
+            # look per ascent: one of them may have the move that opens it.
+            wake = [key for key in sorted(level.wake) if key not in looked]
+            looked.update(wake)
+            wake += sorted(waiting)
+            if not (propagate or standing) and wake:
+                frontier = wake
+                continue
+            if not (propagate or standing):
+                # AT REST, OR ONLY OUT OF NEWS?  A row valued on a returning
+                # line read the pointers of positions further round the loop,
+                # and this ascent may have moved those pointers afterwards
+                # without changing anything the row's own children show, so
+                # nobody woke it.  Before resting, the rows that were valued
+                # that way get one more look; when that look changes nothing
+                # either, the ascent is done.  It costs one level, and only to
+                # an ascent that met a loop.
+                if settling or not returning:
+                    break
+                frontier, returning, settling = list(returning), set(), True
+                continue
+            settling = False
+            if processed >= BACKED_MAX_NODES:
+                guard = 'node-budget'
+                left = [*_parents_to_wake(propagate, standing), *wake]
+                break
+            frontier = []
+            for key in dict.fromkeys([*_parents_to_wake(propagate, standing),
+                                      *wake]):
+                seen = visits.get(key, 0)
+                if seen < BACKED_MAX_REVISITS:
+                    visits[key] = seen + 1
+                    frontier.append(key)
+                else:
+                    dropped.append(key)
+        else:
+            if frontier:
+                guard, left = 'ply-guard', list(frontier)
+    except DatabaseError:
+        # A deadlock with an ingest, a lock wait past lock_timeout: the level
+        # being written rolls back.  Outside a transaction the levels before
+        # it are committed, and the parents of what they changed are exactly
+        # this level, so that is where the work starts again: a retry seeded
+        # with the original keys would find them already written, see no
+        # change and stop.  Inside one (an ingest) everything rolls back and
+        # the job is retried whole, so there is nothing to leave on record.
+        lost = list(frontier)
+        if not connection.in_atomic_block:
+            try:
+                if written:
+                    # The level was written before the error: its parents
+                    # are the ones nobody has recomputed.
+                    lost += list(_parents_to_wake(written, ()))
+                _guard_event('aborted', lost, processed, plies, seed_keys,
+                             generation)
+            except DatabaseError:
+                pass
+        if report is not None:
+            report.update(levels=plies, processed=processed,
+                          changed=changed_total, guard='aborted',
+                          left=len(set(lost)), aborted=True,
+                          frontier=list(dict.fromkeys(lost)))
+        raise
+    if guard:
+        # Cut by a bound: the event carries what the next level would have
+        # read, for a later ascent to start from (see BACKED_GUARD_KEYS).
+        _guard_event(guard, left, processed, plies, seed_keys, generation)
     if dropped:
         # A node the ascent refused to recompute is standing on a value that
         # nobody backs.  It says so, with enough keys to go and look.
-        DBEvent.objects.create(kind='BACKED_GUARD', payload={
-            'reason': 'revisit-cap', 'dropped': len(dropped),
-            'keys': list(dict.fromkeys(dropped))[:20],
-            'processed': processed, 'plies': plies,
-            'seed_count': len(seed_keys)})
+        _guard_event('revisit-cap', dropped, processed, plies, seed_keys,
+                     generation, dropped=len(dropped))
+    if report is not None:
+        report.update(levels=plies, processed=processed,
+                      changed=changed_total,
+                      guard=guard or ('revisit-cap' if dropped else None),
+                      left=len(set(left) | set(dropped)))
     return changed_total
+
+
+def stale_backed_rows(keys):
+    """The open positions among ``keys`` that one level of the backup would
+    rewrite now, as ``{key: (stored, decided)}``.
+
+    Both tuples are ``(backed_eval, backed_move, backed_plies,
+    backed_nodes)``.  The decision is _decide_level's, the one every level
+    of the ascent writes, so a row returned here is a row that
+    backup_backed_evals would change (one that would only wait for a child
+    of the same batch is returned too: what it stores is just as old).
+    Proven positions are never looked at, and nothing is written or bought.
+    """
+    rows = list(Position.objects.filter(key__in=list(keys), status='UNKNOWN')
+                .only('key', 'fen', 'status', 'expanded', 'eval_cp',
+                      'nodes_invested', 'best_move', *_BACKED_FIELDS))
+    if not rows:
+        return {}
+    level = _decide_level(rows, _SpineCache(), [BACKED_LOOP_MAX_SECONDS])
+    stale = {}
+    for row in rows:
+        stored = (row.backed_eval, row.backed_move, row.backed_plies,
+                  row.backed_nodes)
+        if level.decided[row.key] != stored:
+            stale[row.key] = (stored, level.decided[row.key])
+    return stale
+
+
+# A lock conflict is no reason to give up an ascent that runs outside a
+# transaction.  Postgres names them by SQLSTATE: a deadlock (40P01), a lock
+# wait past the session's lock_timeout (55P03), a serialization failure
+# (40001); SQLite says "database is locked".  On 26-Oct-2026 a recascade of
+# the main line died on the first of them, against an ingest writer.
+_LOCK_CONFLICT_SQLSTATES = frozenset({'40P01', '55P03', '40001'})
+BACKED_RETRY_SLEEPS = (1.0, 3.0, 9.0)
+
+
+def is_lock_conflict(error):
+    """``error`` is a lock conflict that another try may get past."""
+    cause = getattr(error, '__cause__', None) or error
+    code = getattr(cause, 'sqlstate', None) or getattr(cause, 'pgcode', None)
+    if code:
+        return code in _LOCK_CONFLICT_SQLSTATES
+    return 'database is locked' in str(error).lower()
+
+
+def backup_backed_evals_retrying(seed_keys, sleeps=None, report=None,
+                                 **kwargs):
+    """backup_backed_evals, tried again after a lock conflict.
+
+    Only outside a transaction: inside one the conflict has already doomed
+    the whole of it.  The next try starts from the level that was rolled
+    back (the ``frontier`` of the report), plus the original seeds, because
+    the levels before it are committed and seeding only the original keys
+    would find nothing to change.  Returns the rows changed by every try;
+    ``report`` gets the last try's report, the total ``changed`` and the
+    number of ``retries``.  The conflict is raised again once ``sleeps``
+    (by default BACKED_RETRY_SLEEPS) runs out.
+    """
+    if sleeps is None:
+        sleeps = BACKED_RETRY_SLEEPS
+    seeds, changed, retries = list(seed_keys), 0, 0
+    for pause in (*sleeps, None):
+        attempt = {}
+        try:
+            changed += backup_backed_evals(seeds, report=attempt, **kwargs)
+        except OperationalError as error:
+            changed += attempt.get('changed', 0)
+            if (pause is None or connection.in_atomic_block
+                    or not is_lock_conflict(error)):
+                if report is not None:
+                    report.update(attempt, changed=changed, retries=retries)
+                raise
+            retries += 1
+            seeds = list(dict.fromkeys([*attempt.get('frontier', ()),
+                                        *seeds]))
+            time.sleep(pause)
+            continue
+        if report is not None:
+            report.update(attempt, changed=changed, retries=retries)
+        return changed
 
 
 def known_eval_of(status, backed_eval, eval_cp):

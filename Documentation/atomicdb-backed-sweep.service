@@ -1,0 +1,54 @@
+# AtomicDB sweep of stale backed values (sweep_stale_backed), example unit.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-backed-sweep.timer
+#     journalctl -u atomicdb-backed-sweep.service -f
+#
+# WHAT A RUN DOES.  It carries on the ascents that a guard cut since the last
+# run (their frontier is in the BACKED_GUARD event), checks the positions
+# where overlapping ingests met, and reads a slice of the table sized so that
+# all of it is read every seven days.  What one level of the backup would
+# rewrite is checked again five minutes later; only what is still stale, with
+# the same stored numbers and no ingest of its own pending, is repaired, by
+# the ordinary ascent, in short transactions, never on a proven position.  The
+# receipt is a BACKED_SWEEP event.  The docstring of
+# atomicdb/management/commands/sweep_stale_backed.py has the reasons and the
+# measurements.
+#
+# WHY NOT atomicdb-recascade.  That one recomputes every position with edges
+# in one pass, and at 75 million positions a pass stopped fitting in a night
+# (stopped since 5-Oct-2026, see its drop-in).  This one checks a slice per
+# run and writes only what is stale: about 12 seconds of checks per run at
+# the size of 26-Oct-2026, then the five minutes of settling, then repairs.
+#
+# BOUNDS.  The command's own: --max-seconds 600 and --max-changes 10000 per
+# run.  TimeoutStartSec below is the hard stop.  One run at a time: the timer
+# never starts a oneshot that is still running, and the command takes a
+# PostgreSQL advisory lock against a second copy started by hand.  It loses
+# against everything with someone waiting: low CPU and I/O weight, and a
+# lock_timeout of 0.2 s on any row an ingest holds, below the 1 s
+# deadlock_timeout, so a deadlock check never picks an ingest for it.
+
+[Unit]
+Description=AtomicDB sweep of stale backed values
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u manage.py sweep_stale_backed
+TimeoutStartSec=1200
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+MemoryMax=2G
