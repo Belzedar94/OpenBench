@@ -55,6 +55,8 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_requestnotification',     # 0029_request_notifications
     'atomicdb_apirequestlog',           # 0042_api_request_receipts
     'atomicdb_contributorpref',          # 0049_contributorpref
+    'atomicdb_mainlinesnapshot',        # 0050_root_extremes
+    'atomicdb_rootextreme',             # 0050_root_extremes
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.

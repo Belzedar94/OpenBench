@@ -140,6 +140,28 @@ The first receipt must say `"created":true`; the second,
 this table. Retention, downsampling and the `/api/progress/v1` contract require
 a separate reviewed change.
 
+## The main line and the root extremes
+
+The same run records the main line from the start position in its own
+append-only table, `MainLineSnapshot`, one row per UTC hour
+(`atomicdb/roots.py`). The line follows `backed_move`, else `best_move`,
+through `atomicdb_edge` until a proven position, 120 plies, a position that
+names no move, a move without an edge, or a position the line already went
+through. The row keeps the moves in UCI and SAN, the start position's headline
+value (White's side), the length and why the line ended. As with the progress
+row, an hour already recorded is reused and never rewritten; the receipt
+reports it under `main_line`.
+
+`RootExtreme` keeps, for the start position and the twenty positions one move
+away, the highest and the lowest headline value since tracking began, and
+when. On PostgreSQL the row trigger `atomicdb_root_extremes` (migration 0050)
+keeps it on every change and the receipt says
+`"extremes":{"kept_by":"trigger"}`. Without the trigger (SQLite, or the
+trigger dropped or disabled) the run folds the current values in instead,
+`"kept_by":"capture"`, and the extremes are hourly samples.
+
+Both are public at `/atomicdb/roots/`.
+
 ## The adversarial arms, and the order they must be switched on
 
 Two scheduling arms make the automatic explorer refute itself the way a human

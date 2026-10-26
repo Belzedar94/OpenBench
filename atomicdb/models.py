@@ -1110,3 +1110,95 @@ class ProgressSnapshot(models.Model):
 
     def __str__(self):
         return f'AtomicDB progress {self.bucket_start.isoformat()}'
+
+
+class RootExtreme(models.Model):
+    """The best and the worst value one watched position has headlined.
+
+    Watched: the start position and the twenty positions one move away
+    (``roots.watched_positions``).  The value is the number the explorer
+    header and the API ``score`` stand on, from White's side and in the same
+    scale: a proven status as +10000, -10000 or 0, otherwise the backed value,
+    otherwise the point eval (``ingest.known_eval_of``).  Best is the highest,
+    worst the lowest.
+
+    EVERY CHANGE, NOT AN HOURLY SAMPLE.  On PostgreSQL a row trigger keeps
+    this table (migration 0050), so a value that lasts five minutes between
+    two captures still counts.  It is a trigger and not a signal because the
+    writes that move these numbers are mostly the cascade's ``bulk_update``,
+    which sends no signal at all.  A database without the trigger (SQLite)
+    folds the current values in at the hourly capture instead
+    (``roots.fold_extremes``), and there the extremes are hourly samples.
+
+    FORWARD ONLY.  ``since`` is when tracking of the row began.  Nothing older
+    was recorded, so nothing older is reconstructed: best and worst are "since
+    then".  The first value starts the row and is not counted as a change.
+    """
+
+    key = models.CharField(max_length=64, primary_key=True)
+    best_value = models.IntegerField()
+    best_status = models.CharField(max_length=10)
+    best_at = models.DateTimeField()
+    worst_value = models.IntegerField()
+    worst_status = models.CharField(max_length=10)
+    worst_at = models.DateTimeField()
+    # The value a write is compared against, which is what tells a change
+    # from a rewrite of the same number.
+    last_value = models.IntegerField()
+    last_status = models.CharField(max_length=10)
+    changed_at = models.DateTimeField()
+    changes = models.IntegerField(default=0)
+    since = models.DateTimeField()
+
+    def __str__(self):
+        return (f'{self.key[:12]} best={self.best_value} '
+                f'worst={self.worst_value}')
+
+
+class MainLineSnapshot(models.Model):
+    """The main line from the start position, once per UTC hour.
+
+    The line follows ``backed_move``, else ``best_move``, through the edges
+    the tree has, and stops at a proven position, at ``roots``'s ply limit,
+    at a position that names no move, at a move with no edge yet, or before
+    a position the line already went through.  ``value`` is the start
+    position's headline value at capture time, White's side, the scale of
+    ``RootExtreme``.  Append-only, like ``ProgressSnapshot``: an hour that
+    is gone is not rewritten.
+    """
+
+    class End(models.TextChoices):
+        PROVEN = 'PROVEN'     # reached a position with a proven status
+        LIMIT = 'LIMIT'       # stopped at the ply limit
+        NO_MOVE = 'NO_MOVE'   # the last position names no move
+        NO_EDGE = 'NO_EDGE'   # its move is not in the tree yet
+        REPEAT = 'REPEAT'     # the next move goes back to the line
+
+    bucket_start = models.DateTimeField(unique=True)
+    captured_at = models.DateTimeField(auto_now_add=True)
+    value = models.IntegerField(null=True)
+    status = models.CharField(max_length=10, default='UNKNOWN')
+    plies = models.IntegerField(default=0)
+    # Space-separated.  ``san`` is empty when the moves could not be
+    # replayed, and then a reader falls back to the UCI.
+    moves = models.TextField(blank=True, default='')
+    san = models.TextField(blank=True, default='')
+    end_key = models.CharField(max_length=64, blank=True, default='')
+    end_value = models.IntegerField(null=True)
+    end_status = models.CharField(max_length=10, default='UNKNOWN')
+    end_reason = models.CharField(max_length=8, choices=End.choices,
+                                  default=End.NO_MOVE)
+
+    class Meta:
+        ordering = ['bucket_start']
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('MainLineSnapshot rows are append-only')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('MainLineSnapshot rows are append-only')
+
+    def __str__(self):
+        return f'AtomicDB main line {self.bucket_start.isoformat()}'
