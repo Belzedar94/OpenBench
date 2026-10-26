@@ -1131,6 +1131,15 @@ class SyncTests(TestCase):
         self.assertEqual(_row(self.root).last_value, 545)
         self.assertEqual(_row(pos).last_value, 150)
 
+    def test_a_failing_sync_does_not_cost_the_main_line(self):
+        _set(self.root, eval_cp=545)
+        with mock.patch.object(roots, 'sync_watched_keys',
+                               side_effect=RuntimeError('broken')), \
+                self.assertRaises(RuntimeError):
+            roots.capture(now=T0)
+
+        self.assertEqual(MainLineSnapshot.objects.get().value, 545)
+
     def test_an_existing_key_keeps_its_source_and_its_history(self):
         _set(self.root, eval_cp=545)
         RootExtreme.objects.create(

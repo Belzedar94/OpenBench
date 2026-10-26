@@ -402,12 +402,16 @@ def capture_main_line(*, now=None):
 
 
 def capture(*, now=None):
-    """The hourly part of the capture command: what is missing from the watch
-    list, the main line, and the extremes where no trigger keeps them.
-    ``(snapshot, created, folded, added)``."""
+    """The hourly part of the capture command: the main line, what is
+    missing from the watch list, and the extremes where no trigger keeps
+    them.  ``(snapshot, created, folded, added)``.
+
+    The main line goes first, in its own transaction: whatever happens to
+    the watch list cannot cost this hour's line.
+    """
     now = now or timezone.now()
-    added = sync_watched_keys(now=now)
     snapshot, created = capture_main_line(now=now)
+    added = sync_watched_keys(now=now)
     folded = None if trigger_installed() else fold_extremes(now=now)
     return snapshot, created, folded, added
 
