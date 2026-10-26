@@ -13,8 +13,14 @@ or more of these sources:
 3. an exact line confirmed by the Atomic-Stockfish project owner.
 
 The catalogue is keyed by the canonical Atomic position, so transpositions are
-recognized. The UI displays a label only for an explicitly catalogued current
-position. It does not carry a shallow opening name into unnamed descendants.
+recognized. A position with no name of its own shows the name of the deepest
+named position of the line it was reached by, with that position's reference
+line. Approved community names (`atomicdb/community_names.py`) take part in
+that rule as names of their own positions: a new community name never replaces
+a catalogued name on the same position, an approved correction does, and
+between a catalogued name and a community name further up the line the deeper
+one wins. Past the 64-ply replay limit the explorer carries the catalogued
+name only.
 
 When several Atomic names genuinely refer to the same position, current
 project terminology wins the display label and the other source-attested names

@@ -3331,14 +3331,21 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             for key in keys if key in payloads}
 
 
-def _opening_name_for_keys(keys):
-    """Last catalogued Atomic opening on an ALREADY replayed line, or ''.
+def _opening_name_for_keys(keys, names=None):
+    """Last named Atomic opening on an ALREADY replayed line, or ''.
 
     The same rule the explorer card follows: the catalogue is keyed by
     position, so a transposition still recognises the opening, and a line
-    that runs past its last named position keeps that name.  Callers hand
-    over the key of every prefix they already walked, which is what spares
-    this a second replay (§ ``openings.match_line_keys_object``).
+    that runs past its last named position keeps that name.  An approved
+    community name counts as a name wherever it stands on its position
+    (§ ``community_names.in_force``), and the deepest named position wins,
+    whichever of the two named it (§ ``_route_community_opening``).  Callers
+    hand over the key of every prefix they already walked, which is what
+    spares this a second replay (§ ``openings.match_line_keys_object``).
+
+    ``names`` is the community map already resolved: a page that names many
+    lines reads it once and passes it to each (§
+    ``community_names.approved_map``).
 
     Anything the catalogue cannot answer is an empty name and nothing else:
     a queue row exists to say what was asked for, and it is not allowed to
@@ -3348,10 +3355,15 @@ def _opening_name_for_keys(keys):
         match = openings.match_line_keys(keys)
     except (openings.InvalidOpeningLine, openings.OpeningCatalogError):
         return ''
+    floor = 0 if match is None else match['matched_ply']
+    _ply, entry = community_names.deepest_on_line(keys, names=names,
+                                                  floor=floor)
+    if entry is not None:
+        return str(entry['name'])
     return '' if match is None else str(match['name'])
 
 
-def _line_readings_many(keys, preview_plies=10):
+def _line_readings_many(keys, preview_plies=10, opening=True):
     """``{key: (preview, full, opening)}`` from ONE walk per lineage.
 
     All three come out of the same breadcrumb on purpose.  A row that prints
@@ -3360,22 +3372,32 @@ def _line_readings_many(keys, preview_plies=10):
     into the same position can cross differently named ancestors.  Resolving
     them together is also what keeps a page that shows both from paying the
     reverse walk twice.
+
+    ``opening=False`` leaves the name empty.  Naming reads the community map,
+    a trip to the shared cache, and a page that only prints the line has no
+    reason to pay it.
     """
+    lineages = _lines_to_root(keys)
+    names = (community_names.approved_map() if opening and lineages
+             else None)
     readings = {}
-    for key, (top, line) in _lines_to_root(keys).items():
+    for key, (top, line) in lineages.items():
         full = _format_san_line(top, line, max_plies=512, keep_head=True)
         # Preview con elipsis EN MEDIO: la cabeza dice que apertura es y la
         # cola dice DONDE va — dos posiciones distintas de la misma linea
         # profunda nunca deben compartir label.
         preview = _format_san_line(top, line, max_plies=preview_plies)
-        readings[key] = (preview, full, _opening_name_for_keys(
-            [top.key, *(step['key'] for step in line)]))
+        name = (_opening_name_for_keys(
+            [top.key, *(step['key'] for step in line)], names=names)
+            if opening else '')
+        readings[key] = (preview, full, name)
     return readings
 
 
 def _line_labels_many(keys, preview_plies=10):
     return {key: reading[:2] for key, reading
-            in _line_readings_many(keys, preview_plies).items()}
+            in _line_readings_many(keys, preview_plies,
+                                   opening=False).items()}
 
 
 def _line_labels(key, preview_plies=10):
@@ -3432,13 +3454,18 @@ def _route_labels_many(pairs, preview_plies=10):
     if not wanted:
         return {}
     if LINEAGE_CACHE_SECONDS <= 0:
+        names = community_names.approved_map()
         return {pair: labels for pair in wanted
-                if (labels := _walk_route_labels(*pair, preview_plies))}
+                if (labels := _walk_route_labels(*pair, preview_plies,
+                                                 names=names))}
 
     def compute(needed):
+        # One read of the community map for the whole batch, and only when
+        # something has to be walked: a cached label already carries its name.
+        names = community_names.approved_map()
         computed = {}
         for pair in needed:
-            labels = _walk_route_labels(*pair, preview_plies)
+            labels = _walk_route_labels(*pair, preview_plies, names=names)
             if labels is not None:
                 computed[pair] = list(labels)
         return computed
@@ -3456,12 +3483,16 @@ def _route_labels_many(pairs, preview_plies=10):
             if pair in payloads}
 
 
-def _walk_route_labels(route, target_key, preview_plies):
+def _walk_route_labels(route, target_key, preview_plies, names=None):
     """La mitad cara: revalidar la ruta y formatearla.  ``None`` si no vale.
 
     El nombre de apertura sale del MISMO paseo, y por eso viaja aqui dentro:
     calcularlo aparte costaria un segundo rejuego identico de la misma linea,
     que es justo lo que la cache de este rotulo existe para no pagar.
+
+    El nombre se cachea con el rotulo, nombres comunitarios incluidos: uno
+    recien aprobado llega a un rotulo ya cacheado cuando este se renueva, con
+    la misma frescura que la linea (§ LINEAGE_CACHE_SECONDS).
     """
     try:
         top, line, _ucis = _validated_play_route(route, target_key)
@@ -3470,7 +3501,7 @@ def _walk_route_labels(route, target_key, preview_plies):
     full = _format_san_line(top, line, max_plies=512, keep_head=True)
     preview = _format_san_line(top, line, max_plies=preview_plies)
     opening = _opening_name_for_keys(
-        [top.key, *(step['key'] for step in line)])
+        [top.key, *(step['key'] for step in line)], names=names)
     return preview, full, opening
 
 
@@ -4916,6 +4947,41 @@ def _exact_child_opening(child_key, current_opening, names=None):
     if current_opening is not None and name == current_opening['name']:
         return None
     return name
+
+
+def _route_community_opening(top, line, ucis, route_keys, catalog_match,
+                             names):
+    """The approved community name a position inherits from its route.
+
+    A position with no name of its own shows the name of the DEEPEST named
+    position of the active route, and an approved community name is a name
+    wherever ``community_names.in_force`` lets it stand: a NEW name never
+    replaces the catalogue on the same position, an approved EDIT does.
+    Depth decides between the two.  ``catalog_match`` is already the deepest
+    catalogued prefix, so only a community name at its ply or below it can
+    win, and then the page reads it as inherited, with the route's own way
+    into the named position as its reference line.
+
+    ``None`` when the catalogue's answer stands, and always without route
+    keys.  Past the replay limit the route travels as a signed anchor, which
+    names a catalogued opening and nothing else, and the canonical lineage
+    that anchor overrides may be another move order.  The position itself is
+    not asked here: its own community name is ``community_names.opening_for``.
+    """
+    if route_keys is None or ucis is None:
+        return None
+    floor = 0 if catalog_match is None else catalog_match['matched_ply']
+    ply, entry = community_names.deepest_on_line(
+        route_keys[:-1], names=names, floor=floor)
+    if entry is None:
+        return None
+    return community_names.inherited_opening(
+        route_keys[ply], entry,
+        current_key=route_keys[-1],
+        matched_ply=ply,
+        line_uci=ucis[:ply],
+        line_san=_format_san_line(top, line[:ply], max_plies=512,
+                                  keep_head=True))
 
 
 # ---------------- nombres de apertura de la comunidad ----------------
@@ -6448,11 +6514,21 @@ def explore(request, key):
     # posicion y por cada una de sus jugadas, y con el almacen compartido cada
     # pregunta suelta es un viaje a Redis (§ community_names.approved_map).
     community_map = community_names.approved_map()
+    # The keys of the active route, one per ply, or None without one.  The
+    # name below and the repetition guard further down read the same line.
+    route_keys = _route_prefix_keys(top, line, active_ucis)
     # Un nombre comunitario aprobado solo puede aparecer donde el catalogo
     # auditado calla sobre ESTA posicion, y gana a un nombre heredado de un
     # ancestro. La navegacion (anclas firmadas) sigue anclada al catalogo.
+    # A position with no name of its own inherits the deepest named position
+    # of its route, and a community name counts there as one more name
+    # (§ _route_community_opening).
     community = community_names.opening_for(pos.key, pos.fen,
                                             names=community_map)
+    if community is None:
+        community = _route_community_opening(
+            top, line, active_ucis, route_keys, current_opening_match,
+            community_map)
     if community is not None:
         current_opening = _opening_for_template(community)
 
@@ -6462,7 +6538,6 @@ def explore(request, key):
     # canonico replayable, que es exactamente lo que la miga de pan enseña y
     # lo que ``goto`` extiende.  Sin ruta activa no hay linea, y sin linea no
     # hay repeticion que bloquear: cada pagina suelta empieza de cero.
-    route_keys = _route_prefix_keys(top, line, active_ucis)
     blocked_keys = None if route_keys is None else set(route_keys)
 
     for move in moves:

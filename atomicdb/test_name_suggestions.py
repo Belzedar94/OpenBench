@@ -10,6 +10,7 @@ el moderador, y que puede y que no puede desplazar al catalogo auditado.
 import html as html_module
 import re
 from datetime import timedelta
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import Client
@@ -17,7 +18,7 @@ from django.utils import timezone
 
 from OpenBench.models import Profile
 
-from . import community_names, ingest, logic, openings
+from . import community_names, ingest, logic, openings, views
 from .models import Edge, OpeningNameSuggestion, Position
 from .testing import TestCase
 
@@ -727,6 +728,195 @@ class CommunityOverlayTests(TestCase):
         # sirviendose un minuto segun a que worker te toque.
         self.assertGreater(community_names.CACHE_SECONDS, 0)
         self.assertLessEqual(community_names.CACHE_SECONDS, 10)
+
+
+# The line of the report (26-Oct-2026): 1.Nf3 d6 2.Ng5 f5 3.Nf7.  The
+# catalogue names the first two plies, the community names the next two, and
+# nobody names the fifth.
+REPORTED_LINE = ('g1f3', 'd7d6', 'f3g5', 'f7f5', 'g5f7')
+# 1.Nc3 f6 2.Nf3 transposes into the Two Knights Opening, which the catalogue
+# names at ply 3, and the catalogue says nothing about 1.Nc3 f6.
+TRANSPOSED_TWO_KNIGHTS = ('b1c3', 'f7f6', 'g1f3', 'a7a6')
+
+
+def _walk(ucis):
+    """The positions of a line from the start, edges included, start first."""
+    node = ingest.get_or_create_position(logic.start_fen())
+    nodes = [node]
+    for uci in ucis:
+        child = ingest.get_or_create_position(logic.apply_move(node.fen, uci))
+        Edge.objects.get_or_create(parent=node, move_uci=uci,
+                                   defaults={'child': child})
+        nodes.append(child)
+        node = child
+    return nodes
+
+
+def _approved(position, name, kind=OpeningNameSuggestion.SKind.NEW,
+              previous=''):
+    OpeningNameSuggestion.objects.create(
+        position=position, proposed_name=name, ip='10.0.0.1', kind=kind,
+        previous_name=previous,
+        status=OpeningNameSuggestion.SState.APPROVED,
+        resolved_by='boss', resolved_at=timezone.now())
+    community_names.invalidate()
+
+
+class RouteInheritanceTests(TestCase):
+    """A community name carries down the played line like a catalogued one.
+
+    A position with no name of its own shows the deepest named position of
+    its route, and an approved community name is one more name there, on the
+    terms ``community_names.in_force`` already sets: a NEW name never stands
+    on a catalogued position, an approved EDIT does.  Depth decides between
+    the two.
+    """
+
+    def setUp(self):
+        community_names.invalidate()
+
+    def tearDown(self):
+        community_names.invalidate()
+
+    def _page(self, nodes, ucis):
+        return self.client.get(f'/atomicdb/explore/{nodes[-1].key}/',
+                               {'play': ','.join(ucis)})
+
+    def test_an_unnamed_position_inherits_the_community_name_above_it(self):
+        nodes = _walk(REPORTED_LINE)
+        _approved(nodes[3], 'Villager Defense, Knight Attack')
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        response = self._page(nodes, REPORTED_LINE)
+
+        opening = response.context['opening']
+        self.assertEqual(opening['name'],
+                         'Villager Defense, Knight Attack Open')
+        self.assertTrue(opening['community'])
+        self.assertFalse(opening['exact'])
+        self.assertEqual(opening['matched_ply'], 4)
+        self.assertEqual(opening['position_key'], nodes[4].key)
+        self.assertEqual(opening['current_key'], nodes[5].key)
+        reading = _reading(response.content.decode())
+        self.assertIn('Community name Villager Defense, Knight Attack Open '
+                      'Reference: 1. Nf3 d6 2. Ng5 f5', reading)
+        self.assertNotIn('Atomic opening', reading)
+
+    def test_the_canonical_lineage_carries_it_the_same_way(self):
+        nodes = _walk(REPORTED_LINE)
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        response = self.client.get(f'/atomicdb/explore/{nodes[5].key}/')
+
+        self.assertEqual(response.context['active_play'], list(REPORTED_LINE))
+        self.assertEqual(response.context['opening']['name'],
+                         'Villager Defense, Knight Attack Open')
+        self.assertFalse(response.context['opening']['exact'])
+
+    def test_the_named_position_itself_reads_exactly_as_before(self):
+        line = REPORTED_LINE[:4]
+        nodes = _walk(line)
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        response = self._page(nodes, line)
+
+        self.assertEqual(
+            response.context['opening'],
+            views._opening_for_template(community_names.opening_for(
+                nodes[4].key, nodes[4].fen)))
+        reading = _reading(response.content.decode())
+        self.assertIn('Community name Villager Defense, Knight Attack Open',
+                      reading)
+        self.assertNotIn('Reference:', reading)
+
+    def test_depth_decides_between_the_catalogue_and_the_community(self):
+        nodes = _walk(TRANSPOSED_TWO_KNIGHTS)
+        self.assertIsNone(openings.lookup_key(nodes[2].key))
+        _approved(nodes[2], 'Tipau, Pawn Wall')
+        aside_line = TRANSPOSED_TWO_KNIGHTS[:2] + ('a2a3',)
+        aside = _walk(aside_line)
+        self.assertIsNone(openings.lookup_key(aside[-1].key))
+
+        # The catalogue names 2.Nf3, deeper than the community name of 1...f6.
+        deeper = self._page(nodes, TRANSPOSED_TWO_KNIGHTS).context['opening']
+        # And after 2.a3 the community name is the deeper one, past the
+        # catalogue's Tipau of 1.Nc3.
+        shallower = self._page(aside, aside_line).context['opening']
+
+        self.assertEqual(deeper['name'], 'Two Knights Opening')
+        self.assertFalse(deeper.get('community', False))
+        self.assertEqual(deeper['matched_ply'], 3)
+        self.assertEqual(shallower['name'], 'Tipau, Pawn Wall')
+        self.assertTrue(shallower['community'])
+        self.assertEqual(shallower['matched_ply'], 2)
+
+    def test_a_new_name_on_a_catalogued_position_neither_shows_nor_carries(
+            self):
+        line = REPORTED_LINE[:3]
+        nodes = _walk(line)
+        _approved(nodes[2], 'Impostor Defense')
+
+        own = self.client.get(f'/atomicdb/explore/{nodes[2].key}/',
+                              {'play': ','.join(line[:2])})
+        below = self._page(nodes, line)
+
+        self.assertEqual(own.context['opening']['name'], 'Villager Defense')
+        self.assertEqual(below.context['opening']['name'], 'Villager Defense')
+        self.assertFalse(below.context['opening'].get('community', False))
+        self.assertNotContains(own, 'Impostor Defense')
+        self.assertNotContains(below, 'Impostor Defense')
+
+    def test_an_approved_correction_carries_down_the_line(self):
+        line = ('g1f3', 'a7a6')
+        nodes = _walk(line)
+        self.assertIsNone(openings.lookup_key(nodes[2].key))
+        _approved(nodes[1], CORRECTED_NAME,
+                  kind=OpeningNameSuggestion.SKind.EDIT,
+                  previous=CATALOGUED_NAME)
+
+        response = self._page(nodes, line)
+
+        opening = response.context['opening']
+        self.assertEqual(opening['name'], CORRECTED_NAME)
+        self.assertFalse(opening['exact'])
+        self.assertEqual(opening['matched_ply'], 1)
+        self.assertEqual(opening['catalog_name'], CATALOGUED_NAME)
+        self.assertIn(
+            f'Community correction {CORRECTED_NAME} Reference: 1. Nf3 '
+            f'Previously “{CATALOGUED_NAME}”.',
+            _reading(response.content.decode()))
+
+    def test_a_deeper_catalogued_name_still_beats_a_correction(self):
+        nodes = _walk(('g1f3', 'd7d6', 'f3g5'))
+        _approved(nodes[1], CORRECTED_NAME,
+                  kind=OpeningNameSuggestion.SKind.EDIT,
+                  previous=CATALOGUED_NAME)
+
+        response = self._page(nodes, ('g1f3', 'd7d6', 'f3g5'))
+
+        self.assertEqual(response.context['opening']['name'],
+                         'Villager Defense')
+        self.assertNotContains(response, CORRECTED_NAME)
+
+    def test_without_route_keys_the_page_names_what_it_did_before(self):
+        """No keys, no inheritance: the catalogue's answer, as before.
+
+        Route keys are missing when the route and its lineage do not match
+        ply by ply (§ views._route_prefix_keys), and then the catalogue is
+        asked by replaying the line.  The community layer is not asked to
+        replay it a second time.
+        """
+        nodes = _walk(REPORTED_LINE)
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        with mock.patch('atomicdb.views._route_prefix_keys',
+                        return_value=None):
+            response = self._page(nodes, REPORTED_LINE)
+
+        opening = response.context['opening']
+        self.assertEqual(opening['name'], 'Villager Defense')
+        self.assertFalse(opening.get('community', False))
+        self.assertNotContains(response, 'Knight Attack Open')
 
 
 class SuggesterIdentityTests(TestCase):

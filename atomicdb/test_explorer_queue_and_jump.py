@@ -21,9 +21,12 @@ What is fixed here:
 
 import html as html_module
 import re
+from unittest import mock
 
-from . import contributors, ingest, logic, views
-from .models import AnalysisTask, Edge, Position
+from django.utils import timezone
+
+from . import community_names, contributors, ingest, logic, openings, views
+from .models import AnalysisTask, Edge, OpeningNameSuggestion, Position
 from .testing import TestCase
 
 
@@ -161,6 +164,127 @@ class WaitingRowOpeningTests(TestCase):
         sequence is allowed to take the page down with it."""
         self.assertEqual(views._opening_name_for_keys([]), '')
         self.assertEqual(views._opening_name_for_keys(['not-a-key']), '')
+
+
+def _approve(position, name, kind=OpeningNameSuggestion.SKind.NEW,
+             previous=''):
+    OpeningNameSuggestion.objects.create(
+        position=position, proposed_name=name, ip='10.0.0.1', kind=kind,
+        previous_name=previous,
+        status=OpeningNameSuggestion.SState.APPROVED,
+        resolved_by='boss', resolved_at=timezone.now())
+    community_names.invalidate()
+
+
+# 1.Nf3 d6 2.Ng5 f5 3.Nf7: the catalogue names the first two plies, and the
+# community the fourth.
+KNIGHT_ATTACK = ['g1f3', 'd7d6', 'f3g5', 'f7f5', 'g5f7']
+KNIGHT_ATTACK_OPEN = 'Villager Defense, Knight Attack Open'
+
+
+class WaitingRowCommunityNameTests(TestCase):
+    """A row names its line the way the explorer card does.
+
+    The card of a position with no name of its own shows the deepest named
+    position of its route, approved community names included; a waiting row
+    that kept naming the catalogue's ancestor would contradict the page its
+    link opens.
+    """
+
+    def setUp(self):
+        contributors.reset_cache()
+        community_names.invalidate()
+
+    def tearDown(self):
+        community_names.invalidate()
+
+    def _body(self, username):
+        return _reading(
+            self.client.get(f'/atomicdb/user/{username}/').content.decode())
+
+    def test_the_line_takes_the_deepest_name_of_either_layer(self):
+        nodes = _positions(KNIGHT_ATTACK, connect=True)
+        keys = [node.key for node in nodes]
+        _approve(nodes[4], KNIGHT_ATTACK_OPEN)
+
+        self.assertEqual(views._opening_name_for_keys(keys),
+                         KNIGHT_ATTACK_OPEN)
+        self.assertEqual(views._opening_name_for_keys(keys[:3]),
+                         'Villager Defense')
+
+    def test_a_new_name_on_a_catalogued_position_names_nothing(self):
+        nodes = _positions(KNIGHT_ATTACK, connect=True)
+        _approve(nodes[2], 'Impostor Defense')
+
+        self.assertEqual(
+            views._opening_name_for_keys([node.key for node in nodes]),
+            'Villager Defense')
+
+    def test_an_approved_correction_names_the_line_below_it(self):
+        nodes = _positions(['g1f3', 'a7a6'], connect=True)
+        _approve(nodes[1], "King's Knight Opening",
+                 kind=OpeningNameSuggestion.SKind.EDIT,
+                 previous='King Knight Opening')
+
+        self.assertEqual(
+            views._opening_name_for_keys([node.key for node in nodes]),
+            "King's Knight Opening")
+
+    def test_a_waiting_row_shows_it(self):
+        nodes = _positions(KNIGHT_ATTACK, connect=True)
+        _approve(nodes[4], KNIGHT_ATTACK_OPEN)
+        _waiting(nodes[-1])
+
+        body = self._body('alice')
+
+        self.assertIn('1. Nf3 d6 2. Ng5 f5 3. Nf7', body)
+        self.assertIn(KNIGHT_ATTACK_OPEN, body)
+
+    def test_the_map_is_read_once_and_only_with_a_waiting_row(self):
+        """Only a waiting row prints a name; the other rows cost no read."""
+        nodes = _positions(KNIGHT_ATTACK, connect=True)
+        _approve(nodes[4], KNIGHT_ATTACK_OPEN)
+        AnalysisTask.objects.create(
+            position=nodes[3], generation=0, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='alice',
+            state=AnalysisTask.TState.COMPLETED)
+
+        with mock.patch('atomicdb.community_names.approved_map',
+                        wraps=community_names.approved_map) as served:
+            served_only = self._body('alice')
+        _waiting(nodes[-1])
+        _waiting(nodes[2])
+        with mock.patch('atomicdb.community_names.approved_map',
+                        wraps=community_names.approved_map) as waiting:
+            body = self._body('alice')
+
+        self.assertIn('1. Nf3 d6 2. Ng5', served_only)
+        self.assertEqual(served.call_count, 0)
+        self.assertEqual(waiting.call_count, 1)
+        self.assertIn(KNIGHT_ATTACK_OPEN, body)
+
+    def test_each_row_names_the_order_it_prints(self):
+        """Lineage and declared route, through a community name only one of
+        the two orders crosses."""
+        villager = _positions(VILLAGER_FIRST, connect=False)
+        target = _positions(TIPAU_FIRST, connect=True)[-1]
+        self.assertIsNone(openings.lookup_key(villager[3].key))
+        _approve(villager[3], 'Villager Defense, Twin Knights')
+        _waiting(target, username='alice')
+        # Another pass of the same position, so another generation.
+        AnalysisTask.objects.create(
+            position=target, generation=1, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.USER, requested_by='bob',
+            route=','.join(VILLAGER_FIRST))
+
+        lineage = self._body('alice')
+        routed = self._body('bob')
+
+        self.assertIn('1. Nc3 Nc6 2. Nf3 d6', lineage)
+        self.assertIn('Tipau', lineage)
+        self.assertNotIn('Twin Knights', lineage)
+        self.assertIn('1. Nf3 d6 2. Nc3 Nc6', routed)
+        self.assertIn('Villager Defense, Twin Knights', routed)
 
 
 class ProvenLineJumpTests(TestCase):
