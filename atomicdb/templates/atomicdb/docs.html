@@ -70,7 +70,10 @@ available as own search context in the tooltip and in the API
   with fewer than two lines still shows what a walked line leads to.</li>
 <li><strong>Every backed value terminates in a real engine analysis, never in
   a loop.</strong> That terminating analysis is the anchor, and where the chip
-  on the value is a link, the link goes to it.</li>
+  on the value is a link, the link goes to it. A value whose distance is longer
+  than any chain of moves can be (more than 256 plies) was counted round a
+  loop by a number that outlived its source: it is an echo, and the position
+  above reads that move as if it had no backed value.</li>
 </ul>
 <p class="dim" style="font-size:.9rem">One value never displaces another for
 free. While a position still has replies nobody has analysed, a favourable

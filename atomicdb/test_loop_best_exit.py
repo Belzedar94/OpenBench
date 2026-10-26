@@ -36,7 +36,11 @@ from .testing import TestCase
 ENGINE = 128_000_000
 HEAVY = 768_000_000
 STALE = 1208
-FAR = 2110
+# The real loop had counted about 2,110 plies.  A stored distance like that
+# is an echo now (see ingest.BACKED_ECHO_PLIES and test_backup_echo), so the
+# fixtures keep theirs under that bound, a whole ascent included: what they
+# test is the loop rule.
+FAR = 120
 FEN = '4k3/8/8/8/8/8/8/4K3 {} - - 0 1'
 
 
