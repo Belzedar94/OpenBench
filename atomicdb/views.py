@@ -3972,6 +3972,9 @@ def _child_moves(pos):
     del todo, derrota probada abajo del todo, y "sin analizar" justo encima de
     la derrota.  Entre esos extremos no hay particiones: una jugada abierta se
     ordena por su mejor valor conocido y da igual de donde salga el numero.
+    Rows of equal rank are a tie, and the tie goes to the arrow's move and
+    then to the move itself (§ _first_among_equals), never to the order the
+    database returns the edges in.
 
     Hubo una particion por procedencia — un ``tier`` que ponia lo buscado por
     encima de lo sembrado — y duro dos dias.  Rompia la tabla justo donde mas
@@ -4152,7 +4155,14 @@ def _child_moves(pos):
                       'mate_str': None if mate is None else
                       (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
-    moves.sort(key=lambda m: -m['rank'])
+    # Value first and nothing else decides the order; what follows only
+    # breaks ties (§ _first_among_equals).  Among equal ranks a row the
+    # backup refuses goes after the ones it can stand on, and the arrow's
+    # move leads the rest, so the top row and the arrow are the same move
+    # whenever the top is a tie.
+    first = _first_among_equals(moves, pos)
+    moves.sort(key=lambda m: (-m['rank'], m['floor'], m['uci'] != first,
+                              m['uci']))
     return moves
 
 
@@ -6036,17 +6046,59 @@ def _queued_children(moves):
             .values('position_id').distinct().count())
 
 
+def _header_move(pos):
+    """The move the header's number comes from, or None.
+
+    An open position quotes its backed value, which comes through
+    ``backed_move``, or its own search when the backup settled there
+    (§ ingest._backed_for returns no move then), which is ``best_move``.
+    A proven position quotes its verdict, not a backed value, so a backed
+    move left over from before the closure names nothing, and neither does
+    a backed value that is not the own search's and has no move behind it.
+    """
+    if pos.status != 'UNKNOWN' or pos.backed_eval is None:
+        return None
+    return pos.backed_move or (
+        pos.best_move if pos.backed_eval == pos.eval_cp else None)
+
+
+def _first_among_equals(moves, pos):
+    """The move that goes first among rows of the same rank.
+
+    The table orders by value, and rows of equal value are a tie it still
+    has to break.  It used to be broken by the order the edges came back in,
+    which on PostgreSQL is physical storage order: on a tie the top row was
+    whichever edge happened to be read first, and the arrow, which names the
+    header's move, pointed somewhere else.  Live on 26-Oct, Black to move in
+    ``rnb1k1nr/2p2p1p/4p1p1/3p4/p3B3/N1P2P2/1P1P1bPP/R1BQ1K1R``: four moves
+    at 0.00, the arrow and ``best_move`` on c8a6, the top row h7h5.
+
+    So the tie goes to the move ``_arrow_move`` picks for this position: the
+    header's move when it is a row the backup can stand on, otherwise the
+    position's own ``best_move``, which is where the arrow falls when no row
+    carries a number.  Any other tie is broken by the move itself, so the
+    order no longer depends on how the database stores the edges.
+    """
+    header = _header_move(pos)
+    if header is not None and any(
+            move['uci'] == header and not move.get('floor')
+            for move in moves):
+        return header
+    return pos.best_move
+
+
 def _arrow_move(moves, pos):
     """The move of the board arrow: the one the header's number comes from.
 
     An open position quotes its backed value, which comes through
     ``backed_move``, or its own search when the backup settled there
-    (§ ingest._backed_for returns no move then), which is ``best_move``.
-    The top row need not be that move: an unsearched claim can top the
-    table and still be vetoed by the backup (1bbe0b3e, 14-Oct: the arrow on
-    g4h5, seeded at 1179, under a header of 1224 through g8h8).  The rule
-    below decides when there is no such move (a proven position, nothing
-    backed yet) or it is blocked, a refused floor or not a row.
+    (§ _header_move).  The top row need not be that move: an unsearched
+    claim can top the table and still be vetoed by the backup (1bbe0b3e,
+    14-Oct: the arrow on g4h5, seeded at 1179, under a header of 1224
+    through g8h8).  The rule below decides when there is no such move (a
+    proven position, nothing backed yet) or it is blocked, a refused floor
+    or not a row.  On a tie of value the table puts this same move first
+    (§ _first_among_equals), so the arrow and the top row agree.
 
     Mismo contrato que tenia el inline de ``explore`` — la primera fila con
     valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
@@ -6059,10 +6111,7 @@ def _arrow_move(moves, pos):
     on, so the move recommended and the number quoted are one pair.
     """
     blocked = {m['uci'] for m in moves if m.get('blocked')}
-    header_move = None
-    if pos.status == 'UNKNOWN' and pos.backed_eval is not None:
-        header_move = pos.backed_move or (
-            pos.best_move if pos.backed_eval == pos.eval_cp else None)
+    header_move = _header_move(pos)
     for move in moves:
         if (move['uci'] == header_move
                 and not (move.get('blocked') or move.get('floor'))):
