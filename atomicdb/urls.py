@@ -3,7 +3,7 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
-from . import page_cache, views
+from . import page_cache, roots, views
 from .conquest_map import map_api
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
@@ -70,6 +70,11 @@ _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
 _docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
 _queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
+# Mejor y peor valor de la posicion inicial y de cada primera jugada, y la
+# linea principal, que se registra una vez por hora.  Nada de lo que pinta
+# tiene que ser mas fresco que la misma cache corta de ``docs``, variada por
+# cookie por las mismas razones.
+_roots_cached = cache_page(30)(vary_on_cookie(csrf_protect(roots.roots_page)))
 
 urlpatterns = [
     path('', _home_cached),
@@ -91,6 +96,7 @@ urlpatterns = [
     # de donde se aplican, asi que entra en la misma cache de lectura que
     # ``method`` y por las mismas razones.
     path('docs/', _docs_cached, name='atomicdb-docs'),
+    path('roots/', _roots_cached, name='atomicdb-roots'),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
     # Avisos: la lista entera y el POST que los marca vistos, en la misma

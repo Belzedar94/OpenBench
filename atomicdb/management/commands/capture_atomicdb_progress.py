@@ -1,4 +1,8 @@
-"""Capture one append-only, cumulative AtomicDB progress observation."""
+"""Capture one append-only, cumulative AtomicDB progress observation.
+
+The same hourly run records the main line from the start position and, where
+no database trigger keeps them, folds in the root extremes (``roots``).
+"""
 
 import json
 from datetime import timezone as datetime_timezone
@@ -7,7 +11,7 @@ from django.core.management.base import BaseCommand
 from django.db.models import BigIntegerField, Case, Count, F, Q, Sum, Value, When
 from django.utils import timezone
 
-from atomicdb import ingest, proof
+from atomicdb import ingest, proof, roots
 from atomicdb.database import atomic
 from atomicdb.metrics import (closure_attribution_totals,
                               human_close_latency, worker_metrics)
@@ -165,10 +169,28 @@ def _payload(snapshot, created):
     return {'created': created, 'snapshot': fields}
 
 
+def _main_line_payload(line, created):
+    if line is None:
+        return None
+    return {'created': created,
+            'bucket_start': line.bucket_start.isoformat(),
+            'value': line.value, 'status': line.status,
+            'plies': line.plies, 'moves': line.moves,
+            'end_reason': line.end_reason}
+
+
+def _extremes_payload(folded):
+    # ``None``: the trigger keeps them and the capture had nothing to do.
+    if folded is None:
+        return {'kept_by': 'trigger'}
+    return {'kept_by': 'capture', 'new': folded[0], 'changed': folded[1]}
+
+
 class Command(BaseCommand):
     help = (
-        'Capture the current AtomicDB counters in one immutable UTC-hour '
-        'bucket. Re-running within the hour is a no-op.'
+        'Capture the current AtomicDB counters and the main line from the '
+        'start position in immutable UTC-hour buckets. Re-running within the '
+        'hour is a no-op.'
     )
 
     def add_arguments(self, parser):
@@ -191,11 +213,18 @@ class Command(BaseCommand):
             # fila no llego a guardar, sin romper esa garantia.
             self.stdout.write(json.dumps(
                 {'preview': True,
-                 'snapshot': _snapshot_values(timezone.now())},
+                 'snapshot': _snapshot_values(timezone.now()),
+                 'main_line': roots.walk_main_line()},
                 sort_keys=True, separators=(',', ':'), default=str))
             return
-        snapshot, created = capture_progress()
+        now = timezone.now()
+        snapshot, created = capture_progress(now=now)
+        # After the progress row has committed, and in its own transactions:
+        # whatever happens to the main line cannot cost this hour's counters.
+        line, line_created, folded = roots.capture(now=now)
         payload = _payload(snapshot, created)
+        payload['main_line'] = _main_line_payload(line, line_created)
+        payload['extremes'] = _extremes_payload(folded)
         if options['json']:
             self.stdout.write(json.dumps(
                 payload, sort_keys=True, separators=(',', ':')))
@@ -206,3 +235,14 @@ class Command(BaseCommand):
             f'positions={snapshot.positions_total} '
             f'closed={snapshot.positions_closed} '
             f'analyses={snapshot.analyses_completed}'))
+        if line is not None:
+            action = 'created' if line_created else 'reused'
+            self.stdout.write(
+                f'main line: {action} UTC bucket '
+                f'{line.bucket_start.isoformat()} plies={line.plies} '
+                f'value={line.value} end={line.end_reason}')
+        extremes = payload['extremes']
+        if extremes['kept_by'] == 'capture':
+            self.stdout.write(
+                f"root extremes: folded new={extremes['new']} "
+                f"changed={extremes['changed']}")

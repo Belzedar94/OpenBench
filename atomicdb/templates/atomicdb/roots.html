@@ -1,0 +1,63 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}AtomicDB, start position and first moves{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Start position and first moves</h2>
+<p class="dim campaign-lede">Each value is the one the explorer shows for that
+  position, in pawns and from White's side. A solved position shows as White
+  win, Black win or Draw. {% if since %}Best and worst are the highest and
+  lowest value each position has had since {{ since|date:"Y-m-d" }}, with the
+  time it first got there (UTC).{% else %}Best and worst start with the first
+  values recorded.{% endif %}</p>
+<div class="contrib-scroll">
+<table class="lb-table">
+  <tr><th>Position</th><th class="n">Now</th><th class="n">Best</th>
+    <th class="n">Worst</th><th class="n"
+      title="How many times the value has changed">Changes</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/atomicdb/explore/{{ r.key }}/">{% if forloop.first %}<strong>{{ r.label }}</strong>{% else %}{{ r.label }}{% endif %}</a></td>
+    <td class="n">{{ r.now_h }}</td>
+    <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
+    <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
+    <td class="n dim">{{ r.changes }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<h2>Main line</h2>
+<p class="dim campaign-lede">From the start position, the best known move at
+  each step, until a solved position or {{ max_plies }} plies. Recorded every
+  hour.</p>
+{% if line %}
+<p><strong>{{ line.value_h }}</strong> · {{ line.plies }} pl{{ line.plies|pluralize:"y,ies" }}{% if line.end_text %} · {{ line.end_text }}{% endif %}
+  <span class="dim">· recorded {{ line.at|date:"Y-m-d H:i" }} UTC</span></p>
+{% if line.text %}<p style="margin-top:.5rem">{{ line.text }}</p>{% endif %}
+{% if line.end_url %}<p class="dim lb-foot"><a href="{{ line.end_url }}">Open the last position of the line</a></p>{% endif %}
+{% else %}
+<p class="dim">Nothing recorded yet.</p>
+{% endif %}
+
+<h2>Main line by day</h2>
+<p class="dim campaign-lede">The last recording of each day (UTC), for the
+  last {{ history_days }} days.</p>
+{% if history %}
+<div class="contrib-scroll">
+<table class="lb-table">
+  <tr><th>Day</th><th class="n">Value</th><th class="n">Plies</th><th>Line</th></tr>
+  {% for h in history %}
+  <tr>
+    <td style="white-space:nowrap">{{ h.day|date:"Y-m-d" }}</td>
+    <td class="n">{{ h.value_h }}</td>
+    <td class="n">{{ h.plies }}</td>
+    <td title="{{ h.full }}">{{ h.preview }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="dim">Nothing recorded yet.</p>
+{% endif %}
+
+{% endblock %}
