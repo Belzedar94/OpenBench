@@ -270,6 +270,14 @@ the request stays in the queue under them.</p>
   some replies to it are known, and its number would beat the lines the search
   of the position you are looking at published. It keeps its place in the
   table, the board arrow passes over it, and searching the move settles it.</li>
+<li><strong>borrowed</strong>: on a move row, a number nothing has searched and
+  no engine line of the position you are looking at gives. The position a move
+  leads to keeps one number, the last one any search wrote into it, and this
+  one was written by another search through it: the search of another position
+  that reaches it by a different move order, or a pass of this position whose
+  lines are not kept. The header and the board arrow count only searched moves
+  and the position's own analysis, so they can disagree with this row. It keeps
+  its place in the table, and requesting analysis of the move settles it.</li>
 <li>A plain number with no chip is the position's own analysis: an engine
   searched this position itself, and that is what it reported.</li>
 </ul>

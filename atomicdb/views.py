@@ -3953,7 +3953,7 @@ def _own_search(point, nodes):
     return f'own search: {point:+d} @ {_human(nodes)} nodes'
 
 
-def _claim_note(line_no, line_score=None, score=None):
+def _claim_note(line_no, line_score=None, score=None, borrowed=False):
     """De donde sale un numero que NINGUNA busqueda suya avala.
 
     Es lo que decia el chip de la fila — ``line N`` cuando la jugada encabeza
@@ -3979,6 +3979,15 @@ def _claim_note(line_no, line_score=None, score=None):
     comunidad del 19-oct-2026: h4 a 809 bajo una linea 2 que decia 589).
     Entonces el aviso dice los dos.  ``line_score`` y ``score`` van desde el
     bando que mueve, como la celda (§ ``_line_value``).
+
+    A BORROWED number (see _own_line_values) is not credited to an earlier
+    pass any more.  That was the wording for every number no current line
+    names, and for one written by another position's search it made the very
+    claim the report of 19-Oct was about: that this node had said it.  Such a
+    number now gets what is known, which is also what the ``borrowed`` label
+    beside it says: no line of this node gives that value, and it came from
+    another line or move order.  The earlier-pass wording is left to a number
+    the earlier wider pass of this node does give.
     """
     if line_no and line_score is not None and score is not None \
             and line_score != score:
@@ -3986,6 +3995,11 @@ def _claim_note(line_no, line_score=None, score=None):
                 f"this move at {line_score}; the number shown is the latest "
                 'value stored for the resulting position, seeded from another '
                 'line or move order; no direct search of it yet')
+    if borrowed:
+        return ("no engine line of this node's analysis gives this move this "
+                'number; it is the latest value stored for the resulting '
+                'position, seeded from another line or move order; no direct '
+                'search yet')
     if line_no:
         return (f"from engine line {line_no} of this node's current analysis"
                 '; no direct search of the resulting position yet')
@@ -4117,6 +4131,53 @@ def _line_numbers(pos):
     return numbers
 
 
+def _own_line_values(pos):
+    """``{uci: {eval_cp, ...}}``: the values this position's own engine lines
+    give each move, White-POV, from the current pass and from the earlier
+    wider pass alike.  Both are this position's MultiPV, both are printed in
+    the raw engine output of the page, and a pass that lands seeds every
+    child its lines name with exactly the value of the line
+    (see ingest._seed_child_eval).
+
+    What it is for: telling a BORROWED number from one of this position's
+    own.  The graph transposes, and the position a move leads to keeps ONE
+    number, the last one any search wrote into it.  When the search of
+    another position wrote it, the row shows a number this position never
+    said, ranked by its value like any other, while the backup does not let
+    an unsearched number displace this position's own search (see
+    ingest._backed_for), so the header can disagree with the row until the
+    move is searched.  Live on 27-Oct-2026, ``1aba372f`` (White to move)
+    listed Rh3 at +15.86 and Rh6 at +15.02, both written by the search of
+    ``6d08fcfd``, above the header's Rf2 at +12.95 from a fresh 128M search
+    of its own, and visitors read the header as wrong.
+
+    So a row is borrowed when nothing has searched its move and its number is
+    none of these values (see _child_moves).  Equality is the test because a
+    seed copies its line's value verbatim; a value written since by anybody
+    else differs from it.  What the rows cannot tell apart is a seed left by
+    a pass of this same position whose lines are not kept: an older one, or
+    a shallower probe whose lines never took the showcase.  The label names
+    that possibility too.  Telling the two apart means reading other
+    positions, and the page pays no query for this: it reads the column the
+    position already carries.
+
+    Not to be confused with ingest's floor, which ingest also calls a
+    borrowed number: that one is a backing borrowed from the replies somebody
+    opened, and its row carries its own note (see _FLOOR_NOTE).
+    """
+    values = {}
+    for line in (pos.last_analysis or []):
+        if not isinstance(line, dict):
+            continue
+        pv = line.get('pv')
+        uci = line.get('move') or (pv[0] if isinstance(pv, list) and pv
+                                   else None)
+        value = line.get('eval_cp')
+        if uci and value is not None:
+            values.setdefault(uci, set()).add(value)
+    return values
+
+
 def _repetition_moves(pos):
     """Las jugadas de esta tabla que solo valen TABLAS, cuando hay que decirlo.
 
@@ -4175,6 +4236,11 @@ def _child_moves(pos):
     Ese aviso es el mismo que ya daba el frontier para elegir que comprar
     (§ ``ingest._frontier_rank``), que ordena por valor y solo por valor.
 
+    One provenance does take a word in the row again: ``borrowed``
+    (see _own_line_values), a number nothing has searched and no line of
+    this position gives, which the header can disagree with until the move
+    is searched.  The word sits beside the number and moves no row either.
+
     ``tier`` sobrevive como DATO de la fila — de que esta hecho el numero — y
     ya no toca la clave de ordenacion:
 
@@ -4197,6 +4263,10 @@ def _child_moves(pos):
     # Sale del ``last_analysis`` que la fila de arriba ya trae cargado: ni una
     # consulta mas por una tabla de treinta y tantas filas.
     line_numbers = _line_numbers(pos)
+    # And the values those lines give each move, from the same loaded column:
+    # what tells this position's own numbers from borrowed ones
+    # (see _own_line_values).
+    own_values = _own_line_values(pos)
     for e in edges:
         c = e.child
         mate = None
@@ -4271,6 +4341,14 @@ def _child_moves(pos):
         # it, because the table orders by value and by nothing else, and the
         # ink and the tooltip say the rest.
         floor = not repetition and ingest.refuses_floor(pos, c, e.move_uci)
+        # A NUMBER THIS POSITION NEVER SAID (see _own_line_values).  Nothing
+        # has searched the move, the number is the claim the child stores (a
+        # backing has its chip, a floor its note, a repetition its zero), and
+        # no line of this position gives the move that value.  Like ``walked``
+        # it touches neither the order nor the tier.
+        borrowed = (walked and not backed_plies and not floor
+                    and ingest.best_known_eval(c)
+                    not in own_values.get(e.move_uci, ()))
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -4325,12 +4403,16 @@ def _child_moves(pos):
                                             _line_value(pos,
                                                         line_numbers.get(e.move_uci),
                                                         stm_white),
-                                            score)
+                                            score, borrowed)
                                 if walked and not backed_plies else None),
                       # A floor this position does not take: never the
                       # recommended move (§ _arrow_move), and flagged in the
                       # API so a client that sorts the rows itself can tell.
                       'floor': floor,
+                      # The one provenance the row spends a word on: a number
+                      # nothing has searched and no line of this position
+                      # gives, which the header can disagree with.
+                      'borrowed': borrowed,
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else

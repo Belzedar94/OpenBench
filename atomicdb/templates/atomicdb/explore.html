@@ -718,14 +718,24 @@
            OPENBENCH_STATIC_ASSETS), asi que una clase nueva declarada alli no
            llegaria a un navegador que ya tiene la hoja en cache.  ``dim`` si
            esta en esa hoja desde hace meses, y de ahi sale la tinta apagada;
-           ``eval-claim`` viaja como gancho estable para los tests.{% endcomment %}
+           ``eval-claim`` viaja como gancho estable para los tests.
+
+           One word does come back, and only on a number this position never
+           said: ``borrowed`` (§ views._own_line_values), a number nothing has
+           searched and no line of this position gives, which the header can
+           disagree with.  It wears the dashed warning chip the header already
+           uses for a position nothing has searched (``backed-mark light``, in
+           the sheet for months), so it needs no new rule; ``eval-borrowed``
+           is the stable hook for the tests.{% endcomment %}
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{% if m.claim %}<em
             class="dim eval-claim" style="font-style:italic"
             title="{{ m.claim }}">{{ m.score }}</em>{% else %}{{ m.score }}{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.borrowed %}<span
+            class="backed-mark light eval-borrowed"
+            title="nothing has searched this move, and no engine line of this position gives it this value. It is the latest value stored for the position the move leads to, written by another search through it: the search of another position that reaches it by a different move order, or a pass here whose lines are not kept. The best line and the arrow of this position count only searched moves and its own analysis, so they can disagree with this row. Requesting analysis of this move settles it">borrowed</span>{% endif %}{% if m.repetition %} <span
             class="backed-mark"
             title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>

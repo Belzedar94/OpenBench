@@ -10,9 +10,12 @@ heuristicas refinadas.
 
 import hashlib
 import re
+from contextlib import ExitStack
 
 from django.conf import settings
+from django.db import connections
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
 from . import ingest, logic, views
 from .models import AnalysisTask, DBEvent, Edge, Position
@@ -1684,7 +1687,13 @@ class SeededValueTests(TestCase):
         self.assertFalse(row['backed_light'])
 
     def test_the_seeded_row_is_marked_in_ink_and_not_in_words(self):
-        parent = _pos('SEED-RP', 'w', expanded=True)
+        # The +900 is this position's own: the earlier wider pass it keeps
+        # gave e7e6 exactly that.  A number no line of it gives would be
+        # borrowed and say so in one word (BorrowedNumberTests).
+        parent = _pos('SEED-RP', 'w', expanded=True, last_analysis=[
+            {'move': 'd7d5', 'eval_cp': 10, 'pv': ['d7d5']},
+            {'move': 'e7e6', 'eval_cp': 900, 'pv': ['e7e6'],
+             'prior_pass': True}])
         _edge(parent, _pos('SEED-RS', 'b', eval_cp=900), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
@@ -1694,6 +1703,7 @@ class SeededValueTests(TestCase):
         self.assertIn('no direct search yet', body)
         # Ni una palabra suelta en la fila.
         self.assertNotIn('>walked</span>', body)
+        self.assertNotIn('eval-borrowed', body)
 
     def test_the_header_of_a_seeded_position_says_walked(self):
         pos = _pos('SEED-HS', 'w', eval_cp=180, expanded=True)
@@ -1800,7 +1810,10 @@ class LineProvenanceTests(TestCase):
         """La siembra de un pase ANTERIOR ya no es el veredicto de nadie, y su
         tooltip lo dice sin poder nombrar ninguna linea vigente."""
         parent = self._parent(self._lines('d7d5', prior=('e7e6',)))
-        _edge(parent, _pos('LINE-B', 'b', eval_cp=30), 'e7e6')
+        # The value that earlier pass gave it (``_lines`` writes 40).  Any
+        # other was written since by another search, and is borrowed
+        # (BorrowedNumberTests).
+        _edge(parent, _pos('LINE-B', 'b', eval_cp=40), 'e7e6')
 
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
@@ -1844,14 +1857,18 @@ class LineProvenanceTests(TestCase):
         una etiqueta de procedencia sino el salto al ply donde nace el valor,
         lleva sus plies dentro y estaba ahi mucho antes del episodio.
         """
-        parent = self._parent(self._lines('d7d5', 'e7e6'))
+        # Every seed below holds the value its own line gives (``_lines``
+        # writes 40; the orphan's line is the earlier wider pass), so no row
+        # is borrowed, the one provenance a row still spends a word on
+        # (BorrowedNumberTests).
+        parent = self._parent(self._lines('d7d5', 'e7e6', prior=('g8f6',)))
         # linea 1, con busqueda propia          -> numero pelado
         _edge(parent, _pos('FULL-A', 'b', eval_cp=40,
                            nodes_invested=128_000_000), 'd7d5')
         # linea 2, sembrada                     -> tinta + tooltip
-        _edge(parent, _pos('FULL-B', 'b', eval_cp=30), 'e7e6')
+        _edge(parent, _pos('FULL-B', 'b', eval_cp=40), 'e7e6')
         # siembra huerfana de linea             -> tinta + tooltip
-        _edge(parent, _pos('FULL-C', 'b', eval_cp=20), 'g8f6')
+        _edge(parent, _pos('FULL-C', 'b', eval_cp=40), 'g8f6')
         # respaldo sin peso                     -> chip-enlace de siempre
         _edge(parent, _pos('FULL-D', 'b', backed_eval=10, backed_plies=5),
               'a7a6')
@@ -1871,6 +1888,7 @@ class LineProvenanceTests(TestCase):
             self.assertNotIn('>walked</span>', row)
             self.assertNotIn('>line 1</span>', row)
             self.assertNotIn('>line 2</span>', row)
+            self.assertNotIn('eval-borrowed', row)
         # Dos filas con tinta de reclamacion, una pelada, y el chip-enlace
         # entero en la suya.
         self.assertEqual(sum('eval-claim' in row for row in rows), 2)
@@ -1903,3 +1921,244 @@ class LineProvenanceTests(TestCase):
         summary = views._moves_summary(views._child_moves(parent))
 
         self.assertEqual(summary, 'Moves here: 0 searched · 2 from lines only')
+
+
+class BorrowedNumberTests(TestCase):
+    """A number this position never said says so in its row.
+
+    The graph transposes, and the position a move leads to keeps ONE number,
+    the last one any search wrote into it (see ingest._seed_child_eval).
+    When the search of another position wrote it, the row shows a number
+    this position never said, ranked by its value like any other, while the
+    backup does not let an unsearched number displace this position's own
+    search.  Live on 27-Oct-2026, ``a4295de0`` (Black to move) listed ...a6
+    at -11.82, written by the search of ``856d27fe`` through ...Ne7, above
+    the header's move at -13.53; searched, ...a6 came out at -13.61.  The
+    header was right and read as wrong.
+
+    Since 4-Aug a row spends no word on where its number comes from
+    (LineProvenanceTests).  ``borrowed`` is the one that comes back, and
+    only on a number nothing has searched and no line of this position
+    gives (see views._own_line_values).
+    """
+
+    @staticmethod
+    def _line(uci, white_pov, prior=False):
+        """A stored engine line: White-POV, like every stored number."""
+        line = {'move': uci, 'eval_cp': white_pov, 'pv': [uci]}
+        if prior:
+            line['prior_pass'] = True
+        return line
+
+    @staticmethod
+    def _page(position):
+        return Client().get(f'/atomicdb/explore/{position.key}/') \
+                       .content.decode()
+
+    @staticmethod
+    def _row(body, uci):
+        """The whole row of ``uci`` in the table of the tree."""
+        for row in re.findall(r'<tr><td><span class="chip.*?</tr>', body):
+            if ('/atomicdb/explore/' in row
+                    and f'<strong>{uci}</strong>' in row):
+                return row
+        raise AssertionError(f'no row for {uci}')
+
+    @staticmethod
+    def _label(row):
+        """The ``borrowed`` chip of a row, whole, or None."""
+        found = re.search(r'<span\b[^>]*>borrowed</span>', row)
+        return found.group(0) if found else None
+
+    @staticmethod
+    def _statements(url):
+        """Statements of one render with the shared caches warm, as in
+        production, on every database the page can touch."""
+        Client().get(url)
+        aliases = sorted({'default', settings.ATOMICDB_DATABASE_ALIAS})
+        with ExitStack() as stack:
+            captured = [stack.enter_context(
+                CaptureQueriesContext(connections[alias]))
+                for alias in aliases]
+            response = Client().get(url)
+        return (sum(len(each.captured_queries) for each in captured),
+                response.content.decode())
+
+    def test_a_number_another_position_wrote_is_labelled_a4295de0(self):
+        """The reported shape.  This position's own lines give the header's
+        move -13.53 and ...h6 -14.00; ...a6, which no line of it names,
+        holds -11.82, written by the search of another position that reaches
+        the same position with ...Ne7."""
+        # Stored White-POV, as always: +1353 reads -13.53 with Black to move.
+        parent = _pos('A429-P', 'b', expanded=True, last_analysis=[
+            self._line('e8f7', 1353), self._line('h7h6', 1400)],
+            eval_cp=1353, best_move='e8f7', nodes_invested=128_000_000,
+            visits=1, backed_eval=1353, backed_move='e8f7', backed_plies=1,
+            backed_nodes=128_000_000)
+        _edge(parent, _pos('A429-KF7', 'w', eval_cp=1353), 'e8f7')
+        _edge(parent, _pos('A429-H6', 'w', eval_cp=1400), 'h7h6')
+        a6 = _pos('A429-A6', 'w', eval_cp=1182)
+        _edge(parent, a6, 'a7a6')
+        _edge(_pos('A429-856D', 'b', expanded=True), a6, 'g8e7')
+
+        rows = views._child_moves(parent)
+
+        # Ranked by its value as before, above the header's move, and the
+        # arrow stays on the header's move: the label moves nothing.
+        self.assertEqual([row['uci'] for row in rows],
+                         ['a7a6', 'e8f7', 'h7h6'])
+        self.assertEqual([row['score'] for row in rows],
+                         [-1182, -1353, -1400])
+        self.assertEqual([row['borrowed'] for row in rows],
+                         [True, False, False])
+        self.assertEqual(views._arrow_move(rows, parent), 'e8f7')
+
+        body = self._page(parent)
+
+        label = self._label(self._row(body, 'a7a6'))
+        self.assertIsNotNone(label)
+        self.assertIn('class="backed-mark light eval-borrowed"', label)
+        # What the number is, why the header can disagree with it, and what
+        # settles it.
+        self.assertIn('the search of another position that reaches it by a '
+                      'different move order', label)
+        self.assertIn('count only searched moves and its own analysis', label)
+        self.assertIn('Requesting analysis of this move settles it', label)
+        for uci in ('e8f7', 'h7h6'):
+            self.assertIsNone(self._label(self._row(body, uci)))
+
+    def test_a_line_that_gives_the_move_another_value_does_not_vouch_for_it(
+            self):
+        """The other report, ``1aba372f`` (White to move).  A fresh 128M
+        search put Rf2 first at +12.95, and here it also named Rh6 in its
+        second line, at +12.50.  Since then the search of ``6d08fcfd`` wrote
+        +15.02 into the position after Rh6 and +15.86 into the one after
+        Rh3, which no line of this position names.  Both rows are borrowed,
+        and the tooltip of each number says what is known of it instead of
+        crediting an earlier pass of this position."""
+        parent = _pos('1ABA-P', 'w', expanded=True, last_analysis=[
+            self._line('f1f2', 1295), self._line('h1h6', 1250)],
+            eval_cp=1295, best_move='f1f2', nodes_invested=128_000_000,
+            visits=1, backed_eval=1295, backed_move='f1f2', backed_plies=1,
+            backed_nodes=128_000_000)
+        _edge(parent, _pos('1ABA-RF2', 'b', eval_cp=1295), 'f1f2')
+        rh6 = _pos('1ABA-RH6', 'b', eval_cp=1502)
+        rh3 = _pos('1ABA-RH3', 'b', eval_cp=1586)
+        _edge(parent, rh6, 'h1h6')
+        _edge(parent, rh3, 'h1h3')
+        other = _pos('1ABA-6D08', 'w', expanded=True)
+        _edge(other, rh6, 'h2h6')
+        _edge(other, rh3, 'h2h3')
+
+        ordered = views._child_moves(parent)
+        rows = {row['uci']: row for row in ordered}
+
+        self.assertEqual([row['uci'] for row in ordered],
+                         ['h1h3', 'h1h6', 'f1f2'])
+        self.assertEqual({uci: row['borrowed'] for uci, row in rows.items()},
+                         {'h1h3': True, 'h1h6': True, 'f1f2': False})
+        # Line 2 named Rh6, so its note quotes what that line said...
+        self.assertIn('engine line 2', rows['h1h6']['claim'])
+        self.assertIn('has this move at 1250', rows['h1h6']['claim'])
+        # ...and Rh3, which no line names, is no longer credited to an
+        # earlier pass of this position.
+        self.assertIn('no engine line', rows['h1h3']['claim'])
+        self.assertIn('seeded from another line or move order',
+                      rows['h1h3']['claim'])
+        self.assertNotIn('earlier pass', rows['h1h3']['claim'])
+
+        body = self._page(parent)
+
+        self.assertIsNotNone(self._label(self._row(body, 'h1h3')))
+        self.assertIsNotNone(self._label(self._row(body, 'h1h6')))
+        self.assertIsNone(self._label(self._row(body, 'f1f2')))
+
+    def test_a_number_from_this_positions_own_lines_is_not(self):
+        """The seed of a current line, and the seed of the earlier wider pass
+        the page prints with them, are numbers this position said itself:
+        ink and tooltip as before, and no label.  The second one even
+        outranks the first line here, and it is still this position's own."""
+        parent = _pos('OWN-P', 'w', expanded=True, last_analysis=[
+            self._line('d2d4', 40), self._line('e2e4', 30),
+            self._line('g1f3', 55, prior=True)])
+        _edge(parent, _pos('OWN-D4', 'b', eval_cp=40), 'd2d4')
+        _edge(parent, _pos('OWN-E4', 'b', eval_cp=30), 'e2e4')
+        _edge(parent, _pos('OWN-NF3', 'b', eval_cp=55), 'g1f3')
+
+        rows = {row['uci']: row for row in views._child_moves(parent)}
+
+        self.assertEqual({uci: row['borrowed'] for uci, row in rows.items()},
+                         {'d2d4': False, 'e2e4': False, 'g1f3': False})
+        self.assertTrue(all(row['walked'] for row in rows.values()))
+        self.assertEqual(rows['g1f3']['claim'],
+                         'seeded by an earlier pass (passes seed their top '
+                         'moves over time); no direct search yet')
+
+        body = self._page(parent)
+
+        for uci in ('d2d4', 'e2e4', 'g1f3'):
+            row = self._row(body, uci)
+            self.assertIn('eval-claim', row)
+            self.assertIsNone(self._label(row))
+
+    def test_a_searched_row_never_is(self):
+        """These numbers were measured on the move itself, by a search of its
+        own or by a backing with search under it, and no line of this
+        position gives any of them: none is borrowed.  Nor is a backing a
+        visitor walked, which keeps the chip that already says so."""
+        parent = _pos('SRCH-P', 'w', expanded=True, last_analysis=[
+            self._line('d2d4', 40), self._line('e2e4', 30)])
+        _edge(parent, _pos('SRCH-D4', 'b', eval_cp=95,
+                           nodes_invested=128_000_000), 'd2d4')
+        _edge(parent, _pos('SRCH-E4', 'b', eval_cp=10, backed_eval=60,
+                           backed_plies=3, backed_nodes=8_000_000), 'e2e4')
+        _edge(parent, _pos('SRCH-NF3', 'b', backed_eval=20, backed_plies=4),
+              'g1f3')
+
+        rows = {row['uci']: row for row in views._child_moves(parent)}
+
+        self.assertEqual({uci: row['borrowed'] for uci, row in rows.items()},
+                         {'d2d4': False, 'e2e4': False, 'g1f3': False})
+        self.assertTrue(rows['d2d4']['searched'])
+        self.assertTrue(rows['e2e4']['searched'])
+
+        body = self._page(parent)
+
+        self.assertNotIn('eval-borrowed', body)
+        self.assertIn('walked ·4</a>', body)
+
+    def test_labelling_costs_the_page_no_query(self):
+        """The label reads the lines the position already carries and the
+        numbers its rows already carry.  The same page costs the same
+        statements whether none of its rows is borrowed or all of them are,
+        and with twice as many borrowed rows: not one statement per row."""
+        parent = _pos('COST-P', 'w', expanded=True, last_analysis=[
+            self._line('d2d4', 40), self._line('e2e4', 30),
+            self._line('g1f3', 20)])
+        children = []
+        for uci, value in (('d2d4', 40), ('e2e4', 30), ('g1f3', 20)):
+            child = _pos(f'COST-{uci}', 'b', eval_cp=value)
+            _edge(parent, child, uci)
+            children.append(child)
+        url = f'/atomicdb/explore/{parent.key}/'
+
+        own, own_body = self._statements(url)
+        # The search of another position writes a new number into all three.
+        for child in children:
+            Position.objects.filter(key=child.key).update(
+                eval_cp=child.eval_cp + 500)
+        borrowed, borrowed_body = self._statements(url)
+        # And three more rows that no line of this position names.
+        for uci, value in (('b1c3', 510), ('c2c4', 505), ('f2f4', 500)):
+            _edge(parent, _pos(f'COST-{uci}', 'b', eval_cp=value), uci)
+        wider, wider_body = self._statements(url)
+
+        labels = r'<span\b[^>]*>borrowed</span>'
+        self.assertNotIn('eval-borrowed', own_body)
+        self.assertEqual(len(re.findall(labels, borrowed_body)), 3)
+        self.assertEqual(len(re.findall(labels, wider_body)), 6)
+        self.assertGreater(own, 0)
+        self.assertEqual(borrowed, own)
+        self.assertEqual(wider, own)
+        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
+            views._own_line_values(parent)
