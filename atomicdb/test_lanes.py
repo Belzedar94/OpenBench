@@ -214,6 +214,11 @@ class QueuePageTests(TestCase):
 
         self.assertContains(response, 'Nothing is queued right now.')
 
+    def test_the_front_page_links_here(self):
+        response = self.client.get('/atomicdb/')
+
+        self.assertContains(response, 'href="/atomicdb/queue/">Queue</a>')
+
 
 class ServiceHarness(TestCase):
     """Drains the real lease endpoint, like ``test_queue_fairness`` does."""
