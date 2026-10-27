@@ -69,7 +69,11 @@ tasks; `api/solve/acquire`, `api/solve/heartbeat` and `api/solve/submit` for
 proof tasks. The worker authenticates with an OpenBench account whose profile
 is enabled. It sends a heartbeat every 60 seconds while it searches; an
 analysis lease that goes `LEASE_MINUTES` (in `atomicdb/views.py`) without one
-is given to the next worker that asks.
+is given to the next worker that asks. A worker that is stopped hands its
+analysis and proof leases back with one `api/release` call, and they go back
+to the queue at once. Each lease is named with its machine and token, as
+heartbeat and submit name it, and anything that is not the caller's live lease
+is ignored.
 
 ## Running the tests
 
@@ -136,7 +140,9 @@ The worker's own usage line is
 `python atomicdb_worker.py -U user -P pass -S https://server -T 8`; `--engine`
 points it at a local engine build. Without `--engine` it downloads the
 reference engine and moves to a newly published one while it runs;
-`--no-engine-update` turns that off.
+`--no-engine-update` turns that off. Ctrl+C, SIGTERM, a closed terminal and,
+on Windows, Ctrl+Break or closing the console window all stop it the same way:
+the engines are ended, the tasks it holds are handed back, and it exits.
 
 A local instance is for disposable testing. `docs/operations.md` sets the
 rule: never point a development worker at production, and never run workers

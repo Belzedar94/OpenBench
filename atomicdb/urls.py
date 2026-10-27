@@ -50,7 +50,8 @@ from .conquest_map import map_api
 #     estado vivo, y son justo lo que el explorador consulta para saber si
 #     algo cambio.  El ultimo ademas cuenta el tiempo que falta: servir un
 #     cuerpo de hace treinta segundos seria servir una cuenta atras vieja.
-#   * todo el protocolo de workers (``lease``/``heartbeat``/``submit``).
+#   * todo el protocolo de workers (``lease``/``heartbeat``/``submit``/
+#     ``release``).
 #   * ``api/map/v1``: ya negocia su propio ETag sobre un snapshot publicado y
 #     no toca la base viva.
 #
@@ -166,6 +167,9 @@ urlpatterns = [
     path('api/lease', views.api_lease),
     path('api/heartbeat', views.api_heartbeat),
     path('api/submit', views.api_submit),
+    # A stopping worker hands its leases back (analysis and SOLVE alike).
+    # Additive: a worker that predates it never calls it.
+    path('api/release', views.api_release),
     # Protocolo SOLVE: aditivo. Un worker anterior no conoce estas rutas.
     path('api/solve/acquire', views.api_solve_acquire),
     path('api/solve/heartbeat', views.api_solve_heartbeat),

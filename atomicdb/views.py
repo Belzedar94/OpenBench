@@ -568,6 +568,40 @@ def _locked_in_order(ordered):
                 yield task
 
 
+def _requeue_leases(leases):
+    """Put leased analysis tasks back in the queue.  Returns how many.
+
+    The one way a lease ends without a result.  The recycler of ``api_lease``
+    hands it the leases that went silent past ``LEASE_MINUTES``, and
+    ``api_release`` the ones a stopping worker gives back, so a task handed
+    back early leaves exactly as one that timed out: PENDING, no machine, no
+    heartbeat, token and session cleared.  ``leased_at`` stays, and it is what
+    ``_absorb_requeued`` finds the row by.  ``attempts`` stays as well: it was
+    counted when the lease was handed out, and a task that has had a lease
+    never goes to a tokenless build again (§ ``choose_pending``).
+    """
+    return leases.filter(state='LEASED').update(
+        state='PENDING', machine='', lease_heartbeat_at=None,
+        lease_token='', lease_session='')
+
+
+def _absorb_requeued():
+    """Absorb the requeued tasks whose position closed while they were leased.
+
+    A closure absorbs a position's PENDING tasks and skips its LEASED ones,
+    so a lease that goes back after its position closed would sit in the
+    queue for ever: ``choose_pending`` skips closed positions.  It is absorbed
+    instead (§ ``ingest.absorb_tasks``): COMPLETED, no nodes, no machine.
+    Never CANCELLED: that is a requester's own withdrawal, which
+    ``ingest.restore_cancelled`` and a later request bring back to the queue.
+    The rows are found by ``leased_at``: a PENDING row that carries one has
+    had a lease.
+    """
+    ingest.absorb_tasks(AnalysisTask.objects.filter(
+        state='PENDING', machine='', lease_heartbeat_at__isnull=True,
+        leased_at__isnull=False).exclude(position__status='UNKNOWN'))
+
+
 # P7 (comunidad, 3-0, 28-ago-2026): cuentas de LA CASA.  Su hierro come de
 # la marea de fondo (AUTO/FILL) y de sus propias peticiones; un click de
 # visitante nunca cae en su plato.  La flota comunitaria sigue sirviendolo
@@ -599,35 +633,27 @@ def api_lease(request):
         legacy_stale = now - timedelta(minutes=LEGACY_LEASE_MINUTES)
         post_legacy_stale = now - timedelta(
             minutes=POST_DEPLOY_LEGACY_LEASE_MINUTES)
-        AnalysisTask.objects.filter(
-            state='LEASED', lease_token__gt='', leased_at__lt=stale,
+        _requeue_leases(AnalysisTask.objects.filter(
+            lease_token__gt='', leased_at__lt=stale,
         ).filter(
             Q(lease_heartbeat_at__isnull=True)
-            | Q(lease_heartbeat_at__lt=stale)
-        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
-                 lease_token='', lease_session='')
+            | Q(lease_heartbeat_at__lt=stale)))
         # A pre-deploy worker cannot heartbeat or fence a deep result. Give
         # already-running tokenless work a one-time long drain window; new
         # legacy assignments below are limited to short first attempts.
-        AnalysisTask.objects.filter(
-            state='LEASED', lease_token='', lease_heartbeat_at__isnull=False,
-            lease_heartbeat_at__lt=post_legacy_stale,
-        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
-                 lease_session='')
-        AnalysisTask.objects.filter(
-            state='LEASED', lease_token='', lease_heartbeat_at__isnull=True,
-            leased_at__lt=legacy_stale,
-        ).update(state='PENDING', machine='', lease_heartbeat_at=None,
-                 lease_session='')
+        _requeue_leases(AnalysisTask.objects.filter(
+            lease_token='', lease_heartbeat_at__isnull=False,
+            lease_heartbeat_at__lt=post_legacy_stale))
+        _requeue_leases(AnalysisTask.objects.filter(
+            lease_token='', lease_heartbeat_at__isnull=True,
+            leased_at__lt=legacy_stale))
         # Un arriendo muerto sobre una posicion que SE CERRO mientras corria
         # no vuelve a la cola: el cierre absorbe las PENDING pero salta las
         # LEASED a proposito (§ ingest.absorb_tasks), y devolverla a PENDING
         # dejaba un zombi que nadie sirve nunca (choose_pending salta lo
         # cerrado) — las peticiones "colgadas para siempre" de un perfil,
         # 7-sep.  La consulta es del tamano de lo reciclado (unas filas).
-        ingest.absorb_tasks(AnalysisTask.objects.filter(
-            state='PENDING', machine='', lease_heartbeat_at__isnull=True,
-            leased_at__isnull=False).exclude(position__status='UNKNOWN'))
+        _absorb_requeued()
 
         # A second process using the same machine identity must not steal a
         # healthy assignment. The per-assignment token below fences old
@@ -1156,6 +1182,116 @@ def _sha_field(raw):
     if len(raw) != 64 or any(ch not in '0123456789abcdef' for ch in raw):
         return ''
     return raw
+
+
+# ---------------- handing leases back ----------------
+#
+# A worker that is stopped (Ctrl+C, SIGTERM, its window closed) used to leave
+# its tasks LEASED until the recycler noticed the silence: LEASE_MINUTES for
+# an analysis, SOLVE_LEASE_MINUTES for a proof.  ``api_release`` lets it hand
+# them back on the way out, so the next ``api_lease`` gives them to somebody
+# else at once.  It is additive: a worker that predates it never calls it, and
+# its leases keep expiring exactly as before.
+
+# What one call may name: every analysis lease a machine can hold at once
+# (LEASES_PER_MACHINE, shared by its --jobs slots) plus its solver's.
+RELEASE_MAX_LEASES = LEASES_PER_MACHINE + 1
+
+
+def _release_entries(raw, machine):
+    """The leases an ``api/release`` names, as (kind, id, token, machine).
+
+    ``leases`` is a JSON list of objects with ``task_id``, ``lease_token``,
+    ``machine`` (the caller's when absent) and ``kind``, ``analysis`` (the
+    default) or ``solve``.  A malformed list raises ValueError and the whole
+    call is refused: nothing is released by half.
+    """
+    try:
+        entries = json.loads(raw or '[]')
+    except ValueError:
+        raise ValueError('leases is not JSON') from None
+    if not isinstance(entries, list):
+        raise ValueError('leases must be a list')
+    if len(entries) > RELEASE_MAX_LEASES:
+        raise ValueError(f'at most {RELEASE_MAX_LEASES} leases per call')
+    parsed = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError('each lease must be an object')
+        kind = entry.get('kind', 'analysis')
+        task_id = entry.get('task_id')
+        token = entry.get('lease_token', '')
+        owner = entry.get('machine', machine)
+        if kind not in ('analysis', 'solve'):
+            raise ValueError('kind must be analysis or solve')
+        if (not isinstance(task_id, int) or isinstance(task_id, bool)
+                or not 0 < task_id < 2 ** 63):
+            raise ValueError('invalid task_id')
+        if not isinstance(token, str) or not isinstance(owner, str):
+            raise ValueError('lease_token and machine must be strings')
+        parsed.append((kind, task_id, token, owner[:64]))
+    return parsed
+
+
+@csrf_exempt
+def api_release(request):
+    """Requeue the leases a stopping worker hands back.  Says how many.
+
+    It checks what ``api_heartbeat`` and ``api_submit`` check: an enabled
+    account, and for each lease the machine it was handed to and its token.
+    A lease goes back only while it is still LEASED to that machine under
+    that token, so a stale token, another machine's lease, a task already
+    COMPLETED or CANCELLED and a repeated call are all no-ops.  Every machine
+    named must be the caller's or one of its ``--jobs`` slots
+    (§ ``machine_base``).  A tokenless lease, which only a build older than
+    ``LEASE_TOKEN_BUILD`` holds, is never released here: the worker chooses
+    its machine name, so only the token proves that the caller holds the
+    lease.
+
+    The rows go back through the recyclers' own helpers (``_requeue_leases``
+    and ``_absorb_requeued``, ``ingest.requeue_solve_leases``), so a lease
+    handed back leaves exactly as one that expired: same fields, the same
+    absorption when its position closed meanwhile, and ``attempts`` counted
+    once, when the lease was handed out.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    user = _auth(request)
+    if user is None:
+        return JsonResponse({'error': 'bad credentials'}, status=403)
+    machine = request.POST.get('machine', user.username)[:64]
+    try:
+        named = _release_entries(request.POST.get('leases', ''), machine)
+    except ValueError as exc:
+        return JsonResponse({'error': f'malformed: {exc}'}, status=400)
+    own = machine_base(machine)
+    entries = sorted(entry for entry in named
+                     if entry[2] and own and machine_base(entry[3]) == own)
+    released = []
+    solve_released = 0
+    with atomic():
+        for kind, task_id, token, owner in entries:
+            if kind == 'solve':
+                solve_released += ingest.requeue_solve_leases(
+                    SolveTask.objects.filter(
+                        id=task_id, machine=owner, lease_token=token))
+            elif _requeue_leases(AnalysisTask.objects.filter(
+                    id=task_id, machine=owner, lease_token=token)):
+                released.append((task_id, owner))
+        if released:
+            _absorb_requeued()
+            # Off the live view now, as after a submit, rather than once the
+            # machine's last heartbeat is old enough.
+            for task_id, owner in released:
+                WorkerPing.objects.filter(
+                    machine=owner, user=user.username,
+                    current_task_id=task_id,
+                ).update(current_task_id=None, last_nps=0, nps_updated=None)
+    logger.info(
+        'AtomicDB release machine=%s user=%s named=%s analysis=%s solve=%s',
+        machine, user.username, len(named), len(released), solve_released)
+    return JsonResponse({'ok': True,
+                         'released': len(released) + solve_released})
 
 
 # ---------------- API SOLVE (aditiva) ----------------

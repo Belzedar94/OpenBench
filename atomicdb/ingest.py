@@ -6440,6 +6440,19 @@ def apply_solve_result(task, outcome, certificate_blob=None, advisory_pn=None,
 SOLVE_LEASE_MINUTES = 20
 
 
+def requeue_solve_leases(leases):
+    """Put leased SOLVE tasks back in the queue.  Returns how many.
+
+    The one way a proof lease ends without a result: the sweep below hands it
+    the leases that went silent, and ``views.api_release`` the ones a stopping
+    worker gives back, so both leave a row alike.  ``attempts`` was counted
+    when the lease was handed out and stays.
+    """
+    return leases.filter(state='LEASED').update(
+        state='PENDING', machine='', lease_heartbeat_at=None,
+        lease_token='', lease_session='')
+
+
 def recycle_stale_solve_leases(now=None, minutes=SOLVE_LEASE_MINUTES):
     """Devuelve a PENDING los arriendos SOLVE sin latido.  Cuantos.
 
@@ -6466,12 +6479,10 @@ def recycle_stale_solve_leases(now=None, minutes=SOLVE_LEASE_MINUTES):
     from .models import SolveTask
 
     stale = (now or timezone.now()) - timedelta(minutes=minutes)
-    freed = SolveTask.objects.filter(
-        state='LEASED', leased_at__lt=stale,
+    freed = requeue_solve_leases(SolveTask.objects.filter(
+        leased_at__lt=stale,
     ).filter(Q(lease_heartbeat_at__isnull=True)
-             | Q(lease_heartbeat_at__lt=stale)).update(
-        state='PENDING', machine='', lease_heartbeat_at=None,
-        lease_token='', lease_session='')
+             | Q(lease_heartbeat_at__lt=stale)))
     if freed:
         DBEvent.objects.create(kind='SOLVE_LEASE_RECYCLED', payload={
             'freed': freed, 'minutes': int(minutes)})

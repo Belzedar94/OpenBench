@@ -12,6 +12,9 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 El motor descargado se renueva sin parar el worker: cada 15 min se relee el
 manifest y, si hay un binario nuevo, se descarga junto al actual, se comprueba
 y cada analisis lo toma entre tareas (--no-engine-update lo desactiva).
+
+Stopping it (Ctrl+C, SIGTERM, Ctrl+Break or closing its console window) ends
+the engines and hands the tasks it holds back to the server at once.
 """
 
 import argparse
@@ -24,12 +27,14 @@ import queue
 import random
 import re
 import secrets
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -48,7 +53,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026102001
+ATOMICDB_WORKER_BUILD = 2026102701
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -96,6 +101,20 @@ MAX_REPORTED_NPS = 10 ** 12
 # no aprende a resolverlo esperando, y seguir pidiendo tareas solo las pasea
 # por un arriendo de veinte minutos para devolverlas intactas.
 SOLVER_ENGINE_FAILURE_LIMIT = 3
+# Stopping (Ctrl+C, SIGTERM, Ctrl+Break, the console window closed): the
+# engines get ENGINE_QUIT_SECONDS to obey ``quit`` before they are killed, a
+# result already on its way to the server gets STOP_JOIN_SECONDS, and then
+# every lease still held goes back in one ``api/release`` call that is given
+# up after RELEASE_TIMEOUT_SECONDS.  Windows ends a process about five
+# seconds after its console window is closed, and the three together stay
+# under that.
+ENGINE_QUIT_SECONDS = 1.0
+STOP_JOIN_SECONDS = 0.5
+RELEASE_TIMEOUT_SECONDS = 3
+CONSOLE_CLOSE_WAIT_SECONDS = 4.5
+# CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT: Windows ends
+# the process as soon as its console handlers return.
+_CONSOLE_CLOSE_EVENTS = (2, 5, 6)
 
 # Each HTTP-calling thread keeps its own Session.  This reuses a healthy TLS
 # connection without sharing requests.Session concurrently between threads.
@@ -137,6 +156,22 @@ class EngineUpdateError(Exception):
 
 class EngineExited(Exception):
     """The engine process ended in the middle of a search."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+# How an engine ends when a console or terminal stops everything attached to
+# it: Ctrl+C, Ctrl+Break and a closed window on Windows (STATUS_CONTROL_C_EXIT),
+# SIGINT, SIGTERM and SIGHUP elsewhere.  It reaches the engines at the same
+# moment as this worker, whose stop may not have begun yet.
+_CONSOLE_EXIT_CODES = frozenset({
+    0xC000013A, -int(signal.SIGINT), -int(signal.SIGTERM),
+    -int(getattr(signal, 'SIGHUP', 1))})
+# How long a job whose engine ended that way waits for the stop before it
+# starts another engine, as it does after any other engine failure.
+STOP_GRACE_SECONDS = 2
 
 
 class LeaseRequestError(Exception):
@@ -630,12 +665,374 @@ def _request_tasks(server, auth, lease_session):
     return payload['tasks']
 
 
+# ---------------------------------------------------------------------------
+# Stopping
+# ---------------------------------------------------------------------------
+#
+# Before this, a stopped worker left its tasks LEASED on the server until
+# their heartbeat had been silent for the whole lease window, and only then
+# did anybody else get them.  Now a stop ends the engines, hands every lease
+# still held back with one ``api/release`` call, and exits.  A server that
+# does not know the endpoint answers 404, and the worker exits as it always
+# has: its leases then expire as they always did.
+
+
+@contextmanager
+def _held_lock(lock, timeout=1.0):
+    """``with lock`` for the paths a stop takes: it gives up after
+    ``timeout`` seconds (and yields False) instead of waiting on a lock that
+    an interrupted thread may never release."""
+    acquired = lock.acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+
+
+class _EngineProcesses:
+    """The engine processes this worker runs, so that a stop can end them.
+
+    Weakly held: a process its owner dropped without closing (an engine
+    that failed its handshake) is not kept alive by being listed here.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._processes = weakref.WeakSet()
+
+    def add(self, process):
+        with self._lock:
+            self._processes.add(process)
+
+    def discard(self, process):
+        with self._lock:
+            self._processes.discard(process)
+
+    def snapshot(self):
+        with _held_lock(self._lock) as acquired:
+            return list(self._processes) if acquired else []
+
+
+_ENGINE_PROCESSES = _EngineProcesses()
+
+
+def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
+    """End every engine process this worker runs.  Returns how many were
+    killed; never raises.
+
+    ``quit`` first, the UCI way, so an engine leaves its search and exits by
+    itself.  One still running ``timeout`` seconds later is killed.  An
+    engine that the console's own Ctrl+C or its closing window already ended
+    is only reaped.
+    """
+    if processes is None:
+        processes = _ENGINE_PROCESSES.snapshot()
+    processes = list(processes)
+    for process in processes:
+        try:
+            if process.poll() is None:
+                process.stdin.write('quit\n')
+                process.stdin.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    deadline = time.monotonic() + timeout
+    killed = []
+    for process in processes:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                killed.append(process)
+            except OSError:
+                pass
+        except Exception:
+            pass
+    # A killed process is gone at once; this only reaps it, and all of them
+    # together get a quarter of a second.
+    deadline = time.monotonic() + 0.25
+    for process in killed:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
+    return len(killed)
+
+
+class HeldLeases:
+    """The leases this worker holds, for a stop to hand them back.
+
+    One list per (kind, machine): the server gives a machine one live
+    assignment of each kind at a time, so a new lease replaces what that job
+    -- or the solver -- held before.  A lease leaves the list once the
+    server has answered its submit.  One whose search the engine abandoned
+    stays: it is this worker's until it expires, and a stop hands it back.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._leases = {}
+
+    def hold(self, kind, machine, tasks):
+        entries = [(task['id'], task.get('lease_token') or '')
+                   for task in tasks]
+        with self._lock:
+            self._leases[(kind, machine)] = entries
+
+    def drop(self, kind, machine, task_id):
+        with self._lock:
+            entries = [entry for entry in self._leases.get((kind, machine), ())
+                       if entry[0] != task_id]
+            if entries:
+                self._leases[(kind, machine)] = entries
+            else:
+                self._leases.pop((kind, machine), None)
+
+    def snapshot(self):
+        """What ``api/release`` is given.  A lease without a token is left
+        out: only a token proves to the server whose lease it is."""
+        with _held_lock(self._lock) as acquired:
+            if not acquired:
+                return []
+            return [{'kind': kind, 'machine': machine, 'task_id': task_id,
+                     'lease_token': token}
+                    for (kind, machine), entries in sorted(
+                        self._leases.items())
+                    for task_id, token in entries if token]
+
+
+def _release_leases(server, auth, leases, timeout=RELEASE_TIMEOUT_SECONDS,
+                    post=None):
+    """Hand ``leases`` back in one ``api/release`` call.
+
+    Returns ``(released, problem)``: how many the server took back, or None
+    with the reason it did not say -- a server without the endpoint (404),
+    any other refusal, a network error, or no answer in ``timeout`` seconds.
+    The request runs on a thread of its own and is abandoned at that
+    deadline: the HTTP timeouts bound the connection and each read, not the
+    whole exchange, and not a name lookup at all.
+    """
+    post = post or requests.post
+    outcome = {}
+
+    def call():
+        try:
+            response = post(
+                server.rstrip('/') + '/atomicdb/api/release',
+                data=dict(auth, leases=json.dumps(leases)),
+                timeout=(timeout, timeout), allow_redirects=False)
+            if response.status_code != 200:
+                outcome['problem'] = f'HTTP {response.status_code}'
+                return
+            outcome['released'] = int(response.json()['released'])
+        except Exception as exc:
+            outcome['problem'] = str(exc) or type(exc).__name__
+
+    thread = threading.Thread(target=call, name='atomicdb-release',
+                              daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if 'released' in outcome:
+        return outcome['released'], ''
+    return None, outcome.get('problem', f'no answer within {timeout:g}s')
+
+
+def _say(message):
+    """Print for a stop: a console that is closing must not stop the stop."""
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
+
+
+class GracefulStop:
+    """What the worker does once it is told to stop, done once.
+
+    1. ``stop`` is set: no job takes another task, and nothing searched from
+       then on is submitted.
+    2. Every engine is told to quit, and killed if it does not
+       (``_stop_engines``).
+    3. A result already on its way to the server gets a moment to arrive
+       (``STOP_JOIN_SECONDS``), and every lease still held goes back in one
+       ``api/release`` call (``_release_leases``).  Nothing held, no call.
+
+    The caller exits afterwards.  ``run`` may be called from more than one
+    thread -- the main thread on a signal, the console handler on Windows
+    when the window closes -- and the first does the work while the others
+    wait for it, at most ``wait`` seconds.
+    """
+
+    def __init__(self, server, auth, held, stop, threads=(), processes=None):
+        self.server, self.auth, self.held, self.stop = server, auth, held, stop
+        self.threads = list(threads)
+        self.processes = processes
+        self.requested = threading.Event()
+        self.done = threading.Event()
+        self._lock = threading.Lock()
+        self._started = False
+
+    def run(self, wait=None):
+        self.requested.set()
+        with self._lock:
+            first, self._started = not self._started, True
+        if not first:
+            self.done.wait(wait)
+            return
+        try:
+            self.stop.set()
+            processes = (self.processes.snapshot() if self.processes
+                         is not None else None)
+            _stop_engines(processes)
+            deadline = time.monotonic() + STOP_JOIN_SECONDS
+            for thread in self.threads:
+                if thread.ident is None or thread is threading.current_thread():
+                    continue
+                thread.join(max(0.0, deadline - time.monotonic()))
+            leases = self.held.snapshot()
+            if leases:
+                _say(f'stopping: handing {len(leases)} task(s) back to the '
+                     'server')
+                released, problem = _release_leases(self.server, self.auth,
+                                                    leases)
+                if released is None:
+                    _say(f'the server did not take them back ({problem}); '
+                         'they return to the queue when their leases expire')
+                else:
+                    _say(f'the server took back {released}')
+        except Exception as exc:  # a stop must always end in an exit
+            _say(f'stop: {exc}')
+        finally:
+            self.done.set()
+
+
+def _interrupt(signum, frame):
+    """SIGTERM, SIGHUP and Ctrl+Break stop the worker as Ctrl+C does."""
+    raise KeyboardInterrupt
+
+
+def _on_console_event(graceful, event):
+    """The decision of the Windows console handler, kept apart from ctypes.
+
+    Closing the window, logging off and shutting down send no signal: the
+    process is ended when its handlers return, and at the latest about five
+    seconds after they are called.  So the stop runs right here, and the
+    handler returns only when it is done.  Ctrl+C and Ctrl+Break go on to the
+    signal handlers.
+    """
+    if event not in _CONSOLE_CLOSE_EVENTS:
+        return False
+    graceful.run(wait=CONSOLE_CLOSE_WAIT_SECONDS)
+    return True
+
+
+class _ConsoleCloseHandler:
+    """``SetConsoleCtrlHandler`` through ctypes: Windows only, no package."""
+
+    def __init__(self, graceful):
+        import ctypes
+        from ctypes import wintypes
+
+        self._kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        prototype = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        # Held here: a callback collected while registered would crash the
+        # process the next time Windows calls it.
+        self._callback = prototype(
+            lambda event: _on_console_event(graceful, event))
+        if not self._kernel32.SetConsoleCtrlHandler(self._callback, True):
+            raise OSError(ctypes.get_last_error(),
+                          'SetConsoleCtrlHandler failed')
+
+    def remove(self):
+        self._kernel32.SetConsoleCtrlHandler(self._callback, False)
+
+
+@contextmanager
+def _stop_signals(graceful):
+    """Route every way of stopping the worker to ``graceful``.
+
+    Ctrl+C raises KeyboardInterrupt in the main thread already; SIGTERM,
+    SIGHUP (the terminal went away) and Ctrl+Break are made to raise it too.
+    A signal that was not left at its default -- ignored under ``nohup``,
+    say -- is left as it was.  On Windows a console handler covers the
+    window being closed.  Everything is put back on the way out.
+    """
+    restore = []
+    if threading.current_thread() is threading.main_thread():
+        for name in ('SIGTERM', 'SIGHUP', 'SIGBREAK'):
+            number = getattr(signal, name, None)
+            if number is None:
+                continue
+            try:
+                if signal.getsignal(number) is signal.SIG_DFL:
+                    restore.append((number, signal.signal(number, _interrupt)))
+            except (OSError, RuntimeError, ValueError):
+                pass
+    console = None
+    if os.name == 'nt':
+        try:
+            console = _ConsoleCloseHandler(graceful)
+        except Exception as exc:
+            _say(f'note: closing this window will not hand tasks back ({exc})')
+    try:
+        yield
+    finally:
+        if console is not None:
+            console.remove()
+        for number, previous in reversed(restore):
+            try:
+                signal.signal(number, previous)
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+
+def _supervise(threads, graceful, poll=0.5):
+    """Start the job threads and wait for them to end, or for a stop.
+
+    True when the worker was stopped: its leases are handed back by then
+    and the caller exits.  The wait polls instead of sitting in ``join``,
+    which on Windows holds Ctrl+C back until the thread ends -- and a job
+    thread does not end by itself.  When every job ends on its own, what
+    they still hold (a search an engine abandoned) is handed back too.
+    """
+    try:
+        for thread in threads:
+            thread.start()
+        while (not graceful.requested.is_set()
+               and any(thread.is_alive() for thread in threads)):
+            graceful.requested.wait(poll)
+    except KeyboardInterrupt:
+        pass
+    else:
+        if not graceful.requested.is_set():
+            if graceful.held.snapshot():
+                graceful.run()
+            return False
+    try:
+        graceful.run()
+    except KeyboardInterrupt:
+        pass            # a second Ctrl+C: stop waiting for the first one
+    return True
+
+
+def _exit_now(code, exit_process=os._exit):
+    """Leave without waiting for a job thread inside a network call or a
+    retry pause: a stop is complete once its leases are handed back."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    exit_process(code)
+
+
 class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
 
     def __init__(self, path, threads=1, hash_mb=256, syzygy=''):
         self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
+        _ENGINE_PROCESSES.add(self.p)
         self._send('uci')
         self._wait('uciok')
         self._send(f'setoption name Threads value {threads}')
@@ -684,7 +1081,7 @@ class Engine:
                 except subprocess.TimeoutExpired:
                     code = 'unknown'
                 raise EngineExited('the engine stopped in the middle of a '
-                                   f'search (exit code {code})')
+                                   f'search (exit code {code})', code)
             if line.startswith('bestmove'):
                 break
             if progress:
@@ -720,6 +1117,8 @@ class Engine:
             self.p.wait(timeout=5)
         except Exception:
             self.p.kill()
+        finally:
+            _ENGINE_PROCESSES.discard(self.p)
 
 
 # ---------------------------------------------------------------------------
@@ -1621,9 +2020,23 @@ class Solver:
         # stderr se CAPTURA (antes iba a DEVNULL): cuando el motor falla, su
         # queja suele ser lo unico que explica por que, y tirarla obliga a
         # diagnosticar a ciegas.  Se lee aparte, nunca se parsea como salida.
-        process = subprocess.run(
-            [self.path], input=command + '\nquit\n', text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Popen rather than subprocess.run so that a stop can reach the
+        # process (§ _stop_engines): a proof runs for minutes.
+        running = subprocess.Popen(
+            [self.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        _ENGINE_PROCESSES.add(running)
+        try:
+            stdout, stderr = running.communicate(command + '\nquit\n')
+        except BaseException:
+            # As subprocess.run does: nothing is left running behind.
+            running.kill()
+            running.wait()
+            raise
+        finally:
+            _ENGINE_PROCESSES.discard(running)
+        process = subprocess.CompletedProcess(
+            running.args, running.returncode, stdout, stderr)
         elapsed = time.time() - started
 
         outcome, pn, dn, nodes = 'UNKNOWN', None, None, 0
@@ -1677,15 +2090,29 @@ class SolveLeaseState:
     el hilo sigue dentro de su tarea.
     """
 
-    def __init__(self):
+    def __init__(self, held=None, machine=''):
         self._lock = threading.Lock()
         self._task_id = None
         self._lease_token = ''
+        # With ``held`` (§ HeldLeases) the lease is also on the list a stop
+        # hands back: from ``start`` until the server answers its submit
+        # (``settled``), not until ``clear``.  An engine failure ends the
+        # heartbeat, but the lease is still this worker's until it expires.
+        self._held = held
+        self._machine = machine
 
     def start(self, task_id, lease_token=''):
         with self._lock:
             self._task_id = task_id
             self._lease_token = lease_token or ''
+        if self._held is not None:
+            self._held.hold('solve', self._machine,
+                            [{'id': task_id, 'lease_token': lease_token}])
+
+    def settled(self, task_id):
+        """The server answered this task's submit: nothing to hand back."""
+        if self._held is not None:
+            self._held.drop('solve', self._machine, task_id)
 
     def clear(self):
         with self._lock:
@@ -1786,6 +2213,10 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
                 data=payload, files=files,
                 timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS,
                          SUBMIT_READ_TIMEOUT_SECONDS))
+            if current_task is not None and submitted.status_code < 500:
+                # Stored, refused or a duplicate: the server has decided on
+                # this lease, and a stop has nothing to hand back.
+                current_task.settled(task['id'])
             summary = submitted.json().get('summary', submitted.text[:200])
         except (requests.RequestException, ValueError) as exc:
             summary = f'submit error: {exc}'
@@ -1797,7 +2228,7 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
     return True
 
 
-def _solve_loop(server, auth, solver, stop_event, engines=None):
+def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
     """Proof thread. The solver is single-threaded, so it runs BESIDE the
     analysis engine instead of in front of it: one core proves while the
     engine's threads keep the analysis queue (and visitor requests) moving.
@@ -1807,8 +2238,11 @@ def _solve_loop(server, auth, solver, stop_event, engines=None):
     With ``engines`` (an EngineUpdater) the solver takes a newly published
     engine between proofs.  This thread is the only one that touches
     ``solver.path`` and ``solver.build_sha``, and only between tasks, so a
-    proof is always signed by the binary that ran it."""
-    current_task = SolveLeaseState()
+    proof is always signed by the binary that ran it.
+
+    With ``held`` (a HeldLeases) the proof it holds is handed back when the
+    worker stops."""
+    current_task = SolveLeaseState(held, auth.get('machine', ''))
     threading.Thread(
         target=_solve_heartbeat_loop,
         args=(server, auth, current_task, stop_event),
@@ -1917,7 +2351,7 @@ def probe_tb(tb, fen):
 
 
 def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
-                   owns_updates, engines=None):
+                   owns_updates, engines=None, held=None):
     """One independent leaseholder: its own engine, lease and heartbeat.
 
     A slot is a worker in every sense the server cares about.  It has its own
@@ -1932,7 +2366,13 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     together, so each result names the binary that analysed it.  The slot
     starts on the engine main() provisioned (generation 0) and reaches any
     later one only through ``_switch_engine``, which can fall back.
+
+    With ``held`` (a HeldLeases) the slot keeps its lease on the list a stop
+    hands back, from the lease until the server answers its submit.  Once
+    ``stop`` is set nothing more is submitted: an engine told to quit may
+    still print ``bestmove``, and what it searched by then is cut short.
     """
+    machine = auth.get('machine', '')
     engine_path = a.engine
     generation = 0
     eng = Engine(engine_path, threads=engine_threads, hash_mb=a.hash,
@@ -2013,7 +2453,13 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             if stop.wait(60):
                 break
             continue
+        if held is not None:
+            # A machine gets a new assignment only once its previous one is
+            # over, so this replaces whatever the slot held before.
+            held.hold('analysis', machine, tasks)
         for t in tasks:
+            if stop.is_set():
+                break          # still held: the stop hands it back
             current_task.start(t['id'], t.get('lease_token', ''))
             t0 = time.time()
             wdl, dtz = probe_tb(tb, t['fen'])
@@ -2028,6 +2474,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     payload['tb_dtz'] = dtz
                 try:
                     rr = _submit_until_definitive(a.S, payload, t['id'])
+                    if held is not None:
+                        held.drop('analysis', machine, t['id'])
                     print(f"[{slot}] task {t['id']} TB wdl={wdl} dtz={dtz} -> "
                           f"{rr.json().get('summary')}", flush=True)
                 except Exception as e:
@@ -2046,8 +2494,15 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 # stored as if it were a result.
                 current_task.clear()
                 engine_failures += 1
-                if stop.is_set():      # Ctrl+C reaches the engines too
-                    print(f'[{slot}] engine failure: {e}', flush=True)
+                # Ctrl+C reaches the engines too, and as fast as this worker:
+                # an engine ended that way waits for the stop instead of
+                # being started again only to be ended.
+                if (getattr(e, 'code', None) in _CONSOLE_EXIT_CODES
+                        and not stop.is_set()):
+                    stop.wait(STOP_GRACE_SECONDS)
+                if stop.is_set():
+                    print(f"[{slot}] task {t['id']} interrupted by the stop",
+                          flush=True)
                     break
                 # A newly offered engine that keeps failing real searches is
                 # taken back for every job (no-op for the engine the worker
@@ -2080,6 +2535,14 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 eng = Engine(engine_path, threads=engine_threads,
                              hash_mb=a.hash, syzygy=a.syzygy)
                 continue   # la tarea vuelve sola al caducar su lease
+            if stop.is_set():
+                # The stop told the engine to quit, and the ``bestmove`` it
+                # printed on the way out ends a search cut short: not a
+                # result.  The lease goes back with the others.
+                print(f"[{slot}] task {t['id']} interrupted by the stop",
+                      flush=True)
+                current_task.clear()
+                break
             engine_failures = 0
             searched = 0
             for ln in lines:
@@ -2099,6 +2562,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     # Un servidor que no la conozca la ignora.
                     'searchmoves': ' '.join(t.get('searchmoves') or ()),
                 }, t['id'])
+                if held is not None:
+                    held.drop('analysis', machine, t['id'])
                 s = rr.json().get('summary', rr.json())
             except Exception as e:
                 s = f'submit error: {e}'
@@ -2248,6 +2713,11 @@ def main():
                               else _net_sha256(a.engine))}
 
     stop = threading.Event()
+    # Every lease the jobs and the solver hold, for a stop to hand back: Ctrl+C,
+    # SIGTERM, Ctrl+Break or the console window closed (§ GracefulStop).
+    held = HeldLeases()
+    graceful = GracefulStop(a.S, dict(auth_base, machine=machines[0]), held,
+                            stop)
     # Only the downloaded reference engine follows the manifest: a binary
     # given with --engine is the contributor's choice and stays.
     engines = None
@@ -2261,12 +2731,6 @@ def main():
     solver = (Solver(a.engine, hash_mb=a.hash,
                      build_sha=provenance['engine_sha'])
               if a.solve else None)
-    if solver is not None and not a.once:
-        threading.Thread(
-            target=_solve_loop,
-            args=(a.S, dict(auth_base, machine=machines[0]), solver, stop,
-                  engines),
-            name='atomicdb-solver', daemon=True).start()
 
     spread = ('x'.join(str(n) for n in sorted(set(slot_threads), reverse=True))
               if len(set(slot_threads)) > 1 else str(slot_threads[0]))
@@ -2279,46 +2743,64 @@ def main():
               f'running (checked every {engines.interval / 60:g} min; '
               '--no-engine-update turns this off)', flush=True)
 
-    if a.once:
-        solved = False
-        if a.solve:
+    with _stop_signals(graceful):
+        if solver is not None and not a.once:
+            threading.Thread(
+                target=_solve_loop,
+                args=(a.S, dict(auth_base, machine=machines[0]), solver, stop,
+                      engines),
+                kwargs={'held': held},
+                name='atomicdb-solver', daemon=True).start()
+
+        if a.once:
+            # The single pass runs in this thread, so a stop arrives in it as
+            # KeyboardInterrupt and leaves exactly as it always did, after
+            # handing back what it holds.
             try:
-                solved = _solve_once(a.S,
-                                     dict(auth_base, machine=machines[0]),
-                                     solver, secrets.token_urlsafe(24))
-            except (SolveAcquireAmbiguous, SolverEngineFailure):
-                # Una sola pasada no reintenta nada: aqui tanto el acquire
-                # roto como el motor sin solver son "no hubo prueba", y se
-                # baja al analisis.  El fallo de motor ya se ha impreso con su
-                # detalle; lo que NO puede hacer es tumbar el smoke entero,
-                # que existe precisamente para comprobar el resto del camino.
                 solved = False
-        if solved:
+                if a.solve:
+                    try:
+                        solved = _solve_once(
+                            a.S, dict(auth_base, machine=machines[0]), solver,
+                            secrets.token_urlsafe(24),
+                            SolveLeaseState(held, machines[0]))
+                    except (SolveAcquireAmbiguous, SolverEngineFailure):
+                        # Una sola pasada no reintenta nada: aqui tanto el
+                        # acquire roto como el motor sin solver son "no hubo
+                        # prueba", y se baja al analisis.  El fallo de motor
+                        # ya se ha impreso con su detalle; lo que NO puede
+                        # hacer es tumbar el smoke entero, que existe
+                        # precisamente para comprobar el resto del camino.
+                        solved = False
+                if not solved:
+                    _analysis_slot(0, a, tb,
+                                   dict(auth_base, machine=machines[0]),
+                                   provenance, slot_threads[0], stop,
+                                   owns_updates=False, held=held)
+            except KeyboardInterrupt:
+                graceful.run()
+                raise
+            # A window closing during the pass stops it from another thread;
+            # an engine failure leaves its lease held.
+            if graceful.requested.is_set() or held.snapshot():
+                graceful.run()
             stop.set()
             return
-        _analysis_slot(0, a, tb, dict(auth_base, machine=machines[0]),
-                       provenance, slot_threads[0], stop, owns_updates=False)
-        stop.set()
-        return
 
-    threads = []
-    for slot in range(jobs):
-        thread = threading.Thread(
-            target=_analysis_slot,
-            args=(slot, a, tb,
-                  dict(auth_base, machine=machines[slot],
-                       threads=slot_threads[slot]),
-                  provenance, slot_threads[slot], stop, slot == 0, engines),
-            name=f'atomicdb-analysis-{slot}')
-        thread.start()
-        threads.append(thread)
-    try:
-        for thread in threads:
-            thread.join()
-    except KeyboardInterrupt:
-        stop.set()
-        for thread in threads:
-            thread.join(timeout=5)
+        threads = [
+            threading.Thread(
+                target=_analysis_slot,
+                args=(slot, a, tb,
+                      dict(auth_base, machine=machines[slot],
+                           threads=slot_threads[slot]),
+                      provenance, slot_threads[slot], stop, slot == 0,
+                      engines),
+                kwargs={'held': held},
+                name=f'atomicdb-analysis-{slot}')
+            for slot in range(jobs)]
+        graceful.threads = threads
+        if _supervise(threads, graceful):
+            _exit_now(0)
 
 
 if __name__ == '__main__':
