@@ -91,6 +91,11 @@ urlpatterns = [
     # igual que el de arriba, y su destino tambien se mueve — una linea mas
     # corta certificada, un ply que faltaba — asi que tampoco lleva cache.
     path('proven-line-end/<str:key>/', views.proven_line_end),
+    # Jump from a borrowed row to the position whose search wrote its number:
+    # reads the other parents of the move's position and redirects.  It only
+    # reads, but any pass on one of those parents can move the destination,
+    # so no cache either.
+    path('borrowed-source/<str:key>/<str:uci>/', views.borrowed_source),
     path('method/', _method_cached),
     # Que significa cada numero que se lee por ahi: filas, respaldo,
     # repeticion, cola, API.  Estatica salvo dos constantes que la vista trae

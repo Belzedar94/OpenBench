@@ -14,7 +14,7 @@ from django.contrib.auth import authenticate
 from django.core import signing
 from django.core.cache import cache
 from django.db import IntegrityError, OperationalError
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -259,6 +259,10 @@ OPENING_ANCHOR_PARAM = 'opening'
 # the walk and the one who has to say it is the destination; deducing it there
 # would mean walking the chain again on every render, which is exactly what
 # these walks do not do.
+# The jump behind a borrowed number (see borrowed_source) goes sideways, not
+# down a chain, and it does not always arrive either: when no other position's
+# lines give the number, it lands on the position that holds it, and says so
+# with the same label.
 BACKED_REPETITION_PARAM = 'repetition'
 JUMP_INCOMPLETE_PARAM = 'incomplete'
 JUMP_REPETITION = 'repetition'
@@ -2406,6 +2410,19 @@ def _backed_source_url(key, ucis=None):
     return base if ucis is None else base + '?play=' + ','.join(ucis)
 
 
+def _borrowed_source_url(key, uci, ucis=None):
+    """Link to the writer of a borrowed number: this position and its move.
+
+    The row already carries both, so a table full of borrowed rows still costs
+    no query; finding the writer is paid on the click (see borrowed_source).
+    ``ucis`` is the visitor's route to THIS position, as in ``goto``, under
+    the route rule of ``_backed_source_url``: an empty route travels too and
+    ``None`` is a bare link.
+    """
+    base = f'/atomicdb/borrowed-source/{key}/{uci}/'
+    return base if ucis is None else base + '?play=' + ','.join(ucis)
+
+
 def _proven_line_end_url(key, ucis=None):
     """Enlace al final de la linea probada, con la ruta propia del que pincha.
 
@@ -2828,7 +2845,7 @@ def goto(request, key, uci):
 def _jump_landing_url(key, ucis, outcome):
     """Explore URL of a landing, carrying what the walk could not finish.
 
-    The two jumps of the explorer share this so that a chain that closed on
+    The jumps of the explorer share this so that a chain that closed on
     itself and a chain that broke read the same on arrival whichever control
     was clicked.  A completed walk lands with no extra parameter: there is
     nothing to explain.
@@ -3107,6 +3124,102 @@ def proven_line_end(request, key):
     response = redirect(_jump_landing_url(end.key, ucis, outcome))
     # El final se mueve en cuanto se certifica una linea mas corta o se
     # materializa un ply que faltaba: este 302 no lo cachea nadie.
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+# THE JUMP BEHIND A BORROWED ROW (see _own_line_values), and why it walks no
+# chain.  The position a move leads to keeps one number, the last one any
+# search wrote into it, and a pass writes into every child its lines name
+# exactly the value of the line (see ingest._seed_child_eval).  A borrowed
+# number was written that way by ANOTHER parent of that position, which
+# reaches it by a different move order, so its writer is one ply up and to
+# the side, not somewhere below.  The row cannot tell which parent without
+# reading them, and the page pays no query for it; the click does.  Asked for
+# by the community's main user on Discord, about the live chip: use it "as a
+# button to get to the position that gave that walked value".
+
+
+def _borrowed_number_writer(edge):
+    """The position whose search wrote the number of the child of ``edge``.
+
+    Returns ``(position, outcome)``, with the outcomes of the other jumps
+    (see _jump_landing_url).  The writer is the OTHER parent of the child
+    whose stored engine lines, current or earlier wider pass alike, give its
+    move into the child exactly the child's current number: White-POV, the
+    value the row shows, read the way _own_line_values reads this
+    position's own lines, because a seed copies its line's value verbatim.
+    When several do, the search that spent the most nodes wins, and the key
+    settles a tie so the jump always lands in the same place.
+
+    No such parent leaves the trail cold: the number may come from a pass of
+    this very position whose lines are not kept, or from no line at all.
+    The jump then lands on the child, labelled as a chain that did not reach
+    its origin.
+
+    A child whose number is its own (a proof, a search of it, or a backing
+    with search under it) borrowed nothing, yet a page painted before the
+    move was searched still offers the jump.  The child is the origin then,
+    and the jump lands there plainly.
+
+    One statement whatever the number of parents: their lines come with
+    their edges.
+    """
+    child = edge.child
+    if child.status != 'UNKNOWN' or not _walked_value(child):
+        return child, ''
+    value = ingest.best_known_eval(child)
+    others = (Edge.objects.filter(child_id=child.key)
+              .exclude(parent_id=edge.parent_id)
+              .select_related('parent')
+              .only('move_uci', 'parent__last_analysis',
+                    'parent__nodes_invested'))
+    writers = [other.parent for other in others
+               if value in _own_line_values(other.parent).get(
+                   other.move_uci, ())]
+    if not writers:
+        return child, JUMP_INCOMPLETE
+    return min(writers, key=lambda writer: (-(writer.nodes_invested or 0),
+                                            writer.key)), ''
+
+
+def borrowed_source(request, key, uci):
+    """Jumps from a borrowed row to the position whose search wrote it.
+
+    A pure GET, like ``backed_source``: it reads, redirects and writes
+    nothing, and answers no other method.  The row's link names this
+    position and the move, which is all a table can carry without a query
+    (see _borrowed_source_url); the work happens here, in two statements at
+    most, three with a route to check (see _borrowed_number_writer).  A 404
+    when the position is unknown or the move is not one of its edges.
+
+    The writer reaches the child by another move order, so the visitor's
+    route does not lead there and that landing is bare.  A landing on the
+    child itself takes the route in ``?play=``, revalidated against THIS
+    position and extended by the move, as ``goto`` would; one that does not
+    validate, or no longer fits, is dropped.
+    """
+    if request.method not in ('GET', 'HEAD'):
+        return HttpResponseNotAllowed(['GET', 'HEAD'])
+    edge = (Edge.objects.select_related('child')
+            .filter(parent_id=key, move_uci=uci).first())
+    if edge is None:
+        return render(request, 'atomicdb/missing.html', status=404)
+    writer, outcome = _borrowed_number_writer(edge)
+    ucis = None
+    if writer.key == edge.child_id:
+        try:
+            route = _validated_play_route(request.GET.get('play'), key)
+        except PlayRouteError:
+            route = None
+        if route is not None:
+            _top, _line, play_ucis = route
+            ucis = [*play_ucis, uci]
+        if ucis is not None and len(ucis) > PLAY_ROUTE_MAX_PLIES:
+            ucis = None
+    response = redirect(_jump_landing_url(writer.key, ucis, outcome))
+    # Any pass that lands on a parent of the child can write a new number,
+    # and with it a new writer: this 302 is not cacheable by anybody.
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -3984,22 +4097,26 @@ def _claim_note(line_no, line_score=None, score=None, borrowed=False):
     pass any more.  That was the wording for every number no current line
     names, and for one written by another position's search it made the very
     claim the report of 19-Oct was about: that this node had said it.  Such a
-    number now gets what is known, which is also what the ``borrowed`` label
-    beside it says: no line of this node gives that value, and it came from
-    another line or move order.  The earlier-pass wording is left to a number
-    the earlier wider pass of this node does give.
+    number tells the story of the ``borrowed`` chip beside it, the link to
+    that search (see borrowed_source): whatever a line of this node says of
+    the move, the number shown is from another position's search.  The
+    earlier-pass wording is left to a number the earlier wider pass of this
+    node does give.
     """
+    if borrowed:
+        if line_no and line_score is not None:
+            return (f"engine line {line_no} of this node's current analysis "
+                    f'has this move at {line_score}; the number shown is from '
+                    "another position's search; no direct search yet")
+        return ("no engine line of this node's analysis gives this move this "
+                "number; it is from another position's search; no direct "
+                'search yet')
     if line_no and line_score is not None and score is not None \
             and line_score != score:
         return (f"engine line {line_no} of this node's current analysis has "
                 f"this move at {line_score}; the number shown is the latest "
                 'value stored for the resulting position, seeded from another '
                 'line or move order; no direct search of it yet')
-    if borrowed:
-        return ("no engine line of this node's analysis gives this move this "
-                'number; it is the latest value stored for the resulting '
-                'position, seeded from another line or move order; no direct '
-                'search yet')
     if line_no:
         return (f"from engine line {line_no} of this node's current analysis"
                 '; no direct search of the resulting position yet')
@@ -4156,10 +4273,12 @@ def _own_line_values(pos):
     seed copies its line's value verbatim; a value written since by anybody
     else differs from it.  What the rows cannot tell apart is a seed left by
     a pass of this same position whose lines are not kept: an older one, or
-    a shallower probe whose lines never took the showcase.  The label names
-    that possibility too.  Telling the two apart means reading other
-    positions, and the page pays no query for this: it reads the column the
-    position already carries.
+    a shallower probe whose lines never took the showcase.  Telling the two
+    apart means reading other positions, and the page pays no query for
+    this: it reads the column the position already carries.  The label's
+    link does that reading on the click (see borrowed_source), and lands on
+    the child, saying the trail went cold, when no other position's lines
+    give the number.
 
     Not to be confused with ingest's floor, which ingest also calls a
     borrowed number: that one is a backing borrowed from the replies somebody
@@ -6776,6 +6895,7 @@ def explore(request, key):
             move['blocked'] = True
             move['url'] = None
             move['backed_url'] = None
+            move['borrowed_url'] = None
             move['enters_opening'] = None
             continue
         move['blocked'] = False
@@ -6790,6 +6910,10 @@ def explore(request, key):
         # lleva chip; aqui es una cadena, no una consulta — el paseo por la
         # espina se paga al pinchar, nunca al pintar la tabla.
         move['backed_url'] = _backed_source_url(move['key'], child_route)
+        # And to the writer of a borrowed number: this position, the move and
+        # the route that reached it, again a string and not a query.
+        move['borrowed_url'] = _borrowed_source_url(pos.key, move['uci'],
+                                                    active_ucis)
         move['enters_opening'] = _exact_child_opening(
             move['key'], current_opening, names=community_map)
     # FUERA DEL ARBOL: jugadas legales que no tienen ni arista.  No son "sin
