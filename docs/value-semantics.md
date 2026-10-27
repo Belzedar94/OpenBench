@@ -40,7 +40,10 @@ Every position value on the site is in exactly one of four states:
    - an ascent stops after `BACKED_MAX_PLIES` levels, and the main line is
      deeper than that. The `BACKED_GUARD` event of a cut ascent carries the
      frontier it left, and the sweep carries the ascent on from there, a
-     bounded number of times;
+     bounded number of times. Since 2026-10-27 an ingest carries its own cut
+     on as soon as it has committed (`ingest.carry_cut_ascents`), so the top
+     of the main line no longer waits for the sweep; the sweep keeps the
+     frontiers too wide for that and the carries that failed;
    - two ingests in flight at once each compute a shared ancestor without
      the other's uncommitted change, and the one that commits last can leave
      it on a number no child holds. The sweep looks first where overlapping

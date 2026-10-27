@@ -269,7 +269,10 @@ no backed value stays behind the rules and the children it stands on
 - each run carries on the ascents that `BACKED_MAX_PLIES` cut since the last
   run (their frontier is in the `BACKED_GUARD` event), checks the positions
   where overlapping ingests met, and reads a slice of the table in physical
-  order, sized so that the whole table is read every 7 days;
+  order, sized so that the whole table is read every 7 days. Since
+  2026-10-27 an ingest carries its own cut on as soon as it has committed,
+  so the sweep only finishes frontiers wider than 64 keys and carries that
+  failed (the ingest log says `carrying ... failed`);
 - what one level of the backup would rewrite is checked again 5 minutes
   later and repaired only if it is still stale with the same stored numbers
   and no ingest of its own is pending, with the ordinary ascent, in short

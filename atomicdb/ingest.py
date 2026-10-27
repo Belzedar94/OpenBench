@@ -3139,6 +3139,45 @@ def _guard_event(reason, keys, processed, plies, seed_keys, generation,
         'left': len(keys), 'keys': keys[:BACKED_GUARD_KEYS], **extra})
 
 
+# ---------------- an ingest carries its own cut on ----------------
+#
+# THE CASE (27-Oct-2026).  The main line was 63 to 66 plies of pointers long
+# all day, a ply or two more than one ascent climbs, so nearly every result
+# from its end was cut just below the top: 37 of the 39 cuts between 17:00
+# and 18:00 UTC left their frontier within the first five plies.  The sweep
+# carries a frontier on only once its event is older than the settle time,
+# from a run every 15 minutes that settles again before it repairs: 10 to 25
+# minutes in all.  Until then the start position and the first moves showed
+# an old number (+12.30 at 17:00 over a line that said +12.10), and
+# Eclipsia, pushing requests down that line, read it as results that moved
+# nothing.
+#
+# THE RULE.  The cut stays inside the ingest's transaction, for the reason
+# above.  An ingest collects the frontiers its ascents leave (carried_cuts)
+# and, once its transaction has committed, carries them on itself in short
+# transactions, as the sweep would (carry_cut_ascents).  A frontier wider than
+# CARRY_MAX_KEYS (5 of the 219 cuts of 26-27 Oct) is left to the sweep, and
+# so is whatever this carry cannot finish: the event of the cut is on record
+# either way.
+CARRY_MAX_KEYS = 64
+_carried = contextvars.ContextVar('atomicdb_carried_cuts', default=None)
+
+
+@contextlib.contextmanager
+def carried_cuts():
+    """Collect the frontiers that ascents cut by the ply guard leave in here.
+
+    Yields the list they are added to.  An ascent outside such a block leaves
+    its BACKED_GUARD event and nothing else, as it always did.
+    """
+    keys = []
+    token = _carried.set(keys)
+    try:
+        yield keys
+    finally:
+        _carried.reset(token)
+
+
 class _LevelDecision:
     """One level of the backup, decided and not yet written."""
 
@@ -3369,6 +3408,11 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
         # Cut by a bound: the event carries what the next level would have
         # read, for a later ascent to start from (see BACKED_GUARD_KEYS).
         _guard_event(guard, left, processed, plies, seed_keys, generation)
+        carried = _carried.get()
+        if carried is not None and guard == 'ply-guard':
+            # And an ingest carries it on itself once it has committed (see
+            # the block above CARRY_MAX_KEYS).
+            carried.extend(left)
     if dropped:
         # A node the ascent refused to recompute is standing on a value that
         # nobody backs.  It says so, with enough keys to go and look.
@@ -3461,6 +3505,23 @@ def backup_backed_evals_retrying(seed_keys, sleeps=None, report=None,
         if report is not None:
             report.update(attempt, changed=changed, retries=retries)
         return changed
+
+
+def carry_cut_ascents(keys, report=None):
+    """Carry on, outside any transaction, the ascents cut at ``keys``.
+
+    ``keys`` is what carried_cuts collected inside an ingest, whose ascents
+    are generation 0, so the carry is generation 1, the same as the sweep's
+    (see the block above CARRY_MAX_KEYS).  Returns the rows changed, or None
+    when there is nothing to carry or the frontier is too wide and stays with
+    the sweep.  A lock conflict that outlasts the retries is raised, with its
+    frontier on record (BACKED_GUARD, "aborted").
+    """
+    keys = list(dict.fromkeys(key for key in keys if key))
+    if not keys or len(keys) > CARRY_MAX_KEYS:
+        return None
+    return backup_backed_evals_retrying(keys, open_only=True, generation=1,
+                                        report=report)
 
 
 def known_eval_of(status, backed_eval, eval_cp):

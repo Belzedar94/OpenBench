@@ -14,7 +14,9 @@ heals on its own:
   evening), so a change at its bottom never reaches its top in one ascent, and
   in a wide family under analysis every ingest is cut.  The parents of what
   the last level changed were left behind; the BACKED_GUARD event of the cut
-  now carries them.
+  now carries them.  Since 27-Oct-2026 an ingest carries its own cut on as
+  soon as it has committed (ingest.carry_cut_ascents), so this feed is the
+  backstop: frontiers too wide for that, and carries that failed.
 * concurrent writers.  The ingest writers run their ascents in their own
   transactions, at READ COMMITTED.  When two of them reach the same ancestor,
   each computes it without the other's uncommitted change: the one that
