@@ -984,6 +984,36 @@ class BackedIngestTests(TestCase):
         self.assertEqual(len(pos.last_analysis), 5)
         self.assertFalse(any(l.get('prior_pass') for l in pos.last_analysis))
 
+    def test_a_third_deeper_narrow_pass_keeps_the_wide_lines(self):
+        """The wide lines stay until a pass as wide as they are replaces them.
+
+        After 128M x5 and 512M x2, a third pass of 2B x2 is as wide as the
+        current pass but narrower than the kept one, and it used to drop the
+        five wide lines: the width was compared with the current pass.
+        """
+        pos = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(pos)
+
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [50, 40, 30, 20, 10]), 128_000_000)
+        ingest.ingest_analysis(pos.key, self._lines(pos, [70, 60]),
+                               512_000_000)
+        ingest.ingest_analysis(pos.key, self._lines(pos, [75, 65]),
+                               2_000_000_000)
+        pos.refresh_from_db()
+        current = [l for l in pos.last_analysis if not l.get('prior_pass')]
+        prior = [l for l in pos.last_analysis if l.get('prior_pass')]
+        self.assertEqual([l['eval_cp'] for l in current], [75, 65])
+        self.assertEqual([l['eval_cp'] for l in prior], [50, 40, 30, 20, 10])
+
+        # A pass as wide as the kept lines replaces them.
+        ingest.ingest_analysis(pos.key, self._lines(
+            pos, [80, 70, 60, 50, 40]), 2_000_000_000)
+        pos.refresh_from_db()
+        self.assertEqual([l['eval_cp'] for l in pos.last_analysis],
+                         [80, 70, 60, 50, 40])
+        self.assertFalse(any(l.get('prior_pass') for l in pos.last_analysis))
+
     def test_a_shallow_repeat_never_undoes_a_deeper_search(self):
         """640M invertidos y mandando el pase de 128M: computo tirado.
 

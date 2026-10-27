@@ -813,9 +813,13 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             # llevan informacion que el pase profundo de 2 lineas no repite
             # (peticion de Wolfram).  Se conservan marcadas como pase
             # anterior; un pase nuevo igual de ancho las sustituye.
+            # The kept lines go only when the new pass is as wide as THEY are.
+            # Measured against the current pass instead, a third deeper and
+            # narrow pass (128M x5, then 512M x2, then 2B x2) dropped the
+            # five wide lines it was meant to keep.
             if current and len(current) > len(snapshot):
                 prior = [dict(ln, prior_pass=True) for ln in current]
-            elif len(snapshot) >= len(current or prior):
+            elif len(snapshot) >= len(prior):
                 prior = []
             pos.last_analysis = (snapshot + prior)[:10]
         # Un pase restringido no puede EMPEORAR la posicion para el que mueve:
