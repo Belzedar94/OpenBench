@@ -28,7 +28,7 @@ from django.core.management import call_command
 from django.db import OperationalError
 from django.utils import timezone
 
-from . import ingest
+from . import ingest, ingest_queue
 from .management.commands import sweep_stale_backed as sweep
 from .models import AnalysisTask, DBEvent, Edge, IngestJob, Position
 from .testing import TestCase, TransactionTestCase
@@ -154,6 +154,96 @@ class CutAscentTests(TestCase):
         self.assertEqual(event.payload['guards']['held_back'], 1)
         self.assertEqual(event.payload['ascents'], 0)
         self.assertEqual(_stored(nodes[0])[0], 100)
+
+
+def _ingest_job(leaf, parent, value):
+    """A queued job whose application ends in a cut ascent: the analysis is
+    stood in for, the rest of apply_job runs as it does in production."""
+    task = AnalysisTask.objects.create(position=leaf, generation=0,
+                                       budget_nodes=128_000_000)
+    job = IngestJob.objects.create(task=task, position=leaf, payload={})
+
+    def analysis(*_args, **_kwargs):
+        _analyse(leaf, parent, value, max_plies=3)
+        return {}
+
+    return job, mock.patch.object(ingest, 'ingest_analysis',
+                                  side_effect=analysis)
+
+
+class IngestCarryTests(TestCase):
+    """An ingest carries its own cut ascent on once it has committed
+    (27-Oct-2026: the top of the main line waited 10 to 25 minutes for the
+    sweep)."""
+
+    def test_the_frontiers_of_a_block_are_collected(self):
+        nodes, leaf = _line('COLLECT', 8, 100)
+
+        with ingest.carried_cuts() as cut:
+            _analyse(leaf, nodes[-1], 250, max_plies=3)
+
+        self.assertEqual(cut, [nodes[4].key])
+
+    def test_an_ascent_outside_an_ingest_collects_nothing(self):
+        nodes, leaf = _line('OUTSIDE', 8, 100)
+
+        with ingest.carried_cuts() as cut:
+            pass
+        _analyse(leaf, nodes[-1], 250, max_plies=3)
+
+        self.assertEqual(cut, [])
+        self.assertEqual(_stored(nodes[0])[0], 100)
+
+    def test_an_ingest_carries_its_cut_to_the_top(self):
+        nodes, leaf = _line('INGEST', 8, 100)
+        job, analysis = _ingest_job(leaf, nodes[-1], 250)
+
+        with analysis:
+            summary = ingest_queue.apply_job(job)
+
+        self.assertEqual(_stored(nodes[0])[:3], (250, 'a1a2', 8))
+        # The ingest's three levels stopped at nodes[5]; the carry rewrote
+        # the five above it.
+        self.assertEqual(summary['carried'], 5)
+        self.assertFalse(ingest.stale_backed_rows(
+            [node.key for node in nodes]))
+        job.refresh_from_db()
+        self.assertEqual(job.state, IngestJob.JState.DONE)
+        # The cut stays on record: the sweep may still carry it, and finds
+        # nothing left to change.
+        guard = DBEvent.objects.get(kind='BACKED_GUARD')
+        self.assertEqual(guard.payload['keys'], [nodes[4].key])
+        event = _sweep('--no-rotation', '--no-recent')
+        self.assertEqual(event.payload['changed'], 0)
+
+    def test_a_wide_frontier_is_left_to_the_sweep(self):
+        nodes, leaf = _line('WIDE', 8, 100)
+        job, analysis = _ingest_job(leaf, nodes[-1], 250)
+
+        with analysis, mock.patch.object(ingest, 'CARRY_MAX_KEYS', 0):
+            summary = ingest_queue.apply_job(job)
+
+        self.assertNotIn('carried', summary)
+        self.assertEqual(_stored(nodes[0])[0], 100)
+        _sweep('--no-rotation', '--no-recent')
+        self.assertEqual(_stored(nodes[0])[:3], (250, 'a1a2', 8))
+
+    def test_a_carry_that_fails_leaves_the_job_applied(self):
+        nodes, leaf = _line('FAILED', 8, 100)
+        job, analysis = _ingest_job(leaf, nodes[-1], 250)
+
+        with analysis, mock.patch.object(ingest, 'carry_cut_ascents',
+                                         side_effect=_deadlock()), \
+                self.assertLogs('atomicdb.ingest_queue', 'ERROR'):
+            summary, error = ingest_queue.process_job(job)
+
+        self.assertIsNone(error)
+        self.assertNotIn('carried', summary)
+        job.refresh_from_db()
+        self.assertEqual(job.state, IngestJob.JState.DONE)
+        self.assertEqual(_stored(nodes[0])[0], 100)
+        _sweep('--no-rotation', '--no-recent')
+        self.assertEqual(_stored(nodes[0])[:3], (250, 'a1a2', 8))
 
 
 class LostUpdateTests(TestCase):

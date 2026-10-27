@@ -2840,6 +2840,16 @@ def _jump_landing_url(key, ucis, outcome):
     return url
 
 
+# How far the walk below goes down.  It used to be ingest.BACKED_MAX_PLIES,
+# what ONE ascent climbs, on the belief that no spine could be longer.  The
+# main line is (27-Oct-2026: 63 to 66 plies below the start position), and
+# its values climb on past a cut (ingest.carry_cut_ascents), so the chip of
+# the start position landed a ply or two short of the origin and called the
+# chain broken.  A distance past BACKED_ECHO_PLIES is an echo, not a value
+# (see ingest), so that is as far as a legitimate spine reaches.
+BACKED_SPINE_MAX_PLIES = ingest.BACKED_ECHO_PLIES
+
+
 def _walk_backed_spine(pos):
     """Baja por la espina de soporte hasta donde NACE el valor respaldado.
 
@@ -2868,15 +2878,15 @@ def _walk_backed_spine(pos):
         tiene una REPETICION, el mismo ciclo que el respaldo marca al subir y
         valora como tablas (§ ``ingest._draw_cycling_children``,
         ``_backed_for``).
-      * el tope de ``ingest.BACKED_MAX_PLIES``, el mismo con el que subio el
-        valor: ninguna espina legitima puede ser mas larga que el, asi que
-        agotarlo es la cadena diciendo algo raro.
+      * the cap of ``BACKED_SPINE_MAX_PLIES``: a spine longer than any
+        distance a value may legitimately carry is the chain saying
+        something odd.
 
     Una consulta por paso como mucho.  Es un GET esporadico de un click
     humano, no algo que se pague al pintar una tabla.
     """
     node, walked, seen = pos, [], {pos.key}
-    for _ in range(ingest.BACKED_MAX_PLIES):
+    for _ in range(BACKED_SPINE_MAX_PLIES):
         if node.status != 'UNKNOWN':
             return node, walked, ''
         if not node.backed_move or node.backed_eval is None:

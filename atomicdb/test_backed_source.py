@@ -155,25 +155,37 @@ class BackedSpineWalkTests(TestCase):
                          f'/atomicdb/explore/{b.key}/?repetition=1')
 
     def test_the_ply_cap_bounds_the_descent_and_the_landing_says_it(self):
-        """El mismo tope con el que el valor SUBIO acota lo que se baja.
-
-        Ninguna espina legitima llega al tope, asi que agotarlo tampoco es
-        aterrizar en un origen: se etiqueta como cualquier otra cadena que no
-        llego al final.
-        """
-        length = ingest.BACKED_MAX_PLIES + 6
+        """Running out of the cap is not reaching an origin either: the
+        landing is labelled like any other chain that did not end."""
         chain = [_pos(f'L{i}', 'w' if i % 2 == 0 else 'b',
                       eval_cp=i, backed_eval=9_000, backed_move='a1a1')
-                 for i in range(length)]
+                 for i in range(14)]
+        for upper, lower in zip(chain, chain[1:]):
+            _edge(upper, lower, 'a1a1')
+
+        with mock.patch.object(views, 'BACKED_SPINE_MAX_PLIES', 8):
+            response = _jump(self.client, chain[0].key)
+
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{chain[8].key}/?incomplete=1')
+
+    def test_a_spine_longer_than_one_ascent_reaches_its_origin(self):
+        """The main line of 27-Oct-2026: 63 to 66 plies of pointers below the
+        start position, more than one ascent climbs.  The chip of the start
+        position landed short of the origin and called the chain broken."""
+        length = ingest.BACKED_MAX_PLIES + 6
+        chain = [_pos(f'M{i}', 'w' if i % 2 == 0 else 'b',
+                      eval_cp=i, backed_eval=9_000, backed_move='a1a1')
+                 for i in range(length - 1)]
+        chain.append(_pos('M-origin', 'w' if length % 2 else 'b',
+                          eval_cp=9_000, backed_eval=9_000))
         for upper, lower in zip(chain, chain[1:]):
             _edge(upper, lower, 'a1a1')
 
         response = _jump(self.client, chain[0].key)
 
-        self.assertEqual(
-            response['Location'],
-            f'/atomicdb/explore/{chain[ingest.BACKED_MAX_PLIES].key}/'
-            '?incomplete=1')
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{chain[-1].key}/')
 
     def test_the_walk_costs_one_query_per_step_at_most(self):
         alias = settings.ATOMICDB_DATABASE_ALIAS

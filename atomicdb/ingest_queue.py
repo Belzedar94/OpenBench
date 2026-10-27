@@ -33,6 +33,7 @@ import time
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
@@ -256,7 +257,8 @@ def apply_job(job):
         'route').first()
     source = (task or {}).get('source')
 
-    with atomic(), ingest.closure_attribution(source):
+    with ingest.carried_cuts() as cut, atomic(), \
+            ingest.closure_attribution(source):
         current = IngestJob.objects.select_for_update().get(pk=job.pk)
         if current.state == IngestJob.JState.DONE:
             return current.summary or {}
@@ -295,6 +297,19 @@ def apply_job(job):
     # ya cerrada) y aun asi haber movido la eval que inicializa la hoja.  Esto
     # es lo que garantiza que TODO submit toca los pn/dn de su posicion.
     ingest.proof.refresh_proof_numbers([job.position_id])
+    # An ascent this job cut short is carried on now that the job has
+    # committed, instead of waiting for the sweep (see the block above
+    # ingest.CARRY_MAX_KEYS).  The job is applied whatever happens here: a
+    # carry that fails leaves its frontier on record for the sweep.
+    if cut:
+        try:
+            carried = ingest.carry_cut_ascents(cut)
+        except DatabaseError:
+            logger.exception('AtomicDB ingest job %s: carrying %d cut keys '
+                             'on failed', job.pk, len(set(cut)))
+        else:
+            if carried is not None:
+                summary = {**summary, 'carried': carried}
     return summary
 
 
