@@ -984,7 +984,7 @@ class RootsPageTests(TestCase):
 
     def test_the_front_page_links_here(self):
         body = self.client.get('/atomicdb/').content.decode()
-        self.assertIn('href="/atomicdb/roots/"', body)
+        self.assertIn('href="/atomicdb/roots/">Openings</a>', body)
 
 
 class ApprovalHookTests(TestCase):
