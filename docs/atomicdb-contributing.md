@@ -69,7 +69,11 @@ tasks; `api/solve/acquire`, `api/solve/heartbeat` and `api/solve/submit` for
 proof tasks. The worker authenticates with an OpenBench account whose profile
 is enabled. It sends a heartbeat every 60 seconds while it searches; an
 analysis lease that goes `LEASE_MINUTES` (in `atomicdb/views.py`) without one
-is given to the next worker that asks.
+is given to the next worker that asks. A worker that is stopped hands its
+analysis and proof leases back with one `api/release` call, and they go back
+to the queue at once. Each lease is named with its machine and token, as
+heartbeat and submit name it, and anything that is not the caller's live lease
+is ignored.
 
 ## Running the tests
 
