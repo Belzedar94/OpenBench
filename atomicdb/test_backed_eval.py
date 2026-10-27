@@ -1797,13 +1797,14 @@ class LineProvenanceTests(TestCase):
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
+        # No line of this node gives the 30, so the row is borrowed and its
+        # note tells the story of its chip (BorrowedNumberTests).
         self.assertRegex(
             body,
             r'<td><em class="dim eval-claim"[^>]*'
             r'title="engine line 2 of this node\S+s current analysis has this '
-            r'move at 40; the number shown is the latest value stored for the '
-            r'resulting position, seeded from another line or move order; no '
-            r'direct search of it yet"[^>]*>30</em>')
+            r'move at 40; the number shown is from another position\S+s '
+            r'search; no direct search yet"[^>]*>30</em>')
         self.assertNotIn('title="from engine line 2', body)
 
     def test_a_seed_with_no_line_left_says_it_came_from_an_older_pass(self):
@@ -1939,7 +1940,9 @@ class BorrowedNumberTests(TestCase):
     Since 4-Aug a row spends no word on where its number comes from
     (LineProvenanceTests).  ``borrowed`` is the one that comes back, and
     only on a number nothing has searched and no line of this position
-    gives (see views._own_line_values).
+    gives (see views._own_line_values).  The chip is the jump to the
+    position whose search wrote the number (see test_backed_source,
+    BorrowedSourceTests).
     """
 
     @staticmethod
@@ -1966,8 +1969,9 @@ class BorrowedNumberTests(TestCase):
 
     @staticmethod
     def _label(row):
-        """The ``borrowed`` chip of a row, whole, or None."""
-        found = re.search(r'<span\b[^>]*>borrowed</span>', row)
+        """The ``borrowed`` chip of a row, whole, link or mute span, or
+        None."""
+        found = re.search(r'<(a|span)\b[^>]*>borrowed</\1>', row)
         return found.group(0) if found else None
 
     @staticmethod
@@ -1999,7 +2003,11 @@ class BorrowedNumberTests(TestCase):
         _edge(parent, _pos('A429-H6', 'w', eval_cp=1400), 'h7h6')
         a6 = _pos('A429-A6', 'w', eval_cp=1182)
         _edge(parent, a6, 'a7a6')
-        _edge(_pos('A429-856D', 'b', expanded=True), a6, 'g8e7')
+        # The search that wrote it, whose line for ...Ne7 gave exactly that.
+        writer = _pos('A429-856D', 'b', expanded=True,
+                      last_analysis=[self._line('g8e7', 1182)],
+                      eval_cp=1182, nodes_invested=64_000_000)
+        _edge(writer, a6, 'g8e7')
 
         rows = views._child_moves(parent)
 
@@ -2018,12 +2026,20 @@ class BorrowedNumberTests(TestCase):
         label = self._label(self._row(body, 'a7a6'))
         self.assertIsNotNone(label)
         self.assertIn('class="backed-mark light eval-borrowed"', label)
-        # What the number is, why the header can disagree with it, and what
-        # settles it.
-        self.assertIn('the search of another position that reaches it by a '
-                      'different move order', label)
-        self.assertIn('count only searched moves and its own analysis', label)
-        self.assertIn('Requesting analysis of this move settles it', label)
+        # One short line: where the number is from, that the chip opens it,
+        # and why the header can disagree with it.
+        self.assertRegex(
+            label,
+            r'title="number from another position\S+s search, click to open '
+            r'it; the best line counts only searched moves until this one is '
+            r'searched"')
+        # The chip IS the jump, and the jump lands on the search that wrote
+        # the number.
+        jump = f'/atomicdb/borrowed-source/{parent.key}/a7a6/'
+        self.assertTrue(label.startswith('<a'))
+        self.assertIn(f'href="{jump}"', label)
+        self.assertEqual(Client().get(jump)['Location'],
+                         f'/atomicdb/explore/{writer.key}/')
         for uci in ('e8f7', 'h7h6'):
             self.assertIsNone(self._label(self._row(body, uci)))
 
@@ -2061,11 +2077,11 @@ class BorrowedNumberTests(TestCase):
         self.assertIn('engine line 2', rows['h1h6']['claim'])
         self.assertIn('has this move at 1250', rows['h1h6']['claim'])
         # ...and Rh3, which no line names, is no longer credited to an
-        # earlier pass of this position.
+        # earlier pass of this position.  Both tell the story of their chip.
         self.assertIn('no engine line', rows['h1h3']['claim'])
-        self.assertIn('seeded from another line or move order',
-                      rows['h1h3']['claim'])
         self.assertNotIn('earlier pass', rows['h1h3']['claim'])
+        for uci in ('h1h3', 'h1h6'):
+            self.assertIn("from another position's search", rows[uci]['claim'])
 
         body = self._page(parent)
 
@@ -2129,9 +2145,10 @@ class BorrowedNumberTests(TestCase):
 
     def test_labelling_costs_the_page_no_query(self):
         """The label reads the lines the position already carries and the
-        numbers its rows already carry.  The same page costs the same
-        statements whether none of its rows is borrowed or all of them are,
-        and with twice as many borrowed rows: not one statement per row."""
+        numbers its rows already carry, and its link is built from them too.
+        The same page costs the same statements whether none of its rows is
+        borrowed or all of them are, and with twice as many borrowed rows: not
+        one statement per row."""
         parent = _pos('COST-P', 'w', expanded=True, last_analysis=[
             self._line('d2d4', 40), self._line('e2e4', 30),
             self._line('g1f3', 20)])
@@ -2153,7 +2170,8 @@ class BorrowedNumberTests(TestCase):
             _edge(parent, _pos(f'COST-{uci}', 'b', eval_cp=value), uci)
         wider, wider_body = self._statements(url)
 
-        labels = r'<span\b[^>]*>borrowed</span>'
+        # Every label a link to its own jump.
+        labels = r'<a\b[^>]*borrowed-source[^>]*>borrowed</a>'
         self.assertNotIn('eval-borrowed', own_body)
         self.assertEqual(len(re.findall(labels, borrowed_body)), 3)
         self.assertEqual(len(re.findall(labels, wider_body)), 6)

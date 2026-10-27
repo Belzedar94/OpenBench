@@ -104,6 +104,8 @@
       salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
       la pagina y viven fuera del if de arriba porque un salto por la linea
       probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
+      The jump behind a borrowed row uses the second one too, when it cannot
+      find the search that wrote the number (§ views.borrowed_source).
       {% endcomment %}{% if backed_repetition %} <span
           class="backed-mark"
           title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
@@ -726,16 +728,21 @@
            disagree with.  It wears the dashed warning chip the header already
            uses for a position nothing has searched (``backed-mark light``, in
            the sheet for months), so it needs no new rule; ``eval-borrowed``
-           is the stable hook for the tests.{% endcomment %}
+           is the stable hook for the tests.  Like the backed chip it IS the
+           jump, here to the position whose search wrote the number
+           (§ views.borrowed_source), and a mute span on a row that offers
+           no jump.{% endcomment %}
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{% if m.claim %}<em
             class="dim eval-claim" style="font-style:italic"
             title="{{ m.claim }}">{{ m.score }}</em>{% else %}{{ m.score }}{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.borrowed %}<span
-            class="backed-mark light eval-borrowed"
-            title="nothing has searched this move, and no engine line of this position gives it this value. It is the latest value stored for the position the move leads to, written by another search through it: the search of another position that reaches it by a different move order, or a pass here whose lines are not kept. The best line and the arrow of this position count only searched moves and its own analysis, so they can disagree with this row. Requesting analysis of this move settles it">borrowed</span>{% endif %}{% if m.repetition %} <span
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.borrowed %}<{% if m.borrowed_url %}a{% else %}span{% endif %}
+            class="backed-mark light eval-borrowed"{% if m.borrowed_url %}
+            href="{{ m.borrowed_url }}"
+            aria-label="jump to the position whose search wrote this number"{% endif %}
+            title="number from another position's search{% if m.borrowed_url %}, click to open it{% endif %}; the best line counts only searched moves until this one is searched">borrowed</{% if m.borrowed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
             class="backed-mark"
             title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
