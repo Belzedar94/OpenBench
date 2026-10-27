@@ -209,6 +209,7 @@ class IngestCarryTests(TestCase):
             [node.key for node in nodes]))
         job.refresh_from_db()
         self.assertEqual(job.state, IngestJob.JState.DONE)
+        self.assertEqual(job.summary['carried'], 5)
         # The cut stays on record: the sweep may still carry it, and finds
         # nothing left to change.
         guard = DBEvent.objects.get(kind='BACKED_GUARD')
@@ -224,6 +225,8 @@ class IngestCarryTests(TestCase):
             summary = ingest_queue.apply_job(job)
 
         self.assertNotIn('carried', summary)
+        job.refresh_from_db()
+        self.assertNotIn('carried', job.summary)
         self.assertEqual(_stored(nodes[0])[0], 100)
         _sweep('--no-rotation', '--no-recent')
         self.assertEqual(_stored(nodes[0])[:3], (250, 'a1a2', 8))

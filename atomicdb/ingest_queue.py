@@ -300,16 +300,17 @@ def apply_job(job):
     # An ascent this job cut short is carried on now that the job has
     # committed, instead of waiting for the sweep (see the block above
     # ingest.CARRY_MAX_KEYS).  The job is applied whatever happens here: a
-    # carry that fails leaves its frontier on record for the sweep.
+    # carry that fails leaves its frontier on record for the sweep.  What
+    # the carry rewrote goes into the job's summary, the one record of it.
     if cut:
         try:
             carried = ingest.carry_cut_ascents(cut)
+            if carried is not None:
+                summary = {**summary, 'carried': carried}
+                IngestJob.objects.filter(pk=job.pk).update(summary=summary)
         except DatabaseError:
             logger.exception('AtomicDB ingest job %s: carrying %d cut keys '
                              'on failed', job.pk, len(set(cut)))
-        else:
-            if carried is not None:
-                summary = {**summary, 'carried': carried}
     return summary
 
 
