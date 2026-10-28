@@ -65,10 +65,14 @@ def get_workload(request, machine):
     # Avoid creating duplicate Result objects
     result, created = Result.objects.get_or_create(test=test, machine=machine)
 
-    # Update the Machine's status and save everything
+    # Update the Machine's status. Write only the columns set here: this copy
+    # of the Machine was read when the request arrived, and a full save would
+    # put back an info column that changed since, such as the list of tests
+    # this worker skips after failing their bench
     machine.workload = test.id;
     machine.mnps = machine.dev_mnps = machine.base_mnps = 0.00
-    machine.save(); result.save()
+    machine.save(update_fields=['workload', 'mnps', 'dev_mnps', 'base_mnps', 'updated'])
+    result.save()
 
     response = {
         'workload' : workload_to_dictionary(
@@ -146,6 +150,21 @@ def requested_focus_test(request):
         return None, focus_verdict(
             None, False, 'Focus test id must be a whole number, not "%s"' % (raw))
 
+# Tests whose bench failed on this worker after other workers had already
+# played them. Such a failure belongs to the worker, not to the test, so the
+# test keeps running and only this worker stops receiving it. The list lives
+# in Machine.info, which the worker replaces whenever it registers, so a
+# restarted, and perhaps repaired, worker is offered those tests again
+
+BENCH_FAILED_TESTS = 'bench_failed_tests'
+
+def bench_failed_tests(info):
+
+    failed = info.get(BENCH_FAILED_TESTS) if isinstance(info, dict) else None
+    if not isinstance(failed, list):
+        return []
+    return [x for x in failed if type(x) is int]
+
 def focus_refusal(test_id, machine, blacklisted):
 
     # Say exactly which gate the focused test failed, so the volunteer can act
@@ -154,6 +173,10 @@ def focus_refusal(test_id, machine, blacklisted):
 
     if str(test_id) in [str(x) for x in blacklisted]:
         return 'Test #%d is blacklisted on this worker' % (test_id)
+
+    if test_id in bench_failed_tests(machine.info):
+        return ('Test #%d failed its bench on this worker, and is skipped '
+                'until the worker restarts' % (test_id))
 
     test = Test.objects.filter(id=test_id).first()
 
@@ -202,6 +225,11 @@ def filter_valid_workloads(request, machine):
     blacklisted = request.POST.getlist('blacklist')
     if blacklisted:
         workloads = workloads.exclude(id__in=blacklisted)
+
+    # Skip workloads whose bench failed on this machine, while others play them
+    bench_failed = bench_failed_tests(machine.info)
+    if bench_failed:
+        workloads = workloads.exclude(id__in=bench_failed)
 
     # Skip workloads that we have insufficient threads to play
     options = [

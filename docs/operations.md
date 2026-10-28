@@ -354,3 +354,33 @@ de la petición podía publicar en ellas.
   el manifiesto del server y solo entonces purga el fichero remoto
   (fail-closed). Log en `F:\OpenBench\archive\archive.log`. El disco del VPS
   (40GB) queda así acotado aunque se encolen datasets de miles de millones.
+
+## A bench that fails on one worker (since 2026-10-28)
+
+A worker whose engine fails its bench reports it to `/clientBenchError/`.
+Upstream OpenBench then stops the test, whatever its state. On 2026-10-28
+that stopped T471, which had 40,186 games from four machines: one worker had
+built that older commit without its embedded network, so its bench could not
+run. `client_bench_error` now looks at the test first:
+
+- **No games yet**: the bench itself is the suspect, and the test stops as
+  before.
+- **Games already** (for a generic DATAGEN, `games` counts the positions of
+  its finished chunks): other workers reproduced that bench to play them, so
+  the failure belongs to the machine. The test keeps running, its id goes
+  into `machine.info['bench_failed_tests']` and the machine's workload is
+  cleared. A generic DATAGEN chunk goes back to `PENDING` at once. The event
+  summary ends in `(test kept running, machine excluded)`.
+- The list lasts until the worker registers again, since `clientWorkerInfo`
+  replaces `info`. A restarted worker is offered the test once more, and if
+  it is still broken it fails the bench once more, with one more event.
+- A worker running with `--focus-test` on such a test is told why it gets
+  nothing.
+- The worker hooks that save a Machine (`clientGetWorkload`,
+  `clientHeartbeat`, `clientSubmitNPS`) write only the columns they change.
+  A copy of the Machine read before the failure therefore cannot put back an
+  `info` without the list.
+
+Removing an engine from `info['supported']` by hand is no longer needed for a
+test that has games. It still is for a worker that fails tests before they
+have any.

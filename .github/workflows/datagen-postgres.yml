@@ -45,6 +45,7 @@ jobs:
       - run: python -c "import cpuinfo, psutil, requests"
       - run: python manage.py migrate --noinput
       - run: python manage.py test OpenBench.tests.test_datagen_mode --verbosity 2
+      - run: python manage.py test OpenBench.tests.test_bench_error --verbosity 2
       # Client tests moved to the client-unittests job: they were listed after
       # the Django suites here, so a red Django run meant they never executed.
       - run: python manage.py test atomicdb --verbosity 2

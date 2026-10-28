@@ -36,6 +36,7 @@ import OpenBench.utils
 
 from OpenBench.workloads.create_workload import create_workload
 from OpenBench.workloads.get_workload import get_workload
+from OpenBench.workloads.get_workload import BENCH_FAILED_TESTS, bench_failed_tests
 from OpenBench.workloads.modify_workload import modify_workload
 from OpenBench.workloads.verify_workload import verify_workload
 from OpenBench.workloads.view_workload import view_workload
@@ -856,21 +857,84 @@ def client_get_network(request, engine, name):
 def client_get_workload(request, machine):
     return JsonResponse(get_workload(request, machine))
 
+def _skip_bench_failed_test(machine, test):
+
+    ## Stop serving the test to this machine until the worker registers again,
+    ## and clear the machine's workload if it still points at the test. The
+    ## row is read afresh and written back only if nothing saved it in between,
+    ## because the copy this request was handed is as old as the request. A
+    ## lost race just means reading the row again
+
+    for attempt in range(8):
+
+        row = Machine.objects.filter(id=machine.id).values(
+            'info', 'workload', 'updated').first()
+        if row is None:
+            return False
+
+        info   = row['info']
+        failed = bench_failed_tests(info)
+        info[BENCH_FAILED_TESTS] = failed + ([] if test.id in failed else [test.id])
+
+        changed = Machine.objects.filter(
+            id=machine.id, updated=row['updated'], workload=row['workload'],
+        ).update(
+            info     = info,
+            workload = 0 if row['workload'] == test.id else row['workload'],
+            updated  = timezone.now(),
+        )
+
+        if changed:
+            return True
+
+    return False
+
 @csrf_exempt
 @verify_worker
 def client_bench_error(request, machine):
 
-    # Find and stop the test with the bad bench
-    test = Test.objects.get(id=int(request.POST['test_id']))
-    test.finished = True; test.save()
+    ## An engine of this machine's workload failed its bench. With no games
+    ## yet, the bench itself is the suspect, and the test stops as it always
+    ## has. Once the test has games (positions, for a generic DATAGEN), other
+    ## workers have reproduced that very bench to play them, so the failure
+    ## belongs to this machine: the test keeps running, and only this machine
+    ## stops receiving it, until the worker registers again
+
+    test    = Test.objects.get(id=int(request.POST['test_id']))
+    error   = request.POST['error']
+    summary = error
+
+    # Stop the test only while it has no games, in a single statement, so that
+    # results arriving meanwhile are never overwritten by a stale copy of it
+    stopped = Test.objects.filter(id=test.id, games=0, finished=False).update(
+        finished=True, updated=timezone.now())
+    test.refresh_from_db(fields=['games', 'finished'])
+
+    if not stopped and test.games > 0 and not test.finished:
+
+        _skip_bench_failed_test(machine, test)
+
+        # Hand the DATAGEN chunk back now, instead of when its lease runs out,
+        # as client_submit_error does for any other DATAGEN failure
+        if test.is_generic_datagen():
+            try:
+                OpenBench.datagen.requeue_chunk(
+                    test.id, int(request.POST['chunk_idx']), machine,
+                    int(request.POST['attempt']), error)
+            except (KeyError, ValueError):
+                pass
+
+        note    = ' (test kept running, machine excluded)'
+        room    = LogEvent._meta.get_field('summary').max_length - len(note)
+        summary = error[:room] + note
 
     # Log the error into the Events table
     LogEvent.objects.create(
         author     = machine.user.username,
-        summary    = request.POST['error'],
+        summary    = summary,
         log_file   = '',
-        machine_id = int(request.POST['machine_id']),
-        test_id    = int(request.POST['test_id']))
+        machine_id = machine.id,
+        test_id    = test.id)
 
     return JsonResponse({})
 
@@ -882,7 +946,7 @@ def client_submit_nps(request, machine):
     machine.mnps      = float(request.POST['nps'     ]) / 1e6;
     machine.dev_mnps  = float(request.POST['dev_nps' ]) / 1e6;
     machine.base_mnps = float(request.POST['base_nps']) / 1e6;
-    machine.save()
+    machine.save(update_fields=['mnps', 'dev_mnps', 'base_mnps', 'updated'])
 
     # Pass back an empty JSON response
     return JsonResponse({})
@@ -964,13 +1028,14 @@ def client_heartbeat(request, machine):
             )
         except (KeyError, ValueError):
             active = False
-        machine.save()
+        machine.save(update_fields=['updated'])
         return JsonResponse(
             {} if active and not test.finished else {'stop': True}
         )
 
-    # Force a refresh of the updated timestamp for gameplay workloads.
-    machine.save()
+    # Force a refresh of the updated timestamp for gameplay workloads. Only
+    # that: the rest of this copy of the Machine is as old as the request
+    machine.save(update_fields=['updated'])
     return JsonResponse([{}, { 'stop' : True }][test.finished])
 
 @csrf_exempt

@@ -249,6 +249,12 @@ local hasta reiniciarse para evitar un bucle caliente. Los fallos transitorios
 de empaquetado/transporte no lo hacen: cualquier cliente puede recoger el chunk
 reencolado. `attempts` permite auditar las reasignaciones.
 
+Un bench que falla en un worker sólo para la campaña mientras ésta no tiene
+posiciones. Con posiciones ya generadas, el fallo es de esa máquina: la campaña
+sigue, el chunk vuelve a `PENDING` en el acto y el servidor deja de dar la
+campaña a esa máquina hasta que el worker se registre de nuevo (ver
+`docs/operations.md`).
+
 Dimensionar `positions_per_chunk` para unos 20–40 minutos en el hardware típico.
 Chunks mucho más cortos amplifican builds, benches y uploads; chunks mucho más
 largos aumentan el trabajo perdido ante un corte. El heartbeat continúa durante
