@@ -3,7 +3,7 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
-from . import page_cache, roots, views
+from . import active_workers, page_cache, roots, views
 from .conquest_map import map_api
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
@@ -76,6 +76,12 @@ _queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 # tiene que ser mas fresco que la misma cache corta de ``docs``, variada por
 # cookie por las mismas razones.
 _roots_cached = cache_page(30)(vary_on_cookie(csrf_protect(roots.roots_page)))
+# Every active worker and what it is searching.  Public and the same for every
+# visitor, like the queue: two small indexed reads plus the line labels the
+# home page already caches, so the short cache only absorbs F5 storms, and it
+# varies by cookie for the same header reasons.
+_workers_cached = cache_page(15)(vary_on_cookie(csrf_protect(
+    active_workers.workers_page)))
 
 urlpatterns = [
     path('', _home_cached),
@@ -122,6 +128,8 @@ urlpatterns = [
     # agregados ya viven en un snapshot compartido de un minuto (§ lanes),
     # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
     path('queue/', _queue_cached, name='atomicdb-queue'),
+    # The machines behind the "active workers" number of the home page.
+    path('workers/', _workers_cached, name='atomicdb-workers'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de
     # una sola persona: sin cache, como la pagina desde la que se pulsa.
     path('queue/bump/<int:task_id>/', views.api_queue_bump,

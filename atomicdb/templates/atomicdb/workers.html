@@ -1,0 +1,41 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}Active workers · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Active workers</h2>
+<p class="dim contrib-lede">Every worker with a heartbeat in the last
+  {{ live_minutes }} minutes, the position it is searching right now and who
+  asked for it. Requests still waiting for a worker are on the
+  <a href="/atomicdb/queue/">queue</a> page.</p>
+
+{% if workers %}
+<p class="dim">{{ count }} worker{{ count|pluralize }} from {{ accounts }}
+  account{{ accounts|pluralize }} · {{ threads_h }} thread{{ threads|pluralize }} ·
+  {{ busy }} searching right now</p>
+<div class="contrib-scroll">
+<table class="contrib-workers fleet-workers">
+  <tr><th>Worker</th><th>Owner</th><th>Searching</th><th>Requested by</th></tr>
+  {% for w in workers %}
+  <tr>
+    <td><strong>{{ w.machine }}</strong>
+      <div class="dim contrib-spec">{% if w.threads %}{{ w.threads }} thread{{ w.threads|pluralize }}{% else %}threads not reported{% endif %}{% if w.hash_mb %} · {{ w.hash_mb }} MB hash{% endif %}{% if w.os %} · {{ w.os }}{% endif %}</div></td>
+    <td><a href="/atomicdb/user/{{ w.owner|urlencode }}/">{{ w.owner }}</a></td>
+    {% if w.task %}
+    <td><span class="chip hot"></span><a class="qline" href="/atomicdb/explore/{{ w.task.key }}/{% if w.task.play %}?play={{ w.task.play|urlencode }}{% endif %}" title="{{ w.task.full }}">{{ w.task.san }}</a>
+      <div class="dim contrib-spec">{{ w.task.budget }} nodes · {{ w.task.source|title }}{% if w.task.since %} · started {{ w.task.since }}{% endif %}</div></td>
+    <td>{% if w.task.requester == 'account' %}<a href="/atomicdb/user/{{ w.task.requested_by|urlencode }}/">{{ w.task.requested_by }}</a>{% if w.task.more %}
+      <span class="dim" title="Other accounts asked for the same position">and {{ w.task.more }} more</span>{% endif %}{% elif w.task.requester == 'anonymous' %}<span title="Asked for by a visitor who was not signed in">Anonymous</span>{% else %}<span class="dim" title="Nobody asked for this one: the server picked it itself">server</span>{% endif %}</td>
+    {% else %}
+    <td><span class="chip cold"></span><span class="dim">between tasks</span></td>
+    <td></td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="dim">No worker has sent a heartbeat in the last {{ live_minutes }}
+  minutes.</p>
+{% endif %}
+
+{% endblock %}
