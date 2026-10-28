@@ -157,7 +157,7 @@ class Test(Model):
     lowerllr      = FloatField(default=0.0) # SPRT
     currentllr    = FloatField(default=0.0) # SPRT
     upperllr      = FloatField(default=0.0) # SPRT
-    max_games     = IntegerField(default=0) # GAMES or legacy DATAGEN summary
+    max_games     = IntegerField(default=0) # GAMES, SPRT cap, or legacy DATAGEN summary
     spsa          = JSONField(default=dict, blank=True, null=True) # SPSA
     genfens_args  = CharField(max_length=256, default='', blank=True) # DATAGEN
     play_reverses = BooleanField(default=False) # DATAGEN

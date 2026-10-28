@@ -123,6 +123,31 @@ class TimeControl(object):
         return float(time_str.split('+')[0])
 
 
+# An SPRT that reaches its game cap without the LLR crossing a bound stops
+# without a verdict. A time control is LTC when its base time is at least
+# SPRT_LTC_MIN_BASE seconds; fixed nodes, depth, or movetime count as STC.
+SPRT_MAX_GAMES_STC = 40000
+SPRT_MAX_GAMES_LTC = 30000
+SPRT_LTC_MIN_BASE  = 20.0
+
+def sprt_max_games(time_control):
+
+    # Game cap for an SPRT test played at the given time control
+
+    control = TimeControl.control_type(time_control)
+
+    if control == TimeControl.FISCHER:
+        base = TimeControl.control_base(time_control)
+
+    elif control == TimeControl.CYCLIC: # X/Y+Z has a base time of Y seconds
+        base = float(time_control.split('/')[1].split('+')[0])
+
+    else: # Fixed nodes, depth, or movetime have no base time
+        base = 0.0
+
+    return SPRT_MAX_GAMES_LTC if base >= SPRT_LTC_MIN_BASE else SPRT_MAX_GAMES_STC
+
+
 
 def read_git_credentials(engine):
     fname = 'Config/credentials.%s' % (engine.replace(' ', '').lower())
@@ -459,6 +484,13 @@ def update_test(request, machine):
             test.passed   = test.currentllr > test.upperllr
             test.failed   = test.currentllr < test.lowerllr
             test.finished = test.passed or test.failed
+
+            # Without a verdict, stop at the game cap: neither passed nor failed
+            if not test.finished and test.max_games > 0 and test.games >= test.max_games:
+                test.finished = True
+                LogEvent.objects.create(
+                    author='OpenBench', log_file='', test_id=test.id,
+                    summary='Max games reached (%d): stopped without a verdict' % (test.max_games))
 
         elif test.test_mode == 'GAMES':
 
