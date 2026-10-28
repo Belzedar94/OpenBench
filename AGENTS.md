@@ -132,6 +132,10 @@ motores — y emite el stdout/PGN exactos que el worker parsea).
    uno porque no usa NPS para escalar), imprime `Nodes searched: N`. Disciplina: los commits que se testeen llevan
    `Bench: <N>` al final del mensaje (regex del server: `(?:BENCH|NODES)[ :=]+([0-9,]+)`).
    Spell: `Bench: 13456297` (red default embebida).
+   Si el bench falla en UN worker: con 0 partidas el test se para (el bench declarado
+   es el sospechoso); con partidas, el test sigue y solo esa máquina deja de recibirlo
+   hasta que el worker se registre de nuevo (`machine.info['bench_failed_tests']`,
+   ver `docs/operations.md`).
 4. **`Engines/Atomic-Stockfish.json`** — copia `Engines/Spell-Stockfish.json` (flujo
    público: `"private": false` + `build.path/compilers/cpuflags/systems`) y ajusta `nps`
    (mídelo: es el que escala TCs entre máquinas), presets y `book_name`. Los motores con
