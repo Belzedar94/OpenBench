@@ -207,6 +207,9 @@ referencia: `Engines/Alice-Stockfish.json` (la más reciente: flujo público,
    bench contra un build limpio local ANTES de escribirlo** (reproducir primero
    un bench ya registrado del mismo engine para validar el entorno; si tu build
    de un engine registrado no reproduce su bench, tu firma nueva tampoco vale).
+   Un SPRT clonado lleva `max_games = OpenBench.utils.sprt_max_games(<TC del
+   clon>)`: el clon hereda el tope de su plantilla, y uno que pasa de STC a LTC
+   se quedaría con el de STC.
 9. **Después del alta**: verificar el primer veredicto en el canal Discord del
    motor (no en el de Atomic), y el primer SPRT con el desglose por máquina (§0).
 
@@ -248,6 +251,10 @@ Es el procedimiento de fishtest/sscg13; los presets viven en `Engines/<Motor>.js
 1. **Flujo por idea**: rama → **SPRT STC** (`8.0+0.08`, Threads=1 Hash=32) → si pasa →
    **SPRT LTC** (`40.0+0.4`, Threads=1 Hash=128) → si pasan AMBOS → **merge a master**
    con `Bench: <N>` al final del commit. Master solo avanza así.
+   **Tope de partidas**: un SPRT que llega a 40.000 partidas a STC o 30.000 a LTC
+   (base de 20 s o más) sin que el LLR cruce una cota termina sin veredicto
+   (`passed` y `failed` a False, con un LogEvent "Max games reached"), y eso
+   cuenta como no pasado. El tope vive en `Test.max_games`; 0 = sin tope.
    **Nomenclatura (corrección del propietario)**: el título del test en la web es
    `Engine-rama_dev vs Engine-rama_base` — la rama dev SIEMPRE lleva nombre descriptivo
    de la idea (`merged-ordering`, `razor-guard`...), NUNCA master-vs-master. Para tests

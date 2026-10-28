@@ -164,6 +164,7 @@ def create_new_test(request):
         test.beta     = float(request.POST['test_confidence'].split(',')[0].lstrip('['))
         test.lowerllr = math.log(test.beta / (1.0 - test.alpha))
         test.upperllr = math.log((1.0 - test.beta) / test.alpha)
+        test.max_games = OpenBench.utils.sprt_max_games(test.dev_time_control)
 
     if test.test_mode == 'GAMES':
         test.max_games = int(request.POST['test_max_games'])
