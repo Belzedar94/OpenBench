@@ -559,12 +559,21 @@ def _locked_in_order(ordered):
     siempre — un worker sin tablas no debe quedarse sin tarea porque las
     primeras de la cola sean todas de tablas.  En la practica el primer lote
     resuelve casi siempre en la primera fila; los demas son el camino raro.
+
+    EL CANDADO ES SOLO DE LA TAREA (``of=('self',)``).  Sin ``of``, el
+    ``FOR UPDATE SKIP LOCKED`` cubria todas las tablas del JOIN y saltaba la
+    tarea mientras la ingesta tuviera cogida su POSICION, que en lo alto de
+    una linea viva es casi siempre: el 28-oct una peticion de 128M espero
+    1.912 s siendo la siguiente mientras se servian 60 tareas de detras.  La
+    posicion aqui solo se lee (estado, visitas, FEN) y basta la foto de la
+    sentencia; bloquearla ademas hacia esperar a la ingesta por todo el lote.
     """
     order = list(ordered.values_list('id', flat=True))
     for start in range(0, len(order), LEASE_SCAN_CHUNK):
         chunk = order[start:start + LEASE_SCAN_CHUNK]
         rows = {task.id: task for task in AnalysisTask.objects
-                .select_for_update(skip_locked=True).select_related('position')
+                .select_for_update(skip_locked=True, of=('self',))
+                .select_related('position')
                 .filter(id__in=chunk, state='PENDING')}
         for task_id in chunk:
             task = rows.get(task_id)
@@ -662,7 +671,10 @@ def api_lease(request):
         # A second process using the same machine identity must not steal a
         # healthy assignment. The per-assignment token below fences old
         # processes once a genuinely stale lease is recycled.
-        active_same_machine = (AnalysisTask.objects.select_for_update()
+        # Candado solo de la tarea (§ ``_locked_in_order``): sin ``of`` este
+        # SELECT esperaba a cualquier ingesta que tuviera cogida su posicion.
+        active_same_machine = (AnalysisTask.objects
+            .select_for_update(of=('self',))
             .select_related('position')
             .filter(state='LEASED', machine=machine)
             .filter(Q(lease_token='', lease_heartbeat_at__isnull=True,
@@ -1093,7 +1105,9 @@ def api_submit(request):
                 return JsonResponse({'error': 'stale-lease'}, status=409)
             return JsonResponse({'error': 'not-your-lease'}, status=409)
 
-        task = (AnalysisTask.objects.select_for_update()
+        # Candado solo de la tarea (§ ``_locked_in_order``): la posicion no
+        # se escribe en esta transaccion.
+        task = (AnalysisTask.objects.select_for_update(of=('self',))
                 .select_related('position').get(id=task_id))
         searched = min(searched, 2 * task.budget_nodes)
         job, _created = ingest_queue.enqueue(task, {
@@ -1332,7 +1346,9 @@ def api_solve_acquire(request):
         # periodico tambien tiene que poder hacerlo sin pasar por aqui.
         ingest.recycle_stale_solve_leases(now=now)
 
-        active = (SolveTask.objects.select_for_update()
+        # Candados solo de la tarea, aqui y al arrendar, por lo mismo que en
+        # las de analisis (§ ``_locked_in_order``).
+        active = (SolveTask.objects.select_for_update(of=('self',))
                   .select_related('position')
                   .filter(state='LEASED', machine=machine,
                           lease_heartbeat_at__gte=stale)
@@ -1363,7 +1379,8 @@ def api_solve_acquire(request):
         # dentro de cada grupo el presupuesto mayor primero.  La deuda de
         # certificacion es importante pero nunca urgente: si se sirviera por
         # tamano de presupuesto se colaria delante por ser barata.
-        task = (SolveTask.objects.select_for_update(skip_locked=True)
+        task = (SolveTask.objects
+                .select_for_update(skip_locked=True, of=('self',))
                 .select_related('position').filter(state='PENDING')
                 .annotate(is_debt=Case(
                     When(arm=ingest.DEBT_ARM, then=Value(1)),
@@ -5739,6 +5756,10 @@ def api_queue_cancel(request, task_id):
     key = ''
     with atomic():
         if undo:
+            # Aqui la posicion SI se bloquea, a diferencia de los arriendos:
+            # ``restore_cancelled`` mira su estado antes de revivir la fila, y
+            # el candado impide que un cierre (que absorbe las PENDING) se
+            # cuele entre las dos cosas y deje un zombi.
             task = (mine.select_for_update().select_related('position')
                     .filter(state=AnalysisTask.TState.CANCELLED).first())
             if task is None:
