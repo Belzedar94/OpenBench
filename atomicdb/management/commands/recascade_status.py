@@ -18,8 +18,10 @@ WHAT IT LOOKS FOR, by the cascade's own rule (``_supporting_status`` and
 * an UNKNOWN expanded position none of whose children is still open (a loss
   for the mover, or a draw).
 
-Every candidate is then decided exactly as ``backup_cascade`` would decide it,
-so a quiet edge without clock slack (the fresh-context rule) does not count.
+Every candidate is then decided exactly as ``backup_cascade`` would decide it
+(``ingest.closable_rows``, the check a landing also runs once it has
+committed), so a quiet edge without clock slack (the fresh-context rule) does
+not count.
 
 WHAT IT DOES.  Nothing, by default: it reads, counts and prints examples, and
 on PostgreSQL every slice is read in a READ ONLY transaction.  With
@@ -44,39 +46,12 @@ from django.core.management.base import BaseCommand
 from django.db import OperationalError, transaction
 from django.db.models import Exists, OuterRef, Q
 
-from atomicdb import ingest, logic
+from atomicdb import ingest
 from atomicdb.database import atomic, connection, current_alias
 from atomicdb.models import DBEvent, Edge, Position
 
 # A slice that hits the statement timeout is retried in halves down to this.
 MIN_SLICE_BLOCKS = 250
-
-
-def _decided(keys):
-    """``{key: (row, status, edges)}`` for the keys their children decide.
-
-    The same three steps as one iteration of ``backup_cascade``: the edges of
-    the row, the status each child can SUPPORT, and ``logic.backup_status``.
-    """
-    rows = {row.key: row for row in Position.objects.filter(
-        key__in=list(keys), status='UNKNOWN').only(
-            'key', 'fen', 'status', 'expanded')}
-    edges = {}
-    for edge in (Edge.objects.filter(parent_id__in=list(rows))
-                 .select_related('child')
-                 .defer('child__last_analysis', 'child__analysis_passes')):
-        edges.setdefault(edge.parent_id, []).append(edge)
-    decided = {}
-    for key, row in rows.items():
-        children = edges.get(key)
-        if not children:
-            continue
-        status = logic.backup_status(
-            row.fen, row.expanded,
-            [ingest._supporting_status(row, edge) for edge in children])
-        if status != 'UNKNOWN':
-            decided[key] = (row, status, children)
-    return decided
 
 
 def _example(row, status, edges):
@@ -236,7 +211,8 @@ class Command(BaseCommand):
                 cursor.execute('SET LOCAL jit = off')
                 one_child, all_children = self._pg_candidates(
                     cursor, start, stop)
-                decided = _decided(set(one_child) | set(all_children))
+                decided = ingest.closable_rows(
+                    set(one_child) | set(all_children))
                 # Nothing to keep.  Rolling back also drops the SET LOCALs
                 # when an outer transaction is open (a test, a shell).
                 transaction.set_rollback(True, using=current_alias())
@@ -292,5 +268,5 @@ class Command(BaseCommand):
             .exclude(Exists(Edge.objects.filter(parent_id=OuterRef('key'),
                                                 child__status='UNKNOWN')))
             .values_list('key', flat=True))
-        decided = _decided(set(one_child) | set(all_children))
+        decided = ingest.closable_rows(set(one_child) | set(all_children))
         return one_child, all_children, decided
