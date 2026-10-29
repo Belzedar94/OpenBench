@@ -95,8 +95,19 @@ class WhoGetsTheBoxesTests(TestCase):
         body = Client().get(self.url).content.decode()
 
         self.assertEqual(BOX.findall(body), [])
-        for mark in ('msbar', '/atomicdb/request-moves/', 'Select all'):
+        for mark in ('msbar', '/atomicdb/request-moves/', 'Select all',
+                     'min-width:3rem'):
             self.assertNotIn(mark, body)
+        self.assertIn('<th></th><th>move</th>', body)
+
+    def test_the_chip_column_keeps_room_for_the_box(self):
+        """On a phone the table is wider than the screen and every column
+        shrinks to its narrowest; without a floor the box drops under the
+        chip and every row doubles in height."""
+        body = _signed_in().get(self.url).content.decode()
+
+        self.assertRegex(body, r'<th style="min-width:3rem;'
+                               r'box-sizing:content-box"></th><th>move</th>')
 
     def test_a_signed_in_visitor_gets_one_on_every_requestable_move(self):
         body = _signed_in().get(self.url).content.decode()

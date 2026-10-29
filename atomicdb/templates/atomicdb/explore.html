@@ -686,8 +686,15 @@
 
   <div>
     <h2 style="margin-top:0">Moves</h2>
+    {% comment %}With the boxes of the multi-select, the chip column needs room
+    for the chip and the box side by side.  On a phone the table is wider than
+    the screen and every column shrinks to its narrowest, so without a floor
+    the box would drop under the chip and double the height of every row.  The
+    floor goes on the header cell because the cells of the rows take no
+    attributes (see the rows below), and it is content-box because browsers
+    disagree on whether a cell's min-width counts its padding.{% endcomment %}
     <table>
-      <tr><th></th><th>move</th><th>state</th><th>eval</th>
+      <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
         <th>visits</th></tr>
       {% comment %}The box of the multi-select (the bar under the table says
@@ -959,7 +966,7 @@
         return parts.join(' · ') || 'Nothing was requested';
       }
       const REFUSED = {
-        'login-required': 'Sign in again to request moves',
+        'login-required': 'Your session has ended, reload the page',
         'already-solved': 'This position is already solved',
         'unknown-position': 'This position is gone, reload the page',
         'bad-budget': 'That depth is gone, reload the page',

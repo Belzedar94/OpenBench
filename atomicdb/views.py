@@ -2192,7 +2192,9 @@ def api_request_moves(request, key):
     * ONE DEPTH FOR ALL OF THEM: the rung of the slider under the rule of the
       single button (§ ``depth.chosen_rung``), so an account that may not
       choose has its choice dropped.  The TOP rung is refused
-      (``top-rung-single``): it is meant for one position at a time.
+      (``top-rung-single``): it is meant for one position at a time.  So
+      ``confirm``, which the single button asks for that rung alone, changes
+      nothing here.
     * A MOVE THAT IS NOT A NODE YET is made exactly as following it would
       make it (§ ``_materialise_child``), and a move that re-enters the line
       the page is on is skipped (``blocked``), for the reason ``goto`` does
