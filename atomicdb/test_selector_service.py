@@ -14,7 +14,7 @@ from unittest.mock import patch
 from django.core.management import call_command
 from django.test import override_settings
 
-from . import ingest, logic
+from . import autosolve, ingest, logic
 from .models import AnalysisTask, Position
 from .testing import TestCase, worker_account
 
@@ -127,14 +127,24 @@ class RefreshSelectorCommandTests(TestCase):
         self.assertNotIn('failed_steps', report)
 
     def test_autosolve_cap_is_forwarded_and_reported(self):
+        """The cap is the walk's target now (§ atomicdb.autosolve)."""
         out = StringIO()
-        with patch.object(ingest, 'enqueue_autosolve95',
-                          return_value=3) as autosolve:
+        with patch.object(autosolve, 'drip_backlog',
+                          return_value=3) as walk:
             call_command('refresh_selector', autosolve_cap=7, stdout=out)
 
-        autosolve.assert_called_once_with(cap=7)
+        walk.assert_called_once_with(target=7)
         report = json.loads(out.getvalue())
         self.assertEqual(report['autosolve95_enqueued'], 3)
+
+    def test_an_autosolve_cap_of_zero_skips_the_walk(self):
+        out = StringIO()
+        with patch.object(autosolve, 'drip_backlog') as walk:
+            call_command('refresh_selector', autosolve_cap=0, stdout=out)
+
+        walk.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue())['autosolve95_enqueued'],
+                         0)
 
     def test_stale_solve_leases_are_recycled_before_queue_caps(self):
         order = []
@@ -152,7 +162,7 @@ class RefreshSelectorCommandTests(TestCase):
                               side_effect=mark('debt')):
                 with patch.object(ingest, 'enqueue_coverage_completion',
                                   side_effect=mark('coverage')):
-                    with patch.object(ingest, 'enqueue_autosolve95',
+                    with patch.object(autosolve, 'drip_backlog',
                                       side_effect=mark('autosolve')):
                         call_command('refresh_selector', stdout=StringIO())
 

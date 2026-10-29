@@ -49,9 +49,10 @@ rather than a request: the ENGINE debt top-up, coverage completion, and — when
 solves on fragile mate claims).  They belong here and not in crons of their
 own because they are one scheduling decision and it should be taken in one
 place.  The order inside a pass is the priority order: debt, coverage, then
-the adversarial arms last.  The walk down the idle fleet's repair backlog
-(§ atomicdb.idle_repair) comes after them and before the analysis pool: one
-bounded step per pass, and nothing past one count while its queue is full.
+the adversarial arms last.  The walks down the backlogs of the solver passes
+for reported mates (§ atomicdb.autosolve) and of the idle fleet's repairs
+(§ atomicdb.idle_repair) come after them and before the analysis pool: one
+bounded step per pass each, and nothing past one count while a queue is full.
 
 And, at the very end, the PUBLIC COUNTERS of the front page.  Those are not a
 scheduling decision, but they are the same kind of thing this process exists
@@ -84,7 +85,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import connections
 
-from atomicdb import idle_repair, ingest, metrics
+from atomicdb import autosolve, idle_repair, ingest, metrics
 from atomicdb.database import connection
 from atomicdb.models import Position
 
@@ -126,9 +127,14 @@ class Command(BaseCommand):
             '--interval', type=float, default=60.0,
             help='Seconds between refreshes when looping (default: 60).')
         parser.add_argument(
-            '--autosolve-cap', type=int, default=32,
-            help='Maximum PENDING autosolve95 SolveTasks (P9): evals at '
-                 'or beyond +-95 get an 8M F0 solver pass')
+            '--autosolve-cap', type=int,
+            default=autosolve.AUTOSOLVE_BACKLOG_TARGET,
+            help='PENDING autosolve95 SolveTasks the walk down the backlog '
+                 'tops up to, never past half the arm\'s own cap; 0 skips '
+                 'the walk (P9: a mate the engine reported gets one 8M F0 '
+                 'solver pass). Passes found when a search lands go on; '
+                 'ATOMICDB_ARM_RATE_AUTOSOLVE=0 stops both (default: '
+                 '%(default)s).')
         parser.add_argument(
             '--pool-target', type=int, default=ingest.ANALYSIS_POOL_TARGET,
             help='Keep this many PENDING analysis tasks minted so the fleet '
@@ -291,12 +297,17 @@ class Command(BaseCommand):
                 fragile = step(
                     'fragile', lambda: ingest.enqueue_fragile_mate_solves(
                         cap=options['fragile_cap']))
-            # P9 (comunidad, 4-0): las evals a +-95 compran su pase de
-            # solver ANTES del colchon, porque cierran nodos en vez de
-            # mirarlos — la misma jerarquia que la cobertura.
-            autosolved = step(
-                'autosolve95', lambda: ingest.enqueue_autosolve95(
-                    cap=options['autosolve_cap']))
+            # P9 (comunidad, 4-0): a mate the engine reported buys its solver
+            # pass BEFORE the pool, because it closes nodes instead of looking
+            # at them, the same order as coverage.  What lands is bought where
+            # it lands; this is one bounded step of the walk round the
+            # searches that landed before (§ atomicdb.autosolve), and it never
+            # scans the tree, whatever the cap says.
+            autosolved = 0
+            if options['autosolve_cap'] > 0:
+                autosolved = step('autosolve95',
+                                  lambda: autosolve.drip_backlog(
+                                      target=options['autosolve_cap']))
             # The idle fleet's repair backlog, before the pool for the same
             # reason as the capped arms above: it counts only its own queue,
             # and the pool does not count it (§ atomicdb.idle_repair).

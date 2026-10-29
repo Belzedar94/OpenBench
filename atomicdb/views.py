@@ -4144,6 +4144,9 @@ def _san_line(key, max_plies=16, keep_head=False):
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
 #   * ``IDLE_REPAIR`` — the same accounting for the idle fleet's repairs
 #     (§ idle_repair): which searches were bought again, not what they found.
+#   * ``AUTOSOLVE95_ENQUEUED`` — and for the solver passes bought for the
+#     mates the engine reported (§ autosolve).  What a pass proves comes out
+#     as ``NODE_CLOSED`` or ``PROOF_UPGRADED``, like any certificate.
 #   * ``SOLVE_LEASE_RECYCLED`` — cuantos arriendos SOLVE muertos devolvio a
 #     la cola una pasada del ciclo (§ ``ingest.recycle_stale_solve_leases``).
 #     Es higiene de cola, no una noticia sobre el arbol: no lleva ``key``, no
@@ -4176,6 +4179,7 @@ def _san_line(key, max_plies=16, keep_head=False):
 # noticia que nunca aparece no la echa de menos nadie.
 FEED_HIDDEN_KINDS = {
     'ARM_RATE_BUDGET',
+    'AUTOSOLVE95_ENQUEUED',
     'BACKED_GUARD',
     'BACKED_SWEEP',
     'BREADTH_SWAP',
