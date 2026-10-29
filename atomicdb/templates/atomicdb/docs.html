@@ -297,7 +297,9 @@ the request stays in the queue under them.</p>
   it (an older pass of this one may have), the link lands on the move's
   position, marked <em>chain breaks here</em>. The header and the board arrow
   count only searched moves and the position's own analysis, so they can
-  disagree with it until the move is searched.</li>
+  disagree with it until the move is searched. A position with no search of
+  its own shows no such chip: every number in its table comes from elsewhere,
+  as its header already says.</li>
 <li>A plain number with no chip is the position's own analysis: an engine
   searched this position itself, and that is what it reported.</li>
 </ul>

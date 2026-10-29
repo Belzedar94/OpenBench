@@ -4787,9 +4787,18 @@ def _child_moves(pos):
         # backing has its chip, a floor its note, a repetition its zero), and
         # no line of this position gives the move that value.  Like ``walked``
         # it touches neither the order nor the tier.
-        borrowed = (walked and not backed_plies and not floor
-                    and ingest.best_known_eval(c)
-                    not in own_values.get(e.move_uci, ()))
+        #
+        foreign = (walked and not backed_plies and not floor
+                   and ingest.best_known_eval(c)
+                   not in own_values.get(e.move_uci, ()))
+        # The CHIP only beside lines of its own.  A position no search has
+        # reached has no number of its own to tell a borrowed one from: every
+        # row came from another position, all of them took the chip, and the
+        # table said nothing the header's summary ("0 searched") does not
+        # (e08e2d14, 29-Oct-2026: five rows, five chips, "borrowed scam, i
+        # think this is too much").  The tooltip still says where the number
+        # is from (``foreign``), and never credits a pass that never ran.
+        borrowed = foreign and bool(own_values)
         if c.status in (win, loss):
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
@@ -4844,7 +4853,7 @@ def _child_moves(pos):
                                             _line_value(pos,
                                                         line_numbers.get(e.move_uci),
                                                         stm_white),
-                                            score, borrowed)
+                                            score, foreign)
                                 if walked and not backed_plies else None),
                       # A floor this position does not take: never the
                       # recommended move (§ _arrow_move), and flagged in the
