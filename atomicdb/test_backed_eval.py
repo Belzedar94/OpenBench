@@ -2173,6 +2173,46 @@ class BorrowedNumberTests(TestCase):
         self.assertNotIn('eval-borrowed', body)
         self.assertIn('walked ·4</a>', body)
 
+    def test_a_position_no_search_has_reached_labels_nothing_e08e2d14(self):
+        """The report of 29-Oct-2026: a position with no search of its own
+        (``e08e2d14``, White to move, 0 searched, 5 from lines only) painted
+        the chip on all five rows, "borrowed scam, i think this is too much".
+        With no line of its own there is no number of its own to tell a
+        borrowed one from: the rows keep their numbers, their order and their
+        tooltips, and no row takes the chip."""
+        parent = _pos('E08E-P', 'w', expanded=True, eval_cp=1295)
+        values = (('f7d8', 957), ('d1d2', 939), ('b2a3', 244),
+                  ('e1g1', 76), ('h2h4', 0))
+        writer = _pos('E08E-W', 'b', expanded=True, last_analysis=[
+            self._line(f'w{index}', value)
+            for index, (_uci, value) in enumerate(values)])
+        for index, (uci, value) in enumerate(values):
+            child = _pos(f'E08E-{uci}', 'b', eval_cp=value)
+            _edge(parent, child, uci)
+            _edge(writer, child, f'w{index}')
+
+        ordered = views._child_moves(parent)
+
+        self.assertEqual([row['uci'] for row in ordered],
+                         [uci for uci, _value in values])
+        self.assertEqual([row['score'] for row in ordered],
+                         [value for _uci, value in values])
+        self.assertFalse(any(row['borrowed'] for row in ordered))
+        self.assertTrue(all(row['walked'] for row in ordered))
+        # The tooltip still says where each number is from, and credits no
+        # earlier pass: this position never had one.
+        for row in ordered:
+            self.assertIn("from another position's search", row['claim'])
+            self.assertNotIn('earlier pass', row['claim'])
+
+        body = self._page(parent)
+
+        self.assertNotIn('eval-borrowed', body)
+        for uci, _value in values:
+            row = self._row(body, uci)
+            self.assertIn('eval-claim', row)
+            self.assertIsNone(self._label(row))
+
     def test_labelling_costs_the_page_no_query(self):
         """The label reads the lines the position already carries and the
         numbers its rows already carry, and its link is built from them too.
