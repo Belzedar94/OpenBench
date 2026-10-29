@@ -24,7 +24,7 @@
     <td><span class="chip hot"></span><a class="qline" href="/atomicdb/explore/{{ w.task.key }}/{% if w.task.play %}?play={{ w.task.play|urlencode }}{% endif %}" title="{{ w.task.full }}">{{ w.task.san }}</a>
       <div class="dim contrib-spec">{{ w.task.budget }} nodes · {{ w.task.source|title }}{% if w.task.since %} · started {{ w.task.since }}{% endif %}</div></td>
     <td>{% if w.task.requester == 'account' %}<a href="/atomicdb/user/{{ w.task.requested_by|urlencode }}/">{{ w.task.requested_by }}</a>{% if w.task.more %}
-      <span class="dim" title="Other accounts asked for the same position">and {{ w.task.more }} more</span>{% endif %}{% elif w.task.requester == 'anonymous' %}<span title="Asked for by a visitor who was not signed in">Anonymous</span>{% else %}<span class="dim" title="Nobody asked for this one: the server picked it itself">server</span>{% endif %}</td>
+      <span class="dim" title="Other accounts asked for the same position">and {{ w.task.more }} more</span>{% endif %}{% elif w.task.requester == 'anonymous' %}<span title="Asked for by a visitor who was not signed in">Anonymous</span>{% elif w.task.reason == 'repair' %}<span class="dim" title="Nobody asked for this one: the server picked it to search again a position whose last search was shallow, or one with no search of its own between searched positions">server: repair</span>{% else %}<span class="dim" title="Nobody asked for this one: the server picked it itself">server</span>{% endif %}</td>
     {% else %}
     <td><span class="chip cold"></span><span class="dim">between tasks</span></td>
     <td></td>

@@ -36,6 +36,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      ProgressSnapshot, ProofCampaign, ProofNode, RequestLog,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
+from . import idle_repair
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
 # gives the task to somebody else.  A worker beats every 60 seconds and gives
@@ -386,21 +387,34 @@ def _auth_pair(username, password):
     return user
 
 
-# What a worker says about its own threads cannot be checked, and it is only shown
-# (the "cores" total, the contributor page), never used to hand out work.  The
-# engine cannot use more than this, so nothing above it is believable.
+# What a worker says about its own threads cannot be checked.  It is shown (the
+# "cores" total, the contributor page), and the only work it decides is whether
+# a slot is handed the idle fleet's repairs (§ idle_repair.fits_slot): a slot
+# that misreports changes nothing else.  The engine cannot use more than this,
+# so nothing above it is believable.
 MAX_REPORTED_THREADS = 1024
+
+
+def reported_threads(request):
+    """The threads per engine a worker reports with this request, else 0.
+
+    A ``--jobs`` slot reports its own engine's threads, not the machine's.
+    """
+    try:
+        return min(MAX_REPORTED_THREADS,
+                   max(0, int(request.POST.get('threads', 0) or 0)))
+    except ValueError:
+        return 0
 
 
 def _touch_worker(request, user):
     """Refresh capacity without changing, extending or reclaiming any lease."""
     machine = request.POST.get('machine', user.username)[:64]
+    threads = reported_threads(request)
     try:
-        threads = min(MAX_REPORTED_THREADS,
-                      max(0, int(request.POST.get('threads', 0) or 0)))
         hash_mb = max(0, int(request.POST.get('hash', 0) or 0))
     except ValueError:
-        threads, hash_mb = 0, 0
+        hash_mb = 0
     now = timezone.now()
     capacity = {
         'threads': threads,
@@ -637,6 +651,7 @@ def api_lease(request):
         return JsonResponse({'error': 'bad credentials'}, status=403)
     ping = _touch_worker(request, user)
     machine = ping.machine
+    slot_threads = reported_threads(request)
 
     try:
         worker_build = int(request.POST.get('worker_build', 0) or 0)
@@ -823,6 +838,12 @@ def api_lease(request):
                 if (candidate.budget_nodes >= DEEP_TASK_NODES
                         and candidate.source == AnalysisTask.Source.USER
                         and candidate.requested_by in capped):
+                    continue
+                # The idle fleet's repairs go to narrow engines only: a wide
+                # one would buy the same shallow search again.  Skipped like
+                # the rows above, so the scan goes on to the next task and the
+                # slot is never left idle by it (§ idle_repair.fits_slot).
+                if not idle_repair.fits_slot(candidate, slot_threads):
                     continue
                 if first is None:
                     first = candidate
@@ -4029,6 +4050,8 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
+#   * ``IDLE_REPAIR`` — the same accounting for the idle fleet's repairs
+#     (§ idle_repair): which searches were bought again, not what they found.
 #   * ``SOLVE_LEASE_RECYCLED`` — cuantos arriendos SOLVE muertos devolvio a
 #     la cola una pasada del ciclo (§ ``ingest.recycle_stale_solve_leases``).
 #     Es higiene de cola, no una noticia sobre el arbol: no lleva ``key``, no
@@ -4070,6 +4093,7 @@ FEED_HIDDEN_KINDS = {
     'DEBT_ENQUEUED',
     'DN_REPAIR',
     'FRAGILE_ENQUEUED',
+    'IDLE_REPAIR',
     'PROOF_GUARD',
     'QUALITY_CONVERGENCE',
     'REVOKE_GUARD',
