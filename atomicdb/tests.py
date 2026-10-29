@@ -370,9 +370,11 @@ class RequestTests(TestCase):
         self.assertEqual(t.source, 'USER')
         self.assertGreaterEqual(t.budget_nodes, ingest.BUDGET_LADDER[2])
 
-    def test_reanalysis_uses_128m_512m_2b_10b_staircase(self):
+    def test_reanalysis_uses_128m_512m_2b_staircase(self):
         p = ingest.get_or_create_position(logic.start_fen())
         expected = ingest.REQUEST_BUDGET_LADDER
+        self.assertEqual(expected,
+                         [128_000_000, 512_000_000, 2_000_000_000])
         for generation, budget in enumerate(expected):
             self.assertEqual(ingest.request_analysis(p), 'queued')
             task = AnalysisTask.objects.get(position=p,
@@ -383,8 +385,9 @@ class RequestTests(TestCase):
             p.visits = generation + 1
             p.save(update_fields=['visits'])
 
-        # Past the top rung the request stops buying the same 10B search
-        # again and becomes a frontier expansion instead (test_frontier.py).
+        # Past the top rung the request stops buying the same 2B search again
+        # and buys the searches below the position instead
+        # (test_subtree_request.py).
         self.assertEqual(ingest.request_analysis(p), 'expanded')
         self.assertFalse(AnalysisTask.objects.filter(
             position=p, generation=len(expected)).exists())

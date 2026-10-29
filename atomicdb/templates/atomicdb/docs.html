@@ -37,7 +37,7 @@ available as own search context in the tooltip and in the API
 <ul style="margin:.8rem 0 .8rem 1.4rem">
 <li><strong>The best informed child always backs up.</strong> There is no depth
   gate between a parent and its children: a child analysed at 128M nodes moves
-  a parent analysed at 10B. Between moves worth the same, a move whose chain
+  a parent analysed at 2B. Between moves worth the same, a move whose chain
   reaches a real analysis comes first (see <a href="#repetition">Repetition</a>);
   then a proven win, the soonest mate first; then any move still open; then a
   proven loss, the latest mate first, so a lost side resists longest and never
@@ -142,9 +142,9 @@ place.</p>
 <ul style="margin:.8rem 0 .8rem 1.4rem">
 <li>Every account advances by the <strong>nodes it already has queued</strong>,
   so the first request of a newcomer is served before the thousandth of a
-  flooder. The unit is nodes and not rows, so one 10B request yields to the
-  seventy-eight 128M requests it costs, and a big batch interleaves instead of
-  walling the queue.</li>
+  flooder. The unit is nodes and not rows, so one 2B request weighs as much as
+  about sixteen 128M requests, and a big batch interleaves instead of walling
+  the queue.</li>
 <li>Running a worker gives exactly <strong>one</strong> advantage: while it
   runs, your own worker serves your own requests first. It is affinity and not
   priority, and it scales with the CPU you are plugging in right now.</li>
@@ -158,8 +158,15 @@ place.</p>
 <p class="dim" style="font-size:.9rem">Asking for a position somebody else
 already asked for joins their request instead of queueing a duplicate, and
 every account that asked is notified when the analysis lands. Repeated requests
-buy genuinely deeper searches, up the ladder of 128M, 512M, 2B and 10B
-nodes.</p>
+buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.</p>
+<p class="dim" style="font-size:.9rem">Once the 2B search of a position has
+run, the next request queues up to {{ subtree_cap }} searches of 128M on the
+lines below it instead, the best lines first: where the side the position
+favours is to move, its three best moves (eight when nothing ranks them yet);
+where the other side is to move, every reply. A position that already has its
+128M search is walked through and its own replies are asked next. Asking again
+while those searches are still waiting queues nothing new. The last stop of
+the depth slider buys the same searches without waiting for the ladder.</p>
 
 <h2 id="contributing">Contributing and attribution</h2>
 <p>Every completed analysis records the authenticated account that delivered
@@ -187,7 +194,9 @@ nothing is lost: wait and send it again. The worker endpoints are not
 limited.</p>
 <p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
 <code>fen</code>. <code>budget</code> picks a rung of the ladder and is
-optional, honoured for the accounts the explorer offers the depth slider to.
+optional, honoured for the accounts the explorer offers the depth slider to;
+<code>budget=10000000000</code> is the slider's last stop, up to
+{{ subtree_cap }} searches of 128M below the position.
 <code>username</code> and <code>password</code> put the request on your
 account, which is what buys the notification when it lands, the affinity with
 your own workers and your place in the fair share. Without them the request is
@@ -200,14 +209,20 @@ tree does not have is seeded rather than refused. Session cookies are
 deliberately ignored here, so a page open in your browser cannot spend your
 queue behind your back.</p>
 <p>Asked again after the first search has landed, a request buys the next rung
-of the ladder, exactly as a second click does. A script that only wants a
-position to <em>have</em> a search adds <code>only_if_missing=1</code>: the
-budget becomes a target (the rung you picked, or the first one). If a search
-that ran already covers it the reply is <code>already-analyzed</code> with
-<code>completed_budget</code> and nothing is queued; otherwise the request is
-queued as usual but never above the target. The check and the purchase happen
-together, so two scripts asking for the same position at the same moment
-cannot push it to the next rung.</p>
+of the ladder, exactly as a second click does, and once the 2B search has run,
+the searches below the position. Those replies say <code>expanded</code>, or
+<code>saturated</code> when there was nothing left to queue, with
+<code>searches_queued</code>, <code>subtree_plies</code> (how deep the
+deepest one is) and a <code>message</code> saying what was done. A script
+that only wants a position to <em>have</em> a search adds
+<code>only_if_missing=1</code>: the budget becomes a target (the rung you
+picked, or the first one). If a search that ran already covers it the reply is
+<code>already-analyzed</code> with <code>completed_budget</code> and nothing is
+queued; otherwise the request is queued as usual but never above the target.
+The check and the purchase happen together, so two scripts asking for the same
+position at the same moment cannot push it to the next rung. It asks about the
+position itself, so it cannot be sent with
+<code>budget=10000000000</code>.</p>
 <p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
 same as the explorer button: what governs both is the per-person cap on queued
 requests above, and the per-account sharing of the service order. The pace
@@ -284,7 +299,7 @@ the request stays in the queue under them.</p>
 moves an engine searched itself, how many were seeded from an engine line
 running through this position, and how many are queued.</p>
 <p>Moves sort by best known value in the mover's perspective and by nothing
-else, so a value from a 10B node search sits beside one from a 128M node
+else, so a value from a 2B node search sits beside one from a 128M node
 search and neither is hidden behind the other. That is why a deeply analysed
 value can disagree with a shallow sibling row: the two numbers were bought with
 very different amounts of search, and the shallow one is the one likely to

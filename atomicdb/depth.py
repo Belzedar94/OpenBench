@@ -2,10 +2,17 @@
 
 QUE ES.  El boton "Request analysis" del explorador compra SIEMPRE el peldano
 que le toca a esa posicion (§ ``ingest._request_rung``): 128M la primera vez,
-512M cuando el 128M ya esta completado, y asi hasta 10B.  Esto anade la
+512M cuando el 128M ya esta completado, y asi hasta 2B.  Esto anade la
 posibilidad de saltarse la escalera hacia ARRIBA — y solo hacia arriba — a
 quien sostiene la flota: el propietario del sitio y quien haya prestado una
 maquina esta semana.
+
+THE LAST STOP IS NOT A RUNG.  Past 2B the slider offers the searches below
+the position (§ ``ingest.request_subtree``): up to 78 searches of 128M on the
+lines below it.  It travels as ``ingest.SUBTREE_REQUEST_NODES``, the 10B of
+the old top rung, so the pages and scripts that sent that number keep
+working, and its entry in ``depth_rungs`` carries ``subtree: true``: that
+flag, not its position at the end of the list, is how a page tells it apart.
 
 POR QUE UN MODULO Y NO UNA COMPROBACION EN LA PLANTILLA.  Esconder el control
 no es negar el permiso: el endpoint de peticion acepta un POST de cualquiera,
@@ -24,7 +31,9 @@ hace tres meses.
 """
 
 from . import lanes
-from .ingest import REQUEST_BUDGET_LADDER, request_ladder_state
+from .ingest import (REQUEST_BUDGET_LADDER, SUBTREE_REQUEST_NODES,
+                     SUBTREE_SEARCH_NODES, SUBTREE_TASK_CAP,
+                     request_ladder_state)
 
 # La ventana de contribuidor vive en ``lanes`` desde que la comunidad voto los
 # carriles: la misma pregunta ("corrio un worker esta semana") decide quien
@@ -34,6 +43,22 @@ from .ingest import REQUEST_BUDGET_LADDER, request_ladder_state
 CONTRIBUTOR_WINDOW_DAYS = lanes.CONTRIBUTOR_WINDOW_DAYS
 # Nombre del campo en el POST de ``/atomicdb/request/<key>/``.
 BUDGET_FIELD = 'budget'
+
+
+def short_nodes(nodes):
+    """A node count as prose says it: 128_000_000 -> '128M', 2e9 -> '2B'."""
+    for size, suffix in ((1_000_000_000, 'B'), (1_000_000, 'M')):
+        if nodes >= size and nodes % size == 0:
+            return f'{nodes // size}{suffix}'
+    return f'{nodes:,}'
+
+
+# How the last stop is named wherever it is named, from the constants that
+# size it: the slider's tick, its confirmation and the page's receipt.
+SUBTREE_SEARCH_LABEL = short_nodes(SUBTREE_SEARCH_NODES)
+SUBTREE_LABEL = f'{SUBTREE_TASK_CAP}×{SUBTREE_SEARCH_LABEL}'
+SUBTREE_CONFIRM = (f'This queues up to {SUBTREE_TASK_CAP} searches of '
+                   f'{SUBTREE_SEARCH_LABEL} below this position. Sure?')
 
 
 def may_choose(user):
@@ -66,10 +91,12 @@ def chosen_rung(request):
     ``(None, True)``   eligio algo que NO es un peldano de la escalera: se
                        rechaza entero y no se encola nada.  Un valor que la
                        escalera no contiene no tiene un "por defecto razonable"
-                       — 999 no es 128M ni 10B — y tragarselo en silencio
+                       — 999 no es 128M ni 2B — y tragarselo en silencio
                        esconderia tanto una manipulacion como un despliegue a
                        medias (pagina vieja, escalera nueva).
-    ``(nodos, False)`` eligio un peldano y tiene derecho a elegirlo.
+    ``(nodos, False)`` eligio un peldano y tiene derecho a elegirlo.  The
+                       last stop (``SUBTREE_REQUEST_NODES``) is a valid choice
+                       too, under the same rule.
 
     SIN derecho, la eleccion se DESCARTA y la peticion sigue por el peldano por
     defecto — no se rechaza.  Pedir analisis lo puede hacer cualquiera; lo que
@@ -98,11 +125,24 @@ def chosen_rung_for(raw, user):
         budget = int(raw)
     except ValueError:
         return None, True
-    if budget not in REQUEST_BUDGET_LADDER:
+    if budget not in REQUEST_BUDGET_LADDER and budget != SUBTREE_REQUEST_NODES:
         return None, True
     if not may_choose(user):
         return None, False
     return budget, False
+
+
+def asks_for_subtree(raw):
+    """Does this ``budget`` field name the last stop, whoever sends it?
+
+    For a refusal that depends on what was ASKED and not on who may ask it:
+    a combination that makes no sense is refused for everybody, so the
+    answer says nothing about who is allowed to choose.
+    """
+    try:
+        return int((raw or '').strip()) == SUBTREE_REQUEST_NODES
+    except ValueError:
+        return False
 
 
 def context(request, pos):
@@ -112,18 +152,20 @@ def context(request, pos):
     como estaba: la plantilla no pinta ni el hueco (§ ``_suggestions_badge``,
     el mismo patron).
 
-    Vacio tambien cuando queda UN solo peldano por comprar, aunque quien mire
-    sea el propietario: un slider con una sola parada no elige nada, y el boton
-    ya compra exactamente eso.  Ahi entran los dos casos de final de escalera —
-    el 2B gastado (solo queda 10B) y el 10B gastado (la peticion se convierte
-    en anchura un ply mas abajo, § ``ingest._expand_frontier``), que es
-    justamente donde un selector de PROFUNDIDAD prometeria algo que la vista no
-    hace.
+    Vacio tambien cuando la escalera ya esta gastada (2B completado), aunque
+    quien mire sea el propietario: ahi el boton mismo compra las busquedas de
+    debajo (§ ``ingest.request_subtree``), y un slider con una sola parada no
+    elige nada.
 
     Los peldanos ya COMPLETADOS en esta posicion no se ofrecen: comprarlos otra
     vez seria repetir una busqueda que ya tenemos.  Por eso la lista empieza en
     el peldano por defecto — el indice 0 del slider ES el comportamiento de hoy
     — y solo se puede viajar hacia arriba.
+
+    Every stop carries ``nodes`` (what the POST sends), ``label`` and ``unit``
+    (what the page writes beside the slider) and ``subtree``.  The last stop
+    is the searches below the position, flagged ``subtree: true``, and it
+    brings the text of the confirmation it needs (``confirm``).
     """
     if pos.status != 'UNKNOWN':
         return {}
@@ -132,13 +174,18 @@ def context(request, pos):
     from .views import _human
 
     completed_max, due = request_ladder_state(pos)
-    rungs = [rung for rung in REQUEST_BUDGET_LADDER if rung >= due]
-    if len(rungs) < 2:
+    if (completed_max is not None
+            and completed_max >= REQUEST_BUDGET_LADDER[-1]):
         return {}
+    stops = [{'nodes': rung, 'label': _human(rung), 'unit': 'nodes',
+              'subtree': False}
+             for rung in REQUEST_BUDGET_LADDER if rung >= due]
+    stops.append({'nodes': SUBTREE_REQUEST_NODES, 'label': SUBTREE_LABEL,
+                  'unit': 'spread over the lines below this position',
+                  'subtree': True, 'confirm': SUBTREE_CONFIRM})
     return {
-        'depth_rungs': [{'nodes': rung, 'label': _human(rung)}
-                        for rung in rungs],
-        'depth_max_index': len(rungs) - 1,
+        'depth_rungs': stops,
+        'depth_max_index': len(stops) - 1,
         'depth_default_label': _human(due),
         # Lo mas profundo que esta posicion tiene ya COMPLETADO, que es lo que
         # explica por que la escalera no empieza en 128M.  No tiene por que ser

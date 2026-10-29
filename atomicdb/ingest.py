@@ -31,25 +31,40 @@ from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
 BUDGET_LADDER = [8_000_000, 32_000_000, 128_000_000, 512_000_000,
                  2_000_000_000]
 # Visitor-requested reanalysis is deliberately steeper than autonomous tree
-# exploration: 128M -> 512M -> 2B -> 10B.  El primer peldano SIGUE a la
+# exploration: 128M -> 512M -> 2B.  El primer peldano SIGUE a la
 # capacidad donada (orden del propietario): 512M mientras las cajas de 288
 # cores masticaban sondas en segundos (28-jul), de vuelta a 128M cuando la
 # flota se fue (29-jul).  Si vuelve capacidad grande, subirlo es cambiar
 # esta lista y nada mas: el suelo del boton masivo y los tests siguen a
 # REQUEST_BUDGET_LADDER[0] mecanicamente.
-REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000,
-                         10_000_000_000]
+REQUEST_BUDGET_LADDER = [128_000_000, 512_000_000, 2_000_000_000]
+# THE 10B RUNG IS GONE.  One search that size holds a worker for half an hour
+# on a single position, and the same nodes go further as 128M searches on the
+# lines below it: a ply of children at 128M reproduces the verdict of a deep
+# re-search 96-99% of the time (§ ``_breadth_swap_eligible``).  Once the 2B
+# search here has run, the next request walks the lines below the position
+# and buys up to SUBTREE_TASK_CAP searches of SUBTREE_SEARCH_NODES there
+# (§ ``request_subtree``).  SUBTREE_REQUEST_NODES is the wire value of that
+# request: the last stop of the explorer's depth slider and the ``budget`` of
+# the public API still send it, so a script that asked for 10B keeps working
+# and gets the new behaviour.  It is not a rung, and no task is ever bought
+# at that size.
+SUBTREE_REQUEST_NODES = 10_000_000_000
+SUBTREE_SEARCH_NODES = REQUEST_BUDGET_LADDER[0]
+SUBTREE_TASK_CAP = SUBTREE_REQUEST_NODES // SUBTREE_SEARCH_NODES   # 78
 # Suelo para AVISAR a quien pidio un analisis.  Sigue al primer peldano de la
 # escalera de peticiones — hoy 128M — porque es lo que define "esto lo pidio
 # una persona": todo lo que sale de un click entra por ahi o por encima
 # (``_request_rung``, la expansion de la frontera y el boton de jugadas sin
 # mirar usan los tres el mismo suelo).
 NOTIFY_MIN_BUDGET = REQUEST_BUDGET_LADDER[0]
-# Once the last rung is spent, buying it again would only repeat a search we
-# already have.  The request then becomes a proof-number style expansion of
-# the frontier one ply below: an OR node (the attacker of the conjecture,
-# White, to move) only needs ONE good try, so a narrow top-k is enough; an
-# AND node (Black to move) has to answer EVERY reply, so it takes them all.
+# Two walks below a position pick children the proof-number way: the breadth
+# swap's frontier expansion (``ATOMICDB_BREADTH_SWAP``,
+# § ``_descend_frontier``) and the subtree request (§ ``request_subtree``).
+# An OR node (the attacker to move) only needs ONE good try, so a narrow
+# top-k is enough; an AND node (the defender to move) has to answer EVERY
+# reply, so it takes them all.  The frontier expansion takes White as the
+# attacker; the subtree request takes the side the position's value favours.
 FRONTIER_OR_WIDTH = 3
 FRONTIER_AND_CAP = 64
 FRONTIER_BLIND_WIDTH = 8   # no ordering information at all: widen a little
@@ -59,8 +74,17 @@ FRONTIER_CLICK_CAP = 64    # hard ceiling of tasks queued by a single click
 # searched, it walks to the most-proving one and grows the tree there.  The
 # DAG transposes and can even close a cycle (1.Nf3 Nf6 2.Ng1 Ng8 IS the start
 # position once the counters are stripped), so the descent carries a visited
-# set and this hard ply guard-rail.
+# set and this hard ply guard-rail.  The subtree request shares both.
 FRONTIER_DESCENT_MAX_PLIES = 32
+# What one subtree request may read on its way down.  Near the root every
+# line already has its 128M search for several plies, so the walk can read a
+# lot of tree before it finds somewhere to buy.  It reads a level at a time,
+# SUBTREE_CHUNK parents per statement, and stops reading once it has seen
+# SUBTREE_SCAN_CAP child rows (plus the chunk that crossed the line): one
+# click stays one bounded transaction on a tree of a hundred million
+# positions.
+SUBTREE_SCAN_CAP = 4_096
+SUBTREE_CHUNK = 64
 MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 # ---------------- mate CORTO: verificacion, no excavacion ----------------
 #
@@ -126,7 +150,7 @@ _priority_refresh_cache = {'at': 0.0}
 
 
 # Cuantos PASES se recuerdan por posicion (§ ``Position.analysis_passes``).
-# Seis cubre la escalera de peticiones entera — 128M, 512M, 2B, 10B — con dos
+# Seis cubre la escalera de peticiones entera — 128M, 512M, 2B — con tres
 # sitios de sobra para las sondas automaticas que caen entre medias, que es
 # donde esta la lectura que se pidio: como se movio la eval al profundizar.
 # Mas alla de eso lo que se recuerda ya no es una serie, es un archivo, y esto
@@ -329,7 +353,7 @@ def multipv_for(visits, budget_nodes=None, seeding=False, clamp=None):
 # mints on its own (source AUTO or FILL, whatever the arm) goes through
 # ``server_picked_budget``.  The arms still decide WHERE to look and quote
 # their own price (``budget_for``, ``value_budget``, the arm constants); this
-# only lifts that price to the floor, so a rung above it (512M, 2B, 10B) is
+# only lifts that price to the floor, so a rung above it (512M, 2B) is
 # untouched, and the hourly arm rates and the pool target go on counting
 # tasks exactly as before.
 #
@@ -5115,8 +5139,8 @@ def value_budget(target):
     """Nodos que compra un objetivo del walker, por su BRAZO.
 
     Los dos brazos con suelo miran escaleras distintas y no es un descuido.
-    Una punta ya comprada sube por la escalera de PETICIONES — 128M, 512M, 2B,
-    10B — porque es la misma linea principal pidiendo mas profundidad.  Un
+    Una punta ya comprada sube por la escalera de PETICIONES — 128M, 512M,
+    2B — porque es la misma linea principal pidiendo mas profundidad.  Un
     nodo pre-ciclo sube por la de EXPLORACION a partir de lo que el hijo que
     cierra el bucle ya tiene: ahi no se busca profundidad, se busca que la
     espina deje de ser la misma (§ ``_queue_cycle_disambiguation``).
@@ -5332,8 +5356,9 @@ class RequestOutcome(str):
 
     It stays a plain ``str`` on purpose: the view still drops it straight
     into ``{'status': ...}``, explore.html still switches on it and the M1
-    tests still compare it against a literal.  Only the frontier path
-    attaches a ``detail`` mapping, which the view merges into its payload.
+    tests still compare it against a literal.  The walks below a position
+    (the frontier expansion and the subtree request) and ``only_if_missing``
+    attach a ``detail`` mapping, which the view merges into its payload.
     """
 
     def __new__(cls, value, **detail):
@@ -5643,7 +5668,8 @@ def ladder_exhausted(pos):
     """True when the visitor ladder has nothing left to buy on ``pos`` itself.
 
     Read-only.  The view needs it to keep click deduplication anchored on
-    the parent even though an expansion places its tasks on the children.
+    the parent even though the request then places its tasks below it
+    (§ ``request_subtree``).
     """
     if pos.status != 'UNKNOWN':
         return False
@@ -5746,7 +5772,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
     interno _LADDER_EXHAUSTED cuando el ultimo peldano ya esta COMPLETED:
-    repetirlo seria gastar 10B en una busqueda que ya tenemos.
+    repetirlo seria gastar 2B en una busqueda que ya tenemos.
     ``requested_by`` y ``route`` viajan a la tarea (afinidad y orden de
     jugadas del peticionario); nunca PISAN lo ya guardado (el primer click
     conserva autoria y ruta).
@@ -5777,7 +5803,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
     joined as it stands: it is theirs, and this call did not cause it."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
-    # a 512M/2B/10B request cannot accidentally target the completed rung.
+    # a 512M/2B request cannot accidentally target the completed rung.
     pos = Position.objects.select_for_update().get(pk=pos.pk)
     if pos.status != 'UNKNOWN':
         return 'already-solved'
@@ -5806,7 +5832,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
     if budget_floor:
         # Va el ULTIMO y es un maximo, asi que gana tambien al carve-out del
         # mate corto: ese abarata la PRIMERA mirada de un nodo que reclama M2,
-        # y quien elige 10B a mano no esta pidiendo una verificacion barata.
+        # y quien elige 2B a mano no esta pidiendo una verificacion barata.
         floor = max(floor, budget_floor)
     if target is not None:
         floor = min(floor, target)
@@ -5923,30 +5949,34 @@ def _frontier_rank(child, stm_white):
     return known if stm_white else -known
 
 
-def _frontier_children(parent, limit=None):
-    """Unsolved children worth buying next, best first and already sliced.
+def _rank_frontier(parent, moves):
+    """``(ranked, informed)``: the unsolved children of ``parent``, best first.
 
+    ``moves`` are the parent's ``(move_uci, child)`` pairs in movegen order;
+    a child only needs ``key``, ``status``, ``eval_cp`` and ``backed_eval``.
     Ordering, by decreasing trust:
 
     1. the parent's stored MultiPV (``last_analysis``) — the engine's own
        ranking of the moves it just searched, emitted best first;
     2. what the tree already knows about each child (eval from the mover's
        point of view, the same convention the explorer's move table uses);
-    3. nothing at all, in which case the first FRONTIER_BLIND_WIDTH legal
-       moves stand in for the ordering we do not have.
+    3. nothing at all, in which case the legal-move order stands in for the
+       ordering we do not have, and ``informed`` says so.
 
     Solved children never take a slot: an OR node cannot be proven through
-    them and an AND node has nothing left to ask of them.  ``limit`` is what
-    a descending click has left of its budget, so an entire descent still
-    fits inside one FRONTIER_CLICK_CAP allowance.
+    them and an AND node has nothing left to ask of them.  Two moves can lead
+    to the same child (a capture that promotes explodes whatever it promotes
+    to), and the child is ranked once.
     """
     stm_white = parent.fen.split()[1] == 'w'
-    # order_by('id') keeps the movegen order expand() wrote the edges in.
-    edges = [e for e in Edge.objects.filter(parent=parent)
-             .select_related('child').order_by('id')
-             if e.child.status == 'UNKNOWN']
-    live = [e.child for e in edges]
-    by_move = {e.move_uci: e.child for e in edges}
+    by_move, live, listed = {}, [], set()
+    for move, child in moves:
+        if child.status != 'UNKNOWN':
+            continue
+        by_move.setdefault(move, child)
+        if child.key not in listed:
+            listed.add(child.key)
+            live.append(child)
 
     ranked, seen = [], set()
     for line in (parent.last_analysis or []):
@@ -5961,11 +5991,30 @@ def _frontier_children(parent, limit=None):
     # literally "the first N legal moves".
     rest.sort(key=lambda c: -_frontier_rank(c, stm_white))
     ranked.extend(rest)
+    return ranked, informed
 
-    if stm_white:     # OR node: one good try is enough to prove the branch
-        width = FRONTIER_OR_WIDTH if informed else FRONTIER_BLIND_WIDTH
-    else:             # AND node: every reply has to be answered
-        width = FRONTIER_AND_CAP
+
+def _frontier_width(attacker_to_move, informed):
+    """How many of the ranked children a node takes."""
+    if attacker_to_move:  # OR node: one good try is enough to prove the branch
+        return FRONTIER_OR_WIDTH if informed else FRONTIER_BLIND_WIDTH
+    return FRONTIER_AND_CAP  # AND node: every reply has to be answered
+
+
+def _frontier_children(parent, limit=None):
+    """Unsolved children worth buying next, best first and already sliced.
+
+    The ranking is ``_rank_frontier``'s.  White is the attacker here: an OR
+    node is White to move.  ``limit`` is what a descending click has left of
+    its budget, so an entire descent still fits inside one FRONTIER_CLICK_CAP
+    allowance.
+    """
+    # order_by('id') keeps the movegen order expand() wrote the edges in.
+    edges = (Edge.objects.filter(parent=parent).select_related('child')
+             .order_by('id'))
+    ranked, informed = _rank_frontier(
+        parent, [(edge.move_uci, edge.child) for edge in edges])
+    width = _frontier_width(parent.fen.split()[1] == 'w', informed)
     width = min(width, FRONTIER_CLICK_CAP)
     if limit is not None:
         width = min(width, max(0, limit))
@@ -6075,6 +6124,9 @@ def _descend_frontier(pos, requested_by='', route=''):
     The way down writes nothing but the edges a level needs to be readable at
     all: a descent that finds everything reachable spent or solved answers
     'saturated' and has bought nothing.
+
+    Only the breadth swap walks this way now.  Past the ladder, a plain
+    request buys the subtree instead (§ ``request_subtree``).
     """
     totals = {'children_considered': 0, 'children_queued': 0,
               'children_solved': 0, 'children_exhausted': 0}
@@ -6114,6 +6166,312 @@ def _descend_frontier(pos, requested_by='', route=''):
             walked_route = (walked_route + ',' + step) if step else ''
         visited.add(following.key)
         node, plies = following, plies + 1
+
+
+# ---------------- the subtree request ----------------
+#
+# What the 10B rung became: the same nodes, spent as up to SUBTREE_TASK_CAP
+# searches of SUBTREE_SEARCH_NODES on the lines below the position.  Two doors
+# lead here, and both are a request somebody made on purpose: the plain
+# button once the 2B search of the position has run, and the last stop of the
+# depth slider (``SUBTREE_REQUEST_NODES``, also the API's ``budget``).
+
+SUBTREE_EVENT = 'SUBTREE_REQUEST'
+
+
+class _SubtreeChild:
+    """A child as the subtree walk reads it: one edge row and nothing more.
+
+    The attributes carry the names of the ``Position`` columns they come
+    from, so ``_rank_frontier`` and ``best_known_eval`` read it the way they
+    read a position, and the walk never loads a whole row per child.
+    """
+
+    __slots__ = ('key', 'status', 'eval_cp', 'backed_eval')
+
+    def __init__(self, key, status, eval_cp, backed_eval):
+        self.key = key
+        self.status = status
+        self.eval_cp = eval_cp
+        self.backed_eval = backed_eval
+
+
+class _SubtreeParent:
+    """A position the walk reads below: what the ranking needs, and the
+    requester's route down to it ('' when they declared none)."""
+
+    __slots__ = ('key', 'fen', 'last_analysis', 'route')
+
+    def __init__(self, key, fen, last_analysis, route):
+        self.key = key
+        self.fen = fen
+        self.last_analysis = last_analysis
+        self.route = route
+
+
+def _subtree_attacker_white(pos):
+    """The attacker of a subtree request: the side the position's value
+    favours.
+
+    ``backed_eval`` first and the position's own eval when nothing is
+    backed, White-POV like every value column.  A position that favours
+    nobody (no value, or exactly 0) keeps White, which is what the frontier
+    expansion has always assumed.
+    """
+    value = pos.backed_eval if pos.backed_eval is not None else pos.eval_cp
+    return value is None or value >= 0
+
+
+def _subtree_parents(entries):
+    """The positions of one chunk of the walk, ready to be read below.
+
+    ``entries`` are ``(key, route)`` pairs in walk order, and so is the
+    result.  One statement for the rows.  A position whose search ran but
+    whose edges were never written (a task completed without its analysis
+    ever being ingested) is expanded first, as the frontier descent does
+    (§ ``_ensure_expanded``); a position that closed since the walk met it is
+    dropped, because nothing below it is left to ask.
+    """
+    rows = {key: (fen, analysis, expanded, status)
+            for key, fen, analysis, expanded, status in
+            Position.objects.filter(key__in=[key for key, _route in entries])
+            .values_list('key', 'fen', 'last_analysis', 'expanded',
+                         'status')}
+    parents = []
+    for key, route in entries:
+        if key not in rows:
+            continue
+        fen, analysis, expanded, status = rows[key]
+        if status != 'UNKNOWN':
+            continue
+        if not expanded:
+            expand(Position.objects.select_for_update().get(pk=key))
+        parents.append(_SubtreeParent(key, fen, analysis, route))
+    return parents
+
+
+def _subtree_replies(parent_keys):
+    """The replies of a chunk of parents in one statement, and how many.
+
+    ``{parent: [(move_uci, child)]}``, each list in movegen order:
+    ``order_by('id')`` keeps the order ``expand()`` wrote the edges in.  Only
+    the columns the ranking reads come back.
+    """
+    replies = {key: [] for key in parent_keys}
+    if not parent_keys:
+        return replies, 0
+    count = 0
+    rows = (Edge.objects.filter(parent_id__in=parent_keys).order_by('id')
+            .values_list('parent_id', 'move_uci', 'child_id', 'child__status',
+                         'child__eval_cp', 'child__backed_eval'))
+    for parent_id, move, child_id, status, eval_cp, backed_eval in rows:
+        replies[parent_id].append(
+            (move, _SubtreeChild(child_id, status, eval_cp, backed_eval)))
+        count += 1
+    return replies, count
+
+
+def _subtree_candidates(parents, replies, attacker_white, visited):
+    """The children one chunk asks about, in walk order: ``(child, route)``.
+
+    The parents come in the order the walk met them, so the best line's
+    children come first.  Inside a parent, ``_rank_frontier``'s order sliced
+    to the parent's width: an OR node when the attacker of the request is to
+    move, an AND node otherwise.  A child the walk already met (a
+    transposition, or a cycle back to a position above) keeps the place it
+    got first and is not asked about again.
+    """
+    candidates = []
+    for parent in parents:
+        moves = replies.get(parent.key, [])
+        ranked, informed = _rank_frontier(parent, moves)
+        attacker_to_move = (parent.fen.split()[1] == 'w') == attacker_white
+        first_move = {}
+        for move, child in moves:
+            first_move.setdefault(child.key, move)
+        for child in ranked[:_frontier_width(attacker_to_move, informed)]:
+            if child.key in visited:
+                continue
+            visited.add(child.key)
+            child_route = (parent.route + ',' + first_move[child.key]
+                           if parent.route else '')
+            candidates.append((child, child_route))
+    return candidates
+
+
+def _subtree_coverage(keys, requested_by):
+    """Which of ``keys`` already have their 128M search, in two statements.
+
+    Returns ``(searched, live)``.  ``searched`` holds the positions where a
+    search of at least SUBTREE_SEARCH_NODES actually ran: COMPLETED with
+    nodes, because an absorbed row bought its rung without anybody searching
+    (the line ``searched_budget`` draws).  ``live`` says, for the others,
+    whose live task already covers that budget:
+
+    * ``'mine'``: a visitor request this requester is on, as its author or
+      as a backer (two anonymous clicks share the one anonymous name, as they
+      share a bucket in the fair share);
+    * ``'others'``: a visitor request of somebody else;
+    * ``'server'``: work the server picked itself (AUTO, FILL) at that
+      budget or above.
+
+    A visitor request covers the position at any budget: below 128M it can
+    only be a short-mate verification, which the purchase would not raise
+    either (§ ``_short_mate_clamp``).  Server work below 128M covers
+    nothing, because buying raises it.
+    """
+    if not keys:
+        return set(), {}
+    searched = set(AnalysisTask.objects.filter(
+        position_id__in=keys, state=AnalysisTask.TState.COMPLETED,
+        nodes_searched__gt=0, budget_nodes__gte=SUBTREE_SEARCH_NODES)
+        .values_list('position_id', flat=True))
+    rest = [key for key in keys if key not in searched]
+    live = {}
+    if not rest:
+        return searched, live
+    precedence = ('server', 'others', 'mine')
+    rows = (AnalysisTask.objects
+            .filter(position_id__in=rest,
+                    state__in=(AnalysisTask.TState.PENDING,
+                               AnalysisTask.TState.LEASED))
+            .filter(Q(source=AnalysisTask.Source.USER)
+                    | Q(budget_nodes__gte=SUBTREE_SEARCH_NODES))
+            .values_list('position_id', 'source', 'requested_by',
+                         'also_requested_by'))
+    for key, source, author, backers in rows:
+        if source != AnalysisTask.Source.USER:
+            whose = 'server'
+        elif requested_by == author or (
+                requested_by and requested_by in (backers or [])):
+            whose = 'mine'
+        else:
+            whose = 'others'
+        if (key not in live
+                or precedence.index(whose) > precedence.index(live[key])):
+            live[key] = whose
+    return searched, live
+
+
+def request_subtree(pos, requested_by='', route=''):
+    """Buy up to SUBTREE_TASK_CAP searches of SUBTREE_SEARCH_NODES below
+    ``pos``, on the lines that decide it and the best lines first.
+
+    WHICH POSITIONS.  The frontier expansion's choice, with the attacker
+    taken from the position's value (§ ``_subtree_attacker_white``).  Where
+    the attacker moves (an OR node) only the top FRONTIER_OR_WIDTH unsolved
+    children are worth a search, because one good try proves the branch;
+    where the defender moves (an AND node) every unsolved child is, because
+    each reply has to be answered.  Solved children never take a slot.
+
+    WHAT A POSITION GETS.  One whose 128M search has run is walked through:
+    the walk asks the same question of its children, one ply lower.  One
+    without it gets that search and is not walked through, because the
+    search is what will order its children.  The purchase is
+    ``_request_rung``'s ``only_if_missing`` one, so it never goes above
+    128M (a claimed short mate can make it cheaper, § ``_short_mate_clamp``).
+
+    WHOSE SEARCH.  A live task that already covers 128M is never bought
+    twice, and it is not walked through either: its search has not landed.
+    When the requester is already on it (their name, or the anonymous name
+    for an anonymous click), it counts as one of this click's searches, so a
+    click repeated while the first one's searches are still waiting buys
+    nothing new, however far below they sit.  When it is somebody else's
+    request it is theirs, and the click spends its searches elsewhere.  Work
+    the server picked itself is promoted to the visitor band by the same
+    purchase any request makes, and counts as bought.
+
+    ORDER.  Breadth first, a ply at a time, and inside a ply in the order of
+    the lines, the best line's positions first: when the cap cuts, the best
+    lines got theirs.
+
+    BOUNDS.  A visited set (the DAG transposes and can close a cycle), the
+    descent's ply guard (FRONTIER_DESCENT_MAX_PLIES) and SUBTREE_SCAN_CAP
+    child rows read, a level at a time and SUBTREE_CHUNK parents per
+    statement.
+
+    Every task goes to the visitor band with ``requested_by`` and the route
+    extended with the moves of the path.  Returns 'expanded' when at least
+    one search below now counts as this requester's, with the counters the
+    page and the API report; 'saturated' when there was nothing to buy; and
+    'already-solved' for a closed position.
+    """
+    with atomic():
+        root = Position.objects.get(pk=pos.pk)
+        if root.status != 'UNKNOWN':
+            return RequestOutcome('already-solved')
+        attacker_white = _subtree_attacker_white(root)
+        counts = {'searches_queued': 0, 'searches_waiting': 0,
+                  'positions_searched': 0, 'positions_others': 0}
+
+        def counted():
+            return counts['searches_queued'] + counts['searches_waiting']
+
+        deepest = plies = scanned = 0
+        stop = 'exhausted'
+        visited = {root.key}
+        level = [(root.key, route)]
+        while level and stop == 'exhausted':
+            if counted() >= SUBTREE_TASK_CAP:
+                stop = 'cap'
+                break
+            if plies >= FRONTIER_DESCENT_MAX_PLIES:
+                stop = 'depth-guard'
+                break
+            plies += 1
+            following = []
+            for start in range(0, len(level), SUBTREE_CHUNK):
+                if scanned >= SUBTREE_SCAN_CAP:
+                    stop = 'scan-limit'
+                    break
+                parents = _subtree_parents(level[start:start + SUBTREE_CHUNK])
+                replies, read = _subtree_replies(
+                    [parent.key for parent in parents])
+                scanned += read
+                candidates = _subtree_candidates(parents, replies,
+                                                 attacker_white, visited)
+                searched, live = _subtree_coverage(
+                    [child.key for child, _route in candidates], requested_by)
+                for child, child_route in candidates:
+                    if counted() >= SUBTREE_TASK_CAP:
+                        stop = 'cap'
+                        break
+                    if child.key in searched:
+                        counts['positions_searched'] += 1
+                        following.append((child.key, child_route))
+                        continue
+                    whose = live.get(child.key)
+                    if whose == 'mine':
+                        counts['searches_waiting'] += 1
+                        continue
+                    if whose == 'others':
+                        counts['positions_others'] += 1
+                        continue
+                    # ``Position(key=...)`` is only a handle: the purchase
+                    # locks and re-reads the row itself.
+                    outcome = _request_rung(Position(key=child.key),
+                                            requested_by, child_route,
+                                            only_if_missing=True)
+                    if outcome == 'already-analyzed':
+                        # Its search landed between the look and the lock.
+                        counts['positions_searched'] += 1
+                        following.append((child.key, child_route))
+                    elif outcome in ('queued', 'already-queued'):
+                        counts['searches_queued'] += 1
+                        deepest = plies
+                    # 'already-solved': it closed in between, nothing to ask.
+                if stop != 'exhausted':
+                    break
+            level = following
+        if counts['searches_queued']:
+            DBEvent.objects.create(kind=SUBTREE_EVENT, payload={
+                'key': root.key, 'queued': counts['searches_queued'],
+                'waiting': counts['searches_waiting'], 'plies': deepest,
+                'stop': stop})
+        return RequestOutcome('expanded' if counted() else 'saturated',
+                              subtree=True, subtree_plies=deepest,
+                              subtree_stop=stop, positions_scanned=scanned,
+                              **counts)
 
 
 # Punto 2 del breadth-swap: desacuerdo propio-vs-respaldado que ya mueve el
@@ -6265,8 +6623,7 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
     frontera un ply mas abajo (estilo proof-number search), descendiendo por
     el hijo mas prometedor si hace falta.  Si el descenso se declara
     saturado, la informacion marginal vuelve a ser la profundidad y se cae
-    al peldano clasico.  Sin el flag, la escalera de siempre; agotada
-    (10B ya COMPLETED), la peticion se convierte en la misma expansion.
+    al peldano clasico.  Sin el flag, la escalera de siempre.
     ``budget_floor`` (peldano elegido a mano, ya validado por la vista) APAGA
     ese swap: el swap existe porque la informacion marginal de un click POR
     DEFECTO suele estar en la anchura, y quien elige un peldano esta diciendo
@@ -6274,12 +6631,23 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
     el motor me oriente el mejor camino", que es la queja que acoto el swap en
     primer lugar (§ ``_breadth_swap_eligible``).
 
+    Once the ladder is spent (2B COMPLETED here), the request buys the
+    searches below the position instead (§ ``request_subtree``).  A
+    ``budget_floor`` of SUBTREE_REQUEST_NODES is not a rung: it is the last
+    stop of the depth slider, and it buys those searches whatever the ladder
+    here says.
+
     ``only_if_missing`` (§ ``_request_rung``) asks about THIS node and
     nothing else, so it turns the swap off as well and never falls through to
-    an expansion.
+    the searches below; asking for both at once is a caller's bug.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
     | 'saturated', y 'already-analyzed' solo con ``only_if_missing``."""
+    if budget_floor == SUBTREE_REQUEST_NODES:
+        if only_if_missing:
+            raise ValueError('only_if_missing asks about one position; it '
+                             'cannot be combined with the subtree request')
+        return request_subtree(pos, requested_by=requested_by, route=route)
     with atomic():
         swapped = False
         if budget_floor is None and not only_if_missing \
@@ -6303,7 +6671,7 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
             return RequestOutcome(outcome)
         if swapped:
             return RequestOutcome('saturated')
-        return _descend_frontier(pos, requested_by=requested_by, route=route)
+        return request_subtree(pos, requested_by=requested_by, route=route)
 
 
 def notification_deserved(source, budget_nodes):

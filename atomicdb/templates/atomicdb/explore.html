@@ -128,7 +128,8 @@
     {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} &mdash; {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
-      <button class="reqbtn" id="reqbtn">Request analysis</button>
+      <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
+        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>Request analysis</button>
       {% comment %}El boton dice QUE compra y CUANTAS: "how I'm supposed to
       cover such node by actual analysis, by clicking every move?" — no, con
       este click, y esto es lo que cubre.  El tooltip mantiene el puente con la
@@ -177,10 +178,12 @@
         <input type="range" id="depth" min="0" max="{{ depth_max_index }}"
                step="1" value="0" aria-describedby="depthnow"
                aria-valuetext="{{ depth_default_label }} nodes">
-        <span class="depthticks" aria-hidden="true">{% for rung in depth_rungs %}<span>{{ rung.label }}</span>{% endfor %}</span>
+        <span class="depthticks" aria-hidden="true">{% for rung in depth_rungs %}<span title="{{ rung.label }} {{ rung.unit }}">{{ rung.label }}</span>{% endfor %}</span>
       </span>
+      {% comment %}The last stop is not a node count: it is the searches below
+      the position, so the word after the number changes with it.{% endcomment %}
       <span class="depthnow"><strong id="depthnow">{{ depth_default_label }}</strong>
-        nodes{% if depth_spent_label %} <span class="dim">&middot; already searched to {{ depth_spent_label }}</span>{% endif %}</span>
+        <span id="depthunit">nodes</span>{% if depth_spent_label %} <span class="dim">&middot; already searched to {{ depth_spent_label }}</span>{% endif %}</span>
     </div>
     {{ depth_rungs|json_script:"atomicdb-depth-rungs" }}
     {% endif %}
@@ -278,17 +281,21 @@
       // POST sale byte a byte como el de siempre.
       const depth = document.getElementById('depth');
       const depthNow = document.getElementById('depthnow');
+      const depthUnit = document.getElementById('depthunit');
       const rungs = JSON.parse(
         document.getElementById('atomicdb-depth-rungs').textContent);
+      // The chosen stop, or null for the default one. The last stop is told
+      // apart by its subtree flag, never by its place in the list.
       function chosenRung() {
         const index = Number(depth.value);
-        return index > 0 && rungs[index] ? String(rungs[index].nodes) : '';
+        return index > 0 && rungs[index] ? rungs[index] : null;
       }
       depth.addEventListener('input', function () {
         const rung = rungs[Number(depth.value)];
         if (!rung) { return; }
         depthNow.textContent = rung.label;
-        depth.setAttribute('aria-valuetext', rung.label + ' nodes');
+        depthUnit.textContent = rung.unit;
+        depth.setAttribute('aria-valuetext', rung.label + ' ' + rung.unit);
       });
       {% endif %}
       function showNote(text, spent) {
@@ -296,13 +303,16 @@
         note.classList.toggle('spent', !!spent);
         note.hidden = !text;
       }
-      // Past the top rung the click stops buying HERE, and the two endings
-      // look identical from the button: one queued work further down, the
-      // other found the whole reachable frontier already bought.  Reporting
-      // both as "queued" (or as nothing at all) is what made an advanced
-      // visitor read a working queue as a broken one.  The counters the
-      // endpoint already returns are the honest answer, so they get said.
+      // When the click buys below this position, the two endings look
+      // identical from the button: one queued work further down, the other
+      // found the whole reachable frontier already bought.  Reporting both
+      // as "queued" (or as nothing at all) is what made an advanced visitor
+      // read a working queue as a broken one.  The counters the endpoint
+      // already returns are the honest answer, so they get said.  The
+      // searches below the position (the ladder spent, or the slider's last
+      // stop) come with their sentence already written by the server.
       function descentNote(d) {
+        if (d.subtree) { return d.message || ''; }
         const plies = Number(d.descent_plies) || 0;
         if (d.status === 'expanded') {
           // Antes decia "Budget exhausted here", que era mentira en el caso
@@ -427,10 +437,15 @@
         const body = {route: playRoute};
         {% if depth_rungs %}
         const rung = chosenRung();
-        if (rung) { body.budget = rung; }
-        // P2 (votada 28-ago): el peldano de 10B pide confirmacion explicita.
-        if (Number(rung) === 10000000000) {
-          if (!window.confirm('This queues a 10,000,000,000-node search. Sure?')) return;
+        if (rung) { body.budget = String(rung.nodes); }
+        // The searches below the position ask first, once per click: a retry
+        // after a busy server does not ask again. Saying no leaves the button
+        // as it was, ready for another click.
+        if (rung && rung.subtree) {
+          if (attempt === 0 && !window.confirm(rung.confirm)) {
+            btn.disabled = false;
+            return;
+          }
           body.confirm = '1';
         }
         {% endif %}
@@ -477,11 +492,11 @@
               // producirlo; si llega, la escalera cambio bajo una pestana
               // abierta y recargar la pone al dia.
               'bad-budget': 'That depth is gone, reload the page',
-              'confirm-10b': '10B requests need the confirmation dialog',
+              'confirm-10b': 'That option needs the confirmation dialog',
               {% endif %}
               'already-solved': 'Already solved',
-              // depth ladder spent here: the request goes one ply deeper,
-              // and deeper still while every candidate it meets is spent.
+              // The request bought below this position: the searches below
+              // it once the ladder here is spent, or the slider's last stop.
               // The counters live in the note beside the button; the button
               // itself only says what it is doing now.
               'expanded': 'Queued below, waiting for a worker...',

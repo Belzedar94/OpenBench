@@ -22,6 +22,8 @@ from .testing import TestCase, worker_account
 
 
 LADDER = ingest.REQUEST_BUDGET_LADDER
+# The last stop: not a rung, the searches below the position.
+SUBTREE = ingest.SUBTREE_REQUEST_NODES
 # Todo lo que el explorador pinta SOLO cuando hay selector: el control, los
 # datos que lo alimentan y el cableado que lo lee.  Son tres formas distintas
 # de filtrarse — y la tercera se filtro de verdad: el JS nombraba el bloque de
@@ -166,7 +168,8 @@ class VisibilityTests(TestCase):
         Profile.objects.filter(user__username='expelled').update(enabled=False)
 
         response = _signed_in('expelled').post(
-            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
+            f'/atomicdb/request/{self.pos.key}/',
+            {'budget': SUBTREE, 'confirm': '1'})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[0])
@@ -195,9 +198,23 @@ class OfferedRungTests(TestCase):
         context = self._context()
 
         self.assertEqual([rung['nodes'] for rung in context['depth_rungs']],
-                         list(LADDER))
+                         list(LADDER) + [SUBTREE])
         self.assertEqual(context['depth_default_label'], '128.0M')
         self.assertEqual(context['depth_spent_label'], '')
+
+    def test_the_last_stop_is_flagged_as_the_searches_below(self):
+        # A page tells the last stop apart by its flag, not by its place: the
+        # top of the ladder is 2B now and the stop after it is not a rung.
+        stops = self._context()['depth_rungs']
+
+        self.assertEqual([stop['subtree'] for stop in stops],
+                         [False] * len(LADDER) + [True])
+        last = stops[-1]
+        self.assertEqual(last['label'], '78×128M')
+        self.assertIn('78 searches of 128M below this position',
+                      last['confirm'])
+        self.assertIn('below this position', last['unit'])
+        self.assertEqual({stop['unit'] for stop in stops[:-1]}, {'nodes'})
 
     def test_a_spent_rung_is_never_offered_again(self):
         # 128M completado: la escalera empieza en 512M, que es exactamente lo
@@ -208,7 +225,7 @@ class OfferedRungTests(TestCase):
         context = self._context()
 
         self.assertEqual([rung['nodes'] for rung in context['depth_rungs']],
-                         list(LADDER[1:]))
+                         list(LADDER[1:]) + [SUBTREE])
         self.assertEqual(context['depth_default_label'], '512.0M')
         self.assertEqual(context['depth_spent_label'], '128.0M')
 
@@ -220,16 +237,20 @@ class OfferedRungTests(TestCase):
 
         self.assertEqual(self._context()['depth_spent_label'], '8.0M')
 
-    def test_one_rung_left_is_no_choice_at_all(self):
-        # Con 2B gastado solo queda 10B: un deslizador de una sola parada no
-        # elige nada y el boton ya compra exactamente eso.
+    def test_the_last_rung_still_leaves_a_choice(self):
+        # 512M spent: the button buys 2B, and the searches below the position
+        # are still the other stop.
         _completed(self.pos, LADDER[-2])
 
-        self.assertEqual(self._context(), {})
+        context = self._context()
+
+        self.assertEqual([rung['nodes'] for rung in context['depth_rungs']],
+                         [LADDER[-1], SUBTREE])
+        self.assertEqual(context['depth_max_index'], 1)
 
     def test_a_spent_ladder_offers_nothing(self):
-        # Aqui el click se convierte en anchura un ply mas abajo, asi que un
-        # selector de PROFUNDIDAD prometeria algo que la vista no hace.
+        # 2B spent: the button itself buys the searches below the position,
+        # and a slider with a single stop chooses nothing.
         _completed(self.pos, LADDER[-1])
 
         self.assertEqual(self._context(), {})
@@ -298,15 +319,26 @@ class ChosenRungTests(TestCase):
 
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[2])
 
-    def test_the_top_rung_requires_an_explicit_confirmation(self):
+    def test_the_last_stop_requires_an_explicit_confirmation(self):
+        _worker('wolfram', seen_days_ago=1)
+
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': SUBTREE})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['status'], 'confirm-10b')
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    def test_the_top_rung_no_longer_asks_for_one(self):
+        # 2B is a rung like the others; the confirmation belongs to the stop
+        # that queues dozens of searches.
         _worker('wolfram', seen_days_ago=1)
 
         response = _signed_in('wolfram').post(
             f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[-1]})
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()['status'], 'confirm-10b')
-        self.assertFalse(AnalysisTask.objects.exists())
+        self.assertEqual(response.json()['status'], 'queued')
+        self.assertEqual(_pending(self.pos).budget_nodes, LADDER[-1])
 
     def test_a_choice_below_the_due_rung_cannot_cheapen_the_request(self):
         # 512M es lo que toca; pedir 128M no compra una busqueda mas pobre —

@@ -99,11 +99,14 @@ PROMISE_FRESH_SECONDS = 180
 # funcion, como hace ``contributors.present``).  Un segundo numero igual al
 # suyo seria una promesa que dejaria de ser cierta el dia que cambie el de
 # verdad.
-# Techo de lo que se promete.  El peldano mas alto de la escalera son 10B, que
-# en la maquina mas lenta que ha pasado por la flota son minutos, no horas: una
-# estimacion de medio dia no es una estimacion larga, es una lectura de
-# velocidad rota (un motor recien arrancado, un nps de tres cifras).  Por
-# encima de esto se dice que se esta buscando y no se dice cuanto.
+# Ceiling of what is promised.  The longest search a request can be waiting on
+# is 10B nodes: the ladder ends at 2B now and the option that replaced the 10B
+# rung buys 128M searches (§ ``ingest.SUBTREE_REQUEST_NODES``), but 10B
+# requests made before are still in the queue.  On the slowest machine that
+# has served the fleet that is minutes, not hours: an estimate of half a day is
+# not a long estimate, it is a broken speed reading (an engine just started, a
+# three-digit nps).  Above this the line says the search is running and does
+# not say for how long.
 MAX_PROMISE_SECONDS = 6 * 3600
 # Tope de filas vivas que se leen de una posicion.  Son como mucho dos (el
 # arriendo en curso y su relevo pendiente), pero la lectura va acotada por

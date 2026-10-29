@@ -41,8 +41,10 @@ A second-tier formal certification roadmap exists separately.</p>
 worker queue, so pointing the search at a line you care about is one click.
 Limits apply per visitor to keep the queue healthy.</p>
 <p class="dim" style="font-size:.9rem">Repeated visitor requests buy genuinely
-deeper searches: 128M, 512M, 2B and then 10B nodes. A healthy worker keeps a
-multi-hour lease alive explicitly, so a deep task cannot be assigned twice.</p>
+deeper searches: 128M, 512M and then 2B nodes. After that, a request queues up
+to {{ subtree_cap }} searches of 128M on the lines below the position, the best
+lines first. A healthy worker keeps a multi-hour lease alive explicitly, so a
+deep task cannot be assigned twice.</p>
 <p class="dim" style="font-size:.9rem">Asking for a position somebody else
 already asked for joins their request instead of queueing a duplicate: every
 account that asked is notified when the analysis lands, and the more people
@@ -91,18 +93,20 @@ analysed before then has a series that starts partway through:
 the missing entries.</p>
 <p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
 <code>fen</code> queues analysis for that position, taking exactly the path the
-explorer button takes. Same budget ladder (128M, then 512M, 2B, 10B on repeat
-requests), same deduplication, same queue cap, and the same joining rule: if
-the position is already queued, you are recorded as another requester rather
-than queueing a duplicate.</p>
+explorer button takes. Same budget ladder (128M, then 512M and 2B on repeat
+requests, then up to {{ subtree_cap }} searches of 128M below the position),
+same deduplication, same queue cap, and the same joining rule: if the position
+is already queued, you are recorded as another requester rather than queueing
+a duplicate.</p>
 <p class="dim" style="font-size:.9rem">Optional fields:
 <code>username</code> and <code>password</code> put the request on your
 account, which is what buys the notification when it lands, the affinity with
 your own workers, and your place in the fair share; without them the request is
 anonymous and served like a click without a session. <code>budget</code> picks
-a ladder rung, and is honoured for the same accounts the explorer's depth
-slider is offered to. Session cookies are deliberately ignored here, so a page
-in your browser cannot spend your queue behind your back.</p>
+a ladder rung, or <code>10000000000</code> for the searches below the
+position, and is honoured for the same accounts the explorer's depth slider is
+offered to. Session cookies are deliberately ignored here, so a page in your
+browser cannot spend your queue behind your back.</p>
 <p class="dim" style="font-size:.9rem">The reply carries <code>status</code>,
 the position <code>key</code> and canonical <code>fen</code>, the
 <code>task</code> id and its <code>budget_nodes</code> when there is a live one,
@@ -110,9 +114,10 @@ the position <code>key</code> and canonical <code>fen</code>, the
 (true when you joined a request somebody else had already made), and
 <code>seeded</code> when the FEN was not in the tree and was added by this call.
 <code>status</code> is <code>queued</code>, <code>already-queued</code>,
-<code>already-solved</code>, <code>expanded</code> (the ladder here is spent, so
-the work went to the replies below), <code>saturated</code> (nothing left to buy
-here or below), or <code>refused</code>. A refusal explains itself in
+<code>already-solved</code>, <code>expanded</code> (the work went to the
+positions below, with a <code>message</code> saying what was queued),
+<code>saturated</code> (nothing left to buy here or below), or
+<code>refused</code>. A refusal explains itself in
 <code>reason</code>: an unreadable FEN or a bad budget give 400, wrong
 credentials 403, too many calls 429, and a full queue or a busy database 503
 with a <code>Retry-After</code>.</p>
@@ -152,7 +157,7 @@ this way is never replaced.</p>
 <p class="dim" style="font-size:.9rem">-T is the engine thread count per task
 (any number, no need to be a multiple of anything) and --hash is the engine
 hash in MB. Memory does <em>not</em> scale with the node budget: the
-transposition table is fixed-size, so a 10B search uses the same RAM as a
+transposition table is fixed-size, so a 2B search uses the same RAM as a
 128M one, it just runs longer; ~1&nbsp;GB of free RAM per engine instance is
 enough to handle anything. What a bigger table buys is search <em>quality</em>
 on long runs (less entry overwriting): if you can spare the RAM, run
