@@ -46,7 +46,7 @@ from django.db.models import BooleanField, Case, Q, Value, When
 from django.shortcuts import render
 from django.utils import timezone
 
-from . import contributors, metrics, views
+from . import contributors, idle_repair, metrics, views
 from .models import AnalysisTask, WorkerPing
 
 USER = AnalysisTask.Source.USER
@@ -98,7 +98,7 @@ def current_tasks(pings, now):
                               default=Value(False),
                               output_field=BooleanField()))
         .order_by('machine', 'leased_at', 'id')
-        .values('id', 'position_id', 'budget_nodes', 'source',
+        .values('id', 'position_id', 'budget_nodes', 'source', 'arm',
                 'requested_by', 'also_requested_by', 'route', 'machine',
                 'leased_at', 'legacy'))
     by_id = {row['id']: row for row in leases}
@@ -123,6 +123,10 @@ def _requester(row):
     """Who asked for the task: an account, an anonymous visitor or nobody."""
     if row['source'] != USER:
         # AUTO and FILL: the selector and its arms chose it, nobody asked.
+        # The idle fleet's repairs say so, being searches the tree already
+        # had once (§ idle_repair).
+        if row.get('arm') == idle_repair.REPAIR_ARM:
+            return {'requester': 'server', 'reason': 'repair'}
         return {'requester': 'server'}
     if not row['requested_by']:
         return {'requester': 'anonymous'}

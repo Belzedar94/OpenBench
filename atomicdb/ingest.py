@@ -902,11 +902,18 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # es como el walker encuentra el siguiente cuello de botella en vez de
     # volver a la misma punta.  Con el descenso df-pn no hace nada.
     cascaded = _queue_value_cascade(pos)
+    # The idle fleet's repairs: a shallow search this position now shows, or
+    # a parent with no search of its own between it and a searched position,
+    # is bought one more search for when nobody is requesting (§ idle_repair).
+    from . import idle_repair
+    repaired = idle_repair.queue_from_landing(pos, parent_keys)
     summary = {'closed_children': closed_here, 'backed_up': changed,
                'backed_evals': backed, 'uncertainty_expanded': uncertainty,
                'witness_refuted': refuted}
     if cascaded:
         summary['cascaded'] = cascaded
+    if repaired:
+        summary['repaired'] = repaired
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
@@ -5064,10 +5071,15 @@ def top_up_analysis_pool(target=None):
     contando SOLO las tareas AUTO: si contase toda la cola, un backlog de
     peticiones USER o de FILL apagaria el colchon justo cuando la flota
     grande lo va a necesitar, y al reves, el colchon les comeria el cupo a
-    los brazos si corriese antes."""
+    los brazos si corriese antes.
+
+    The idle fleet's repairs are AUTO as well, and they are left out: they
+    wait for the narrow slots only (§ idle_repair), so counting them would
+    shrink the pool every other slot eats from."""
     target = ANALYSIS_POOL_TARGET if target is None else target
     pending = AnalysisTask.objects.filter(
-        state='PENDING', source=AnalysisTask.Source.AUTO).count()
+        state='PENDING', source=AnalysisTask.Source.AUTO).exclude(
+            arm=IDLE_REPAIR_ARM).count()
     if pending >= target:
         return 0
     return len(next_tasks(target - pending))
@@ -7165,10 +7177,17 @@ ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
 # pisa (§ OpenSite/settings.py).  La cascada lleva el doble que los otros dos
 # porque compra la mirada mas barata de todas — 8M, un peldano de
 # reconocimiento — y es la que descubre por donde sigue el cuello.
+#
+# The idle fleet's repairs (§ idle_repair) pay here too: each one is a search
+# bought on the strength of a search that landed, the same loop the walker's
+# arms are capped for.  Sixty an hour is a small share of what the fleet
+# serves when it is idle, which is the only time an AUTO task is served.
+IDLE_REPAIR_ARM = 'repair'
 ARM_RATE_SETTING = {
     VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),
     QUALITY_ARM: ('ATOMICDB_ARM_RATE_QUALITY', 120),
     VALUE_DESCEND_ARM: ('ATOMICDB_ARM_RATE_DESCEND', 120),
+    IDLE_REPAIR_ARM: ('ATOMICDB_ARM_RATE_REPAIR', 60),
 }
 
 
@@ -7182,9 +7201,16 @@ def arm_rate(arm):
     default.  Es la leccion de siempre con los conmutadores cableados al
     entorno — el despliegue tiene que poder accionarlos, y equivocarse al
     teclear uno no puede ser un incidente.
+
+    A knob that ``OpenSite/settings.py`` does not mirror yet is read from the
+    environment directly, so a new arm has its lever (and its rollback, ``0``)
+    from the day it is deployed.
     """
     name, default = ARM_RATE_SETTING[arm]
-    raw = str(getattr(settings, name, '')).strip()
+    raw = getattr(settings, name, None)
+    if raw is None:
+        raw = os.environ.get(name, '')
+    raw = str(raw).strip()
     return int(raw) if raw.isdigit() else default
 
 
