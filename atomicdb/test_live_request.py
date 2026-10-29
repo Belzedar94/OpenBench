@@ -49,7 +49,10 @@ LANE_LAYOUT_QUERIES = 0
 _TEXT = re.compile(r'id="livereq-text">([^<]*)</span>')
 _ELEMENT = re.compile(r'<p class="livereq"([^>]*)>')
 
-TOP_RUNG = ingest.REQUEST_BUDGET_LADDER[-1]
+# A 10B search, the longest a request can still be waiting on: no request
+# buys one any more, but the ones made before the ladder ended at 2B are
+# still in the queue, and they are what this line has the most to narrate.
+TOP_RUNG = 10_000_000_000
 # La maquina del caso real: 9,48M nps.  Con 10B eso son 1054s, 17,6 minutos.
 MEASURED_NPS = 9_481_948
 

@@ -1,11 +1,13 @@
-"""Frontier expansion: what a visitor request buys once the ladder is spent.
+"""Frontier expansion: the breadth swap's walk one ply below a position.
 
-The depth ladder (128M -> 512M -> 2B -> 10B) stops being useful the moment
-10B is COMPLETED on a position; buying it again would repeat a search we
-already have.  From there the request is spent one ply deeper instead, the
-way proof-number search grows a frontier: an OR node (White, the attacker of
-the conjecture, to move) only needs one good try; an AND node (Black to move)
-has to answer every reply.
+With ``ATOMICDB_BREADTH_SWAP`` on, a revisit is spent one ply deeper instead
+of on the next rung, the way proof-number search grows a frontier: an OR node
+(White, the attacker of the conjecture, to move) only needs one good try; an
+AND node (Black to move) has to answer every reply.  The walk itself is
+driven directly here (``ingest._descend_frontier``).
+
+The plain ladder (128M -> 512M -> 2B) and what a request buys once it is
+spent, the searches below the position, are in test_subtree_request.py.
 """
 
 from unittest import mock
@@ -13,6 +15,7 @@ from unittest import mock
 from django.test import override_settings
 
 from . import ingest, logic
+from .database import atomic
 from .models import AnalysisTask, DBEvent, Edge, Position, RequestLog
 from .testing import TestCase, worker_account
 
@@ -43,6 +46,12 @@ def _queued_moves(parent):
 def _multipv(*moves):
     return [{'move': uci, 'eval_cp': 40 - 10 * i, 'mate': None, 'pv': [uci]}
             for i, uci in enumerate(moves)]
+
+
+def _descend(pos, **kwargs):
+    """The breadth swap's walk, inside the transaction a request gives it."""
+    with atomic():
+        return ingest._descend_frontier(pos, **kwargs)
 
 
 def _spent_line(*moves):
@@ -319,7 +328,7 @@ class OrNodeExpansionTests(TestCase):
         pos = self._root('e2e4', 'd2d4', 'g1f3', 'b1c3')
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome, 'expanded')
         self.assertEqual(outcome.detail['children_queued'],
@@ -330,7 +339,7 @@ class OrNodeExpansionTests(TestCase):
         pos = self._root('e2e4', 'd2d4', 'g1f3')
         _exhaust_ladder(pos)
 
-        ingest.request_analysis(pos)
+        _descend(pos)
 
         tasks = AnalysisTask.objects.filter(position__edges_in__parent=pos)
         self.assertEqual(tasks.count(), 3)
@@ -348,7 +357,7 @@ class OrNodeExpansionTests(TestCase):
                                                      closure='TERMINAL')
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertFalse(AnalysisTask.objects.filter(position=solved).exists())
         self.assertEqual(_queued_moves(pos), ['b1c3', 'd2d4', 'g1f3'])
@@ -364,7 +373,7 @@ class OrNodeExpansionTests(TestCase):
             ).update(eval_cp=eval_cp)
         _exhaust_ladder(pos)
 
-        ingest.request_analysis(pos)
+        _descend(pos)
 
         self.assertEqual(_queued_moves(pos), ['d2d4', 'e2e4', 'g1f3'])
 
@@ -372,7 +381,7 @@ class OrNodeExpansionTests(TestCase):
         pos = self._root()
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['children_queued'],
                          ingest.FRONTIER_BLIND_WIDTH)
@@ -384,7 +393,7 @@ class OrNodeExpansionTests(TestCase):
         pos = self._root('e2e5', 'd2d4', 'g1f3', 'b1c3')
         _exhaust_ladder(pos)
 
-        ingest.request_analysis(pos)
+        _descend(pos)
 
         self.assertEqual(_queued_moves(pos), ['b1c3', 'd2d4', 'g1f3'])
 
@@ -404,7 +413,7 @@ class AndNodeExpansionTests(TestCase):
         self.assertLess(len(legal), ingest.FRONTIER_AND_CAP)
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome, 'expanded')
         self.assertEqual(outcome.detail['children_queued'], len(legal))
@@ -415,7 +424,7 @@ class AndNodeExpansionTests(TestCase):
         pos = self._after_e4()
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['children_queued'], 5)
         self.assertEqual(len(_queued_moves(pos)), 5)
@@ -426,7 +435,7 @@ class AndNodeExpansionTests(TestCase):
         pos = self._after_e4()
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['children_queued'], 4)
 
@@ -448,7 +457,7 @@ class PartialExhaustionTests(TestCase):
         spent = _exhaust_ladder(deep_child)
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['children_exhausted'], 1)
         self.assertEqual(outcome.detail['children_queued'], 2)
@@ -473,7 +482,7 @@ class PartialExhaustionTests(TestCase):
             source=AnalysisTask.Source.AUTO)
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['children_queued'], 3)
         self.assertEqual(AnalysisTask.objects.get(position=child).source,
@@ -508,7 +517,7 @@ class DescentTests(TestCase):
             pos, {'e2e4': 50, 'd2d4': 30, 'g1f3': 10})
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome, 'expanded')
         self.assertEqual(outcome.detail['descent_plies'], 1)
@@ -527,7 +536,7 @@ class DescentTests(TestCase):
             pos, {'c7c5': -30, 'g8f6': 10, 'e7e5': 50})
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['descent_key'], children['c7c5'].key)
 
@@ -542,7 +551,7 @@ class DescentTests(TestCase):
             status='WHITE_WIN', closure='MATE_PV')
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['descent_key'], children['c7c5'].key)
         self.assertFalse(Edge.objects.filter(parent=children['b8c6']).exists())
@@ -552,7 +561,7 @@ class DescentTests(TestCase):
     def test_the_descent_keeps_going_while_the_line_is_spent(self):
         nodes = _spent_line('e2e4', 'e7e5', 'g1f3')
 
-        outcome = ingest.request_analysis(nodes[0])
+        outcome = _descend(nodes[0])
 
         # It stops at the last node that still has something to buy, and the
         # tasks land one ply below THAT, exactly as a click there would.
@@ -573,7 +582,7 @@ class DescentTests(TestCase):
         nodes = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
         self.assertEqual(nodes[-1].key, nodes[0].key)
 
-        outcome = ingest.request_analysis(nodes[0])
+        outcome = _descend(nodes[0])
 
         self.assertEqual(outcome, 'saturated')
         self.assertEqual(outcome.detail['descent_stop'], 'no-candidate')
@@ -585,7 +594,7 @@ class DescentTests(TestCase):
     def test_the_ply_guard_stops_a_long_spent_line(self):
         nodes = _spent_line('e2e4', 'e7e5', 'g1f3', 'b8c6')
 
-        outcome = ingest.request_analysis(nodes[0])
+        outcome = _descend(nodes[0])
 
         self.assertEqual(outcome, 'saturated')
         self.assertEqual(outcome.detail['descent_stop'], 'depth-guard')
@@ -601,7 +610,7 @@ class DescentTests(TestCase):
                 status='DRAW', closure='TERMINAL')
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome, 'saturated')
         self.assertEqual(outcome.detail['descent_plies'], 0)
@@ -618,7 +627,7 @@ class DescentTests(TestCase):
             pos, {'e2e4': 50, 'd2d4': 30, 'g1f3': 10})
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome.detail['descent_plies'], 1)
         self.assertEqual(outcome.detail['descent_key'], children['e2e4'].key)
@@ -634,7 +643,7 @@ class DescentTests(TestCase):
         pos = ingest.get_or_create_position(logic.start_fen())
         _exhaust_ladder(pos)
 
-        outcome = ingest.request_analysis(pos)
+        outcome = _descend(pos)
 
         self.assertEqual(outcome, 'saturated')
         self.assertEqual(outcome.detail['descent_stop'], 'budget-spent')
@@ -645,7 +654,7 @@ class DescentTests(TestCase):
     def test_the_way_down_queues_nothing_above_where_it_stops(self):
         nodes = _spent_line('e2e4', 'e7e5', 'g1f3')
 
-        ingest.request_analysis(nodes[0])
+        _descend(nodes[0])
 
         for node in nodes[:-1]:
             self.assertFalse(
@@ -660,28 +669,20 @@ class DescentTests(TestCase):
 
 class DescentRequestApiTests(TestCase):
 
-    @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
-    @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
-    def test_saturated_is_reported_with_its_counters(self):
-        line = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
-
-        body = self.client.post(f'/atomicdb/request/{line[0].key}/').json()
-
-        self.assertEqual(body['status'], 'saturated')
-        self.assertEqual(body['descent_stop'], 'no-candidate')
-        self.assertEqual(body['descent_plies'], 3)
-        self.assertEqual(body['children_exhausted'], 4)
-
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
     @mock.patch('atomicdb.ingest.FRONTIER_OR_WIDTH', 1)
     @mock.patch('atomicdb.ingest.FRONTIER_AND_CAP', 1)
     def test_a_saturated_click_still_leaves_one_receipt(self):
+        # The breadth swap walks the spent cycle, finds nothing and falls
+        # back to a ladder that is spent too.
         line = _spent_line('g1f3', 'g8f6', 'f3g1', 'f6g8')
         before = AnalysisTask.objects.count()
 
-        self.client.post(f'/atomicdb/request/{line[0].key}/')
+        body = self.client.post(f'/atomicdb/request/{line[0].key}/').json()
 
-        # It bought nothing, but it did the walking: the hourly allowance is
+        # It bought nothing, but it did the walking: the per-position dedup is
         # what bounds how often a visitor can pay for that walk.
+        self.assertEqual(body['status'], 'saturated')
         self.assertEqual(
             RequestLog.objects.filter(position=line[0]).count(), 1)
         self.assertEqual(AnalysisTask.objects.count(), before)
@@ -723,6 +724,13 @@ class DescentRequestApiTests(TestCase):
 
 
 class ExpansionRequestApiTests(TestCase):
+    """A spent ladder through the endpoint.
+
+    Without the breadth swap the click buys the searches below the position
+    (test_subtree_request.py has the walk); with it, the frontier expansion.
+    Both land their tasks on the children here, so the dedup and the receipt
+    rules read the same.
+    """
 
     def _exhausted_root(self):
         pos = ingest.get_or_create_position(logic.start_fen())
@@ -731,6 +739,7 @@ class ExpansionRequestApiTests(TestCase):
         _exhaust_ladder(pos)
         return pos
 
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
     def test_expansion_reports_its_counters(self):
         pos = self._exhausted_root()
 

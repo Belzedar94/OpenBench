@@ -109,7 +109,14 @@ LEASES_PER_MACHINE = 32
 # peldano mas alto a TODO el mundo.  Y el tope solo ordena, nunca deja hierro
 # parado: si al respetarlo no queda nada que dar, ``api_lease`` repite el
 # reparto sin el (§ ``choose_pending``, segunda pasada).
-DEEP_TASK_NODES = ingest.REQUEST_BUDGET_LADDER[-1]
+#
+# THE THRESHOLD STAYS AT 10B although the request ladder now ends at 2B
+# (§ ``ingest.SUBTREE_REQUEST_NODES``).  The cap exists for half-hour leases;
+# following the ladder down would start capping 2B ones, which is a different
+# policy.  Nothing queues a 10B search any more, so from here on the cap only
+# orders the 10B requests that were already waiting, and the ones a withdrawal
+# brings back as they were (§ ``ingest.restore_cancelled``).
+DEEP_TASK_NODES = 10_000_000_000
 DEEP_LEASES_POOL_SHARE = 3
 DEEP_LEASES_FLOOR = 1
 # Cuantos ids de la cola ya ordenada se bloquean de una vez.  Mismo tamano que
@@ -1977,6 +1984,36 @@ def _pv_verify_message(queued, detail):
             'to verify.')
 
 
+def _subtree_message(detail):
+    """What a request for the searches below a position did, in a sentence.
+
+    Three endings that look the same from the button: searches went in, the
+    click found the searches it already asked for still waiting (a repeated
+    click), or there was nothing left to buy.  A count alone said none of
+    that.
+    """
+    size = depth.SUBTREE_SEARCH_LABEL
+    queued = detail.get('searches_queued') or 0
+    waiting = detail.get('searches_waiting') or 0
+    if queued:
+        said = (f'Queued {queued} search{"" if queued == 1 else "es"} of '
+                f'{size} below this position '
+                f'({_human_plies(detail.get("subtree_plies") or 0)} deep)')
+        if waiting:
+            said += (f'; {waiting} more {"was" if waiting == 1 else "were"} '
+                     'already queued')
+        return said + '.'
+    if waiting:
+        return (f'Nothing new to queue: {waiting} '
+                f'search{"" if waiting == 1 else "es"} of {size} below this '
+                f'position {"is" if waiting == 1 else "are"} already queued.')
+    if detail.get('subtree_stop') in ('scan-limit', 'depth-guard'):
+        return ('Nothing queued: everything one request can reach below this '
+                'position is already searched, queued or solved.')
+    return ('Nothing left to queue below this position: everything within '
+            'reach is already searched, queued or solved.')
+
+
 def _client_ip(request):
     """Ultima entrada de XFF: la puso nuestro nginx, el cliente no la falsea."""
     return (request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[-1].strip()
@@ -2014,7 +2051,12 @@ def _api_request_once(request, key):
     # vuelta atras una vez arrendado (math_god y Eclipsia, 25-ago); el
     # explorador manda la marca tras un dialogo y un script que de verdad
     # quiere 10B la escribe a mano.
-    if (chosen == ingest.REQUEST_BUDGET_LADDER[-1]
+    #
+    # The last stop is now the searches below the position, the same 10B of
+    # nodes in up to 78 searches, and it keeps the confirmation.  The status
+    # word keeps its name: it names the value on the wire, which did not
+    # change.
+    if (chosen == ingest.SUBTREE_REQUEST_NODES
             and request.POST.get('confirm') != '1'):
         return JsonResponse({'status': 'confirm-10b'}, status=400)
     requested_by = (request.user.username
@@ -2042,7 +2084,7 @@ def _validated_route_for(raw_route, key):
 
 
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
-                   only_if_missing=False, with_place=True):
+                   only_if_missing=False, with_place=True, one_search=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2061,6 +2103,11 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     multi-select of the move list comes here once per ticked move and shows
     no place for any of them, so it would pay that sort up to
     ``MULTI_REQUEST_CAP`` times for nothing (§ ``api_request_moves``).
+
+    ``one_search=True`` buys at most one search on ``pos``: a spent ladder
+    answers ``ingest.LADDER_SPENT`` instead of buying the searches below it
+    (§ ``ingest.request_analysis``).  The same multi-select passes it, so one
+    click on sixty-four moves cannot turn into thousands of searches.
     """
     if only_if_missing and pos.status == 'UNKNOWN':
         # Answered before the dedup and the queue cap: a call with nothing to
@@ -2076,9 +2123,10 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     hour_ago = timezone.now() - timedelta(hours=1)
     # A recent click is only a duplicate while the request it represented is
     # still queued or running.  Once that task has completed, the same visitor
-    # must be able to request the next 128M -> 512M -> 2B -> 10B rung.  A
-    # RequestLog may also have been created merely by adding a new FEN, without
-    # ever creating an AnalysisTask, so the log alone is not evidence of work.
+    # must be able to request the next 128M -> 512M -> 2B rung, and past it
+    # the searches below the position.  A RequestLog may also have been
+    # created merely by adding a new FEN, without ever creating an
+    # AnalysisTask, so the log alone is not evidence of work.
     recent_same_position = RequestLog.objects.filter(
         ip=ip, created__gte=hour_ago, position=pos,
     ).exists()
@@ -2089,9 +2137,12 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     ).exists()
     if recent_same_position and not active_user_request \
             and ingest.ladder_exhausted(pos):
-        # A frontier expansion puts its tasks on the CHILDREN, so the parent
-        # row alone can no longer prove that the previous click is still
-        # being served.  One click stays one expansion event.
+        # Past the ladder a click puts its tasks BELOW the position
+        # (§ ``ingest.request_subtree``), so the parent row alone can no
+        # longer prove that the previous click is still being served.  The
+        # direct children are the cheap check.  Searches further down need
+        # none: the walk counts the requester's own live searches against its
+        # cap, so a click repeated while they wait buys nothing new.
         active_user_request = AnalysisTask.objects.filter(
             position__edges_in__parent=pos,
             source=AnalysisTask.Source.USER,
@@ -2122,16 +2173,21 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
                                           route=route, budget_floor=chosen,
-                                          only_if_missing=only_if_missing)
+                                          only_if_missing=only_if_missing,
+                                          one_search=one_search)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
         if outcome in ('queued', 'already-queued', 'expanded', 'saturated'):
             RequestLog.objects.create(ip=ip, position=pos)
     payload = {'status': str(outcome)}
-    # Only a frontier expansion carries counters; every other status keeps
-    # the exact single-key body explore.html has always parsed.
+    # Only the walks below a position carry counters; every other status
+    # keeps the exact single-key body explore.html has always parsed.
     payload.update(getattr(outcome, 'detail', None) or {})
+    if payload.get('subtree'):
+        # The sentence is composed here, where the counters are, and the
+        # page and the API say it as it is (§ ``_subtree_message``).
+        payload['message'] = _subtree_message(payload)
     if with_place and str(outcome) in ('queued', 'already-queued'):
         ahead = _user_queue_ahead(pos)
         if ahead is not None:
@@ -2212,10 +2268,17 @@ def api_request_moves(request, key):
     * AT MOST ``MULTI_REQUEST_CAP`` MOVES a click, refused whole above it.
     * ONE DEPTH FOR ALL OF THEM: the rung of the slider under the rule of the
       single button (§ ``depth.chosen_rung``), so an account that may not
-      choose has its choice dropped.  The TOP rung is refused
-      (``top-rung-single``): it is meant for one position at a time.  So
-      ``confirm``, which the single button asks for that rung alone, changes
-      nothing here.
+      choose has its choice dropped.  Every rung of the ladder, 2B included,
+      is allowed.  The slider's LAST STOP is refused (``top-rung-single``):
+      it is not a rung but the searches below a position
+      (``ingest.SUBTREE_REQUEST_NODES``), meant for one position at a time.
+      So ``confirm``, which the single button asks for that stop alone,
+      changes nothing here.
+    * ONE SEARCH A MOVE AT MOST.  A move searched to the top of the ladder
+      buys nothing and says so (``ladder-spent``): from its own page the next
+      click buys the searches below it, up to 78, and sixty-four of those in
+      one click would be thousands of searches (§ ``_queue_request``,
+      ``one_search``).
     * A MOVE THAT IS NOT A NODE YET is made exactly as following it would
       make it (§ ``_materialise_child``), and a move that re-enters the line
       the page is on is skipped (``blocked``), for the reason ``goto`` does
@@ -2261,7 +2324,10 @@ def _request_moves(request, key):
     chosen, invalid = depth.chosen_rung(request)
     if invalid:
         return JsonResponse({'status': 'bad-budget'}, status=400)
-    if chosen == ingest.REQUEST_BUDGET_LADDER[-1]:
+    # Keyed on the stop and not on the top of the ladder: 2B, the last rung,
+    # is a choice like the others.  ``chosen`` is None for an account that
+    # may not choose, so its choice of this stop is dropped, not refused.
+    if chosen == ingest.SUBTREE_REQUEST_NODES:
         return JsonResponse({'status': 'top-rung-single'}, status=400)
     tokens = [token.strip()
               for token in (request.POST.get('moves') or '').split(',')]
@@ -2312,7 +2378,8 @@ def _request_moves(request, key):
         child = children.get(uci) or _materialise_child(pos, uci)
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
-            raw_route=f'{route},{uci}' if route else '', with_place=False)
+            raw_route=f'{route},{uci}' if route else '', with_place=False,
+            one_search=True)
         if payload['status'] == 'queue-full-account':
             outcomes.extend((rest, 'queue-full') for rest in wanted[index:])
             break
@@ -2396,11 +2463,11 @@ def api_public_request(request):
 
     EL CAMINO ES EL DEL CLICK, y no es una manera de hablar: el trabajo lo hace
     ``_queue_request``, la misma funcion que sirve al boton.  Mismo dedup por
-    ip+posicion, misma escalera de presupuesto (128M -> 512M -> 2B -> 10B),
-    mismo techo de cola, mismo registro de peticionarios que convierte la
-    segunda peticion de una posicion en un respaldo con su aviso, y misma
-    contabilidad por cuenta.  Esta puerta solo pone lo suyo: identidad, tope y
-    recibo.
+    ip+posicion, misma escalera de presupuesto (128M -> 512M -> 2B, y despues
+    las busquedas de debajo), mismo techo de cola, mismo registro de
+    peticionarios que convierte la segunda peticion de una posicion en un
+    respaldo con su aviso, y misma contabilidad por cuenta.  Esta puerta solo
+    pone lo suyo: identidad, tope y recibo.
 
     LA IDENTIDAD VIAJA EN EL CUERPO Y LA COOKIE DE SESION NO SE MIRA.  Es la
     unica combinacion segura de las tres cosas que esto tiene que ser a la vez.
@@ -2435,6 +2502,13 @@ def api_public_request(request):
     nothing is queued, and otherwise nothing above the target is queued
     (§ ``ingest._request_rung``).  Only this door reads it; the explorer
     button has no use for it.
+
+    ``budget=10000000000`` (``ingest.SUBTREE_REQUEST_NODES``) is the last stop
+    of the depth slider: up to 78 searches of 128M below the position
+    (§ ``ingest.request_subtree``), for the same accounts and with no
+    confirmation, as the top value of this door never had one.  It asks for
+    searches below the position and ``only_if_missing`` asks about the
+    position itself, so the two together are refused for everybody.
     """
     if request.method != 'POST':
         return JsonResponse({'status': 'refused', 'reason': 'POST only'},
@@ -2460,9 +2534,25 @@ def api_public_request(request):
     if invalid:
         return JsonResponse(
             {'status': 'refused',
-             'reason': 'budget must be one of the ladder rungs: '
-                       + ', '.join(str(rung)
-                                   for rung in ingest.REQUEST_BUDGET_LADDER)},
+             'reason': ('budget must be one of the ladder rungs ('
+                        + ', '.join(str(rung)
+                                    for rung in ingest.REQUEST_BUDGET_LADDER)
+                        + f') or {ingest.SUBTREE_REQUEST_NODES}, which '
+                        f'queues up to {ingest.SUBTREE_TASK_CAP} searches '
+                        f'of {ingest.SUBTREE_SEARCH_NODES} below the '
+                        'position')},
+            status=400)
+    only_if_missing = request.POST.get('only_if_missing') in ('1', 'true')
+    if only_if_missing and depth.asks_for_subtree(request.POST.get('budget')):
+        # Refused on what was asked, not on who asked: for an account that
+        # may not choose, the budget would be dropped, and answering that
+        # differently would tell anyone who may choose and who may not.
+        return JsonResponse(
+            {'status': 'refused',
+             'reason': (f'budget {ingest.SUBTREE_REQUEST_NODES} queues '
+                        'searches below the position, and only_if_missing '
+                        'asks about the position itself: send one or the '
+                        'other')},
             status=400)
     key = logic.key_of(fen)
     seeded = False
@@ -2481,8 +2571,7 @@ def api_public_request(request):
             ApiRequestLog.objects.create(account=username, ip=ip)
         payload, status = _queue_request(
             pos, ip, requested_by=username, chosen=chosen,
-            only_if_missing=request.POST.get('only_if_missing') in ('1',
-                                                                    'true'))
+            only_if_missing=only_if_missing)
     except OperationalError as error:
         # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
         # grande puede rechazar la subida a escritura, y ningun efecto quedo
@@ -4041,6 +4130,9 @@ def _san_line(key, max_plies=16, keep_head=False):
 #     ``DN_REPAIR`` — decisiones internas de los brazos: por donde gasto el
 #     explorador su siguiente click o su siguiente ciclo.  Encolan trabajo; no
 #     concluyen nada.
+#   * ``SUBTREE_REQUEST`` — the receipt of a request that bought searches
+#     below a position (§ ``ingest.request_subtree``).  It queues work and
+#     concludes nothing, like the breadth swap's.
 #   * ``CASCADE_GUARD``, ``BACKED_GUARD``, ``REVOKE_GUARD``, ``PROOF_GUARD`` —
 #     topes de recorrido que saltaron.  Son literalmente "esta pasada se paro
 #     antes de tiempo": una alarma nuestra, no una noticia.
@@ -4102,6 +4194,7 @@ FEED_HIDDEN_KINDS = {
     'SOLVE_LEASE_RECYCLED',
     'SOLVE_REJECTED',
     'SOLVE_VERIFIED',
+    'SUBTREE_REQUEST',
     'SURVIVE_VERIFIED',
     'TB_REJECTED',
     'UNCERTAINTY_EXPAND',
@@ -7388,8 +7481,10 @@ def explore(request, key):
         'multi_request': bool(viewer) and pos.status == 'UNKNOWN',
         'multi_request_cap': MULTI_REQUEST_CAP,
         # Spent ladder: a click here lands below, so the page shows the
-        # cascade underneath from the first render, before any click.
+        # cascade underneath from the first render, before any click, and
+        # the button says what it will buy there.
         'frontier_exhausted': ingest.ladder_exhausted(pos),
+        'subtree_cap': ingest.SUBTREE_TASK_CAP,
         'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
                          else None),
@@ -7397,7 +7492,11 @@ def explore(request, key):
 
 
 def method(request):
-    return render(request, 'atomicdb/method.html')
+    # The number of searches the last request option buys comes from the
+    # constant that sizes it, as the queue cap of ``docs`` does.
+    return render(request, 'atomicdb/method.html', {
+        'subtree_cap': ingest.SUBTREE_TASK_CAP,
+    })
 
 
 def docs(request):
@@ -7423,6 +7522,7 @@ def docs(request):
     """
     return render(request, 'atomicdb/docs.html', {
         'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
+        'subtree_cap': ingest.SUBTREE_TASK_CAP,
         'multi_request_cap': MULTI_REQUEST_CAP,
     })
 
