@@ -165,6 +165,8 @@ urlpatterns = [
     path('campaign/<int:campaign_id>/state/', views.campaign_state),
     path('request/<str:key>/', views.api_request),
     path('request-unexplored/<str:key>/', views.api_request_unexplored),
+    # Every move ticked in the move list, in one click.  Writes, so no cache.
+    path('request-moves/<str:key>/', views.api_request_moves),
     path('pv-verify/<str:key>/', views.api_pv_verify),
     path('fen/', views.fen_jump),
     path('api/query', views.api_query),

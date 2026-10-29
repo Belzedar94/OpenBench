@@ -701,13 +701,27 @@
 
   <div>
     <h2 style="margin-top:0">Moves</h2>
+    {% comment %}With the boxes of the multi-select, the chip column needs room
+    for the chip and the box side by side.  On a phone the table is wider than
+    the screen and every column shrinks to its narrowest, so without a floor
+    the box would drop under the chip and double the height of every row.  The
+    floor goes on the header cell because the cells of the rows take no
+    attributes (see the rows below), and it is content-box because browsers
+    disagree on whether a cell's min-width counts its padding.{% endcomment %}
     <table>
-      <tr><th></th><th>move</th><th>state</th><th>eval</th>
+      <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
         <th>visits</th></tr>
+      {% comment %}The box of the multi-select (the bar under the table says
+      what it is for) lives INSIDE the chip cell, after the chip: the tests
+      read the rows of the tree as <tr><td><span class="chip, so neither a new
+      first cell nor an attribute on the <tr> is free.  A row blocked by
+      repetition and a solved reply get no box, there is nothing to request
+      there.  The label around the box is the tap target, padded and pulled
+      back with negative margins so the row does not grow.{% endcomment %}
       {% for m in moves %}
       <tr>
-        <td><span class="chip {{ m.css }}"></span></td>
+        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}" aria-label="Select {{ m.uci }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
         {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
         conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
         vuelve a una posicion que ya esta en la linea actual y las
@@ -766,7 +780,7 @@
       {% endfor %}
       {% for u in offtree %}
       <tr>
-        <td><span class="chip cold"></span></td>
+        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" aria-label="Select {{ u.uci }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
         <td>{% if u.blocked %}<strong>{{ u.uci }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
@@ -821,6 +835,300 @@
       show(open);
     })();
     </script>
+    {% if multi_request %}
+    {% comment %}Tick several moves and request them all with one click
+    (§ views.api_request_moves), for a signed-in visitor on an unsolved
+    position: the condition of the request buttons at the top.  Everybody
+    else gets the table exactly as before, with no box and no bar.
+
+    The bar stays hidden until the script finds a box to tick, so without
+    JavaScript nothing offers a click that would do nothing.  While a move is
+    ticked, or a receipt is showing, it sticks to the bottom of the screen, so
+    on a phone neither the button nor what it did is a scroll away.  Inline
+    styles and classes the sheet already has, for the reason the eval cell
+    gives above: atomicdb.css is not part of the ?v= digest of base.html.
+
+    With the fold: "Select all" ticks the rows that are shown and no others,
+    and a ticked row the fold hides stays ticked and counted, with a note
+    saying so.  After the click the moves that were handled are unticked, and
+    the ones the queue left out stay ticked.
+
+    Depth: the rung of the slider goes with every ticked move, read from the
+    control and the data block the single button reads, and only on a page
+    that has them, so a page without the slider names neither.  On its first
+    stop nothing is sent and each move gets its own next rung, as it would
+    from its own page.  The last stop, the searches below a position (its
+    entry says ``subtree``), is for one position at a time, and it turns the
+    button off.
+
+    When analysis lands on a move this bar requested the page reloads, as it
+    does for the buttons at the top.  Their poller lives inside their own
+    script, so this one watches the requested moves itself, and only them: a
+    reply somebody else asked for does not reload the page.{% endcomment %}
+    <div class="reqrow" id="msbar" style="display:none;bottom:0;z-index:2;margin:.6rem 0 0;padding:.45rem 0;background:var(--canvas)">
+      <button type="button" class="reqbtn" id="msreq" disabled>Request 0 selected</button>
+      <button type="button" class="reqbtn dim" id="msall" title="Ticks every move shown in the table">Select all</button>
+      <button type="button" class="reqbtn dim" id="msclear" style="display:none">Clear</button>
+      <span class="dim" id="msnote" style="font-size:.8rem"></span>
+      <span class="reqnote" id="msdone" hidden></span>
+    </div>
+    <script>
+    (function () {
+      const bar = document.getElementById('msbar');
+      const table = bar.parentNode.querySelector('table');
+      function boxes() {
+        return Array.from(table.querySelectorAll('input[data-ms]'));
+      }
+      if (!boxes().length) { return; }   // nothing on this page to tick
+      const button = document.getElementById('msreq');
+      const all = document.getElementById('msall');
+      const clear = document.getElementById('msclear');
+      const note = document.getElementById('msnote');
+      const done = document.getElementById('msdone');
+      const CAP = {{ multi_request_cap }};
+      const fen = '{{ pos.fen|escapejs }}';
+      const key = '{{ pos.key|escapejs }}';
+      let sending = false;
+      {% if depth_rungs %}
+      // The depth slider: its rung goes with every ticked move.
+      const depth = document.getElementById('depth');
+      let rungs = [];
+      try {
+        rungs = JSON.parse(
+          document.getElementById('atomicdb-depth-rungs').textContent);
+      } catch (e) { rungs = []; }
+      function sliderRung() {
+        if (!depth) { return null; }
+        const index = Number(depth.value);
+        const rung = rungs[index];
+        // The first stop is each move's own next rung: nothing to send.
+        if (!index || !rung) { return null; }
+        // The searches below a position are told by their flag, not by being
+        // the last stop.
+        return {nodes: String(rung.nodes), label: rung.label,
+                top: !!rung.subtree};
+      }
+      if (depth) { depth.addEventListener('input', refresh); }
+      {% else %}
+      function sliderRung() { return null; }
+      {% endif %}
+      function shown(box) {
+        const row = box.closest('tr');
+        return !row || row.style.display !== 'none';
+      }
+      function ticked() {
+        return boxes().filter(box => box.checked);
+      }
+      function say(text) {
+        done.textContent = text || '';
+        done.hidden = !text;
+      }
+      function csrf() {
+        const field = document.querySelector('[name=csrfmiddlewaretoken]');
+        return field ? field.value : '';
+      }
+      function refresh() {
+        const picked = ticked();
+        const n = picked.length;
+        const folded = picked.filter(box => !shown(box)).length;
+        const rung = sliderRung();
+        let text = '';
+        let refused = false;
+        if (!n) {
+          text = 'Tick moves to request several at once';
+        } else if (rung && rung.top) {
+          text = rung.label + ' is for one position at a time';
+          refused = true;
+        } else if (n > CAP) {
+          text = 'At most ' + CAP + ' moves per click';
+          refused = true;
+        } else {
+          const parts = [];
+          if (rung) { parts.push(rung.label + ' nodes each'); }
+          if (folded) {
+            parts.push(folded === 1 ? '1 ticked move is folded away'
+                       : folded + ' ticked moves are folded away');
+          }
+          text = parts.join(' · ');
+        }
+        if (!sending) { button.textContent = 'Request ' + n + ' selected'; }
+        button.disabled = sending || refused || !n;
+        note.textContent = text;
+        note.hidden = !text;
+        // Stuck to the bottom of the screen while it has something to send
+        // or something to say.
+        const live = n > 0 || !done.hidden;
+        clear.style.display = live ? '' : 'none';
+        bar.style.position = live ? 'sticky' : '';
+        bar.style.borderTop = live ? '1px solid var(--border)' : '';
+      }
+      function receipt(counts) {
+        const n = name => Number(counts[name]) || 0;
+        const parts = [];
+        if (n('queued')) { parts.push('Queued ' + n('queued')); }
+        // A move whose own depth is all spent buys its replies instead.
+        if (n('expanded')) { parts.push(n('expanded') + ' queued below'); }
+        const waiting = n('already-queued') + n('already-requested');
+        if (waiting) { parts.push(waiting + ' already in the queue'); }
+        if (n('already-solved')) {
+          parts.push(n('already-solved') + ' already solved');
+        }
+        if (n('saturated')) {
+          parts.push(n('saturated') + ' with nothing left to request');
+        }
+        if (n('blocked')) { parts.push(n('blocked') + ' skipped, repetition'); }
+        if (n('illegal')) { parts.push(n('illegal') + ' not legal here'); }
+        if (n('queue-full')) {
+          parts.push(n('queue-full') + ' left out, your queue is full');
+        }
+        return parts.join(' · ') || 'Nothing was requested';
+      }
+      const REFUSED = {
+        'login-required': 'Your session has ended, reload the page',
+        'already-solved': 'This position is already solved',
+        'unknown-position': 'This position is gone, reload the page',
+        'bad-budget': 'That depth is gone, reload the page',
+        'top-rung-single': 'That depth is for one position at a time',
+        'no-moves': 'None of those moves can be requested here',
+        'too-many': 'At most ' + CAP + ' moves per click',
+        'queue-full-account': 'You have too many requests waiting',
+        'busy': 'Server busy, try again',
+      };
+      const IN_FLIGHT = ['queued', 'already-queued', 'already-requested',
+                         'expanded'];
+      function finish(d, offline) {
+        sending = false;
+        if (d && (d.status === 'done' || d.status === 'partial')) {
+          const moves = d.moves || [];
+          const handled = new Set(moves.filter(m => m.status !== 'queue-full')
+                                       .map(m => m.uci));
+          boxes().forEach(box => {
+            if (handled.has(box.dataset.ms)) { box.checked = false; }
+          });
+          say(receipt(d.counts || {}));
+          const waiting = moves.filter(m => IN_FLIGHT.includes(m.status))
+                               .map(m => m.uci);
+          if (waiting.length) { watch(waiting); }
+        } else if (d) {
+          say(REFUSED[d.status] || 'Something went wrong');
+        } else {
+          say(offline ? 'Network error, try again'
+                      : 'Server error, try again');
+        }
+        refresh();
+      }
+      function post(body, attempt) {
+        fetch('/atomicdb/request-moves/' + key + '/', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-CSRFToken': csrf()},
+          body: body})
+          .then(r => r.json().catch(() => null).then(d => ({
+            code: r.status, data: d,
+            wait: Number(r.headers.get('Retry-After')) || 2})))
+          .then(reply => {
+            const d = reply.data;
+            // Every move is its own commit, so sending the same click again
+            // only finds the moves that went through already queued.
+            if (reply.code === 503 && d && d.status === 'busy'
+                && attempt < 9) {
+              button.textContent = 'Server busy, retrying...';
+              setTimeout(() => post(body, attempt + 1),
+                         Math.max(reply.wait * 1000,
+                                  Math.min(1000 + attempt * 1000, 5000)));
+              return;
+            }
+            finish(d, false);
+          })
+          .catch(() => finish(null, true));
+      }
+      button.addEventListener('click', function () {
+        const moves = ticked().map(box => box.dataset.ms);
+        if (!moves.length || sending) { return; }
+        const body = {moves: moves.join(','),
+                      route: new URLSearchParams(location.search)
+                               .get('play') || ''};
+        const rung = sliderRung();
+        if (rung) { body.budget = rung.nodes; }
+        sending = true;
+        button.textContent = 'Requesting...';
+        say('');
+        refresh();
+        post(new URLSearchParams(body).toString(), 0);
+      });
+      all.addEventListener('click', function () {
+        boxes().forEach(box => { if (shown(box)) { box.checked = true; } });
+        refresh();
+      });
+      clear.addEventListener('click', function () {
+        boxes().forEach(box => { box.checked = false; });
+        say('');
+        refresh();
+      });
+      table.addEventListener('click', function (event) {
+        // The whole chip cell toggles its box, so a thumb does not have to
+        // hit the box itself.  Any click in the table may also be the fold's
+        // button, which hides or shows ticked rows.
+        const cell = event.target.closest('td');
+        if (cell && cell.cellIndex === 0
+            && !event.target.closest('label, a, button, input')) {
+          const box = cell.querySelector('input[data-ms]');
+          if (box) { box.checked = !box.checked; }
+        }
+        refresh();
+      });
+      // Reload when analysis lands on a move this bar requested.
+      const watched = new Set();
+      let baseline = null;
+      let asks = 0;
+      let looking = false;
+      function digest(d) {
+        const rows = {};
+        d.moves.forEach(m => { rows[m.uci] = m; });
+        return Array.from(watched).sort().map(uci => {
+          const m = rows[uci] || {};
+          return [uci, m.visits, m.score, m.mate, m.status,
+                  m.backed_plies].join('/');
+        }).join(';');
+      }
+      function watch(moves) {
+        moves.forEach(uci => watched.add(uci));
+        baseline = null;   // more moves, a new baseline
+        asks = 36;         // about six minutes, like the buttons at the top
+        if (!looking) { looking = true; look(); }
+      }
+      function again() { setTimeout(look, 10000); }
+      function look() {
+        if (document.hidden) { again(); return; }   // a hidden tab asks nothing
+        if (asks <= 0) {
+          looking = false;
+          if (!done.hidden) {
+            say(done.textContent + ' · still waiting, check back in a while');
+          }
+          return;
+        }
+        asks -= 1;
+        fetch('/atomicdb/api/query?fen=' + encodeURIComponent(fen))
+          .then(r => r.json())
+          .then(d => {
+            if (!d || !Array.isArray(d.moves)) { again(); return; }
+            const now = digest(d);
+            if (baseline === null) {
+              baseline = now;
+            } else if (now !== baseline) {
+              say('Analysis arrived, reloading...');
+              location.reload();
+              return;
+            }
+            again();
+          })
+          .catch(again);
+      }
+      refresh();
+      bar.style.display = '';
+    })();
+    </script>
+    {% endif %}
   </div>
 </div>
 

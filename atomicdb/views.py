@@ -151,6 +151,13 @@ MAX_REPORTED_NPS = 1_000_000_000_000
 # Solo se rechaza lo que pide una PERSONA: el selector y los brazos
 # automaticos siguen encolando pase lo que pase.
 REQUEST_QUEUE_MAX = 5000
+# How many moves one click of the move list's multi-select may request
+# (§ api_request_moves).  The same ceiling as the other one-click batches,
+# the unanalysed-moves button and the frontier expansion
+# (§ ingest.UNEXPLORED_CLICK_CAP, ingest.FRONTIER_CLICK_CAP), and more than a
+# position usually has moves.  What bounds a person's spending is still
+# REQUEST_QUEUE_MAX above; this bounds what one click asks of the server.
+MULTI_REQUEST_CAP = 64
 MAX_SUBMIT_LINES_BYTES = 512 * 1024
 MAX_SUBMIT_PV_PLIES = 512
 # Breadcrumb reconstruction is public-request work. Keep the cycle-safe
@@ -2056,7 +2063,7 @@ def _validated_route_for(raw_route, key):
 
 
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
-                   only_if_missing=False):
+                   only_if_missing=False, with_place=True):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2068,6 +2075,13 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
 
     Devuelve ``(payload, codigo http)``.  Quien llama pone la envoltura — el
     metodo, la identidad, y lo que su puerta anada al cuerpo — y nada mas.
+
+    ``with_place=False`` leaves ``ahead``, the place in the queue, out of the
+    payload.  Working it out sorts the whole visitor band
+    (§ ``live_request.queue_ahead``), which one click can afford.  The
+    multi-select of the move list comes here once per ticked move and shows
+    no place for any of them, so it would pay that sort up to
+    ``MULTI_REQUEST_CAP`` times for nothing (§ ``api_request_moves``).
     """
     if only_if_missing and pos.status == 'UNKNOWN':
         # Answered before the dedup and the queue cap: a call with nothing to
@@ -2147,7 +2161,7 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
         # The sentence is composed here, where the counters are, and the
         # page and the API say it as it is (§ ``_subtree_message``).
         payload['message'] = _subtree_message(payload)
-    if str(outcome) in ('queued', 'already-queued'):
+    if with_place and str(outcome) in ('queued', 'already-queued'):
         ahead = _user_queue_ahead(pos)
         if ahead is not None:
             payload['ahead'] = ahead
@@ -2201,6 +2215,162 @@ def api_request(request, key):
         response = JsonResponse({'status': 'busy'}, status=503)
         response['Retry-After'] = '2'
         return response
+
+
+def api_request_moves(request, key):
+    """Request several moves of a position with one click.
+
+    The multi-select of the explorer's move list: a signed-in visitor ticks
+    rows and one button requests every ticked move.  It answers two requests
+    from the community: analysing the top lines of a position without
+    opening each of them ("often i just want to analyse the top pv moves"),
+    and queueing from a phone with fewer taps.
+
+    EVERY MOVE TAKES THE PATH EVERY REQUEST TAKES (§ ``_queue_request``): the
+    same dedup, ladder, per-account cap and receipts as the button on that
+    move's own page.  This door only adds what a batch needs, and wherever it
+    can it refuses before starting rather than half way through:
+
+    * SIGNED IN ONLY.  The page offers the boxes to signed-in visitors, and
+      hiding a control is not refusing it (§ ``depth``): a batch is charged
+      to the account that clicks, against that account's own cap.
+    * LEGAL MOVES OF THIS POSITION, deduplicated, in the order given.  The
+      rest is IGNORED rather than refused and comes back under ``ignored``:
+      the page only offers legal moves, so anything else comes from a stale
+      or hand-made list, and one bad token should not cost the good ones.
+    * AT MOST ``MULTI_REQUEST_CAP`` MOVES a click, refused whole above it.
+    * ONE DEPTH FOR ALL OF THEM: the rung of the slider under the rule of the
+      single button (§ ``depth.chosen_rung``), so an account that may not
+      choose has its choice dropped.  Every rung of the ladder, 2B included,
+      is allowed.  The slider's LAST STOP is refused (``top-rung-single``):
+      it is not a rung but the searches below a position
+      (``ingest.SUBTREE_REQUEST_NODES``), meant for one position at a time.
+      So ``confirm``, which the single button asks for that stop alone,
+      changes nothing here.
+    * A MOVE THAT IS NOT A NODE YET is made exactly as following it would
+      make it (§ ``_materialise_child``), and a move that re-enters the line
+      the page is on is skipped (``blocked``), for the reason ``goto`` does
+      not follow it and the page offers no box there.
+    * THE ACCOUNT'S QUEUE FILLING UP part way stops the batch: what was
+      requested stays requested, and the rest comes back as ``queue-full``.
+
+    The reply: an overall ``status``, ``done`` or ``partial`` when the queue
+    filled up; ``counts`` per outcome; the outcome of each move, in order,
+    under ``moves``; ``ignored``; and ``left_out``.
+
+    NOT ``csrf_exempt``, for the reason its siblings give: the page sends its
+    token in ``X-CSRFToken``, and exempt, a third-party page could spend the
+    queue of anybody who visits it signed in.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({'status': 'login-required'}, status=403)
+    try:
+        return _request_moves(request, key)
+    except OperationalError as error:
+        # The single button's answer (§ ``api_request``), and a retry is as
+        # safe here: every move is its own commit, and a move that went
+        # through comes back from the retry as already requested or queued.
+        message = str(error).lower()
+        if 'database is locked' not in message \
+                and 'database table is locked' not in message:
+            raise
+        response = JsonResponse({'status': 'busy'}, status=503)
+        response['Retry-After'] = '2'
+        return response
+
+
+def _request_moves(request, key):
+    """The batch behind ``api_request_moves``, once the caller is known."""
+    try:
+        pos = Position.objects.get(key=key)
+    except Position.DoesNotExist:
+        return JsonResponse({'status': 'unknown-position'}, status=404)
+    if pos.status != 'UNKNOWN':
+        return JsonResponse({'status': 'already-solved'})
+    chosen, invalid = depth.chosen_rung(request)
+    if invalid:
+        return JsonResponse({'status': 'bad-budget'}, status=400)
+    # Keyed on the stop and not on the top of the ladder: 2B, the last rung,
+    # is a choice like the others.  ``chosen`` is None for an account that
+    # may not choose, so its choice of this stop is dropped, not refused.
+    if chosen == ingest.SUBTREE_REQUEST_NODES:
+        return JsonResponse({'status': 'top-rung-single'}, status=400)
+    tokens = [token.strip()
+              for token in (request.POST.get('moves') or '').split(',')]
+    tokens = list(dict.fromkeys(token for token in tokens if token))
+    legal = set(logic.legal_moves(pos.fen))
+    wanted = [uci for uci in tokens if uci in legal]
+    dropped = [token for token in tokens if token not in legal]
+    # Echoed so the caller can see what was dropped, cut to the length of a
+    # move and to the size of a click so a junk list is not echoed whole.
+    ignored = [token[:8] for token in dropped[:MULTI_REQUEST_CAP]]
+    if not wanted:
+        return JsonResponse({'status': 'no-moves', 'ignored': ignored},
+                            status=400)
+    if len(wanted) > MULTI_REQUEST_CAP:
+        return JsonResponse({'status': 'too-many', 'cap': MULTI_REQUEST_CAP},
+                            status=400)
+    username = request.user.username
+    if _account_queue_full(username):
+        return _queue_full_response(username)
+    # The route of the page, validated as the other buttons validate it:
+    # every task inherits it plus its own move, so the notification reads in
+    # the order the visitor played.  It also names the line the page is on,
+    # and without one that line is the canonical lineage, as on the page.
+    explicit = None
+    raw_route = (request.POST.get('route') or '').strip()
+    if raw_route:
+        try:
+            explicit = _validated_play_route(raw_route, key)
+        except (PlayRouteError, PlayRouteConflict):
+            explicit = None
+    route = raw_route if explicit is not None else ''
+    top, line, active_ucis = (explicit if explicit is not None
+                              else _canonical_route(pos))
+    on_line = set(_route_prefix_keys(top, line, active_ucis) or ())
+    # One query for the moves that are already edges.  The keys of the rest
+    # come from the store the page filled when it drew them (§ _child_keys).
+    children = {edge.move_uci: edge.child for edge in
+                Edge.objects.filter(parent=pos, move_uci__in=wanted)
+                .select_related('child')}
+    keys = _child_keys(pos, [uci for uci in wanted if uci not in children])
+    keys.update((uci, child.key) for uci, child in children.items())
+    ip = _client_ip(request)
+    outcomes = []
+    for index, uci in enumerate(wanted):
+        if keys[uci] in on_line:
+            outcomes.append((uci, 'blocked'))
+            continue
+        child = children.get(uci) or _materialise_child(pos, uci)
+        payload, _code = _queue_request(
+            child, ip, requested_by=username, chosen=chosen,
+            raw_route=f'{route},{uci}' if route else '', with_place=False)
+        if payload['status'] == 'queue-full-account':
+            outcomes.extend((rest, 'queue-full') for rest in wanted[index:])
+            break
+        outcomes.append((uci, payload['status']))
+    counts = {}
+    for _uci, status in outcomes:
+        counts[status] = counts.get(status, 0) + 1
+    if dropped:
+        counts['illegal'] = len(dropped)
+    # The audit receipt of a batch, under the kind the other batch button
+    # writes so one query reads both doors, and hidden from the public feed
+    # with it (§ FEED_HIDDEN_KINDS).
+    DBEvent.objects.create(kind='BULK_REQUEST', payload={
+        'ip': ip, 'key': pos.key, 'via': 'moves',
+        'queued': counts.get('queued', 0), 'candidates': len(wanted)})
+    left_out = counts.get('queue-full', 0)
+    return JsonResponse({
+        'status': 'partial' if left_out else 'done',
+        'counts': counts,
+        'moves': [{'uci': uci, 'status': status}
+                  for uci, status in outcomes],
+        'ignored': ignored,
+        'left_out': left_out,
+    })
 
 
 # ---------------- API oficial de peticion ----------------
@@ -2851,6 +3021,38 @@ def _canonical_route(pos):
     return top, line, [step['uci'] for step in line]
 
 
+def _materialise_child(pos, uci):
+    """The node ``uci`` leads to from ``pos``, made with its edge if missing.
+
+    THE ONE WAY A CLICK MAKES A NODE.  Following a move (``goto``) and
+    requesting it from the move list (``api_request_moves``) both come here,
+    so a move requested before anybody followed it is born exactly as the
+    click would have made it: same owner, same edge, same discovery of a
+    terminal.  ``uci`` has to be a legal move of ``pos`` that does not
+    re-enter the caller's line; both callers check that before they call.
+    """
+    # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
+    # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
+    # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
+    child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
+                                          campaign_id=pos.campaign_id)
+    Edge.objects.get_or_create(parent=pos, move_uci=uci,
+                               defaults={'child': child})
+    if child.status != 'UNKNOWN':
+        # Navegar puede DESCUBRIR un terminal (Bxe7 que explota al rey es
+        # mate en 1 nada mas crear la arista).  Sin esta cascada el padre
+        # seguia diciendo UNSOLVED +302 con un hijo WHITE_WIN TERMINAL en la
+        # tabla hasta que algun analisis ajeno tocara la familia — el
+        # "delay" que reporto la comunidad (29-jul).  El descubridor paga
+        # las cuatro consultas de su hallazgo.
+        ingest.backup_cascade([pos.key])
+        ingest.backup_backed_evals([pos.key])
+    if child.priority <= ingest.DEAD / 2:
+        child.priority = 0.0   # ruta nueva: revive de la lapida
+        child.save(update_fields=['priority'])
+    return child
+
+
 def goto(request, key, uci):
     """Navegacion jugando: valida la jugada, crea/encuentra el hijo y salta."""
     try:
@@ -2907,25 +3109,7 @@ def goto(request, key, uci):
             response = redirect(_explore_url(looped, active_ucis[:at]))
             response['Cache-Control'] = 'no-store'
             return response
-    # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
-    # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
-    # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
-    child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
-                                          campaign_id=pos.campaign_id)
-    Edge.objects.get_or_create(parent=pos, move_uci=uci,
-                               defaults={'child': child})
-    if child.status != 'UNKNOWN':
-        # Navegar puede DESCUBRIR un terminal (Bxe7 que explota al rey es
-        # mate en 1 nada mas crear la arista).  Sin esta cascada el padre
-        # seguia diciendo UNSOLVED +302 con un hijo WHITE_WIN TERMINAL en la
-        # tabla hasta que algun analisis ajeno tocara la familia — el
-        # "delay" que reporto la comunidad (29-jul).  El descubridor paga
-        # las cuatro consultas de su hallazgo.
-        ingest.backup_cascade([pos.key])
-        ingest.backup_backed_evals([pos.key])
-    if child.priority <= ingest.DEAD / 2:
-        child.priority = 0.0   # ruta nueva: revive de la lapida
-        child.save(update_fields=['priority'])
+    child = _materialise_child(pos, uci)
     child_route, child_anchor = _child_navigation_state(
         active_ucis, current_opening, route_ply, child.key, uci)
     return redirect(_explore_url(child.key, child_route, child_anchor))
@@ -7254,6 +7438,12 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'offtree': offtree,
+        # The boxes of the move list and the button that requests every
+        # ticked move (§ api_request_moves): for a signed-in visitor, on a
+        # position the page offers to request at all.  Without them the table
+        # is the one it has always been.
+        'multi_request': bool(viewer) and pos.status == 'UNKNOWN',
+        'multi_request_cap': MULTI_REQUEST_CAP,
         # Spent ladder: a click here lands below, so the page shows the
         # cascade underneath from the first render, before any click, and
         # the button says what it will buy there.
@@ -7297,6 +7487,7 @@ def docs(request):
     return render(request, 'atomicdb/docs.html', {
         'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
         'subtree_cap': ingest.SUBTREE_TASK_CAP,
+        'multi_request_cap': MULTI_REQUEST_CAP,
     })
 
 
