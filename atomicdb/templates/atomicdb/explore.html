@@ -711,7 +711,7 @@
     <table>
       <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
-        <th>visits</th></tr>
+        <th title="The node budget of the deepest search each move's position has had, a dash where none has yet. Hover a cell for its visits.">depth</th></tr>
       {% comment %}The box of the multi-select (the bar under the table says
       what it is for) lives INSIDE the chip cell, after the chip: the tests
       read the rows of the tree as <tr><td><span class="chip, so neither a new
@@ -775,7 +775,13 @@
             class="backed-mark"
             title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
-        <td class="dim">{{ m.visits }}</td>
+        {% comment %}How deep the move's position has been searched, in the
+        slider's unit, where the visit count used to be ("it would be more
+        useful to see with which node budget that position was analyzed
+        with", BManBJ, 29-Oct).  Only a search that ran counts, the line a
+        chosen depth in the bar below is held to (§ views._with_search_depth),
+        and the visits live on in the tooltip.{% endcomment %}
+        <td class="dim" title="{% if m.searched_h %}searched to {{ m.searched_h }} nodes{% else %}not searched yet{% endif %} · visits {{ m.visits }}">{% if m.searched_h %}{{ m.searched_h }}{% else %}-{% endif %}</td>
       </tr>
       {% endfor %}
       {% for u in offtree %}
@@ -859,8 +865,13 @@
     stop nothing is sent and each move gets its own next rung, as it would
     from its own page.  The last stop, the searches below a position (its
     entry says ``subtree``), is for one position at a time, and it turns the
-    button off.  A ticked move already searched to the top of the ladder buys
-    nothing here: the receipt says so, and its own page buys what is below.
+    button off.  A chosen rung is a target, not a floor to climb from
+    (§ views._request_moves): a move a search already reached that deep is
+    skipped and counted in the receipt, and every other move gets exactly
+    that rung, so ticking at 512M never buys 2B for a move the depth column
+    shows at 512M.  The note says so while a rung is chosen.  A ticked move
+    already searched to the top of the ladder buys nothing here: the receipt
+    says so, and its own page buys what is below.
 
     When analysis lands on a move this bar requested the page reloads, as it
     does for the buttons at the top.  Their poller lives inside their own
@@ -945,7 +956,11 @@
           refused = true;
         } else {
           const parts = [];
-          if (rung) { parts.push(rung.label + ' nodes each'); }
+          // A chosen depth is a target: what is searched that deep is skipped.
+          if (rung) {
+            parts.push(rung.label + ' nodes is a target: moves already '
+                       + 'searched that deep are skipped');
+          }
           if (folded) {
             parts.push(folded === 1 ? '1 ticked move is folded away'
                        : folded + ' ticked moves are folded away');
@@ -969,6 +984,10 @@
         if (n('queued')) { parts.push('Queued ' + n('queued')); }
         const waiting = n('already-queued') + n('already-requested');
         if (waiting) { parts.push(waiting + ' already in the queue'); }
+        // Skipped by a chosen depth: a search that ran already reached it.
+        if (n('already-analyzed')) {
+          parts.push(n('already-analyzed') + ' already searched that deep');
+        }
         if (n('already-solved')) {
           parts.push(n('already-solved') + ' already solved');
         }

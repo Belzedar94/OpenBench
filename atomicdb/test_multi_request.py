@@ -17,6 +17,9 @@ What is pinned here:
     a move back into the line is skipped;
   * the rung of the depth slider reaches every move for whoever may choose
     one, and its last stop, the searches below a position, is refused;
+  * a chosen rung is a target: a move already searched that deep is skipped
+    and says so, every other move gets exactly that rung, and with no rung
+    chosen each move climbs its own ladder as before;
   * one search a move at most: a move searched to the top of the ladder buys
     nothing and says so, where its own button would buy the searches below
     it;
@@ -492,10 +495,13 @@ class SpentLadderTests(TestCase):
             state=AnalysisTask.TState.PENDING).count(), 1)
 
     def test_a_rung_chosen_for_it_changes_nothing(self):
+        # A chosen rung is a target (TargetDepthTests), and the 2B search
+        # that ran reaches every rung: the move is skipped as already
+        # searched that deep, and still nothing is bought below it.
         body = _signed_in('belzedar', staff=True).post(
             self.url, {'moves': 'e2e4', 'budget': LADDER[-1]}).json()
 
-        self.assertEqual(body['counts'], {'ladder-spent': 1})
+        self.assertEqual(body['counts'], {'already-analyzed': 1})
         self._nothing_below(self.spent)
 
     def test_its_own_button_still_buys_the_searches_below(self):
@@ -526,6 +532,125 @@ class SpentLadderTests(TestCase):
 
         self.assertContains(
             response, 'at full depth, open a move to search below it')
+
+
+class TargetDepthTests(TestCase):
+    """A chosen rung is a target, not a floor to climb from.
+
+    BManBJ, 29-Oct-2026: "I don't want to accidentally queue something for 2B
+    when on its first visit it was analyzed at 512M if I'm just trying to
+    update positions to 512M".  As a floor, a rung ticked at 512M bought each
+    move its next rung from 512M up, so a move already searched at 512M got
+    2B.  As a target (``only_if_missing``, the rule the API already had) a
+    move a search already reached that deep is skipped, and every other move
+    gets exactly that rung.  With no rung chosen nothing changes: each move
+    climbs its own ladder, as from its own button.
+    """
+
+    def setUp(self):
+        self.root = _root()
+        self.url = f'/atomicdb/request-moves/{self.root.key}/'
+        # 1.e4 has been searched at 512M, 1.d4 at 128M.
+        self.at_512 = _chain(self.root, ['e2e4'])[0]
+        self.at_128 = _chain(self.root, ['d2d4'])[0]
+        _ran(self.at_512, LADDER[1])
+        _ran(self.at_128, LADDER[0])
+
+    def _waiting(self, position):
+        return [task.budget_nodes for task in AnalysisTask.objects.filter(
+            position=position, state=AnalysisTask.TState.PENDING)]
+
+    def _absorbed(self, position, budget):
+        """A rung bought and never searched, on the slot visits point at."""
+        position.refresh_from_db()
+        row = AnalysisTask.objects.create(
+            position=position, generation=position.visits,
+            budget_nodes=budget, state=AnalysisTask.TState.COMPLETED,
+            source=AnalysisTask.Source.AUTO)
+        self.assertTrue(ingest.is_absorbed(row))
+
+    def test_a_chosen_512m_skips_a_move_at_512m_and_buys_512m_for_one_at_128m(
+            self):
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'e2e4,d2d4', 'budget': LADDER[1]}).json()
+
+        self.assertEqual(body['moves'],
+                         [{'uci': 'e2e4', 'status': 'already-analyzed'},
+                          {'uci': 'd2d4', 'status': 'queued'}])
+        self.assertEqual(body['counts'], {'already-analyzed': 1, 'queued': 1})
+        self.assertEqual(self._waiting(self.at_512), [])
+        self.assertEqual(self._waiting(self.at_128), [LADDER[1]])
+        # A skipped move was not requested: it leaves no receipt, so the next
+        # real request for it from this address is not taken for a repeat.
+        self.assertFalse(
+            RequestLog.objects.filter(position=self.at_512).exists())
+
+    def test_no_rung_chosen_keeps_climbing(self):
+        # The slider on its first stop sends nothing: each move gets its own
+        # next rung, 2B for the move searched at 512M.
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'e2e4,d2d4'}).json()
+
+        self.assertEqual(body['counts'], {'queued': 2})
+        self.assertEqual(self._waiting(self.at_512), [LADDER[2]])
+        self.assertEqual(self._waiting(self.at_128), [LADDER[1]])
+
+    def test_a_choice_dropped_for_an_account_that_may_not_choose_climbs_too(
+            self):
+        """Its rung never counted, so it sets no target either."""
+        body = _signed_in('lesha').post(
+            self.url, {'moves': 'e2e4,d2d4', 'budget': LADDER[1]}).json()
+
+        self.assertEqual(body['counts'], {'queued': 2})
+        self.assertEqual(self._waiting(self.at_512), [LADDER[2]])
+        self.assertEqual(self._waiting(self.at_128), [LADDER[1]])
+
+    def test_a_deeper_search_covers_a_shallower_choice(self):
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'e2e4,d2d4', 'budget': LADDER[0]}).json()
+
+        self.assertEqual(body['counts'], {'already-analyzed': 2})
+        self.assertFalse(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).exists())
+
+    def test_a_rung_bought_but_never_searched_does_not_raise_the_price(self):
+        # 1.d4 also holds a 512M rung absorbed without a search.  The ladder
+        # reads it as spent, so as a floor the click bought 2B; as a target
+        # it buys the 512M search that never ran, and nothing above it.
+        self._absorbed(self.at_128, LADDER[1])
+
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'd2d4', 'budget': LADDER[1]}).json()
+
+        self.assertEqual(body['counts'], {'queued': 1})
+        self.assertEqual(self._waiting(self.at_128), [LADDER[1]])
+
+    def test_a_target_never_reaches_below_the_move(self):
+        # Both guarantees at once.  The 2B rung of 1.e4 was absorbed, so its
+        # ladder reads as spent, and with no target the batch would answer
+        # ladder-spent (SpentLadderTests).  No 2B search ran there, so the
+        # target buys exactly that one search: one task, at 2B, and nothing
+        # among the replies.
+        self._absorbed(self.at_512, LADDER[2])
+        self.assertTrue(ingest.ladder_exhausted(self.at_512))
+
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'e2e4', 'budget': LADDER[2]}).json()
+
+        self.assertEqual(body['counts'], {'queued': 1})
+        self.assertEqual(self._waiting(self.at_512), [LADDER[2]])
+        self.assertFalse(AnalysisTask.objects.filter(
+            position__edges_in__parent=self.at_512).exists())
+        self.assertFalse(DBEvent.objects.filter(
+            kind=ingest.SUBTREE_EVENT).exists())
+
+    def test_the_bar_says_a_chosen_rung_is_a_target(self):
+        body = _signed_in('belzedar', staff=True).get(
+            f'/atomicdb/explore/{self.root.key}/').content.decode()
+
+        # The note while a rung is chosen, and the receipt's count.
+        self.assertIn('nodes is a target: moves already ', body)
+        self.assertIn(' already searched that deep', body)
 
 
 class AccountCapTests(TestCase):

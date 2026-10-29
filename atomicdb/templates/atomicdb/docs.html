@@ -161,10 +161,12 @@ every account that asked is notified when the analysis lands. Repeated requests
 buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.
 Signed in, you can also tick several moves in the move list of a position and
 request them all with one button, up to
-<strong>{{ multi_request_cap }}</strong> at a time: each ticked move is one
-request, exactly as if its own button had been clicked, except that a move
-already searched to the top of the ladder is left as it is; open it to queue
-the searches below it.</p>
+<strong>{{ multi_request_cap }}</strong> at a time. Each ticked move is one
+request, as if its own button had been clicked, with two differences. A depth
+picked on the slider is a target: a move with no search that deep gets exactly
+that depth, and a move already searched that deep, as its depth column shows,
+is skipped. And with no depth picked, a move already searched to the top of
+the ladder is left as it is; open it to queue the searches below it.</p>
 <p class="dim" style="font-size:.9rem">Once the 2B search of a position has
 run, the next request queues up to {{ subtree_cap }} searches of 128M on the
 lines below it instead, the best lines first: where the side the position
@@ -261,6 +263,13 @@ outside the position's current lines, whose number would beat the last of
 those lines: the position does not use that number, and
 <code>best_move</code> never points at such a move. A client that picks from
 <code>moves</code> itself should skip those rows the same way.</p>
+<p class="dim" style="font-size:.9rem">Each entry also carries
+<code>searched_nodes</code>, the node budget of the deepest search that move's
+position has had, the depth column of the explorer, or <code>null</code> where
+no search has reached it, next to <code>visits</code>, the number of passes it
+has received. It counts the same searches <code>only_if_missing</code> does,
+so a request for a rung at or below <code>searched_nodes</code> with that flag
+comes back <code>already-analyzed</code>.</p>
 <p class="dim" style="font-size:.9rem">A request nobody has started yet is
 still yours to take back. <strong>Withdraw</strong> sits on the position and on
 every waiting row of your contributor page, and <strong>Clear my
@@ -312,5 +321,10 @@ search and neither is hidden behind the other. That is why a deeply analysed
 value can disagree with a shallow sibling row: the two numbers were bought with
 very different amounts of search, and the shallow one is the one likely to
 move. The gap is not papered over, it is queued.</p>
+<p>The last column, <strong>depth</strong>, says how much search that is: the
+node budget of the deepest search the move's position has had (128M, 512M,
+2B), or a dash where no search has reached it yet. Only a search that really
+ran counts: a request that was closed without one, because other work got
+there first, does not. Hover the cell for the number of visits.</p>
 
 {% endblock %}
