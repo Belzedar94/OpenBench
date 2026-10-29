@@ -49,7 +49,9 @@ rather than a request: the ENGINE debt top-up, coverage completion, and — when
 solves on fragile mate claims).  They belong here and not in crons of their
 own because they are one scheduling decision and it should be taken in one
 place.  The order inside a pass is the priority order: debt, coverage, then
-the adversarial arms last.
+the adversarial arms last.  The walk down the idle fleet's repair backlog
+(§ atomicdb.idle_repair) comes after them and before the analysis pool: one
+bounded step per pass, and none at all while its queue is full.
 
 And, at the very end, the PUBLIC COUNTERS of the front page.  Those are not a
 scheduling decision, but they are the same kind of thing this process exists
@@ -82,7 +84,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import connections
 
-from atomicdb import ingest, metrics
+from atomicdb import idle_repair, ingest, metrics
 from atomicdb.database import connection
 from atomicdb.models import Position
 
@@ -172,6 +174,11 @@ class Command(BaseCommand):
             '--fragile-cap', type=int, default=ingest.FRAGILE_QUEUE_CAP,
             help='Maximum PENDING fragile-mate SolveTasks (default: '
                  '%(default)s).')
+        parser.add_argument(
+            '--no-repair-backlog', action='store_true',
+            help='Do not walk the backlog of shallow and unanalysed '
+                 'positions for the idle fleet. Repairs found when a search '
+                 'lands go on; ATOMICDB_ARM_RATE_REPAIR=0 stops both.')
         parser.add_argument(
             '--status', action='store_true',
             help='Print how many live positions carry a priority and exit.')
@@ -290,6 +297,13 @@ class Command(BaseCommand):
             autosolved = step(
                 'autosolve95', lambda: ingest.enqueue_autosolve95(
                     cap=options['autosolve_cap']))
+            # The idle fleet's repair backlog, before the pool for the same
+            # reason as the capped arms above: it counts only its own queue,
+            # and the pool does not count it (§ atomicdb.idle_repair).
+            repair_backlog = 0
+            if not options['no_repair_backlog']:
+                repair_backlog = step('repair-backlog',
+                                      idle_repair.drip_backlog)
             # Colchon de analisis, DETRAS de los brazos con cupo: la flota
             # no debe esperar al minteo inline del lease (4 con cola vacia
             # = valles de utilizacion), pero el colchon tampoco debe
@@ -331,6 +345,7 @@ class Command(BaseCommand):
                       'dn_repair_enqueued': repaired,
                       'fragile_enqueued': fragile,
                       'autosolve95_enqueued': autosolved,
+                      'repair_backlog_enqueued': repair_backlog,
                       'public_counters_published': published}
             if failures:
                 report['failed_steps'] = failures

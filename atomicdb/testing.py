@@ -29,10 +29,13 @@ class _IsolatedViewCache:
     """
 
     def _pre_setup(self):
-        from . import ingest
+        from . import idle_repair, ingest
 
         cache.clear()
         ingest.reset_selector_delta_state()
+        # Where the idle fleet's backlog walk stands lives in the process
+        # too (§ idle_repair), and the same rule holds for it.
+        idle_repair.reset_backlog_state()
         super()._pre_setup()
 
 
