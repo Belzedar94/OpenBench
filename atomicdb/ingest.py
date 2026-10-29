@@ -10,6 +10,7 @@ import contextvars
 import functools
 import heapq
 import json
+import logging
 import math
 import os
 import re
@@ -23,8 +24,10 @@ from django.db.models import Max, Q
 from django.utils import timezone
 
 from . import logic, proof, solve_estimate, tb
-from .database import atomic, connection
+from .database import atomic, connection, current_alias
 from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
+
+logger = logging.getLogger(__name__)
 
 # Sondas profundas estilo chessdb.cn: sin TT persistente entre visitas, la
 # profundidad se compra por sonda; evals fiables valen mas que anchura barata.
@@ -883,7 +886,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # closed positions, some of them 20 plies or more too long.  Seeding them
     # lets ``mate_distance_refresh`` compare each with all its children, and
     # a change climbs the chain from there as any other does.
-    changed = backup_cascade([pos.key, *closed_keys, *others])
+    cascade = {}
+    changed = backup_cascade([pos.key, *closed_keys, *others], report=cascade)
     # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
     # cambia necesariamente el backed de este nodo (un autoeco bloqueado se
     # queda igual y no propaga), pero SI cambia ``nodes_invested`` — que es
@@ -911,6 +915,16 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # through a child, is bought one pass of the solver (§ autosolve).
     from . import autosolve
     autosolved = autosolve.queue_from_landing(pos)
+    # Once this landing has committed, the positions its ascents read are
+    # read again: a landing beside it may have changed another of their
+    # children where this one could not see it (see the block above
+    # RECHECK_MAX_KEYS).  The parents of ``closed_keys`` are this position
+    # and ``others``, already on the list.
+    closed_set = set(closed_keys)
+    _recheck_once_committed(
+        pos.key, [pos.key, *parent_keys, *others],
+        [key for key in cascade.get('changed', ())
+         if key != pos.key and key not in closed_set])
     summary = {'closed_children': closed_here, 'backed_up': changed,
                'backed_evals': backed, 'uncertainty_expanded': uncertainty,
                'witness_refuted': refuted}
@@ -1021,7 +1035,7 @@ def _adopt_certified_line(child, parent, prepared_proof):
     return [child.key, *materialise_won_line(child)['closed_keys']]
 
 
-def backup_cascade(seed_keys):
+def backup_cascade(seed_keys, report=None):
     """Recalcula el STATUS hacia arriba hasta punto fijo (§3.3).
 
     Ya NO toca ``eval_cp``.  Durante un tiempo hubo aqui un minimax de evals
@@ -1037,6 +1051,10 @@ def backup_cascade(seed_keys):
     Ahora cada columna significa una sola cosa: ``eval_cp`` es lo que dijo el
     ultimo analisis DE ESTA posicion, ``backed_eval`` es lo que su subarbol
     sabe, y ``best_known_eval`` elige entre ambas en un solo sitio.
+
+    ``report``, a dict, gets the keys the cascade ``changed``, in the order
+    it wrote them: a landing reads their parents again once it has committed
+    (see the block above RECHECK_MAX_KEYS).
     """
     frontier = set(seed_keys)
     for pid in Edge.objects.filter(child_id__in=list(seed_keys)).values_list(
@@ -1132,12 +1150,47 @@ def backup_cascade(seed_keys):
             'iterations': guard, 'remaining': len(frontier),
             'seed_count': len(seed_keys),
         })
+    if report is not None:
+        report['changed'] = list(changed_keys)
     # Hook del gestor de prueba: los pn/dn del cono que acaba de moverse.
     # Va DESPUES del punto fijo exacto a proposito — la prueba se apoya en el
     # status, no al reves — y nunca puede tumbar una ingesta: unos numeros de
     # prueba viejos ordenan peor, no mienten.
     proof.refresh_proof_numbers(list(seed_keys) + changed_keys)
     return changed_total
+
+
+def closable_rows(keys):
+    """The open positions among ``keys`` that their children decide now, as
+    ``{key: (row, status, edges)}``.
+
+    One step of backup_cascade, read only: the edges of the row, the status
+    each child can SUPPORT (_supporting_status) and logic.backup_status, the
+    three calls the cascade makes, so a position returned here is one the
+    cascade would close.  Two indexed reads whatever the number of keys, and
+    nothing is written.  recascade_status asks it of the whole table, a
+    landing of what it touched once it has committed (see the block above
+    RECHECK_MAX_KEYS) and sweep_stale_backed of its batches.
+    """
+    rows = {row.key: row for row in Position.objects.filter(
+        key__in=list(keys), status='UNKNOWN').only(
+            'key', 'fen', 'status', 'expanded')}
+    edges = {}
+    for edge in (Edge.objects.filter(parent_id__in=list(rows))
+                 .select_related('child')
+                 .defer('child__last_analysis', 'child__analysis_passes')):
+        edges.setdefault(edge.parent_id, []).append(edge)
+    decided = {}
+    for key, row in rows.items():
+        children = edges.get(key)
+        if not children:
+            continue
+        status = logic.backup_status(
+            row.fen, row.expanded,
+            [_supporting_status(row, edge) for edge in children])
+        if status != 'UNKNOWN':
+            decided[key] = (row, status, children)
+    return decided
 
 
 def _status_eval(status):
@@ -3563,6 +3616,179 @@ def carry_cut_ascents(keys, report=None):
         return None
     return backup_backed_evals_retrying(keys, open_only=True, generation=1,
                                         report=report)
+
+
+# ---------------- a landing reads its neighbours again ----------------
+#
+# THE CASE (29-Oct-2026).  9d0c0b45, Black to move with 28 replies, closes
+# once every reply is proven a White win.  A visitor was requesting its
+# replies, several to a click with the multi-select deployed that day, and
+# they were proven one by one between 11:30 and 11:33 UTC.  The last two,
+# f0e41a59 and fe8a79a1, closed in the same second, 11:33:06, each in the
+# transaction of a different ingest process.  At READ COMMITTED a change is
+# nobody else's until it commits, so each cascade read the other reply still
+# open and neither closed the parent.  It stayed open until 11:34:11, when a
+# visitor opened one of its moves and _materialise_child ran the cascade
+# again; the sweep of that day compared backed values only.  The 72 hours
+# before had four more: the last two replies closed 0.1 to 2.6 s apart, the
+# parent 7 minutes to 13 hours late, and three of them closed outside any
+# landing, as a visitor's click is.  The backed value meets the same race
+# wherever two ingests reach one position (see sweep_stale_backed), and
+# waited for the sweep, 10 to 25 minutes.
+#
+# THE RULE.  Once a landing has committed, the positions its ascents read
+# children for are read again: the landed position, its parents, the other
+# parents of what it closed and the parents of what its cascade closed on
+# the way up, RECHECK_MAX_KEYS at most.  Of two landings that race, the one
+# that commits last reads what both wrote, so between them the race closes.
+# Read only first, the cascade's check (closable_rows) and the backup's
+# (stale_backed_rows); a write only where one of them finds something, and
+# only through backup_cascade and backup_backed_evals, so nothing is decided
+# here that they would not decide.  A repair leaves a LANDING_RECHECK event;
+# nothing found leaves nothing.  Measured on 300 landings of 29-Oct, the two
+# checks cost 20 ms at the median and 91 ms at most.
+#
+# WHAT IT DOES NOT SEE: two ascents that meet higher up (the later levels of
+# a backed ascent are not read again), and a landing whose process dies
+# between its commit and its recheck.  The sweep looks for both, at the merge
+# points of overlapping ingests and on its rotation.
+#
+# Measured on the same landings: 2.2 keys to read on average, 6 at most (96%
+# of positions have a single parent, see idle_repair.REPAIR_PARENTS_MAX).
+RECHECK_MAX_KEYS = 16
+# A repair gives a row lock up quickly, as the sweep does (its --lock-timeout,
+# below PostgreSQL's deadlock_timeout): a deadlock check must never pick the
+# ingest that holds the row as its victim.  The tries after
+# RECHECK_RETRY_SLEEPS are all a landing's process waits for; what they
+# cannot get past stays for the sweep.
+RECHECK_LOCK_TIMEOUT_MS = 200
+RECHECK_RETRY_SLEEPS = (0.5, 2.0)
+RECHECK_EVENT = 'LANDING_RECHECK'
+
+
+@contextlib.contextmanager
+def _brief_lock_waits(milliseconds=RECHECK_LOCK_TIMEOUT_MS):
+    """PostgreSQL: in here a row lock is given up after ``milliseconds``.
+
+    Set on the session and put back on the way out: the connection is the
+    ingest process's own, and its next landing waits for locks as it always
+    did.
+    """
+    if connection.vendor != 'postgresql':
+        yield
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('lock_timeout')")
+        previous = cursor.fetchone()[0]
+        cursor.execute("SELECT set_config('lock_timeout', %s, false)",
+                       ['%dms' % milliseconds])
+    try:
+        yield
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('lock_timeout', %s, false)",
+                           [previous])
+
+
+def close_missed(keys, sleeps=RECHECK_RETRY_SLEEPS):
+    """Close what is still open among ``keys``, with backup_cascade.
+
+    One transaction, its rows locked first.  Two landings that commit
+    together may both read the parent closable; the second to lock it finds
+    it closed, so it is closed and announced once.  A lock conflict rolls the
+    whole of it back, so it is tried again from the same keys, and raised
+    once ``sleeps`` runs out.  Returns the keys it closed.  The recheck of a
+    landing and sweep_stale_backed close what closable_rows found with it.
+    """
+    for pause in (*sleeps, None):
+        try:
+            with atomic():
+                locked = list(Position.objects.select_for_update()
+                              .filter(key__in=list(keys), status='UNKNOWN')
+                              .order_by('key').values_list('key', flat=True))
+                report = {}
+                if locked:
+                    backup_cascade(locked, report=report)
+                changed = set(report.get('changed', ()))
+                return [key for key in locked if key in changed]
+        except OperationalError as error:
+            if (pause is None or connection.in_atomic_block
+                    or not is_lock_conflict(error)):
+                raise
+            time.sleep(pause)
+
+
+def _recheck_once_committed(landed, keys, climbed):
+    """Register recheck_after_commit for when this transaction commits.
+
+    On the AtomicDB alias, the one the landing's transaction is on: on any
+    other alias the callback would find no transaction to wait for and run
+    at once, before the commit it exists to follow.  Outside a transaction
+    it runs at once, and everything it reads has committed already.  The
+    closure source is read now, while the landing's is still set.  A plain
+    function and not a partial: ``robust`` names the callback by its
+    ``__qualname__`` when it logs a failure, and a partial has none.
+    """
+    keys, climbed = list(keys), list(climbed)
+    source = current_closure_source()
+
+    def recheck():
+        recheck_after_commit(landed, keys, climbed=climbed, source=source)
+
+    transaction.on_commit(recheck, using=current_alias(), robust=True)
+
+
+def recheck_after_commit(landed, keys, climbed=(), source=None):
+    """Both rules again on what a landing read, once it has committed.
+
+    Registered by ingest_analysis and by a TB landing (_apply_prepared_tb)
+    with ``transaction.on_commit`` (see the block above RECHECK_MAX_KEYS).
+    A solver certificate needs none: its cascade runs after its commit
+    already.  ``keys`` are read in their order, and the parents of
+    ``climbed`` (what the landing's cascade changed on the way up) after
+    them.  ``source`` is the landing's (see closure_attribution): a closure
+    found here is the one its own cascade would have written had the other
+    landing committed first.  Returns ``{'checked', 'closed', 'stale',
+    'changed'}``, or None when it failed.  It never raises: the landing it
+    follows has committed, and what a failed recheck leaves is the sweep's.
+    """
+    try:
+        with closure_attribution(source):
+            return _recheck(landed, keys, climbed)
+    except Exception:       # noqa: BLE001 - the landing stands without it
+        logger.exception('AtomicDB recheck after the landing on %s failed',
+                         landed)
+        return None
+
+
+def _recheck(landed, keys, climbed):
+    keys = list(dict.fromkeys(key for key in keys if key))
+    climbed = list(dict.fromkeys(key for key in climbed if key))
+    if climbed and len(keys) < RECHECK_MAX_KEYS:
+        keys = list(dict.fromkeys([*keys, *Edge.objects.filter(
+            child_id__in=climbed[:RECHECK_MAX_KEYS]).order_by(
+                'parent_id').values_list('parent_id', flat=True)]))
+    keys = keys[:RECHECK_MAX_KEYS]
+    closing = sorted(closable_rows(keys))
+    stale = sorted(key for key in stale_backed_rows(keys)
+                   if key not in closing)
+    summary = {'checked': len(keys), 'closed': [], 'stale': stale,
+               'changed': 0}
+    if not (closing or stale):
+        return summary
+    with _brief_lock_waits():
+        if closing:
+            summary['closed'] = close_missed(closing)
+        seeds = [*summary['closed'], *stale]
+        if seeds:
+            # A position closed here is seeded too: its parents read its
+            # status now, and only an ascent through it tells them.
+            summary['changed'] = backup_backed_evals_retrying(
+                seeds, sleeps=RECHECK_RETRY_SLEEPS, generation=1)
+    if summary['closed'] or stale:
+        DBEvent.objects.create(kind=RECHECK_EVENT,
+                               payload={'key': landed, **summary})
+    return summary
 
 
 def known_eval_of(status, backed_eval, eval_cp):
@@ -8386,8 +8612,14 @@ def _apply_prepared_tb(position_key, prepared):
                                 'updated'])
         _emit_closure_events(pos, dtz=dtz, dtz_verified=False,
                              clock_slack=pos.clock_slack)
-    backup_cascade([position_key])
+    cascade = {}
+    backup_cascade([position_key], report=cascade)
     backup_backed_evals([position_key])
+    # A TB landing closes a reply as an engine landing does, inside the same
+    # queued transaction, so it meets the same race at the parent (see the
+    # block above RECHECK_MAX_KEYS).  Its parents are read once committed.
+    _recheck_once_committed(position_key, [position_key],
+                            [position_key, *cascade.get('changed', ())])
     return True
 
 

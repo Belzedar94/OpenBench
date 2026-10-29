@@ -31,7 +31,7 @@ heals on its own:
   (invariant 4 of docs/value-semantics.md) has been stopped since 5-Oct-2026:
   a pass over the whole table no longer fits in a night.
 
-THREE FEEDS, ONE CHECK.  Every run reads
+THREE FEEDS, TWO CHECKS.  Every run reads
 
 1. ``guards``: the frontiers of the BACKED_GUARD events since the last run.
    They are not checked: they are the parents of rows that the last level of
@@ -51,9 +51,24 @@ numbers it stored the first time, and with no ingest of its own pending, is
 repaired.  One that changed in between is being worked on; the next look
 will see where it ended up.
 
+THE SECOND CHECK, CLOSURES (29-Oct-2026).  The same race leaves a parent
+open: two replies of 9d0c0b45 closed in the same second, each cascade read
+the other still open, and the parent waited for a visitor's click (see the
+block above ingest.RECHECK_MAX_KEYS).  A landing now reads its neighbours
+again once it has committed; this is the backstop for what that cannot see,
+a meeting point further up or a process killed between its commit and its
+recheck.  The merge points of feed 2, what the last run handed over and any
+``--keys`` are asked ``ingest.closable_rows``, one step of the cascade read
+only, and what is still decided after the settle, with no ingest of its own
+pending, is closed with ``ingest.close_missed``.  Not the rotation: on
+production (29-Oct-2026) the check cost 2.7 s per thousand positions beside
+the backed check's 2.5 s, and a sample of 3,199 open expanded positions held
+no closable one, while the race is met where ingests overlap.
+
 REPAIR.  ``ingest.backup_backed_evals``, in short transactions, with proven
 positions left out (``open_only``) and tried again after a lock conflict:
-first the confirmed positions in small batches, then the continuations.
+first the confirmed closures, each with an ascent through what it closed,
+then the confirmed positions in small batches, then the continuations.
 
 VALVES.  ``--max-changes`` rows written per run; ``--max-cut`` repair ascents
 cut by a guard per run, the mark of a family that does not come to rest;
@@ -387,17 +402,25 @@ class Command(BaseCommand):
 
     # ------------------------------------------------------------ check
 
-    def _check(self, keys, opts):
+    def _check(self, keys, opts, check=None):
+        check = check or ingest.stale_backed_rows
         found = {}
         for batch in _chunks(sorted(set(keys)), opts['check_batch']):
             try:
-                found.update(self._read_only(ingest.stale_backed_rows, batch))
+                found.update(self._read_only(check, batch))
             except OperationalError as error:
                 # A statement timeout: this batch waits for the next look.
                 self.counts['check_failed'] += len(batch)
                 self.stderr.write('check of %d keys failed: %s' % (
                     len(batch), str(error).splitlines()[0]))
         return found
+
+    def _check_closures(self, keys, opts):
+        """``{key: status}``: the open positions their children decide now."""
+        def statuses(batch):
+            return {key: status for key, (_row, status, _edges)
+                    in ingest.closable_rows(batch).items()}
+        return self._check(keys, opts, check=statuses)
 
     # ------------------------------------------------------------ repair
 
@@ -410,11 +433,12 @@ class Command(BaseCommand):
             return 'max-seconds'
         return None
 
-    def _repair(self, keys, generation):
+    def _repair(self, keys, generation, open_only=True):
         report = {}
         try:
             changed = ingest.backup_backed_evals_retrying(
-                keys, open_only=True, generation=generation, report=report)
+                keys, open_only=open_only, generation=generation,
+                report=report)
         except OperationalError as error:
             if not ingest.is_lock_conflict(error):
                 raise
@@ -427,6 +451,23 @@ class Command(BaseCommand):
             self.counts['cut'] += 1
             self.unsettled.extend(keys[:3])
 
+    def _close(self, keys, pending):
+        """Close the confirmed positions and tell their parents."""
+        try:
+            closed = ingest.close_missed(keys)
+        except OperationalError as error:
+            if not ingest.is_lock_conflict(error):
+                raise
+            # Rolled back whole: the next run looks at them first.
+            self.counts['busy'] += 1
+            pending.extend(keys)
+            return
+        self.counts['closed'] += len(closed)
+        if closed:
+            # Their parents read their status now, and only an ascent through
+            # them tells those parents: the one repair that is not open_only.
+            self._repair(closed, 1, open_only=False)
+
     # ------------------------------------------------------------ run
 
     def handle(self, *args, **opts):
@@ -434,7 +475,7 @@ class Command(BaseCommand):
         self.counts = Counter(dict.fromkeys(
             ('checked', 'stale', 'confirmed', 'moved', 'resolved',
              'in_flight', 'held', 'check_failed', 'ascents', 'changed', 'cut',
-             'busy'), 0))
+             'busy', 'closable', 'closable_confirmed', 'closed'), 0))
         self.cursors = {}
         self.unsettled = []
         postgres = connection.vendor == 'postgresql'
@@ -478,6 +519,7 @@ class Command(BaseCommand):
         if given:
             summary['mode'] = 'keys'
             candidates = list(dict.fromkeys(given))
+            meeting = list(candidates)
         else:
             summary['mode'] = 'scheduled'
             last = self._last_run()
@@ -487,21 +529,30 @@ class Command(BaseCommand):
             if not opts['no_rotation']:
                 rotation = self._rotation(opts, last, summary)
                 candidates += rotation
-            if not opts['no_recent']:
-                candidates += self._recent(opts, last, summary)
+            recent = ([] if opts['no_recent']
+                      else self._recent(opts, last, summary))
+            candidates += recent
+            meeting = pending + recent
             if not opts['no_guards']:
                 guards = self._guards(opts, last, summary)
             summary['pending_in'] = len(pending)
         candidates = list(dict.fromkeys(candidates))
 
         first = self._check(candidates, opts)
+        # Closures where ingests met, not on the rotation (see THE SECOND
+        # CHECK above).
+        closable = self._check_closures(meeting, opts)
         self.counts['checked'] = len(candidates)
         self.counts['stale'] = len(first)
+        self.counts['closable'] = len(closable)
         kinds = Counter(_kind(*pair) for pair in first.values())
         summary['kinds'] = dict(kinds)
         summary['examples'] = [
             {'key': key, 'stored': list(stored), 'decided': list(decided)}
             for key, (stored, decided) in sorted(first.items())[:EXAMPLES]]
+        summary['closable_examples'] = [
+            {'key': key, 'would_be': status}
+            for key, status in sorted(closable.items())[:EXAMPLES]]
 
         # The rotation is a sample of the whole table.  When too much of it is
         # stale that is a change of rule, not drift, and it wants a
@@ -516,14 +567,15 @@ class Command(BaseCommand):
             held = set(rotation)
             self.counts['held'] = rotation_stale
 
-        confirmed, pending = [], []
+        confirmed, to_close, pending = [], [], []
         recheck = [key for key in first if key not in held]
-        if recheck:
+        reclose = list(closable)
+        if recheck or reclose:
             settle = max(0.0, opts['settle_seconds'])
             if self._elapsed() + settle >= opts['max_seconds']:
                 # No time left to look again: the next run will.
                 valves.append('max-seconds')
-                pending += recheck
+                pending += recheck + reclose
             else:
                 if settle:
                     time.sleep(settle)
@@ -534,35 +586,47 @@ class Command(BaseCommand):
                     else:
                         self.counts['moved'] += 1
                 self.counts['resolved'] = len(set(recheck) - set(again))
+                # A closure is not undone in between, so still decided is
+                # confirmed; one closed meanwhile is simply not returned.
+                to_close = list(self._check_closures(reclose, opts))
                 # A position whose own result is landing is recomputed by
                 # that ingest; repairing it now would only race with it.
                 flight = set(IngestJob.objects.filter(
-                    position_id__in=confirmed,
+                    position_id__in=confirmed + to_close,
                     state__in=(IngestJob.JState.PENDING,
                                IngestJob.JState.PROCESSING))
                     .values_list('position_id', flat=True))
                 self.counts['in_flight'] = len(flight)
                 confirmed = sorted(key for key in confirmed
                                    if key not in flight)
+                to_close = sorted(key for key in to_close
+                                  if key not in flight)
         self.counts['confirmed'] = len(confirmed)
+        self.counts['closable_confirmed'] = len(to_close)
 
         if not opts['dry_run']:
-            # Confirmed positions first, in small ascents; the continuations
-            # of cut ascents after them, a chunk per ascent.
-            work = [(1, batch)
-                    for batch in _chunks(confirmed, opts['repair_batch'])]
+            # Closures first: what they close changes the backed values of
+            # their parents.  Then the confirmed positions, in small ascents;
+            # the continuations of cut ascents after them, a chunk per ascent.
+            work = [('close', 1, batch)
+                    for batch in _chunks(to_close, opts['repair_batch'])]
+            work += [('backed', 1, batch)
+                     for batch in _chunks(confirmed, opts['repair_batch'])]
             for generation, keys in guards.items():
-                work += [(generation + 1, chunk)
+                work += [('backed', generation + 1, chunk)
                          for chunk in _chunks(keys, opts['chunk'])]
-            for index, (generation, keys) in enumerate(work):
+            for index, (what, generation, keys) in enumerate(work):
                 stop = self._valve(opts)
                 if stop:
                     # What is left is checked first by the next run.
                     valves.append(stop)
-                    for _generation, rest in work[index:]:
+                    for _what, _generation, rest in work[index:]:
                         pending += rest
                     break
-                self._repair(keys, generation)
+                if what == 'close':
+                    self._close(keys, pending)
+                else:
+                    self._repair(keys, generation)
         summary['valve'] = ','.join(dict.fromkeys(valves)) or None
         summary['pending'] = pending[:PENDING_KEYS]
         summary['pending_dropped'] = max(0, len(pending) - PENDING_KEYS)
@@ -582,8 +646,8 @@ class Command(BaseCommand):
         self.stdout.write(
             'sweep_stale_backed ({mode}{dry}): checked={checked} '
             'stale={stale} confirmed={confirmed} changed={changed} '
-            'ascents={ascents} cut={cut} valve={valve} '
-            'seconds={seconds}'.format(
+            'ascents={ascents} cut={cut} closable={closable} '
+            'closed={closed} valve={valve} seconds={seconds}'.format(
                 mode=summary.get('mode'),
                 dry=', dry run' if summary.get('dry_run') else '',
                 checked=summary.get('checked', 0),
@@ -592,6 +656,8 @@ class Command(BaseCommand):
                 changed=summary.get('changed', 0),
                 ascents=summary.get('ascents', 0),
                 cut=summary.get('cut', 0),
+                closable=summary.get('closable', 0),
+                closed=summary.get('closed', 0),
                 valve=summary.get('valve'),
                 seconds=summary.get('seconds')))
         if rotation:
@@ -602,5 +668,6 @@ class Command(BaseCommand):
             if summary.get(name):
                 self.stdout.write('  %s %s' % (
                     name, json.dumps(summary[name], sort_keys=True)))
-        for example in summary.get('examples') or ():
+        for example in ((summary.get('examples') or [])
+                        + (summary.get('closable_examples') or [])):
             self.stdout.write('  ' + json.dumps(example, sort_keys=True))

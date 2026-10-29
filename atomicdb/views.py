@@ -4139,6 +4139,10 @@ def _san_line(key, max_plies=16, keep_head=False):
 #   * ``BACKED_SWEEP`` — el recibo de una pasada de ``sweep_stale_backed``:
 #     cuantos respaldos encontro viejos y reescribio, y por donde empieza la
 #     siguiente.  Mantenimiento con una lista de claves dentro, no una noticia.
+#   * ``LANDING_RECHECK`` — the receipt of a landing that, once committed,
+#     found a neighbour its own ascents had read before a concurrent landing
+#     committed (§ ``ingest.recheck_after_commit``).  A closure it makes comes
+#     out as ``NODE_CLOSED``, like any other; the receipt is maintenance.
 #   * ``DEBT_ENQUEUED``, ``COVERAGE_ENQUEUED``, ``FRAGILE_ENQUEUED``,
 #     ``QUALITY_CONVERGENCE`` — contabilidad de cola (cuantas tareas se
 #     mintearon, con que cupo).  Ni siquiera llevan ``key``.
@@ -4190,6 +4194,7 @@ FEED_HIDDEN_KINDS = {
     'DN_REPAIR',
     'FRAGILE_ENQUEUED',
     'IDLE_REPAIR',
+    'LANDING_RECHECK',
     'PROOF_GUARD',
     'QUALITY_CONVERGENCE',
     'REVOKE_GUARD',
