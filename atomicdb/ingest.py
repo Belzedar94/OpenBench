@@ -907,6 +907,10 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     # is bought one more search for when nobody is requesting (§ idle_repair).
     from . import idle_repair
     repaired = idle_repair.queue_from_landing(pos, parent_keys)
+    # A mate this position now shows, in its own first line or in the line
+    # through a child, is bought one pass of the solver (§ autosolve).
+    from . import autosolve
+    autosolved = autosolve.queue_from_landing(pos)
     summary = {'closed_children': closed_here, 'backed_up': changed,
                'backed_evals': backed, 'uncertainty_expanded': uncertainty,
                'witness_refuted': refuted}
@@ -914,6 +918,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         summary['cascaded'] = cascaded
     if repaired:
         summary['repaired'] = repaired
+    if autosolved:
+        summary['autosolved'] = autosolved
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
@@ -7031,64 +7037,17 @@ def enqueue_engine_debt(cap=DEBT_QUEUE_CAP, limit=None):
     return len(made)
 
 
+# P9 (community poll, 4-0, 28-Aug-2026): a mate the engine reported is bought
+# one F0 pass of the solver at 8M.  The arm lives in ``autosolve``.  It used to
+# be a scan of ``Position`` by ``eval_cp`` OR ``backed_eval``, two unindexed
+# columns, on every tick of the selector: with few matches that reads a large
+# share of a table of 100M rows, the scale law the selector broke on 29-Aug.
+# It also bought a failed pass again two minutes later, forever.  Now what
+# qualifies is found where a search lands, and in a bounded walk round the
+# completed searches (§ autosolve).
 AUTOSOLVE95_ARM = 'autosolve95'
 AUTOSOLVE95_THRESHOLD = 9500
 AUTOSOLVE95_STAGE_NODES = 8_000_000
-
-
-def enqueue_autosolve95(cap):
-    """P9 (comunidad, 4-0, 28-ago-2026): un +-95 se intenta CERRAR.
-
-    Una eval a 95 o mas es "mate encontrado, distancia desconocida"
-    (Eclipsia, 23-ago): gastarle mas analisis heuristico es excavar una
-    pregunta contestada a medias.  Este brazo le compra a cada una un pase
-    de solver F0 de 8M para convertirla en cierre exacto.
-
-    Mismo contrato que los demas brazos con cupo: ``cap`` acota lo PENDING
-    del brazo, una posicion con CUALQUIER SolveTask viva no se toca, y el
-    minteo es un bulk_create acotado con su DBEvent.  Solo posiciones
-    UNKNOWN: una cerrada ya tiene algo mejor que una eval.
-    """
-    from .models import SolveTask
-
-    pending = SolveTask.objects.filter(
-        arm=AUTOSOLVE95_ARM, state=SolveTask.TState.PENDING).count()
-    room = cap - pending
-    if room <= 0:
-        return 0
-    taken = set(SolveTask.objects.filter(
-        state__in=(SolveTask.TState.PENDING, SolveTask.TState.LEASED))
-        .values_list('position__key', flat=True))
-    th = AUTOSOLVE95_THRESHOLD
-    made = []
-    for goal, cond in (
-            ('WHITE_WIN', Q(eval_cp__gte=th) | Q(backed_eval__gte=th)),
-            ('BLACK_WIN', Q(eval_cp__lte=-th) | Q(backed_eval__lte=-th))):
-        if len(made) >= room:
-            break
-        # SIN ORDEN, a proposito (29-ago): ordenar por extremidad costaba un
-        # sort paralelo de ~1,3M filas estimadas por tick a la escala de 36M
-        # posiciones. Cualquier candidata vale — el cupo es 32 y el brazo
-        # vuelve cada dos minutos — asi que el LIMIT de abajo corta el
-        # escaneo en cuanto junta las primeras coincidencias.
-        candidates = (Position.objects.filter(status='UNKNOWN').filter(cond)
-                      .exclude(key__in=taken).order_by())
-        for position in candidates[:room * 2]:
-            if len(made) >= room:
-                break
-            if position.key in taken:
-                continue
-            taken.add(position.key)
-            made.append(SolveTask(
-                position=position, goal=goal,
-                budget_stage='F0', budget_nodes=AUTOSOLVE95_STAGE_NODES,
-                arm=AUTOSOLVE95_ARM))
-    if not made:
-        return 0
-    SolveTask.objects.bulk_create(made, ignore_conflicts=True)
-    DBEvent.objects.create(kind='AUTOSOLVE95_ENQUEUED', payload={
-        'created': len(made), 'pending_before': pending, 'cap': int(cap)})
-    return len(made)
 
 
 # ---------------- completado de cobertura ----------------
@@ -7182,12 +7141,18 @@ ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
 # bought on the strength of a search that landed, the same loop the walker's
 # arms are capped for.  Sixty an hour is a small share of what the fleet
 # serves when it is idle, which is the only time an AUTO task is served.
+#
+# So do the solver passes bought for the mates the engine reported
+# (§ autosolve), counted on their own table.  A pass of 8M that does not prove
+# runs to its budget, 20 to 80 seconds on one core: sixty an hour keep one
+# solver thread busy, and leave the debt and the fragile claims to any other.
 IDLE_REPAIR_ARM = 'repair'
 ARM_RATE_SETTING = {
     VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),
     QUALITY_ARM: ('ATOMICDB_ARM_RATE_QUALITY', 120),
     VALUE_DESCEND_ARM: ('ATOMICDB_ARM_RATE_DESCEND', 120),
     IDLE_REPAIR_ARM: ('ATOMICDB_ARM_RATE_REPAIR', 60),
+    AUTOSOLVE95_ARM: ('ATOMICDB_ARM_RATE_AUTOSOLVE', 60),
 }
 
 
@@ -7214,7 +7179,7 @@ def arm_rate(arm):
     return int(raw) if raw.isdigit() else default
 
 
-def _arm_budget_room(arm):
+def _arm_budget_room(arm, tasks=None):
     """Cuantas tareas MAS puede crear este brazo en la hora que corre.
 
     Cero deja recibo (uno por tramo) y es la respuesta a "salta la compra".
@@ -7226,6 +7191,9 @@ def _arm_budget_room(arm):
     reloj: un tope que se resetea en punto permite el doble del presupuesto a
     caballo del cambio de hora, y ese doble es exactamente la rafaga que esto
     existe para cortar.
+
+    ``tasks`` is the table the arm buys into, analysis tasks unless it says
+    otherwise: the solver passes count their own rows (§ autosolve).
     """
     rate = arm_rate(arm)
     if rate <= 0:
@@ -7233,7 +7201,7 @@ def _arm_budget_room(arm):
         # techo", y un brazo apagado no alcanzo nada.  Ademas se ahorra el
         # COUNT, que es lo unico que cuesta esta comprobacion.
         return 0
-    made = AnalysisTask.objects.filter(
+    made = (AnalysisTask.objects if tasks is None else tasks).filter(
         arm=arm, created__gte=timezone.now() - ARM_RATE_WINDOW).count()
     if made >= rate:
         _arm_rate_receipt(arm, rate, made)
