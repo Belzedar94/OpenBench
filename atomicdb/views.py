@@ -2266,19 +2266,35 @@ def api_request_moves(request, key):
       the page only offers legal moves, so anything else comes from a stale
       or hand-made list, and one bad token should not cost the good ones.
     * AT MOST ``MULTI_REQUEST_CAP`` MOVES a click, refused whole above it.
-    * ONE DEPTH FOR ALL OF THEM: the rung of the slider under the rule of the
-      single button (§ ``depth.chosen_rung``), so an account that may not
-      choose has its choice dropped.  Every rung of the ladder, 2B included,
-      is allowed.  The slider's LAST STOP is refused (``top-rung-single``):
-      it is not a rung but the searches below a position
+    * ONE DEPTH FOR ALL OF THEM: the rung chosen in the bar's own depth
+      choice (§ ``depth.bar_context``), under the rule of the single button
+      (§ ``depth.chosen_rung``), so an account that may not choose has its
+      choice dropped.  Every rung of the ladder, 2B included, is allowed,
+      whatever the position's own depth.  The slider's LAST STOP, which the
+      bar does not offer, is refused when posted (``top-rung-single``): it
+      is not a rung but the searches below a position
       (``ingest.SUBTREE_REQUEST_NODES``), meant for one position at a time.
       So ``confirm``, which the single button asks for that stop alone,
       changes nothing here.
+    * A CHOSEN DEPTH IS A TARGET, not a floor to climb from: a move a search
+      already reached that deep is skipped (``already-analyzed``), and every
+      other move gets exactly that rung.  This is ``only_if_missing``
+      (§ ``ingest._request_rung``).  As a floor, ticking at 512M bought 2B
+      for a move already searched at 512M, the very accident BManBJ asked
+      to avoid (29-Oct: "I don't want to accidentally queue something for 2B
+      when on its first visit it was analyzed at 512M if I'm just trying to
+      update positions to 512M").  The move table shows the same line
+      (§ ``_with_search_depth``), so what the page shows at 512M is what the
+      click skips.  With no depth chosen each move still gets its own next
+      rung, as from its own button.
     * ONE SEARCH A MOVE AT MOST.  A move searched to the top of the ladder
       buys nothing and says so (``ladder-spent``): from its own page the next
       click buys the searches below it, up to 78, and sixty-four of those in
       one click would be thousands of searches (§ ``_queue_request``,
-      ``one_search``).
+      ``one_search``).  A target keeps that bound on its own: it never
+      reaches the searches below, and a move whose 2B search ran is already
+      searched deep enough for any rung, so it comes back
+      ``already-analyzed`` rather than ``ladder-spent``.
     * A MOVE THAT IS NOT A NODE YET is made exactly as following it would
       make it (§ ``_materialise_child``), and a move that re-enters the line
       the page is on is skipped (``blocked``), for the reason ``goto`` does
@@ -2376,10 +2392,14 @@ def _request_moves(request, key):
             outcomes.append((uci, 'blocked'))
             continue
         child = children.get(uci) or _materialise_child(pos, uci)
+        # A chosen depth is a target, the ``only_if_missing`` of the API: a
+        # move already searched that deep answers ``already-analyzed``, and
+        # any other gets that rung and nothing above it.  Without a choice
+        # each move climbs its own ladder, as from its own button.
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
             raw_route=f'{route},{uci}' if route else '', with_place=False,
-            one_search=True)
+            one_search=True, only_if_missing=chosen is not None)
         if payload['status'] == 'queue-full-account':
             outcomes.extend((rest, 'queue-full') for rest in wanted[index:])
             break
@@ -2500,8 +2520,9 @@ def api_public_request(request):
     With it the budget is a target (the chosen rung, or the first one): if a
     search that ran already covers it the answer is ``already-analyzed`` and
     nothing is queued, and otherwise nothing above the target is queued
-    (§ ``ingest._request_rung``).  Only this door reads it; the explorer
-    button has no use for it.
+    (§ ``ingest._request_rung``).  Only this door reads it from the caller;
+    the explorer button has no use for it, and the multi-select of the move
+    list sets it itself whenever a depth is chosen (§ ``_request_moves``).
 
     ``budget=10000000000`` (``ingest.SUBTREE_REQUEST_NODES``) is the last stop
     of the depth slider: up to 78 searches of 128M below the position
@@ -4879,6 +4900,62 @@ def _child_moves(pos):
     return moves
 
 
+def _budget_label(nodes):
+    """A budget as the depth slider names it: '128M', '512M', '2B'.
+
+    Every budget the tree buys is a whole number of millions, so this is
+    ``depth.short_nodes``; anything else gets ``_human``'s form rather than
+    eleven digits with commas in a narrow column.
+    """
+    label = depth.short_nodes(nodes)
+    return label if label[-1] in 'MB' else _human(nodes)
+
+
+def _with_search_depth(moves):
+    """Each row's deepest search, read for the whole table in ONE aggregate.
+
+    The last column of the move table was the visit count.  BManBJ,
+    29-Oct-2026 in #suggestions: "instead of showing the number of visits, it
+    would be more useful to see with which node budget that position was
+    analyzed with. Especially with now being able to multi select moves from
+    a position I don't want to accidentally queue something for 2B when on
+    its first visit it was analyzed at 512M".  So the column shows the budget
+    of the deepest search each move's position has had, and the visits move
+    to its tooltip.
+
+    THE SOURCE IS THE TASKS THAT RAN (§ ``ingest.searched_budgets``):
+    COMPLETED with nodes, at the budget they were bought at.  The other
+    candidates each answer a different question:
+
+    * ``ingest.request_ladder_state`` reads every COMPLETED row, absorbed
+      ones included, and an absorbed row bought its rung without anybody
+      searching (§ ``ingest.absorb_tasks``);
+    * the ``_budget`` of the showcase lines and ``Position.analysis_passes``
+      hold the nodes a pass reported, which are not its rung (a search
+      reports a little more than its budget, or less when it stops early),
+      and the passes are kept only since 15-Aug and only the last six;
+    * ``nodes_invested`` adds every pass up, so four searches of 128M read as
+      one of 512M.
+
+    And it is the same line a chosen depth in the multi-select is held to
+    (``only_if_missing``, § ``_request_moves``): a move this column shows at
+    512M is a move a 512M request skips, and one it shows lower or not at
+    all is a move that request buys.  The page and the button cannot
+    disagree.
+
+    Rows of the tree only: an off-tree move has no position to have been
+    searched, and its cell says so on its own.  The rows come back with
+    ``searched_nodes`` (None when no search has reached the position) and
+    its label ``searched_h``.
+    """
+    deepest = ingest.searched_budgets([move['key'] for move in moves])
+    for move in moves:
+        nodes = deepest.get(move['key'])
+        move['searched_nodes'] = nodes
+        move['searched_h'] = None if nodes is None else _budget_label(nodes)
+    return moves
+
+
 def home(request):
     now = timezone.now()
     # Los tres agregados que barrian la tabla entera salen de la instantanea
@@ -5366,11 +5443,14 @@ def api_query(request):
     score = None if known is None else (known if stm_white else -known)
     point = None if pos.eval_cp is None else (
         pos.eval_cp if stm_white else -pos.eval_cp)
-    children = _child_moves(pos)
+    children = _with_search_depth(_child_moves(pos))
+    # ``searched_nodes`` sits beside ``visits`` and does not replace it: the
+    # page moved the visits into a tooltip, but a client may count on them,
+    # and the explorer's own poller reads them (§ explore.html).
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
               'backed_plies': m['backed_plies'], 'visits': m['visits'],
-              'floor': m['floor']}
+              'searched_nodes': m['searched_nodes'], 'floor': m['floor']}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
@@ -7141,7 +7221,9 @@ def explore(request, key):
         # Leida = VISITADA: lo que apaga un aviso es llegar a su posicion —
         # desde el propio aviso o por su pie — no abrir el panel.
         notifications.mark_position_seen(viewer, pos.key)
-    moves = _child_moves(pos)
+    # The depth column of the table, one aggregate for every row
+    # (§ _with_search_depth).
+    moves = _with_search_depth(_child_moves(pos))
     parents = [{'key': e.parent_id, 'uci': e.move_uci}
                for e in Edge.objects.filter(child=pos)[:8]]
     raw_play = request.GET.get('play')
@@ -7362,13 +7444,26 @@ def explore(request, key):
     # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
     # cuando las lineas vigentes no llenan el tope).
     pv_plies = _pv_verify_plies(pos)
+    # The boxes of the move list and the button that requests every ticked
+    # move (§ api_request_moves): for a signed-in visitor, on a position the
+    # page offers to request at all.
+    multi_request = bool(viewer) and pos.status == 'UNKNOWN'
+    # Who may choose a rung, asked ONCE for the two controls that offer one
+    # under that rule: the slider of the Request button and the depth choice
+    # of the bar under the table (§ depth.may_choose).  Only an open position
+    # offers either, so a solved one asks nothing, as before.
+    chooser = pos.status == 'UNKNOWN' and depth.may_choose(request.user)
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
         # Selector de profundidad del boton de peticion: vacio — y por tanto
         # invisible, sin hueco ni pista — para quien no puede elegir peldano
         # (§ depth.context).  Esta pagina no lleva cache (§ urls), asi que un
         # render con selector no se le sirve a nadie mas.
-        **depth.context(request, pos),
+        **depth.context(request, pos, chooser=chooser),
+        # And the depth choice of the bar, which reads no slider: every rung
+        # of the ladder, whatever this position's own depth
+        # (§ depth.bar_context).  Empty without the bar or the right.
+        **(depth.bar_context(chooser) if multi_request else {}),
         # En que va la peticion viva de ESTA posicion: esperando en la cola, o
         # buscandose ahora y cuanto falta.  Y, junto a esa linea, lo que TU
         # puedes hacer con tu peticion de aqui: adelantarla
@@ -7492,11 +7587,9 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'offtree': offtree,
-        # The boxes of the move list and the button that requests every
-        # ticked move (§ api_request_moves): for a signed-in visitor, on a
-        # position the page offers to request at all.  Without them the table
-        # is the one it has always been.
-        'multi_request': bool(viewer) and pos.status == 'UNKNOWN',
+        # The boxes and the bar, decided above.  Without them the table is
+        # the one it has always been.
+        'multi_request': multi_request,
         'multi_request_cap': MULTI_REQUEST_CAP,
         # Spent ladder: a click here lands below, so the page shows the
         # cascade underneath from the first render, before any click, and

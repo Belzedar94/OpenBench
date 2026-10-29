@@ -5623,6 +5623,17 @@ def _completed_max_budget(pos):
         .first())
 
 
+def _searches_that_ran(tasks):
+    """The rows of ``tasks`` an engine actually searched: COMPLETED with nodes.
+
+    The one line ``searched_budget`` and ``searched_budgets`` both draw, so
+    the explorer's depth column and a request that wants a search only if it
+    is missing cannot disagree about what counts.
+    """
+    return tasks.filter(state=AnalysisTask.TState.COMPLETED,
+                        nodes_searched__gt=0)
+
+
 def searched_budget(pos):
     """The largest budget a search of ``pos`` has actually RUN, or ``None``.
 
@@ -5634,11 +5645,33 @@ def searched_budget(pos):
     here", which is the question of a caller who wants a search only if it is
     missing (§ ``_request_rung``, ``only_if_missing``).
     """
-    return (AnalysisTask.objects.filter(
-        position=pos, state=AnalysisTask.TState.COMPLETED,
-        nodes_searched__gt=0)
-        .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
-        .first())
+    return (_searches_that_ran(AnalysisTask.objects.filter(position=pos))
+            .order_by('-budget_nodes').values_list('budget_nodes', flat=True)
+            .first())
+
+
+def searched_budgets(keys):
+    """``{key: searched_budget}`` for many positions, in ONE aggregate.
+
+    For the explorer's move table, which shows the deepest search each move's
+    position has had (§ ``views._with_search_depth``): a table is thirty-odd
+    rows, and asking ``searched_budget`` row by row would be thirty-odd
+    statements for one page.  A position no search has reached is left out,
+    not given a zero: no search is not a search of zero nodes.
+
+    It is the budget the search was bought at (128M, 512M, 2B), not the nodes
+    it reported: those run a little past the budget, or short of it when a
+    search stops early, and the rung is what a chosen depth is compared with
+    (§ ``_request_rung``).
+    """
+    keys = [key for key in keys if key]
+    if not keys:
+        return {}
+    rows = (_searches_that_ran(
+        AnalysisTask.objects.filter(position_id__in=keys))
+        .values('position_id')
+        .annotate(deepest=Max('budget_nodes')))
+    return {row['position_id']: row['deepest'] for row in rows}
 
 
 def front_of_own_queue(task):
@@ -6896,6 +6929,12 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
     searches below it would be thousands of searches.  So the swap, which
     buys up to FRONTIER_CLICK_CAP replies, is off, and a spent ladder answers
     LADDER_SPENT and buys nothing.
+
+    The multi-select sends both flags when a depth is chosen there, and they
+    compose: with a target ``_request_rung`` never reports a spent ladder, so
+    LADDER_SPENT does not come back and the searches below are never reached,
+    and a move already searched that deep answers 'already-analyzed'.  At
+    most one search, never above the target.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
     | 'saturated', y 'already-analyzed' solo con ``only_if_missing``, y
