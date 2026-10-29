@@ -401,6 +401,11 @@ class ArbitrationTests(TestCase):
 # ---------------------------------------------------------------------------
 # Connectors, found when a search lands below them.
 # ---------------------------------------------------------------------------
+# The quality arm can buy the same link its first search in the same landing
+# (its support against the searched grandparent's); off here, so these tests
+# see this arm alone.  ``test_another_arms_search_of_the_link_is_enough`` has
+# the two together.
+@override_settings(ATOMICDB_ARM_RATE_QUALITY='0')
 class ConnectorTests(TestCase):
 
     def setUp(self):
@@ -472,6 +477,16 @@ class ConnectorTests(TestCase):
 
         self.assertEqual(set(_repairs().values_list('position_id', flat=True)),
                          {self.link.key, self.below.key})
+
+    def test_another_arms_search_of_the_link_is_enough(self):
+        """With the quality arm on, whoever queues the link's search first
+        owns it, and the link gets one search, not two."""
+        with override_settings(ATOMICDB_ARM_RATE_QUALITY='120'):
+            _land(self.below, depth=24)
+
+        tasks = AnalysisTask.objects.filter(position=self.link)
+        self.assertEqual(tasks.count(), 1)
+        self.assertEqual(tasks.get().generation, 0)
 
 
 # ---------------------------------------------------------------------------
