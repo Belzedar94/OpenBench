@@ -17,6 +17,9 @@ What is pinned here:
     a move back into the line is skipped;
   * the rung of the depth slider reaches every move for whoever may choose
     one, and its last stop, the searches below a position, is refused;
+  * one search a move at most: a move searched to the top of the ladder buys
+    nothing and says so, where its own button would buy the searches below
+    it;
   * the account's queue cap, before the batch and part way through it;
   * the route of the page reaching every task, and the tally coming back.
 """
@@ -25,7 +28,7 @@ import re
 from unittest import mock
 
 from django.db import OperationalError
-from django.test import Client
+from django.test import Client, override_settings
 
 from . import ingest, logic, views
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
@@ -76,6 +79,16 @@ def _child_of(parent, uci):
 def _pending(position):
     return AnalysisTask.objects.get(position=position,
                                     state=AnalysisTask.TState.PENDING)
+
+
+def _ran(position, budget):
+    """A search of ``budget`` that ran on ``position``, as a worker leaves it."""
+    position.refresh_from_db()
+    AnalysisTask.objects.create(
+        position=position, generation=position.visits, budget_nodes=budget,
+        nodes_searched=budget, state=AnalysisTask.TState.COMPLETED,
+        source=AnalysisTask.Source.USER, machine='box0')
+    Position.objects.filter(pk=position.pk).update(visits=position.visits + 1)
 
 
 class WhoGetsTheBoxesTests(TestCase):
@@ -441,6 +454,78 @@ class DepthTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'status': 'bad-budget'})
         self.assertFalse(AnalysisTask.objects.exists())
+
+
+class SpentLadderTests(TestCase):
+    """One search a move at most, even where the move's own button buys more.
+
+    From its own page, a move whose 2B search has run buys up to 78 searches
+    below it (``ingest.request_subtree``).  Ticked in a batch of sixty-four
+    such moves, that would be about five thousand searches from one click,
+    the whole of an account's queue.  So the batch buys nothing there and
+    says so.
+    """
+
+    def setUp(self):
+        self.root = _root()
+        self.url = f'/atomicdb/request-moves/{self.root.key}/'
+        self.spent = _chain(self.root, ['e2e4'])[0]
+        _ran(self.spent, LADDER[-1])
+
+    def _nothing_below(self, position):
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=position, state=AnalysisTask.TState.PENDING).exists())
+        self.assertFalse(AnalysisTask.objects.filter(
+            position__edges_in__parent=position).exists())
+
+    def test_a_move_searched_to_the_top_buys_nothing_and_says_so(self):
+        body = _signed_in().post(self.url, {'moves': 'e2e4,d2d4'}).json()
+
+        self.assertEqual(body['moves'],
+                         [{'uci': 'e2e4', 'status': 'ladder-spent'},
+                          {'uci': 'd2d4', 'status': 'queued'}])
+        self.assertEqual(body['counts'], {'ladder-spent': 1, 'queued': 1})
+        self._nothing_below(self.spent)
+        self.assertFalse(DBEvent.objects.filter(
+            kind=ingest.SUBTREE_EVENT).exists())
+        self.assertEqual(AnalysisTask.objects.filter(
+            state=AnalysisTask.TState.PENDING).count(), 1)
+
+    def test_a_rung_chosen_for_it_changes_nothing(self):
+        body = _signed_in('belzedar', staff=True).post(
+            self.url, {'moves': 'e2e4', 'budget': LADDER[-1]}).json()
+
+        self.assertEqual(body['counts'], {'ladder-spent': 1})
+        self._nothing_below(self.spent)
+
+    def test_its_own_button_still_buys_the_searches_below(self):
+        # The contrast: the batch rule is the batch's, not the move's.
+        body = Client().post(f'/atomicdb/request/{self.spent.key}/').json()
+
+        self.assertEqual(body['status'], 'expanded')
+        self.assertGreater(body['searches_queued'], 1)
+
+    @override_settings(ATOMICDB_BREADTH_SWAP=True)
+    def test_nor_does_the_breadth_swap_buy_replies_in_a_batch(self):
+        # 512M ran and the value is open: a plain click there would buy the
+        # replies with the swap on.  In a batch the move gets its next rung.
+        deep = _chain(self.root, ['d2d4'])[0]
+        _ran(deep, LADDER[1])
+        Position.objects.filter(pk=deep.pk).update(eval_cp=30)
+
+        body = _signed_in().post(self.url, {'moves': 'd2d4'}).json()
+
+        self.assertEqual(body['counts'], {'queued': 1})
+        self.assertEqual(_pending(deep).budget_nodes, LADDER[2])
+        self.assertFalse(AnalysisTask.objects.filter(
+            position__edges_in__parent=deep).exists())
+        self.assertFalse(DBEvent.objects.filter(kind='BREADTH_SWAP').exists())
+
+    def test_the_bar_says_what_full_depth_means(self):
+        response = _signed_in().get(f'/atomicdb/explore/{self.root.key}/')
+
+        self.assertContains(
+            response, 'at full depth, open a move to search below it')
 
 
 class AccountCapTests(TestCase):

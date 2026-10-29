@@ -859,7 +859,8 @@
     stop nothing is sent and each move gets its own next rung, as it would
     from its own page.  The last stop, the searches below a position (its
     entry says ``subtree``), is for one position at a time, and it turns the
-    button off.
+    button off.  A ticked move already searched to the top of the ladder buys
+    nothing here: the receipt says so, and its own page buys what is below.
 
     When analysis lands on a move this bar requested the page reloads, as it
     does for the buttons at the top.  Their poller lives inside their own
@@ -966,15 +967,16 @@
         const n = name => Number(counts[name]) || 0;
         const parts = [];
         if (n('queued')) { parts.push('Queued ' + n('queued')); }
-        // A move whose own depth is all spent buys its replies instead.
-        if (n('expanded')) { parts.push(n('expanded') + ' queued below'); }
         const waiting = n('already-queued') + n('already-requested');
         if (waiting) { parts.push(waiting + ' already in the queue'); }
         if (n('already-solved')) {
           parts.push(n('already-solved') + ' already solved');
         }
-        if (n('saturated')) {
-          parts.push(n('saturated') + ' with nothing left to request');
+        // A move searched to the top of the ladder buys nothing from here;
+        // from its own page the next click buys the searches below it.
+        if (n('ladder-spent')) {
+          parts.push(n('ladder-spent')
+                     + ' at full depth, open a move to search below it');
         }
         if (n('blocked')) { parts.push(n('blocked') + ' skipped, repetition'); }
         if (n('illegal')) { parts.push(n('illegal') + ' not legal here'); }
@@ -994,8 +996,7 @@
         'queue-full-account': 'You have too many requests waiting',
         'busy': 'Server busy, try again',
       };
-      const IN_FLIGHT = ['queued', 'already-queued', 'already-requested',
-                         'expanded'];
+      const IN_FLIGHT = ['queued', 'already-queued', 'already-requested'];
       function finish(d, offline) {
         sending = false;
         if (d && (d.status === 'done' || d.status === 'partial')) {

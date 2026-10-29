@@ -5349,6 +5349,11 @@ def bootstrap_root(budget=None):
 
 
 _LADDER_EXHAUSTED = 'ladder-exhausted'   # interno: nunca sale del modulo
+# What a one-search request answers for a position whose ladder is spent
+# (§ ``request_analysis``, ``one_search``): nothing bought, and the searches
+# below it are its own page's to ask for.  Unlike the sentinel above, this one
+# does leave the module.
+LADDER_SPENT = 'ladder-spent'
 
 
 class RequestOutcome(str):
@@ -6610,7 +6615,7 @@ def _breadth_swap_eligible(pos):
 
 
 def request_analysis(pos, requested_by='', route='', budget_floor=None,
-                     only_if_missing=False):
+                     only_if_missing=False, one_search=False):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -6641,16 +6646,25 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
     nothing else, so it turns the swap off as well and never falls through to
     the searches below; asking for both at once is a caller's bug.
 
+    ``one_search`` is for a door that buys at most one search per position,
+    the multi-select of the explorer's move list (§ ``views._request_moves``):
+    one click there can tick sixty-four moves, and each of them buying the
+    searches below it would be thousands of searches.  So the swap, which
+    buys up to FRONTIER_CLICK_CAP replies, is off, and a spent ladder answers
+    LADDER_SPENT and buys nothing.
+
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
-    | 'saturated', y 'already-analyzed' solo con ``only_if_missing``."""
+    | 'saturated', y 'already-analyzed' solo con ``only_if_missing``, y
+    LADDER_SPENT solo con ``one_search``."""
     if budget_floor == SUBTREE_REQUEST_NODES:
-        if only_if_missing:
-            raise ValueError('only_if_missing asks about one position; it '
-                             'cannot be combined with the subtree request')
+        if only_if_missing or one_search:
+            raise ValueError('the subtree request buys searches below the '
+                             'position; only_if_missing and one_search ask '
+                             'about the position itself')
         return request_subtree(pos, requested_by=requested_by, route=route)
     with atomic():
         swapped = False
-        if budget_floor is None and not only_if_missing \
+        if budget_floor is None and not only_if_missing and not one_search \
                 and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
@@ -6671,6 +6685,8 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
             return RequestOutcome(outcome)
         if swapped:
             return RequestOutcome('saturated')
+        if one_search:
+            return RequestOutcome(LADDER_SPENT)
         return request_subtree(pos, requested_by=requested_by, route=route)
 
 

@@ -2063,7 +2063,7 @@ def _validated_route_for(raw_route, key):
 
 
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
-                   only_if_missing=False, with_place=True):
+                   only_if_missing=False, with_place=True, one_search=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2082,6 +2082,11 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     multi-select of the move list comes here once per ticked move and shows
     no place for any of them, so it would pay that sort up to
     ``MULTI_REQUEST_CAP`` times for nothing (§ ``api_request_moves``).
+
+    ``one_search=True`` buys at most one search on ``pos``: a spent ladder
+    answers ``ingest.LADDER_SPENT`` instead of buying the searches below it
+    (§ ``ingest.request_analysis``).  The same multi-select passes it, so one
+    click on sixty-four moves cannot turn into thousands of searches.
     """
     if only_if_missing and pos.status == 'UNKNOWN':
         # Answered before the dedup and the queue cap: a call with nothing to
@@ -2147,7 +2152,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     with atomic():
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
                                           route=route, budget_floor=chosen,
-                                          only_if_missing=only_if_missing)
+                                          only_if_missing=only_if_missing,
+                                          one_search=one_search)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -2247,6 +2253,11 @@ def api_request_moves(request, key):
       (``ingest.SUBTREE_REQUEST_NODES``), meant for one position at a time.
       So ``confirm``, which the single button asks for that stop alone,
       changes nothing here.
+    * ONE SEARCH A MOVE AT MOST.  A move searched to the top of the ladder
+      buys nothing and says so (``ladder-spent``): from its own page the next
+      click buys the searches below it, up to 78, and sixty-four of those in
+      one click would be thousands of searches (§ ``_queue_request``,
+      ``one_search``).
     * A MOVE THAT IS NOT A NODE YET is made exactly as following it would
       make it (§ ``_materialise_child``), and a move that re-enters the line
       the page is on is skipped (``blocked``), for the reason ``goto`` does
@@ -2346,7 +2357,8 @@ def _request_moves(request, key):
         child = children.get(uci) or _materialise_child(pos, uci)
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
-            raw_route=f'{route},{uci}' if route else '', with_place=False)
+            raw_route=f'{route},{uci}' if route else '', with_place=False,
+            one_search=True)
         if payload['status'] == 'queue-full-account':
             outcomes.extend((rest, 'queue-full') for rest in wanted[index:])
             break
