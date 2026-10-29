@@ -51,7 +51,7 @@ own because they are one scheduling decision and it should be taken in one
 place.  The order inside a pass is the priority order: debt, coverage, then
 the adversarial arms last.  The walk down the idle fleet's repair backlog
 (§ atomicdb.idle_repair) comes after them and before the analysis pool: one
-bounded step per pass, and none at all while its queue is full.
+bounded step per pass, and nothing past one count while its queue is full.
 
 And, at the very end, the PUBLIC COUNTERS of the front page.  Those are not a
 scheduling decision, but they are the same kind of thing this process exists

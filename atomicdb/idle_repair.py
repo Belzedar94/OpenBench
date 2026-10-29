@@ -24,9 +24,9 @@ them.  Two kinds qualify, and both are read off what a position stores:
 WHEN THEY ARE FOUND.  When a search lands (``queue_from_landing``, at the end of
 ``ingest_analysis``): the landed position is checked for a shallow showcase,
 which costs no query, and its parents for connectors, one indexed read of a
-handful of rows.  What landed before this arm existed is reached by a slow
-walk down the completed searches (``drip_backlog``, one bounded step per tick
-of the selector service).
+handful of rows.  What landed before this arm existed, or while its queue was
+full, is reached by a slow walk round the completed searches
+(``drip_backlog``, one bounded step per tick of the selector service).
 
 WHAT IS BOUGHT.  One search per position: a repair that ran, or one still
 waiting, is never bought again, so a repair that comes out shallow itself
@@ -73,13 +73,14 @@ REPAIR_MAX_RUNG = ingest.BUDGET_LADDER[3]
 # decide the showcase only if it ran at least as many nodes as the one it
 # replaces, counted as the engine reported them, and an engine stops a little
 # past its budget: measured on 128M searches, a median of 1,500 nodes past it
-# on engines of up to 8 threads and 10,000 on engines of 17 or more (91,384 at
-# most).  Bought at exactly the same budget, the repair would lose that
-# comparison to the wide search it repairs nine times in ten and land in the
-# pass history only.  Five per mille more (640,000 nodes on 128M) clears the
-# worst overshoot measured seven times over and stays inside
-# ``RUNG_OVERSHOOT_TOLERANCE``, so every reader of the ladder still sees the
-# rung it repairs.  In whole numbers, so 128M buys exactly 128,640,000.
+# on engines of up to 8 threads (3,600 at the 90th percentile) and 10,000 on
+# engines of 17 or more (91,384 at most).  Bought at exactly the same budget,
+# the repair would lose that comparison to the wide search it repairs most of
+# the time and land in the pass history only.  Five per mille more (640,000
+# nodes on 128M) clears the worst overshoot measured seven times over and
+# stays inside ``RUNG_OVERSHOOT_TOLERANCE``, so every reader of the ladder
+# still sees the rung it repairs.  In whole numbers, so 128M buys exactly
+# 128,640,000.
 REPAIR_OVERBID_PER_MILLE = 5
 # And it searches two lines, the house width for a revisit whose purpose is
 # depth (§ ``ingest.multipv_for``): at five lines even small engines left 9%
@@ -337,15 +338,19 @@ def queue_from_landing(pos, parent_keys):
 # ``REPAIR_BACKLOG_WINDOW`` ids below where it stands, then their positions by
 # key and their parents through their edges: index ranges and lookups, never a
 # scan of the tree.  It only walks while there is room, and stops where the
-# room ran out, so nothing is skipped and a full queue costs nothing.
+# room ran out, so nothing is skipped; a full queue costs one count.
+#
+# AND IT GOES ROUND.  Past the oldest search it starts again from the newest.
+# That is what picks up a landing the arm had to let go because its queue was
+# full, which is exactly while the fleet is busy with requests; the second time
+# round, whatever was repaired is skipped without spending room.
 #
 # WHERE IT STANDS is a file in ``ATOMICDB_STATE_DIR``, like the selector's own
 # state (§ ingest, ``_delta_state_path``): a restart resumes the walk.
 # Without the directory the walk lives in the process and starts from the
-# newest search again after a restart; what it already repaired it then skips
-# without spending room.  Deleting the file and restarting the service starts
-# the walk over.
-_backlog = {'cursor': None, 'done': False, 'loaded': False}
+# newest search again after a restart.  Deleting the file and restarting the
+# service starts the walk over.
+_backlog = {'cursor': None, 'loaded': False}
 
 
 def _backlog_path():
@@ -354,33 +359,35 @@ def _backlog_path():
 
 
 def _backlog_state():
-    """Where the walk stands, read from disk once per process."""
+    """Where the walk stands, read from disk once per process.
+
+    ``cursor`` is the task id the next step reads below, ``None`` for the
+    top.  Anything unreadable on disk is the top: re-reading what was walked
+    costs reads, never a second repair.
+    """
     if not _backlog['loaded']:
         _backlog['loaded'] = True
         path = _backlog_path()
         if path is not None:
             try:
                 with open(path, encoding='utf-8') as handle:
-                    stored = json.load(handle)
-                cursor = stored.get('cursor')
-                if cursor is None or (isinstance(cursor, int)
-                                      and cursor >= 0):
+                    cursor = json.load(handle).get('cursor')
+                if isinstance(cursor, int) and cursor > 0:
                     _backlog['cursor'] = cursor
-                    _backlog['done'] = bool(stored.get('done'))
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
     return _backlog
 
 
-def _save_backlog(cursor, done):
-    _backlog.update(cursor=cursor, done=done, loaded=True)
+def _save_backlog(cursor):
+    _backlog.update(cursor=cursor, loaded=True)
     path = _backlog_path()
     if path is None:
         return
     try:
         partial = path + '.tmp'
         with open(partial, 'w', encoding='utf-8') as handle:
-            json.dump({'cursor': cursor, 'done': done}, handle)
+            json.dump({'cursor': cursor}, handle)
         os.replace(partial, path)
     except OSError:
         pass
@@ -388,7 +395,7 @@ def _save_backlog(cursor, done):
 
 def reset_backlog_state():
     """Forget where the walk stands, on disk too: it starts over."""
-    _backlog.update(cursor=None, done=False, loaded=False)
+    _backlog.update(cursor=None, loaded=False)
     path = _backlog_path()
     if path is not None:
         try:
@@ -403,13 +410,10 @@ def drip_backlog(target=REPAIR_BACKLOG_TARGET, scan=REPAIR_BACKLOG_SCAN,
     rate = ingest.arm_rate(REPAIR_ARM)
     if rate <= 0:
         return 0
-    state = _backlog_state()
-    if state['done']:
-        return 0
     room, pending = _room(target, reserve=rate - rate // 2)
     if room <= 0:
         return 0
-    cursor = state['cursor']
+    cursor = _backlog_state()['cursor']
     if cursor is None:
         cursor = 1 + (AnalysisTask.objects.order_by('-id')
                       .values_list('id', flat=True).first() or 0)
@@ -451,5 +455,7 @@ def drip_backlog(target=REPAIR_BACKLOG_TARGET, scan=REPAIR_BACKLOG_SCAN,
         if made:
             _receipt(made, pending, target, via='backlog', cursor=resume,
                      scanned=len(rows))
-    _save_backlog(resume, resume <= 0)
+    # Below the first task there is nothing left: the next step starts again
+    # from the newest search.
+    _save_backlog(resume if resume > 0 else None)
     return len(made)

@@ -6797,7 +6797,7 @@ ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
 # The idle fleet's repairs (§ idle_repair) pay here too: each one is a search
 # bought on the strength of a search that landed, the same loop the walker's
 # arms are capped for.  Sixty an hour is a small share of what the fleet
-# serves when it is idle, and the arm only runs then.
+# serves when it is idle, which is the only time an AUTO task is served.
 IDLE_REPAIR_ARM = 'repair'
 ARM_RATE_SETTING = {
     VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),

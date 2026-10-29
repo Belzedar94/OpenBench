@@ -20,7 +20,8 @@ What these tests pin, and why each one:
   of it to their request goes to anybody, and the pool does not count it;
 * the walk down the backlog reads a bounded step, resumes where it stopped
   (on disk when there is a state directory), leaves half the room to
-  landings, costs nothing while the queue is full, and finishes;
+  landings, costs one count while the queue is full, and goes round, so a
+  landing a full queue let go is found the next time;
 * it shows: "server: repair" on the workers page, one hidden event per batch;
 * and a failure in the arm never costs the landing it rides on.
 """
@@ -764,17 +765,19 @@ class BacklogTests(TestCase):
         self.assertTrue(_repairs(position=fresh).exists())
         self.assertEqual(_repairs(position=done).count(), 1)
 
-    def test_the_walk_finishes(self):
-        _searched('only')
+    def test_past_the_oldest_search_it_starts_again_from_the_newest(self):
+        """What a full queue made a landing let go is found next time."""
+        _searched('first-round')
 
         # One window wide enough to reach the first task id.
         self.assertEqual(idle_repair.drip_backlog(window=10 ** 12), 1)
-        self.assertTrue(idle_repair._backlog_state()['done'])
-        self.assertEqual(idle_repair._backlog_state()['cursor'], 0)
+        self.assertIsNone(idle_repair._backlog_state()['cursor'])
 
-        _searched('after-the-end')
-        _, queries = _queries(idle_repair.drip_backlog)
-        self.assertEqual(queries, [])
+        dropped = _searched('let-go-by-a-full-queue')
+        self.assertEqual(idle_repair.drip_backlog(window=10 ** 12), 1)
+
+        self.assertTrue(_repairs(position=dropped).exists())
+        self.assertEqual(_repairs().count(), 2)
 
     def test_a_full_queue_costs_one_count_and_no_walk(self):
         for index in range(3):
@@ -840,10 +843,9 @@ class BacklogStateTests(TestCase):
 
         idle_repair.drip_backlog(scan=1)
 
-        self.assertEqual(self._stored(), {'cursor': newer_task.id,
-                                          'done': False})
+        self.assertEqual(self._stored(), {'cursor': newer_task.id})
         # A new process: nothing in memory, the file on disk.
-        idle_repair._backlog.update(cursor=None, done=False, loaded=False)
+        idle_repair._backlog.update(cursor=None, loaded=False)
         with patch.object(idle_repair, '_mint',
                           wraps=idle_repair._mint) as mint:
             idle_repair.drip_backlog(scan=1)
