@@ -1973,6 +1973,16 @@ html.theme-ready .tile {
   }
 }
 
+/* The page of active workers borrows the table above, but there the line is
+   what each row is about.  Cut to a fixed width, the rows of one opening
+   read the same: the move that tells them apart is the one the ellipsis
+   hides.  So the line wraps inside its cell instead, at every width.  The
+   table selector outranks the two .qline caps above wherever they sit. */
+table.fleet-workers .qline {
+  display: inline;
+  white-space: normal;
+}
+
 /* Ranking de contribuidores de la portada.  Dos ventanas de la MISMA pregunta,
    una al lado de la otra, y casi todo prestado de lo que ya existe:
    .contrib-scroll para el desbordamiento, .contrib-sub para el titulillo y
