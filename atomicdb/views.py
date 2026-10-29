@@ -2266,11 +2266,13 @@ def api_request_moves(request, key):
       the page only offers legal moves, so anything else comes from a stale
       or hand-made list, and one bad token should not cost the good ones.
     * AT MOST ``MULTI_REQUEST_CAP`` MOVES a click, refused whole above it.
-    * ONE DEPTH FOR ALL OF THEM: the rung of the slider under the rule of the
-      single button (§ ``depth.chosen_rung``), so an account that may not
-      choose has its choice dropped.  Every rung of the ladder, 2B included,
-      is allowed.  The slider's LAST STOP is refused (``top-rung-single``):
-      it is not a rung but the searches below a position
+    * ONE DEPTH FOR ALL OF THEM: the rung chosen in the bar's own depth
+      choice (§ ``depth.bar_context``), under the rule of the single button
+      (§ ``depth.chosen_rung``), so an account that may not choose has its
+      choice dropped.  Every rung of the ladder, 2B included, is allowed,
+      whatever the position's own depth.  The slider's LAST STOP, which the
+      bar does not offer, is refused when posted (``top-rung-single``): it
+      is not a rung but the searches below a position
       (``ingest.SUBTREE_REQUEST_NODES``), meant for one position at a time.
       So ``confirm``, which the single button asks for that stop alone,
       changes nothing here.
@@ -7442,13 +7444,26 @@ def explore(request, key):
     # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
     # cuando las lineas vigentes no llenan el tope).
     pv_plies = _pv_verify_plies(pos)
+    # The boxes of the move list and the button that requests every ticked
+    # move (§ api_request_moves): for a signed-in visitor, on a position the
+    # page offers to request at all.
+    multi_request = bool(viewer) and pos.status == 'UNKNOWN'
+    # Who may choose a rung, asked ONCE for the two controls that offer one
+    # under that rule: the slider of the Request button and the depth choice
+    # of the bar under the table (§ depth.may_choose).  Only an open position
+    # offers either, so a solved one asks nothing, as before.
+    chooser = pos.status == 'UNKNOWN' and depth.may_choose(request.user)
     return render(request, 'atomicdb/explore.html', {
         **_suggestions_badge(request),
         # Selector de profundidad del boton de peticion: vacio — y por tanto
         # invisible, sin hueco ni pista — para quien no puede elegir peldano
         # (§ depth.context).  Esta pagina no lleva cache (§ urls), asi que un
         # render con selector no se le sirve a nadie mas.
-        **depth.context(request, pos),
+        **depth.context(request, pos, chooser=chooser),
+        # And the depth choice of the bar, which reads no slider: every rung
+        # of the ladder, whatever this position's own depth
+        # (§ depth.bar_context).  Empty without the bar or the right.
+        **(depth.bar_context(chooser) if multi_request else {}),
         # En que va la peticion viva de ESTA posicion: esperando en la cola, o
         # buscandose ahora y cuanto falta.  Y, junto a esa linea, lo que TU
         # puedes hacer con tu peticion de aqui: adelantarla
@@ -7572,11 +7587,9 @@ def explore(request, key):
         'nodes_h': _human(pos.nodes_invested),
         'time_str': f'{pos.time_invested:,.1f}s',
         'offtree': offtree,
-        # The boxes of the move list and the button that requests every
-        # ticked move (§ api_request_moves): for a signed-in visitor, on a
-        # position the page offers to request at all.  Without them the table
-        # is the one it has always been.
-        'multi_request': bool(viewer) and pos.status == 'UNKNOWN',
+        # The boxes and the bar, decided above.  Without them the table is
+        # the one it has always been.
+        'multi_request': multi_request,
         'multi_request_cap': MULTI_REQUEST_CAP,
         # Spent ladder: a click here lands below, so the page shows the
         # cascade underneath from the first render, before any click, and

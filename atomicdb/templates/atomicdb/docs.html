@@ -162,11 +162,13 @@ buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.
 Signed in, you can also tick several moves in the move list of a position and
 request them all with one button, up to
 <strong>{{ multi_request_cap }}</strong> at a time. Each ticked move is one
-request, as if its own button had been clicked, with two differences. A depth
-picked on the slider is a target: a move with no search that deep gets exactly
-that depth, and a move already searched that deep, as its depth column shows,
-is skipped. And with no depth picked, a move already searched to the top of
-the ladder is left as it is; open it to queue the searches below it.</p>
+request, as if its own button had been clicked, with two differences. If you
+may pick a depth for that button, the bar offers a depth of its own, any rung
+from 128M to 2B whatever the depth of the position you are on, and a depth
+picked there is a target: a move with no search that deep gets exactly that
+depth, and a move already searched that deep, as its depth column shows, is
+skipped. And with no depth picked, a move already searched to the top of the
+ladder is left as it is; open it to queue the searches below it.</p>
 <p class="dim" style="font-size:.9rem">Once the 2B search of a position has
 run, the next request queues up to {{ subtree_cap }} searches of 128M on the
 lines below it instead, the best lines first: where the side the position

@@ -15,8 +15,9 @@ What is pinned here:
     so dedup, ladder, account cap and receipts apply move by move;
   * a move that is not a node yet is made the way following it makes it, and
     a move back into the line is skipped;
-  * the rung of the depth slider reaches every move for whoever may choose
-    one, and its last stop, the searches below a position, is refused;
+  * the bar has its own depth choice, for whoever may choose a rung: every
+    rung of the ladder whatever the page's own depth, and never the searches
+    below a position, which are refused when posted; it reads no slider;
   * a chosen rung is a target: a move already searched that deep is skipped
     and says so, every other move gets exactly that rung, and with no rung
     chosen each move climbs its own ladder as before;
@@ -30,12 +31,14 @@ What is pinned here:
 import re
 from unittest import mock
 
+from django.contrib.auth.models import User
 from django.db import OperationalError
 from django.test import Client, override_settings
+from django.utils import timezone
 
-from . import ingest, logic, views
+from . import depth, ingest, logic, views
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
-                     RequestLog)
+                     RequestLog, WorkerPing)
 from .testing import TestCase, worker_account
 
 
@@ -163,23 +166,34 @@ class WhoGetsTheBoxesTests(TestCase):
         first_cell = re.match(r'<tr><td>(.*?)</td>', open_row).group(1)
         self.assertEqual(BOX.findall(first_cell), ['e2e4'])
 
-    def test_a_page_without_the_slider_still_names_none_of_it(self):
-        """The bar reads the slider only where the page has one: a script
-        naming its data block on every page is the leak test_depth_slider
+    def test_an_account_that_may_not_choose_names_no_depth_at_all(self):
+        """No depth choice in the bar and no trace of the slider: a script
+        naming a control the page does not have is the leak test_depth_slider
         exists to catch."""
         body = _signed_in('lesha').get(self.url).content.decode()
 
         self.assertTrue(BOX.findall(body))
         self.assertEqual([mark for mark in SLIDER_MARKS if mark in body], [])
-        self.assertRegex(body, r'function sliderRung\(\) \{\s*return null;')
+        self.assertNotIn('msdepth', body)
+        self.assertRegex(body, r'function pickedRung\(\) \{\s*return null;')
 
-    def test_with_the_slider_the_bar_reads_it(self):
+    def test_a_chooser_gets_the_bar_s_own_choice_and_the_bar_reads_no_slider(
+            self):
+        """The slider stays for the page's own button; the bar has its own
+        depth choice (BarDepthTests) and never reads the slider, so the two
+        controls cannot disagree."""
         body = _signed_in('belzedar', staff=True).get(self.url).content.decode()
+        bar = body[body.index('id="msbar"'):]
 
         self.assertTrue(BOX.findall(body))
         self.assertEqual(sorted(mark for mark in SLIDER_MARKS if mark in body),
                          sorted(SLIDER_MARKS))
-        self.assertRegex(body, r'function sliderRung\(\) \{\s*if \(!depth\)')
+        self.assertIn('id="msdepth"', bar)
+        self.assertRegex(bar, r'function pickedRung\(\) \{\s*const nodes = '
+                              r'Number\(pick\.value\);')
+        for slider in ("getElementById('depth')", 'atomicdb-depth-rungs',
+                       'sliderRung'):
+            self.assertNotIn(slider, bar)
 
 
 class BlockedRowTests(TestCase):
@@ -400,7 +414,8 @@ class RequestMovesTests(TestCase):
 
 
 class DepthTests(TestCase):
-    """The rung of the slider goes with every move, for whoever may choose."""
+    """The rung chosen in the bar goes with every move, for whoever may
+    choose."""
 
     def setUp(self):
         self.root = _root()
@@ -651,6 +666,118 @@ class TargetDepthTests(TestCase):
         # The note while a rung is chosen, and the receipt's count.
         self.assertIn('nodes is a target: moves already ', body)
         self.assertIn(' already searched that deep', body)
+
+
+class BarDepthTests(TestCase):
+    """The bar's own depth choice, which reads no slider.
+
+    The slider prices the position the page is on: its stops start at that
+    position's own next rung, and its first stop sends nothing.  Read by the
+    bar, it left 512M out of reach on any page already searched to 128M or
+    more, the very case BManBJ asked about (29-Oct-2026: "I'm just trying to
+    update positions to 512M").  So the bar offers every rung of the ladder,
+    to the accounts the slider is offered to, whatever the page's own depth.
+    """
+
+    def setUp(self):
+        self.root = _root()
+        self.page = f'/atomicdb/explore/{self.root.key}/'
+        self.url = f'/atomicdb/request-moves/{self.root.key}/'
+
+    def _options(self, client):
+        """``[(value, label)]`` of the bar's depth choice, or None without one.
+
+        Read by pattern, whatever order the HTML minifier leaves the
+        attributes in.
+        """
+        body = client.get(self.page).content.decode()
+        select = re.search(r'<select\b[^>]*\bid="msdepth"[^>]*>(.*?)</select>',
+                           body, re.S)
+        if select is None:
+            return None
+        return re.findall(r'<option\b[^>]*?value="([^"]*)"[^>]*>([^<]*)'
+                          r'</option>', select.group(1))
+
+    def _slider(self, username):
+        """The stops the page's own slider offers that account."""
+        user = User.objects.get(username=username)
+        request = type('R', (), {'user': user})()
+        context = depth.context(request,
+                                Position.objects.get(pk=self.root.pk))
+        return [stop['nodes'] for stop in context.get('depth_rungs', [])]
+
+    def test_a_chooser_gets_every_rung_and_never_the_searches_below(self):
+        options = self._options(_signed_in('belzedar', staff=True))
+
+        self.assertEqual(options, [('', "each move's next rung"),
+                                   (str(LADDER[0]), '128M'),
+                                   (str(LADDER[1]), '512M'),
+                                   (str(LADDER[2]), '2B')])
+        self.assertNotIn(str(SUBTREE), [value for value, _label in options])
+
+    def test_a_contributor_gets_it_under_the_rule_of_the_slider(self):
+        client = _signed_in('wolfram')
+        ping = WorkerPing.objects.create(machine='wolfram-box', user='wolfram',
+                                         threads=8, hash_mb=1024, os='Linux')
+        WorkerPing.objects.filter(pk=ping.pk).update(
+            last_result_at=timezone.now())
+
+        self.assertEqual(len(self._options(client)), 1 + len(LADDER))
+        self.assertTrue(self._slider('wolfram'))
+
+    def test_an_account_that_may_not_choose_gets_none(self):
+        self.assertIsNone(self._options(_signed_in('lesha')))
+        self.assertEqual(self._slider('lesha'), [])
+
+    def test_the_choice_does_not_follow_the_depth_of_the_page(self):
+        # The page itself is searched to 512M: its slider starts at 2B, and
+        # the bar still offers 128M and 512M for the moves.
+        client = _signed_in('belzedar', staff=True)
+        _ran(self.root, LADDER[1])
+
+        self.assertEqual(self._slider('belzedar'), [LADDER[2], SUBTREE])
+        self.assertEqual([value for value, _label in self._options(client)],
+                         [''] + [str(rung) for rung in LADDER])
+
+    def test_a_spent_page_has_no_slider_and_the_bar_keeps_its_choice(self):
+        client = _signed_in('belzedar', staff=True)
+        _ran(self.root, LADDER[2])
+
+        self.assertEqual(self._slider('belzedar'), [])
+        self.assertEqual(len(self._options(client)), 1 + len(LADDER))
+
+    def test_512m_on_a_page_searched_to_512m_still_targets_512m(self):
+        # Where the slider has no 512M to offer, the bar's 512M reaches the
+        # ticked moves, as a target: the move at 128M gets 512M and the move
+        # already at 512M is skipped.
+        client = _signed_in('belzedar', staff=True)
+        _ran(self.root, LADDER[1])
+        at_128 = _chain(self.root, ['e2e4'])[0]
+        at_512 = _chain(self.root, ['d2d4'])[0]
+        _ran(at_128, LADDER[0])
+        _ran(at_512, LADDER[1])
+        self.assertNotIn(LADDER[1], self._slider('belzedar'))
+
+        body = client.post(self.url, {'moves': 'e2e4,d2d4',
+                                      'budget': LADDER[1]}).json()
+
+        self.assertEqual(body['moves'],
+                         [{'uci': 'e2e4', 'status': 'queued'},
+                          {'uci': 'd2d4', 'status': 'already-analyzed'}])
+        self.assertEqual(_pending(at_128).budget_nodes, LADDER[1])
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=at_512, state=AnalysisTask.TState.PENDING).exists())
+
+    def test_a_budget_posted_by_an_account_that_may_not_choose_is_dropped(
+            self):
+        """The page offers it no choice, and the endpoint drops one it posts
+        anyway: an unsearched move gets the first rung, not the 512M."""
+        body = _signed_in('lesha').post(
+            self.url, {'moves': 'e2e4', 'budget': LADDER[1]}).json()
+
+        self.assertEqual(body['counts'], {'queued': 1})
+        self.assertEqual(_pending(_child_of(self.root, 'e2e4')).budget_nodes,
+                         LADDER[0])
 
 
 class AccountCapTests(TestCase):

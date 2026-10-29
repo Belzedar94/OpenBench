@@ -145,8 +145,12 @@ def asks_for_subtree(raw):
         return False
 
 
-def context(request, pos):
+def context(request, pos, chooser=None):
     """Lo que la plantilla pinta del selector, o ``{}`` si no hay selector.
+
+    ``chooser`` is the answer of ``may_choose`` when the caller already has
+    it: the explorer asks once for the two controls it offers under that rule,
+    this slider and the depth choice of the multi-select (§ ``bar_context``).
 
     Vacio para todo el que no puede elegir, y el explorador queda EXACTAMENTE
     como estaba: la plantilla no pinta ni el hueco (§ ``_suggestions_badge``,
@@ -169,7 +173,9 @@ def context(request, pos):
     """
     if pos.status != 'UNKNOWN':
         return {}
-    if not may_choose(getattr(request, 'user', None)):
+    if chooser is None:
+        chooser = may_choose(getattr(request, 'user', None))
+    if not chooser:
         return {}
     from .views import _human
 
@@ -193,3 +199,32 @@ def context(request, pos):
         # asi que se dice el numero real y no el peldano de al lado.
         'depth_spent_label': _human(completed_max) if completed_max else '',
     }
+
+
+def bar_context(chooser):
+    """The depth choice of the multi-select bar, or ``{}`` without one.
+
+    The bar requests the MOVES of a position, and the slider above prices the
+    position itself: its stops start at the position's own next rung, and its
+    first stop sends nothing.  Read by the bar, it left the depth BManBJ asked
+    for out of reach exactly where he needs it ("I'm just trying to update
+    positions to 512M", 29-Oct-2026): on a page searched to 128M the slider
+    offers 512M only as the stop that sends nothing, and on one searched to
+    512M it offers no 512M at all.  So the bar has a choice of its own, and it
+    reads no slider: the two controls cannot disagree.
+
+    Every rung of the ladder, whatever the position's own depth, and never
+    the last stop of the slider, which buys the searches below one position
+    and is refused for a batch (§ ``views._request_moves``).  A rung chosen
+    here is a target for every ticked move (``only_if_missing``).  The labels
+    are the short ones, the way the depth column of the move table names a
+    search (§ ``views._budget_label``).
+
+    ``chooser`` is ``may_choose`` for the visitor, the rule the slider uses:
+    an account that may not choose gets no control, and the endpoint drops a
+    choice it posts anyway (§ ``chosen_rung``).
+    """
+    if not chooser:
+        return {}
+    return {'bar_rungs': [{'nodes': rung, 'label': short_nodes(rung)}
+                          for rung in REQUEST_BUDGET_LADDER]}
