@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from datetime import timedelta, timezone as datetime_timezone
 
+from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
 
@@ -548,19 +549,24 @@ def _row(watched, record, label=None, community=False):
     return {
         'key': watched.key,
         'label': label or watched.label,
+        'kind': watched.kind,
+        'line': list(watched.line),
         'line_san': watched.line_san,
         'url': _explore_url(watched),
         # The name shown comes from an approved community suggestion.
         'community': community,
         'present': record.get('present', False),
         'value': record.get('value'),
+        'status': record.get('status', 'UNKNOWN'),
         'now_h': value_text(record.get('value'),
                             record.get('status', 'UNKNOWN')),
         'best_value': record.get('best_value'),
+        'best_status': record.get('best_status'),
         'best_h': (value_text(record['best_value'], record['best_status'])
                    if tracked else _NONE),
         'best_at': record.get('best_at'),
         'worst_value': record.get('worst_value'),
+        'worst_status': record.get('worst_status'),
         'worst_h': (value_text(record['worst_value'], record['worst_status'])
                     if tracked else _NONE),
         'worst_at': record.get('worst_at'),
@@ -670,6 +676,14 @@ def _opening_rows(records, sort):
     return rows, links, arrows
 
 
+def _since(records, first_rows):
+    """When tracking of the first table began: its oldest row."""
+    return min((records[row['key']]['since'] for row in first_rows
+                if row['key'] in records
+                and records[row['key']]['since'] is not None),
+               default=None)
+
+
 def page_context(now=None, sort=DEFAULT_SORT):
     now = now or timezone.now()
     records = _records()
@@ -678,10 +692,7 @@ def page_context(now=None, sort=DEFAULT_SORT):
     latest = MainLineSnapshot.objects.order_by('-bucket_start').first()
     return {
         'rows': first_rows,
-        'since': min((records[row['key']]['since'] for row in first_rows
-                      if row['key'] in records
-                      and records[row['key']]['since'] is not None),
-                     default=None),
+        'since': _since(records, first_rows),
         'openings': opening_rows,
         'sort_links': sort_links,
         'sort_arrows': sort_arrows,
@@ -690,6 +701,47 @@ def page_context(now=None, sort=DEFAULT_SORT):
         'history': _daily_history(now),
         'history_days': HISTORY_DAYS,
     }
+
+
+# What a row of the API carries, in this order (§ api_context).
+API_FIELDS = ('key', 'label', 'kind', 'line', 'line_san', 'community',
+              'present', 'value', 'status', 'best_value', 'best_status',
+              'best_at', 'worst_value', 'worst_status', 'worst_at', 'changes')
+
+
+def _api_row(row):
+    entry = {field: row[field] for field in API_FIELDS}
+    for field in ('best_at', 'worst_at'):
+        entry[field] = entry[field].isoformat() if entry[field] else None
+    return entry
+
+
+def api_context():
+    """The two tables of the page as data, rows in the page's own order and
+    the openings by name.
+
+    Built from the same rows as the page, so the two cannot disagree: the
+    values are the ones the explorer headlines, from White's side (a proven
+    status as +10000, -10000 or 0).  The API ``score`` of ``api/query`` is
+    from the side to move instead, which only matters when Black moves.
+    """
+    records = _records()
+    first_rows = _first_table_rows(records)
+    opening_rows = _opening_rows(records, DEFAULT_SORT)[0]
+    since = _since(records, first_rows)
+    return {
+        'perspective': 'white',
+        'since': since.isoformat() if since else None,
+        'positions': [_api_row(row) for row in first_rows],
+        'openings': [_api_row(row) for row in opening_rows],
+    }
+
+
+def roots_api(request):
+    """``GET /atomicdb/api/roots``: the roots page as JSON, so a script does
+    not have to read the HTML (Torom, 1-Nov).  Cached in ``urls`` like the
+    page."""
+    return JsonResponse(api_context())
 
 
 def roots_page(request):

@@ -987,6 +987,69 @@ class RootsPageTests(TestCase):
         self.assertIn('href="/atomicdb/roots/">Openings</a>', body)
 
 
+class RootsApiTests(TestCase):
+    """``api/roots``: the page's rows as data (Torom, 1-Nov)."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+
+    def _data(self, path='/atomicdb/api/roots'):
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'application/json')
+        return json.loads(response.content)
+
+    def test_the_start_position_quotes_now_best_and_worst(self):
+        best_at = datetime(2026, 10, 20, 8, 14, tzinfo=UTC)
+        worst_at = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
+        _set(self.root, eval_cp=545, backed_eval=1243)
+        RootExtreme.objects.update_or_create(key=self.root.key, defaults=dict(
+            best_value=1310, best_status='UNKNOWN', best_at=best_at,
+            worst_value=310, worst_status='UNKNOWN', worst_at=worst_at,
+            last_value=1243, last_status='UNKNOWN', changed_at=best_at,
+            changes=7, since=worst_at))
+
+        data = self._data()
+        start = data['positions'][0]
+
+        self.assertEqual(data['perspective'], 'white')
+        self.assertEqual(data['since'], '2026-07-28T09:00:00+00:00')
+        self.assertEqual((start['key'], start['kind'], start['label'],
+                          start['line']),
+                         (self.root.key, 'start', 'Start position', []))
+        # Now is the backed value, as on the page.
+        self.assertEqual((start['value'], start['best_value'],
+                          start['worst_value'], start['changes']),
+                         (1243, 1310, 310, 7))
+        self.assertEqual((start['best_at'], start['worst_at']),
+                         ('2026-10-20T08:14:00+00:00',
+                          '2026-07-28T09:00:00+00:00'))
+        self.assertEqual(list(start), list(roots.API_FIELDS))
+
+    def test_the_rows_are_the_rows_of_the_page(self):
+        page = roots.page_context(now=T0)
+
+        data = self._data('/atomicdb/api/roots/')
+
+        self.assertEqual([row['key'] for row in data['positions']],
+                         [row['key'] for row in page['rows']])
+        self.assertEqual([row['key'] for row in data['openings']],
+                         [row['key'] for row in page['openings']])
+        nf3 = next(row for row in data['positions']
+                   if row['label'] == '1. Nf3')
+        self.assertEqual((nf3['kind'], nf3['line'], nf3['line_san']),
+                         ('move', ['g1f3'], '1. Nf3'))
+
+    def test_a_row_without_a_record_has_no_best_or_worst(self):
+        data = self._data()
+
+        start = data['positions'][0]
+        self.assertIsNone(start['best_value'])
+        self.assertIsNone(start['best_at'])
+        self.assertIsNone(start['worst_value'])
+
+
 class ApprovalHookTests(TestCase):
     """Approving a name on the moderation page puts its position on the watch
     list, with its first value, in the approval's own transaction."""

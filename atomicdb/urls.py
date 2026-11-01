@@ -76,6 +76,9 @@ _queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 # tiene que ser mas fresco que la misma cache corta de ``docs``, variada por
 # cookie por las mismas razones.
 _roots_cached = cache_page(30)(vary_on_cookie(csrf_protect(roots.roots_page)))
+# The same tables as JSON: the same for everybody and nothing in it depends on
+# the session, so no cookie variation.
+_roots_api_cached = cache_page(30)(roots.roots_api)
 # Every active worker and what it is searching.  Public and the same for every
 # visitor, like the queue: two small indexed reads plus the line labels the
 # home page already caches, so the short cache only absorbs F5 storms, and it
@@ -177,6 +180,8 @@ urlpatterns = [
     path('api/request', views.api_public_request,
          name='atomicdb-api-request'),
     path('api/frontier/<str:key>/', views.api_frontier),
+    path('api/roots', _roots_api_cached, name='atomicdb-api-roots'),
+    path('api/roots/', _roots_api_cached),
     path('api/live-request/<str:key>/', views.api_live_request),
     path('api/map/v1', map_api),
     path('api/lease', views.api_lease),
