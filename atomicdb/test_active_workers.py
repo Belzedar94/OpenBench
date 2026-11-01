@@ -1,8 +1,9 @@
 """The page behind the "active workers" number of the home page.
 
 What is pinned here: its rows are exactly the workers that number counts; a
-row says what its worker is searching and who asked for it (an account, an
-anonymous visitor or the server itself) with the rules of "Now analyzing";
+row says how fast its worker searched over the last hour, what it is
+searching and who asked for it (an account, an anonymous visitor or the
+server itself) with the rules of "Now analyzing";
 nothing private reaches the page; and what it costs does not grow with the
 fleet.
 """
@@ -76,6 +77,16 @@ def _lease(position, machine, minutes_ago=3, token='tok', beat_minutes_ago=0,
         lease_heartbeat_at=(now - timedelta(minutes=beat_minutes_ago)
                             if token else None),
         **fields)
+
+
+def _done(machine, user, nodes, seconds, minutes_ago=10):
+    """A search the worker finished, as ``api_submit`` records it."""
+    task = _lease(_child('a2a3'), machine)
+    AnalysisTask.objects.filter(pk=task.pk).update(
+        state=AnalysisTask.TState.COMPLETED, lease_token='',
+        delivered_by=user, nodes_searched=nodes, elapsed_seconds=seconds,
+        completed=timezone.now() - timedelta(minutes=minutes_ago))
+    return task
 
 
 def _busy(machine, user, uci, **fields):
@@ -239,7 +250,8 @@ class RowTests(TestCase):
 
         self.assertIsNone(_rows()[0]['task'])
         self.assertIn('idle-box 8 threads · 1024 MB hash · Linux alice '
-                      'between tasks', _reading(_page()))
+                      'no search finished in the last hour between tasks',
+                      _reading(_page()))
 
     def test_rows_group_by_owner_and_list_slots_in_order(self):
         _ping('box#10', 'bob')
@@ -248,6 +260,58 @@ class RowTests(TestCase):
 
         self.assertEqual([row['machine'] for row in _rows()],
                          ['zed', 'box#2', 'box#10'])
+
+
+class SpeedTests(TestCase):
+    """A worker's speed: its searches of the last hour, nodes over time."""
+
+    def test_the_speed_is_the_nodes_over_the_time_of_the_last_hour(self):
+        _ping('box', 'alice')
+        _done('box', 'alice', 100_000_000, 20)
+        _done('box', 'alice', 50_000_000, 5)
+
+        row = _rows()[0]
+
+        # 150M nodes in 25 s, not the 7.5M mean of the two ratios: each
+        # search weighs by the time it ran.
+        self.assertEqual((row['nps_h'], row['searches']), ('6.0M', 2))
+        self.assertIn('alice 6.0M nodes/s 2 searches in the last hour',
+                      _reading(_page()))
+
+    def test_only_the_workers_own_searches_of_the_hour_count(self):
+        _ping('box', 'alice')
+        _ping('box', 'bob')
+        _done('box', 'alice', 60_000_000, 10)
+        # Older than the window, delivered by another account under the same
+        # machine name, without a time to divide by, or still running: none
+        # of them is alice's speed now.
+        _done('box', 'alice', 10 ** 12, 1,
+              minutes_ago=active_workers.SPEED_MINUTES + 1)
+        _done('box', 'bob', 10_000_000, 10)
+        _done('box', 'alice', 10 ** 9, 0)
+        _lease(_child('b2b3'), 'box')
+
+        speeds = {row['owner']: (row['nps_h'], row['searches'])
+                  for row in _rows()}
+
+        self.assertEqual(speeds, {'alice': ('6.0M', 1), 'bob': ('1.0M', 1)})
+        self.assertIn('bob 1.0M nodes/s 1 search in the last hour',
+                      _reading(_page()))
+
+    def test_a_worker_with_no_search_finished_lately_says_so(self):
+        _ping('new-box', 'alice')
+
+        self.assertEqual(_rows()[0]['nps_h'], '')
+        self.assertIn('alice no search finished in the last hour between '
+                      'tasks',
+                      _reading(_page()))
+
+    def test_a_speed_is_capped_like_the_one_the_submit_keeps(self):
+        _ping('box', 'alice')
+        _done('box', 'alice', 10 ** 15, 0.001)
+
+        self.assertEqual(_rows()[0]['nps_h'],
+                         views._human(views.MAX_REPORTED_NPS))
 
 
 class LeaseRuleTests(TestCase):
@@ -376,7 +440,8 @@ class PrivacyTests(TestCase):
         row = _rows()[0]
 
         self.assertEqual(set(row), {'machine', 'owner', 'threads', 'hash_mb',
-                                    'os', 'task'})
+                                    'os', 'task', 'nps_h', 'searches',
+                                    'searches_h'})
         self.assertEqual(set(row['task']),
                          {'key', 'san', 'full', 'play', 'budget', 'source',
                           'since', 'requester', 'requested_by', 'more'})
@@ -406,8 +471,8 @@ class CostTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return sum(len(context.captured_queries) for context in captured)
 
-    def test_a_warm_page_reads_the_pings_and_the_leases_and_nothing_else(self):
-        self.assertEqual(self._cost(3, warm=True), 2)
+    def test_a_warm_page_reads_pings_leases_and_speeds_and_nothing_else(self):
+        self.assertEqual(self._cost(3, warm=True), 3)
 
     def test_three_workers_and_twelve_cost_the_same_warm(self):
         three = self._cost(3, warm=True)

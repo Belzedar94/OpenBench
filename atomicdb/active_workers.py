@@ -15,7 +15,14 @@ other pages publish one at a time:
 * who asked for it: the contributor page lists the account's running
   requests with the machine serving them, and the queue page has the
   anonymous visitors as one row.  Somebody who joined a request is a count
-  and never a name, as on the contributor page (§ AnalysisTask.backers).
+  and never a name, as on the contributor page (§ AnalysisTask.backers);
+* and one figure of the page's own, the worker's speed: the nodes per second
+  of the searches it finished in the last hour, from the nodes and the time
+  every finished search records (§ views.api_submit keeps the last one as
+  ``last_nps``).  An average of dozens of searches and not the heartbeat of
+  the moment, it neither jumps from one position to the next nor drops to
+  zero between tasks; and unlike the lifetime figure of the contributor
+  page, a faster machine shows within the hour.
 
 Nothing else of the ping reaches the template: the rows are built here from
 named fields, and the lease token never leaves the database (the query only
@@ -29,20 +36,22 @@ here exactly as it is absent there.  The rules are restated rather than
 shared because ``home`` keeps them inline; ``test_active_workers`` pins the
 two pages to the same answer.
 
-WHAT IT COSTS.  Two indexed reads whatever the size of the fleet: the live
-pings (``last_seen`` is indexed) and the live leases of those machines (the
-LEASED band of ``state``, a few rows).  The lines come from the lineage and
-route label caches the home page already fills, so a warm page reads nothing
-else, and a cold one pays the reverse walk once per ply for all rows at once.
-The one cost that grows with the rows is the known one of every page that
-shows declared routes: a cold route is revalidated with one primary-key read
-(§ views._validated_play_route).
+WHAT IT COSTS.  Three indexed reads whatever the size of the fleet: the live
+pings (``last_seen`` is indexed), the live leases of those machines (the
+LEASED band of ``state``, a few rows) and the searches those machines
+finished in the last hour (the COMPLETED band of the (state, completed)
+index: one hour of searches, never the whole table).  The lines come from the
+lineage and route label caches the home page already fills, so a warm page
+reads nothing else, and a cold one pays the reverse walk once per ply for
+all rows at once.  The one cost that grows with the rows is the known one of
+every page that shows declared routes: a cold route is revalidated with one
+primary-key read (§ views._validated_play_route).
 """
 
 import re
 from datetime import timedelta
 
-from django.db.models import BooleanField, Case, Q, Value, When
+from django.db.models import BooleanField, Case, Count, Q, Sum, Value, When
 from django.shortcuts import render
 from django.utils import timezone
 
@@ -50,6 +59,9 @@ from . import contributors, idle_repair, metrics, views
 from .models import AnalysisTask, WorkerPing
 
 USER = AnalysisTask.Source.USER
+# The window a worker's speed is measured over: dozens of searches for a
+# typical slot, and a faster machine shows within it.
+SPEED_MINUTES = 60
 
 
 def live_pings(now):
@@ -119,6 +131,32 @@ def current_tasks(pings, now):
     return current
 
 
+def speeds(pings, now):
+    """``{(owner, machine): (nodes per second, searches)}`` of the live pings.
+
+    A worker's speed is the nodes of the searches it finished in the last
+    ``SPEED_MINUTES`` over the time they took: the ratio ``api_submit`` keeps
+    as ``last_nps`` for one search, over the window, so each search weighs by
+    the time it ran.  It is capped like that one.  The account that delivered a
+    search tells it apart as well as the machine name, because two accounts
+    can announce the same name.
+    """
+    machines = sorted({ping.machine for ping in pings})
+    if not machines:
+        return {}
+    rows = (AnalysisTask.objects
+            .filter(state=AnalysisTask.TState.COMPLETED, machine__in=machines,
+                    completed__gte=now - timedelta(minutes=SPEED_MINUTES),
+                    nodes_searched__gt=0, elapsed_seconds__gt=0)
+            .values('delivered_by', 'machine')
+            .annotate(searches=Count('id'), nodes=Sum('nodes_searched'),
+                      seconds=Sum('elapsed_seconds')))
+    return {(row['delivered_by'], row['machine']):
+            (min(row['nodes'] / row['seconds'], views.MAX_REPORTED_NPS),
+             row['searches'])
+            for row in rows}
+
+
 def _requester(row):
     """Who asked for the task: an account, an anonymous visitor or nobody."""
     if row['source'] != USER:
@@ -172,8 +210,10 @@ def present(now=None):
     now = now or timezone.now()
     pings = live_pings(now)
     tasks = _task_rows(current_tasks(pings, now), now)
+    speed = speeds(pings, now)
     workers = []
     for ping in pings:
+        nps, searches = speed.get((ping.user, ping.machine), (0, 0))
         workers.append({
             'machine': ping.machine,
             'owner': ping.user,
@@ -184,6 +224,9 @@ def present(now=None):
             'hash_mb': ping.hash_mb,
             'os': ping.os,
             'task': tasks.get(ping.pk),
+            'nps_h': views._human(round(nps)) if nps else '',
+            'searches': searches,
+            'searches_h': views._human(searches),
         })
     threads = sum(worker['threads'] for worker in workers)
     return {
