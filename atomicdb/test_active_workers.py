@@ -20,7 +20,7 @@ from django.test import Client, RequestFactory
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from . import active_workers, ingest, logic, metrics, views
+from . import active_workers, contributors, ingest, logic, metrics, views
 from .models import AnalysisTask, Edge, WorkerPing
 from .testing import TestCase
 
@@ -286,7 +286,7 @@ class SpeedTests(TestCase):
         # machine name, without a time to divide by, or still running: none
         # of them is alice's speed now.
         _done('box', 'alice', 10 ** 12, 1,
-              minutes_ago=active_workers.SPEED_MINUTES + 1)
+              minutes_ago=contributors.SPEED_MINUTES + 1)
         _done('box', 'bob', 10_000_000, 10)
         _done('box', 'alice', 10 ** 9, 0)
         _lease(_child('b2b3'), 'box')

@@ -273,11 +273,32 @@ class WorkerAggregationTests(TestCase):
         self.assertEqual(page['nodes_all_h'], '9.0M')
         self.assertEqual(page['tasks_all_h'], '3')
 
-    def test_the_average_speed_is_nodes_over_engine_seconds(self):
-        page = contributors.present('alice')
+    def test_the_speed_is_the_last_hour_of_searches(self):
+        # Las tres del fixture tienen una hora o mas: la velocidad es la de
+        # estas dos, 9.0M nodos en 3 segundos de motor, y no la de su vida.
+        _completed(_child('d2d3'), 'alice-box-atomicdb', 6_000_000, 2.0,
+                   ago_hours=0.25, delivered_by='alice')
+        _completed(_child('e2e3'), 'alice-box-atomicdb', 3_000_000, 1.0,
+                   ago_hours=0.5, delivered_by='alice')
+        # Otra cuenta con el mismo nombre de maquina no es alice.
+        _completed(_child('f2f3'), 'alice-box-atomicdb', 10 ** 12, 1.0,
+                   ago_hours=0.5, delivered_by='mallory')
 
-        # 9.0M nodos en 6 segundos de motor.
-        self.assertEqual(page['workers'][0]['nps_h'], '1.5M')
+        page = contributors.present('alice')
+        body = _reading(self.client.get('/atomicdb/user/alice/')
+                        .content.decode())
+
+        self.assertEqual((page['workers'][0]['nps_h'],
+                          page['workers'][0]['searches']), ('3.0M', 2))
+        self.assertIn('3.0M n/s 2 searches in the last hour', body)
+
+    def test_a_machine_without_a_search_in_the_last_hour_says_so(self):
+        page = contributors.present('alice')
+        body = _reading(self.client.get('/atomicdb/user/alice/')
+                        .content.decode())
+
+        self.assertEqual(page['workers'][0]['nps_h'], '')
+        self.assertIn('no search in the last hour', body)
 
     def test_the_fleet_share_counts_the_whole_last_day(self):
         page = contributors.present('alice')

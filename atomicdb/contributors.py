@@ -42,6 +42,12 @@ from .models import AnalysisTask, OpeningNameSuggestion, WorkerPing
 # medidores de la portada a proposito — alli se cuenta capacidad viva, aqui se
 # le dice a una persona si su ordenador esta puesto.
 ONLINE_SECONDS = 240
+# La velocidad de una maquina es la de sus busquedas de la ULTIMA HORA, aqui y
+# en la pagina de workers.  La media de toda la vida no se movia cuando la
+# maquina cambiaba: mas rapida tras una mejora, o con mas hilos por ranura tras
+# otro ``--jobs`` (Eclipsia y Torom en #suggestions, 1-nov).  Una hora son
+# decenas de busquedas para una ranura normal.
+SPEED_MINUTES = 60
 # Listas acotadas: esto es una pagina de cortesia, no un registro de auditoria.
 QUEUE_ROWS = 20
 SUGGESTION_ROWS = 20
@@ -488,6 +494,37 @@ def _presented(task, labels, now, extra=None):
     return row
 
 
+def speeds(pings, now):
+    """``{(cuenta, maquina): (nodos por segundo, busquedas)}`` de esos pings.
+
+    Los nodos de las busquedas que la maquina termino en los ultimos
+    ``SPEED_MINUTES`` entre el tiempo que tardaron: la razon que
+    ``api_submit`` guarda como ``last_nps`` para UNA busqueda, sobre la
+    ventana, asi que cada busqueda pesa lo que duro.  Con el mismo tope que
+    esa.  La cuenta que entrego la busqueda la distingue ademas del nombre,
+    porque dos cuentas pueden anunciar la misma maquina (§
+    ``_owner_of_machine``).  UNA lectura: la banda COMPLETED del indice
+    ``(state, completed)`` de una hora, filtrada a esas maquinas.
+    """
+    from . import views
+
+    machines = sorted({ping.machine for ping in pings})
+    if not machines:
+        return {}
+    rows = (AnalysisTask.objects
+            .filter(state=COMPLETED, machine__in=machines,
+                    completed__gte=now - timedelta(minutes=SPEED_MINUTES),
+                    nodes_searched__gt=0, elapsed_seconds__gt=0)
+            .values('delivered_by', 'machine')
+            .annotate(searches=Count('id'), nodes=Sum('nodes_searched'),
+                      seconds=Sum('elapsed_seconds'))
+            .order_by())
+    return {(row['delivered_by'], row['machine']):
+            (min(row['nodes'] / row['seconds'], views.MAX_REPORTED_NPS),
+             row['searches'])
+            for row in rows}
+
+
 def present(username, now=None):
     """Todo el contexto de la pagina de ``username``. Sin escribir nada."""
     from . import views
@@ -578,7 +615,9 @@ def present(username, now=None):
     online_cutoff = now - timedelta(seconds=ONLINE_SECONDS)
     workers = []
     nodes_24h = tasks_24h = nodes_all = tasks_all = 0
-    for ping in WorkerPing.objects.filter(user=username).order_by('machine'):
+    pings = list(WorkerPing.objects.filter(user=username).order_by('machine'))
+    speed = speeds(pings, now)
+    for ping in pings:
         day = snapshot['machines_24h'].get(ping.machine,
                                            {'nodes': 0, 'tasks': 0})
         life = snapshot['machines_all'].get(
@@ -587,8 +626,8 @@ def present(username, now=None):
         tasks_24h += day['tasks']
         nodes_all += life['nodes']
         tasks_all += life['tasks']
-        seconds = life.get('seconds') or 0.0
         task = running.get(ping.machine)
+        nps, searches = speed.get((ping.user, ping.machine), (0, 0))
         row = {
             'machine': ping.machine,
             'threads': ping.threads,
@@ -606,7 +645,9 @@ def present(username, now=None):
             'nodes_all': life['nodes'],
             'nodes_all_h': human(life['nodes']),
             'tasks_all': life['tasks'],
-            'nps_h': human(int(life['nodes'] / seconds)) if seconds else '',
+            'nps_h': human(round(nps)) if nps else '',
+            'searches': searches,
+            'searches_h': human(searches),
         }
         if task is not None:
             row['searching'] = _presented(task, labels, now)
