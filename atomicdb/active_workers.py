@@ -17,11 +17,12 @@ other pages publish one at a time:
   anonymous visitors as one row.  Somebody who joined a request is a count
   and never a name, as on the contributor page (§ AnalysisTask.backers);
 * and one figure of the page's own, the worker's speed: the nodes per second
-  of the searches it finished in the last day, from the nodes and the time
+  of the searches it finished in the last hour, from the nodes and the time
   every finished search records (§ views.api_submit keeps the last one as
-  ``last_nps``).  A day's average and not the heartbeat of the moment, it
-  neither jumps from one position to the next nor drops to zero between
-  tasks.
+  ``last_nps``).  An average of dozens of searches and not the heartbeat of
+  the moment, it neither jumps from one position to the next nor drops to
+  zero between tasks; and unlike the lifetime figure of the contributor
+  page, a faster machine shows within the hour.
 
 Nothing else of the ping reaches the template: the rows are built here from
 named fields, and the lease token never leaves the database (the query only
@@ -38,8 +39,8 @@ two pages to the same answer.
 WHAT IT COSTS.  Three indexed reads whatever the size of the fleet: the live
 pings (``last_seen`` is indexed), the live leases of those machines (the
 LEASED band of ``state``, a few rows) and the searches those machines
-finished in the last day (the COMPLETED band of the (state, completed)
-index: one day of searches, never the whole table).  The lines come from the
+finished in the last hour (the COMPLETED band of the (state, completed)
+index: one hour of searches, never the whole table).  The lines come from the
 lineage and route label caches the home page already fills, so a warm page
 reads nothing else, and a cold one pays the reverse walk once per ply for
 all rows at once.  The one cost that grows with the rows is the known one of
@@ -58,8 +59,9 @@ from . import contributors, idle_repair, metrics, views
 from .models import AnalysisTask, WorkerPing
 
 USER = AnalysisTask.Source.USER
-# The window a worker's speed is measured over.
-SPEED_HOURS = 24
+# The window a worker's speed is measured over: dozens of searches for a
+# typical slot, and a faster machine shows within it.
+SPEED_MINUTES = 60
 
 
 def live_pings(now):
@@ -133,9 +135,9 @@ def speeds(pings, now):
     """``{(owner, machine): (nodes per second, searches)}`` of the live pings.
 
     A worker's speed is the nodes of the searches it finished in the last
-    ``SPEED_HOURS`` over the time they took: the ratio ``api_submit`` keeps
-    as ``last_nps`` for one search, over a day, so each search weighs by the
-    time it ran.  It is capped like that one.  The account that delivered a
+    ``SPEED_MINUTES`` over the time they took: the ratio ``api_submit`` keeps
+    as ``last_nps`` for one search, over the window, so each search weighs by
+    the time it ran.  It is capped like that one.  The account that delivered a
     search tells it apart as well as the machine name, because two accounts
     can announce the same name.
     """
@@ -144,7 +146,7 @@ def speeds(pings, now):
         return {}
     rows = (AnalysisTask.objects
             .filter(state=AnalysisTask.TState.COMPLETED, machine__in=machines,
-                    completed__gte=now - timedelta(hours=SPEED_HOURS),
+                    completed__gte=now - timedelta(minutes=SPEED_MINUTES),
                     nodes_searched__gt=0, elapsed_seconds__gt=0)
             .values('delivered_by', 'machine')
             .annotate(searches=Count('id'), nodes=Sum('nodes_searched'),
