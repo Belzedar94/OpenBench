@@ -259,6 +259,18 @@ yet. Inside that block, <code>lines</code> is the current pass,
 one that replaced it, and <code>passes</code> is a compact summary per pass,
 newest first, which is what shows how the evaluation moved as the search went
 deeper. A position the tree does not have returns 404 here.</p>
+<p><strong>Roots</strong>: <code>GET /atomicdb/api/roots</code> returns the
+<a href="/atomicdb/roots/">roots page</a> as data: the start position, its
+first moves and the replies to 1.Nf3 in <code>positions</code>, and every
+named opening in <code>openings</code>. Each row has its <code>key</code>,
+<code>label</code>, <code>line</code> (the moves from the start position, in
+UCI) and its <code>value</code> now, then <code>best_value</code> and
+<code>worst_value</code> with their <code>best_at</code> and
+<code>worst_at</code> times (UTC) and their statuses. The values are
+centipawns from White's side, as on the page, with a proven win as +10000 or
+-10000 and a proven draw as 0; the <code>score</code> of <code>query</code> is
+from the side to move instead. <code>since</code> is when tracking
+began.</p>
 <p class="dim" style="font-size:.9rem">Each entry of <code>moves</code> carries
 <code>floor</code>. It is <code>true</code> for a move nobody has searched,
 outside the position's current lines, whose number would beat the last of
