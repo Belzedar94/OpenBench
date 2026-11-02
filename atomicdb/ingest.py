@@ -8685,9 +8685,9 @@ def _apply_prepared_tb(position_key, prepared):
 def close_by_tb(position_key, wdl, user=None, dtz=None):
     """Cierra con WDL del lado al turno, dentro de una frontera verificable.
 
-    Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
-    fijado. Las posiciones de seis piezas solo se aceptan de identidades
-    explicitamente confiables porque el set completo no reside en el VPS.
+    Hasta ATOMICDB_TB_SERVER_MAX_MEN piezas el servidor repite siempre el
+    probe con sus propias tablas (5 por defecto, 6 con las tablas de seis).
+    Por encima, solo se aceptan de identidades explicitamente confiables.
     Todo rechazo queda registrado y nunca muta el arbol.
     """
     prepared = prepare_tb_closure(position_key, wdl, user=user, dtz=dtz)
