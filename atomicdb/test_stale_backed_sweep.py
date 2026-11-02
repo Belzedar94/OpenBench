@@ -451,9 +451,12 @@ class AtRestTests(TestCase):
 
 
 def _start(**kw):
-    """The start position itself, where the spine feed begins."""
+    """The start position itself, where the spine feed begins.  The
+    migrations already create its row."""
     fen = logic.start_fen()
-    return Position.objects.create(key=logic.key_of(fen), fen=fen, **kw)
+    start, _created = Position.objects.update_or_create(
+        key=logic.key_of(fen), defaults={'fen': fen, **kw})
+    return start
 
 
 class SpineTests(TestCase):
