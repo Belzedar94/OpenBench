@@ -28,7 +28,7 @@ from django.core.management import call_command
 from django.db import OperationalError
 from django.utils import timezone
 
-from . import ingest, ingest_queue
+from . import ingest, ingest_queue, logic
 from .management.commands import sweep_stale_backed as sweep
 from .models import AnalysisTask, DBEvent, Edge, IngestJob, Position
 from .testing import TestCase, TransactionTestCase
@@ -448,6 +448,55 @@ class AtRestTests(TestCase):
             pass
 
         self.assertEqual(ingest.stale_backed_rows(everything), {})
+
+
+def _start(**kw):
+    """The start position itself, where the spine feed begins."""
+    fen = logic.start_fen()
+    return Position.objects.create(key=logic.key_of(fen), fen=fen, **kw)
+
+
+class SpineTests(TestCase):
+    """The main line is checked on every run (Torom, 1-Nov-2026)."""
+
+    def _main_line(self, name):
+        parent = _lost_update(name)
+        start = _start(expanded=True, backed_eval=1216, backed_move='a1a2',
+                       backed_plies=2, backed_nodes=0)
+        _edge(start, parent, 'a1a2')
+        return start, parent
+
+    def test_the_spine_repairs_a_stale_position_on_the_main_line(self):
+        start, parent = self._main_line('SPINE')
+
+        event = _sweep('--no-guards', '--no-recent', '--no-rotation')
+
+        self.assertEqual(event.payload['spine'],
+                         {'plies': 3, 'candidates': 4})
+        self.assertEqual(_stored(parent), (1139, 'b7b5', 1, 128_000_000))
+        # And the start position follows it up.
+        self.assertEqual(_stored(start)[:2], (1139, 'a1a2'))
+
+    def test_without_the_feed_the_main_line_waits_for_the_rotation(self):
+        _start_row, parent = self._main_line('NO-SPINE')
+
+        event = _sweep('--no-guards', '--no-recent', '--no-rotation',
+                       '--no-spine')
+
+        self.assertNotIn('spine', event.payload)
+        self.assertEqual(_stored(parent), (1216, 'b7b5', 1, 0))
+
+    def test_a_proven_position_ends_the_walk(self):
+        start = _start(expanded=True, backed_move='a1a2')
+        proven = _pos('SPINE-PROVEN', 'b', status='WHITE_WIN',
+                      closure='MINIMAX', expanded=True)
+        _edge(start, proven, 'a1a2')
+        summary = {}
+
+        keys = sweep.Command()._spine(summary)
+
+        self.assertEqual(keys, [start.key])
+        self.assertEqual(summary['spine'], {'plies': 1, 'candidates': 1})
 
 
 class LockConflictTests(TransactionTestCase):

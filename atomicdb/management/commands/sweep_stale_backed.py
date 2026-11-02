@@ -31,7 +31,7 @@ heals on its own:
   (invariant 4 of docs/value-semantics.md) has been stopped since 5-Oct-2026:
   a pass over the whole table no longer fits in a night.
 
-THREE FEEDS, TWO CHECKS.  Every run reads
+FOUR FEEDS, TWO CHECKS.  Every run reads
 
 1. ``guards``: the frontiers of the BACKED_GUARD events since the last run.
    They are not checked: they are the parents of rows that the last level of
@@ -43,9 +43,20 @@ THREE FEEDS, TWO CHECKS.  Every run reads
    last run: the merge points of the race above;
 3. ``rotation``: a slice of the table in physical order (PostgreSQL block
    ranges, SQLite rowids), sized from the time since the last run so that
-   the whole table is read every ``--rotation-days``.
+   the whole table is read every ``--rotation-days``;
+4. ``spine``: the support spine of the start position (its ``backed_move``,
+   then that child's, down to where the value is born) and every open reply
+   of each position on it.  THE CASE (1-Nov-2026): the start position read
+   +12.41 for twenty minutes over a main line that said +12.57.  One position
+   33 plies down stood on ...Kh8 at the number of its sibling ...Bd7, another
+   two plies further down stored a value none of its replies supported, and
+   five more were behind them.  Torom, requesting down that line, read it as
+   "the backpropagation is hanging".  That line is what every visitor
+   watches, it is where ingests meet most, and the rotation reaches any one
+   position of it once a week.  A walk of it costs two indexed queries a ply
+   and the check about a thousand positions.
 
-What 2 and 3 find stale (and what a valve held back last time) is checked
+What 2, 3 and 4 find stale (and what a valve held back last time) is checked
 again after ``--settle-seconds``.  Only a position still stale, with the very
 numbers it stored the first time, and with no ingest of its own pending, is
 repaired.  One that changed in between is being worked on; the next look
@@ -97,7 +108,7 @@ from django.core.management.base import BaseCommand
 from django.db import DatabaseError, OperationalError, transaction
 from django.utils import timezone
 
-from atomicdb import ingest
+from atomicdb import ingest, logic
 from atomicdb.database import atomic, connection, current_alias
 from atomicdb.models import DBEvent, Edge, IngestJob, Position
 
@@ -116,6 +127,9 @@ EXAMPLES = 5
 # The stale-fraction valve only judges a rotation slice this large: a few
 # positions say nothing about the table.
 ROTATION_MIN_SAMPLE = 200
+# How far the spine walk goes down: past BACKED_ECHO_PLIES a distance is an
+# echo, not a value (see ingest), the same cap as the explorer's walk.
+SPINE_MAX_PLIES = ingest.BACKED_ECHO_PLIES
 
 
 def _chunks(items, size):
@@ -232,6 +246,7 @@ class Command(BaseCommand):
         parser.add_argument('--no-guards', action='store_true')
         parser.add_argument('--no-recent', action='store_true')
         parser.add_argument('--no-rotation', action='store_true')
+        parser.add_argument('--no-spine', action='store_true')
         parser.add_argument('--dry-run', action='store_true',
                             help='Find and report; write nothing at all.')
         parser.add_argument('--json', action='store_true',
@@ -361,6 +376,34 @@ class Command(BaseCommand):
         keys = _merge_points(jobs, max(0, opts['recent_depth']))
         summary['recent'] = {'jobs': len(jobs), 'merge_points': len(keys)}
         self.cursors['recent_until'] = until.isoformat()
+        return keys
+
+    def _spine(self, summary):
+        """The start position's support spine and every open reply along it.
+
+        A proven position ends the walk: its value is exact, so there is no
+        spine below it.  So do a missing ``backed_move`` edge and a position
+        already walked (a repetition).
+        """
+        key, keys, seen, plies = logic.key_of(logic.start_fen()), [], set(), 0
+        while key and key not in seen and plies < SPINE_MAX_PLIES:
+            seen.add(key)
+            row = (Position.objects.filter(key=key, status='UNKNOWN')
+                   .values_list('backed_move').first())
+            if row is None:
+                break
+            keys.append(key)
+            children = {}
+            for move, child, status in Edge.objects.filter(
+                    parent_id=key).values_list(
+                        'move_uci', 'child_id', 'child__status'):
+                if status == 'UNKNOWN':
+                    children[move] = child
+            keys.extend(children.values())
+            key = children.get(row[0])
+            plies += 1
+        keys = list(dict.fromkeys(keys))
+        summary['spine'] = {'plies': plies, 'candidates': len(keys)}
         return keys
 
     def _guards(self, opts, last, summary):
@@ -532,6 +575,8 @@ class Command(BaseCommand):
             recent = ([] if opts['no_recent']
                       else self._recent(opts, last, summary))
             candidates += recent
+            if not opts['no_spine']:
+                candidates += self._spine(summary)
             meeting = pending + recent
             if not opts['no_guards']:
                 guards = self._guards(opts, last, summary)
@@ -664,7 +709,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 '  rotation {unit} {from}-{to} of {total}: {candidates} '
                 'candidates'.format(**rotation))
-        for name in ('recent', 'guards', 'kinds'):
+        for name in ('recent', 'spine', 'guards', 'kinds'):
             if summary.get(name):
                 self.stdout.write('  %s %s' % (
                     name, json.dumps(summary[name], sort_keys=True)))
