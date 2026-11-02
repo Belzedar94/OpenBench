@@ -491,6 +491,47 @@ class AccountQueueCapTests(TestCase):
         self.assertIsNotNone(event)
         self.assertEqual(event.payload['account'], 'busy')
 
+    def test_one_receipt_per_account_and_minute(self):
+        # An account at its cap keeps asking: on 2 November one client wrote
+        # a row per attempt, about 110 a minute.  The first refusal of the
+        # minute already says all a receipt can say.
+        from .models import DBEvent
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+
+        for target in self.targets:
+            self._request(target.key, 'busy')
+
+        self.assertEqual(
+            DBEvent.objects.filter(kind='LANE_CAP_HIT').count(), 1)
+
+    def test_a_new_minute_writes_a_new_receipt(self):
+        from .models import DBEvent
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+        self._request(self.targets[0].key, 'busy')
+        DBEvent.objects.filter(kind='LANE_CAP_HIT').update(
+            ts=timezone.now() - views.LANE_CAP_RECEIPT_WINDOW
+            - timedelta(seconds=1))
+
+        self._request(self.targets[1].key, 'busy')
+
+        self.assertEqual(
+            DBEvent.objects.filter(kind='LANE_CAP_HIT').count(), 2)
+
+    def test_another_accounts_receipt_does_not_count(self):
+        from .models import DBEvent
+        DBEvent.objects.create(kind='LANE_CAP_HIT',
+                               payload={'account': 'newcomer', 'waiting': 1})
+        self._fill('busy', views.REQUEST_QUEUE_MAX)
+
+        self._request(self.targets[0].key, 'busy')
+
+        self.assertTrue(DBEvent.objects.filter(
+            kind='LANE_CAP_HIT', payload__account='busy').exists())
+
+    def test_the_receipt_stays_off_the_home_feed(self):
+        # It names an account and says nothing about the tree.
+        self.assertIn('LANE_CAP_HIT', views.FEED_HIDDEN_KINDS)
+
     def test_the_bulk_button_respects_the_same_allowance(self):
         self._fill('busy', views.REQUEST_QUEUE_MAX)
         self.client.login(username='busy', password='p')
