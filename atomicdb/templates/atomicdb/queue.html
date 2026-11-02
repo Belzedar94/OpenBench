@@ -2,18 +2,16 @@
 {% block title %}AtomicDB queue{% endblock %}
 {% block content %}
 
-<h2 style="margin-top:0">The queue, by account</h2>
-<p class="dim">One shared queue. Each account advances by the nodes it already
-  has queued, so the first request of a newcomer is served before the
-  thousandth of a heavy user, and a big batch interleaves instead of walling
-  the queue. Running a worker gives exactly one scheduling advantage: while it
-  runs, it serves its owner's requests first.</p>
+<h2 style="margin-top:0">Queue</h2>
+<p>One shared queue: the account with the fewest nodes waiting goes next, so a
+  newcomer is never stuck behind a big batch. Your own worker serves your
+  requests first. <a href="/atomicdb/docs/#queue">More</a></p>
 
 {% if account_rows %}
 <table>
   <tr>
     <th>Account</th><th>Waiting</th><th>Running</th>
-    <th>Queued nodes</th><th>Served ({{ served_minutes }} min)</th>
+    <th>Queued nodes</th><th title="Nodes the fleet actually spent in the last {{ served_minutes }} minutes, not what was asked for. An account with nothing waiting still appears while it has recent deliveries.">Served ({{ served_minutes }} min)</th>
     <th>Oldest wait</th>
   </tr>
   {% for row in account_rows %}
@@ -28,10 +26,6 @@
   </tr>
   {% endfor %}
 </table>
-<p class="dim">Served counts the nodes the fleet actually spent in the last
-  {{ served_minutes }} minutes, not what was asked for. An account with
-  nothing waiting still appears while it has recent deliveries to account
-  for.</p>
 {% else %}
 <p class="dim">Nothing is queued right now.</p>
 {% endif %}

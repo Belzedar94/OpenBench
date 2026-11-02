@@ -2,11 +2,29 @@
 {% block title %}AtomicDB documentation{% endblock %}
 {% block content %}
 
-<p class="dim" style="margin-top:0">Every number on this site comes from one
-of a few places, and this page says which one, and what each of them does not
-claim. What makes a position <em>closed</em> is on the
-<a href="/atomicdb/method/">method page</a>; this one is about the values, the
-graph, the queue and the API.</p>
+<p style="margin-top:0">This page explains where each number on the site comes
+from. What makes a position <em>closed</em> (solved) is on the
+<a href="/atomicdb/method/">method page</a>.</p>
+
+<h2 id="short">In short</h2>
+<ul style="margin:.8rem 0 .8rem 1.4rem">
+<li><a href="#rows">A position row</a>: the engine's own evaluation, the value
+  worked out from the moves below it, and whether it is solved.</li>
+<li><a href="#backing">Backed values</a>: a position takes the best value its
+  analysed moves give it, and every such value ends in a real engine search.</li>
+<li><a href="#repetition">Repetition</a>: a line that comes back to where it
+  has been counts as a draw, but only along the line you are playing.</li>
+<li><a href="#queue">The queue</a>: one queue shared by account, so nobody can
+  crowd everyone else out; your own worker serves your requests first.</li>
+<li><a href="#contributing">Contributing</a>: every analysis is credited to the
+  account that delivered it.</li>
+<li><a href="#api">API</a>: query, request and manage your queue from a
+  script.</li>
+<li><a href="#reading">Reading a page</a>: what the chips next to the numbers
+  mean.</li>
+</ul>
+<p class="dim" style="font-size:.9rem">The sections below give the exact
+rules.</p>
 
 <h2 id="rows">What a position row shows</h2>
 <p>A position is one row in the graph. Scores are centipawns from the side to
