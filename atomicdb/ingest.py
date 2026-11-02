@@ -8582,13 +8582,14 @@ def _tb_rejected(position_key, reason, **payload):
 
 
 def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
-    """Validate and, for <=5 men, probe TB before any encompassing write tx.
+    """Validate and, within the server's tables, probe TB before any encompassing write tx.
 
     ``dtz`` es ADITIVO y opcional: un worker anterior a este protocolo no
     lo manda y el cierre sigue exactamente igual, con ``clock_slack`` 0 —
     que es lo unico honesto, porque un WDL a secas asume haberse
     alcanzado justo tras un reset.  El WDL se sigue re-verificando en el
-    servidor hasta cinco piezas; el DTZ se ACEPTA SIN VERIFICAR y queda
+    servidor hasta ATOMICDB_TB_SERVER_MAX_MEN piezas (5 por defecto, 6 con
+    las tablas de seis); el DTZ se ACEPTA SIN VERIFICAR y queda
     marcado como tal en el evento.  La verificacion dura del DTZ llega
     con los certificados de P1c.
     """
@@ -8608,8 +8609,9 @@ def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
         return None
 
     men = logic.piece_count(pos.fen)
-    if men <= 5:
-        server_wdl = tb.probe_wdl(pos.fen, max_pieces=5)
+    server_max = int(getattr(settings, 'ATOMICDB_TB_SERVER_MAX_MEN', 5))
+    if men <= server_max:
+        server_wdl = tb.probe_wdl(pos.fen, max_pieces=server_max)
         if server_wdl is None or int(server_wdl) != wdl:
             _tb_rejected(
                 pos.key,
@@ -8629,6 +8631,24 @@ def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
     except (TypeError, ValueError):
         dtz = None
     return {'key': pos.key, 'fen': pos.fen, 'wdl': wdl, 'dtz': dtz}
+
+
+def prepare_server_tb_closure(position_key, fen):
+    """Settle a searched position from the server's own tables, if they cover it.
+
+    A worker only probes the tables it carries (the 3-4-5 set, or none on an
+    old worker), so a position beyond them arrives as a plain search.  When
+    the server's tables (ATOMICDB_TB_SERVER_MAX_MEN) cover it, their exact
+    result goes through the same validation as a worker's WDL.  None when
+    they don't, and the caller ingests the search as before.
+    """
+    server_max = int(getattr(settings, 'ATOMICDB_TB_SERVER_MAX_MEN', 5))
+    if not logic.tb_applicable(fen, server_max):
+        return None
+    wdl = tb.probe_wdl(fen, max_pieces=server_max)
+    if wdl is None:
+        return None
+    return prepare_tb_closure(position_key, wdl)
 
 
 def _apply_prepared_tb(position_key, prepared):
@@ -8665,9 +8685,9 @@ def _apply_prepared_tb(position_key, prepared):
 def close_by_tb(position_key, wdl, user=None, dtz=None):
     """Cierra con WDL del lado al turno, dentro de una frontera verificable.
 
-    Hasta cinco piezas el servidor repite siempre el probe con su set Atomic
-    fijado. Las posiciones de seis piezas solo se aceptan de identidades
-    explicitamente confiables porque el set completo no reside en el VPS.
+    Hasta ATOMICDB_TB_SERVER_MAX_MEN piezas el servidor repite siempre el
+    probe con sus propias tablas (5 por defecto, 6 con las tablas de seis).
+    Por encima, solo se aceptan de identidades explicitamente confiables.
     Todo rechazo queda registrado y nunca muta el arbol.
     """
     prepared = prepare_tb_closure(position_key, wdl, user=user, dtz=dtz)

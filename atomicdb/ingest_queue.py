@@ -243,7 +243,11 @@ def apply_job(job):
         rejected = tb_prepared is None
     else:
         fen = Position.objects.only('fen').get(key=job.position_id).fen
-        mate_proofs = ingest.prepare_mate_proofs(fen, lines)
+        # A position the server's tables cover closes on their exact result,
+        # whatever tables the worker had.
+        tb_prepared = ingest.prepare_server_tb_closure(job.position_id, fen)
+        if tb_prepared is None:
+            mate_proofs = ingest.prepare_mate_proofs(fen, lines)
 
     # De QUE cola salio este trabajo.  Es lo unico que sabe la procedencia de
     # todos los cierres que esta aplicacion vaya a producir — incluidos los
