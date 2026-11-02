@@ -152,6 +152,11 @@ MAX_REPORTED_NPS = 1_000_000_000_000
 # Solo se rechaza lo que pide una PERSONA: el selector y los brazos
 # automaticos siguen encolando pase lo que pase.
 REQUEST_QUEUE_MAX = 5000
+# UN recibo de negativa por cuenta y minuto, no uno por negativa
+# (§ _queue_full_payload).  Una cuenta en el tope no deja de pedir: un cliente
+# que reintenta sin pausa escribia una fila por intento, unas 110 por minuto
+# de una sola cuenta el 2-nov.
+LANE_CAP_RECEIPT_WINDOW = timedelta(minutes=1)
 # How many moves one click of the move list's multi-select may request
 # (§ api_request_moves).  The same ceiling as the other one-click batches,
 # the unanalysed-moves button and the frontier expansion
@@ -488,20 +493,26 @@ def _account_queue_full(requested_by):
 def _queue_full_payload(requested_by):
     """La negativa, con el recibo de por que.  ``(cuerpo, codigo)``.
 
-    ``LANE_CAP_HIT`` es raro por construccion — hacen falta cinco mil
-    peticiones esperando de una misma cuenta — asi que cada fila es senal y
-    ninguna es ruido.  Es ademas lo unico que convierte "me dijo que no" en
-    algo que se puede mirar despues.
+    El recibo, ``LANE_CAP_HIT``, es lo unico que convierte "me dijo que no"
+    en algo que se puede mirar despues.  Llegar al tope es raro — hacen falta
+    cinco mil peticiones esperando de una misma cuenta —, pero quien llega
+    sigue pidiendo, asi que se escribe uno por cuenta y minuto
+    (``LANE_CAP_RECEIPT_WINDOW``): lo que afirma, esta cuenta estaba en el
+    tope a esta hora, ya lo dice el primero del minuto.
 
     Devuelve la pareja y no una respuesta porque el camino comun de las
     peticiones (``_queue_request``, que sirve al click y a la API oficial) habla
     en parejas: quien llama pone la envoltura.  Las puertas que si devuelven
     una respuesta usan ``_queue_full_response``, que es esta misma envuelta.
     """
-    DBEvent.objects.create(kind='LANE_CAP_HIT', payload={
-        'account': requested_by or '(anonymous)',
-        'waiting': REQUEST_QUEUE_MAX,
-    })
+    account = requested_by or '(anonymous)'
+    since = timezone.now() - LANE_CAP_RECEIPT_WINDOW
+    if not DBEvent.objects.filter(kind='LANE_CAP_HIT', ts__gte=since,
+                                  payload__account=account).exists():
+        DBEvent.objects.create(kind='LANE_CAP_HIT', payload={
+            'account': account,
+            'waiting': REQUEST_QUEUE_MAX,
+        })
     return {'status': 'queue-full-account'}, 503
 
 
@@ -4192,6 +4203,9 @@ def _san_line(key, max_plies=16, keep_head=False):
 #     comentario lo dice: existe como auditoria para poder reintroducir un
 #     limite informado.  Un recibo no es una historia, y lleva la IP del
 #     visitante.
+#   * ``LANE_CAP_HIT`` — the receipt of a request refused because its account
+#     already had its allowance waiting (§ ``_queue_full_payload``).  It says
+#     nothing about the tree, and it carries the account's name.
 #
 # Lo que SE QUEDA, por si alguien anade un kind manana: ``NODE_CLOSED``,
 # ``CAMPAIGN_CLOSED``, ``CLOSURE_REVOKED``, ``MATE_PROOF_DISPUTED``,
@@ -4216,6 +4230,7 @@ FEED_HIDDEN_KINDS = {
     'FRAGILE_ENQUEUED',
     'IDLE_REPAIR',
     'LANDING_RECHECK',
+    'LANE_CAP_HIT',
     'PROOF_GUARD',
     'QUALITY_CONVERGENCE',
     'REVOKE_GUARD',
