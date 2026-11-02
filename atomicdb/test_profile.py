@@ -160,6 +160,25 @@ class ExistenceTests(TestCase):
         self.assertEqual(
             self.client.get('/atomicdb/user/alice/').status_code, 200)
 
+    def test_a_name_typed_in_another_case_goes_to_the_real_page(self):
+        worker_account('Wolfram')
+        _ping('box-atomicdb', 'Wolfram')
+
+        response = self.client.get('/atomicdb/user/wolfram/')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/atomicdb/user/Wolfram/')
+
+    def test_two_accounts_that_differ_by_case_keep_their_own_pages(self):
+        worker_account('Wolfram')
+        worker_account('wolfram')
+        _ping('box-atomicdb', 'Wolfram')
+
+        self.assertEqual(
+            self.client.get('/atomicdb/user/wolfram/').status_code, 404)
+        self.assertEqual(
+            self.client.get('/atomicdb/user/Wolfram/').status_code, 200)
+
     def test_the_page_is_never_cached(self):
         _ping('box-atomicdb', 'alice')
 
