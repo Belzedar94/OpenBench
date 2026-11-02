@@ -2,10 +2,9 @@
 {% block title %}AtomicDB queue{% endblock %}
 {% block content %}
 
-<h2 style="margin-top:0">Queue</h2>
-<p>One shared queue: the account with the fewest nodes waiting goes next, so a
-  newcomer is never stuck behind a big batch. Your own worker serves your
-  requests first. <a href="/atomicdb/docs/#queue">More</a></p>
+<h2 style="margin-top:0">Queue <a href="/atomicdb/docs/#queue"
+    title="How the queue works" aria-label="How the queue works"
+    style="font-size:.8em;text-decoration:none">&#9432;</a></h2>
 
 {% if account_rows %}
 <table>
