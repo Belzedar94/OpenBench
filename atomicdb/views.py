@@ -6250,6 +6250,14 @@ def contributor_me(request):
         f'/atomicdb/user/{quote(request.user.username, safe="")}/')
 
 
+def _account_named_any_case(username):
+    """The one account whose name matches ``username`` ignoring case, or ''."""
+    from django.contrib.auth import get_user_model
+    names = list(get_user_model().objects.filter(username__iexact=username)
+                 .values_list('username', flat=True)[:2])
+    return names[0] if len(names) == 1 else ''
+
+
 def contributor(request, username):
     """La pagina publica de una cuenta con actividad en AtomicDB.
 
@@ -6268,6 +6276,12 @@ def contributor(request, username):
     username = (username or '')[:64]
     viewer = (request.user.username if request.user.is_authenticated else '')
     if viewer != username and not contributors.has_activity(username):
+        # A name typed in another case goes to the real page (seaside_cliff,
+        # 2-Nov-2026).  Only when exactly one account matches: two accounts
+        # that differ only by case would each keep their own exact URL.
+        canonical = _account_named_any_case(username)
+        if canonical and canonical != username:
+            return redirect('/atomicdb/user/%s/' % canonical)
         return render(request, 'atomicdb/missing.html', {
             'missing_note': 'No AtomicDB activity under that name (yet).',
         }, status=404)
