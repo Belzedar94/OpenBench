@@ -48,6 +48,10 @@ Every position value on the site is in exactly one of four states:
      the other's uncommitted change, and the one that commits last can leave
      it on a number no child holds. The sweep looks first where overlapping
      ingests meet.
+   - the main line is what every visitor watches and where ingests meet
+     most, while the rotation reaches any one position of it once a week.
+     Since 2026-11-02 every run also checks the start position's support
+     spine, with every open reply along it.
 
    The nightly global pass this invariant used to name (`recascade_backed`)
    stopped fitting in a night and has been off since 2026-10-05; it remains
