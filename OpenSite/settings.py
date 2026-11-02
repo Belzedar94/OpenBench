@@ -117,6 +117,11 @@ ATOMICDB_TB_TRUSTED = [
         'ATOMICDB_TB_TRUSTED', 'belzedar'
     ).split(',') if username.strip()
 ]
+# Largest piece count the server's own tables cover.  A worker's TB result up to
+# this size is re-probed here and accepted from anyone when it matches; above it
+# only ATOMICDB_TB_TRUSTED users are believed.  6 needs the 6-piece WDL tables
+# in ATOMICDB_TB_PATHS.
+ATOMICDB_TB_SERVER_MAX_MEN = int(os.environ.get('ATOMICDB_TB_SERVER_MAX_MEN', '5'))
 
 # Identidad CONGELADA del enunciado que AtomicDB prueba.  No es una opcion de
 # despliegue: cambiarla cambia el teorema, y todo cierre decisivo existente

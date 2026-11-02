@@ -41,6 +41,36 @@ class TablebaseClosureTrustTests(TestCase):
             kind='TB_REJECTED',
             payload__reason='untrusted-six-piece').exists())
 
+    @override_settings(ATOMICDB_TB_TRUSTED=['belzedar'],
+                       ATOMICDB_TB_SERVER_MAX_MEN=6)
+    @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=2)
+    def test_six_piece_result_is_reprobed_with_six_piece_tables(self, probe):
+        user = User.objects.create_user('visitor', password='secret')
+        position = ingest.get_or_create_position(SIX_MEN)
+        self.assertTrue(ingest.close_by_tb(position.key, 2, user=user))
+        probe.assert_called_once_with(position.fen, max_pieces=6)
+        position.refresh_from_db()
+        self.assertEqual((position.status, position.closure),
+                         ('WHITE_WIN', 'TB'))
+
+    @override_settings(ATOMICDB_TB_SERVER_MAX_MEN=6)
+    @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=2)
+    def test_server_tables_settle_a_searched_six_piece_position(self, probe):
+        position = ingest.get_or_create_position(SIX_MEN)
+        prepared = ingest.prepare_server_tb_closure(position.key, position.fen)
+        self.assertEqual(prepared['wdl'], 2)
+        self.assertTrue(ingest._apply_prepared_tb(position.key, prepared))
+        position.refresh_from_db()
+        self.assertEqual((position.status, position.closure),
+                         ('WHITE_WIN', 'TB'))
+
+    @mock.patch('atomicdb.ingest.tb.probe_wdl')
+    def test_server_tables_leave_positions_beyond_them_alone(self, probe):
+        position = ingest.get_or_create_position(SIX_MEN)
+        self.assertIsNone(
+            ingest.prepare_server_tb_closure(position.key, position.fen))
+        probe.assert_not_called()
+
     @override_settings(ATOMICDB_TB_TRUSTED=['belzedar'])
     def test_trusted_six_piece_result_is_accepted(self):
         user = User.objects.create_user('belzedar', password='secret')
