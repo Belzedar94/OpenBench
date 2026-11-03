@@ -80,8 +80,10 @@ class HeadlineValueTests(TestCase):
         page = self._explore(parent)
         body = page.content.decode()
         self.assertEqual(page.context['eval_stm_str'], '+436cp')
-        # The point eval is context now, not the headline.
-        self.assertIn('eval stored on this position +370cp', body)
+        # The point eval is context now, not the headline; the chip under
+        # the board that quoted it is gone (the table's top row has the
+        # value), and the API keeps it below.
+        self.assertNotIn('eval stored on this position', body)
 
         payload = self._api(parent)
         self.assertEqual(payload['score'], 436)
