@@ -16,7 +16,7 @@
   {% for row in account_rows %}
   <tr>
     <td>{% if row.named %}<a class="qline"
-        href="/atomicdb/user/{{ row.name }}/">{{ row.name }}</a>{% else %}<a class="qline"
+        href="/atomicdb/queue/{{ row.name|urlencode }}/">{{ row.name }}</a>{% else %}<a class="qline"
         href="/atomicdb/queue/anonymous/"><strong>{{ row.name }}</strong></a>{% endif %}</td>
     <td>{{ row.waiting }}</td>
     <td class="dim">{{ row.running }}</td>

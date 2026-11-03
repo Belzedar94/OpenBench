@@ -72,7 +72,8 @@
     </form>{% endif %}</div>
   {% endif %}
   {% if has_queue %}
-  <h3 class="contrib-sub">Running now</h3>
+  <h3 class="contrib-sub">Running now <a class="dim" style="font-weight:normal;font-size:.85em"
+    href="/atomicdb/queue/{{ profile_user|urlencode }}/">queue only</a></h3>
   {% if queue_leased %}
   <ul class="feed">
     {% for q in queue_leased %}

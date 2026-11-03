@@ -1,0 +1,46 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}{{ profile_user }}'s queue · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 class="contrib-name" style="margin-top:0">{{ profile_user }}'s queue</h2>
+<p class="contrib-lede"><a href="/atomicdb/user/{{ profile_user|urlencode }}/">Profile</a>
+  · <a href="/atomicdb/queue/">Whole queue</a></p>
+
+<section class="contrib-section">
+  <h3 class="contrib-sub">Running now</h3>
+  {% if queue_leased %}
+  <ul class="feed">
+    {% for q in queue_leased %}
+    <li><span class="chip hot"></span>
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes on <b>{{ q.machine }}</b>{% if q.since %} · started {{ q.since }}{% endif %}{% if q.quiet %} · no recent heartbeat{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="dim">Nothing on a worker right now.</p>{% endif %}
+
+  <h3 class="contrib-sub">Waiting</h3>
+  {% if queue_pending %}
+  <ul class="feed">
+    {% for q in queue_pending %}
+    <li>{% if q.place %}<span class="t" title="Place in the visitor queue: how many requests are served before this one">#{{ q.place }}</span>{% else %}<span class="t" title="No place yet: this request is outside the band the workers serve right now">&ndash;</span>{% endif %}
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.budget }} nodes{% if q.opening %} · <span title="Last named Atomic opening on this line">{{ q.opening }}</span>{% endif %}{% if q.when %} · asked {{ q.when }}{% endif %}{% if q.backers %} · {{ q.backers }} more {{ q.backers|pluralize:"person,people" }} asked for this{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}
+  {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
+
+  <h3 class="contrib-sub">Served</h3>
+  {% if queue_done %}
+  <ul class="feed">
+    {% for q in queue_done %}
+    <li><span class="chip won"></span>
+      <a class="qline" href="/atomicdb/explore/{{ q.key }}/{% if q.play %}?play={{ q.play|urlencode }}{% endif %}" title="{{ q.full }}">{{ q.san }}</a>
+      <span class="contrib-when">&nbsp;{{ q.nodes }} nodes{% if q.when %} · {{ q.when }}{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% if queue_done_more %}<p class="dim">and {{ queue_done_more }} more served.</p>{% endif %}
+  {% else %}<p class="dim">Nothing served yet.</p>{% endif %}
+</section>
+
+{% endblock %}
