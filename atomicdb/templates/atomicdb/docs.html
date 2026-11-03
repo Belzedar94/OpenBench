@@ -14,26 +14,65 @@
 </script>
 {% endblock %}
 {% block doc %}
-<p style="margin-top:0">These pages explain where each number on the site comes
-from. What makes a position <em>closed</em> (solved) is on the
-<a href="/atomicdb/docs/method/">method page</a>.</p>
+<h2 id="overview">AtomicDB documentation</h2>
+<p class="docs-lead">AtomicDB is a shared, growing database of analysed
+Atomic Chess positions. These pages explain where each number on the site
+comes from, and how you can help.</p>
+<p>New here? Read <a href="/atomicdb/docs/method/">Method</a> for what
+<em>closed</em> (solved) means, then <a href="/atomicdb/docs/reading/">Reading
+a page</a> to make sense of the explorer.</p>
 
-<h2 id="short">In short</h2>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><a href="/atomicdb/docs/rows/">A position row</a>: the engine's own evaluation, the value
-  worked out from the moves below it, and whether it is solved.</li>
-<li><a href="/atomicdb/docs/backing/">Backed values</a>: a position takes the best value its
-  analysed moves give it, and every such value ends in a real engine search.</li>
-<li><a href="/atomicdb/docs/repetition/">Repetition</a>: a line that comes back to where it
-  has been counts as a draw, but only along the line you are playing.</li>
-<li><a href="/atomicdb/docs/queue/">The queue</a>: one queue shared by account, so nobody can
-  crowd everyone else out; your own worker serves your requests first.</li>
-<li><a href="/atomicdb/docs/contributing/">Contributing</a>: every analysis is credited to the
-  account that delivered it.</li>
-<li><a href="/atomicdb/docs/api/">API</a>: query, request and manage your queue from a
-  script.</li>
-<li><a href="/atomicdb/docs/reading/">Reading a page</a>: what the chips next to the numbers
-  mean.</li>
+<h3 id="short">In short</h3>
+<ul>
+<li><a href="/atomicdb/docs/method/">Method</a>: what makes a position
+  closed, and how to contribute a worker.</li>
+<li><a href="/atomicdb/docs/rows/">A position row</a>: the engine's own
+  evaluation, the value worked out from the moves below it, and whether it is
+  solved.</li>
+<li><a href="/atomicdb/docs/backing/">Backed values</a>: a position takes the
+  best value its analysed moves give it, and every such value ends in a real
+  engine search.</li>
+<li><a href="/atomicdb/docs/repetition/">Repetition</a>: a line that comes
+  back to where it has been counts as a draw, but only along the line you are
+  playing.</li>
+<li><a href="/atomicdb/docs/queue/">The queue</a>: one queue shared by
+  account, so nobody can crowd everyone else out; your own worker serves your
+  requests first.</li>
+<li><a href="/atomicdb/docs/contributing/">Contributing</a>: every analysis is
+  credited to the account that delivered it.</li>
+<li><a href="/atomicdb/docs/api/">API</a>: query, request and manage your
+  queue from a script.</li>
+<li><a href="/atomicdb/docs/reading/">Reading a page</a>: what the chips next
+  to the numbers mean.</li>
 </ul>
-<p class="dim" style="font-size:.9rem">Each page gives the exact rules.</p>
+<p class="docs-note">Each page starts with a short summary and gives the exact
+rules further down.</p>
+
+<h3 id="terms">Words used on these pages</h3>
+<div class="docs-table-wrap"><table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>position</td><td>One board situation, with the side to move. Stored
+  once, however it was reached.</td></tr>
+<tr><td>ply</td><td>One move by one side (a half-move).</td></tr>
+<tr><td>nodes</td><td>The unit of engine search effort: roughly, positions
+  the engine looked at. 128M = 128 million, 2B = 2 billion.</td></tr>
+<tr><td>centipawns (cp)</td><td>Engine scores; 100 is about one pawn. Given
+  from the side to move unless a page says otherwise.</td></tr>
+<tr><td>closed / solved</td><td>The result of the position is proven by one
+  of the <a href="/atomicdb/docs/method/#gates">four gates</a>. Everything
+  else is open (<code>UNKNOWN</code>).</td></tr>
+<tr><td>point eval</td><td>What one engine search reported about the position
+  itself.</td></tr>
+<tr><td>backed value</td><td>The value worked out from the analysed moves
+  below a position. See <a href="/atomicdb/docs/backing/">Backed
+  values</a>.</td></tr>
+<tr><td>anchor</td><td>The real engine search a backed value ends in.</td></tr>
+<tr><td>transposition</td><td>The same position reached by a different move
+  order. See <a href="/atomicdb/docs/repetition/">Repetition</a>.</td></tr>
+<tr><td>request, worker</td><td>A request asks for an analysis; a worker is a
+  volunteer computer that runs it. See <a href="/atomicdb/docs/queue/">The
+  queue</a>.</td></tr>
+<tr><td>ladder, rung</td><td>Asking again buys a deeper search: 128M, then
+  512M, then 2B.</td></tr>
+</table></div>
 {% endblock %}
