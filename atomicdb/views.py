@@ -37,6 +37,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
 from . import idle_repair
+from . import san as move_names
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
 # gives the task to somebody else.  A worker beats every 60 seconds and gives
@@ -1911,17 +1912,12 @@ def _move_san(fen, move):
 
     El movegen puede negarse — una FEN que ya no admite esa jugada por lo que
     sea — y quedarse sin frase por un adorno seria absurdo: el UCI dice lo
-    mismo con menos gracia.
+    mismo con menos gracia (§ san).
     """
-    import pyffish as pf
-
     if not (move and fen):
         return move
     black = fen.split()[1:2] == ['b']
-    try:
-        san = pf.get_san(logic.VARIANT, fen, move)
-    except Exception:
-        san = move
+    san = move_names.san(fen, move)
     return f'...{san}' if black else san
 
 
@@ -5121,6 +5117,13 @@ def home(request):
                        'play': route if routed is not None else ''})
     events = _friendly_events(event_rows, labels)
     root_legal_ucis = logic.legal_moves(root.fen)
+    # The first moves in SAN, read off the root with its legal moves: no
+    # query and no move generation (§ san).
+    root_sans = move_names.sans(root.fen, root_legal_ucis
+                                + [m['uci'] for m in first_moves],
+                                legal=root_legal_ucis)
+    for move in first_moves:
+        move['san'] = root_sans.get(move['uci'], move['uci'])
     compute = worker_metrics()
     root_pn, root_dn = proof.headline_numbers()
     return render(request, 'atomicdb/home.html', {
@@ -5163,7 +5166,8 @@ def home(request):
         'board_key': root.key, 'best_move': root.best_move, 'board_play': '',
         'legal_ucis': root_legal_ucis,
         'legal_move_links': [
-            {'uci': uci, 'url': _goto_url(root.key, uci, [])}
+            {'uci': uci, 'san': root_sans.get(uci, uci),
+             'url': _goto_url(root.key, uci, [])}
             for uci in root_legal_ucis
         ]})
 
@@ -7192,8 +7196,8 @@ def _mate_pv_provenance(pos, active_ucis=None, route_keys=None):
     instead, by the same equality on its winning line, so a visitor can
     climb the chain to the search a link at a time.
 
-    One query, bounded by ``PROVENANCE_MAX_PARENTS``, and no move
-    generation: the move is shown as stored.
+    One query, bounded by ``PROVENANCE_MAX_PARENTS``.  The move is named in
+    SAN from the parent's FEN, which the same query brings (§ san).
     """
     line = (pos.won_line or '').split()
     if not line:
@@ -7203,20 +7207,20 @@ def _mate_pv_provenance(pos, active_ucis=None, route_keys=None):
                     | Q(parent__closure='MATE_PV'))
             .order_by('parent_id', 'move_uci')
             .values_list('parent_id', 'move_uci', 'parent__last_analysis',
-                         'parent__closure', 'parent__won_line')
+                         'parent__closure', 'parent__won_line', 'parent__fen')
             [:PROVENANCE_MAX_PARENTS])
     searched = chained = None
-    for parent_key, uci, analysis, closure, won_line in rows:
+    for parent_key, uci, analysis, closure, won_line, fen in rows:
         wanted = [uci, *line]
         stored = analysis if isinstance(analysis, list) else []
         if searched is None and any(
                 isinstance(entry, dict) and not entry.get('prior_pass')
                 and entry.get('pv') == wanted for entry in stored):
-            searched = (parent_key, uci)
+            searched = (parent_key, uci, fen)
         if (chained is None and closure == 'MATE_PV'
                 and (won_line or '').split() == wanted):
-            chained = (parent_key, uci)
-    parent_key, uci = searched or chained or (None, None)
+            chained = (parent_key, uci, fen)
+    parent_key, uci, fen = searched or chained or (None, None, None)
     if parent_key is None:
         return None
     # The parent the visitor came from keeps the visitor's route, one ply
@@ -7228,7 +7232,7 @@ def _mate_pv_provenance(pos, active_ucis=None, route_keys=None):
     return {
         'text': ('proven by the search of' if searched
                  else 'proven as part of the winning line of'),
-        'link_text': f'the position before {uci}',
+        'link_text': f'the position before {move_names.san(fen, uci)}',
         'url': _explore_url(parent_key,
                             active_ucis[:-1] if on_route else None),
     }
@@ -7250,6 +7254,8 @@ def _minimax_provenance(pos, moves):
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
     lead = 'proven by minimax from its replies'
+    # Named in SAN when the explorer has named the rows (§ explore).
+    named = {move['uci']: move.get('san') or move['uci'] for move in moves}
     if pos.status == win:
         winners = [move['uci'] for move in moves if move['status'] == win]
         if pos.best_move in winners:
@@ -7258,17 +7264,20 @@ def _minimax_provenance(pos, moves):
             winners.insert(0, pos.best_move)
         if winners:
             verb = 'wins' if len(winners) == 1 else 'win'
-            return {'text': f'{lead}: {_join_moves(winners)} {verb}'}
+            return {'text': f'{lead}: '
+                            f'{_join_moves([named[uci] for uci in winners])} '
+                            f'{verb}'}
     elif pos.status == 'DRAW':
-        draws = [move['uci'] for move in moves if move['status'] == 'DRAW']
+        draws = [named[move['uci']] for move in moves
+                 if move['status'] == 'DRAW']
         if draws:
             verb = 'draws' if len(draws) == 1 else 'draw'
             return {'text': f'{lead}: {_join_moves(draws)} {verb}, '
                             'none wins'}
     elif moves and all(move['status'] == loss for move in moves):
         if len(moves) == 1:
-            return {'text': f"{lead}: its only reply, {moves[0]['uci']}, "
-                            'loses'}
+            return {'text': f"{lead}: its only reply, "
+                            f"{named[moves[0]['uci']]}, loses"}
         return {'text': f'{lead}: all {len(moves)} lose'}
     return {'text': lead}
 
@@ -7311,8 +7320,15 @@ def explore(request, key):
     # The depth column of the table, one aggregate for every row
     # (§ _with_search_depth).
     moves = _with_search_depth(_child_moves(pos))
-    parents = [{'key': e.parent_id, 'uci': e.move_uci}
-               for e in Edge.objects.filter(child=pos)[:8]]
+    # The parent's FEN rides on the same query, so the page names each move in
+    # SAN without a read per parent (§ san).  Only shown with two or more.
+    parents = [{'key': parent_key, 'uci': uci, 'fen': parent_fen}
+               for parent_key, uci, parent_fen in Edge.objects.filter(
+                   child=pos).values_list('parent_id', 'move_uci',
+                                          'parent__fen')[:8]]
+    if len(parents) > 1:
+        for parent in parents:
+            parent['san'] = move_names.san(parent['fen'], parent['uci'])
     raw_play = request.GET.get('play')
     try:
         explicit_route = _validated_play_route(raw_play, pos.key)
@@ -7443,6 +7459,14 @@ def explore(request, key):
             'enters_opening': _exact_child_opening(
                 offtree_keys[uci], current_opening, names=community_map),
         })
+    # Every move the page names, in SAN, read off this position with the
+    # legal moves already at hand: no query and no move generation (§ san).
+    # The rows keep their UCI for the links and the boxes.
+    sans = move_names.sans(
+        pos.fen, [m['uci'] for m in moves] + offtree_ucis + [pos.best_move],
+        legal=legal_ucis or None)
+    for move in moves + offtree:
+        move['san'] = sans.get(move['uci'], move['uci'])
     # JUMP TO THE END OF THE PROVEN LINE.  Offered when the first ply of that
     # line can really be travelled, which is one of two things: the ply is
     # already an edge of the table below, or the closure can build its chain
@@ -7502,6 +7526,7 @@ def explore(request, key):
     legal_move_links = [
         {
             'uci': uci,
+            'san': sans.get(uci, uci),
             'url': _goto_url(
                 pos.key, uci, active_ucis, current_anchor),
         }
@@ -7638,6 +7663,12 @@ def explore(request, key):
         # MINIMAX solo guarda el testigo de cada nodo) no hay longitud que
         # prometer y el chip no la inventa.
         'proven_end_plies': len((pos.won_line or '').split()) or None,
+        # The two lines above the jump, as a person reads them: the winning
+        # line in one move generation for the whole line, the witness from
+        # the names above.  Without a name the page keeps the stored UCI.
+        'won_line_san': ' '.join(
+            _batched_sans(pos.fen, (pos.won_line or '').split()) or ()),
+        'best_move_san': sans.get(pos.best_move),
         # Where the proof of a closed position came from: the search whose
         # line it is, or the replies minimax closed it from
         # (§ _provenance).  None on an open page, at no cost there.
