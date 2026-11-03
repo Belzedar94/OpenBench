@@ -23,20 +23,36 @@ iniciado, un recuento por indice y una pagina de diez filas.
 """
 
 import functools
+import hashlib
 import os
 from urllib.parse import quote
 
 from django.utils.timesince import timesince
 
+from . import preferences
 from .models import RequestNotification
 
-# Version de cache de los estaticos propios: el mtime de la hoja principal en
-# el momento de importar.  Cada deploy que la toque cambia el numero y los
-# navegadores dejan de casar su copia vieja — el estreno de la cabecera se
-# vio ROTO (insignia debajo de la campana, pila vertical) exactamente por una
-# hoja cacheada de antes del deploy.
-STATIC_VERSION = str(int(os.path.getmtime(os.path.join(
-    os.path.dirname(__file__), 'static', 'atomicdb', 'atomicdb.css'))))
+# Version de cache de los estaticos propios, calculada al importar.  Cada
+# deploy que toque uno cambia el numero y los navegadores dejan de casar su
+# copia vieja — el estreno de la cabecera se vio ROTO (insignia debajo de la
+# campana, pila vertical) exactamente por una hoja cacheada de antes del
+# deploy.  Antes era el mtime de atomicdb.css a secas, asi que un cambio que
+# solo tocara un .js salia con la URL de siempre; ahora es un digest del
+# CONTENIDO de todos los ficheros de primer nivel (hoja y scripts propios, sin
+# vendor), que tampoco depende de que el deploy conserve o no los mtimes.
+def _static_version(folder=os.path.join(
+        os.path.dirname(__file__), 'static', 'atomicdb')):
+    digest = hashlib.sha256()
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            digest.update(name.encode('utf-8'))
+            with open(path, 'rb') as handle:
+                digest.update(handle.read())
+    return digest.hexdigest()[:10]
+
+
+STATIC_VERSION = _static_version()
 
 
 # Diez filas en el desplegable: es lo que cabe sin convertirlo en una pagina.
@@ -201,5 +217,8 @@ def identity(request):
         'notifications': presented(user.username),
         'notifications_unseen': count,
         'notifications_badge': badge(count),
+        # The settings panel: its queue option, and where its POST returns.
+        'settings_lifo': preferences.lifo_on(user.username),
+        'identity_path': request.get_full_path(),
     })
     return context

@@ -6,7 +6,7 @@
 <div class="linebox">
   {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
   {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
-    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% if not forloop.last %} {% endif %}{% endfor %}
+    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{% if st.uci %}<span data-uci="{{ st.uci }}">{{ st.san }}</span>{% else %}{{ st.san }}{% endif %}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
 {% endif %}
 
@@ -41,7 +41,7 @@ most eight (§ views.explore).{% endcomment %}
 <details class="suggest-name transpositions">
   <summary title="The moves that lead here from other positions">transpositions ({{ parents|length }})</summary>
   <p class="crumb" style="margin:.4rem 0 0">from:
-  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}</p>
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}" data-uci="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}</p>
 </details>
 {% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
@@ -675,13 +675,13 @@ most eight (§ views.explore).{% endcomment %}
     nacio esto.{% endcomment %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
-      <strong{% if won_line_san %} title="{{ pos.won_line }}"{% endif %}>{{ won_line_san|default:pos.won_line }}</strong>{% if proven_end_url %} <a
+      <strong{% if won_line_san %} title="{{ pos.won_line }}" data-uci="{{ pos.won_line }}"{% endif %}>{{ won_line_san|default:pos.won_line }}</strong>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position of this winning line, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below"
         title="Follow this line to its end and land on the position it finishes at, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below">end of line ·{{ proven_end_plies }}</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
     <p style="font-size:.85rem"><span class="dim">witness move:</span>
-      <strong{% if best_move_san and best_move_san != pos.best_move %} title="{{ pos.best_move }}"{% endif %}>{{ best_move_san|default:pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
+      <strong{% if best_move_san and best_move_san != pos.best_move %} title="{{ pos.best_move }}" data-uci="{{ pos.best_move }}"{% endif %}>{{ best_move_san|default:pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position this witness leads to"
         title="Follow the witness move of each position down to where the line ends">end of line</a>{% endif %}</p>
@@ -750,10 +750,10 @@ most eight (§ views.explore).{% endcomment %}
         propietario 6-ago).  El chip es el de siempre.{% endcomment %}
         {% comment %}The move in SAN, its UCI in the tooltip; the link, the
         box and the scripts keep the UCI.{% endcomment %}
-        <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
+        <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
-          title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
+          title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
@@ -810,10 +810,10 @@ most eight (§ views.explore).{% endcomment %}
       {% for u in offtree %}
       <tr>
         <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" data-unanalysed aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
-        <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
+        <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
-          title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
+          title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim" data-fold>-</span></td>
