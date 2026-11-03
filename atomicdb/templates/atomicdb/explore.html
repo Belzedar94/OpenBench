@@ -696,11 +696,22 @@ most eight (§ views.explore).{% endcomment %}
         aria-label="FEN of this position. Edit it, or paste another FEN or a PGN, to go there"
         title="Edit this FEN, or paste another FEN or a PGN, to go there">
       <button class="reqbtn">Go</button>
-      <button type="button" class="reqbtn fen-copy" id="fen-copy"
-        title="Copy this FEN">Copy</button>
-      <a class="fen-lichess" id="fen-lichess" href="{{ pos.fen|lichess_analysis }}"
-        target="_blank" rel="noopener"
-        title="Open this position on the lichess atomic analysis board">lichess</a>
+      {% comment %}Icons rather than words (cz_eclipsia, 3-Nov-2026): the
+      box is as wide as the board and the FEN needs the room.{% endcomment %}
+      <button type="button" class="reqbtn fen-icon fen-copy" id="fen-copy"
+        title="Copy this FEN" aria-label="Copy this FEN"><svg class="ico-copy"
+        viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect
+        x="9" y="9" width="11" height="11" rx="2"/><path
+        d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><svg class="ico-done"
+        viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path
+        d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+      <a class="reqbtn fen-icon fen-lichess" id="fen-lichess"
+        href="{{ pos.fen|lichess_analysis }}" target="_blank" rel="noopener"
+        title="Open this position on the lichess atomic analysis board"
+        aria-label="Open this position on lichess"><svg viewBox="0 0 24 24"
+        width="16" height="16" aria-hidden="true"><path d="M14 4h6v6"/><path
+        d="M20 4l-9 9"/><path
+        d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg></a>
     </form>
     <script>
     (function () {
@@ -710,10 +721,19 @@ most eight (§ views.explore).{% endcomment %}
       var copy = document.getElementById('fen-copy');
       var lichess = document.getElementById('fen-lichess');
       var timer = null;
+      // The icon turns into a tick when the FEN is on the clipboard; when it
+      // is not, the FEN is left selected and the tooltip says what to press.
       function said(text) {
-        copy.textContent = text;
+        var done = text === 'Copied';
+        copy.classList.toggle('done', done);
+        copy.title = text;
+        copy.setAttribute('aria-label', text);
         clearTimeout(timer);
-        timer = setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
+        timer = setTimeout(function () {
+          copy.classList.remove('done');
+          copy.title = 'Copy this FEN';
+          copy.setAttribute('aria-label', 'Copy this FEN');
+        }, 1500);
       }
       function fallback() {
         input.focus();
