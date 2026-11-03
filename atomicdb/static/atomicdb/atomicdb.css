@@ -26,7 +26,8 @@
     linear-gradient(135deg, rgba(127, 166, 80, .12),
       rgba(232, 163, 61, .045) 60%);
   --opening-border: #46523a;
-  --opening-ink: #e0b867;
+  --opening-ink: #a8c98a;
+  --opening-fill: rgba(127, 166, 80, .13);
   --shadow-board: 0 4px 18px rgba(0, 0, 0, .5);
   --scroll-thumb: #4b463f;
   --scroll-track: transparent;
@@ -71,7 +72,8 @@ html[data-theme="light"] {
     linear-gradient(135deg, rgba(93, 132, 54, .13),
       rgba(171, 105, 15, .055) 60%);
   --opening-border: #bcccae;
-  --opening-ink: #70470b;
+  --opening-ink: #3f6526;
+  --opening-fill: #e5f0d9;
   --shadow-board: 0 5px 20px rgba(67, 55, 38, .22);
   --scroll-thumb: #b7ada0;
   --scroll-track: transparent;
@@ -106,7 +108,8 @@ html[data-theme="light"] {
       linear-gradient(135deg, rgba(93, 132, 54, .13),
         rgba(171, 105, 15, .055) 60%);
     --opening-border: #bcccae;
-    --opening-ink: #70470b;
+    --opening-ink: #3f6526;
+  --opening-fill: #e5f0d9;
     --shadow-board: 0 5px 20px rgba(67, 55, 38, .22);
     --scroll-thumb: #b7ada0;
     --scroll-track: transparent;
