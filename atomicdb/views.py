@@ -7705,7 +7705,7 @@ DOCS_PAGES = (
     ('queue', 'The queue'),
     ('contributing', 'Contributing'),
     ('api', 'API'),
-    ('reading', 'Reading a page'),
+    ('reading', 'The position page'),
 )
 
 
