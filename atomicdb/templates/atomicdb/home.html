@@ -154,45 +154,9 @@
   </div>
 </div>
 
-<h2 id="contributors">Contributors <span class="dim">by engine nodes</span></h2>
-{% if has_contrib_board %}
-<div class="lb-grid">
-  {% for b in contrib_boards %}
-  <section>
-    <h3 class="contrib-sub">{{ b.window }}</h3>
-    {% if b.rows %}
-    <div class="contrib-scroll">
-    <table class="lb-table">
-      <tr><th class="lb-place"><span class="visually-hidden">Place</span><span aria-hidden="true">#</span></th>
-        <th>Contributor</th><th class="n">Nodes</th><th class="n">Analyses</th></tr>
-      {% for r in b.rows %}
-      <tr>
-        <td class="lb-place"><span class="lb-medal {{ r.medal }}">{{ r.rank }}</span></td>
-        <td><a class="lb-name" href="/atomicdb/user/{{ r.name|urlencode }}/">{{ r.name }}</a>
-          <div class="lb-bar" aria-hidden="true"><span style="width:{{ r.share|unlocalize }}%"></span></div>
-          <div class="dim contrib-spec">{{ r.share_h }}% of the fleet</div></td>
-        <td class="n">{{ r.nodes_h }}</td>
-        <td class="n">{{ r.tasks_h }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-    </div>
-    {% if b.more %}<p class="dim lb-foot">and {{ b.more }} more.</p>{% endif %}
-    <p class="dim lb-foot">{{ b.accounts }} account{{ b.accounts|pluralize }} ·
-      {{ b.fleet_h }} nodes{% if b.unclaimed_h %},
-      {{ b.unclaimed_h }} of them by machines with no account{% endif %}.</p>
-    {% else %}<p class="dim">{{ b.empty }}</p>{% endif %}
-  </section>
-  {% endfor %}
-</div>
-{% else %}
-<p class="dim">No worker has searched anything yet. Run the AtomicDB client and
-  the machines under your account show up here, with what they searched.</p>
-{% endif %}
+<p class="dim home-elsewhere"><a href="/atomicdb/contributors/">Contributors</a> <span class="dim">by engine nodes</span></p>
 
 <h2 id="campaigns">Proposed campaigns</h2>
-<p class="dim campaign-lede">Anyone can put a line up and vote for it. The site
-  owner decides which one the solver actually runs.</p>
 {% if campaigns_proposed %}
 <ul class="campaign-list">
   {% for c in campaigns_proposed %}
@@ -223,21 +187,10 @@
   </li>
   {% endfor %}
 </ul>
-{% if campaigns_proposed_total > campaigns_proposed|length %}<p class="dim campaign-more">Showing the {{ campaigns_proposed|length }} most voted of {{ campaigns_proposed_total }} proposals · <a href="/atomicdb/campaigns/">see every proposal</a></p>{% endif %}
+{% if campaigns_proposed_total > campaigns_proposed|length %}<p class="dim campaign-more"><a href="/atomicdb/campaigns/">see every proposal</a></p>{% endif %}
 {% else %}<p class="dim">No campaigns proposed yet. Open a line in the explorer
   and put it up from there.</p>{% endif %}
 
-<h2>Milestones</h2>
-<ul class="feed">
-  {% for e in events %}
-  <li><span class="t">{{ e.ts|date:"M d H:i" }}</span>
-    {{ e.text }}{% if e.san %}
-    <details class="milestone-line dim">
-      <summary class="qline" title="{{ e.full }}">&nbsp;{{ e.san }}</summary>
-      <span class="milestone-full">{{ e.full }}</span>
-    </details>{% endif %}
-    {% if e.key %} <a href="/atomicdb/explore/{{ e.key }}/">view</a>{% endif %}</li>
-  {% empty %}<li class="dim">No events yet.</li>{% endfor %}
-</ul>
+<p class="dim home-elsewhere"><a href="/atomicdb/milestones/">Milestones</a> <span class="dim">the latest solved positions</span></p>
 
 {% endblock %}

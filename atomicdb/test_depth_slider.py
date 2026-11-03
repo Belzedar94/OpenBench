@@ -229,6 +229,19 @@ class OfferedRungTests(TestCase):
         self.assertEqual(context['depth_default_label'], '512.0M')
         self.assertEqual(context['depth_spent_label'], '128.0M')
 
+    def test_the_choice_and_what_was_spent_live_in_the_tooltip(self):
+        """No caption beside the slider: the ticks name every stop, and the
+        chosen one with the depth already searched is the tooltip."""
+        _completed(self.pos, LADDER[0])
+
+        body = _signed_in('belzedar').get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn('title="512.0M nodes · already searched to 128.0M"',
+                      body)
+        self.assertNotIn('class="depthnow"', body)
+        self.assertNotIn('id="depthnow"', body)
+
     def test_the_deepest_completed_search_is_reported_as_it_is(self):
         # Una sonda automatica de 8M no es un peldano de la escalera, y decir
         # "already searched to 128M" por redondear al peldano de al lado seria

@@ -328,7 +328,11 @@ class SliderTests(TestCase):
         self.assertContains(
             response, 'This queues up to 78 searches of 128M below this '
                       'position. Sure?')
-        self.assertContains(response, 'id="depthunit"')
+        # The chosen stop is named in the slider's tooltip, with its own word
+        # after the number (searches below, not nodes); no caption beside it.
+        self.assertContains(response, "depth.title = rung.label + ' ' + "
+                                      "rung.unit")
+        self.assertNotContains(response, 'id="depthunit"')
 
 
 class ApiTests(TestCase):

@@ -1398,7 +1398,7 @@ class MilestoneLineTests(TestCase):
             'key': current.key, 'status': 'WHITE_WIN', 'closure': 'MATE_PV',
         })
 
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/milestones/')
         event = response.context['events'][0]
 
         self.assertTrue(event['san'].startswith('1. Nf3 Nf6'))
@@ -1434,7 +1434,7 @@ class MilestoneLineTests(TestCase):
             'key': current.key, 'status': 'WHITE_WIN', 'closure': 'MATE_PV',
         })
 
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/milestones/')
         event = response.context['events'][0]
 
         self.assertTrue(event['full'].startswith('1. Nf3 f6'))
@@ -1442,8 +1442,9 @@ class MilestoneLineTests(TestCase):
         self.assertNotIn('Bf8', event['full'])
         self.assertNotIn('1... Bf8', event['full'])
         self.assertFalse(event['full'].startswith('…'))
+        home = self.client.get('/atomicdb/')
         queued = next(
-            row for row in response.context['upnext']
+            row for row in home.context['upnext']
             if row['key'] == current.key)
         self.assertTrue(queued['full'].startswith('1. Nf3 f6'))
 
@@ -1543,22 +1544,22 @@ class HomeFeedKindTests(TestCase):
         return DBEvent.objects.create(
             kind=kind, payload={'key': self.pos.key, **payload})
 
-    def test_an_instrumentation_event_never_reaches_the_home(self):
+    def test_an_instrumentation_event_never_reaches_the_feed(self):
         from .views import FEED_HIDDEN_KINDS
 
         for kind in sorted(FEED_HIDDEN_KINDS):
             with self.subTest(kind=kind):
                 self._event(kind)
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/milestones/')
 
         self.assertEqual(response.context['events'], [])
         self.assertNotContains(response, 'SOLVE_GATE_DISAGREE')
         self.assertNotContains(response, 'BREADTH_SWAP')
 
-    def test_a_historical_event_still_reaches_the_home(self):
+    def test_a_historical_event_still_reaches_the_feed(self):
         self._event('NODE_CLOSED', status='WHITE_WIN', closure='MATE_PV')
 
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/milestones/')
 
         self.assertEqual(len(response.context['events']), 1)
         self.assertEqual(response.context['events'][0]['text'],
@@ -1566,7 +1567,7 @@ class HomeFeedKindTests(TestCase):
 
     def test_the_twelve_slots_stay_twelve_under_a_noisy_night(self):
         # El filtro va en la CONSULTA: si se descartara despues de cortar, una
-        # noche de brazos internos habladores dejaria la portada casi vacia.
+        # noche de brazos internos habladores dejaria la lista casi vacia.
         for index in range(30):
             self._event('SOLVE_GATE_DISAGREE', annoyance=0.5, factor=1.0,
                         index=index)
@@ -1574,11 +1575,21 @@ class HomeFeedKindTests(TestCase):
             self._event('NODE_CLOSED', status='DRAW', closure='MINIMAX',
                         index=index)
 
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/milestones/')
 
         self.assertEqual(len(response.context['events']), 12)
         self.assertTrue(all(row['text'].startswith('Solved:')
                             for row in response.context['events']))
+
+
+    def test_the_home_page_links_the_feed_instead_of_carrying_it(self):
+        self._event('NODE_CLOSED', status='WHITE_WIN', closure='MATE_PV')
+
+        response = self.client.get('/atomicdb/')
+
+        self.assertNotIn('events', response.context)
+        self.assertNotContains(response, 'Solved: WHITE_WIN')
+        self.assertContains(response, 'href="/atomicdb/milestones/"')
 
 
 class BoardInteractionTests(TestCase):

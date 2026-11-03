@@ -741,14 +741,16 @@ class ProposalsPageTests(TestCase):
             for votes, uci in enumerate(reversed(self.THIRD))]
         self.least = min(self.proposals, key=lambda c: c.votes)
 
-    def test_the_front_page_cuts_the_list_but_says_so_and_links_the_rest(self):
+    def test_the_front_page_cuts_the_list_and_links_the_rest(self):
         cache.clear()
         raw = self.client.get('/atomicdb/').content.decode()
 
         self.assertNotIn(f'/atomicdb/campaign/{self.least.id}/vote/', raw)
-        self.assertIn(f'Showing the {views.HOME_PROPOSED_CAMPAIGNS} most voted '
-                      f'of {len(self.THIRD)} proposals', _reading(raw))
-        self.assertIn('href="/atomicdb/campaigns/"', raw)
+        # The link says enough; no sentence counting what is left out.
+        self.assertNotIn('most voted of', _reading(raw))
+        self.assertNotIn('Anyone can put a line up', raw)
+        self.assertIn('<a href="/atomicdb/campaigns/">see every proposal</a>',
+                      raw)
 
     def test_the_full_list_offers_every_proposal_with_its_vote_button(self):
         raw = self.client.get('/atomicdb/campaigns/').content.decode()
@@ -853,11 +855,16 @@ class HomeCampaignTests(TestCase):
         self.assertIn(f'/atomicdb/campaign/{waiting.id}/state/', body)
         self.assertIn('Activate', _reading(body))
 
-    def test_the_page_says_who_decides(self):
+    def test_who_decides_is_said_where_a_line_is_put_up(self):
+        """Not on the overview any more: the proposal form says it."""
         body = self._home()
+        self.assertNotIn('The site owner decides', body)
 
-        self.assertIn('The site owner decides which one the solver actually '
-                      'runs.', body)
+        root = ingest.get_or_create_position(logic.start_fen())
+        explore = self.client.get(
+            f'/atomicdb/explore/{root.key}/').content.decode()
+        self.assertIn('the site owner decides which one the solver runs',
+                      _reading(explore))
 
     def test_an_outcome_from_a_button_comes_back_as_a_sentence(self):
         cache.clear()

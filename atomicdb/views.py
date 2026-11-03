@@ -5066,15 +5066,9 @@ def home(request):
         upnext_keys.append(key)
         if len(upnext_keys) >= 5:
             break
-    # El filtro va en la CONSULTA, no en el render: descartar despues de
-    # cortar dejaria una portada con siete noticias las noches en que los
-    # brazos internos hablan mucho, y ademas ya habriamos pagado el
-    # ``_line_labels`` de las que se tiran (§ FEED_HIDDEN_KINDS).
-    event_rows = list(DBEvent.objects.exclude(kind__in=FEED_HIDDEN_KINDS)
-                      .order_by('-ts')[:12])
-    event_keys = [(event.payload or {}).get('key', '') for event in event_rows]
+    # The milestones moved to a page of their own (§ milestones_page).
     labels = _line_labels_many(
-        [task.position_id for task in leased] + upnext_keys + event_keys)
+        [task.position_id for task in leased] + upnext_keys)
     pending_meta = {}
     for pid, source, route in (AnalysisTask.objects.filter(
             position_id__in=upnext_keys,
@@ -5115,7 +5109,6 @@ def home(request):
                        'full': full or 'start position',
                        'source': source,
                        'play': route if routed is not None else ''})
-    events = _friendly_events(event_rows, labels)
     root_legal_ucis = logic.legal_moves(root.fen)
     # The first moves in SAN, read off the root with its legal moves: no
     # query and no move generation (§ san).
@@ -5130,15 +5123,8 @@ def home(request):
         **_suggestions_badge(request),
         **_proof_health(now),
         **_campaign_context(request),
-        # El ranking de contribuidores sale del snapshot compartido de flota,
-        # que ya lleva su propia cache de un minuto: la portada no gana ni una
-        # consulta por contribuidor (§ contributors.leaderboard).  Y lo que
-        # gana en el peor caso es MENOS de lo que ya pagaba: el GROUP BY de
-        # todos los tiempos recorre el mismo indice de tareas completadas que
-        # el contador ``analyses`` de aqui arriba, pero como mucho una vez por
-        # minuto, mientras que ese contador se recalcula en cada fallo de la
-        # cache de pagina, o sea cada quince segundos.
-        **contributors.leaderboard(now=now),
+        # The contributors leaderboard and the milestones have pages of their
+        # own now (§ contributors_page, milestones_page); home links to them.
         'root_pn_h': proof.format_number(root_pn),
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,
@@ -5159,7 +5145,7 @@ def home(request):
         'solved_first': solved_first, 'n_first': len(first_moves),
         'solved_pct': solved_pct,
         'closed_24h_h': _human(closed_24h), 'nodes_24h_h': _human(nodes_24h),
-        'first_moves': first_moves, 'events': events,
+        'first_moves': first_moves,
         'root_key': root_key, 'board': _ctx_board(root.fen),
         'board_fen': root.fen,
         'board_turn': 'white' if root.fen.split()[1] == 'w' else 'black',
@@ -5170,6 +5156,41 @@ def home(request):
              'url': _goto_url(root.key, uci, [])}
             for uci in root_legal_ucis
         ]})
+
+
+# How many milestones the page lists: the twelve the home page used to show.
+MILESTONES_SHOWN = 12
+
+
+def contributors_page(request):
+    """The contributors leaderboard, the section the home page used to carry.
+
+    It comes from the shared fleet snapshot, with its own one-minute cache,
+    so the page costs no query per contributor (§ contributors.leaderboard),
+    and the URL adds the same short page cache as the workers page.
+    """
+    return render(request, 'atomicdb/contributors.html', {
+        **_suggestions_badge(request),
+        **contributors.leaderboard(now=timezone.now()),
+    })
+
+
+def milestones_page(request):
+    """The latest milestones, the feed the home page used to end with.
+
+    The kinds the feed hides are filtered in the query, not after the cut, so
+    a night of internal events does not leave the list short and no label is
+    paid for a row that is thrown away (§ FEED_HIDDEN_KINDS).  The labels of
+    every row come in one batch (§ _line_labels_many).
+    """
+    rows = list(DBEvent.objects.exclude(kind__in=FEED_HIDDEN_KINDS)
+                .order_by('-ts')[:MILESTONES_SHOWN])
+    labels = _line_labels_many(
+        [(row.payload or {}).get('key', '') for row in rows])
+    return render(request, 'atomicdb/milestones.html', {
+        **_suggestions_badge(request),
+        'events': _friendly_events(rows, labels),
+    })
 
 
 # Cuatro, cinco o seis campos.  Un FEN pegado de un GUI o de un chat llega a
