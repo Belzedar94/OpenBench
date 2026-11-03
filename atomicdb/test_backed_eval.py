@@ -538,10 +538,10 @@ class BackedDisplayTests(TestCase):
 
         self.assertEqual(page.status_code, 200)
         body = page.content.decode()
-        # The value itself is the table's now; the header keeps the jump.
+        # The value and its backed chip are the table's; the box under the
+        # board no longer repeats the chip.
         self.assertEqual(page.context['eval_stm_str'], '+94cp')
-        self.assertIn('backed', body)
-        self.assertIn('+30cp', body)          # la puntual sigue visible
+        self.assertNotIn('backed ·3', body)
 
     def test_explore_header_falls_back_to_the_point_eval(self):
         # Con busqueda propia detras: sin respaldo no hay chip que pintar, y
@@ -2002,7 +2002,7 @@ class BorrowedNumberTests(TestCase):
         """The whole row of ``uci`` in the table of the tree."""
         for row in re.findall(r'<tr><td><span class="chip.*?</tr>', body):
             if ('/atomicdb/explore/' in row
-                    and (f'<strong title="{uci}">' in row
+                    and (f'<strong data-uci="{uci}" title="{uci}">' in row
                          or f'<strong>{uci}</strong>' in row)):
                 return row
         raise AssertionError(f'no row for {uci}')

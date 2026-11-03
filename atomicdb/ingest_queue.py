@@ -37,7 +37,7 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import ingest, logic
+from . import ingest, logic, preferences
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -148,6 +148,9 @@ def _notify_requester(job, task):
         return []
     known = set(User.objects.filter(username__in=wanted)
                 .values_list('username', flat=True))
+    # Quien apago el aviso en sus ajustes no lo recibe; los demas
+    # peticionarios de la misma tarea, si.
+    known -= preferences.ready_notice_muted(sorted(known))
     notifications = []
     for name in wanted:
         if name not in known:

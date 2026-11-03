@@ -122,11 +122,11 @@ class ExplorerSanTests(TestCase):
         body = Client().get(self.url).content.decode()
 
         row = _row_of(body, 'g1f3')
-        self.assertIn('<strong title="g1f3">Nf3</strong>', row)
+        self.assertIn('<strong data-uci="g1f3" title="g1f3">Nf3</strong>', row)
         self.assertIn(f'href="/atomicdb/explore/{self.child.key}/', row)
         # An off-tree reply links by its UCI and reads in SAN.
         offtree = _row_of(body, 'e2e4')
-        self.assertIn('<strong title="e2e4">e4</strong>', offtree)
+        self.assertIn('<strong data-uci="e2e4" title="e2e4">e4</strong>', offtree)
         self.assertIn('/atomicdb/goto/', offtree)
         self.assertIn('e2e4/', offtree)
         self.assertNotIn('<strong>g1f3</strong>', body)
@@ -185,7 +185,7 @@ class ExplorerSanTests(TestCase):
 
         body = Client().get(self.url).content.decode()
 
-        self.assertIn('<strong title="g1f3 f7f6">Nf3 f6</strong>', body)
+        self.assertIn('<strong data-uci="g1f3 f7f6" title="g1f3 f7f6">Nf3 f6</strong>', body)
 
     def test_a_witness_move_reads_in_san(self):
         Position.objects.filter(pk=self.child.pk).update(status='WHITE_WIN',
@@ -195,7 +195,7 @@ class ExplorerSanTests(TestCase):
 
         body = Client().get(self.url).content.decode()
 
-        self.assertIn('<strong title="g1f3">Nf3</strong> <span class="dim">'
+        self.assertIn('<strong data-uci="g1f3" title="g1f3">Nf3</strong> <span class="dim">'
                       '(follow it below)', body)
         self.assertIn('proven by minimax from its replies: Nf3 wins', body)
 
@@ -226,5 +226,5 @@ class HomeSanTests(TestCase):
         body = Client().get('/atomicdb/').content.decode()
 
         self.assertIn(f'<a href="/atomicdb/explore/{self.child.key}/">'
-                      '<strong title="g1f3">Nf3</strong></a>', body)
+                      '<strong data-uci="g1f3" title="g1f3">Nf3</strong></a>', body)
         self.assertNotIn('<strong>g1f3</strong>', body)

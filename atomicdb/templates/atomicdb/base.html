@@ -31,6 +31,11 @@
   root.style.colorScheme = theme;
   document.getElementById("atomicdb-theme-color").content =
     theme === "light" ? "#f5f2ea" : "#161512";
+  try {
+    if (window.localStorage.getItem("atomicdb-notation") === "uci") {
+      root.dataset.notation = "uci";
+    }
+  } catch (_error) {}
 }());
 </script>
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.base.css' %}">
@@ -39,6 +44,7 @@
 <link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
 <script src="{% static 'atomicdb/theme.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 <script src="{% static 'atomicdb/notifications.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
+<script src="{% static 'atomicdb/settings.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -100,6 +106,43 @@
     <a class="identity-link" href="/login/?next={{ identity_next }}">Sign in</a>
     <a class="identity-link identity-cta" href="/register/?next={{ identity_next }}">Register</a>
     {% endif %}
+    <div class="settings-wrap" id="settings-wrap">
+      <button type="button" class="settings-cog" id="settings-cog"
+        aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel"
+        title="Settings">
+        <svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span class="visually-hidden">Settings</span>
+      </button>
+      <div class="settings-panel" id="settings-panel" hidden>
+        <div class="settings-panel-head">Settings</div>
+        <fieldset class="settings-row">
+          <legend>Theme</legend>
+          <div class="settings-choice">
+            <label><input type="radio" name="settings-theme" value="dark"><span>Dark</span></label>
+            <label><input type="radio" name="settings-theme" value="light"><span>Light</span></label>
+          </div>
+        </fieldset>
+        <fieldset class="settings-row">
+          <legend>Move notation</legend>
+          <div class="settings-choice">
+            <label><input type="radio" name="settings-notation" value="san" checked><span>SAN</span></label>
+            <label><input type="radio" name="settings-notation" value="uci"><span>UCI</span></label>
+          </div>
+        </fieldset>
+        {% if user.is_authenticated %}
+        <form class="settings-row settings-lifo" method="post" action="/atomicdb/queue/lifo/">{% csrf_token %}
+          <input type="hidden" name="back" value="{{ identity_path }}">
+          <input type="hidden" name="lifo" value="0">
+          <label><input type="checkbox" name="lifo" value="1"{% if settings_lifo %} checked{% endif %}
+            onchange="this.form.submit()">Newest first in my queue</label>
+        </form>
+        <a class="settings-link" href="/atomicdb/notifications/settings/">Notification settings</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
   <button type="button" class="theme-toggle" id="theme-toggle"
     role="switch" aria-checked="true" aria-labelledby="theme-toggle-label"
@@ -118,6 +161,36 @@
 <footer>AtomicDB, a practical solving effort for Atomic Chess. Results are
   labeled "practical", not game-theoretic certificates. Piece set: cburnett
   (lichess), CC BY-SA.</footer>
+<script>
+(function () {
+  // Moves are printed in SAN with their UCI in data-uci. In UCI mode the two
+  // swap, and the tooltip with them; the SAN is kept in data-san. Until this
+  // has run, the stylesheet hides the moves of a UCI page.
+  var root = document.documentElement;
+  window.atomicdbNotation = function (notation) {
+    var uci = notation === "uci";
+    var nodes = document.querySelectorAll(uci ? "[data-uci]" : "[data-san]");
+    Array.prototype.forEach.call(nodes, function (node) {
+      if (!node.hasAttribute("data-san")) {
+        node.setAttribute("data-san", node.textContent);
+      }
+      var san = node.getAttribute("data-san");
+      var code = node.getAttribute("data-uci");
+      var shown = uci ? code : san;
+      var other = uci ? san : code;
+      if (node.textContent !== shown) node.textContent = shown;
+      if (node.title && node.title !== other) node.title = other;
+    });
+    if (uci) {
+      root.dataset.notation = "uci";
+    } else {
+      delete root.dataset.notation;
+    }
+    root.classList.add("notation-ready");
+  };
+  window.atomicdbNotation(root.dataset.notation === "uci" ? "uci" : "san");
+}());
+</script>
 {% block extra_scripts %}{% endblock %}
 </body>
 </html>

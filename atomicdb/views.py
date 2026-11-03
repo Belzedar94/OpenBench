@@ -1783,6 +1783,10 @@ def api_pref_lifo(request):
         account=request.user.username)
     pref.lifo_queue = request.POST.get('lifo') == '1'
     pref.save(update_fields=['lifo_queue'])
+    # The settings panel sends the page it was on; the profile sends nothing.
+    back = request.POST.get('back') or ''
+    if back.startswith('/atomicdb/'):
+        return redirect(back)
     own_page = f'/atomicdb/user/{quote(request.user.username, safe="")}/'
     return redirect(own_page)
 
@@ -5653,6 +5657,7 @@ def _numbered_line(top, line, route_ucis=None, opening_match=None,
             n += 1
         token = {
             'num': number, 'san': step['san'], 'key': step['key'],
+            'uci': step.get('uci', ''),
         }
         if route_ucis is not None:
             token['url'] = _explore_url(step['key'], route_ucis[:i + 1])

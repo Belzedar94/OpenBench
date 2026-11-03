@@ -437,20 +437,16 @@ class BackedJumpRenderTests(TestCase):
         self.assertNotIn('backed-mark', body)
         self.assertNotIn('backed-source', body)
 
-    def test_the_header_chip_is_itself_the_jump(self):
+    def test_the_box_under_the_board_leaves_the_chip_to_the_table(self):
+        # The row of the move that leads here already carries the chip and
+        # its jump; the box under the board does not repeat it.
         _root, child = self._tree_with_a_backed_child()
 
         body = self.client.get(
             f'/atomicdb/explore/{child.key}/').content.decode()
 
-        chip = self._chip(body, 'a', 'backed ·12')
-        self.assertIn('class="backed-mark"', chip)
-        self.assertIn(
-            f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
-        self.assertIn(
-            'aria-label="jump to the position this value comes from, '
-            '12 plies below"',
-            chip)
+        self.assertNotIn('class="verdict', body)
+        self.assertNotIn('backed ·12', body)
         self.assertNotIn('backed-jump', body)
 
     def test_a_chip_without_a_jump_stays_a_mute_span(self):

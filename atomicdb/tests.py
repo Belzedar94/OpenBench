@@ -1474,7 +1474,7 @@ class MilestoneLineTests(TestCase):
         self.assertFalse(orphan_page.context['line_from_root'])
         self.assertEqual(resolved_top.key, top.key)
         self.assertEqual(_numbered_line(resolved_top, line), [{
-            'num': '', 'san': 'Nf6', 'key': target.key,
+            'num': '', 'san': 'Nf6', 'key': target.key, 'uci': 'g8f6',
         }])
 
     def test_sql_parent_cap_keeps_direct_startpos_edge(self):

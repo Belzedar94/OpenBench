@@ -3,7 +3,7 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
-from . import active_workers, page_cache, roots, views
+from . import active_workers, page_cache, preferences, roots, views
 from .conquest_map import map_api
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
@@ -121,6 +121,10 @@ urlpatterns = [
     # ruta.  Escribe, y ademas es de una sola persona: sin cache.
     path('notifications/', views.notifications_page,
          name='atomicdb-notifications'),
+    # Which notices the account receives.  Of one person and it writes: no
+    # cache either.
+    path('notifications/settings/', preferences.notification_settings,
+         name='atomicdb-notification-settings'),
     # Pagina de contribuidor.  Publica, pero DE UNA PERSONA: sin cache, ni
     # siquiera variando por cookie.  Una entrada por visitante de una pagina
     # que ya es distinta para cada uno no absorbe ninguna tormenta de F5 —

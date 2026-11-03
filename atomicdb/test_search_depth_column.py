@@ -87,7 +87,7 @@ def _absorbed(position, budget):
 def _depth_cell(body, uci):
     """``(attributes, content)`` of the last cell of ``uci``'s row."""
     row = next(row for row in ROW.findall(body)
-               if f'<strong title="{uci}">' in row)
+               if f'<strong data-uci="{uci}" title="{uci}">' in row)
     return CELL.findall(row)[-1]
 
 
@@ -174,7 +174,7 @@ class DepthColumnTests(TestCase):
 
         attrs, content = _depth_cell(body, 'a2a3')
         self.assertIn('not in tree', next(row for row in ROW.findall(body)
-                                          if '<strong title="a2a3">a3</strong>' in row))
+                                          if '<strong data-uci="a2a3" title="a2a3">a3</strong>' in row))
         self.assertEqual(content, '-')
         self.assertNotIn('title=', attrs)
 

@@ -164,7 +164,7 @@ class WhoGetsTheBoxesTests(TestCase):
         tree = [row for row in rows if '/atomicdb/explore/' in row]
         self.assertEqual(len(rows), 2 + len(self.offtree))
         self.assertEqual(len(tree), 2)
-        open_row = next(row for row in tree if '<strong title="e2e4">e4</strong>' in row)
+        open_row = next(row for row in tree if '<strong data-uci="e2e4" title="e2e4">e4</strong>' in row)
         first_cell = re.match(r'<tr><td>(.*?)</td>', open_row).group(1)
         self.assertEqual(BOX.findall(first_cell), ['e2e4'])
 

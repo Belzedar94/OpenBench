@@ -1,0 +1,20 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}Notification settings · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Notification settings</h2>
+<p class="dim notif-lede">Notices appear under the bell at the top of every
+  page. <a href="/atomicdb/notifications/">See your notices</a></p>
+
+<form class="notif-settings" method="post" action="/atomicdb/notifications/settings/">{% csrf_token %}
+  <input type="hidden" name="ready" value="0">
+  <p><label><input type="checkbox" name="ready" value="1" id="notify-ready"
+    style="margin-right:.45rem"{% if notify_ready %} checked{% endif %}>
+    Tell me when an analysis I asked for is ready</label></p>
+  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Turned off, new
+    results stop arriving under the bell. The notices you already have stay.</p>
+  <button type="submit" class="reqbtn">Save</button>
+  {% if saved %}<span class="dim" role="status" style="margin-left:.6rem">Saved.</span>{% endif %}
+</form>
+
+{% endblock %}

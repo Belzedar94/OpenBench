@@ -545,6 +545,170 @@ html[data-theme="light"] .theme-toggle .theme-toggle-moon {
   text-align: center;
 }
 
+/* Settings: a cog at the end of the identity zone, just left of the theme
+   switch, with a panel that hangs from it like the bell's. Hidden without
+   scripts, like the switch: nothing in the panel works without them. */
+.settings-wrap {
+  position: relative;
+  display: none;
+  align-items: center;
+}
+
+html.theme-js .settings-wrap {
+  display: flex;
+}
+
+.settings-cog {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.settings-cog:hover,
+.settings-cog[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--accent);
+}
+
+.settings-cog:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.settings-icon {
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.settings-panel {
+  position: absolute;
+  top: calc(100% + .55rem);
+  right: -.4rem;
+  z-index: 900;
+  width: 15.5rem;
+  max-width: calc(100vw - 1.6rem);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-board);
+  font-size: .84rem;
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.settings-panel-head {
+  padding: .55rem .8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-muted);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+  min-width: 0;
+  padding: .55rem .8rem;
+  border: none;
+  border-bottom: 1px solid var(--border);
+}
+
+/* A legend does not take part in its fieldset's flex row, so it floats. */
+.settings-row legend {
+  float: left;
+  padding: 0;
+  color: var(--ink);
+}
+
+.settings-choice {
+  display: inline-flex;
+  margin-left: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.settings-choice label {
+  position: relative;
+  display: flex;
+  cursor: pointer;
+}
+
+.settings-choice label + label {
+  border-left: 1px solid var(--border-strong);
+}
+
+.settings-choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.settings-choice span {
+  padding: .2rem .6rem;
+  color: var(--ink-muted);
+}
+
+.settings-choice label:hover span {
+  color: var(--ink);
+}
+
+.settings-choice input:checked + span {
+  background: var(--surface-2);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.settings-choice input:focus-visible + span {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.settings-lifo label {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.settings-lifo input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.settings-link {
+  display: block;
+  padding: .5rem .8rem;
+  font-size: .82rem;
+}
+
+/* A UCI page keeps its moves out of sight until the inline script at the end
+   of the page has swapped them, so SAN never flashes first. */
+html[data-notation="uci"]:not(.notation-ready) [data-uci] {
+  visibility: hidden;
+}
+
 /* Pagina completa de avisos: la misma lista, sin la caja. */
 .notif-lede {
   margin: -.35rem 0 1rem;
@@ -1159,6 +1323,16 @@ details summary {
   font-size: 11px;
 }
 
+.fenbox-here .reqbtn {
+  padding: .4rem .7rem;
+}
+
+.fen-lichess {
+  align-self: center;
+  font-size: .82rem;
+  white-space: nowrap;
+}
+
 .feed {
   list-style: none;
 }
@@ -1728,6 +1902,24 @@ html.theme-ready .tile {
     max-width: none;
   }
 
+  /* The settings panel hangs from the bar for the same reason, against its
+     right edge and only as wide as it needs. */
+  .settings-wrap {
+    position: static;
+  }
+
+  .settings-panel {
+    top: calc(100% + .3rem);
+    right: .75rem;
+    max-width: calc(100% - 1.5rem);
+  }
+
+  /* On a phone the theme is set from the settings panel, which takes the
+     switch's place in the row: the name keeps the room it had. */
+  html.theme-js header .theme-toggle {
+    display: none;
+  }
+
   /* Un nombre largo no puede empujar a "Sign out" fuera de la pantalla. */
   .identity-user {
     max-width: 6.5rem;
@@ -1764,7 +1956,8 @@ html.theme-ready .tile {
 
 @media (forced-colors: active) {
   .theme-toggle,
-  .bell {
+  .bell,
+  .settings-cog {
     forced-color-adjust: auto;
     border: 1px solid ButtonText;
     background: ButtonFace;

@@ -1,4 +1,5 @@
 {% extends "atomicdb/base.html" %}
+{% load atomicdb_links %}
 {% block title %}AtomicDB explorer{% endblock %}
 {% block content %}
 
@@ -6,7 +7,7 @@
 <div class="linebox">
   {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
   {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
-    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% if not forloop.last %} {% endif %}{% endfor %}
+    {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{% if st.uci %}<span data-uci="{{ st.uci }}">{{ st.san }}</span>{% else %}{{ st.san }}{% endif %}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
 {% endif %}
 
@@ -41,7 +42,7 @@ most eight (§ views.explore).{% endcomment %}
 <details class="suggest-name transpositions">
   <summary title="The moves that lead here from other positions">transpositions ({{ parents|length }})</summary>
   <p class="crumb" style="margin:.4rem 0 0">from:
-  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}</p>
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}" data-uci="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}</p>
 </details>
 {% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
@@ -99,37 +100,6 @@ most eight (§ views.explore).{% endcomment %}
 <div class="cols" style="column-gap:1.1rem">
   <div>
     {% include "atomicdb/_board.html" with no_keyboard_list=True %}
-    {% comment %}Under the board, only what the board and the table do not say.
-    A closed position says its verdict, how it closed and the mate distance;
-    "practical" lives in the tooltip.  An open one shows no status, no side to
-    move (the board shows it) and no value (the table's top row has it): only
-    the backed chip when it is a jump to where the value comes from, since
-    that jump is not on the page anywhere else.  The two arrival marks of a
-    jump that could not finish stay, for the reason below.  With none of
-    that, there is no box at all.
-
-    El chip backed/walked ES el salto a su origen: un solo elemento, con los
-    plies dentro.  Sin URL no hay salto, y sin numero al lado un chip mudo no
-    dice nada, asi que no se pinta.{% endcomment %}
-    {% if pos.status != 'UNKNOWN' or eval_backed and backed_source_url or backed_repetition or jump_incomplete %}
-    <div class="verdict {{ verdict_css }}">
-      {% if pos.status != 'UNKNOWN' %}<span title="practical verdict, closed via {{ pos.closure }}">{% if pos.status == 'WHITE_WIN' %}White wins{% elif pos.status == 'BLACK_WIN' %}Black wins{% else %}Draw{% endif %} · {{ pos.closure }}</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}{% elif eval_backed and backed_source_url %}<a
-          class="backed-mark{% if eval_backed_light %} light{% endif %}"
-          href="{{ backed_source_url }}"
-          aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
-          title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</a>{% endif %}{% comment %}Como llego el visitante, cuando llego por un
-      salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
-      la pagina y viven fuera del if de arriba porque un salto por la linea
-      probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
-      The jump behind a borrowed row uses the second one too, when it cannot
-      find the search that wrote the number (§ views.borrowed_source).
-      {% endcomment %}{% if backed_repetition %} <span
-          class="backed-mark"
-          title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
-          class="backed-mark"
-          title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
-    </div>
-    {% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
@@ -661,6 +631,30 @@ most eight (§ views.explore).{% endcomment %}
     })();
     </script>
     {% endif %}
+    {% comment %}After the request buttons, only what the board and the table
+    do not say.  A closed position says its verdict, how it closed and the
+    mate distance; "practical" lives in the tooltip.  An open one shows no
+    status, no side to move (the board shows it) and no value: the table's
+    top row has it, with its backed chip and the jump to where it comes from.
+    The two arrival marks of a jump that could not finish stay, for the
+    reason below.  With none of that, there is no box at all.  A closed
+    position has no request buttons, so its verdict still sits right under
+    the board.{% endcomment %}
+    {% if pos.status != 'UNKNOWN' or backed_repetition or jump_incomplete %}
+    <div class="verdict {{ verdict_css }}">
+      {% if pos.status != 'UNKNOWN' %}<span title="practical verdict, closed via {{ pos.closure }}">{% if pos.status == 'WHITE_WIN' %}White wins{% elif pos.status == 'BLACK_WIN' %}Black wins{% else %}Draw{% endif %} · {{ pos.closure }}</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}{% endif %}{% comment %}Como llego el visitante, cuando llego por un
+      salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
+      la pagina y viven fuera del if de arriba porque un salto por la linea
+      probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
+      The jump behind a borrowed row uses the second one too, when it cannot
+      find the search that wrote the number (§ views.borrowed_source).
+      {% endcomment %}{% if backed_repetition %} <span
+          class="backed-mark"
+          title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
+          class="backed-mark"
+          title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
+    </div>
+    {% endif %}
     {% comment %}El chip del final de la linea ES el salto, con la misma
     forma que el chip de respaldo de la cabecera: un solo elemento, y solo
     cuando el viaje existe de verdad (§ views, proven_end_url).  La linea que
@@ -675,13 +669,13 @@ most eight (§ views.explore).{% endcomment %}
     nacio esto.{% endcomment %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
-      <strong{% if won_line_san %} title="{{ pos.won_line }}"{% endif %}>{{ won_line_san|default:pos.won_line }}</strong>{% if proven_end_url %} <a
+      <strong{% if won_line_san %} title="{{ pos.won_line }}" data-uci="{{ pos.won_line }}"{% endif %}>{{ won_line_san|default:pos.won_line }}</strong>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position of this winning line, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below"
         title="Follow this line to its end and land on the position it finishes at, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below">end of line ·{{ proven_end_plies }}</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
     <p style="font-size:.85rem"><span class="dim">witness move:</span>
-      <strong{% if best_move_san and best_move_san != pos.best_move %} title="{{ pos.best_move }}"{% endif %}>{{ best_move_san|default:pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
+      <strong{% if best_move_san and best_move_san != pos.best_move %} title="{{ pos.best_move }}" data-uci="{{ pos.best_move }}"{% endif %}>{{ best_move_san|default:pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position this witness leads to"
         title="Follow the witness move of each position down to where the line ends">end of line</a>{% endif %}</p>
@@ -699,7 +693,49 @@ most eight (§ views.explore).{% endcomment %}
         aria-label="FEN of this position. Edit it, or paste another FEN or a PGN, to go there"
         title="Edit this FEN, or paste another FEN or a PGN, to go there">
       <button class="reqbtn">Go</button>
+      <button type="button" class="reqbtn fen-copy" id="fen-copy"
+        title="Copy this FEN">Copy</button>
+      <a class="fen-lichess" id="fen-lichess" href="{{ pos.fen|lichess_analysis }}"
+        target="_blank" rel="noopener"
+        title="Open this position on the lichess atomic analysis board">lichess</a>
     </form>
+    <script>
+    (function () {
+      // Copy the FEN as it stands in the box, edits included, and keep the
+      // lichess link on the same FEN.
+      var input = document.querySelector('.fenbox-here input[name="fen"]');
+      var copy = document.getElementById('fen-copy');
+      var lichess = document.getElementById('fen-lichess');
+      var timer = null;
+      function said(text) {
+        copy.textContent = text;
+        clearTimeout(timer);
+        timer = setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
+      }
+      function fallback() {
+        input.focus();
+        input.select();
+        try {
+          said(document.execCommand('copy') ? 'Copied' : 'Press Ctrl+C');
+        } catch (_error) {
+          said('Press Ctrl+C');
+        }
+      }
+      copy.addEventListener('click', function () {
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(input.value.trim())
+            .then(function () { said('Copied'); }, fallback);
+        } else {
+          fallback();
+        }
+      });
+      input.addEventListener('input', function () {
+        lichess.href = 'https://lichess.org/analysis/atomic/' +
+          encodeURIComponent(input.value.trim().replace(/ /g, '_'))
+            .replace(/%2F/g, '/');
+      });
+    }());
+    </script>
     {% comment %}What this position and its moves have behind them, on one
     line: its own passes, nodes and seconds, then what the table below is
     made of (§ views._moves_summary), with its tooltip.  It replaced a
@@ -750,10 +786,10 @@ most eight (§ views.explore).{% endcomment %}
         propietario 6-ago).  El chip es el de siempre.{% endcomment %}
         {% comment %}The move in SAN, its UCI in the tooltip; the link, the
         box and the scripts keep the UCI.{% endcomment %}
-        <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
+        <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
-          title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
+          title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
@@ -810,10 +846,10 @@ most eight (§ views.explore).{% endcomment %}
       {% for u in offtree %}
       <tr>
         <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" data-unanalysed aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
-        <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
+        <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
-          title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
+          title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim" data-fold>-</span></td>
