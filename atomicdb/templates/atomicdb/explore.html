@@ -33,6 +33,15 @@ stays in view without scrolling: where this position sits, its other
 parents, and the two public proposals.  An open proposal takes a line of its
 own under the row.{% endcomment %}
 <div class="pos-tools">
+{% comment %}This position's value, first in the row and above the board
+(cz_eclipsia, 3-Nov-2026): under the board it hung loose (seaside_cliff),
+but the number is what most visitors come for.  The backed chip is the
+jump to where the value comes from.{% endcomment %}
+{% if pos.status == 'UNKNOWN' and eval_stm_str %}<span class="crumb pos-eval" title="the value of this position for the side to move ({{ stm }})">eval <strong>{{ eval_stm_str }}</strong>{% if eval_backed and backed_source_url %} <a
+    class="backed-mark{% if eval_backed_light %} light{% endif %}"
+    href="{{ backed_source_url }}"
+    aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
+    title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</a>{% endif %}</span>{% endif %}
 {% if not line %}{% if not line_from_root %}<span class="crumb">&hellip; move order unknown</span>{% elif opening %}<span class="crumb">root position</span>{% endif %}{% endif %}
 {% comment %}The other parents fold into a toggle like the two proposals
 beside it, with their count; open, it takes the row under them and lists

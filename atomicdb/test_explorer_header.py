@@ -411,8 +411,8 @@ class StatusUnderTheBoardTests(TestCase):
             self.assertNotIn(gone, body)
 
     def test_an_open_backed_position_leaves_its_chip_to_the_table(self):
-        # The table's top row already carries the backed number and its
-        # jump; the box under the board no longer repeats it.
+        # The backed number and its jump sit in the row above the board;
+        # the box under the board no longer repeats them.
         Position.objects.filter(key=self.root.key).update(
             eval_cp=30, backed_eval=94, backed_plies=3, expanded=True,
             nodes_invested=128_000_000)
@@ -420,7 +420,7 @@ class StatusUnderTheBoardTests(TestCase):
         body = self._body()
 
         self.assertNotIn('class="verdict', body)
-        self.assertNotIn('backed ·3</a>', body)
+        self.assertNotIn('backed ·3</a>', body[body.index('class="cols"'):])
 
     def test_the_request_buttons_sit_right_under_the_board(self):
         Position.objects.filter(key=self.root.key).update(
