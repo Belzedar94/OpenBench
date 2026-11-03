@@ -6,7 +6,7 @@
   aria-label="Atomic chess board"></div>
 </div>
 {{ legal_ucis|json_script:"atomicdb-legal-moves" }}
-<script type="module" src="{% static 'atomicdb/board.js' %}"></script>
+<script type="module" src="{% static 'atomicdb/board.js' %}{% if static_version %}?v={{ static_version }}{% endif %}"></script>
 {% comment %}``no_keyboard_list``: the page lists every legal move as a link
 already (the explorer's move table), so the board adds no second list.{% endcomment %}
 <noscript><p class="dim">Enable JavaScript for the interactive board; legal
