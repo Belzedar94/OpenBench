@@ -1,6 +1,10 @@
 {% extends "atomicdb/base.html" %}
 {% load atomicdb_links %}
-{% block title %}AtomicDB explorer{% endblock %}
+{% block title %}{% if opening %}{{ opening.name }} · {% endif %}AtomicDB explorer{% endblock %}
+{% block description %}{% if opening %}{{ opening.name }}, an Atomic Chess opening{% else %}An Atomic Chess position{% endif %}{% if pos.status == 'WHITE_WIN' %}: White wins{% elif pos.status == 'BLACK_WIN' %}: Black wins{% elif pos.status == 'DRAW' %}: a draw{% elif eval_stm_str %}, eval {{ eval_stm_str }} for {{ stm }}{% endif %}, in AtomicDB's opening tree, with engine analysis and every move from here.{% endblock %}
+{% comment %}One URL per position: the ?play= variants only carry the route
+the visitor came by.{% endcomment %}
+{% block canonical %}<link rel="canonical" href="{{ request.scheme }}://{{ request.get_host }}/atomicdb/explore/{{ pos.key }}/">{% endblock %}
 {% block content %}
 
 {% if line %}

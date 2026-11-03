@@ -203,6 +203,7 @@ urlpatterns = [
     path('request-moves/<str:key>/', views.api_request_moves),
     path('pv-verify/<str:key>/', views.api_pv_verify),
     path('fen/', views.fen_jump),
+    path('sitemap.xml', cache_page(3600)(views.sitemap)),
     path('api/query', views.api_query),
     # La API oficial de peticion, hermana de ``api/query``: la de lectura vive
     # ahi arriba desde el principio y esta es la de escritura, con la misma
