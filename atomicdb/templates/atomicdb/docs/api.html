@@ -2,104 +2,243 @@
 {% block title %}API · AtomicDB docs{% endblock %}
 {% block doc %}
 <h2 id="api">API</h2>
-<p><strong>Pace</strong>: the endpoints a script can call
-(<code>query</code>, <code>request</code>, <code>live-request</code>,
-<code>frontier</code>, <code>my-queue</code>, <code>queue-bump</code>,
-<code>queue-cancel</code> and <code>map</code>) take 5 requests a second from
-one address, with bursts of up to 50. Past that the reply is
-<code>429</code> with a JSON body and a <code>Retry-After</code> header, and
-nothing is lost: wait and send it again. The worker endpoints are not
-limited.</p>
-<p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
-<code>fen</code>. <code>budget</code> picks a rung of the ladder and is
-optional, honoured for the accounts the explorer offers the depth slider to;
-<code>budget=10000000000</code> is the slider's last stop, up to
-{{ subtree_cap }} searches of 128M below the position.
-<code>username</code> and <code>password</code> put the request on your
-account, which is what buys the notification when it lands, the affinity with
-your own workers and your place in the fair share. Without them the request is
-anonymous, which works, and is served like a click without a session. The
-reply names the live request on that position: <code>task</code>, its
-<code>budget_nodes</code>, and <code>task_state</code>, which is
-<code>waiting</code> while it is in the queue and <code>searching</code> once
-an engine has it. A FEN the
-tree does not have is seeded rather than refused. Session cookies are
-deliberately ignored here, so a page open in your browser cannot spend your
-queue behind your back.</p>
-<p>Asked again after the first search has landed, a request buys the next rung
-of the ladder, exactly as a second click does, and once the 2B search has run,
-the searches below the position. Those replies say <code>expanded</code>, or
-<code>saturated</code> when there was nothing left to queue, with
-<code>searches_queued</code>, <code>subtree_plies</code> (how deep the
-deepest one is) and a <code>message</code> saying what was done. A script
-that only wants a position to <em>have</em> a search adds
-<code>only_if_missing=1</code>: the budget becomes a target (the rung you
-picked, or the first one). If a search that ran already covers it the reply is
-<code>already-analyzed</code> with <code>completed_budget</code> and nothing is
-queued; otherwise the request is queued as usual but never above the target.
-The check and the purchase happen together, so two scripts asking for the same
-position at the same moment cannot push it to the next rung. It asks about the
-position itself, so it cannot be sent with
-<code>budget=10000000000</code>.</p>
-<p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
-same as the explorer button: what governs both is the per-person cap on queued
-requests above, and the per-account sharing of the service order. The pace
-above is about calls a second, not about how much you may ask for. Every call
-still leaves a receipt.</p>
-<p><strong>Your queue</strong>: <code>POST /atomicdb/api/my-queue/</code>
-with <code>username</code> and <code>password</code> (your OpenBench
-credentials, same as a worker) returns your PENDING and LEASED requests:
-task ids, position keys, budgets, state, and the <code>bump</code> /
-<code>cancel</code> paths each row accepts. A logged-in browser can simply
-<code>GET</code> it. The ids are what scripted withdraw needed (P3, voted
-28-Aug), and they plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
-and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code> with the same
-credentials (form or JSON; <code>undo=1</code> on cancel restores the row).
-The profile-page buttons are separate, session-guarded routes.</p>
+<p class="docs-lead">Scripts can read the database and ask for analysis over
+plain HTTP. Every endpoint takes positions as FEN and answers in JSON, and
+reading and requesting work without an account.</p>
 
-<p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
-the position row (<code>status</code>, <code>closure</code>,
-<code>score</code>, <code>point</code>, <code>backed_plies</code>,
-<code>best_move</code>, the trust fields and the move list) plus an
-<code>analysis</code> block, which is <code>null</code> where no engine has looked
-yet. Inside that block, <code>lines</code> is the current pass,
-<code>previous</code> is the earlier pass, kept whenever it was wider than the
-one that replaced it, and <code>passes</code> is a compact summary per pass,
-newest first, which is what shows how the evaluation moved as the search went
-deeper. A position the tree does not have returns 404 here.</p>
-<p><strong>Roots</strong>: <code>GET /atomicdb/api/roots</code> returns the
-<a href="/atomicdb/roots/">roots page</a> as data: the start position, its
-first moves and the replies to 1.Nf3 in <code>positions</code>, and every
-named opening in <code>openings</code>. Each row has its <code>key</code>,
-<code>label</code>, <code>line</code> (the moves from the start position, in
-UCI) and its <code>value</code> now, then <code>best_value</code> and
-<code>worst_value</code> with their <code>best_at</code> and
-<code>worst_at</code> times (UTC) and their statuses. The values are
-centipawns from White's side, as on the page, with a proven win as +10000 or
--10000 and a proven draw as 0; the <code>score</code> of <code>query</code> is
-from the side to move instead. <code>since</code> is when tracking
-began.</p>
-<p class="dim" style="font-size:.9rem">Each entry of <code>moves</code> carries
-<code>floor</code>. It is <code>true</code> for a move nobody has searched,
+<h3 id="endpoints">Endpoints at a glance</h3>
+<div class="docs-table-wrap"><table>
+<tr><th>Endpoint</th><th>What it does</th></tr>
+<tr><td><code>GET /atomicdb/api/query?fen=...</code></td><td>Read what the
+  database knows about one position.</td></tr>
+<tr><td><code>POST /atomicdb/api/request</code></td><td>Ask for analysis of a
+  position, exactly like the explorer button.</td></tr>
+<tr><td><code>POST /atomicdb/api/my-queue/</code></td><td>List your own
+  waiting and running requests (credentials needed).</td></tr>
+<tr><td><code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code><br>
+  <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code></td><td>Move one of
+  your requests to the front, or withdraw it.</td></tr>
+<tr><td><code>GET /atomicdb/api/roots</code></td><td>The roots page (start
+  position, first moves, named openings) as data.</td></tr>
+</table></div>
+
+<h3 id="example">Example</h3>
+<div class="raw"><div class="rawline">curl "https://belzedar.duckdns.org/atomicdb/api/query?fen=rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%20w%20KQkq%20-%200%201"</div><div class="rawline">curl --data-urlencode "fen=rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" https://belzedar.duckdns.org/atomicdb/api/request</div></div>
+
+<h3 id="pace">Rate limit</h3>
+<ul>
+<li>The endpoints a script can call (<code>query</code>,
+  <code>request</code>, <code>live-request</code>, <code>frontier</code>,
+  <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code> and
+  <code>map</code>) take 5 requests a second from one address, with bursts of
+  up to 50.</li>
+<li>Past that the reply is <code>429</code> with a JSON body and a
+  <code>Retry-After</code> header. Nothing is lost: wait and send it
+  again.</li>
+<li>The worker endpoints are not limited.</li>
+<li>There is no hourly limit on this door, same as the explorer button. What
+  governs both is the per-person cap on queued requests and the per-account
+  sharing of the service order (see <a href="/atomicdb/docs/queue/">The
+  queue</a>). The pace above is about calls a second, not about how much you
+  may ask for. Every call still leaves a receipt.</li>
+</ul>
+
+<h3 id="query">Query a position</h3>
+<p><code>GET /atomicdb/api/query?fen=...</code> returns the position row and
+its move list. Scores are centipawns from the side to move (the chessdb.cn
+convention). A position the tree does not have returns <code>404</code>; add
+it with the request endpoint below, the FEN box or the explorer.</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>status</code>, <code>closure</code></td><td>The verdict and
+  the gate it closed through (see <a href="/atomicdb/docs/rows/">Position
+  rows</a>).</td></tr>
+<tr><td><code>score</code></td><td>The best known value, the one the page
+  headlines, from the side to move.</td></tr>
+<tr><td><code>point</code></td><td>The position's own engine evaluation (its
+  point eval).</td></tr>
+<tr><td><code>backed_plies</code></td><td>How deep the backing chain
+  runs.</td></tr>
+<tr><td><code>best_move</code></td><td>The move <code>score</code> comes
+  from, the one the board arrow shows.</td></tr>
+<tr><td>trust fields</td><td>How much the result can be trusted (see
+  <a href="/atomicdb/docs/method/">Method</a>).</td></tr>
+<tr><td><code>moves</code></td><td>One entry per move; see below.</td></tr>
+<tr><td><code>analysis</code></td><td>The engine's own output on this
+  position, or <code>null</code> where no engine has looked yet.</td></tr>
+</table></div>
+
+<p>Each entry of <code>moves</code> carries, among others:</p>
+<ul>
+<li><code>searched_nodes</code>: the node budget of the deepest search that
+  move's position has had (the depth column of the explorer), or
+  <code>null</code> where no search has reached it.</li>
+<li><code>visits</code>: the number of passes it has received.</li>
+<li><code>floor</code>: <code>true</code> for a number the position does not
+  use (see below).</li>
+</ul>
+<details>
+<summary>Details: <code>floor</code> and <code>searched_nodes</code></summary>
+<p><code>floor</code> is <code>true</code> for a move nobody has searched,
 outside the position's current lines, whose number would beat the last of
-those lines: the position does not use that number, and
+those lines. The position does not use that number, and
 <code>best_move</code> never points at such a move. A client that picks from
-<code>moves</code> itself should skip those rows the same way.</p>
-<p class="dim" style="font-size:.9rem">Each entry also carries
-<code>searched_nodes</code>, the node budget of the deepest search that move's
-position has had, the depth column of the explorer, or <code>null</code> where
-no search has reached it, next to <code>visits</code>, the number of passes it
-has received. It counts the same searches <code>only_if_missing</code> does,
-so a request for a rung at or below <code>searched_nodes</code> with that flag
-comes back <code>already-analyzed</code>.</p>
-<p class="dim" style="font-size:.9rem">A request nobody has started yet is
-still yours to take back. <strong>Withdraw</strong> sits on the position and on
-every waiting row of your contributor page, and <strong>Clear my
-queue</strong>, at the foot of that list, empties everything you have waiting
-at once. Both are signed in controls rather than credential calls: they post to
-<code>/atomicdb/queue/cancel/&lt;task&gt;/</code> and
-<code>/atomicdb/queue/clear/</code> from a session. A request a worker has
-already started cannot be withdrawn, because the search is already running, and
-withdrawing a request somebody else also asked for only takes your name off:
-the request stays in the queue under them.</p>
+<code>moves</code> itself should skip those rows the same way (the rule is on
+<a href="/atomicdb/docs/backing/">Backed values</a>).</p>
+<p><code>searched_nodes</code> counts the same searches
+<code>only_if_missing</code> does, so a request for a rung at or below
+<code>searched_nodes</code> with that flag comes back
+<code>already-analyzed</code>.</p>
+</details>
+<details>
+<summary>Details: the <code>analysis</code> block</summary>
+<ul>
+<li><code>lines</code> is the current pass. Each line carries its move,
+  <code>cp</code> or <code>mate</code> (from the side to move, like the rest
+  of the reply), the PV, the <code>depth</code>, <code>seldepth</code> and
+  <code>nodes</code> the engine reported, and the untouched <code>raw</code>
+  UCI info string it came from.</li>
+<li><code>budget_nodes</code> is the node budget of the pass that produced
+  <code>lines</code>.</li>
+<li><code>previous</code> is the pass before it, kept whenever it was wider
+  than the one that replaced it.</li>
+<li><code>passes</code> is one compact summary per pass, newest first:
+  budget, width, evaluation, move, depth and whether that pass is the one on
+  display. It shows how the evaluation moved as the search went deeper.</li>
+<li>Passes have only been recorded since 15 August 2026, so a position
+  analysed before then has a series that starts partway through:
+  <code>passes_complete</code> is false there, and no attempt is made to
+  invent the missing entries.</li>
+</ul>
+</details>
+
+<h3 id="request">Request analysis</h3>
+<p><code>POST /atomicdb/api/request</code> takes exactly the path the explorer
+button takes: the same budget ladder, the same deduplication, the same queue
+cap and the same joining rule. If the position is already queued, you are
+recorded as another requester instead of queueing a duplicate. A FEN the tree
+does not have is seeded (added) rather than refused.</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>fen</code></td><td>Required. The position.</td></tr>
+<tr><td><code>username</code>, <code>password</code></td><td>Optional. Put
+  the request on your account, which is what buys the notification when it
+  lands, the affinity with your own workers and your place in the fair share.
+  Without them the request is anonymous, which works, and is served like a
+  click without a session.</td></tr>
+<tr><td><code>budget</code></td><td>Optional. Picks a rung of the ladder.
+  Honoured for the accounts the explorer offers the depth slider to.
+  <code>budget=10000000000</code> is the slider's last stop: up to
+  {{ subtree_cap }} searches of 128M below the position.</td></tr>
+<tr><td><code>only_if_missing=1</code></td><td>Optional. Only make sure a
+  search exists; see below.</td></tr>
+</table></div>
+<p>Session cookies are deliberately ignored here, so a page open in your
+browser cannot spend your queue behind your back.</p>
+
+<p><strong>Asking again.</strong> Asked again after the first search has
+landed, a request buys the next rung of the ladder, exactly as a second click
+does. Once the 2B search has run, it buys the searches below the position.
+Those replies say <code>expanded</code>, or <code>saturated</code> when there
+was nothing left to queue, with <code>searches_queued</code>,
+<code>subtree_plies</code> (how deep the deepest one is) and a
+<code>message</code> saying what was done.</p>
+
+<p><strong>Only if missing.</strong> A script that only wants a position to
+<em>have</em> a search adds <code>only_if_missing=1</code>. The budget becomes
+a target (the rung you picked, or the first one):</p>
+<ul>
+<li>If a search that ran already covers it, the reply is
+  <code>already-analyzed</code> with <code>completed_budget</code>, and
+  nothing is queued.</li>
+<li>Otherwise the request is queued as usual, but never above the
+  target.</li>
+<li>The check and the purchase happen together, so two scripts asking for the
+  same position at the same moment cannot push it to the next rung.</li>
+<li>It asks about the position itself, so it cannot be sent with
+  <code>budget=10000000000</code>.</li>
+</ul>
+
+<h4>The reply</h4>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>status</code></td><td>What happened; see the next
+  table.</td></tr>
+<tr><td><code>key</code>, <code>fen</code></td><td>The position key and the
+  canonical FEN.</td></tr>
+<tr><td><code>task</code>, <code>budget_nodes</code></td><td>The live request
+  on that position and its budget, when there is one.</td></tr>
+<tr><td><code>task_state</code></td><td><code>waiting</code> while it is in
+  the queue, <code>searching</code> once an engine has it.</td></tr>
+<tr><td><code>ahead</code></td><td>How many requests are served
+  first.</td></tr>
+<tr><td><code>backed</code></td><td><code>true</code> when you joined a
+  request somebody else had already made.</td></tr>
+<tr><td><code>seeded</code></td><td>The FEN was not in the tree and was
+  added by this call.</td></tr>
+</table></div>
+<div class="docs-table-wrap"><table>
+<tr><th><code>status</code></th><th>Meaning</th></tr>
+<tr><td><code>queued</code></td><td>A new request was queued.</td></tr>
+<tr><td><code>already-queued</code></td><td>The position was already
+  waiting or being searched.</td></tr>
+<tr><td><code>already-solved</code></td><td>The position is closed; nothing to
+  ask.</td></tr>
+<tr><td><code>already-analyzed</code></td><td>Only with
+  <code>only_if_missing</code>: a search already covers the target.</td></tr>
+<tr><td><code>expanded</code></td><td>The work went to the positions below,
+  with a <code>message</code> saying what was queued.</td></tr>
+<tr><td><code>saturated</code></td><td>Nothing left to buy here or
+  below.</td></tr>
+<tr><td><code>refused</code></td><td>Not accepted; <code>reason</code> says
+  why.</td></tr>
+</table></div>
+<p>Refusals by HTTP code:</p>
+<ul>
+<li><code>400</code>: an unreadable FEN or a bad budget.</li>
+<li><code>403</code>: wrong credentials.</li>
+<li><code>429</code>: too many calls.</li>
+<li><code>503</code> with a <code>Retry-After</code>: a full queue or a busy
+  database.</li>
+</ul>
+
+<h3 id="my-queue">Your queue</h3>
+<ul>
+<li><code>POST /atomicdb/api/my-queue/</code> with <code>username</code> and
+  <code>password</code> (your OpenBench credentials, same as a worker) returns
+  your PENDING and LEASED requests: task ids, position keys, budgets, state,
+  and the <code>bump</code> / <code>cancel</code> paths each row accepts. A
+  logged-in browser can simply <code>GET</code> it.</li>
+<li>The ids plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
+  and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code>, with the same
+  credentials (form or JSON). <code>undo=1</code> on cancel restores the
+  row.</li>
+<li>The profile-page buttons are separate, session-guarded routes.
+  <strong>Withdraw</strong> (on the position and on every waiting row of your
+  contributor page) and <strong>Clear my queue</strong> (at the foot of that
+  list) are signed-in controls rather than credential calls: they post to
+  <code>/atomicdb/queue/cancel/&lt;task&gt;/</code> and
+  <code>/atomicdb/queue/clear/</code> from a session.</li>
+<li>A request a worker has already started cannot be withdrawn, because the
+  search is already running. Withdrawing a request somebody else also asked
+  for only takes your name off: the request stays in the queue under
+  them.</li>
+</ul>
+
+<h3 id="roots">Roots</h3>
+<p><code>GET /atomicdb/api/roots</code> returns the
+<a href="/atomicdb/roots/">roots page</a> as data.</p>
+<ul>
+<li><code>positions</code>: the start position, its first moves and the
+  replies to 1.Nf3. <code>openings</code>: every named opening.</li>
+<li>Each row has its <code>key</code>, <code>label</code>, <code>line</code>
+  (the moves from the start position, in UCI) and its <code>value</code> now,
+  then <code>best_value</code> and <code>worst_value</code> with their
+  <code>best_at</code> and <code>worst_at</code> times (UTC) and their
+  statuses.</li>
+<li>The values are centipawns from White's side, as on the page, with a proven
+  win as +10000 or -10000 and a proven draw as 0. (The <code>score</code> of
+  <code>query</code> is from the side to move instead.)</li>
+<li><code>since</code> is when tracking began.</li>
+</ul>
 {% endblock %}
