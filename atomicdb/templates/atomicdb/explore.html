@@ -10,19 +10,19 @@
 </div>
 {% endif %}
 
+{% comment %}The opening's name on one line under the moves, with no box and
+no label: the name says what it is.  The reference line only when it is not
+the line printed above (§ views._reference_on_the_line), and a corrected
+name keeps its old one as a short muted note.  Inline styles because
+atomicdb.css is not part of the ?v= digest of base.html (see the eval cell
+below); the colour is a token both themes define.{% endcomment %}
 {% if opening %}
-<section class="opening-card" aria-labelledby="opening-name">
-  <span class="opening-kicker">{% if opening.catalog_name %}Community correction{% elif opening.community %}Community name{% else %}Atomic opening{% endif %}</span>
-  <h2 id="opening-name">{{ opening.name }}</h2>
-  {% if opening.reference_line_san %}
-  <p class="opening-reference"><span class="dim">Reference:</span>
-    {{ opening.reference_line_san }}</p>
-  {% endif %}
-  {% if opening.catalog_name %}
-  <p class="opening-reference dim">Previously
-    &ldquo;{{ opening.catalog_name }}&rdquo;.</p>
-  {% endif %}
-</section>
+<div class="opening-line" style="margin:{% if line %}-.45rem{% else %}0{% endif %} 0 .8rem;padding:0 .3rem;line-height:1.45;overflow-wrap:anywhere">
+  <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)">{{ opening.name }}</h2>
+  {% if opening.catalog_name %}<span class="dim" style="font-size:.78rem"
+    title="Previously &ldquo;{{ opening.catalog_name }}&rdquo;">previously {{ opening.catalog_name }}</span>{% endif %}
+  {% if opening_reference_shown %}<span class="dim" style="font-size:.78rem">&middot; {{ opening.reference_line_san }}</span>{% endif %}
+</div>
 {% endif %}
 
 {% comment %}One compact row of small links above the board, so the board
@@ -33,7 +33,7 @@ own under the row.{% endcomment %}
 {% if not line %}<span class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</span>{% endif %}
 {% if parents|length > 1 %}
 <span class="crumb">transpositions from:
-  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
 </span>
 {% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
@@ -673,13 +673,13 @@ own under the row.{% endcomment %}
     nacio esto.{% endcomment %}
     {% if pos.won_line %}
     <p style="font-size:.85rem"><span class="dim">winning line:</span>
-      <strong>{{ pos.won_line }}</strong>{% if proven_end_url %} <a
+      <strong{% if won_line_san %} title="{{ pos.won_line }}"{% endif %}>{{ won_line_san|default:pos.won_line }}</strong>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position of this winning line, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below"
         title="Follow this line to its end and land on the position it finishes at, {{ proven_end_plies }} pl{{ proven_end_plies|pluralize:"y,ies" }} below">end of line ·{{ proven_end_plies }}</a>{% endif %}</p>
     {% elif pos.status != 'UNKNOWN' and pos.closure == 'MINIMAX' and pos.best_move %}
     <p style="font-size:.85rem"><span class="dim">witness move:</span>
-      <strong>{{ pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
+      <strong{% if best_move_san and best_move_san != pos.best_move %} title="{{ pos.best_move }}"{% endif %}>{{ best_move_san|default:pos.best_move }}</strong> <span class="dim">(follow it below)</span>{% if proven_end_url %} <a
         class="backed-mark" href="{{ proven_end_url }}"
         aria-label="jump to the last position this witness leads to"
         title="Follow the witness move of each position down to where the line ends">end of line</a>{% endif %}</p>
@@ -733,16 +733,18 @@ own under the row.{% endcomment %}
       back with negative margins so the row does not grow.{% endcomment %}
       {% for m in moves %}
       <tr>
-        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}" aria-label="Select {{ m.uci }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}" aria-label="Select {{ m.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
         {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
         conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
         vuelve a una posicion que ya esta en la linea actual y las
         repeticiones estan desactivadas (invariante 6, decision del
         propietario 6-ago).  El chip es el de siempre.{% endcomment %}
-        <td>{% if m.blocked %}<strong>{{ m.uci }}</strong> <span class="backed-mark"
+        {% comment %}The move in SAN, its UCI in the tooltip; the link, the
+        box and the scripts keep the UCI.{% endcomment %}
+        <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
-          title="Enters {{ m.enters_opening }}"{% endif %}><strong>{{ m.uci }}</strong></a>
+          title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
@@ -798,11 +800,11 @@ own under the row.{% endcomment %}
       {% endfor %}
       {% for u in offtree %}
       <tr>
-        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" aria-label="Select {{ u.uci }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
-        <td>{% if u.blocked %}<strong>{{ u.uci }}</strong> <span class="backed-mark"
+        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
-          title="Enters {{ u.enters_opening }}"{% endif %}><strong>{{ u.uci }}</strong></a>
+          title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
           {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim" data-fold>-</span></td>
@@ -957,8 +959,9 @@ own under the row.{% endcomment %}
         const rung = pickedRung();
         let text = '';
         let refused = false;
+        // Nothing ticked, nothing said: the boxes explain themselves.
         if (!n) {
-          text = 'Tick moves to request several at once';
+          text = '';
         } else if (n > CAP) {
           text = 'At most ' + CAP + ' moves per click';
           refused = true;

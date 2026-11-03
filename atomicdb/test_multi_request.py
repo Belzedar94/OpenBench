@@ -135,8 +135,10 @@ class WhoGetsTheBoxesTests(TestCase):
 
         boxes = BOX.findall(body)
         self.assertEqual(sorted(boxes), sorted(['e2e4', *self.offtree]))
-        self.assertIn('aria-label="Select e2e4"', body)
+        self.assertIn('aria-label="Select e4"', body)
         self.assertIn('id="msbar"', body)
+        # The boxes need no sentence telling anyone to tick them.
+        self.assertNotIn('Tick moves', body)
 
     def test_a_solved_reply_gets_none(self):
         body = _signed_in().get(self.url).content.decode()
@@ -162,7 +164,7 @@ class WhoGetsTheBoxesTests(TestCase):
         tree = [row for row in rows if '/atomicdb/explore/' in row]
         self.assertEqual(len(rows), 2 + len(self.offtree))
         self.assertEqual(len(tree), 2)
-        open_row = next(row for row in tree if '<strong>e2e4</strong>' in row)
+        open_row = next(row for row in tree if '<strong title="e2e4">e4</strong>' in row)
         first_cell = re.match(r'<tr><td>(.*?)</td>', open_row).group(1)
         self.assertEqual(BOX.findall(first_cell), ['e2e4'])
 

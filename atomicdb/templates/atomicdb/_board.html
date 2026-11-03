@@ -14,7 +14,7 @@
   <summary>Keyboard move list</summary>
   <nav aria-label="Legal moves">
     {% if legal_move_links %}
-      {% for move in legal_move_links %}<a href="{{ move.url }}">{{ move.uci }}</a>{% endfor %}
+      {% for move in legal_move_links %}<a href="{{ move.url }}"{% if move.san and move.san != move.uci %} title="{{ move.uci }}"{% endif %}>{{ move.san|default:move.uci }}</a>{% endfor %}
     {% else %}
       {% for uci in legal_ucis %}<a href="/atomicdb/goto/{{ board_key }}/{{ uci }}/">{{ uci }}</a>{% endfor %}
     {% endif %}

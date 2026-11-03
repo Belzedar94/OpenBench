@@ -58,11 +58,11 @@ class MatePvProvenanceTests(_Closed, TestCase):
 
         provenance = response.context['provenance']
         self.assertEqual(provenance['text'], 'proven by the search of')
-        self.assertEqual(provenance['link_text'], 'the position before e2e4')
+        self.assertEqual(provenance['link_text'], 'the position before e4')
         self.assertEqual(provenance['url'],
                          f'/atomicdb/explore/{self.root.key}/')
         self.assertContains(response, 'proven by the search of')
-        self.assertContains(response, 'the position before e2e4')
+        self.assertContains(response, 'the position before e4')
 
     def test_the_link_keeps_the_visitors_route(self):
         """Arriving through 1.e4 e5, the link goes one ply back on it."""
@@ -77,7 +77,7 @@ class MatePvProvenanceTests(_Closed, TestCase):
         provenance = response.context['provenance']
         self.assertEqual(provenance['text'],
                          'proven as part of the winning line of')
-        self.assertEqual(provenance['link_text'], 'the position before e7e5')
+        self.assertEqual(provenance['link_text'], 'the position before e5')
         self.assertTrue(provenance['url'].startswith(
             f'/atomicdb/explore/{self.top.key}/'))
 
@@ -118,9 +118,9 @@ class MinimaxProvenanceTests(_Closed, TestCase):
 
         self.assertEqual(response.context['provenance'],
                          {'text': 'proven by minimax from its replies: '
-                                  'e2e4 wins'})
+                                  'e4 wins'})
         self.assertContains(response,
-                            'proven by minimax from its replies: e2e4 wins')
+                            'proven by minimax from its replies: e4 wins')
 
     def test_it_reads_the_rows_and_costs_nothing(self):
         rows = views._child_moves(self.root)
