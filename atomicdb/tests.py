@@ -976,8 +976,13 @@ class TbRoutingTests(TestCase):
 
     def setUp(self):
         worker_account('u', 'p')
+        # Routing between workers only matters while the server's own tables
+        # cannot answer; when they can, nobody is served (test_tb_on_pick).
+        probe = mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=None)
+        probe.start()
+        self.addCleanup(probe.stop)
         self.lease_number = 0
-        self.tbpos = ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
+        self.tbpos =ingest.get_or_create_position('4k3/8/8/8/8/8/8/QK6 w - - 0 1')
         self.normal = ingest.get_or_create_position(logic.start_fen())
 
     def test_tb_task_waits_for_tb_worker(self):

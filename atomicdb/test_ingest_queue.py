@@ -259,7 +259,7 @@ class ProcessorTests(TestCase):
         call_command('process_ingest_queue', once=True, stdout=out)
 
         self.assertEqual(json.loads(out.getvalue().strip()),
-                         {'done': 1, 'failed': 0})
+                         {'done': 1, 'failed': 0, 'tb_closed': 0})
         self.target.refresh_from_db()
         self.assertEqual(self.target.visits, 1)
 

@@ -37,7 +37,7 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import ingest
+from . import ingest, logic
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -348,6 +348,64 @@ def drain(limit=None):
             failed += 1
         del summary
     return {'done': done, 'failed': failed}
+
+
+# How many queued positions one sweep of the server's tables settles at most,
+# and how often the processor runs it.  A covered position waits at most one
+# period for its closure; no worker is ever served it (§ views choose_pending).
+TB_SWEEP_LIMIT = 200
+TB_SWEEP_SECONDS = 30.0
+
+
+def close_queued_by_tables(limit=TB_SWEEP_LIMIT):
+    """Close from the server's own tables the queued positions they cover.
+
+    The lease skips a task whose position the server's tables cover, so no
+    worker spends a search on a result that sits on the server's disk; this
+    is what closes it.  Each closure goes through the same validation and
+    landing as a worker's WDL (§ ingest.prepare_server_tb_closure), one
+    transaction per position, and the requesters get the same notice as for
+    an analysis.  The piece count is read from the FEN in Python, so only a
+    covered position reaches the probe.  Returns how many positions closed.
+    """
+    rows = (AnalysisTask.objects
+            .filter(state=AnalysisTask.TState.PENDING,
+                    position__status='UNKNOWN')
+            .order_by('id')
+            .values('id', 'position_id', 'position__fen', 'source',
+                    'requested_by', 'also_requested_by', 'budget_nodes',
+                    'route'))
+    server_max = ingest.tb_server_max_men()
+    waiting = {}
+    for row in rows.iterator():
+        fen = row['position__fen']
+        if not logic.tb_applicable(fen, server_max):
+            continue
+        if row['position_id'] not in waiting and len(waiting) >= limit:
+            continue
+        waiting.setdefault(row['position_id'], (fen, []))[1].append(row)
+    closed = 0
+    for key, (fen, tasks) in waiting.items():
+        prepared = ingest.prepare_server_tb_closure(key, fen)
+        if prepared is None:
+            continue
+        with atomic(), ingest.closure_attribution(tasks[0]['source']):
+            if not ingest._apply_prepared_tb(key, prepared):
+                continue
+            for task in tasks:
+                _notify_requester(_TaskJob(task['id'], key), task)
+        closed += 1
+    return closed
+
+
+class _TaskJob:
+    """What _notify_requester reads of a job, for a task closed without one."""
+
+    __slots__ = ('task_id', 'position_id')
+
+    def __init__(self, task_id, position_id):
+        self.task_id = task_id
+        self.position_id = position_id
 
 
 def retry_failed():
