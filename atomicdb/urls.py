@@ -139,6 +139,9 @@ urlpatterns = [
     # agregados ya viven en un snapshot compartido de un minuto (§ lanes),
     # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
     path('queue/', _queue_cached, name='atomicdb-queue'),
+    # The "Anonymous" row of the queue, as a page of its own.
+    path('queue/anonymous/', cache_page(15)(vary_on_cookie(csrf_protect(
+        views.queue_anonymous))), name='atomicdb-queue-anonymous'),
     # The machines behind the "active workers" number of the home page.
     path('workers/', _workers_cached, name='atomicdb-workers'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de

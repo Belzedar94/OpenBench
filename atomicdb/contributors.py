@@ -781,6 +781,56 @@ def present(username, now=None, every_worker=False):
     return context
 
 
+def present_anonymous(now=None):
+    """The queue of the requests made without an account, like a profile's.
+
+    Every query is bounded by an index the hot pages already use, never by
+    the whole history of anonymous requests: ``requested_by=''`` is also every
+    AUTO task, so "served" reads only the last day of the completed band.
+    """
+    now = now or timezone.now()
+    mine = _requests_of('')
+    pending = list(mine.filter(state=PENDING)
+                   .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
+    places = live_request.queue_ahead_map(pending)
+    pending, pending_more = _overflow(pending, QUEUE_ROWS,
+                                      mine.filter(state=PENDING))
+    leased = list(mine.filter(state=LEASED)
+                  .order_by('-leased_at', '-id')[:QUEUE_ROWS])
+    done = list(AnalysisTask.objects
+                .filter(state=COMPLETED,
+                        completed__gte=now - timedelta(hours=24),
+                        source=USER, requested_by='')
+                .order_by('-completed', '-id')[:QUEUE_ROWS])
+    labels = _labels([task.position_id for task in pending + leased + done],
+                     opening=bool(pending))
+    from . import views
+    lease_cutoff = now - timedelta(minutes=views.LEASE_MINUTES)
+    leased_rows = []
+    for task in leased:
+        beat = task.lease_heartbeat_at or task.leased_at
+        leased_rows.append(_presented(task, labels, now, {
+            'machine': task.machine,
+            'since': _ago(task.leased_at, now),
+            'quiet': beat is None or beat < lease_cutoff,
+        }))
+    pending_rows = []
+    for task in pending:
+        place = places.get(task.id)
+        pending_rows.append(_presented(task, labels, now, {
+            'place': None if place is None else place[0] + 1,
+            'when': _ago(task.created, now),
+            'backers': task.backers}))
+    done_rows = [_presented(task, labels, now,
+                            {'when': _ago(task.completed, now),
+                             'nodes': human(task.nodes_searched)})
+                 for task in done]
+    return {
+        'queue_pending': pending_rows, 'queue_pending_more': pending_more,
+        'queue_leased': leased_rows, 'queue_done': done_rows,
+    }
+
+
 def _first_contribution(username, machines):
     """La fecha mas antigua que esta cuenta puede reclamar, o ``None``.
 

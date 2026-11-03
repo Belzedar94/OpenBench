@@ -5915,6 +5915,15 @@ def queue_page(request):
     })
 
 
+def queue_anonymous(request):
+    """The requests made without an account, listed like a profile's queue.
+
+    Public and the same for everybody, cached like the queue page (§ urls).
+    """
+    return render(request, 'atomicdb/queue_anonymous.html',
+                  contributors.present_anonymous())
+
+
 def _ago_text(moment):
     """"3 hours" for a queue age, in ONE unit.  Same shape the profile uses."""
     from django.utils.timesince import timesince

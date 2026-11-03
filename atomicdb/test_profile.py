@@ -719,3 +719,44 @@ class CachedAggregateTests(TestCase):
         self._queries()
 
         self.assertLessEqual(len(self._queries()), 12)
+
+class AnonymousQueueTests(TestCase):
+    """The "Anonymous" row of the queue opens a page like a profile's queue."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        self.waiting = _task(_child('a2a3'), source=AnalysisTask.Source.USER,
+                             requested_by='')
+        self.served = _completed(_child('b2b3'), 'box', 1_000_000, 1.0,
+                                 source=AnalysisTask.Source.USER,
+                                 requested_by='')
+        # Neither an account's request nor an AUTO task belongs there.
+        _task(_child('c2c3'), source=AnalysisTask.Source.USER,
+              requested_by='alice')
+        _task(_child('d2d3'))
+
+    def test_the_queue_row_links_to_it(self):
+        body = Client().get('/atomicdb/queue/').content.decode()
+
+        self.assertIn('href="/atomicdb/queue/anonymous/"', body)
+
+    def test_it_lists_waiting_and_served_anonymous_requests_only(self):
+        response = Client().get('/atomicdb/queue/anonymous/')
+
+        self.assertEqual(response.status_code, 200)
+        keys = ([row['key'] for row in response.context['queue_pending']],
+                [row['key'] for row in response.context['queue_done']])
+        self.assertEqual(keys, ([self.waiting.position_id],
+                                [self.served.position_id]))
+        body = response.content.decode()
+        self.assertIn(f'/atomicdb/explore/{self.waiting.position_id}/', body)
+        self.assertNotIn('Withdraw', body)
+
+    def test_it_costs_a_handful_of_queries(self):
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            Client().get('/atomicdb/queue/anonymous/')
+
+        self.assertLessEqual(len(queries), 8)
+        self.assertFalse([query['sql'] for query in queries
+                          if 'LIKE' in query['sql'].upper()])
