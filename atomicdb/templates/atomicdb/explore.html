@@ -488,8 +488,10 @@ most eight (§ views.explore).{% endcomment %}
               : (' (~' + d.ahead + ' ahead)');
             btn.textContent = {
               'queued': 'Queued, waiting for a worker...' + inline,
-              'already-queued': 'In the queue, waiting for a worker...'
-                + inline,
+              // An anonymous request for this position is now yours.
+              'already-queued': (d.adopted
+                ? 'Moved to your queue, waiting for a worker...'
+                : 'In the queue, waiting for a worker...') + inline,
               'already-requested': 'Already requested, waiting...',
               'rate-limited': 'Hourly limit reached, try later',
               'queue-full': 'Queue is full, try later',

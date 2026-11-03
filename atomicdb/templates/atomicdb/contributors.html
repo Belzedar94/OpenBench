@@ -3,7 +3,7 @@
 {% block title %}Contributors · AtomicDB{% endblock %}
 {% block content %}
 
-<h2 id="contributors" style="margin-top:0">Contributors <span class="dim">by engine nodes</span></h2>
+<h2 id="contributors" style="margin-top:0">Contributors <span class="dim">by engine nodes</span> <a href="/atomicdb/workers/" style="font-size:.8rem;font-weight:400" title="Every active worker, what it is searching and who asked for it">active workers</a></h2>
 {% if has_contrib_board %}
 <div class="lb-grid">
   {% for b in contrib_boards %}

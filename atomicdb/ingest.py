@@ -6159,6 +6159,12 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == 'PENDING':
+        # An anonymous visitor's request that a signed-in one asks for again
+        # becomes theirs (§ ``_record_requester``).  The receipt says so: the
+        # bare "In the queue" read as nothing having happened (cz_eclipsia
+        # and Opabinia, 3-Nov-2026).
+        adopted = (bool(requested_by) and not task.requested_by
+                   and task.source == 'USER')
         task.budget_nodes = max(task.budget_nodes, floor)
         promoted = task.source != 'USER'
         task.source = 'USER'   # promocion: al frente de la cola
@@ -6176,6 +6182,8 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         add_requester(task, requested_by)
         if promoted:
             return 'queued'
+        if adopted:
+            return RequestOutcome('already-queued', adopted=True)
     elif task.state == 'LEASED':
         if task.budget_nodes < floor:
             # The running engine cannot change its ``go nodes`` command.
