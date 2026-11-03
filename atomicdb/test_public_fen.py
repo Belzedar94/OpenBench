@@ -65,6 +65,37 @@ class PublicPgnParserTests(SimpleTestCase):
         self.assertIn('move 2 for White', str(caught.exception))
         self.assertIn('Ke2', str(caught.exception))
 
+    def test_a_fen_header_is_where_the_line_starts(self):
+        """cz_eclipsia, 3-Nov-2026: a game from a set-up position walked
+        from the start position instead."""
+        raw = ('[Event "study"]\n[SetUp "1"]\n'
+               '[FEN "rnbqkbnr/ppppp1pp/5p2/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2"]'
+               '\n\n2. Nc3 c6 *')
+        self.assertEqual(_parse_public_position(raw),
+                         _walk('g1f3', 'f7f6', 'b1c3', 'c7c6'))
+
+    def test_a_fen_header_without_moves_lands_on_it(self):
+        raw = '[FEN "rnbqkbnr/ppppp1pp/5p2/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2"]'
+        self.assertEqual(_parse_public_position(raw), _walk('g1f3', 'f7f6'))
+
+    def test_move_numbers_count_from_the_fen_header(self):
+        raw = ('[FEN "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1"]'
+               ' 1... f6 2. Ke2')
+        with self.assertRaises(PublicFenError) as caught:
+            _parse_public_position(raw)
+        self.assertIn('move 2 for White', str(caught.exception))
+        raw = ('[FEN "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1"]'
+               ' 1... Kf7')
+        with self.assertRaises(PublicFenError) as caught:
+            _parse_public_position(raw)
+        self.assertIn('move 1 for Black', str(caught.exception))
+
+    def test_a_broken_fen_header_says_so(self):
+        with self.assertRaises(PublicFenError) as caught:
+            _parse_public_position('[FEN "8/8/8/8/8/8/8/8 w - - 0 1"] 1. e4')
+        self.assertEqual(caught.exception.reason, 'kings')
+        self.assertIn('FEN header', str(caught.exception))
+
     def test_rubbish_still_reports_as_a_fen_problem(self):
         """No movetext hint: the visitor gets the FEN answer, not a PGN one."""
         with self.assertRaises(PublicFenError) as caught:
