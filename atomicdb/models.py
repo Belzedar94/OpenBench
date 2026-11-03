@@ -311,10 +311,17 @@ class ContributorPref(models.Model):
     ``notify_ready`` — el aviso de la campana cuando una peticion propia ya
     esta servida (§ ``ingest_queue._notify_requester``).  Encendido por
     defecto: una cuenta sin fila recibe avisos, como siempre.
+
+    ``serve_others_first`` — los workers de la cuenta renuncian al own-first
+    (§ ``views.choose_pending``): sus peticiones propias esperan su turno en
+    la banda USER como las de cualquiera.  Solo reordena, nunca excluye: sin
+    nada ajeno esperando, lo propio se sirve igual.  Peticion de
+    seaside_cliff (3-nov).  Apagado por defecto.
     """
     account      = models.CharField(max_length=64, unique=True)
     lifo_queue   = models.BooleanField(default=False)
     notify_ready = models.BooleanField(default=True)
+    serve_others_first = models.BooleanField(default=False)
 
 
 class AnalysisTask(models.Model):

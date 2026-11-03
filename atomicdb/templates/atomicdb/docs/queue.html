@@ -31,7 +31,10 @@ without an account are at <a href="/atomicdb/queue/anonymous/">/atomicdb/queue/a
   everyone else instead of walling off the queue.</li>
 <li>Running a worker gives exactly <strong>one</strong> advantage: while it
   runs, your own worker serves your own requests first. It is affinity, not
-  priority, and it scales with the CPU you are plugging in right now.</li>
+  priority, and it scales with the CPU you are plugging in right now. You
+  can give it up in <a href="/atomicdb/notifications/settings/">Account
+  settings</a>: your workers then serve everyone else's requests first, and
+  go back to yours when nobody else is waiting.</li>
 </ul>
 <figure class="docs-diagram">
 <svg viewBox="0 0 640 210" role="img" aria-labelledby="queue-svg-title">
