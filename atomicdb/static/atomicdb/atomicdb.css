@@ -239,6 +239,28 @@ header nav a:hover {
   color: var(--ink);
 }
 
+/* The fundraiser: the one nav link in the accent colour, so it can be found
+   without shouting (MoKy, 3-Nov-2026). */
+header nav a.nav-support {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+header nav a.nav-support:hover {
+  color: var(--accent-hover);
+}
+
+.support-line {
+  margin: .2rem 0 .8rem;
+  font-size: .9rem;
+  color: var(--ink-muted);
+}
+
+.support-line a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* Light / dark switch.
 
    The same control OpenBench uses: a bare sun/moon icon pinned to the
