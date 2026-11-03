@@ -18,13 +18,14 @@ name keeps its old one in the tooltip only.  The space before the reference
 is a margin: the minifier drops the whitespace after the heading.  Inline styles because
 atomicdb.css is not part of the ?v= digest of base.html (see the eval cell
 below); the colours are tokens both themes define: a hazy green name on a
-softer green fill (cz_eclipsia, 3-Nov-2026).{% endcomment %}
+softer green fill as wide as the text, not the page (cz_eclipsia,
+3-Nov-2026); a table box shrinks to its content and keeps its margins.{% endcomment %}
 {% if opening %}
-<div class="opening-line" style="margin:{% if line %}-.45rem{% else %}0{% endif %} 0 .2rem;padding:.1rem .45rem;background:var(--opening-fill);border-radius:6px;line-height:1.45;overflow-wrap:anywhere">
+<div class="opening-line" style="margin:{% if line %}-.45rem{% else %}0{% endif %} 0 .2rem;padding:.1rem .45rem;display:table;max-width:100%;box-sizing:border-box;background:var(--opening-fill);border-radius:6px;line-height:1.45;overflow-wrap:anywhere">
   <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)"{% if opening.catalog_name and not opening_url %} title="Previously &ldquo;{{ opening.catalog_name }}&rdquo;"{% endif %}>{% if opening_url %}<a href="{{ opening_url }}" style="color:inherit" title="Open the position this name belongs to{% if opening.catalog_name %} · previously &ldquo;{{ opening.catalog_name }}&rdquo;{% endif %}">{{ opening.name }}</a>{% else %}{{ opening.name }}{% endif %}</h2>{% if opening_reference_shown %}<span class="dim" style="margin-left:.35rem;font-size:.78rem">&middot; {{ opening.reference_line_san }}</span>{% endif %}
 </div>
 {% elif not line and line_from_root %}
-<div class="opening-line" style="margin:0 0 .2rem;padding:.1rem .45rem;background:var(--opening-fill);border-radius:6px;line-height:1.45">
+<div class="opening-line" style="margin:0 0 .2rem;padding:.1rem .45rem;display:table;max-width:100%;box-sizing:border-box;background:var(--opening-fill);border-radius:6px;line-height:1.45">
   <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)">Starting position</h2>
 </div>
 {% endif %}
