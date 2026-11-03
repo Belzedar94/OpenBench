@@ -788,6 +788,8 @@ class AccountQueueTests(TestCase):
         body = response.content.decode()
         self.assertIn('href="/atomicdb/user/alice/"', body)
         self.assertNotIn('Workers', body)
+        self.assertEqual((response.context['waiting_total_h'],
+                          response.context['served_total_h']), ('1', '1'))
 
     def test_the_queue_rows_and_the_profile_link_to_it(self):
         queue = Client().get('/atomicdb/queue/').content.decode()
