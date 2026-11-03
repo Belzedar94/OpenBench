@@ -307,8 +307,11 @@ class PageTests(TestCase):
         for marker in ('Now analyzing', 'Up next', 'First moves',
                        'Proposed campaigns'):
             self.assertIn(marker, body)
-        here = body.index('href="/atomicdb/contributors/"')
-        self.assertLess(body.index('First moves'), here)
+        # The nav links it too (Torom, 3-Nov-2026); this is the one in the page.
+        self.assertLess(body.index('href="/atomicdb/contributors/"'),
+                        body.index('First moves'))
+        here = body.index('href="/atomicdb/contributors/"',
+                          body.index('First moves'))
         self.assertLess(here, body.index('id="campaigns"'))
         self.assertNotIn('lb-table', body)
         self.assertNotIn('href="/atomicdb/user/alice/"', body)
