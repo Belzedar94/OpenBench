@@ -2,11 +2,8 @@
 {% block title %}Active workers · AtomicDB{% endblock %}
 {% block content %}
 
-<h2 style="margin-top:0">Active workers</h2>
-<p class="dim contrib-lede">Every worker with a heartbeat in the last
-  {{ live_minutes }} minutes, its speed over the last hour, the position it is
-  searching right now and who asked for it. Requests still waiting for a worker are on the
-  <a href="/atomicdb/queue/">queue</a> page.</p>
+<h2 style="margin-top:0" title="Every worker with a heartbeat in the last {{ live_minutes }} minutes">Active workers
+  <a href="/atomicdb/queue/" style="font-size:.8rem;font-weight:400" title="Requests still waiting for a worker">queue</a></h2>
 
 {% if workers %}
 <p class="dim">{{ count }} worker{{ count|pluralize }} from {{ accounts }}
@@ -14,7 +11,7 @@
   {{ busy }} searching right now</p>
 <div class="contrib-scroll">
 <table class="contrib-workers fleet-workers">
-  <tr><th>Worker</th><th>Owner</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th>Searching</th><th>Requested by</th></tr>
+  <tr><th>Worker</th><th>Owner</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th title="The position it is searching right now">Searching</th><th title="Who asked for that search">Requester</th></tr>
   {% for w in workers %}
   <tr>
     <td><strong>{{ w.machine }}</strong>

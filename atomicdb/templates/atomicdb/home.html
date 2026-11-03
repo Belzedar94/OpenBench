@@ -127,8 +127,8 @@
 </div>
 
 <div class="cols">
-  <div>
-    <h2 style="margin-top:0">Play to explore</h2>
+  <div style="width:440px;max-width:100%">
+    <h2 style="margin-top:0">Explore</h2>
     {% include "atomicdb/_board.html" %}
   </div>
   <div>
@@ -147,8 +147,6 @@
   </tr>
   {% endfor %}
 </table>
-<p class="dim lb-foot"><a href="/atomicdb/roots/">Best and worst values over
-  time, and the main line</a></p>
 {% else %}
 <p class="dim">The tree does not include the starting position yet.
   <a href="/atomicdb/explore/{{ root_key }}/">Explore the root</a>.</p>
@@ -157,9 +155,6 @@
 </div>
 
 <h2 id="contributors">Contributors <span class="dim">by engine nodes</span></h2>
-<p class="dim campaign-lede">Every position in this tree was searched by
-  somebody's machine. Ties share a place, and the share is measured against
-  everything the whole fleet searched in that window.</p>
 {% if has_contrib_board %}
 <div class="lb-grid">
   {% for b in contrib_boards %}
@@ -184,7 +179,7 @@
     </div>
     {% if b.more %}<p class="dim lb-foot">and {{ b.more }} more.</p>{% endif %}
     <p class="dim lb-foot">{{ b.accounts }} account{{ b.accounts|pluralize }} ·
-      {{ b.fleet_h }} nodes searched by the whole fleet{% if b.unclaimed_h %},
+      {{ b.fleet_h }} nodes{% if b.unclaimed_h %},
       {{ b.unclaimed_h }} of them by machines with no account{% endif %}.</p>
     {% else %}<p class="dim">{{ b.empty }}</p>{% endif %}
   </section>
