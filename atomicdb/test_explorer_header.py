@@ -410,18 +410,29 @@ class StatusUnderTheBoardTests(TestCase):
         for gone in ('UNSOLVED', 'White to move', 'best line'):
             self.assertNotIn(gone, body)
 
-    def test_an_open_position_keeps_the_jump_to_its_value(self):
+    def test_an_open_backed_position_leaves_its_chip_to_the_table(self):
+        # The table's top row already carries the backed number and its
+        # jump; the box under the board no longer repeats it.
         Position.objects.filter(key=self.root.key).update(
             eval_cp=30, backed_eval=94, backed_plies=3, expanded=True,
             nodes_invested=128_000_000)
 
         body = self._body()
 
-        verdict = body[body.index('class="verdict'):]
-        verdict = verdict[:verdict.index('</div>')]
-        self.assertIn('backed ·3</a>', verdict)
-        self.assertIn('href="/atomicdb/backed-source/', verdict)
-        self.assertNotIn('+94cp<', verdict)
+        self.assertNotIn('class="verdict', body)
+        self.assertNotIn('backed ·3</a>', body)
+
+    def test_the_request_buttons_sit_right_under_the_board(self):
+        Position.objects.filter(key=self.root.key).update(
+            eval_cp=30, nodes_invested=128_000_000, expanded=True)
+
+        body = self._body()
+
+        board = body.index('class="boardwrap')
+        request = body.index('id="reqbtn"')
+        self.assertLess(board, request)
+        self.assertLess(request, body.index('fenbox-here'))
+        self.assertNotIn('class="verdict', body[board:request])
 
     def test_a_closed_position_says_its_verdict_and_how(self):
         Position.objects.filter(key=self.root.key).update(

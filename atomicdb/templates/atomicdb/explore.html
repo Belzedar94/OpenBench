@@ -100,37 +100,6 @@ most eight (§ views.explore).{% endcomment %}
 <div class="cols" style="column-gap:1.1rem">
   <div>
     {% include "atomicdb/_board.html" with no_keyboard_list=True %}
-    {% comment %}Under the board, only what the board and the table do not say.
-    A closed position says its verdict, how it closed and the mate distance;
-    "practical" lives in the tooltip.  An open one shows no status, no side to
-    move (the board shows it) and no value (the table's top row has it): only
-    the backed chip when it is a jump to where the value comes from, since
-    that jump is not on the page anywhere else.  The two arrival marks of a
-    jump that could not finish stay, for the reason below.  With none of
-    that, there is no box at all.
-
-    El chip backed/walked ES el salto a su origen: un solo elemento, con los
-    plies dentro.  Sin URL no hay salto, y sin numero al lado un chip mudo no
-    dice nada, asi que no se pinta.{% endcomment %}
-    {% if pos.status != 'UNKNOWN' or eval_backed and backed_source_url or backed_repetition or jump_incomplete %}
-    <div class="verdict {{ verdict_css }}">
-      {% if pos.status != 'UNKNOWN' %}<span title="practical verdict, closed via {{ pos.closure }}">{% if pos.status == 'WHITE_WIN' %}White wins{% elif pos.status == 'BLACK_WIN' %}Black wins{% else %}Draw{% endif %} · {{ pos.closure }}</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}{% elif eval_backed and backed_source_url %}<a
-          class="backed-mark{% if eval_backed_light %} light{% endif %}"
-          href="{{ backed_source_url }}"
-          aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
-          title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from{% if eval_point_str %} · eval stored on this position {{ eval_point_str }}{% endif %}">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</a>{% endif %}{% comment %}Como llego el visitante, cuando llego por un
-      salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
-      la pagina y viven fuera del if de arriba porque un salto por la linea
-      probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
-      The jump behind a borrowed row uses the second one too, when it cannot
-      find the search that wrote the number (§ views.borrowed_source).
-      {% endcomment %}{% if backed_repetition %} <span
-          class="backed-mark"
-          title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
-          class="backed-mark"
-          title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
-    </div>
-    {% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
@@ -661,6 +630,30 @@ most eight (§ views.explore).{% endcomment %}
       showCascade();   // an already-spent ladder shows its cascade on load
     })();
     </script>
+    {% endif %}
+    {% comment %}After the request buttons, only what the board and the table
+    do not say.  A closed position says its verdict, how it closed and the
+    mate distance; "practical" lives in the tooltip.  An open one shows no
+    status, no side to move (the board shows it) and no value: the table's
+    top row has it, with its backed chip and the jump to where it comes from.
+    The two arrival marks of a jump that could not finish stay, for the
+    reason below.  With none of that, there is no box at all.  A closed
+    position has no request buttons, so its verdict still sits right under
+    the board.{% endcomment %}
+    {% if pos.status != 'UNKNOWN' or backed_repetition or jump_incomplete %}
+    <div class="verdict {{ verdict_css }}">
+      {% if pos.status != 'UNKNOWN' %}<span title="practical verdict, closed via {{ pos.closure }}">{% if pos.status == 'WHITE_WIN' %}White wins{% elif pos.status == 'BLACK_WIN' %}Black wins{% else %}Draw{% endif %} · {{ pos.closure }}</span>{% if verdict_mate %} · <strong>{{ verdict_mate }}</strong>{% endif %}{% endif %}{% comment %}Como llego el visitante, cuando llego por un
+      salto que NO pudo terminar.  Las dos marcas valen para los dos saltos de
+      la pagina y viven fuera del if de arriba porque un salto por la linea
+      probada aterriza en una posicion CERRADA (§ views._jump_landing_url).
+      The jump behind a borrowed row uses the second one too, when it cannot
+      find the search that wrote the number (§ views.borrowed_source).
+      {% endcomment %}{% if backed_repetition %} <span
+          class="backed-mark"
+          title="the chain that leads here returns to a position it has already been through. A repetition is worth a draw, not a verdict">repetition</span>{% endif %}{% if jump_incomplete %} <span
+          class="backed-mark"
+          title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
+    </div>
     {% endif %}
     {% comment %}El chip del final de la linea ES el salto, con la misma
     forma que el chip de respaldo de la cabecera: un solo elemento, y solo
