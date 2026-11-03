@@ -489,6 +489,22 @@ class SpineTests(TestCase):
         self.assertNotIn('spine', event.payload)
         self.assertEqual(_stored(parent), (1216, 'b7b5', 1, 0))
 
+    def test_a_side_branch_is_walked_down_to_its_stale_position(self):
+        """1...e5 of 3-Nov-2026: stale far below a reply of the main line."""
+        start = _start(expanded=True, backed_move='a1a2', backed_eval=0)
+        _edge(start, _pos('SIDE-MAIN', 'b'), 'a1a2')
+        side = _pos('SIDE-ROOT', 'b', expanded=True, backed_move='c1c2')
+        mid = _pos('SIDE-MID', 'w', expanded=True, backed_move='d1d2')
+        stale = _lost_update('SIDE')
+        _edge(start, side, 'b1b2')
+        _edge(side, mid, 'c1c2')
+        _edge(mid, stale, 'd1d2')
+
+        event = _sweep('--no-guards', '--no-recent', '--no-rotation')
+
+        self.assertEqual(event.payload['side_spines']['branches'], 2)
+        self.assertEqual(_stored(stale), (1139, 'b7b5', 1, 128_000_000))
+
     def test_a_proven_position_ends_the_walk(self):
         start = _start(expanded=True, backed_move='a1a2')
         proven = _pos('SPINE-PROVEN', 'b', status='WHITE_WIN',
