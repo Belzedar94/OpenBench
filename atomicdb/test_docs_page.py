@@ -25,7 +25,7 @@ class DocsPageTests(TestCase):
                 'The queue',
                 'Contributing and attribution',
                 'API',
-                'Reading a page')
+                'The position page')
 
     def setUp(self):
         self.client = Client()
