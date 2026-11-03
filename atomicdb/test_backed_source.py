@@ -419,6 +419,20 @@ class BackedJumpRenderTests(TestCase):
         self.assertNotIn('backed-jump', body)
         self.assertNotIn('↓12', body)
 
+    def test_the_row_above_the_board_says_the_value_and_jumps(self):
+        """cz_eclipsia, 3-Nov-2026: the position's own value, above the
+        board, with the chip that jumps to where it comes from."""
+        _root, child = self._tree_with_a_backed_child()
+
+        body = self.client.get(
+            f'/atomicdb/explore/{child.key}/').content.decode()
+
+        tools = body[body.index('class="pos-tools"'):]
+        tools = tools[:tools.index('</span>', tools.index('pos-eval'))]
+        self.assertIn('eval <strong>-260cp</strong>', tools)
+        self.assertIn(f'/atomicdb/backed-source/{child.key}/', tools)
+        self.assertIn('backed ·12</a>', tools)
+
     def test_a_row_without_backing_paints_no_chip_and_no_jump(self):
         root = ingest.get_or_create_position(logic.start_fen())
         child = ingest.get_or_create_position(
@@ -438,15 +452,16 @@ class BackedJumpRenderTests(TestCase):
         self.assertNotIn('backed-source', body)
 
     def test_the_box_under_the_board_leaves_the_chip_to_the_table(self):
-        # The row of the move that leads here already carries the chip and
-        # its jump; the box under the board does not repeat it.
+        # The chip and its jump sit in the row above the board, with the
+        # value; the box under the board does not repeat them.
         _root, child = self._tree_with_a_backed_child()
 
         body = self.client.get(
             f'/atomicdb/explore/{child.key}/').content.decode()
+        below = body[body.index('class="cols"'):]
 
         self.assertNotIn('class="verdict', body)
-        self.assertNotIn('backed ·12', body)
+        self.assertNotIn('backed ·12', below)
         self.assertNotIn('backed-jump', body)
 
     def test_a_chip_without_a_jump_stays_a_mute_span(self):
