@@ -8,13 +8,6 @@
   {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
     {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{{ st.san }}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
-{% else %}
-<div class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</div>
-{% endif %}
-{% if parents|length > 1 %}
-<div class="crumb">transpositions from:
-  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
-</div>
 {% endif %}
 
 {% if opening %}
@@ -32,6 +25,17 @@
 </section>
 {% endif %}
 
+{% comment %}One compact row of small links above the board, so the board
+stays in view without scrolling: where this position sits, its other
+parents, and the two public proposals.  An open proposal takes a line of its
+own under the row.{% endcomment %}
+<div class="pos-tools">
+{% if not line %}<span class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</span>{% endif %}
+{% if parents|length > 1 %}
+<span class="crumb">transpositions from:
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/">{{ p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+</span>
+{% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
   <summary>{% if suggest_current_name %}Suggest a correction to this name{% else %}Suggest a name for this position{% endif %}</summary>
   {% if suggest_message %}
@@ -80,6 +84,7 @@
       overview page; the site owner decides which one the solver runs.</span>
   </form>
 </details>
+</div>
 
 <div class="cols">
   <div>
@@ -685,7 +690,14 @@
     {% if provenance %}
     <p class="dim provenance" style="font-size:.8rem">{{ provenance.text }}{% if provenance.url %} <a href="{{ provenance.url }}">{{ provenance.link_text }}</a>{% endif %}</p>
     {% endif %}
-    <p class="dim" style="font-size:.8rem;word-break:break-all">{{ pos.fen }}</p>
+    {% comment %}The FEN of this position, editable: change it, or paste
+    another FEN or a PGN, and Go travels there (the home page's box).{% endcomment %}
+    <form class="fenbox fenbox-here" method="post" action="/atomicdb/fen/">{% csrf_token %}
+      <input name="fen" value="{{ pos.fen }}" spellcheck="false" autocomplete="off"
+        aria-label="FEN of this position. Edit it, or paste another FEN or a PGN, to go there"
+        title="Edit this FEN, or paste another FEN or a PGN, to go there">
+      <button class="reqbtn">Go</button>
+    </form>
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
       nodes {{ nodes_h }} · {{ time_str }}</p>
     {% if analysis_lines %}
