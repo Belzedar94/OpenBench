@@ -2088,12 +2088,41 @@ def _api_request_once(request, key):
     if (chosen == ingest.SUBTREE_REQUEST_NODES
             and request.POST.get('confirm') != '1'):
         return JsonResponse({'status': 'confirm-10b'}, status=400)
+    # The page names the depth its button buys and sends it as ``expect``.
+    # When a search lands the page reloads, and a stale tab, or a click meant
+    # for something else, would otherwise buy the NEXT rung, one the visitor
+    # never saw on the button: "the browser version should explicitly state
+    # the amount of nodes it is requesting, if it is equal or lower than what
+    # the position is already analysed at, prevent the request from going
+    # through" (cz_eclipsia, 3-Nov-2026).  A rung chosen on the slider is the
+    # depth the visitor named, so it is the one held to that rule.  Without
+    # either, the request buys the next rung as it always has.
+    target = (chosen if chosen and chosen != ingest.SUBTREE_REQUEST_NODES
+              else _expected_budget(request.POST.get('expect')))
+    if target is not None:
+        completed_max, _due = ingest.request_ladder_state(pos)
+        if completed_max is not None and completed_max >= target:
+            return JsonResponse({'status': 'already-analyzed',
+                                 'completed_budget': completed_max})
     requested_by = (request.user.username
                     if request.user.is_authenticated else '')
     payload, status = _queue_request(
         pos, ip, requested_by=requested_by, chosen=chosen,
         raw_route=request.POST.get('route'))
     return JsonResponse(payload, status=status)
+
+
+def _expected_budget(raw):
+    """The ``expect`` of a request: a rung of the ladder, or ``None``.
+
+    Anything else is ignored rather than refused: the field can only hold a
+    request back, so a bad one is no reason to refuse the click.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value in ingest.REQUEST_BUDGET_LADDER else None
 
 
 def _validated_route_for(raw_route, key):
@@ -7899,6 +7928,10 @@ def explore(request, key):
         # cascade underneath from the first render, before any click, and
         # the button says what it will buy there.
         'frontier_exhausted': ingest.ladder_exhausted(pos),
+        # What the button buys when nothing is chosen, named on it and sent
+        # back as ``expect`` (§ _api_request_once).
+        'request_due_nodes': ingest.request_ladder_state(pos)[1],
+        'request_due_label': _human(ingest.request_ladder_state(pos)[1]),
         'subtree_cap': ingest.SUBTREE_TASK_CAP,
         'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in

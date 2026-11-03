@@ -118,7 +118,7 @@ most eight (§ views.explore).{% endcomment %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
-        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>{% if frontier_exhausted %}Request {{ subtree_cap }}&times;128M{% else %}Request analysis{% endif %}</button>
+        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>{% if frontier_exhausted %}Request {{ subtree_cap }}&times;128M{% else %}Request {{ request_due_label }}{% endif %}</button>
       {% comment %}El boton dice QUE compra y CUANTAS: "how I'm supposed to
       cover such node by actual analysis, by clicking every move?" — no, con
       este click, y esto es lo que cubre.  El tooltip mantiene el puente con la
@@ -257,6 +257,11 @@ most eight (§ views.explore).{% endcomment %}
       // watching this row alone would say nothing for six minutes.  Follow
       // whatever level the request actually reached instead.
       let below = {% if frontier_exhausted %}key{% else %}null{% endif %};
+      function humanNodes(n) {
+        n = Number(n) || 0;
+        return n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
+                        : (n / 1e6).toFixed(1) + 'M';
+      }
       function plural(n, one, many) {
         return n + ' ' + (n === 1 ? one : many);
       }
@@ -291,6 +296,10 @@ most eight (§ views.explore).{% endcomment %}
         depth.title = rung.label + ' ' + rung.unit
           + (depthSpent ? ' · already searched to ' + depthSpent : '');
         depth.setAttribute('aria-valuetext', rung.label + ' ' + rung.unit);
+        // The button names the depth it will send.
+        if (!btn.disabled) {
+          btn.textContent = 'Request ' + rung.label;
+        }
       });
       {% endif %}
       function showNote(text, spent) {
@@ -430,6 +439,11 @@ most eight (§ views.explore).{% endcomment %}
       function requestAnalysis(attempt) {
         const playRoute = new URLSearchParams(location.search).get('play') || '';
         const body = {route: playRoute};
+        {% if not frontier_exhausted %}
+        // The depth the button names: the server refuses it if the position
+        // was searched that deep since this page loaded.
+        body.expect = '{{ request_due_nodes }}';
+        {% endif %}
         {% if depth_rungs %}
         const rung = chosenRung();
         if (rung) { body.budget = String(rung.nodes); }
@@ -489,6 +503,9 @@ most eight (§ views.explore).{% endcomment %}
               'bad-budget': 'That depth is gone, reload the page',
               'confirm-10b': 'That option needs the confirmation dialog',
               {% endif %}
+              // Searched that deep since the page loaded: nothing was sent.
+              'already-analyzed': 'Already searched to '
+                + humanNodes(d.completed_budget) + ', nothing sent',
               'already-solved': 'Already solved',
               // The request bought below this position: the searches below
               // it once the ladder here is spent, or the slider's last stop.
@@ -513,7 +530,8 @@ most eight (§ views.explore).{% endcomment %}
             if (['queued', 'already-queued', 'already-requested',
                  'expanded'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
-            } else {
+            } else if (d.status !== 'already-analyzed') {
+              // A refused depth stays refused until a reload prices the next.
               btn.disabled = false;
             }
           })
