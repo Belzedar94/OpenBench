@@ -1,0 +1,14 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}Openings matching "{{ query }}"{% endblock %}
+{% block content %}
+<h1 style="font-size:1.15rem">Openings matching &ldquo;{{ query }}&rdquo;</h1>
+<ul class="opening-results" style="line-height:1.8;padding-left:1.2rem">
+{% for key, fen, name, also, line in results %}<li><a href="/atomicdb/explore/{{ key }}/">{{ name }}</a>{% if also %} <span class="dim">(also &ldquo;{{ also }}&rdquo;)</span>{% endif %}{% if line %} <span class="dim" style="font-size:.82rem">&middot; {{ line }}</span>{% endif %}</li>
+{% endfor %}</ul>
+{% if more %}<p class="dim">and {{ more }} more: type more of the name to narrow it down.</p>{% endif %}
+<form class="fenbox" method="post" action="/atomicdb/fen/">{% csrf_token %}
+  <input name="fen" value="{{ query }}" spellcheck="false" autocomplete="off"
+    aria-label="An opening name, a FEN or a PGN">
+  <button class="reqbtn">Go</button>
+</form>
+{% endblock %}
