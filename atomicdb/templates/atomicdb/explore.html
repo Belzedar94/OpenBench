@@ -966,6 +966,9 @@ most eight (§ views.explore).{% endcomment %}
     It ticks no more than the per-click cap, in table order, and the note
     says how many it left out.  It shows only where such a box exists.
 
+    The selection buttons sit together after the depth choice, "Select all"
+    first (cz_eclipsia, 3-Nov), so when the bar wraps they wrap as one group.
+
     Depth: the bar has a choice of its own (§ depth.bar_context), for the
     accounts the slider is offered to and under the same rule, and it reads
     no slider.  The slider prices this position, from its own next rung up
@@ -1031,7 +1034,20 @@ most eight (§ views.explore).{% endcomment %}
         return {nodes: String(nodes),
                 label: pick.options[pick.selectedIndex].textContent};
       }
-      pick.addEventListener('change', refresh);
+      // The choice is remembered in this browser: most people want the same
+      // depth page after page (cz_eclipsia, 3-Nov).  A remembered rung the
+      // page does not offer is ignored.
+      const PICK_KEY = 'atomicdb-msdepth';
+      try {
+        const kept = localStorage.getItem(PICK_KEY);
+        if (kept && Array.from(pick.options).some(o => o.value === kept)) {
+          pick.value = kept;
+        }
+      } catch (e) {}
+      pick.addEventListener('change', function () {
+        try { localStorage.setItem(PICK_KEY, pick.value); } catch (e) {}
+        refresh();
+      });
       {% else %}
       function pickedRung() { return null; }
       {% endif %}
