@@ -32,8 +32,9 @@ column shows how much search each move has had.</figcaption>
 <tr><td><strong>repetition</strong></td><td>The line repeats a position
   (see <a href="/atomicdb/docs/repetition/">Repetition</a>); details
   below.</td></tr>
-<tr><td>a muted, italic number with a backed chip</td><td>A floor the
-  position does not take; details below.</td></tr>
+<tr><td>a muted, italic number with a backed chip</td><td>A number the
+  position does not use yet (a <em>floor</em>): nobody has searched that move.
+  Details below.</td></tr>
 <tr><td><strong>borrowed</strong></td><td>A number on a move row that another
   position's search wrote; details below.</td></tr>
 </table></div>
@@ -89,7 +90,10 @@ board arrow passes over it, and searching the move settles it.</p>
 </ul>
 <p>The last column, <strong>depth</strong>, says how much search that is: the
 node budget of the deepest search the move's position has had (128M, 512M,
-2B), or a dash where no search has reached it yet. Only a search that really
-ran counts: a request that was closed without one, because other work got
-there first, does not. Hover the cell for the number of visits.</p>
+2B), or a dash where no search has reached it yet.</p>
+<ul>
+<li>Only a search that really ran counts: a request that was closed without
+  one, because other work got there first, does not.</li>
+<li>Hover the cell for the number of visits.</li>
+</ul>
 {% endblock %}

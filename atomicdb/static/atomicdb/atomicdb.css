@@ -2216,9 +2216,19 @@ table.fleet-workers .qline {
   max-width: 48rem;
 }
 
+.docs-body h2 {
+  margin-top: 2.2rem;
+  font-size: 1.25rem;
+}
+
 .docs-body h3 {
   margin: 1.4rem 0 .5rem;
   font-size: 1.05rem;
+}
+
+.docs-body h4 {
+  margin: 1.1rem 0 .4rem;
+  font-size: 1rem;
 }
 
 .docs-body p {

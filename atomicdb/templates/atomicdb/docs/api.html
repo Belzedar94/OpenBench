@@ -36,11 +36,8 @@ reading and requesting work without an account.</p>
   <code>Retry-After</code> header. Nothing is lost: wait and send it
   again.</li>
 <li>The worker endpoints are not limited.</li>
-<li>There is no hourly limit on this door, same as the explorer button. What
-  governs both is the per-person cap on queued requests and the per-account
-  sharing of the service order (see <a href="/atomicdb/docs/queue/">The
-  queue</a>). The pace above is about calls a second, not about how much you
-  may ask for. Every call still leaves a receipt.</li>
+<li>The pace is about calls a second, not about how much you may ask for
+  (see the request endpoint below).</li>
 </ul>
 
 <h3 id="query">Query a position</h3>
@@ -135,6 +132,10 @@ does not have is seeded (added) rather than refused.</p>
 </table></div>
 <p>Session cookies are deliberately ignored here, so a page open in your
 browser cannot spend your queue behind your back.</p>
+<p>There is no hourly limit on this door, same as the explorer button. What
+governs both is the per-person cap on queued requests and the per-account
+sharing of the service order (see <a href="/atomicdb/docs/queue/">The
+queue</a>). Every call still leaves a receipt.</p>
 
 <p><strong>Asking again.</strong> Asked again after the first search has
 landed, a request buys the next rung of the ladder, exactly as a second click
