@@ -165,3 +165,18 @@ class MoveNotationMarkupTests(TestCase):
 
         self.assertIn(
             'html[data-notation="uci"]:not(.notation-ready) [data-uci]', style)
+
+
+class NewestFirstOnlyInTheMenuTests(TestCase):
+    """cz_eclipsia, 3-Nov-2026: the profile no longer has its own copy."""
+
+    def test_the_own_profile_has_no_newest_first_box(self):
+        from django.test import Client
+        from .testing import worker_account
+        worker_account('lesha', 'pw')
+        client = Client()
+        client.login(username='lesha', password='pw')
+        body = client.get('/atomicdb/user/lesha/').content.decode()
+        self.assertNotIn('lifo-toggle', body)
+        start = body.index('settings-panel')
+        self.assertIn('Newest first in my queue', body[start:])

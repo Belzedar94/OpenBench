@@ -1786,7 +1786,7 @@ def api_queue_cancel_script(request, task_id):
 
 
 def api_pref_lifo(request):
-    """Interruptor "newest first" del perfil propio (P5).  POST y de vuelta."""
+    """Interruptor "newest first" del menu de ajustes (P5).  POST y de vuelta."""
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
     if not request.user.is_authenticated:
@@ -6513,11 +6513,6 @@ def contributor(request, username):
         **_suggestions_badge(request),
         **_queue_receipt(request, viewer == username),
         'is_self': viewer == username,
-        # P5 (comunidad, 3-0, 28-ago-2026): el interruptor "newest first"
-        # existe solo en el perfil PROPIO — la preferencia es de la cuenta.
-        'lifo_toggle': viewer == username,
-        'lifo_on': bool(viewer == username and ContributorPref.objects.filter(
-            account=viewer, lifo_queue=True).exists()),
         # Los titulos hablan de la persona que se esta mirando: "Your queue"
         # cuando eres tu, "alice's queue" cuando no.  La pagina es publica y
         # tutear al visitante sobre la cola de otro seria mentirle.
