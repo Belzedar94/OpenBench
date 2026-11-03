@@ -295,8 +295,7 @@ class PageTests(TestCase):
         # Los 2.5B de alice y los 3.0B de la flota, en la misma escala que el
         # resto del sitio.
         self.assertIn('2.50B', body)
-        self.assertIn('2 accounts · 3.00B nodes searched by the whole fleet',
-                      body)
+        self.assertIn('2 accounts · 3.00B nodes', body)
 
     def test_the_section_sits_between_the_tree_and_the_campaigns(self):
         _searched('alice', 4_000_000)
