@@ -7,6 +7,8 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" id="atomicdb-theme-color" content="#161512">
 <title>{% block title %}AtomicDB{% endblock %}</title>
+<meta name="description" content="{% block description %}AtomicDB, a community effort to practically solve Atomic Chess: explore the opening tree, engine evaluations, proven lines and named openings.{% endblock %}">
+{% block canonical %}{% endblock %}
 <link rel="icon" type="image/svg+xml" href="{% static 'atomicdb/favicon.svg' %}{% if static_version %}?v={{ static_version }}{% endif %}">
 <script>
 (function () {

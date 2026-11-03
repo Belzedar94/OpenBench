@@ -7990,3 +7990,34 @@ def conquest_map(request):
         'root_key': logic.key_of(root_fen),
         'root_fen': root_fen,
     })
+
+
+# Un sitemap de verdad (cz_eclipsia, 3-nov: "is atomicdb SEO optimized?").
+# El robots.txt apuntaba a la portada, que es HTML.  Aqui van las paginas
+# fijas y una URL por posicion con nombre de apertura: lo que alguien busca
+# por su nombre.  Las posiciones sin nombre las encuentra el rastreador
+# siguiendo enlaces, al ritmo de su Crawl-delay.
+SITEMAP_PAGES = ('', 'docs/', 'roots/', 'map/', 'contributors/',
+                 'milestones/', 'queue/', 'workers/', 'campaigns/')
+
+
+def sitemap(request):
+    base = f'{request.scheme}://{request.get_host()}/atomicdb/'
+    paths = list(SITEMAP_PAGES)
+    paths += [f'docs/{slug}/' for slug, _title in DOCS_PAGES]
+    keys = set(openings.load_catalog())
+    try:
+        keys |= set(community_names.approved_map())
+    except Exception:
+        pass
+    # Solo las que el arbol tiene: una URL que contesta "not in the tree" no
+    # es una pagina que indexar.
+    present = Position.objects.filter(key__in=keys).values_list('key',
+                                                                flat=True)
+    paths += [f'explore/{key}/' for key in sorted(present)]
+    body = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    body += [f'<url><loc>{base}{path}</loc></url>' for path in paths]
+    body.append('</urlset>')
+    return HttpResponse('\n'.join(body) + '\n',
+                        content_type='application/xml; charset=utf-8')
