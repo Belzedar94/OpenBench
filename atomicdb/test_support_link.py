@@ -14,6 +14,7 @@ class SupportLinkTests(TestCase):
                 nav = body[body.index('<nav'):body.index('</nav>')]
                 self.assertIn(FUNDRAISER, nav)
                 self.assertIn('nav-support', nav)
+                self.assertIn(">Donate</a>", nav)
 
     def test_the_home_page_says_what_it_is_for(self):
         body = self.client.get('/atomicdb/').content.decode()
