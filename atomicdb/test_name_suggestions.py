@@ -78,7 +78,9 @@ class SuggestionFormTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn('Suggest a name for this position', body)
+        # A short toggle, the long wording in its tooltip.
+        self.assertIn('title="Suggest a name for this position">Suggest name'
+                      '</summary>', body)
         self.assertIn(f'/atomicdb/suggest/{self.pos.key}/', body)
         self.assertIn('csrfmiddlewaretoken', body)
 
@@ -217,8 +219,9 @@ class EditSuggestionFormTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn('Suggest a correction to this name', body)
-        self.assertNotIn('Suggest a name for this position', body)
+        self.assertIn('title="Suggest a correction to this name">Suggest '
+                      'correction</summary>', body)
+        self.assertNotIn('Suggest name', body)
         self.assertIn(f'Current name: {CATALOGUED_NAME}', _reading(body))
         self.assertIn(f'/atomicdb/suggest/{self.pos.key}/', body)
 
@@ -528,11 +531,13 @@ class EditModerationTests(TestCase):
     def test_the_page_still_says_what_the_catalogue_reads(self):
         self._decide('approve')
 
-        reading = _reading(Client().get(
-            f'/atomicdb/explore/{self.pos.key}/').content.decode())
+        body = Client().get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn(f'{CORRECTED_NAME} previously {CATALOGUED_NAME}',
-                      reading)
+        # In the name's tooltip only, not as text beside it.
+        self.assertIn(f'title="Previously “{CATALOGUED_NAME}”">'
+                      f'{CORRECTED_NAME}</h2>', body)
+        self.assertNotIn('previously', _reading(body))
 
     def test_the_static_catalogue_itself_is_untouched(self):
         digest = openings.catalog_sha256()
@@ -834,6 +839,48 @@ class RouteInheritanceTests(TestCase):
         self.assertNotIn('Reference:', reading)
         self.assertEqual(reading.count('2. Ng5 f5'), 1)
 
+    def test_the_name_links_to_the_position_that_bears_it(self):
+        nodes = _walk(REPORTED_LINE)
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        below = self._page(nodes, REPORTED_LINE)
+        own = self._page(nodes[:5], REPORTED_LINE[:4])
+
+        # Down the line: the route up to the named ply, so the line reads on.
+        url = views._explore_url(nodes[4].key, list(REPORTED_LINE[:4]))
+        self.assertEqual(below.context['opening_url'], url)
+        self.assertContains(
+            below, f'<a href="{url}" style="color:inherit" '
+                   'title="Open the position this name belongs to">'
+                   'Villager Defense, Knight Attack Open</a></h2>', html=False)
+        # On the named position itself the name is plain text.
+        self.assertIsNone(own.context['opening_url'])
+        self.assertContains(own, 'Villager Defense, Knight Attack Open</h2>')
+
+    def test_a_transposed_name_keeps_the_order_the_visitor_played(self):
+        nodes = _walk(TRANSPOSED_TWO_KNIGHTS)
+
+        response = self._page(nodes, TRANSPOSED_TWO_KNIGHTS)
+
+        opening = response.context['opening']
+        self.assertNotEqual(list(opening['reference_line_uci']),
+                            list(TRANSPOSED_TWO_KNIGHTS[:3]))
+        self.assertEqual(response.context['opening_url'], views._explore_url(
+            opening['position_key'], list(TRANSPOSED_TWO_KNIGHTS[:3])))
+
+    def test_off_the_route_the_name_links_by_its_reference(self):
+        opening = {'position_key': 'named', 'matched_ply': 1,
+                   'reference_line_uci': ['g1f3']}
+
+        self.assertEqual(
+            views._opening_name_url(opening, 'here', None, None),
+            views._explore_url('named', ['g1f3']))
+        self.assertEqual(
+            views._opening_name_url(opening, 'here', ['b1c3'],
+                                    ['start', 'elsewhere']),
+            views._explore_url('named', ['g1f3']))
+        self.assertIsNone(views._opening_name_url(opening, 'named', None, None))
+
     def test_a_name_reached_by_another_order_shows_its_reference(self):
         nodes = _walk(TRANSPOSED_TWO_KNIGHTS[:3])
 
@@ -897,9 +944,12 @@ class RouteInheritanceTests(TestCase):
         self.assertFalse(opening['exact'])
         self.assertEqual(opening['matched_ply'], 1)
         self.assertEqual(opening['catalog_name'], CATALOGUED_NAME)
-        reading = _reading(response.content.decode())
-        self.assertIn(f'1. Nf3 a6 {CORRECTED_NAME} previously '
-                      f'{CATALOGUED_NAME}', reading)
+        body = response.content.decode()
+        reading = _reading(body)
+        self.assertIn(f'1. Nf3 a6 {CORRECTED_NAME}', reading)
+        self.assertNotIn('previously', reading)
+        self.assertIn(f'· previously “{CATALOGUED_NAME}”">{CORRECTED_NAME}'
+                      '</a></h2>', body)
         self.assertNotIn('Community correction', reading)
         self.assertNotIn('Reference:', reading)
 

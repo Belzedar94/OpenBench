@@ -132,7 +132,9 @@ class ExplorerSanTests(TestCase):
         self.assertNotIn('<strong>g1f3</strong>', body)
 
     def test_the_keyboard_list_reads_in_san_and_links_in_uci(self):
-        body = Client().get(self.url).content.decode()
+        # The list lives on the home page's board; the explorer's table is
+        # its list there.
+        body = Client().get('/atomicdb/').content.decode()
 
         nav = re.search(r'<nav aria-label="Legal moves">(.*?)</nav>', body,
                         re.S).group(1)
@@ -169,8 +171,11 @@ class ExplorerSanTests(TestCase):
 
         body = Client().get(f'/atomicdb/explore/{meet.key}/').content.decode()
 
-        crumb = re.search(r'transpositions from:(.*?)</span>', body,
-                          re.S).group(1)
+        # A folded toggle with the count, the links inside it.
+        crumb = re.search(
+            r'<details class="suggest-name transpositions">\s*<summary[^>]*>'
+            r'transpositions \(2\)</summary>(.*?)</details>', body,
+            re.S).group(1)
         self.assertIn('title="g1f3">Nf3</a>', crumb)
         self.assertIn('title="b1c3">Nc3</a>', crumb)
 

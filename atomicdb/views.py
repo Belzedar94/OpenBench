@@ -7313,6 +7313,26 @@ def _reference_on_the_line(reference_san, line, from_root):
     return bool(from_root and wanted and shown[:len(wanted)] == wanted)
 
 
+def _opening_name_url(opening, pos_key, active_ucis, route_keys):
+    """Where the opening's name links: the position that bears the name.
+
+    None on that position itself.  Reached along the page's route, the link
+    keeps that route up to the named ply, so the move line above it reads as
+    it did; otherwise it takes the opening's reference line.  Strings only,
+    no query.
+    """
+    named_key = (opening or {}).get('position_key')
+    if not named_key or named_key == pos_key:
+        return None
+    ply = opening.get('matched_ply')
+    if (active_ucis is not None and route_keys is not None
+            and isinstance(ply, int) and 0 <= ply < len(route_keys)
+            and route_keys[ply] == named_key):
+        return _explore_url(named_key, active_ucis[:ply])
+    reference = list(opening.get('reference_line_uci') or ())
+    return _explore_url(named_key, reference or None)
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -7625,6 +7645,8 @@ def explore(request, key):
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
+        'opening_url': _opening_name_url(current_opening, pos.key,
+                                         active_ucis, route_keys),
         'opening_reference_shown': bool(
             current_opening and current_opening.get('reference_line_san')
             and not _reference_on_the_line(

@@ -7,9 +7,11 @@
 </div>
 {{ legal_ucis|json_script:"atomicdb-legal-moves" }}
 <script type="module" src="{% static 'atomicdb/board.js' %}"></script>
+{% comment %}``no_keyboard_list``: the page lists every legal move as a link
+already (the explorer's move table), so the board adds no second list.{% endcomment %}
 <noscript><p class="dim">Enable JavaScript for the interactive board; legal
-  moves remain available below.</p></noscript>
-{% if legal_ucis %}
+  moves remain available {% if no_keyboard_list %}in the move table{% else %}below{% endif %}.</p></noscript>
+{% if legal_ucis and not no_keyboard_list %}
 <details class="board-legal">
   <summary>Keyboard move list</summary>
   <nav aria-label="Legal moves">
