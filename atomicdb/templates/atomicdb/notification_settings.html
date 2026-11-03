@@ -13,14 +13,22 @@
     Tell me when an analysis I asked for is ready</label></p>
   <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Turned off, new
     results stop arriving under the bell. The notices you already have stay.</p>
-  <input type="hidden" name="serve" value="0">
-  <p><label><input type="checkbox" name="serve" value="1" id="serve-others-first"
-    style="margin-right:.45rem"{% if serve_others_first %} checked{% endif %}>
-    Let my workers serve other people's requests first</label></p>
-  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Normally the
-    workers you run take your own requests before anyone else's. Turned on,
-    they take everyone else's first, signed in or anonymous. When nobody
-    else is waiting, they go back to yours.</p>
+  {% comment %}Three buttons in a row, as cz_eclipsia drew it (3-Nov-2026):
+  the old checkbox was the first and the last of these.{% endcomment %}
+  <fieldset class="serve-order">
+    <legend>Which requests my workers take first</legend>
+    <div class="serve-order-choices">
+      <label><input type="radio" name="serve_order" value="own"{% if serve_order == 'own' %} checked{% endif %}><span>Mine first</span></label>
+      <label><input type="radio" name="serve_order" value="queue"{% if serve_order == 'queue' %} checked{% endif %}><span>Queue order</span></label>
+      <label><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
+    </div>
+  </fieldset>
+  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Mine first,
+    the default: the workers you run take your own requests before anyone
+    else's. Queue order: they take requests in the order the queue serves
+    everybody, yours included. Others first: they take everyone else's
+    first, signed in or anonymous, and go back to yours when nobody else is
+    waiting.</p>
   <button type="submit" class="reqbtn">Save</button>
   {% if saved %}<span class="dim" role="status" style="margin-left:.6rem">Saved.</span>{% endif %}
 </form>

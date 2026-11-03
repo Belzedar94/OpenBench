@@ -20,16 +20,27 @@ def lifo_on(username):
         account=username, lifo_queue=True).exists()
 
 
-def serves_others_first(username):
-    """Whether this account's workers give up serving its own requests first.
+# How an account's workers order the visitor requests: their own first (the
+# default), plain queue order, or everybody else's first.
+SERVE_ORDERS = ('own', 'queue', 'others')
+
+
+def serve_order(username):
+    """``'own'``, ``'queue'`` or ``'others'`` for this account's workers.
 
     Read once per lease by ``views.choose_pending``.  It only reorders the
     USER band, so it can never leave a worker without a task.
     """
     if not username:
-        return False
-    return ContributorPref.objects.filter(
-        account=username, serve_others_first=True).exists()
+        return 'own'
+    value = (ContributorPref.objects.filter(account=username)
+             .values_list('serve_order', flat=True).first())
+    return value if value in SERVE_ORDERS else 'own'
+
+
+def serves_others_first(username):
+    """Whether this account's workers serve everybody else's requests first."""
+    return serve_order(username) == 'others'
 
 
 def ready_notice_muted(usernames):
@@ -59,15 +70,21 @@ def notification_settings(request):
         pref.notify_ready = request.POST.get('ready') == '1'
         fields = ['notify_ready']
         # A form without the field (a page loaded before it existed) leaves
-        # the setting as it was instead of switching it off.
-        if 'serve' in request.POST:
-            pref.serve_others_first = request.POST.get('serve') == '1'
-            fields.append('serve_others_first')
+        # the setting as it was instead of switching it off.  ``serve`` is
+        # the checkbox of the page before the three choices.
+        order = request.POST.get('serve_order')
+        if order not in SERVE_ORDERS and 'serve' in request.POST:
+            order = 'others' if request.POST.get('serve') == '1' else 'own'
+        if order in SERVE_ORDERS:
+            pref.serve_order = order
+            pref.serve_others_first = order == 'others'
+            fields += ['serve_order', 'serve_others_first']
         pref.save(update_fields=fields)
         return redirect(f'{path}?saved=1')
     pref = ContributorPref.objects.filter(account=username).first()
     return render(request, 'atomicdb/notification_settings.html', {
         'notify_ready': pref.notify_ready if pref else True,
-        'serve_others_first': pref.serve_others_first if pref else False,
+        'serve_order': (pref.serve_order if pref
+                        and pref.serve_order in SERVE_ORDERS else 'own'),
         'saved': request.GET.get('saved') == '1',
     })
