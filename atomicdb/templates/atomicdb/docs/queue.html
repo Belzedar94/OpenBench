@@ -1,47 +1,146 @@
 {% extends "atomicdb/docs/_layout.html" %}
+{% load static %}
 {% block title %}The queue · AtomicDB docs{% endblock %}
 {% block doc %}
 <h2 id="queue">The queue</h2>
-<p>One commons, and it is public at <a href="/atomicdb/queue/">the queue
-page</a>: one row per account, read from the same predicates the ordering uses,
-so the page and the queue cannot disagree without it being a bug in one
-place.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li>Every account advances by the <strong>nodes it already has queued</strong>,
-  so the first request of a newcomer is served before the thousandth of a
-  flooder. The unit is nodes and not rows, so one 2B request weighs as much as
-  about sixteen 128M requests, and a big batch interleaves instead of walling
-  the queue.</li>
+<p class="docs-lead">Every analysis request waits in one shared queue until a
+worker picks it up. The queue is shared out fairly by account, so nobody can
+crowd everyone else out.</p>
+
+<figure>
+<img src="{% static 'atomicdb/docs/queue-page.webp' %}{% if static_version %}?v={{ static_version }}{% endif %}"
+  width="1080" height="370" loading="lazy"
+  alt="The queue page: a table with one row per account and the columns account, waiting, running, queued nodes, served in the last 60 minutes, and oldest wait.">
+<figcaption>The <a href="/atomicdb/queue/">queue page</a>: one row per
+account.</figcaption>
+</figure>
+<p>The queue is public at <a href="/atomicdb/queue/">the queue page</a>. Its
+rows are read from the same rules the ordering uses, so the page and the queue
+cannot disagree without it being a bug in one place.</p>
+<p>Click an account to see only its requests (running now, waiting with their
+place, and served) at <code>/atomicdb/queue/&lt;name&gt;/</code>; requests made
+without an account are at <a href="/atomicdb/queue/anonymous/">/atomicdb/queue/anonymous/</a>.</p>
+
+<h3 id="order">Who is served first</h3>
+<ul>
+<li>Each request waits behind the <strong>nodes its account already has
+  queued</strong> ahead of it. So the first request of a newcomer is served
+  before the thousandth of a flooder.</li>
+<li>The unit is nodes (search effort), not requests. One 2B request weighs as
+  much as about sixteen 128M requests, and a big batch interleaves with
+  everyone else instead of walling off the queue.</li>
 <li>Running a worker gives exactly <strong>one</strong> advantage: while it
-  runs, your own worker serves your own requests first. It is affinity and not
+  runs, your own worker serves your own requests first. It is affinity, not
   priority, and it scales with the CPU you are plugging in right now.</li>
-<li>The cap is per person: <strong>{{ queue_cap }}</strong> queued requests,
-  pending rows only. Cancelled rows do not count, running rows do not count,
-  and clearing your queue gives the allowance back immediately.</li>
-<li>Backing a request charges it to the <strong>best placed of its
-  requesters</strong>, which is what makes backing move things. Authorship
-  never moves; only the charge does.</li>
 </ul>
-<p class="dim" style="font-size:.9rem">Asking for a position somebody else
-already asked for joins their request instead of queueing a duplicate, and
-every account that asked is notified when the analysis lands. Repeated requests
-buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.
-Signed in, you can also tick several moves in the move list of a position and
+<figure class="docs-diagram">
+<svg viewBox="0 0 640 210" role="img" aria-labelledby="queue-svg-title">
+<title id="queue-svg-title">Three accounts: A has four 128M requests, B has a
+2B request followed by a 128M one, C has one 128M request. Each request is
+placed by the nodes its own account has queued ahead of it, so the first
+request of each account is served first, A's later ones next, and B's second
+request, which waits behind 2B, last.</title>
+<text x="0" y="22" class="muted">nodes already queued ahead, same account</text>
+<text x="0" y="62">A</text><text x="0" y="112">B</text><text x="0" y="162">C</text>
+<line class="edge" x1="40" y1="190" x2="630" y2="190"/>
+<text x="62" y="206">0</text><text x="142" y="206">128M</text>
+<text x="222" y="206">256M</text><text x="302" y="206">384M</text>
+<text x="420" y="206" class="muted">…</text><text x="552" y="206">2B</text>
+<rect class="box-hi" x="44" y="42" width="56" height="30" rx="5"/><text x="56" y="62">1st</text>
+<rect class="box" x="124" y="42" width="56" height="30" rx="5"/><text x="134" y="62">4th</text>
+<rect class="box" x="204" y="42" width="56" height="30" rx="5"/><text x="216" y="62">5th</text>
+<rect class="box" x="284" y="42" width="56" height="30" rx="5"/><text x="296" y="62">6th</text>
+<rect class="box-hi" x="44" y="92" width="56" height="30" rx="5"/><text x="54" y="112">2nd</text>
+<rect class="box" x="534" y="92" width="56" height="30" rx="5"/><text x="546" y="112">7th</text>
+<rect class="box-hi" x="44" y="142" width="56" height="30" rx="5"/><text x="56" y="162">3rd</text>
+</svg>
+<figcaption>Account A has four 128M requests, B one 2B request and then a
+128M one, C a single 128M request. Every account's first request goes before
+anyone's second; B's second request waits behind its own 2B.</figcaption>
+</figure>
+
+<h3 id="cap">How much you can queue</h3>
+<ul>
+<li>The cap is per person: <strong>{{ queue_cap }}</strong> queued requests,
+  counting pending rows only.</li>
+<li>Cancelled rows do not count, running rows do not count, and clearing your
+  queue gives the allowance back immediately.</li>
+</ul>
+
+<h3 id="sharing">Asking for the same position as somebody else</h3>
+<ul>
+<li>Asking for a position somebody else already asked for joins their request
+  instead of queueing a duplicate. This is called <em>backing</em> the
+  request.</li>
+<li>Every account that asked is notified when the analysis lands.</li>
+<li>The more people waiting on one request, the sooner it is served: a backed
+  request is charged to the <strong>best placed of its requesters</strong>.
+  Authorship never moves; only the charge does.</li>
+</ul>
+
+<h3 id="ladder">Asking again: deeper searches</h3>
+<ul>
+<li>Repeated requests buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.</li>
+<li>Once the 2B search of a position has run, the next request queues up to {{ subtree_cap }} searches of 128M on the lines below it instead, the best lines first.</li>
+<li>The last stop of the depth slider buys the same searches without waiting
+  for the ladder.</li>
+</ul>
+<details>
+<summary>Which lines below a position get searched</summary>
+<ul>
+<li>Where the side the position favours is to move: its three best moves
+  (eight when nothing ranks them yet).</li>
+<li>Where the other side is to move: every reply.</li>
+<li>A position that already has its 128M search is walked through, and its
+  own replies are asked next.</li>
+<li>Asking again while those searches are still waiting queues nothing
+  new.</li>
+</ul>
+</details>
+
+<h3 id="multi">Requesting several moves at once</h3>
+<p>Signed in, you can tick several moves in the move list of a position and
 request them all with one button, up to
 <strong>{{ multi_request_cap }}</strong> at a time. Each ticked move is one
-request, as if its own button had been clicked, with two differences. If you
-may pick a depth for that button, the bar offers a depth of its own, any rung
-from 128M to 2B whatever the depth of the position you are on, and a depth
-picked there is a target: a move with no search that deep gets exactly that
-depth, and a move already searched that deep, as its depth column shows, is
-skipped. And with no depth picked, a move already searched to the top of the
-ladder is left as it is; open it to queue the searches below it.</p>
-<p class="dim" style="font-size:.9rem">Once the 2B search of a position has
-run, the next request queues up to {{ subtree_cap }} searches of 128M on the
-lines below it instead, the best lines first: where the side the position
-favours is to move, its three best moves (eight when nothing ranks them yet);
-where the other side is to move, every reply. A position that already has its
-128M search is walked through and its own replies are asked next. Asking again
-while those searches are still waiting queues nothing new. The last stop of
-the depth slider buys the same searches without waiting for the ladder.</p>
+request, as if its own button had been clicked, with two differences:</p>
+<ul>
+<li>If you may pick a depth for that button, the bar offers a depth of its
+  own: any rung from 128M to 2B, whatever the depth of the position you are
+  on. A depth picked there is a target. A move with no search that deep gets
+  exactly that depth, and a move already searched that deep (as its depth
+  column shows) is skipped.</li>
+<li>With no depth picked, a move already searched to the top of the ladder is
+  left as it is; open it to queue the searches below it.</li>
+</ul>
+
+<h3 id="manage">Managing your own requests</h3>
+<p>While a request of yours is waiting, the position it was asked for offers
+two controls, and your contributor page lists all your waiting requests in one
+place.</p>
+<ul>
+<li><strong>Move to front</strong> serves that request before the rest of
+  yours. It takes the place your own first request already held, so nobody
+  else's request moves.</li>
+<li><strong>Withdraw</strong> takes back a request you have not been served
+  yet. It sits beside Move to front on the position, and on every waiting row
+  of your contributor page.</li>
+<li><strong>Clear my queue</strong>, at the foot of the waiting list,
+  withdraws everything you have waiting at once.</li>
+</ul>
+<details>
+<summary>Exact rules for withdrawing</summary>
+<ul>
+<li>Nothing has been spent on a waiting request, so withdrawing costs nothing
+  and puts nothing on your record.</li>
+<li>The ladder does not advance either, so the same rung is still there if you
+  ask again.</li>
+<li>It is one click, and the page you come back to offers to undo it.</li>
+<li>If somebody else asked for the same position, withdrawing only takes your
+  name off: the request stays in the queue under them.</li>
+<li>A request a worker has already started cannot be withdrawn, because the
+  search is already running.</li>
+<li><strong>Clear my queue</strong> follows the same rule for shared requests.
+  It asks for confirmation and has no undo.</li>
+</ul>
+</details>
 {% endblock %}

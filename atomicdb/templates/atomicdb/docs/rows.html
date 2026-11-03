@@ -1,27 +1,55 @@
 {% extends "atomicdb/docs/_layout.html" %}
+{% load static %}
 {% block title %}What a position row shows · AtomicDB docs{% endblock %}
 {% block doc %}
 <h2 id="rows">What a position row shows</h2>
-<p>A position is one row in the graph. Scores are centipawns from the side to
-move, the chessdb.cn convention used everywhere on this site.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><code>eval_cp</code>: the latest engine analysis of this position. It is
-  what one search reported, and nothing more.</li>
-<li><code>backed_eval</code> and <code>backed_move</code>: the negamax over the
-  graph, built from the analyses that really exist below this position, and the
-  edge the value came through. <code>backed_move</code> points at where to
-  look; it is not a recommendation an engine made here.</li>
-<li><code>status</code> and <code>closure</code>: for a solved position, the
-  verdict and the gate it closed through. Anything still open carries
-  <code>UNKNOWN</code> and no closure.</li>
-<li><code>backed_plies</code>: how deep the backing chain runs, counted in
-  plies below this position.</li>
-<li><code>backed_nodes</code>: the analysis size of the weakest link on that
-  chain. A long chain is worth what its thinnest search is worth.</li>
-</ul>
-<p class="dim" style="font-size:.9rem">A position headlines its best known
-value: proven status first, then the backed value, then the point eval. The
-point eval never headlines while something better is known, and it stays
-available as own search context in the tooltip and in the API
-<code>point</code> field. One position, one number.</p>
+<p class="docs-lead">Each position in the database is stored as one row. The
+row keeps three things apart: what the engine said about this position itself,
+what the analysed moves below it add up to, and whether it is solved.</p>
+<p>Scores are in centipawns (100 = one pawn) from the side to move, the
+chessdb.cn convention used everywhere on this site. Positions and the moves
+between them form a graph (see <a href="/atomicdb/docs/repetition/">Repetition</a>
+for why it is not a simple tree).</p>
+
+<figure>
+<img src="{% static 'atomicdb/docs/explore-status.webp' %}{% if static_version %}?v={{ static_version }}{% endif %}"
+  width="600" height="300" loading="lazy"
+  alt="The header of a position in the explorer: UNSOLVED, White to move, best line +1261cp with a BACKED 36 chip, then a line saying the position was analysed with 12.78B nodes across 6 passes, and the Request analysis button.">
+<figcaption>The header of the start position: unsolved, headlined by its
+backed value (+1261, through a chain 36 plies deep).</figcaption>
+</figure>
+
+<h3 id="fields">The fields</h3>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>What it is</th></tr>
+<tr><td><code>eval_cp</code></td><td>The latest engine analysis of this
+  position. It is what one search reported, and nothing more.</td></tr>
+<tr><td><code>backed_eval</code></td><td>The <a href="/atomicdb/docs/backing/">backed
+  value</a>: the best result the side to move can reach, worked out (by
+  negamax) from the analyses that really exist below this position.</td></tr>
+<tr><td><code>backed_move</code></td><td>The move the backed value came
+  through. It points at where to look; it is not a recommendation an engine
+  made here.</td></tr>
+<tr><td><code>status</code>, <code>closure</code></td><td>For a solved
+  position, the verdict and the <a href="/atomicdb/docs/method/#gates">gate</a>
+  it closed through. Anything still open carries <code>UNKNOWN</code> and no
+  closure.</td></tr>
+<tr><td><code>backed_plies</code></td><td>How deep the backing chain runs,
+  counted in plies (half-moves) below this position.</td></tr>
+<tr><td><code>backed_nodes</code></td><td>The analysis size of the weakest
+  link on that chain. A long chain is worth what its thinnest search is
+  worth.</td></tr>
+</table></div>
+
+<h3 id="headline">Which number a position shows</h3>
+<p>One position, one number. A position headlines its best known value, in
+this order:</p>
+<ol>
+<li>a proven status, if it has one;</li>
+<li>otherwise the backed value;</li>
+<li>otherwise the point eval (<code>eval_cp</code>).</li>
+</ol>
+<p>The point eval never headlines while something better is known. It stays
+available as the position's own search context in the tooltip and in the API
+<code>point</code> field.</p>
 {% endblock %}
