@@ -1323,6 +1323,16 @@ details summary {
   font-size: 11px;
 }
 
+.fenbox-here .reqbtn {
+  padding: .4rem .7rem;
+}
+
+.fen-lichess {
+  align-self: center;
+  font-size: .82rem;
+  white-space: nowrap;
+}
+
 .feed {
   list-style: none;
 }

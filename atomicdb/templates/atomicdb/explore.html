@@ -1,4 +1,5 @@
 {% extends "atomicdb/base.html" %}
+{% load atomicdb_links %}
 {% block title %}AtomicDB explorer{% endblock %}
 {% block content %}
 
@@ -699,7 +700,49 @@ most eight (§ views.explore).{% endcomment %}
         aria-label="FEN of this position. Edit it, or paste another FEN or a PGN, to go there"
         title="Edit this FEN, or paste another FEN or a PGN, to go there">
       <button class="reqbtn">Go</button>
+      <button type="button" class="reqbtn fen-copy" id="fen-copy"
+        title="Copy this FEN">Copy</button>
+      <a class="fen-lichess" id="fen-lichess" href="{{ pos.fen|lichess_analysis }}"
+        target="_blank" rel="noopener"
+        title="Open this position on the lichess atomic analysis board">lichess</a>
     </form>
+    <script>
+    (function () {
+      // Copy the FEN as it stands in the box, edits included, and keep the
+      // lichess link on the same FEN.
+      var input = document.querySelector('.fenbox-here input[name="fen"]');
+      var copy = document.getElementById('fen-copy');
+      var lichess = document.getElementById('fen-lichess');
+      var timer = null;
+      function said(text) {
+        copy.textContent = text;
+        clearTimeout(timer);
+        timer = setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
+      }
+      function fallback() {
+        input.focus();
+        input.select();
+        try {
+          said(document.execCommand('copy') ? 'Copied' : 'Press Ctrl+C');
+        } catch (_error) {
+          said('Press Ctrl+C');
+        }
+      }
+      copy.addEventListener('click', function () {
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(input.value.trim())
+            .then(function () { said('Copied'); }, fallback);
+        } else {
+          fallback();
+        }
+      });
+      input.addEventListener('input', function () {
+        lichess.href = 'https://lichess.org/analysis/atomic/' +
+          encodeURIComponent(input.value.trim().replace(/ /g, '_'))
+            .replace(/%2F/g, '/');
+      });
+    }());
+    </script>
     {% comment %}What this position and its moves have behind them, on one
     line: its own passes, nodes and seconds, then what the table below is
     made of (§ views._moves_summary), with its tooltip.  It replaced a
