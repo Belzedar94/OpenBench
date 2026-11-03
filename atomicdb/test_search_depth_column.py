@@ -269,8 +269,9 @@ class DepthColumnCostTests(TestCase):
 class DocsTests(TestCase):
 
     def test_the_docs_describe_the_column_and_the_field(self):
-        response = Client().get('/atomicdb/docs/')
+        response = Client().get('/atomicdb/docs/reading/')
 
         self.assertContains(response,
                             'The last column, <strong>depth</strong>')
+        response = Client().get('/atomicdb/docs/api/')
         self.assertContains(response, '<code>searched_nodes</code>')

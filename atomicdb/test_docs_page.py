@@ -55,26 +55,62 @@ class DocsPageTests(TestCase):
 
         self.assertContains(response, 'Sign out')
 
-    def test_every_section_is_there(self):
+    PAGES = ('rows', 'backing', 'repetition', 'queue', 'contributing', 'api',
+             'reading')
+
+    def test_every_section_has_its_own_page(self):
+        for slug, heading in zip(self.PAGES, self.SECTIONS):
+            with self.subTest(slug=slug):
+                response = self.client.get(f'/atomicdb/docs/{slug}/')
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, heading)
+                self.assertContains(response, f'id="{slug}"')
+
+    def test_the_index_lists_every_page(self):
         response = self.client.get('/atomicdb/docs/')
 
-        for heading in self.SECTIONS:
-            self.assertContains(response, heading)
+        for slug in self.PAGES + ('method',):
+            self.assertContains(response, f'href="/atomicdb/docs/{slug}/"')
 
-    def test_the_sections_are_linkable(self):
-        """Los anclajes son la mitad de para que sirve: se citan sueltos."""
-        response = self.client.get('/atomicdb/docs/')
+    def test_old_section_anchors_go_on_to_their_page(self):
+        """A fragment never reaches the server, so the index maps it itself:
+        /atomicdb/docs/#queue (the queue page's help icon, old posts) must
+        still land on the queue section."""
+        body = self.client.get('/atomicdb/docs/').content.decode()
 
-        for anchor in ('id="rows"', 'id="backing"', 'id="repetition"',
-                       'id="queue"', 'id="contributing"', 'id="api"',
-                       'id="reading"'):
-            self.assertContains(response, anchor)
+        self.assertIn('window.location.replace("/atomicdb/docs/" + hash',
+                      body)
+        for slug in self.PAGES:
+            self.assertIn(f'"{slug}"', body)
+
+    def test_an_unknown_page_is_a_404(self):
+        response = self.client.get('/atomicdb/docs/nothing-here/')
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_method_page_moved_under_the_docs(self):
+        response = self.client.get('/atomicdb/method/')
+
+        self.assertEqual(response.status_code, 301)
+        self.assertEqual(response['Location'], '/atomicdb/docs/method/')
+        page = self.client.get('/atomicdb/docs/method/')
+        self.assertContains(page, 'What "solved" means here')
+        self.assertContains(page, 'id="api"')
+
+    def test_the_pages_link_to_each_other_not_to_old_anchors(self):
+        for slug in self.PAGES + ('method',):
+            with self.subTest(slug=slug):
+                body = self.client.get(f'/atomicdb/docs/{slug}/').content.decode()
+                for old in self.PAGES:
+                    self.assertNotIn(f'href="#{old}"', body)
+                self.assertNotIn('href="/atomicdb/method/"', body)
 
     def test_the_limits_come_from_the_constants_that_apply_them(self):
-        response = self.client.get('/atomicdb/docs/')
+        response = self.client.get('/atomicdb/docs/queue/')
 
         self.assertContains(response,
                             f'<strong>{views.REQUEST_QUEUE_MAX:,}</strong>')
+        response = self.client.get('/atomicdb/docs/api/')
         self.assertContains(response, 'no hourly limit on this door')
 
     def test_the_navigation_takes_you_there(self):

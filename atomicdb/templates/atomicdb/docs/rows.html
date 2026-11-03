@@ -1,0 +1,27 @@
+{% extends "atomicdb/docs/_layout.html" %}
+{% block title %}What a position row shows · AtomicDB docs{% endblock %}
+{% block doc %}
+<h2 id="rows">What a position row shows</h2>
+<p>A position is one row in the graph. Scores are centipawns from the side to
+move, the chessdb.cn convention used everywhere on this site.</p>
+<ul style="margin:.8rem 0 .8rem 1.4rem">
+<li><code>eval_cp</code>: the latest engine analysis of this position. It is
+  what one search reported, and nothing more.</li>
+<li><code>backed_eval</code> and <code>backed_move</code>: the negamax over the
+  graph, built from the analyses that really exist below this position, and the
+  edge the value came through. <code>backed_move</code> points at where to
+  look; it is not a recommendation an engine made here.</li>
+<li><code>status</code> and <code>closure</code>: for a solved position, the
+  verdict and the gate it closed through. Anything still open carries
+  <code>UNKNOWN</code> and no closure.</li>
+<li><code>backed_plies</code>: how deep the backing chain runs, counted in
+  plies below this position.</li>
+<li><code>backed_nodes</code>: the analysis size of the weakest link on that
+  chain. A long chain is worth what its thinnest search is worth.</li>
+</ul>
+<p class="dim" style="font-size:.9rem">A position headlines its best known
+value: proven status first, then the backed value, then the point eval. The
+point eval never headlines while something better is known, and it stays
+available as own search context in the tooltip and in the API
+<code>point</code> field. One position, one number.</p>
+{% endblock %}

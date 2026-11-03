@@ -786,7 +786,7 @@ class PagesTests(TestCase):
     """The pages that describe the ladder say what it is now."""
 
     def test_the_docs_describe_the_ladder_and_the_searches_below(self):
-        body = self.client.get('/atomicdb/docs/').content.decode()
+        body = self.client.get('/atomicdb/docs/queue/').content.decode()
 
         self.assertIn('up the ladder of 128M, 512M and 2B nodes', body)
         self.assertIn('the next request queues up to 78 searches of 128M',
@@ -794,7 +794,7 @@ class PagesTests(TestCase):
         self.assertNotIn('10B', body)
 
     def test_the_method_page_too(self):
-        body = self.client.get('/atomicdb/method/').content.decode()
+        body = self.client.get('/atomicdb/docs/method/').content.decode()
 
         self.assertIn('128M, 512M and then 2B nodes', body)
         self.assertIn('to 78 searches of 128M on the lines below the position',

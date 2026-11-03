@@ -1,362 +1,39 @@
-{% extends "atomicdb/base.html" %}
+{% extends "atomicdb/docs/_layout.html" %}
 {% block title %}AtomicDB documentation{% endblock %}
-{% block content %}
-
-<p style="margin-top:0">This page explains where each number on the site comes
+{% block extra_head %}
+<script>
+/* The docs used to be one page with one anchor per section: an old link such
+   as /atomicdb/docs/#queue goes on to the page that section became. */
+(function () {
+  var pages = [{% for page in doc_pages %}"{{ page.slug }}"{% if not forloop.last %}, {% endif %}{% endfor %}];
+  var hash = window.location.hash.slice(1);
+  if (hash && pages.indexOf(hash) !== -1) {
+    window.location.replace("/atomicdb/docs/" + hash + "/");
+  }
+}());
+</script>
+{% endblock %}
+{% block doc %}
+<p style="margin-top:0">These pages explain where each number on the site comes
 from. What makes a position <em>closed</em> (solved) is on the
-<a href="/atomicdb/method/">method page</a>.</p>
+<a href="/atomicdb/docs/method/">method page</a>.</p>
 
 <h2 id="short">In short</h2>
 <ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><a href="#rows">A position row</a>: the engine's own evaluation, the value
+<li><a href="/atomicdb/docs/rows/">A position row</a>: the engine's own evaluation, the value
   worked out from the moves below it, and whether it is solved.</li>
-<li><a href="#backing">Backed values</a>: a position takes the best value its
+<li><a href="/atomicdb/docs/backing/">Backed values</a>: a position takes the best value its
   analysed moves give it, and every such value ends in a real engine search.</li>
-<li><a href="#repetition">Repetition</a>: a line that comes back to where it
+<li><a href="/atomicdb/docs/repetition/">Repetition</a>: a line that comes back to where it
   has been counts as a draw, but only along the line you are playing.</li>
-<li><a href="#queue">The queue</a>: one queue shared by account, so nobody can
+<li><a href="/atomicdb/docs/queue/">The queue</a>: one queue shared by account, so nobody can
   crowd everyone else out; your own worker serves your requests first.</li>
-<li><a href="#contributing">Contributing</a>: every analysis is credited to the
+<li><a href="/atomicdb/docs/contributing/">Contributing</a>: every analysis is credited to the
   account that delivered it.</li>
-<li><a href="#api">API</a>: query, request and manage your queue from a
+<li><a href="/atomicdb/docs/api/">API</a>: query, request and manage your queue from a
   script.</li>
-<li><a href="#reading">Reading a page</a>: what the chips next to the numbers
+<li><a href="/atomicdb/docs/reading/">Reading a page</a>: what the chips next to the numbers
   mean.</li>
 </ul>
-<p class="dim" style="font-size:.9rem">The sections below give the exact
-rules.</p>
-
-<h2 id="rows">What a position row shows</h2>
-<p>A position is one row in the graph. Scores are centipawns from the side to
-move, the chessdb.cn convention used everywhere on this site.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><code>eval_cp</code>: the latest engine analysis of this position. It is
-  what one search reported, and nothing more.</li>
-<li><code>backed_eval</code> and <code>backed_move</code>: the negamax over the
-  graph, built from the analyses that really exist below this position, and the
-  edge the value came through. <code>backed_move</code> points at where to
-  look; it is not a recommendation an engine made here.</li>
-<li><code>status</code> and <code>closure</code>: for a solved position, the
-  verdict and the gate it closed through. Anything still open carries
-  <code>UNKNOWN</code> and no closure.</li>
-<li><code>backed_plies</code>: how deep the backing chain runs, counted in
-  plies below this position.</li>
-<li><code>backed_nodes</code>: the analysis size of the weakest link on that
-  chain. A long chain is worth what its thinnest search is worth.</li>
-</ul>
-<p class="dim" style="font-size:.9rem">A position headlines its best known
-value: proven status first, then the backed value, then the point eval. The
-point eval never headlines while something better is known, and it stays
-available as own search context in the tooltip and in the API
-<code>point</code> field. One position, one number.</p>
-
-<h2 id="backing">How a backed value is built</h2>
-<p>Backing is a negamax over the graph, and it runs under five rules.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><strong>The best informed child always backs up.</strong> There is no depth
-  gate between a parent and its children: a child analysed at 128M nodes moves
-  a parent analysed at 2B. Between moves worth the same, a move whose chain
-  reaches a real analysis comes first (see <a href="#repetition">Repetition</a>);
-  then a proven win, the soonest mate first; then any move still open; then a
-  proven loss, the latest mate first, so a lost side resists longest and never
-  stands on a mate while a move is still open; then the heavier support, the
-  shallower chain, the move the position's own search chose and the move's
-  name, so the same graph always produces the same choice.</li>
-<li><strong>A multipv showcase bound grants permission, never a value.</strong>
-  When the last analysis of a position published two or more lines, the engine
-  asserted that no other move is better for the mover than the worst line of
-  that showcase. That bound lifts the partial coverage guards, so the negamax
-  runs over the informed children as if the table were complete. It never
-  competes as a value of its own: the number is always a real child's, and a
-  bound with no informed child under it backs nothing.</li>
-<li><strong>A mate band value against the mover backs nothing under partial
-  coverage without an anchor.</strong> A position with no evaluation of its own
-  whose only known reply loses knows nothing about itself: the mover still has
-  the rest of the legal moves unopened and is not going to choose that loss. A
-  gain for the mover still travels on a single child, as always.</li>
-<li><strong>A move nobody has searched cannot beat the lines of the position
-  above it.</strong> A position that was never searched and knows only the
-  replies somebody opened does not have a value yet. Its number is the best of
-  those replies: what the side to move there gets at least, a floor. Seen from
-  the position above, that same number is a ceiling on what the move can bring.
-  And when the position above published two or more lines, its own search
-  already said that no move outside them is better for the mover than the last
-  one. So an unsearched move outside those lines is not taken at a number that
-  beats them: the position stands on its other moves, and an analysis of that
-  move is queued to settle it. A move an engine did search always backs up, a
-  move that heads one of the lines refines its line as before, and a position
-  with fewer than two lines still shows what a walked line leads to.</li>
-<li><strong>Every backed value terminates in a real engine analysis, never in
-  a loop.</strong> That terminating analysis is the anchor, and where the chip
-  on the value is a link, the link goes to it. A value whose distance is longer
-  than any chain of moves can be (more than 256 plies) was counted round a
-  loop by a number that outlived its source: it is an echo, and the position
-  above reads that move as if it had no backed value.</li>
-</ul>
-<p class="dim" style="font-size:.9rem">One value never displaces another for
-free. While a position still has replies nobody has analysed, a favourable
-value with no engine nodes behind it, the band of a line a visitor walked, does
-not push aside a measured evaluation, and the analysis that would settle it is
-queued. It is set aside, not obeyed: the position is decided over its other
-moves as if that value were not there. So it keeps its own number unless a
-searched move beats it, except where a multipv bound vouches for the moves
-nobody opened: there its searched moves decide, even below its own number.
-When the value sits on the very move the position's own search chose, that
-search still values the move, and the position keeps its own number as
-before. The same when a favourable child
-carries far less search than the pass that produced the parent's own
-evaluation: the value propagates, the gap is recorded as an open question, and
-a deeper pass is bought for that child.</p>
-
-<h2 id="repetition">Repetition</h2>
-<p>The explorer is a transposition <strong>graph</strong>, not a tree.
-Positions are deduplicated by FEN with the counters erased, so the graph itself
-cannot say that a position occurred twice. Only a walk can.</p>
-<p>A repetition therefore belongs to a <strong>path</strong>, not to a
-position. The same position reached by another move order is not a repetition,
-and nothing stored on the position says otherwise. The repetition chip appears
-when the line you are currently playing revisits a position it has already been
-through.</p>
-<p>During a graph walk a line that returns to a position it has already been
-through contributes exactly <strong>0</strong> at the point where it returns,
-with zero quality. Every position on the way back still chooses among all of
-its moves: the side that does not want the draw leaves the loop wherever it
-has something better, and the side that can play the repeating move itself
-is never worse off than that draw. Between two moves worth the same, a move
-whose chain of backed moves reaches a real analysis wins over one whose chain
-runs into a loop, and that one over a move that comes back to the position
-itself; no position is left standing round a loop that one of its positions
-can leave for the same value. A returning line is only worth its value
-because somebody leaves the loop later, so the move that leaves is the one a
-position stands on and recommends, and following the best move does not go
-round a loop it could leave. Nor is a loop ever worth more than its best way
-out: the moves that only go round it bring no value of their own, nor does a
-move whose line runs straight back into it, a loop nobody wants to leave is a
-draw, and the distance shown is counted from the way out.
-Zero is what the line is worth; zero quality is
-what the claim
-deserves, because nobody has ever searched whether the repetition is forced,
-so it is an assertion about a walk over pointers and not a measurement. It can
-never settle a position that is not fully covered: while replies nobody has
-opened are still there, "the mover has nothing better than repeating" is a
-guess and not a verdict, so the position keeps its own measure and buys the
-analysis that answers the question either way.</p>
-<p>Where the coverage is complete, a 0 that wins against fully analysed
-siblings is a real drawing line, and a parent standing on it is standing on
-the truth. A position published on a repetition draw shows that same draw on
-the row it comes from, wearing the repetition chip: a header quoting a draw
-that no row displays would be a bug.</p>
-<p class="dim" style="font-size:.9rem">Repetitions are switched off in
-navigation rather than merely labelled. A move that would re-enter the line you
-are playing renders as a disabled row with the chip, and a stored line is shown
-only up to its first self crossing. Reach that position through the line above
-it instead.</p>
-
-<h2 id="queue">The queue</h2>
-<p>One commons, and it is public at <a href="/atomicdb/queue/">the queue
-page</a>: one row per account, read from the same predicates the ordering uses,
-so the page and the queue cannot disagree without it being a bug in one
-place.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li>Every account advances by the <strong>nodes it already has queued</strong>,
-  so the first request of a newcomer is served before the thousandth of a
-  flooder. The unit is nodes and not rows, so one 2B request weighs as much as
-  about sixteen 128M requests, and a big batch interleaves instead of walling
-  the queue.</li>
-<li>Running a worker gives exactly <strong>one</strong> advantage: while it
-  runs, your own worker serves your own requests first. It is affinity and not
-  priority, and it scales with the CPU you are plugging in right now.</li>
-<li>The cap is per person: <strong>{{ queue_cap }}</strong> queued requests,
-  pending rows only. Cancelled rows do not count, running rows do not count,
-  and clearing your queue gives the allowance back immediately.</li>
-<li>Backing a request charges it to the <strong>best placed of its
-  requesters</strong>, which is what makes backing move things. Authorship
-  never moves; only the charge does.</li>
-</ul>
-<p class="dim" style="font-size:.9rem">Asking for a position somebody else
-already asked for joins their request instead of queueing a duplicate, and
-every account that asked is notified when the analysis lands. Repeated requests
-buy genuinely deeper searches, up the ladder of 128M, 512M and 2B nodes.
-Signed in, you can also tick several moves in the move list of a position and
-request them all with one button, up to
-<strong>{{ multi_request_cap }}</strong> at a time. Each ticked move is one
-request, as if its own button had been clicked, with two differences. If you
-may pick a depth for that button, the bar offers a depth of its own, any rung
-from 128M to 2B whatever the depth of the position you are on, and a depth
-picked there is a target: a move with no search that deep gets exactly that
-depth, and a move already searched that deep, as its depth column shows, is
-skipped. And with no depth picked, a move already searched to the top of the
-ladder is left as it is; open it to queue the searches below it.</p>
-<p class="dim" style="font-size:.9rem">Once the 2B search of a position has
-run, the next request queues up to {{ subtree_cap }} searches of 128M on the
-lines below it instead, the best lines first: where the side the position
-favours is to move, its three best moves (eight when nothing ranks them yet);
-where the other side is to move, every reply. A position that already has its
-128M search is walked through and its own replies are asked next. Asking again
-while those searches are still waiting queues nothing new. The last stop of
-the depth slider buys the same searches without waiting for the ladder.</p>
-
-<h2 id="contributing">Contributing and attribution</h2>
-<p>Every completed analysis records the authenticated account that delivered
-it, and the boards on the front page group by that stamp.</p>
-<p>Machine names are chosen by the worker, and two accounts can announce the
-same one, so attribution never rests on a machine name where it can be avoided.
-Rows older than the stamp fall back to the machine map, and only for
-unambiguous machines: a disputed name attributes to nobody. Those nodes still
-count for the fleet, because they were really searched, and the page says out
-loud what belongs to nobody.</p>
-<p class="dim" style="font-size:.9rem">Contributing compute needs an account
-and the worker, and the instructions for both are on the
-<a href="/atomicdb/method/">method page</a>. Contributing without hardware
-needs neither: every unsolved position has a request button, and that request
-rides the same queue as everything else.</p>
-
-<h2 id="api">API</h2>
-<p><strong>Pace</strong>: the endpoints a script can call
-(<code>query</code>, <code>request</code>, <code>live-request</code>,
-<code>frontier</code>, <code>my-queue</code>, <code>queue-bump</code>,
-<code>queue-cancel</code> and <code>map</code>) take 5 requests a second from
-one address, with bursts of up to 50. Past that the reply is
-<code>429</code> with a JSON body and a <code>Retry-After</code> header, and
-nothing is lost: wait and send it again. The worker endpoints are not
-limited.</p>
-<p><strong>Request</strong>: <code>POST /atomicdb/api/request</code> with
-<code>fen</code>. <code>budget</code> picks a rung of the ladder and is
-optional, honoured for the accounts the explorer offers the depth slider to;
-<code>budget=10000000000</code> is the slider's last stop, up to
-{{ subtree_cap }} searches of 128M below the position.
-<code>username</code> and <code>password</code> put the request on your
-account, which is what buys the notification when it lands, the affinity with
-your own workers and your place in the fair share. Without them the request is
-anonymous, which works, and is served like a click without a session. The
-reply names the live request on that position: <code>task</code>, its
-<code>budget_nodes</code>, and <code>task_state</code>, which is
-<code>waiting</code> while it is in the queue and <code>searching</code> once
-an engine has it. A FEN the
-tree does not have is seeded rather than refused. Session cookies are
-deliberately ignored here, so a page open in your browser cannot spend your
-queue behind your back.</p>
-<p>Asked again after the first search has landed, a request buys the next rung
-of the ladder, exactly as a second click does, and once the 2B search has run,
-the searches below the position. Those replies say <code>expanded</code>, or
-<code>saturated</code> when there was nothing left to queue, with
-<code>searches_queued</code>, <code>subtree_plies</code> (how deep the
-deepest one is) and a <code>message</code> saying what was done. A script
-that only wants a position to <em>have</em> a search adds
-<code>only_if_missing=1</code>: the budget becomes a target (the rung you
-picked, or the first one). If a search that ran already covers it the reply is
-<code>already-analyzed</code> with <code>completed_budget</code> and nothing is
-queued; otherwise the request is queued as usual but never above the target.
-The check and the purchase happen together, so two scripts asking for the same
-position at the same moment cannot push it to the next rung. It asks about the
-position itself, so it cannot be sent with
-<code>budget=10000000000</code>.</p>
-<p class="dim" style="font-size:.9rem">There is no hourly limit on this door,
-same as the explorer button: what governs both is the per-person cap on queued
-requests above, and the per-account sharing of the service order. The pace
-above is about calls a second, not about how much you may ask for. Every call
-still leaves a receipt.</p>
-<p><strong>Your queue</strong>: <code>POST /atomicdb/api/my-queue/</code>
-with <code>username</code> and <code>password</code> (your OpenBench
-credentials, same as a worker) returns your PENDING and LEASED requests:
-task ids, position keys, budgets, state, and the <code>bump</code> /
-<code>cancel</code> paths each row accepts. A logged-in browser can simply
-<code>GET</code> it. The ids are what scripted withdraw needed (P3, voted
-28-Aug), and they plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
-and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code> with the same
-credentials (form or JSON; <code>undo=1</code> on cancel restores the row).
-The profile-page buttons are separate, session-guarded routes.</p>
-
-<p><strong>Query</strong>: <code>GET /atomicdb/api/query?fen=...</code> returns
-the position row (<code>status</code>, <code>closure</code>,
-<code>score</code>, <code>point</code>, <code>backed_plies</code>,
-<code>best_move</code>, the trust fields and the move list) plus an
-<code>analysis</code> block, which is <code>null</code> where no engine has looked
-yet. Inside that block, <code>lines</code> is the current pass,
-<code>previous</code> is the earlier pass, kept whenever it was wider than the
-one that replaced it, and <code>passes</code> is a compact summary per pass,
-newest first, which is what shows how the evaluation moved as the search went
-deeper. A position the tree does not have returns 404 here.</p>
-<p><strong>Roots</strong>: <code>GET /atomicdb/api/roots</code> returns the
-<a href="/atomicdb/roots/">roots page</a> as data: the start position, its
-first moves and the replies to 1.Nf3 in <code>positions</code>, and every
-named opening in <code>openings</code>. Each row has its <code>key</code>,
-<code>label</code>, <code>line</code> (the moves from the start position, in
-UCI) and its <code>value</code> now, then <code>best_value</code> and
-<code>worst_value</code> with their <code>best_at</code> and
-<code>worst_at</code> times (UTC) and their statuses. The values are
-centipawns from White's side, as on the page, with a proven win as +10000 or
--10000 and a proven draw as 0; the <code>score</code> of <code>query</code> is
-from the side to move instead. <code>since</code> is when tracking
-began.</p>
-<p class="dim" style="font-size:.9rem">Each entry of <code>moves</code> carries
-<code>floor</code>. It is <code>true</code> for a move nobody has searched,
-outside the position's current lines, whose number would beat the last of
-those lines: the position does not use that number, and
-<code>best_move</code> never points at such a move. A client that picks from
-<code>moves</code> itself should skip those rows the same way.</p>
-<p class="dim" style="font-size:.9rem">Each entry also carries
-<code>searched_nodes</code>, the node budget of the deepest search that move's
-position has had, the depth column of the explorer, or <code>null</code> where
-no search has reached it, next to <code>visits</code>, the number of passes it
-has received. It counts the same searches <code>only_if_missing</code> does,
-so a request for a rung at or below <code>searched_nodes</code> with that flag
-comes back <code>already-analyzed</code>.</p>
-<p class="dim" style="font-size:.9rem">A request nobody has started yet is
-still yours to take back. <strong>Withdraw</strong> sits on the position and on
-every waiting row of your contributor page, and <strong>Clear my
-queue</strong>, at the foot of that list, empties everything you have waiting
-at once. Both are signed in controls rather than credential calls: they post to
-<code>/atomicdb/queue/cancel/&lt;task&gt;/</code> and
-<code>/atomicdb/queue/clear/</code> from a session. A request a worker has
-already started cannot be withdrawn, because the search is already running, and
-withdrawing a request somebody else also asked for only takes your name off:
-the request stays in the queue under them.</p>
-
-<h2 id="reading">Reading a page</h2>
-<p>Every value carries where it came from.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><strong>backed</strong>: the negamax of what the subtree already knows,
-  with the depth of the chain in the chip. Where the chip is a link, it jumps
-  to the position the value comes from.</li>
-<li><strong>walked</strong>: the same shape of value, carried up a line a
-  visitor walked. No engine search supports it yet, and verification is queued
-  automatically.</li>
-<li><strong>repetition</strong>: on a move row, the value of that move comes
-  back to the position you are looking at, so the line repeats and the move is
-  worth no more than 0 whatever its own page claims. In the header, the chain
-  that leads here returns to a position it has already been through. On a
-  disabled row, the move would re-enter the line you are playing.</li>
-<li>A <strong>muted, italic number that still carries a backed chip</strong>
-  is a floor the position does not take: nothing has searched that move, only
-  some replies to it are known, and its number would beat the lines the search
-  of the position you are looking at published. It keeps its place in the
-  table, the board arrow passes over it, and searching the move settles it.</li>
-<li><strong>borrowed</strong>: on a move row, a number nothing has searched and
-  no engine line of the position you are looking at gives. Another position's
-  search wrote it, and the chip links there; if no other position's lines give
-  it (an older pass of this one may have), the link lands on the move's
-  position, marked <em>chain breaks here</em>. The header and the board arrow
-  count only searched moves and the position's own analysis, so they can
-  disagree with it until the move is searched. A position with no search of
-  its own shows no such chip: every number in its table comes from elsewhere,
-  as its header already says.</li>
-<li>A plain number with no chip is the position's own analysis: an engine
-  searched this position itself, and that is what it reported.</li>
-</ul>
-<p>The line under the header says what the table below is made of: how many
-moves an engine searched itself, how many were seeded from an engine line
-running through this position, and how many are queued.</p>
-<p>Moves sort by best known value in the mover's perspective and by nothing
-else, so a value from a 2B node search sits beside one from a 128M node
-search and neither is hidden behind the other. That is why a deeply analysed
-value can disagree with a shallow sibling row: the two numbers were bought with
-very different amounts of search, and the shallow one is the one likely to
-move. The gap is not papered over, it is queued.</p>
-<p>The last column, <strong>depth</strong>, says how much search that is: the
-node budget of the deepest search the move's position has had (128M, 512M,
-2B), or a dash where no search has reached it yet. Only a search that really
-ran counts: a request that was closed without one, because other work got
-there first, does not. Hover the cell for the number of visits.</p>
-
+<p class="dim" style="font-size:.9rem">Each page gives the exact rules.</p>
 {% endblock %}

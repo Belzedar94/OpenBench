@@ -91,7 +91,7 @@ class SuggestionsBadgeTests(TestCase):
         self._pending(2)
         self.client.login(username='mod', password='pw')
 
-        for path in ('/atomicdb/map/', '/atomicdb/method/'):
+        for path in ('/atomicdb/map/', '/atomicdb/docs/method/'):
             body = self.client.get(path).content.decode()
             self.assertNotIn('/atomicdb/suggestions/', body, path)
 

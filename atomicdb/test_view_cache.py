@@ -72,7 +72,7 @@ class CachedReadViewTests(TestCase):
 
     def test_map_and_method_serve_with_a_short_cache(self):
         for url, seconds in (('/atomicdb/map/', 30),
-                             ('/atomicdb/method/', 30)):
+                             ('/atomicdb/docs/method/', 30)):
             with self.subTest(url=url):
                 response = self.client.get(url)
                 self.assertEqual(response.status_code, 200)
