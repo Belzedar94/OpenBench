@@ -103,7 +103,7 @@ most eight (§ views.explore).{% endcomment %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
-        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>Request analysis</button>
+        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>{% if frontier_exhausted %}Request {{ subtree_cap }}&times;128M{% else %}Request analysis{% endif %}</button>
       {% comment %}El boton dice QUE compra y CUANTAS: "how I'm supposed to
       cover such node by actual analysis, by clicking every move?" — no, con
       este click, y esto es lo que cubre.  El tooltip mantiene el puente con la
@@ -229,6 +229,9 @@ most eight (§ views.explore).{% endcomment %}
     <script>
     (function () {
       const btn = document.getElementById('reqbtn');
+      // At the top of the ladder the button names what it buys below
+      // (cz_eclipsia, 3-Nov-2026), so a spent click goes back to that name.
+      const idleLabel = btn ? btn.textContent : 'Request analysis';
       const note = document.getElementById('reqnote');
       const cascade = document.getElementById('cascade');
       const fen = '{{ pos.fen|escapejs }}';
@@ -479,7 +482,7 @@ most eight (§ views.explore).{% endcomment %}
               'expanded': 'Queued below, waiting for a worker...',
               // nothing reachable from here had anything left to buy, so
               // the button goes back to offering the click it did not spend
-              'saturated': 'Request analysis',
+              'saturated': idleLabel,
             }[d.status] || 'Something went wrong';
             showNote(descent ? descentNote(d) : '',
                      d.status === 'saturated');

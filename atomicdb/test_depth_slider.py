@@ -468,3 +468,24 @@ class ForgedChoiceTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(AnalysisTask.objects.exists())
+
+
+class SpentLadderButtonTests(TestCase):
+    """cz_eclipsia, 3-Nov-2026: with the ladder spent and no slider, the
+    button says what it buys below the position."""
+
+    def setUp(self):
+        self.pos = _position()
+
+    def test_the_button_names_the_searches_below(self):
+        _completed(self.pos, LADDER[-1])
+
+        page = Client().get(f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn(f'Request {ingest.SUBTREE_TASK_CAP}×128M</button>',
+                      page)
+
+    def test_an_open_ladder_keeps_the_plain_label(self):
+        page = Client().get(f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn('>Request analysis</button>', page)
