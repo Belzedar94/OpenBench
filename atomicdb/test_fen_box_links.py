@@ -54,3 +54,4 @@ class FenBoxTests(TestCase):
         self.assertIn('target="_blank"', link)
         self.assertIn('rel="noopener"', link)
         self.assertIn('aria-label="Open this position on lichess"', link)
+        self.assertRegex(self.box, r'id="fen-lichess"[^>]*>.*?lichess</span></a>')
