@@ -191,16 +191,23 @@ a target (the rung you picked, or the first one):</p>
   with a <code>message</code> saying what was queued.</td></tr>
 <tr><td><code>saturated</code></td><td>Nothing left to buy here or
   below.</td></tr>
+<tr><td><code>already-requested</code></td><td>Your address already has a
+  live request on this position; wait for it to land.</td></tr>
+<tr><td><code>queue-full-account</code></td><td>You already have the maximum
+  number of requests waiting (HTTP <code>503</code>); let some land or clear
+  your queue.</td></tr>
 <tr><td><code>refused</code></td><td>Not accepted; <code>reason</code> says
-  why.</td></tr>
+  why (see the HTTP codes below).</td></tr>
 </table></div>
-<p>Refusals by HTTP code:</p>
+<p>Every answer that is not accepted carries a <code>reason</code>. Refusals by
+  HTTP code:</p>
 <ul>
 <li><code>400</code>: an unreadable FEN or a bad budget.</li>
 <li><code>403</code>: wrong credentials.</li>
+<li><code>405</code>: anything but a <code>POST</code>.</li>
 <li><code>429</code>: too many calls.</li>
-<li><code>503</code> with a <code>Retry-After</code>: a full queue or a busy
-  database.</li>
+<li><code>503</code>: your queue is full (<code>queue-full-account</code>), or
+  the database is busy (<code>refused</code> with a <code>Retry-After</code>).</li>
 </ul>
 
 <h3 id="my-queue">Your queue</h3>

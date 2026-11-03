@@ -89,8 +89,9 @@ board arrow passes over it, and searching the move settles it.</p>
   is queued.</li>
 </ul>
 <p>The last column, <strong>depth</strong>, says how much search that is: the
-node budget of the deepest search the move's position has had (128M, 512M,
-2B), or a dash where no search has reached it yet.</p>
+node budget of the deepest search the move's position has had (requests are
+128M, 512M or 2B; older 10B searches and smaller automatic ones such as 32M
+show too), or a dash where no search has reached it yet.</p>
 <ul>
 <li>Only a search that really ran counts: a request that was closed without
   one, because other work got there first, does not.</li>
