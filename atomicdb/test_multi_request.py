@@ -979,3 +979,25 @@ class DocsTests(TestCase):
 
         self.assertContains(
             response, f'<strong>{views.MULTI_REQUEST_CAP}</strong> at a time')
+
+
+class BarLayoutTests(TestCase):
+    """cz_eclipsia, 3-Nov-2026: "Select all" first among the selection
+    buttons, and the depth choice kept from page to page."""
+
+    def setUp(self):
+        self.root = _root()
+        self.page = f'/atomicdb/explore/{self.root.key}/'
+
+    def test_select_all_leads_the_selection_buttons(self):
+        body = _signed_in('belzedar', staff=True).get(self.page).content.decode()
+        bar = body[body.index('id="msbar"'):body.index('id="msnote"')]
+        order = [bar.index(f'id="{name}"')
+                 for name in ('msreq', 'msdepth', 'msall', 'msnew', 'msclear')]
+        self.assertEqual(order, sorted(order))
+
+    def test_the_depth_choice_is_remembered_in_the_browser(self):
+        body = _signed_in('belzedar', staff=True).get(self.page).content.decode()
+        bar = body[body.index('id="msbar"'):]
+        self.assertIn("'atomicdb-msdepth'", bar)
+        self.assertIn('localStorage.setItem(PICK_KEY, pick.value)', bar)
