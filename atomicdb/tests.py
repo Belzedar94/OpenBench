@@ -1610,6 +1610,10 @@ class BoardInteractionTests(TestCase):
         self.assertIn('Chessground(board', board_js)
         self.assertIn('draggable:', board_js)
         self.assertIn('/atomicdb/goto/', board_js)
+        # Back from a move, a page restored from the back/forward cache
+        # takes moves again, and a new board.js reaches cached browsers.
+        self.assertIn("addEventListener('pageshow'", board_js)
+        self.assertContains(response, 'atomicdb/board.js?v=')
 
     def test_terminal_board_still_initializes_chessground(self):
         from django.template.loader import render_to_string

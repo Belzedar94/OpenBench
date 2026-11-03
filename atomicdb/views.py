@@ -5502,7 +5502,10 @@ def api_query(request):
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
               'backed_plies': m['backed_plies'], 'visits': m['visits'],
-              'searched_nodes': m['searched_nodes'], 'floor': m['floor']}
+              'searched_nodes': m['searched_nodes'], 'floor': m['floor'],
+              # The explorer's ``borrowed`` chip (§ _child_moves): a number
+              # another position's search wrote.  Additive, after the rest.
+              'borrowed': m['borrowed']}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el

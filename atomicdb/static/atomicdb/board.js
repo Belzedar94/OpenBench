@@ -78,4 +78,20 @@ if (board && movesNode) {
       },
     },
   });
+
+  // Back from the position a move led to, the browser may restore this page
+  // from its back/forward cache exactly as it was left: mid-navigation, with
+  // the turn handed over by the move.  The board then took no move until a
+  // reload (seaside_cliff, 3-Nov-2026).  Put it back as the server drew it.
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    navigating = false;
+    ground.set({
+      fen: board.dataset.fen,
+      turnColor: board.dataset.turn,
+      lastMove: undefined,
+      movable: { color: board.dataset.turn, dests },
+    });
+    ground.cancelMove();
+  });
 }
