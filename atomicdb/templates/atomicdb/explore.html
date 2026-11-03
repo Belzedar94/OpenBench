@@ -697,7 +697,9 @@ most eight (§ views.explore).{% endcomment %}
         title="Edit this FEN, or paste another FEN or a PGN, to go there">
       <button class="reqbtn">Go</button>
       {% comment %}Icons rather than words (cz_eclipsia, 3-Nov-2026): the
-      box is as wide as the board and the FEN needs the room.{% endcomment %}
+      box is as wide as the board and the FEN needs the room.  An arrow out
+      alone does not say where it goes, so lichess keeps its name, small,
+      beside it.{% endcomment %}
       <button type="button" class="reqbtn fen-icon fen-copy" id="fen-copy"
         title="Copy this FEN" aria-label="Copy this FEN"><svg class="ico-copy"
         viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect
@@ -711,7 +713,8 @@ most eight (§ views.explore).{% endcomment %}
         aria-label="Open this position on lichess"><svg viewBox="0 0 24 24"
         width="16" height="16" aria-hidden="true"><path d="M14 4h6v6"/><path
         d="M20 4l-9 9"/><path
-        d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg></a>
+        d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg><span
+        class="fen-icon-word">lichess</span></a>
     </form>
     <script>
     (function () {

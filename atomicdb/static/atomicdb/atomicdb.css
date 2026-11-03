@@ -1335,6 +1335,11 @@ details summary {
   text-decoration: none;
 }
 
+.fen-icon-word {
+  margin-left: .3rem;
+  font-size: .78rem;
+}
+
 .fen-icon svg {
   fill: none;
   stroke: currentColor;
