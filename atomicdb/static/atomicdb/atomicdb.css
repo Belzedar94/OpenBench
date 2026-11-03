@@ -2207,6 +2207,152 @@ table.fleet-workers .qline {
 
 .docs-body > h2:first-child {
   margin-top: 0;
+  font-size: 1.4rem;
+}
+
+/* Docs prose is read top to bottom, so it keeps full contrast: the muted ink
+   is for short captions and footnotes only, never for a paragraph. */
+.docs-body {
+  max-width: 48rem;
+}
+
+.docs-body h3 {
+  margin: 1.4rem 0 .5rem;
+  font-size: 1.05rem;
+}
+
+.docs-body p {
+  margin: .7rem 0;
+}
+
+.docs-body p.dim,
+.docs-body li,
+.docs-body td {
+  color: var(--ink);
+}
+
+.docs-body ul,
+.docs-body ol {
+  margin: .6rem 0 .9rem 1.4rem;
+}
+
+.docs-body li + li {
+  margin-top: .35rem;
+}
+
+.docs-body code {
+  font-size: .9em;
+  overflow-wrap: anywhere;
+}
+
+.docs-lead {
+  font-size: 1.05rem;
+  color: var(--ink-strong);
+}
+
+.docs-note,
+.docs-body figcaption {
+  color: var(--ink-muted);
+  font-size: .85rem;
+}
+
+.docs-badge {
+  display: inline-block;
+  padding: .25rem .65rem;
+  border: 1px solid var(--warm);
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.docs-body figure {
+  margin: 1rem 0 1.2rem;
+}
+
+.docs-body figure img,
+.docs-body figure svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.docs-body figure img {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.docs-body figcaption {
+  margin-top: .35rem;
+}
+
+.docs-diagram text {
+  fill: var(--ink);
+  font: 13px "Segoe UI", system-ui, sans-serif;
+}
+
+.docs-diagram .box {
+  fill: var(--surface-1);
+  stroke: var(--border-strong);
+}
+
+.docs-diagram .box-hi {
+  fill: var(--surface-2);
+  stroke: var(--accent);
+}
+
+.docs-diagram .edge {
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.docs-diagram .edge-hi {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  fill: none;
+}
+
+.docs-diagram .muted {
+  fill: var(--ink-muted);
+}
+
+.docs-table-wrap {
+  margin: .8rem 0 1rem;
+  overflow-x: auto;
+}
+
+.docs-body table td {
+  vertical-align: top;
+}
+
+.docs-body tr:hover td {
+  background: none;
+}
+
+.docs-body details {
+  margin: .9rem 0;
+  padding: 0 .9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.docs-body details > summary {
+  margin: 0;
+  padding: .6rem 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.docs-body details[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.docs-body .raw {
+  max-height: none;
+  color: var(--ink);
+  font-size: 13px;
 }
 
 .docs-pager {
