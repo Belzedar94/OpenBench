@@ -538,7 +538,8 @@ class BackedDisplayTests(TestCase):
 
         self.assertEqual(page.status_code, 200)
         body = page.content.decode()
-        self.assertIn('best line +94cp', body)
+        # The value itself is the table's now; the header keeps the jump.
+        self.assertEqual(page.context['eval_stm_str'], '+94cp')
         self.assertIn('backed', body)
         self.assertIn('+30cp', body)          # la puntual sigue visible
 
@@ -550,9 +551,10 @@ class BackedDisplayTests(TestCase):
         Position.objects.filter(key=pos.key).update(
             eval_cp=30, nodes_invested=128_000_000, expanded=True)
 
-        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+        page = Client().get(f'/atomicdb/explore/{pos.key}/')
+        body = page.content.decode()
 
-        self.assertIn('best line +30cp', body)
+        self.assertEqual(page.context['eval_stm_str'], '+30cp')
         self.assertNotIn('backed-mark', body)
 
     def test_api_query_reports_both_values(self):
@@ -1611,9 +1613,10 @@ class RepetitionZeroContractTests(TestCase):
         self.assertFalse(row['backed'])
         self.assertIsNone(row['claim'])
 
-        body = Client().get(f'/atomicdb/explore/{a.key}/').content.decode()
+        page = Client().get(f'/atomicdb/explore/{a.key}/')
+        body = page.content.decode()
 
-        self.assertIn('best line +0cp', body)
+        self.assertEqual(page.context['eval_stm_str'], '+0cp')
         self.assertIsNotNone(
             re.search(r'<td>0\s*<span[^>]*>repetition</span>', body))
 
@@ -1735,21 +1738,27 @@ class SeededValueTests(TestCase):
         self.assertNotIn('>walked</span>', body)
         self.assertNotIn('eval-borrowed', body)
 
-    def test_the_header_of_a_seeded_position_says_walked(self):
+    def test_the_header_of_a_seeded_position_quotes_no_bare_claim(self):
+        """The header no longer quotes a value, so a ``walked`` chip with
+        no number and no jump would qualify nothing: it is gone.  The
+        claim's own warning lives on the rows that carry it."""
         pos = _pos('SEED-HS', 'w', eval_cp=180, expanded=True)
 
-        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+        page = Client().get(f'/atomicdb/explore/{pos.key}/')
+        body = page.content.decode()
 
-        self.assertIn('best line +180cp', body)
-        self.assertIn('>walked</span>', body)
+        self.assertEqual(page.context['eval_stm_str'], '+180cp')
+        self.assertTrue(page.context['eval_walked'])
+        self.assertNotIn('class="verdict', body)
 
     def test_the_header_of_a_searched_position_carries_no_mark(self):
         pos = _pos('SEED-HE', 'w', eval_cp=180, nodes_invested=128_000_000,
                    expanded=True)
 
-        body = Client().get(f'/atomicdb/explore/{pos.key}/').content.decode()
+        page = Client().get(f'/atomicdb/explore/{pos.key}/')
+        body = page.content.decode()
 
-        self.assertIn('best line +180cp', body)
+        self.assertEqual(page.context['eval_stm_str'], '+180cp')
         # ``walked`` a secas sale tambien del JS del boton de frontera; lo que
         # no puede existir es el chip.
         self.assertNotIn('>walked</span>', body)

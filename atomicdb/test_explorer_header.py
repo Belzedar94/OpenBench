@@ -340,7 +340,9 @@ class NodeStoryTests(TestCase):
 
         self.assertEqual(response.context['node_story'], '')
         self.assertNotIn('This position: analysed', body)
-        self.assertIn('>walked</span>', body)
+        # Nor a bare chip under the board: it qualified a value the header
+        # no longer quotes.
+        self.assertNotIn('>walked</span>', body)
 
 
 class CompactHeaderAndFenBoxTests(TestCase):
@@ -385,3 +387,46 @@ class CompactHeaderAndFenBoxTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Location'],
                          f'/atomicdb/explore/{logic.key_of(target)}/')
+
+class StatusUnderTheBoardTests(TestCase):
+    """Under the board only what the board and the table do not say."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+
+    def _body(self):
+        return self.client.get(
+            f'/atomicdb/explore/{self.root.key}/').content.decode()
+
+    def test_an_open_position_shows_no_status_side_or_value(self):
+        Position.objects.filter(key=self.root.key).update(
+            eval_cp=30, nodes_invested=128_000_000, expanded=True)
+
+        body = self._body()
+
+        self.assertNotIn('class="verdict', body)
+        for gone in ('UNSOLVED', 'White to move', 'best line'):
+            self.assertNotIn(gone, body)
+
+    def test_an_open_position_keeps_the_jump_to_its_value(self):
+        Position.objects.filter(key=self.root.key).update(
+            eval_cp=30, backed_eval=94, backed_plies=3, expanded=True,
+            nodes_invested=128_000_000)
+
+        body = self._body()
+
+        verdict = body[body.index('class="verdict'):]
+        verdict = verdict[:verdict.index('</div>')]
+        self.assertIn('backed ·3</a>', verdict)
+        self.assertIn('href="/atomicdb/backed-source/', verdict)
+        self.assertNotIn('+94cp<', verdict)
+
+    def test_a_closed_position_says_its_verdict_and_how(self):
+        Position.objects.filter(key=self.root.key).update(
+            status='WHITE_WIN', closure='TB', mate_in=9)
+
+        body = self._body()
+
+        self.assertIn('title="practical verdict, closed via TB">White wins · '
+                      'TB</span> · <strong>≤M5</strong>', body)
+        self.assertNotIn('WHITE_WIN <span', body)

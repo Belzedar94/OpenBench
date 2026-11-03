@@ -52,7 +52,7 @@ class HeadlineValueTests(TestCase):
         pos.refresh_from_db()
 
         body = self._explore(pos).content.decode()
-        self.assertIn('WHITE_WIN', body)
+        self.assertIn('White wins · MINIMAX', body)
         self.assertNotIn('best line', body)   # no cp headline on a proof
 
         payload = self._api(pos)
@@ -77,9 +77,9 @@ class HeadlineValueTests(TestCase):
         self.assertEqual(parent.backed_eval, 436)
         self.assertEqual(parent.backed_move, 'b2b4')
 
-        body = self._explore(parent).content.decode()
-        self.assertIn('best line +436cp', body)
-        self.assertNotIn('best line +370cp', body)
+        page = self._explore(parent)
+        body = page.content.decode()
+        self.assertEqual(page.context['eval_stm_str'], '+436cp')
         # The point eval is context now, not the headline.
         self.assertIn('eval stored on this position +370cp', body)
 
@@ -95,8 +95,9 @@ class HeadlineValueTests(TestCase):
             eval_cp=30, nodes_invested=128_000_000)
         pos.refresh_from_db()
 
-        body = self._explore(pos).content.decode()
-        self.assertIn('best line +30cp', body)
+        page = self._explore(pos)
+        body = page.content.decode()
+        self.assertEqual(page.context['eval_stm_str'], '+30cp')
         self.assertNotIn('backed-mark', body)
 
         payload = self._api(pos)
@@ -123,9 +124,9 @@ class HeadlineValueTests(TestCase):
         self.assertEqual(parent.backed_eval, 416)    # displaced, not vetoed
         self.assertEqual(parent.backed_move, 'd2d4')
 
-        body = self._explore(parent).content.decode()
-        self.assertIn('best line +416cp', body)
-        self.assertNotIn('best line +369cp', body)
+        page = self._explore(parent)
+        body = page.content.decode()
+        self.assertEqual(page.context['eval_stm_str'], '+416cp')
 
         self.assertEqual(self._api(parent)['score'], 416)
         self.assertTrue(AnalysisTask.objects.filter(
@@ -144,8 +145,9 @@ class HeadlineValueTests(TestCase):
         node.refresh_from_db()
 
         # Header: Black to move, best known -180 White-POV -> +180 mover-POV.
-        body = self._explore(node).content.decode()
-        self.assertIn('best line +180cp', body)
+        page = self._explore(node)
+        body = page.content.decode()
+        self.assertEqual(page.context['eval_stm_str'], '+180cp')
 
         # The node's row in its parent's table: White chooses at the root,
         # so the same value reads -180 there.
