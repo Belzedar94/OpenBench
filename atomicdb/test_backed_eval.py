@@ -2002,7 +2002,7 @@ class BorrowedNumberTests(TestCase):
         """The whole row of ``uci`` in the table of the tree."""
         for row in re.findall(r'<tr><td><span class="chip.*?</tr>', body):
             if ('/atomicdb/explore/' in row
-                    and (f'<strong title="{uci}">' in row
+                    and (f'<strong data-uci="{uci}" title="{uci}">' in row
                          or f'<strong>{uci}</strong>' in row)):
                 return row
         raise AssertionError(f'no row for {uci}')
