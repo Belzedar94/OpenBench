@@ -36,8 +36,10 @@ class TablesSettleQueuedPositionsTests(TestCase):
     @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=2)
     def test_a_covered_position_is_served_to_no_worker(self, probe):
         AnalysisTask.objects.create(position=self.covered, budget_nodes=1000)
-        self.assertEqual(self._lease(tb='1'), [])
-        probe.assert_called_with(SIX_MEN, max_pieces=6)
+        # An empty queue refills itself from the selector, so the lease may
+        # still hand out something; never the covered position.
+        self.assertNotIn(SIX_MEN, self._lease(tb='1'))
+        probe.assert_any_call(SIX_MEN, max_pieces=6)
 
     @mock.patch('atomicdb.ingest.tb.probe_wdl', return_value=2)
     def test_the_lease_goes_on_to_the_next_task(self, probe):
