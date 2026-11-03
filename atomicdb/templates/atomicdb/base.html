@@ -7,6 +7,7 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" id="atomicdb-theme-color" content="#161512">
 <title>{% block title %}AtomicDB{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="{% static 'atomicdb/favicon.svg' %}{% if static_version %}?v={{ static_version }}{% endif %}">
 <script>
 (function () {
   var root = document.documentElement;
