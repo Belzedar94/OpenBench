@@ -137,6 +137,8 @@ class WhoGetsTheBoxesTests(TestCase):
         self.assertEqual(sorted(boxes), sorted(['e2e4', *self.offtree]))
         self.assertIn('aria-label="Select e4"', body)
         self.assertIn('id="msbar"', body)
+        # The boxes need no sentence telling anyone to tick them.
+        self.assertNotIn('Tick moves', body)
 
     def test_a_solved_reply_gets_none(self):
         body = _signed_in().get(self.url).content.decode()

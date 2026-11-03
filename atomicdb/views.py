@@ -7297,6 +7297,22 @@ def _provenance(pos, moves, active_ucis=None, route_keys=None):
     return None
 
 
+def _reference_on_the_line(reference_san, line, from_root):
+    """Whether the opening's reference line is already the line printed above.
+
+    The name line under the moves repeats the reference only where it says
+    something the page does not: a position reached by another order, or one
+    whose printed line does not start at the root.
+    """
+    def plies(text):
+        tokens = (re.sub(r'^\d+\.+', '', token).rstrip('+#')
+                  for token in text.split())
+        return [token for token in tokens if token]
+    wanted = plies(reference_san or '')
+    shown = [step['san'].rstrip('+#') for step in line or ()]
+    return bool(from_root and wanted and shown[:len(wanted)] == wanted)
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -7609,6 +7625,11 @@ def explore(request, key):
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
+        'opening_reference_shown': bool(
+            current_opening and current_opening.get('reference_line_san')
+            and not _reference_on_the_line(
+                current_opening['reference_line_san'], numbered,
+                top.fen == logic.start_fen())),
         # El tablero recibe SOLO lo navegable: las jugadas bloqueadas por
         # repeticion no existen para el click (§ blocked_keys, arriba).
         'board_key': pos.key, 'legal_ucis': playable_ucis,

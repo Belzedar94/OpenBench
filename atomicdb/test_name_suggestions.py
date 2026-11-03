@@ -387,8 +387,9 @@ class ModerationFlowTests(TestCase):
         self.assertIsNotNone(self.suggestion.resolved_at)
         body = Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
-        self.assertIn('Belfast Gambit', body)
-        self.assertIn('Community name', body)
+        # The name stands on its own line, with no label in front of it.
+        self.assertIn('Belfast Gambit</h2>', body)
+        self.assertNotIn('Community name', body)
 
     def test_an_approved_name_labels_the_parent_edge(self):
         self._decide('approve')
@@ -522,7 +523,7 @@ class EditModerationTests(TestCase):
         reading = _reading(Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode())
         self.assertIn(CORRECTED_NAME, reading)
-        self.assertIn('Community correction', reading)
+        self.assertNotIn('Community correction', reading)
 
     def test_the_page_still_says_what_the_catalogue_reads(self):
         self._decide('approve')
@@ -530,7 +531,7 @@ class EditModerationTests(TestCase):
         reading = _reading(Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode())
 
-        self.assertIn(f'Previously “{CATALOGUED_NAME}”',
+        self.assertIn(f'{CORRECTED_NAME} previously {CATALOGUED_NAME}',
                       reading)
 
     def test_the_static_catalogue_itself_is_untouched(self):
@@ -595,10 +596,11 @@ class EditModerationTests(TestCase):
         self._decide('approve', suggestion=back)
 
         self.assertIsNone(community_names.name_for(self.pos.key))
-        reading = _reading(Client().get(
-            f'/atomicdb/explore/{self.pos.key}/').content.decode())
-        self.assertIn(f'Atomic opening {CATALOGUED_NAME}', reading)
-        self.assertNotIn('Community correction', reading)
+        body = Client().get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
+        self.assertIn(f'{CATALOGUED_NAME}</h2>', body)
+        self.assertNotIn('previously', _reading(body))
+        self.assertNotIn('Community correction', _reading(body))
 
     def test_a_plain_user_cannot_approve_an_edit_either(self):
         plain = User.objects.create_user(username='plain', password='pw')
@@ -798,8 +800,10 @@ class RouteInheritanceTests(TestCase):
         self.assertEqual(opening['position_key'], nodes[4].key)
         self.assertEqual(opening['current_key'], nodes[5].key)
         reading = _reading(response.content.decode())
-        self.assertIn('Community name Villager Defense, Knight Attack Open '
-                      'Reference: 1. Nf3 d6 2. Ng5 f5', reading)
+        # The name follows the line, which already prints the reference.
+        self.assertIn('Nf7 Villager Defense, Knight Attack Open', reading)
+        self.assertEqual(reading.count('2. Ng5 f5'), 1)
+        self.assertNotIn('Community name', reading)
         self.assertNotIn('Atomic opening', reading)
 
     def test_the_canonical_lineage_carries_it_the_same_way(self):
@@ -825,9 +829,21 @@ class RouteInheritanceTests(TestCase):
             views._opening_for_template(community_names.opening_for(
                 nodes[4].key, nodes[4].fen)))
         reading = _reading(response.content.decode())
-        self.assertIn('Community name Villager Defense, Knight Attack Open',
-                      reading)
+        self.assertIn('Villager Defense, Knight Attack Open', reading)
+        self.assertNotIn('Community name', reading)
         self.assertNotIn('Reference:', reading)
+        self.assertEqual(reading.count('2. Ng5 f5'), 1)
+
+    def test_a_name_reached_by_another_order_shows_its_reference(self):
+        nodes = _walk(TRANSPOSED_TWO_KNIGHTS[:3])
+
+        response = self._page(nodes, TRANSPOSED_TWO_KNIGHTS[:3])
+
+        opening = response.context['opening']
+        self.assertEqual(opening['name'], 'Two Knights Opening')
+        self.assertTrue(response.context['opening_reference_shown'])
+        self.assertIn(f"Two Knights Opening · {opening['reference_line_san']}",
+                      _reading(response.content.decode()))
 
     def test_depth_decides_between_the_catalogue_and_the_community(self):
         nodes = _walk(TRANSPOSED_TWO_KNIGHTS)
@@ -881,10 +897,11 @@ class RouteInheritanceTests(TestCase):
         self.assertFalse(opening['exact'])
         self.assertEqual(opening['matched_ply'], 1)
         self.assertEqual(opening['catalog_name'], CATALOGUED_NAME)
-        self.assertIn(
-            f'Community correction {CORRECTED_NAME} Reference: 1. Nf3 '
-            f'Previously “{CATALOGUED_NAME}”.',
-            _reading(response.content.decode()))
+        reading = _reading(response.content.decode())
+        self.assertIn(f'1. Nf3 a6 {CORRECTED_NAME} previously '
+                      f'{CATALOGUED_NAME}', reading)
+        self.assertNotIn('Community correction', reading)
+        self.assertNotIn('Reference:', reading)
 
     def test_a_deeper_catalogued_name_still_beats_a_correction(self):
         nodes = _walk(('g1f3', 'd7d6', 'f3g5'))
