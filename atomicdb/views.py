@@ -5932,6 +5932,30 @@ def queue_anonymous(request):
                   contributors.present_anonymous())
 
 
+def queue_user(request, username):
+    """One account's requests only: running, waiting and served.
+
+    Public like the profile it comes from, and cached like the anonymous page
+    (§ urls).  A name in another case goes to the account's own spelling, and
+    a name with no requests gets the same page as a missing profile.
+    """
+    if not contributors.has_activity(username):
+        canonical = _account_named_any_case(username)
+        if canonical and canonical != username:
+            return redirect('/atomicdb/queue/%s/' % canonical)
+        return render(request, 'atomicdb/missing.html', {
+            'missing_note': 'No AtomicDB requests under that name (yet).',
+        }, status=404)
+    return render(request, 'atomicdb/queue_user.html',
+                  contributors.present_queue(username))
+
+
+def queue_user_redirect(request, username):
+    """``/user/<name>/queue/`` is the same page as ``/queue/<name>/``."""
+    from urllib.parse import quote
+    return redirect('/atomicdb/queue/%s/' % quote(username), permanent=True)
+
+
 def _ago_text(moment):
     """"3 hours" for a queue age, in ONE unit.  Same shape the profile uses."""
     from django.utils.timesince import timesince

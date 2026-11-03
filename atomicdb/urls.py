@@ -169,6 +169,13 @@ urlpatterns = [
     # vaciarle la cola a otro.
     path('queue/clear/', views.api_queue_clear,
          name='atomicdb-queue-clear'),
+    # One account's requests only, without the rest of its profile.  After
+    # every fixed ``queue/<word>/`` route above, so none of them is shadowed;
+    # same short cache as the anonymous page.
+    path('queue/<str:username>/', cache_page(15)(vary_on_cookie(csrf_protect(
+        views.queue_user))), name='atomicdb-queue-user'),
+    path('user/<str:username>/queue/', views.queue_user_redirect,
+         name='atomicdb-contributor-queue'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es
     # del propietario y lo comprueba ella misma (no basta con esconder el
     # boton).  Las tres escriben, asi que ninguna lleva cache.

@@ -760,3 +760,61 @@ class AnonymousQueueTests(TestCase):
         self.assertLessEqual(len(queries), 8)
         self.assertFalse([query['sql'] for query in queries
                           if 'LIKE' in query['sql'].upper()])
+
+
+class AccountQueueTests(TestCase):
+    """``/queue/<name>/``: one account's requests, without the profile."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        self.waiting = _task(_child('a2a3'), source=AnalysisTask.Source.USER,
+                             requested_by='alice')
+        self.served = _completed(_child('b2b3'), 'box', 1_000_000, 1.0,
+                                 source=AnalysisTask.Source.USER,
+                                 requested_by='alice')
+        # Somebody else's request and an AUTO task stay out of it.
+        _task(_child('c2c3'), source=AnalysisTask.Source.USER,
+              requested_by='bob')
+        _task(_child('d2d3'))
+
+    def test_it_lists_the_account_requests_only(self):
+        response = Client().get('/atomicdb/queue/alice/')
+
+        self.assertEqual(response.status_code, 200)
+        keys = ([row['key'] for row in response.context['queue_pending']],
+                [row['key'] for row in response.context['queue_done']])
+        self.assertEqual(keys, ([self.waiting.position_id],
+                                [self.served.position_id]))
+        body = response.content.decode()
+        self.assertIn('href="/atomicdb/user/alice/"', body)
+        self.assertNotIn('Workers', body)
+
+    def test_the_queue_rows_and_the_profile_link_to_it(self):
+        queue = Client().get('/atomicdb/queue/').content.decode()
+        profile = Client().get('/atomicdb/user/alice/').content.decode()
+
+        self.assertIn('href="/atomicdb/queue/alice/"', queue)
+        self.assertIn('href="/atomicdb/queue/alice/"', profile)
+
+    def test_the_profile_spelling_redirects_to_it(self):
+        response = Client().get('/atomicdb/user/alice/queue/')
+
+        self.assertEqual(response.status_code, 301)
+        self.assertEqual(response['Location'], '/atomicdb/queue/alice/')
+
+    def test_the_fixed_queue_routes_are_not_taken_for_names(self):
+        for path in ('anonymous', 'clear', 'lifo'):
+            response = Client().get(f'/atomicdb/queue/{path}/')
+            self.assertTemplateNotUsed(response, 'atomicdb/queue_user.html')
+
+    def test_an_unknown_name_is_a_missing_page(self):
+        self.assertEqual(Client().get('/atomicdb/queue/nobody/').status_code,
+                         404)
+
+    def test_it_costs_fewer_queries_than_the_profile(self):
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            Client().get('/atomicdb/queue/alice/')
+
+        # Cold, with nothing cached: the profile's warm budget is 12.
+        self.assertLessEqual(len(queries), 10)
