@@ -1177,6 +1177,14 @@ details summary {
   color: var(--ink-muted);
 }
 
+.depthhold {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
 /* El deslizador y su escala comparten columna: las etiquetas de los peldanos
    solo significan algo si caen debajo del recorrido, no debajo de la fila. */
 .depthscale {

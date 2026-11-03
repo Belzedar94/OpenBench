@@ -198,6 +198,10 @@ def context(request, pos, chooser=None):
         # un peldano de la escalera (una sonda automatica de 8M tambien cuenta),
         # asi que se dice el numero real y no el peldano de al lado.
         'depth_spent_label': _human(completed_max) if completed_max else '',
+        # The first rung, the most an untouched button may send while the
+        # visitor's "only when I move the slider" box is ticked.
+        'depth_floor_nodes': REQUEST_BUDGET_LADDER[0],
+        'depth_floor_label': _human(REQUEST_BUDGET_LADDER[0]),
     }
 
 
