@@ -198,6 +198,67 @@ class WhoGetsTheBoxesTests(TestCase):
             self.assertNotIn(slider, bar)
 
 
+# A box "Select unanalysed" ticks, whatever order the attributes come in.
+UNANALYSED_BOX = re.compile(
+    r'<input\b(?=[^>]*\bdata-unanalysed\b)[^>]*\bdata-ms="([^"]+)"'
+    r'|<input\b[^>]*\bdata-ms="([^"]+)"[^>]*\bdata-unanalysed\b')
+
+
+class SelectUnanalysedTests(TestCase):
+    """One click ticks what no engine has searched and what is not a node."""
+
+    def setUp(self):
+        self.root = _root()
+        # e2e4 searched here, g1f3 a node nobody searched, d2d4 solved, and
+        # the other seventeen replies not nodes yet.
+        searched = _chain(self.root, ['e2e4'])[0]
+        Position.objects.filter(pk=searched.pk).update(
+            nodes_invested=128_000_000, visits=1, eval_cp=20)
+        _chain(self.root, ['g1f3'])
+        solved = _chain(self.root, ['d2d4'])[0]
+        Position.objects.filter(pk=solved.pk).update(status='WHITE_WIN',
+                                                     closure='MINIMAX')
+        self.offtree = [uci for uci in logic.legal_moves(self.root.fen)
+                        if uci not in ('e2e4', 'g1f3', 'd2d4')]
+        self.url = f'/atomicdb/explore/{self.root.key}/'
+
+    def _marked(self, body):
+        return sorted(a or b for a, b in UNANALYSED_BOX.findall(body))
+
+    def test_the_unsearched_and_the_off_tree_rows_are_marked(self):
+        body = _signed_in().get(self.url).content.decode()
+
+        self.assertEqual(self._marked(body), sorted(['g1f3', *self.offtree]))
+        self.assertIn('e2e4', BOX.findall(body))
+        self.assertIn('id="msnew"', body)
+        self.assertIn('>Select unanalysed</button>', body)
+
+    def test_the_button_respects_the_cap_and_counts_what_it_left(self):
+        body = _signed_in().get(self.url).content.decode()
+
+        script = body[body.index("getElementById('msnew')"):]
+        self.assertIn('CAP - ticked().length', script)
+        self.assertIn('left unticked, at most', script)
+        self.assertGreater(len(self._marked(body)), 0)
+
+    def test_an_anonymous_visitor_gets_no_button(self):
+        body = Client().get(self.url).content.decode()
+
+        self.assertNotIn('msnew', body)
+        self.assertEqual(self._marked(body), [])
+
+    def test_the_marks_are_the_rows_the_page_already_has(self):
+        """No new data behind the button: the rows' own ``unexplored`` flag
+        and the off-tree list, both in the context already."""
+        response = _signed_in().get(self.url)
+
+        expected = sorted(
+            [m['uci'] for m in response.context['moves']
+             if m['unexplored'] and m['status'] == 'UNKNOWN']
+            + [u['uci'] for u in response.context['offtree']])
+        self.assertEqual(self._marked(response.content.decode()), expected)
+
+
 class BlockedRowTests(TestCase):
     """The knight loop of test_repetition_ui: after 1.Nf3 Nf6 2.Ng1, the reply
     ...Ng8 is the start position again, so it re-enters the line."""

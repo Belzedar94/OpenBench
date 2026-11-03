@@ -88,7 +88,7 @@ own under the row.{% endcomment %}
 
 <div class="cols">
   <div>
-    {% include "atomicdb/_board.html" %}
+    {% include "atomicdb/_board.html" with no_keyboard_list=True %}
     <div class="verdict {{ verdict_css }}">
       {% comment %}El chip backed/walked ES el salto a su origen: un solo
       elemento, con los plies dentro.  La etiqueta se decide por la URL — con
@@ -733,7 +733,7 @@ own under the row.{% endcomment %}
       back with negative margins so the row does not grow.{% endcomment %}
       {% for m in moves %}
       <tr>
-        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}" aria-label="Select {{ m.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}"{% if m.unexplored %} data-unanalysed{% endif %} aria-label="Select {{ m.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
         {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
         conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
         vuelve a una posicion que ya esta en la linea actual y las
@@ -800,7 +800,7 @@ own under the row.{% endcomment %}
       {% endfor %}
       {% for u in offtree %}
       <tr>
-        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" data-unanalysed aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
         <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
@@ -873,6 +873,13 @@ own under the row.{% endcomment %}
     saying so.  After the click the moves that were handled are unticked, and
     the ones the queue left out stay ticked.
 
+    "Select unanalysed" ticks the moves no engine has searched (the
+    population of the "Analyse the N unanalysed moves" button,
+    § ingest.is_unexplored) and the replies not in the tree, folded or not:
+    those are the rows the fold hides, so that is the point of the button.
+    It ticks no more than the per-click cap, in table order, and the note
+    says how many it left out.  It shows only where such a box exists.
+
     Depth: the bar has a choice of its own (§ depth.bar_context), for the
     accounts the slider is offered to and under the same rule, and it reads
     no slider.  The slider prices this position, from its own next rung up
@@ -901,6 +908,7 @@ own under the row.{% endcomment %}
       {% if bar_rungs %}<span class="pvlinechoice"><label class="pvlinelab" for="msdepth">depth</label><select id="msdepth" class="pvline" autocomplete="off"
         title="The depth for every ticked move. A depth is a target: a move already searched that deep is skipped, and every other move gets exactly that depth"><option value="">each move's next rung</option>{% for rung in bar_rungs %}<option value="{{ rung.nodes }}">{{ rung.label }}</option>{% endfor %}</select></span>{% endif %}
       <button type="button" class="reqbtn dim" id="msall" title="Ticks every move shown in the table">Select all</button>
+      <button type="button" class="reqbtn dim" id="msnew" style="display:none" title="Ticks every move no engine has searched yet and every reply not in the tree, folded rows included, up to {{ multi_request_cap }} per click">Select unanalysed</button>
       <button type="button" class="reqbtn dim" id="msclear" style="display:none">Clear</button>
       <span class="dim" id="msnote" style="font-size:.8rem"></span>
       <span class="reqnote" id="msdone" hidden></span>
@@ -915,6 +923,7 @@ own under the row.{% endcomment %}
       if (!boxes().length) { return; }   // nothing on this page to tick
       const button = document.getElementById('msreq');
       const all = document.getElementById('msall');
+      const unanalysed = document.getElementById('msnew');
       const clear = document.getElementById('msclear');
       const note = document.getElementById('msnote');
       const done = document.getElementById('msdone');
@@ -922,6 +931,9 @@ own under the row.{% endcomment %}
       const fen = '{{ pos.fen|escapejs }}';
       const key = '{{ pos.key|escapejs }}';
       let sending = false;
+      // Unanalysed moves "Select unanalysed" could not tick for the cap; said
+      // in the note until the selection changes some other way.
+      let leftOut = 0;
       {% if bar_rungs %}
       // The bar's own depth choice, sent with every ticked move.  It reads no
       // slider: the slider prices this position, the bar its moves.
@@ -976,6 +988,11 @@ own under the row.{% endcomment %}
             parts.push(folded === 1 ? '1 ticked move is folded away'
                        : folded + ' ticked moves are folded away');
           }
+          if (leftOut) {
+            parts.push(leftOut + ' more unanalysed '
+                       + (leftOut === 1 ? 'move' : 'moves')
+                       + ' left unticked, at most ' + CAP + ' per click');
+          }
           text = parts.join(' · ');
         }
         if (!sending) { button.textContent = 'Request ' + n + ' selected'; }
@@ -1028,6 +1045,7 @@ own under the row.{% endcomment %}
       const IN_FLIGHT = ['queued', 'already-queued', 'already-requested'];
       function finish(d, offline) {
         sending = false;
+        leftOut = 0;   // the next click of the button counts afresh
         if (d && (d.status === 'done' || d.status === 'partial')) {
           const moves = d.moves || [];
           const handled = new Set(moves.filter(m => m.status !== 'queue-full')
@@ -1088,12 +1106,33 @@ own under the row.{% endcomment %}
       });
       all.addEventListener('click', function () {
         boxes().forEach(box => { if (shown(box)) { box.checked = true; } });
+        leftOut = 0;
+        refresh();
+      });
+      // The unanalysed moves, folded or not, in table order and up to the
+      // cap, counting what is ticked already.  With none on the page the
+      // button stays hidden.
+      function unanalysedBoxes() {
+        return boxes().filter(box => box.hasAttribute('data-unanalysed'));
+      }
+      if (unanalysedBoxes().length) { unanalysed.style.display = ''; }
+      unanalysed.addEventListener('click', function () {
+        const waiting = unanalysedBoxes().filter(box => !box.checked);
+        const room = Math.max(0, CAP - ticked().length);
+        waiting.slice(0, room).forEach(box => { box.checked = true; });
+        leftOut = Math.max(0, waiting.length - room);
         refresh();
       });
       clear.addEventListener('click', function () {
         boxes().forEach(box => { box.checked = false; });
+        leftOut = 0;
         say('');
         refresh();
+      });
+      // A box ticked or unticked by hand makes the count of what the button
+      // left out stale.
+      table.addEventListener('change', function (event) {
+        if (event.target.matches('input[data-ms]')) { leftOut = 0; refresh(); }
       });
       table.addEventListener('click', function (event) {
         // The whole chip cell toggles its box, so a thumb does not have to
@@ -1103,7 +1142,7 @@ own under the row.{% endcomment %}
         if (cell && cell.cellIndex === 0
             && !event.target.closest('label, a, button, input')) {
           const box = cell.querySelector('input[data-ms]');
-          if (box) { box.checked = !box.checked; }
+          if (box) { box.checked = !box.checked; leftOut = 0; }
         }
         refresh();
       });

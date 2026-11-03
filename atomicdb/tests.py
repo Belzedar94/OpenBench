@@ -1614,6 +1614,16 @@ class BoardInteractionTests(TestCase):
         self.assertIn('atomicdb-legal-moves', html)
         self.assertNotIn('Keyboard move list', html)
 
+    def test_the_explorer_board_adds_no_second_move_list(self):
+        """The explorer's move table links every legal move already."""
+        root = ingest.get_or_create_position(logic.start_fen())
+        response = self.client.get(f'/atomicdb/explore/{root.key}/')
+
+        self.assertContains(response, 'atomicdb/board.js')
+        self.assertContains(response, 'atomicdb-legal-moves')
+        self.assertNotContains(response, 'Keyboard move list')
+        self.assertContains(response, f'/atomicdb/goto/{root.key}/g1f3/')
+
 
 class NodesAccountingTests(TestCase):
 

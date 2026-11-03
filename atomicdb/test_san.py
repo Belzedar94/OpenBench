@@ -132,7 +132,9 @@ class ExplorerSanTests(TestCase):
         self.assertNotIn('<strong>g1f3</strong>', body)
 
     def test_the_keyboard_list_reads_in_san_and_links_in_uci(self):
-        body = Client().get(self.url).content.decode()
+        # The list lives on the home page's board; the explorer's table is
+        # its list there.
+        body = Client().get('/atomicdb/').content.decode()
 
         nav = re.search(r'<nav aria-label="Legal moves">(.*?)</nav>', body,
                         re.S).group(1)
