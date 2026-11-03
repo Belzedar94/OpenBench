@@ -781,6 +781,54 @@ def present(username, now=None, every_worker=False):
     return context
 
 
+def present_queue(username, now=None):
+    """Only the queue of ``username``: running, waiting and served.
+
+    The profile's three lists without the rest of the profile (workers,
+    counters, chart, names), so it costs the queue reads and nothing else.
+    """
+    now = now or timezone.now()
+    pending, leased, done = _queue_rows(username)
+    mine = _requests_of(username)
+    pending, pending_more = _overflow(pending, QUEUE_ROWS,
+                                      mine.filter(state=PENDING))
+    if len(done) > QUEUE_ROWS:
+        done_total = _account_cached(
+            'served', username, mine.filter(state=COMPLETED).count,
+            seconds=ACCOUNT_COUNT_SECONDS)
+        done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
+    else:
+        done_more = 0
+    labels = _labels([task.position_id for task in pending + leased + done],
+                     opening=bool(pending))
+    from . import views
+    lease_cutoff = now - timedelta(minutes=views.LEASE_MINUTES)
+    leased_rows = []
+    for task in leased:
+        beat = task.lease_heartbeat_at or task.leased_at
+        leased_rows.append(_presented(task, labels, now, {
+            'machine': task.machine,
+            'since': _ago(task.leased_at, now),
+            'quiet': beat is None or beat < lease_cutoff,
+        }))
+    pending_rows = [
+        _presented(task, labels, now,
+                   {'place': None if task.ahead is None else task.ahead + 1,
+                    'when': _ago(task.created, now),
+                    'backers': task.backers})
+        for task in pending]
+    done_rows = [_presented(task, labels, now,
+                            {'when': _ago(task.completed, now),
+                             'nodes': human(task.nodes_searched)})
+                 for task in done]
+    return {
+        'profile_user': username,
+        'queue_pending': pending_rows, 'queue_pending_more': pending_more,
+        'queue_leased': leased_rows, 'queue_done': done_rows,
+        'queue_done_more': done_more,
+    }
+
+
 def present_anonymous(now=None):
     """The queue of the requests made without an account, like a profile's.
 
