@@ -21,6 +21,10 @@ below); the colour is a token both themes define.{% endcomment %}
 <div class="opening-line" style="margin:{% if line %}-.45rem{% else %}0{% endif %} 0 .2rem;padding:0 .3rem;line-height:1.45;overflow-wrap:anywhere">
   <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)"{% if opening.catalog_name and not opening_url %} title="Previously &ldquo;{{ opening.catalog_name }}&rdquo;"{% endif %}>{% if opening_url %}<a href="{{ opening_url }}" style="color:inherit" title="Open the position this name belongs to{% if opening.catalog_name %} · previously &ldquo;{{ opening.catalog_name }}&rdquo;{% endif %}">{{ opening.name }}</a>{% else %}{{ opening.name }}{% endif %}</h2>{% if opening_reference_shown %}<span class="dim" style="margin-left:.35rem;font-size:.78rem">&middot; {{ opening.reference_line_san }}</span>{% endif %}
 </div>
+{% elif not line and line_from_root %}
+<div class="opening-line" style="margin:0 0 .2rem;padding:0 .3rem;line-height:1.45">
+  <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)">Starting position</h2>
+</div>
 {% endif %}
 
 {% comment %}One compact row of small links above the board, so the board
@@ -28,7 +32,7 @@ stays in view without scrolling: where this position sits, its other
 parents, and the two public proposals.  An open proposal takes a line of its
 own under the row.{% endcomment %}
 <div class="pos-tools">
-{% if not line %}<span class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</span>{% endif %}
+{% if not line %}{% if not line_from_root %}<span class="crumb">&hellip; move order unknown</span>{% elif opening %}<span class="crumb">root position</span>{% endif %}{% endif %}
 {% comment %}The other parents fold into a toggle like the two proposals
 beside it, with their count; open, it takes the row under them and lists
 the move from each parent.  The count is of the parents the page read, at

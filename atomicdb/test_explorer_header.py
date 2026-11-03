@@ -361,7 +361,9 @@ class CompactHeaderAndFenBoxTests(TestCase):
                         body.index('id="board"'))
         self.assertIn('title="Propose this line as an exploration campaign"',
                       body)
-        self.assertLess(row, body.index('root position'))
+        # The start position is named like an opening, above that row.
+        self.assertLess(body.index('>Starting position</h2>'), row)
+        self.assertNotIn('root position', body)
         # The board and the move table start on the same line: no visible
         # heading above the table, which keeps its name for screen readers.
         self.assertIn('<h2 class="visually-hidden" id="moves-heading">Moves'
