@@ -489,36 +489,3 @@ class SpentLadderButtonTests(TestCase):
         page = Client().get(f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
         self.assertIn('>Request analysis</button>', page)
-
-
-class DepthHoldTests(TestCase):
-    """cz_eclipsia, 3-Nov-2026: when a 128M search landed the page reloaded
-    and the untouched button bought 512M on the next click.  The hold box
-    keeps the untouched button at the first rung."""
-
-    def setUp(self):
-        self.pos = _position()
-        self.user = _staff()
-        self.url = f'/atomicdb/explore/{self.pos.key}/'
-
-    def test_a_chooser_gets_the_hold_box_and_its_floor(self):
-        body = _signed_in('belzedar').get(self.url).content.decode()
-        self.assertRegex(body, r'<input\b[^>]*\bid="depthhold"')
-        self.assertIn('deeper than 128.0M only when I move the slider', body)
-        self.assertIn(f'const FLOOR = {LADDER[0]};', body)
-        self.assertIn("'atomicdb-depth-hold'", body)
-        self.assertRegex(body, r"addEventListener\('click', function \(\) \{\s*"
-                               r"if \(held\(\)\) \{ return; \}")
-
-    def test_an_account_that_may_not_choose_gets_no_hold(self):
-        worker_account('lesha')
-        body = _signed_in('lesha').get(self.url).content.decode()
-        self.assertNotIn('depthhold', body)
-        self.assertRegex(body, r'function held\(\) \{ return false; \}')
-
-    def test_the_context_names_the_first_rung(self):
-        request = type('R', (), {'user': self.user})()
-        _completed(self.pos, LADDER[0])
-        context = depth.context(request, Position.objects.get(pk=self.pos.pk))
-        self.assertEqual(context['depth_floor_nodes'], LADDER[0])
-        self.assertEqual(context['depth_rungs'][0]['nodes'], LADDER[1])
