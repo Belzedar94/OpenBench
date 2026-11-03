@@ -44,11 +44,10 @@
 <header>
   <h1><a class="atomicdb-brand" href="/atomicdb/">Atomic<span>DB</span></a></h1>
   <nav>
-    <a href="/atomicdb/">Overview</a>
+    <a href="{{ start_url|default:'/atomicdb/' }}">Analyze</a>
     <a href="/atomicdb/map/">Move tree</a>
     <a href="/atomicdb/roots/">Openings</a>
     <a href="/atomicdb/queue/">Queue</a>
-    <a href="/atomicdb/method/">Method</a>
     <a href="/atomicdb/docs/">Docs</a>
     {% if suggestions_pending is not None %}<a href="/atomicdb/suggestions/"
       >Suggestions{% if suggestions_pending %} ({{ suggestions_pending }}){% endif %}</a>{% endif %}

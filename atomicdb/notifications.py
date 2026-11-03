@@ -22,6 +22,7 @@ COSTE.  Para quien no ha iniciado sesion, cero consultas: se decide con
 iniciado, un recuento por indice y una pagina de diez filas.
 """
 
+import functools
 import os
 from urllib.parse import quote
 
@@ -175,13 +176,24 @@ def _return_path(request):
     return quote(f'{path}?{query}' if query else path, safe='')
 
 
+@functools.lru_cache(maxsize=1)
+def start_url():
+    """The explorer page of the start position, for the "Analyze" nav link.
+
+    A constant of the variant, so it is computed once per process.
+    """
+    from . import logic
+    return f'/atomicdb/explore/{logic.key_of(logic.start_fen())}/'
+
+
 def identity(request):
     """Contexto de la zona de identidad. Vacio fuera de AtomicDB."""
     if not request.path.startswith('/atomicdb/'):
         return {}
     user = getattr(request, 'user', None)
     context = {'identity_next': _return_path(request),
-               'static_version': STATIC_VERSION}
+               'static_version': STATIC_VERSION,
+               'start_url': start_url()}
     if user is None or not user.is_authenticated:
         return context
     count = unseen_count(user.username)

@@ -88,11 +88,23 @@ class AtomicMoveTreePageTests(SimpleTestCase):
     def test_atomicdb_navigation_names_the_product_not_the_old_chart(self):
         response = self.client.get('/atomicdb/map/')
 
-        self.assertContains(response, 'href="/atomicdb/">Overview</a>')
         self.assertContains(
             response,
             'href="/atomicdb/map/">Move tree</a>',
         )
+
+    def test_the_first_nav_item_opens_the_start_position(self):
+        """The logo already goes home; the nav goes straight to analysis."""
+        from . import logic
+
+        response = self.client.get('/atomicdb/map/')
+
+        start = logic.key_of(logic.start_fen())
+        self.assertContains(
+            response, f'href="/atomicdb/explore/{start}/">Analyze</a>')
+        self.assertNotContains(response, '>Overview</a>')
+        self.assertNotContains(response, '>Method</a>')
+        self.assertContains(response, 'class="atomicdb-brand" href="/atomicdb/"')
 
 
 class AtomicMoveTreeStaticContractTests(SimpleTestCase):
