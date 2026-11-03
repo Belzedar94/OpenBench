@@ -2,7 +2,7 @@
 
 By default a worker serves its own account's requests before anybody else's
 (§ ``views.choose_pending``, ``own_first``).  With the setting on, that
-account's workers order the USER band exactly as anybody else's would; with
+account's workers serve everybody else's requests before their own; with
 nobody else waiting, its own requests are still served.
 """
 
@@ -72,17 +72,16 @@ class ServeOthersFirstLeaseTests(TestCase):
         self.assertEqual(first['id'], stranger.id)
         self.assertEqual(second['id'], own.id)
 
-    def test_on_an_older_own_request_keeps_its_place(self):
-        # Treated like anybody's, not pushed to the back: first come, first
-        # served still holds between own and foreign requests.
+    def test_on_an_older_own_request_still_waits_for_the_stranger(self):
+        # Skipped while anyone else's is waiting, however early it came.
         ContributorPref.objects.create(account='lesha',
                                        serve_others_first=True)
-        own = self._request(self.first, 'lesha')
-        self._request(self.second, 'w')
+        self._request(self.first, 'lesha')
+        stranger = self._request(self.second, 'w')
 
         leased = self._lease('m5')['tasks'][0]
 
-        self.assertEqual(leased['id'], own.id)
+        self.assertEqual(leased['id'], stranger.id)
 
     def test_on_with_only_own_requests_waiting_own_is_served(self):
         ContributorPref.objects.create(account='lesha',

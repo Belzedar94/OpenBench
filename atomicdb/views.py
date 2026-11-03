@@ -755,14 +755,16 @@ def api_lease(request):
             # y entre las ajenas, el reparto justo de mas abajo.  AUTO/FILL ni
             # se enteran: own vale 0 en toda la banda.
             #
-            # Con ``serve_others`` own vale 0 en TODAS las filas y la banda
-            # queda en el orden de cualquier otro worker.  Solo reordena:
-            # sin peticiones ajenas, lo propio sale igual.
-            own_first = (Value(0, output_field=IntegerField()) if serve_others
-                         else Case(
-                             When(source=AnalysisTask.Source.USER,
-                                  requested_by=user.username, then=Value(1)),
-                             default=Value(0), output_field=IntegerField()))
+            # Con ``serve_others`` el signo se invierte: lo propio va DETRAS
+            # de toda peticion ajena de la banda USER ("skip your own requests
+            # while anyone else's are waiting", lo prometido a seaside_cliff
+            # el 3-nov).  Solo reordena: sin ajenas, lo propio sale igual, y
+            # sigue por delante de AUTO/FILL, que miran -source antes.
+            own_first = Case(
+                When(source=AnalysisTask.Source.USER,
+                     requested_by=user.username,
+                     then=Value(-1 if serve_others else 1)),
+                default=Value(0), output_field=IntegerField())
             # Peticiones CON NOMBRE por delante de la marea anonima.  Un
             # "Analyse all" sin login encola decenas de tareas de cobertura;
             # un humano identificado que pide UNA posicion no debe esperar
