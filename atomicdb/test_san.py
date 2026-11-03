@@ -171,8 +171,11 @@ class ExplorerSanTests(TestCase):
 
         body = Client().get(f'/atomicdb/explore/{meet.key}/').content.decode()
 
-        crumb = re.search(r'transpositions from:(.*?)</span>', body,
-                          re.S).group(1)
+        # A folded toggle with the count, the links inside it.
+        crumb = re.search(
+            r'<details class="suggest-name transpositions">\s*<summary[^>]*>'
+            r'transpositions \(2\)</summary>(.*?)</details>', body,
+            re.S).group(1)
         self.assertIn('title="g1f3">Nf3</a>', crumb)
         self.assertIn('title="b1c3">Nc3</a>', crumb)
 

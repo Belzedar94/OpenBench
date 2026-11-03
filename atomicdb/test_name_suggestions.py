@@ -78,7 +78,9 @@ class SuggestionFormTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn('Suggest a name for this position', body)
+        # A short toggle, the long wording in its tooltip.
+        self.assertIn('title="Suggest a name for this position">Suggest name'
+                      '</summary>', body)
         self.assertIn(f'/atomicdb/suggest/{self.pos.key}/', body)
         self.assertIn('csrfmiddlewaretoken', body)
 
@@ -217,8 +219,9 @@ class EditSuggestionFormTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn('Suggest a correction to this name', body)
-        self.assertNotIn('Suggest a name for this position', body)
+        self.assertIn('title="Suggest a correction to this name">Suggest '
+                      'correction</summary>', body)
+        self.assertNotIn('Suggest name', body)
         self.assertIn(f'Current name: {CATALOGUED_NAME}', _reading(body))
         self.assertIn(f'/atomicdb/suggest/{self.pos.key}/', body)
 
@@ -528,11 +531,13 @@ class EditModerationTests(TestCase):
     def test_the_page_still_says_what_the_catalogue_reads(self):
         self._decide('approve')
 
-        reading = _reading(Client().get(
-            f'/atomicdb/explore/{self.pos.key}/').content.decode())
+        body = Client().get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn(f'{CORRECTED_NAME} previously {CATALOGUED_NAME}',
-                      reading)
+        # In the name's tooltip only, not as text beside it.
+        self.assertIn(f'title="Previously “{CATALOGUED_NAME}”">'
+                      f'{CORRECTED_NAME}</h2>', body)
+        self.assertNotIn('previously', _reading(body))
 
     def test_the_static_catalogue_itself_is_untouched(self):
         digest = openings.catalog_sha256()
@@ -939,9 +944,12 @@ class RouteInheritanceTests(TestCase):
         self.assertFalse(opening['exact'])
         self.assertEqual(opening['matched_ply'], 1)
         self.assertEqual(opening['catalog_name'], CATALOGUED_NAME)
-        reading = _reading(response.content.decode())
-        self.assertIn(f'1. Nf3 a6 {CORRECTED_NAME} previously '
-                      f'{CATALOGUED_NAME}', reading)
+        body = response.content.decode()
+        reading = _reading(body)
+        self.assertIn(f'1. Nf3 a6 {CORRECTED_NAME}', reading)
+        self.assertNotIn('previously', reading)
+        self.assertIn(f'· previously “{CATALOGUED_NAME}”">{CORRECTED_NAME}'
+                      '</a></h2>', body)
         self.assertNotIn('Community correction', reading)
         self.assertNotIn('Reference:', reading)
 

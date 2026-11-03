@@ -13,15 +13,13 @@
 {% comment %}The opening's name on one line under the moves, with no box and
 no label: the name says what it is.  The reference line only when it is not
 the line printed above (§ views._reference_on_the_line), and a corrected
-name keeps its old one as a short muted note.  Inline styles because
+name keeps its old one in the tooltip only.  The space before the reference
+is a margin: the minifier drops the whitespace after the heading.  Inline styles because
 atomicdb.css is not part of the ?v= digest of base.html (see the eval cell
 below); the colour is a token both themes define.{% endcomment %}
 {% if opening %}
 <div class="opening-line" style="margin:{% if line %}-.45rem{% else %}0{% endif %} 0 .8rem;padding:0 .3rem;line-height:1.45;overflow-wrap:anywhere">
-  <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)">{% if opening_url %}<a href="{{ opening_url }}" style="color:inherit" title="Open the position this name belongs to">{{ opening.name }}</a>{% else %}{{ opening.name }}{% endif %}</h2>
-  {% if opening.catalog_name %}<span class="dim" style="font-size:.78rem"
-    title="Previously &ldquo;{{ opening.catalog_name }}&rdquo;">previously {{ opening.catalog_name }}</span>{% endif %}
-  {% if opening_reference_shown %}<span class="dim" style="font-size:.78rem">&middot; {{ opening.reference_line_san }}</span>{% endif %}
+  <h2 id="opening-name" style="display:inline;margin:0;font-size:.95rem;color:var(--opening-ink)"{% if opening.catalog_name and not opening_url %} title="Previously &ldquo;{{ opening.catalog_name }}&rdquo;"{% endif %}>{% if opening_url %}<a href="{{ opening_url }}" style="color:inherit" title="Open the position this name belongs to{% if opening.catalog_name %} · previously &ldquo;{{ opening.catalog_name }}&rdquo;{% endif %}">{{ opening.name }}</a>{% else %}{{ opening.name }}{% endif %}</h2>{% if opening_reference_shown %}<span class="dim" style="margin-left:.35rem;font-size:.78rem">&middot; {{ opening.reference_line_san }}</span>{% endif %}
 </div>
 {% endif %}
 
@@ -31,13 +29,19 @@ parents, and the two public proposals.  An open proposal takes a line of its
 own under the row.{% endcomment %}
 <div class="pos-tools">
 {% if not line %}<span class="crumb">{% if line_from_root %}root position{% else %}&hellip; move order unknown{% endif %}</span>{% endif %}
+{% comment %}The other parents fold into a toggle like the two proposals
+beside it, with their count; open, it takes the row under them and lists
+the move from each parent.  The count is of the parents the page read, at
+most eight (§ views.explore).{% endcomment %}
 {% if parents|length > 1 %}
-<span class="crumb">transpositions from:
-  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
-</span>
+<details class="suggest-name transpositions">
+  <summary title="The moves that lead here from other positions">transpositions ({{ parents|length }})</summary>
+  <p class="crumb" style="margin:.4rem 0 0">from:
+  {% for p in parents %}<a href="/atomicdb/explore/{{ p.key }}/"{% if p.san != p.uci %} title="{{ p.uci }}"{% endif %}>{{ p.san|default:p.uci }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}</p>
+</details>
 {% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
-  <summary>{% if suggest_current_name %}Suggest a correction to this name{% else %}Suggest a name for this position{% endif %}</summary>
+  <summary title="{% if suggest_current_name %}Suggest a correction to this name{% else %}Suggest a name for this position{% endif %}">{% if suggest_current_name %}Suggest correction{% else %}Suggest name{% endif %}</summary>
   {% if suggest_message %}
   <p class="suggest-status{% if suggest_ok %} ok{% endif %}">{{ suggest_message }}</p>
   {% endif %}
@@ -64,7 +68,7 @@ own under the row.{% endcomment %}
 </details>
 
 <details class="suggest-name">
-  <summary>Propose this line as an exploration campaign</summary>
+  <summary title="Propose this line as an exploration campaign">Propose campaign</summary>
   <form method="post" action="/atomicdb/campaign/propose/">{% csrf_token %}
     <input type="hidden" name="key" value="{{ pos.key }}">
     <input type="hidden" name="back" value="1">
@@ -117,20 +121,6 @@ own under the row.{% endcomment %}
           class="backed-mark"
           title="the jump that landed here could not finish: the chain it was following breaks at this position. This is as far as the database goes, not the end of the line">chain breaks here</span>{% endif %}
     </div>
-    {% comment %}La historia del conocimiento del nodo, antes de los botones:
-    cuanto se busco AQUI y de que esta hecha la tabla de abajo.  Un visitante
-    leyo un nodo con cinco lineas vigentes y 136M de nodos como "no analysis is
-    done in the node ... just a bunch of walked evals": el dato estaba, en una
-    linea gris debajo del FEN y en veintitantos chips sueltos, y nadie lo
-    contaba.  Las dos frases las compone la vista (§ views._node_story,
-    views._moves_summary).
-
-    Van en UN renglon, no en dos: ahora que la procedencia ya no ocupa una
-    palabra por fila, la cabecera tampoco tiene por que gastar dos lineas para
-    decir de donde viene lo de abajo.  Siguen siendo dos frases con dos
-    tooltips propios — cada una explica lo suyo — separadas por una raya para
-    que el ``·`` de dentro del resumen no compita con el de fuera.{% endcomment %}
-    {% if node_story or moves_summary %}<p class="dim" style="font-size:.85rem;margin:.35rem 0 0">{% if node_story %}<span>{{ node_story }}</span>{% endif %}{% if node_story and moves_summary %} &mdash; {% endif %}{% if moves_summary %}<span title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">{{ moves_summary }}</span>{% endif %}</p>{% endif %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
@@ -165,7 +155,6 @@ own under the row.{% endcomment %}
       una eleccion, es un adorno que ocupa sitio.{% endcomment %}
       {% if pv_verify_lines|length > 1 %}<span class="pvlinechoice"><label class="pvlinelab" for="pvline">line</label><select id="pvline" class="pvline"
         title="Which line of the engine output to walk. The default buys the nearest gap, moving on when a line is covered end to end; pick a line to walk that one and no other"><option value="0">nearest gap</option>{% for cand in pv_verify_lines %}<option value="{{ cand.index }}">{{ cand.index }}. {{ cand.label }}</option>{% endfor %}</select></span>{% endif %}
-      <span class="dim" style="font-size:.8rem">workers serve visitor requests first</span>
       <span class="reqnote" id="reqnote" hidden></span>
     </p>
     {% comment %}El selector va DEBAJO del boton, no encima: el boton sigue
@@ -698,8 +687,12 @@ own under the row.{% endcomment %}
         title="Edit this FEN, or paste another FEN or a PGN, to go there">
       <button class="reqbtn">Go</button>
     </form>
+    {% comment %}What this position and its moves have behind them, on one
+    line: its own passes, nodes and seconds, then what the table below is
+    made of (§ views._moves_summary), with its tooltip.  It replaced a
+    second line above the buttons that said the same nodes and passes.{% endcomment %}
     <p class="dim" style="font-size:.8rem">visits {{ pos.visits }} ·
-      nodes {{ nodes_h }} · {{ time_str }}</p>
+      nodes {{ nodes_h }} · {{ time_str }}{% if moves_summary %} · <span class="moves-summary" title="searched = an engine looked at that move itself · from lines only = the value was seeded from an engine line through here, and every pass seeds the top moves it reports, so they pile up over passes · queued = analysis already requested and waiting">moves {{ moves_summary|cut:"Moves here: " }}</span>{% endif %}</p>
     {% if analysis_lines %}
     <details>
       <summary>raw engine output (last analysis)</summary>
@@ -712,7 +705,10 @@ own under the row.{% endcomment %}
     {% endif %}  </div>
 
   <div>
-    <h2 style="margin-top:0">Moves</h2>
+    {% comment %}No visible heading: the table starts level with the board,
+    and its name stays for screen readers (``visually-hidden`` has been in
+    the sheet for months, so a cached copy has it).{% endcomment %}
+    <h2 class="visually-hidden" id="moves-heading">Moves</h2>
     {% comment %}With the boxes of the multi-select, the chip column needs room
     for the chip and the box side by side.  On a phone the table is wider than
     the screen and every column shrinks to its narrowest, so without a floor
@@ -720,7 +716,7 @@ own under the row.{% endcomment %}
     floor goes on the header cell because the cells of the rows take no
     attributes (see the rows below), and it is content-box because browsers
     disagree on whether a cell's min-width counts its padding.{% endcomment %}
-    <table>
+    <table aria-labelledby="moves-heading">
       <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
         <th title="The node budget of the deepest search each move's position has had, a dash where none has yet. Hover a cell for its visits.">depth</th></tr>

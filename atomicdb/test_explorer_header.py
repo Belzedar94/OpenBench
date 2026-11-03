@@ -189,7 +189,7 @@ class NodeKnowledgeSummaryTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{parent.key}/').content.decode()
 
-        self.assertIn('Moves here: 1 searched · 2 from lines only · 1 queued',
+        self.assertIn('moves 1 searched · 2 from lines only · 1 queued',
                       body)
 
     def test_a_leased_search_counts_as_queued_like_the_status_line(self):
@@ -245,13 +245,15 @@ class NodeKnowledgeSummaryTests(TestCase):
         response = self.client.get(f'/atomicdb/explore/{pos.key}/')
 
         self.assertEqual(response.context['moves_summary'], '')
-        self.assertNotIn('Moves here:', response.content.decode())
+        body = response.content.decode()
+        self.assertNotIn('Moves here:', body)
+        self.assertNotIn('moves-summary', body)
 
-    def test_the_two_sentences_share_one_line_and_keep_two_tooltips(self):
-        """Ahora que la procedencia no gasta una palabra por fila, la cabecera
-        tampoco gasta dos renglones en decir de donde viene lo de abajo.  Una
-        linea, dos frases, y cada una con su propia explicacion al pasar el
-        raton: el resumen de la tabla la necesita, la del nodo no."""
+    def test_one_line_says_the_position_and_its_moves(self):
+        """The visits, nodes and seconds of this position and what its table
+        is made of, on the one line under the FEN, the summary with its own
+        tooltip.  The second line above the buttons said the same nodes and
+        passes again, so it is gone."""
         parent = self._mixed()
 
         body = self.client.get(
@@ -259,12 +261,11 @@ class NodeKnowledgeSummaryTests(TestCase):
 
         self.assertRegex(
             body,
-            r'<p class="dim"[^>]*>'
-            r'<span>This position: analysed \(136\.4M nodes across 27 '
-            r'passes\)</span> — <span title="searched = an engine looked at '
-            r'that move itself[^"]*">'
-            r'Moves here: 1 searched · 2 from lines only · 1 queued'
-            r'</span></p>')
+            r'<p class="dim"[^>]*>visits 27 · nodes 136\.4M · [\d.,]+s · '
+            r'<span class="moves-summary" title="searched = an engine looked '
+            r'at that move itself[^"]*">'
+            r'moves 1 searched · 2 from lines only · 1 queued</span></p>')
+        self.assertNotIn('This position: analysed', body)
 
     def test_the_queue_count_is_one_statement_for_the_whole_table(self):
         """El unico numero que no viaja ya en la fila entra por un IN, no por
@@ -305,14 +306,16 @@ class NodeStoryTests(TestCase):
 
     def test_a_searched_position_says_what_it_cost_and_over_how_many_passes(
             self):
+        """Said once, on the line under the FEN; the sentence above the
+        buttons repeated it and is gone from the page."""
         pos = _pos('KSTORY-A', 'w', eval_cp=180, expanded=True,
                    nodes_invested=136_400_000, visits=27)
 
         body = self.client.get(
             f'/atomicdb/explore/{pos.key}/').content.decode()
 
-        self.assertIn(
-            'This position: analysed (136.4M nodes across 27 passes)', body)
+        self.assertIn('visits 27 · nodes 136.4M', body)
+        self.assertNotIn('This position: analysed', body)
 
     def test_a_single_pass_is_not_pluralised(self):
         pos = _pos('KSTORY-B', 'w', eval_cp=180, expanded=True,
@@ -351,10 +354,18 @@ class CompactHeaderAndFenBoxTests(TestCase):
             f'/atomicdb/explore/{self.root.key}/').content.decode()
 
         row = body.index('class="pos-tools"')
-        self.assertLess(row, body.index('Suggest a name for this position'))
-        self.assertLess(body.index('Propose this line as an exploration '
-                                   'campaign'), body.index('id="board"'))
+        self.assertLess(row, body.index('>Suggest name</summary>'))
+        self.assertLess(body.index('>Propose campaign</summary>'),
+                        body.index('id="board"'))
+        self.assertIn('title="Propose this line as an exploration campaign"',
+                      body)
         self.assertLess(row, body.index('root position'))
+        # The board and the move table start on the same line: no visible
+        # heading above the table, which keeps its name for screen readers.
+        self.assertIn('<h2 class="visually-hidden" id="moves-heading">Moves'
+                      '</h2>', body)
+        self.assertIn('<table aria-labelledby="moves-heading">', body)
+        self.assertNotIn('workers serve visitor requests first', body)
 
     def test_the_fen_box_holds_this_position_and_posts_to_the_fen_jump(self):
         response = self.client.get(f'/atomicdb/explore/{self.root.key}/')
