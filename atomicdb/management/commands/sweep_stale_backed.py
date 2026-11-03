@@ -404,7 +404,59 @@ class Command(BaseCommand):
             plies += 1
         keys = list(dict.fromkeys(keys))
         summary['spine'] = {'plies': plies, 'candidates': len(keys)}
+        return keys + self._side_spines(summary, keys)
+
+    def _side_spines(self, summary, main):
+        """The support spines of the side branches at the top of the tree.
+
+        THE CASE (3-Nov-2026): 30 plies down 1...e5 a Black position kept its
+        arrow on ...Nc4 at 1261 after ...Nc4 had risen to 1275 and ...Rad8
+        stood at 1262, so 1...e5 read 1261 over a line ending at 1275.  1 cp
+        is under the epsilon, 1...e5 is a reply on the main spine, so the
+        spine feed checked it, but nothing walked the line under it.  Here:
+        the spine of every open first move of White and of every open reply
+        to the main line's first move, the positions only (no replies), down
+        to where each value is born.  About forty spines of up to
+        SPINE_MAX_PLIES positions, two indexed queries a ply.
+        """
+        start = logic.key_of(logic.start_fen())
+        main_set = set(main)
+        roots = []
+        for parent in (start, self._arrow_child(start)):
+            if parent is None:
+                continue
+            roots.extend(child for _move, child, status in Edge.objects.filter(
+                parent_id=parent).values_list(
+                    'move_uci', 'child_id', 'child__status')
+                if status == 'UNKNOWN')
+        keys, plies, branches = [], 0, 0
+        for root in dict.fromkeys(roots):
+            key, seen, depth = self._arrow_child(root), {root}, 0
+            branches += 1
+            while key and key not in seen and depth < SPINE_MAX_PLIES:
+                seen.add(key)
+                if not Position.objects.filter(key=key,
+                                               status='UNKNOWN').exists():
+                    break
+                if key not in main_set:
+                    keys.append(key)
+                key = self._arrow_child(key)
+                depth += 1
+            plies += depth
+        keys = list(dict.fromkeys(keys))
+        summary['side_spines'] = {'branches': branches, 'plies': plies,
+                                  'candidates': len(keys)}
         return keys
+
+    @staticmethod
+    def _arrow_child(key):
+        """The child ``key``'s ``backed_move`` points at, or None."""
+        move = (Position.objects.filter(key=key, status='UNKNOWN')
+                .values_list('backed_move', flat=True).first())
+        if not move:
+            return None
+        return (Edge.objects.filter(parent_id=key, move_uci=move)
+                .values_list('child_id', flat=True).first())
 
     def _guards(self, opts, last, summary):
         """``{generation: [keys]}`` of the BACKED_GUARD frontiers to carry on.
@@ -709,7 +761,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 '  rotation {unit} {from}-{to} of {total}: {candidates} '
                 'candidates'.format(**rotation))
-        for name in ('recent', 'spine', 'guards', 'kinds'):
+        for name in ('recent', 'spine', 'side_spines', 'guards', 'kinds'):
             if summary.get(name):
                 self.stdout.write('  %s %s' % (
                     name, json.dumps(summary[name], sort_keys=True)))
