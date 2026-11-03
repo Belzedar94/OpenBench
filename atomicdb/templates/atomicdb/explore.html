@@ -118,7 +118,7 @@ most eight (§ views.explore).{% endcomment %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
       <button class="reqbtn" id="reqbtn"{% if frontier_exhausted %}
-        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>{% if frontier_exhausted %}Request {{ subtree_cap }}&times;128M{% else %}Request analysis{% endif %}</button>
+        title="Searched to the top of the ladder already: this queues up to {{ subtree_cap }} searches of 128M on the lines below it"{% endif %}>{% if frontier_exhausted %}Request {{ subtree_cap }}&times;128M{% else %}Request {{ request_due_label }}{% endif %}</button>
       {% comment %}El boton dice QUE compra y CUANTAS: "how I'm supposed to
       cover such node by actual analysis, by clicking every move?" — no, con
       este click, y esto es lo que cubre.  El tooltip mantiene el puente con la
@@ -175,13 +175,6 @@ most eight (§ views.explore).{% endcomment %}
                data-spent="{{ depth_spent_label }}">
         <span class="depthticks" aria-hidden="true">{% for rung in depth_rungs %}<span title="{{ rung.label }} {{ rung.unit }}">{{ rung.label }}</span>{% endfor %}</span>
       </span>
-      {% comment %}When a search lands the page reloads, and the untouched
-      button then buys the next rung: a second click meant for something else
-      bought 512M (cz_eclipsia, 3-Nov-2026: "please prevent the client from
-      sending more than the explicitly requested amount of nodes").  Ticked,
-      the button sends no more than the first rung unless the slider was moved
-      on this page.  Remembered in this browser.{% endcomment %}
-      <label class="depthhold" title="With this ticked, a position already searched to {{ depth_floor_label }} or deeper is only searched deeper after you move the slider on its page"><input type="checkbox" id="depthhold" autocomplete="off"> deeper than {{ depth_floor_label }} only when I move the slider</label>
     </div>
     {{ depth_rungs|json_script:"atomicdb-depth-rungs" }}
     {% endif %}
@@ -264,6 +257,11 @@ most eight (§ views.explore).{% endcomment %}
       // watching this row alone would say nothing for six minutes.  Follow
       // whatever level the request actually reached instead.
       let below = {% if frontier_exhausted %}key{% else %}null{% endif %};
+      function humanNodes(n) {
+        n = Number(n) || 0;
+        return n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
+                        : (n / 1e6).toFixed(1) + 'M';
+      }
       function plural(n, one, many) {
         return n + ' ' + (n === 1 ? one : many);
       }
@@ -298,44 +296,11 @@ most eight (§ views.explore).{% endcomment %}
         depth.title = rung.label + ' ' + rung.unit
           + (depthSpent ? ' · already searched to ' + depthSpent : '');
         depth.setAttribute('aria-valuetext', rung.label + ' ' + rung.unit);
-        moved = true;
-        applyHold();
-        // Once the slider speaks, the button says what it will buy.
+        // The button names the depth it will send.
         if (!btn.disabled) {
-          btn.textContent = rung.subtree ? idleLabel : 'Request ' + rung.label;
+          btn.textContent = 'Request ' + rung.label;
         }
       });
-      // The hold: an untouched slider sends no more than the first rung.
-      const hold = document.getElementById('depthhold');
-      const HOLD_KEY = 'atomicdb-depth-hold';
-      const FLOOR = {{ depth_floor_nodes }};
-      let moved = false;
-      function held() {
-        return hold.checked && !moved && !!rungs[0] && !rungs[0].subtree
-               && Number(rungs[0].nodes) > FLOOR;
-      }
-      function applyHold() {
-        if (held()) {
-          btn.disabled = true;
-          btn.dataset.held = '1';
-          btn.textContent = (depthSpent ? 'Searched to ' + depthSpent + ': '
-                             : '') + 'move the slider to go deeper';
-        } else if (btn.dataset.held) {
-          delete btn.dataset.held;
-          btn.disabled = false;
-          btn.textContent = moved && chosenRung() && !chosenRung().subtree
-            ? 'Request ' + chosenRung().label
-            : 'Request ' + rungs[Number(depth.value)].label;
-        }
-      }
-      try { hold.checked = localStorage.getItem(HOLD_KEY) === '1'; } catch (e) {}
-      hold.addEventListener('change', function () {
-        try { localStorage.setItem(HOLD_KEY, hold.checked ? '1' : '0'); } catch (e) {}
-        applyHold();
-      });
-      applyHold();
-      {% else %}
-      function held() { return false; }
       {% endif %}
       function showNote(text, spent) {
         note.textContent = text || '';
@@ -474,6 +439,11 @@ most eight (§ views.explore).{% endcomment %}
       function requestAnalysis(attempt) {
         const playRoute = new URLSearchParams(location.search).get('play') || '';
         const body = {route: playRoute};
+        {% if not frontier_exhausted %}
+        // The depth the button names: the server refuses it if the position
+        // was searched that deep since this page loaded.
+        body.expect = '{{ request_due_nodes }}';
+        {% endif %}
         {% if depth_rungs %}
         const rung = chosenRung();
         if (rung) { body.budget = String(rung.nodes); }
@@ -533,6 +503,9 @@ most eight (§ views.explore).{% endcomment %}
               'bad-budget': 'That depth is gone, reload the page',
               'confirm-10b': 'That option needs the confirmation dialog',
               {% endif %}
+              // Searched that deep since the page loaded: nothing was sent.
+              'already-analyzed': 'Already searched to '
+                + humanNodes(d.completed_budget) + ', nothing sent',
               'already-solved': 'Already solved',
               // The request bought below this position: the searches below
               // it once the ladder here is spent, or the slider's last stop.
@@ -557,7 +530,8 @@ most eight (§ views.explore).{% endcomment %}
             if (['queued', 'already-queued', 'already-requested',
                  'expanded'].includes(d.status)) {
               poll(36);   // espera activa ~6 min, luego rendirse con gracia
-            } else {
+            } else if (d.status !== 'already-analyzed') {
+              // A refused depth stays refused until a reload prices the next.
               btn.disabled = false;
             }
           })
@@ -577,7 +551,6 @@ most eight (§ views.explore).{% endcomment %}
           });
       }
       btn.addEventListener('click', function () {
-        if (held()) { return; }
         btn.disabled = true;
         showNote('');   // a new click does not inherit the last verdict
         requestAnalysis(0);

@@ -353,18 +353,22 @@ class ChosenRungTests(TestCase):
         self.assertEqual(response.json()['status'], 'queued')
         self.assertEqual(_pending(self.pos).budget_nodes, LADDER[-1])
 
-    def test_a_choice_below_the_due_rung_cannot_cheapen_the_request(self):
-        # 512M es lo que toca; pedir 128M no compra una busqueda mas pobre —
-        # una eleccion solo puede SUBIR el suelo.  La plantilla ni siquiera
+    def test_a_choice_already_searched_buys_nothing(self):
+        # 512M es lo que toca; pedir 128M no compra una busqueda mas pobre, y
+        # desde el 3-nov tampoco compra la de 512M que nadie nombro: una
+        # profundidad elegida que la posicion ya tiene se rechaza
+        # (§ ExpectedBudgetTests, cz_eclipsia).  La plantilla ni siquiera
         # ofrece ese peldano, asi que esto es la red de abajo.
         _worker('wolfram', seen_days_ago=1)
         _completed(self.pos, LADDER[0])
         Position.objects.filter(pk=self.pos.pk).update(visits=1)
 
-        _signed_in('wolfram').post(f'/atomicdb/request/{self.pos.key}/',
-                                   {'budget': LADDER[0]})
+        response = _signed_in('wolfram').post(
+            f'/atomicdb/request/{self.pos.key}/', {'budget': LADDER[0]})
 
-        self.assertEqual(_pending(self.pos).budget_nodes, LADDER[1])
+        self.assertEqual(response.json()['status'], 'already-analyzed')
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self.pos, state=AnalysisTask.TState.PENDING).exists())
 
     def test_a_deeper_choice_lifts_a_request_that_is_still_waiting(self):
         # El dedup por ip+posicion existe para que un click repetido no compre
@@ -485,40 +489,59 @@ class SpentLadderButtonTests(TestCase):
         self.assertIn(f'Request {ingest.SUBTREE_TASK_CAP}×128M</button>',
                       page)
 
-    def test_an_open_ladder_keeps_the_plain_label(self):
+    def test_an_open_ladder_names_the_depth_it_buys(self):
         page = Client().get(f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        self.assertIn('>Request analysis</button>', page)
+        self.assertIn('>Request 128.0M</button>', page)
 
 
-class DepthHoldTests(TestCase):
-    """cz_eclipsia, 3-Nov-2026: when a 128M search landed the page reloaded
-    and the untouched button bought 512M on the next click.  The hold box
-    keeps the untouched button at the first rung."""
+class ExpectedBudgetTests(TestCase):
+    """cz_eclipsia, 3-Nov-2026: the button names the nodes it asks for and
+    sends them; a position searched that deep since the page loaded refuses
+    the click instead of buying the next rung."""
 
     def setUp(self):
         self.pos = _position()
-        self.user = _staff()
-        self.url = f'/atomicdb/explore/{self.pos.key}/'
+        self.url = f'/atomicdb/request/{self.pos.key}/'
 
-    def test_a_chooser_gets_the_hold_box_and_its_floor(self):
-        body = _signed_in('belzedar').get(self.url).content.decode()
-        self.assertRegex(body, r'<input\b[^>]*\bid="depthhold"')
-        self.assertIn('deeper than 128.0M only when I move the slider', body)
-        self.assertIn(f'const FLOOR = {LADDER[0]};', body)
-        self.assertIn("'atomicdb-depth-hold'", body)
-        self.assertRegex(body, r"addEventListener\('click', function \(\) \{\s*"
-                               r"if \(held\(\)\) \{ return; \}")
+    def _post(self, client, **fields):
+        return client.post(self.url, fields)
 
-    def test_an_account_that_may_not_choose_gets_no_hold(self):
-        worker_account('lesha')
-        body = _signed_in('lesha').get(self.url).content.decode()
-        self.assertNotIn('depthhold', body)
-        self.assertRegex(body, r'function held\(\) \{ return false; \}')
-
-    def test_the_context_names_the_first_rung(self):
-        request = type('R', (), {'user': self.user})()
+    def test_the_page_names_and_sends_the_next_rung(self):
         _completed(self.pos, LADDER[0])
-        context = depth.context(request, Position.objects.get(pk=self.pos.pk))
-        self.assertEqual(context['depth_floor_nodes'], LADDER[0])
-        self.assertEqual(context['depth_rungs'][0]['nodes'], LADDER[1])
+        page = Client().get(f'/atomicdb/explore/{self.pos.key}/').content.decode()
+        self.assertIn('>Request 512.0M</button>', page)
+        self.assertIn(f"body.expect = '{LADDER[1]}';", page)
+
+    def test_a_stale_expect_is_refused_and_buys_nothing(self):
+        _completed(self.pos, LADDER[0])
+        response = self._post(Client(), expect=str(LADDER[0]))
+        self.assertEqual(response.json(),
+                         {'status': 'already-analyzed',
+                          'completed_budget': LADDER[0]})
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self.pos, state=AnalysisTask.TState.PENDING).exists())
+
+    def test_a_current_expect_buys_exactly_that_rung(self):
+        _completed(self.pos, LADDER[0])
+        response = self._post(Client(), expect=str(LADDER[1]))
+        self.assertEqual(response.json()['status'], 'queued')
+        self.assertEqual(_pending(self.pos).budget_nodes, LADDER[1])
+
+    def test_no_expect_or_a_bad_one_behaves_as_before(self):
+        for first, fields in (('e2e3', {}), ('e2e4', {'expect': 'rubbish'}),
+                              ('d2d4', {'expect': '12345'})):
+            pos = ingest.get_or_create_position(
+                logic.apply_move(logic.start_fen(), first))
+            _completed(pos, LADDER[0])
+            with self.subTest(fields=fields):
+                response = Client().post(f'/atomicdb/request/{pos.key}/',
+                                         fields)
+                self.assertEqual(response.json()['status'], 'queued')
+                self.assertEqual(_pending(pos).budget_nodes, LADDER[1])
+
+    def test_a_chosen_rung_already_searched_is_refused(self):
+        _staff()
+        _completed(self.pos, LADDER[1])
+        response = self._post(_signed_in('belzedar'), budget=str(LADDER[1]))
+        self.assertEqual(response.json()['status'], 'already-analyzed')
