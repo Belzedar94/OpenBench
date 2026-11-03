@@ -307,9 +307,14 @@ class ContributorPref(models.Model):
     mismas garantias que el boton Move to front
     (v. ``ingest.front_of_own_queue``): se hereda un sitio que la cuenta ya
     tenia, nadie ajeno pierde turno.
+
+    ``notify_ready`` — el aviso de la campana cuando una peticion propia ya
+    esta servida (§ ``ingest_queue._notify_requester``).  Encendido por
+    defecto: una cuenta sin fila recibe avisos, como siempre.
     """
-    account    = models.CharField(max_length=64, unique=True)
-    lifo_queue = models.BooleanField(default=False)
+    account      = models.CharField(max_length=64, unique=True)
+    lifo_queue   = models.BooleanField(default=False)
+    notify_ready = models.BooleanField(default=True)
 
 
 class AnalysisTask(models.Model):
