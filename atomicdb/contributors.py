@@ -826,6 +826,10 @@ def present_queue(username, now=None):
         'queue_pending': pending_rows, 'queue_pending_more': pending_more,
         'queue_leased': leased_rows, 'queue_done': done_rows,
         'queue_done_more': done_more,
+        # The totals the lists already counted: no query of their own.
+        'waiting_total_h': human(len(pending_rows) + pending_more),
+        'running_total_h': human(len(leased_rows)),
+        'served_total_h': human(len(done_rows) + done_more),
     }
 
 
