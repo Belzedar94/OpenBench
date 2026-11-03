@@ -27,8 +27,8 @@ from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, engine_policy, ingest,
                ingest_queue, lanes, live_request, logic, metrics,
-               notifications, openings, proof, revalidate, solve,
-               solve_estimate)
+               notifications, openings, preferences, proof, revalidate,
+               solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
@@ -726,6 +726,9 @@ def api_lease(request):
                     | Q(lease_token__gt='', lease_heartbeat_at__isnull=True,
                         leased_at__gte=stale))
             .order_by('leased_at', 'id').first())
+        # "Serve others first" (§ ``ContributorPref.serve_others_first``):
+        # la cuenta renuncia al own-first de abajo.  Una lectura por lease.
+        serve_others = preferences.serves_others_first(user.username)
 
         def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -751,10 +754,15 @@ def api_lease(request):
             # primero (quien pone hierro cobra el suyo antes); entre ellas
             # y entre las ajenas, el reparto justo de mas abajo.  AUTO/FILL ni
             # se enteran: own vale 0 en toda la banda.
-            own_first = Case(
-                When(source=AnalysisTask.Source.USER,
-                     requested_by=user.username, then=Value(1)),
-                default=Value(0), output_field=IntegerField())
+            #
+            # Con ``serve_others`` own vale 0 en TODAS las filas y la banda
+            # queda en el orden de cualquier otro worker.  Solo reordena:
+            # sin peticiones ajenas, lo propio sale igual.
+            own_first = (Value(0, output_field=IntegerField()) if serve_others
+                         else Case(
+                             When(source=AnalysisTask.Source.USER,
+                                  requested_by=user.username, then=Value(1)),
+                             default=Value(0), output_field=IntegerField()))
             # Peticiones CON NOMBRE por delante de la marea anonima.  Un
             # "Analyse all" sin login encola decenas de tareas de cobertura;
             # un humano identificado que pide UNA posicion no debe esperar

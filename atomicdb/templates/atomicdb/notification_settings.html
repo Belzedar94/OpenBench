@@ -1,8 +1,8 @@
 {% extends "atomicdb/base.html" %}
-{% block title %}Notification settings · AtomicDB{% endblock %}
+{% block title %}Account settings · AtomicDB{% endblock %}
 {% block content %}
 
-<h2 style="margin-top:0">Notification settings</h2>
+<h2 style="margin-top:0">Account settings</h2>
 <p class="dim notif-lede">Notices appear under the bell at the top of every
   page. <a href="/atomicdb/notifications/">See your notices</a></p>
 
@@ -13,6 +13,14 @@
     Tell me when an analysis I asked for is ready</label></p>
   <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Turned off, new
     results stop arriving under the bell. The notices you already have stay.</p>
+  <input type="hidden" name="serve" value="0">
+  <p><label><input type="checkbox" name="serve" value="1" id="serve-others-first"
+    style="margin-right:.45rem"{% if serve_others_first %} checked{% endif %}>
+    Let my workers serve other people's requests first</label></p>
+  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Normally the
+    workers you run take your own requests before anyone else's. Turned on,
+    your requests wait their turn like everybody's. When nobody else is
+    waiting, your workers still analyse yours.</p>
   <button type="submit" class="reqbtn">Save</button>
   {% if saved %}<span class="dim" role="status" style="margin-left:.6rem">Saved.</span>{% endif %}
 </form>
