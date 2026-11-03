@@ -38,7 +38,10 @@ class FenBoxTests(TestCase):
         self.assertIn('>Go</button>', self.box)
 
     def test_the_box_has_a_copy_button(self):
-        self.assertRegex(self.box, r'<button[^>]*id="fen-copy"[^>]*>Copy<')
+        button = re.search(r'<button[^>]*id="fen-copy"[^>]*>(<svg)?',
+                           self.box)
+        self.assertIn('aria-label="Copy this FEN"', button.group(0))
+        self.assertEqual(button.group(1), '<svg')
         self.assertRegex(self.box, r'<button[^>]*type="button"[^>]*id="fen-copy"'
                          r'|<button[^>]*id="fen-copy"[^>]*type="button"')
         self.assertIn('navigator.clipboard.writeText', self.body)
@@ -50,3 +53,4 @@ class FenBoxTests(TestCase):
         self.assertEqual(href, lichess_analysis(self.root.fen))
         self.assertIn('target="_blank"', link)
         self.assertIn('rel="noopener"', link)
+        self.assertIn('aria-label="Open this position on lichess"', link)

@@ -1327,10 +1327,29 @@ details summary {
   padding: .4rem .7rem;
 }
 
-.fen-lichess {
-  align-self: center;
-  font-size: .82rem;
-  white-space: nowrap;
+.fenbox-here .fen-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: .4rem .5rem;
+  text-decoration: none;
+}
+
+.fen-icon svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.fen-copy .ico-done,
+.fen-copy.done .ico-copy {
+  display: none;
+}
+
+.fen-copy.done .ico-done {
+  display: block;
 }
 
 .feed {
