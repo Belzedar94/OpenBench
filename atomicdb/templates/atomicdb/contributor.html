@@ -61,8 +61,10 @@
     </form>{% endif %}</div>
   {% endif %}
   {% if has_queue %}
-  <h3 class="contrib-sub">Running now <a class="dim" style="font-weight:normal;font-size:.85em"
-    href="/atomicdb/queue/{{ profile_user|urlencode }}/">queue only</a></h3>
+  {% comment %}A link in the link colour, saying where it goes (cz_eclipsia,
+  3-Nov-2026): grey, "queue only" read as a label.{% endcomment %}
+  <h3 class="contrib-sub">Running now <a style="font-weight:normal;font-size:.85em"
+    href="/atomicdb/queue/{{ profile_user|urlencode }}/">view queue only</a></h3>
   {% if queue_leased %}
   <ul class="feed">
     {% for q in queue_leased %}
