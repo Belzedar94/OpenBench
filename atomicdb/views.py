@@ -5567,6 +5567,9 @@ def fen_jump(request):
     crea como semilla."""
     if request.method != 'POST':
         return redirect('/atomicdb/')
+    # An empty box means "start from the beginning".
+    if not request.POST.get('fen', '').strip():
+        return redirect(f'/atomicdb/explore/{ingest.root_key()}/')
     try:
         fen = _parse_public_position(request.POST.get('fen', ''))
     except PublicFenError as error:
