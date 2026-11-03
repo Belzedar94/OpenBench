@@ -138,7 +138,7 @@ class WindowTests(TestCase):
         self.assertEqual(_names(life), ['alice', 'bob'])
 
     def test_and_the_page_shows_both_orders_without_mixing_them(self):
-        body = self.client.get('/atomicdb/').content.decode()
+        body = self.client.get('/atomicdb/contributors/').content.decode()
 
         after_day, rest = (body.split('Last 24 hours', 1)[1]
                            .split('All time', 1))
@@ -226,7 +226,7 @@ class AttributionTests(TestCase):
         _searched('minnow', 123_000_000, uci='b2b3')
 
         day, _life = _boards()
-        body = _reading(self.client.get('/atomicdb/').content.decode())
+        body = _reading(self.client.get('/atomicdb/contributors/').content.decode())
 
         minnow = [row for row in day['rows'] if row['name'] == 'minnow'][0]
         self.assertEqual(minnow['share'], 0.0)
@@ -247,7 +247,7 @@ class AttributionTests(TestCase):
         _searched('alice', 3_000_000)
         _completed(_child('b2b3'), 'orphan-box-atomicdb', 1_000_000, 1.0)
 
-        body = _reading(self.client.get('/atomicdb/').content.decode())
+        body = _reading(self.client.get('/atomicdb/contributors/').content.decode())
 
         self.assertIn('1.0M of them by machines with no account', body)
 
@@ -263,7 +263,7 @@ class PageTests(TestCase):
         worker_account('alice')
         _searched('alice', 4_000_000)
 
-        body = self.client.get('/atomicdb/').content.decode()
+        body = self.client.get('/atomicdb/contributors/').content.decode()
 
         self.assertIn('href="/atomicdb/user/alice/"', body)
         self.assertEqual(
@@ -272,12 +272,12 @@ class PageTests(TestCase):
     def test_a_name_that_needs_quoting_still_links_to_its_page(self):
         _searched('a b+c', 4_000_000)
 
-        body = self.client.get('/atomicdb/').content.decode()
+        body = self.client.get('/atomicdb/contributors/').content.decode()
 
         self.assertIn('href="/atomicdb/user/a%20b%2Bc/"', body)
 
     def test_the_front_page_survives_with_no_contributors_at_all(self):
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/contributors/')
 
         self.assertEqual(response.status_code, 200)
         body = _reading(response.content.decode())
@@ -290,24 +290,28 @@ class PageTests(TestCase):
         _searched('alice', 100_000_000, uci='b2b3')
         _searched('bob', 500_000_000)
 
-        body = _reading(self.client.get('/atomicdb/').content.decode())
+        body = _reading(self.client.get('/atomicdb/contributors/').content.decode())
 
         # Los 2.5B de alice y los 3.0B de la flota, en la misma escala que el
         # resto del sitio.
         self.assertIn('2.50B', body)
         self.assertIn('2 accounts · 3.00B nodes', body)
 
-    def test_the_section_sits_between_the_tree_and_the_campaigns(self):
+    def test_the_home_page_links_it_where_the_section_was(self):
+        """The leaderboard has a page of its own; the home page keeps a link
+        between the tree and the campaigns, and no table."""
         _searched('alice', 4_000_000)
 
         body = self.client.get('/atomicdb/').content.decode()
 
         for marker in ('Now analyzing', 'Up next', 'First moves',
-                       'Proposed campaigns', 'Milestones'):
+                       'Proposed campaigns'):
             self.assertIn(marker, body)
-        here = body.index('id="contributors"')
+        here = body.index('href="/atomicdb/contributors/"')
         self.assertLess(body.index('First moves'), here)
         self.assertLess(here, body.index('id="campaigns"'))
+        self.assertNotIn('lb-table', body)
+        self.assertNotIn('href="/atomicdb/user/alice/"', body)
 
 
 class MobileOverflowTests(TestCase):
@@ -327,7 +331,7 @@ class MobileOverflowTests(TestCase):
         _searched('belzedar-ryzen-9950x3d-node', 987_654_321)
         _searched('a-very-long-contributor-name', 123_456_789)
 
-        body = self.client.get('/atomicdb/').content.decode()
+        body = self.client.get('/atomicdb/contributors/').content.decode()
 
         # Una por ventana, y siempre POR FUERA de su tabla.
         self.assertEqual(body.count('contrib-scroll'), 2)
@@ -380,7 +384,7 @@ class QueryCostTests(TestCase):
             _searched(f'runner{index:02d}', (index + 1) * 1_000_000)
 
     def _cost(self):
-        """Consultas de una portada con las TRES caches en frio.
+        """Consultas de la pagina con las TRES caches en frio.
 
         La de pagina (15s), el snapshot de flota (60s) y la de medidores (30s,
         que ademas es de proceso y no de Django): sin vaciar las tres, la
@@ -391,7 +395,7 @@ class QueryCostTests(TestCase):
         metrics.reset_metrics_cache()
         alias = settings.ATOMICDB_DATABASE_ALIAS
         with CaptureQueriesContext(connections[alias]) as queries:
-            response = self.client.get('/atomicdb/')
+            response = self.client.get('/atomicdb/contributors/')
         self.assertEqual(response.status_code, 200)
         return len(queries), response.content.decode()
 

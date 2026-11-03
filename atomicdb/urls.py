@@ -144,6 +144,15 @@ urlpatterns = [
         views.queue_anonymous))), name='atomicdb-queue-anonymous'),
     # The machines behind the "active workers" number of the home page.
     path('workers/', _workers_cached, name='atomicdb-workers'),
+    # The two sections the home page used to end with, as pages of their own.
+    # Public and the same for everybody, like the workers page: the
+    # leaderboard reads the shared one-minute fleet snapshot and the
+    # milestones one small indexed read plus the batched line labels, so the
+    # short cache only absorbs F5 storms, varied by cookie for the header.
+    path('contributors/', cache_page(30)(vary_on_cookie(csrf_protect(
+        views.contributors_page))), name='atomicdb-contributors'),
+    path('milestones/', cache_page(15)(vary_on_cookie(csrf_protect(
+        views.milestones_page))), name='atomicdb-milestones'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de
     # una sola persona: sin cache, como la pagina desde la que se pulsa.
     path('queue/bump/<int:task_id>/', views.api_queue_bump,

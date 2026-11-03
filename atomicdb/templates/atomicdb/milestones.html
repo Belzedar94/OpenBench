@@ -1,0 +1,18 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}Milestones · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 style="margin-top:0">Milestones</h2>
+<ul class="feed">
+  {% for e in events %}
+  <li><span class="t">{{ e.ts|date:"M d H:i" }}</span>
+    {{ e.text }}{% if e.san %}
+    <details class="milestone-line dim">
+      <summary class="qline" title="{{ e.full }}">&nbsp;{{ e.san }}</summary>
+      <span class="milestone-full">{{ e.full }}</span>
+    </details>{% endif %}
+    {% if e.key %} <a href="/atomicdb/explore/{{ e.key }}/">view</a>{% endif %}</li>
+  {% empty %}<li class="dim">No events yet.</li>{% endfor %}
+</ul>
+
+{% endblock %}
