@@ -152,7 +152,9 @@ class FenJumpTests(TestCase):
                       response['Location'])
 
     def test_a_bad_fen_says_what_is_wrong_with_it(self):
-        response = self.client.post('/atomicdb/fen/', {'fen': 'rubbish'})
+        # With a slash it reads as a FEN; a bare word is an opening name now
+        # (§ test_opening_lookup).
+        response = self.client.post('/atomicdb/fen/', {'fen': 'rubbish/8 w'})
         self.assertEqual(response.status_code, 400)
         body = response.content.decode()
         self.assertIn('was not accepted', body)

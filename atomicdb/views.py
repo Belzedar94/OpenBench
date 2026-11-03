@@ -5636,20 +5636,100 @@ def _trust_for(pos):
     return 'UNPROVEN'
 
 
+# Un nombre de apertura en el cajetin: "the best way to navigate to an
+# opening is to go the roots page and ctrl+f it" (cz_eclipsia, 3-nov).  Un
+# FEN siempre lleva '/', asi que un texto sin barra puede ser un nombre; si
+# ninguno casa, sigue el camino de siempre (PGN o FEN) con su error de siempre.
+OPENING_QUERY_MAX_CHARS = 80
+OPENING_RESULTS_MAX = 40
+
+
+def _opening_matches(query):
+    """[(key, fen, name, also, line)] de las aperturas cuyo nombre casa con
+    ``query``: ``also`` es el otro nombre que caso cuando el que se ensena no
+    lo contiene, y ``line`` la linea de referencia, que separa dos posiciones
+    con el mismo nombre.
+
+    Nombre del catalogo, sus otros nombres y alias, y el nombre de comunidad
+    aprobado, que es el que se ensena cuando lo hay.  Un nombre igual (sin
+    mayusculas) gana a los que solo lo contienen; estos van del mas corto al
+    mas largo, que es casi siempre de lo general a la variante.
+    """
+    wanted = ' '.join(query.lower().split())
+    if not wanted:
+        return []
+    entries = {}
+    for key, opening in openings.load_catalog().items():
+        entries[key] = [opening.fen, opening.name,
+                        [opening.name, *opening.names, *opening.aliases],
+                        opening.reference_line_san]
+    for key, row in community_names.approved_map().items():
+        fen, _name, names, line = entries.get(key, [None, None, [], ''])
+        entries[key] = [fen, row['name'], [row['name'], *names], line]
+
+    def folded(text):
+        return ' '.join(text.lower().split())
+
+    exact, partial = [], []
+    for key, (fen, name, names, line) in entries.items():
+        hits = [n for n in names if n and wanted in folded(n)]
+        if not hits:
+            continue
+        also = '' if wanted in folded(name) else hits[0]
+        row = (key, fen, name, also, line)
+        if any(folded(n) == wanted for n in hits):
+            exact.append(row)
+        else:
+            partial.append(row)
+    if exact:
+        return sorted(exact, key=lambda row: row[2].lower())
+    return sorted(partial, key=lambda row: (len(row[2]), row[2].lower()))
+
+
+def _opening_jump(request, raw):
+    """La respuesta a un nombre de apertura, o None si no es uno."""
+    raw = raw.strip()
+    if '/' in raw or len(raw) > OPENING_QUERY_MAX_CHARS:
+        return None
+    try:
+        found = _opening_matches(raw)
+    except Exception:
+        return None
+    if not found:
+        return None
+    if len(found) == 1:
+        key, fen = found[0][:2]
+        if fen and not Position.objects.filter(key=key).exists():
+            ingest.get_or_create_position(fen)
+        return redirect(f'/atomicdb/explore/{key}/')
+    return render(request, 'atomicdb/opening_search.html', {
+        'query': raw, 'results': found[:OPENING_RESULTS_MAX],
+        'more': max(0, len(found) - OPENING_RESULTS_MAX)})
+
+
 def fen_jump(request):
-    """Cajetin de posicion: FEN o PGN; salta a la posicion y si no existe la
-    crea como semilla."""
+    """Cajetin de posicion: FEN, PGN o nombre de apertura; salta a la
+    posicion y si no existe la crea como semilla."""
     if request.method != 'POST':
         return redirect('/atomicdb/')
     # An empty box means "start from the beginning".
     if not request.POST.get('fen', '').strip():
         return redirect(f'/atomicdb/explore/{ingest.root_key()}/')
+    by_name = _opening_jump(request, request.POST.get('fen', ''))
+    if by_name is not None:
+        return by_name
     try:
         fen = _parse_public_position(request.POST.get('fen', ''))
     except PublicFenError as error:
         # "Not a legal atomic position" is not the same answer as "we do not
         # have this position yet", and saying the second when the first is
         # true is how a visitor concludes the explorer is broken.
+        raw = request.POST.get('fen', '').strip()
+        if error.reason == 'malformed' and '/' not in raw                 and not _looks_like_movetext(raw):
+            # Sin barra ni jugadas: lo que se tecleo era un nombre.
+            return render(request, 'atomicdb/missing.html', {
+                'missing_note': f'No opening is called "{raw}" yet, and it '
+                                'is not a FEN or a PGN either.'}, status=400)
         return render(request, 'atomicdb/missing.html',
                       {'fen_error': str(error)}, status=400)
     except Exception:
