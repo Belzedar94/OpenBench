@@ -728,7 +728,8 @@ def api_lease(request):
             .order_by('leased_at', 'id').first())
         # "Serve others first" (§ ``ContributorPref.serve_others_first``):
         # la cuenta renuncia al own-first de abajo.  Una lectura por lease.
-        serve_others = preferences.serves_others_first(user.username)
+        # Three ways since 3-Nov: own first, queue order, others first.
+        serve_order = preferences.serve_order(user.username)
 
         def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -763,7 +764,8 @@ def api_lease(request):
             own_first = Case(
                 When(source=AnalysisTask.Source.USER,
                      requested_by=user.username,
-                     then=Value(-1 if serve_others else 1)),
+                     then=Value({'own': 1, 'queue': 0,
+                                 'others': -1}[serve_order])),
                 default=Value(0), output_field=IntegerField())
             # Peticiones CON NOMBRE por delante de la marea anonima.  Un
             # "Analyse all" sin login encola decenas de tareas de cobertura;

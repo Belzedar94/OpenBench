@@ -63,7 +63,7 @@ class ServeOthersFirstLeaseTests(TestCase):
 
     def test_on_the_waiting_stranger_is_served_first(self):
         ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+                                       serve_order='others')
         stranger, own = self._stranger_then_own()
 
         first = self._lease('m3')['tasks'][0]
@@ -75,7 +75,7 @@ class ServeOthersFirstLeaseTests(TestCase):
     def test_on_an_older_own_request_still_waits_for_the_stranger(self):
         # Skipped while anyone else's is waiting, however early it came.
         ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+                                       serve_order='others')
         self._request(self.first, 'lesha')
         stranger = self._request(self.second, 'w')
 
@@ -85,7 +85,7 @@ class ServeOthersFirstLeaseTests(TestCase):
 
     def test_on_with_only_own_requests_waiting_own_is_served(self):
         ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+                                       serve_order='others')
         own = self._request(self.second, 'lesha')
 
         leased = self._lease('m6')['tasks'][0]
@@ -94,7 +94,7 @@ class ServeOthersFirstLeaseTests(TestCase):
 
     def test_on_own_requests_still_beat_the_selector_bands(self):
         ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+                                       serve_order='others')
         AnalysisTask.objects.create(
             position=self.first, generation=0, budget_nodes=8_000_000,
             source=AnalysisTask.Source.AUTO)
@@ -104,8 +104,25 @@ class ServeOthersFirstLeaseTests(TestCase):
 
         self.assertEqual(leased['id'], own.id)
 
+    def test_queue_order_serves_the_older_request_whoever_asked(self):
+        ContributorPref.objects.create(account='lesha', serve_order='queue')
+        stranger, own = self._stranger_then_own()
+
+        leased = self._lease('mq')['tasks'][0]
+
+        self.assertEqual(leased['id'], stranger.id)
+
+    def test_queue_order_serves_an_older_own_request_first(self):
+        ContributorPref.objects.create(account='lesha', serve_order='queue')
+        own = self._request(self.second, 'lesha')
+        self._request(self.first, 'w')
+
+        leased = self._lease('mq2')['tasks'][0]
+
+        self.assertEqual(leased['id'], own.id)
+
     def test_another_accounts_setting_changes_nothing_here(self):
-        ContributorPref.objects.create(account='w', serve_others_first=True)
+        ContributorPref.objects.create(account='w', serve_order='others')
         _stranger, own = self._stranger_then_own()
 
         leased = self._lease('m8')['tasks'][0]
@@ -116,14 +133,20 @@ class ServeOthersFirstLeaseTests(TestCase):
         self.assertFalse(preferences.serves_others_first('lesha'))
         self.assertFalse(preferences.serves_others_first(''))
         ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+                                       serve_order='others')
         self.assertTrue(preferences.serves_others_first('lesha'))
 
 
-def _box(body):
-    # The minifier reorders attributes, so the tag is found by its id.
-    return re.search(r'<input[^>]*id="serve-others-first"[^>]*>',
-                     body).group(0)
+def _checked(body):
+    """The value of the serve-order radio that is checked, or None.
+
+    Found by name and value, whatever order the minifier leaves the
+    attributes in.
+    """
+    for tag in re.findall(r'<input[^>]*name="serve_order"[^>]*>', body):
+        if re.search(r'\bchecked\b', tag):
+            return re.search(r'value="([^"]*)"', tag).group(1)
+    return None
 
 
 class ServeOthersFirstSettingPageTests(TestCase):
@@ -133,44 +156,52 @@ class ServeOthersFirstSettingPageTests(TestCase):
         self.client = Client()
         self.client.login(username='lesha', password='pw')
 
-    def test_the_box_starts_unchecked(self):
+    def test_three_choices_and_mine_first_is_the_default(self):
         body = self.client.get(PAGE).content.decode()
 
-        self.assertIn("Let my workers serve other people's requests first",
-                      body.replace('&#x27;', "'").replace('&#39;', "'"))
-        self.assertNotIn('checked', _box(body))
+        for label in ('Mine first', 'Queue order', 'Others first'):
+            self.assertIn(label, body)
+        self.assertEqual(_checked(body), 'own')
 
-    def test_checking_and_saving_turns_it_on_and_shows_it(self):
-        response = self.client.post(PAGE, {'ready': ['0', '1'],
-                                           'serve': ['0', '1']})
+    def test_each_choice_saves_and_shows(self):
+        for order in ('others', 'queue', 'own'):
+            with self.subTest(order=order):
+                response = self.client.post(PAGE, {'ready': ['0', '1'],
+                                                   'serve_order': order})
+                self.assertEqual(response.status_code, 302)
+                pref = ContributorPref.objects.get(account='lesha')
+                self.assertEqual(pref.serve_order, order)
+                # The old field stays in step for code that only knows it.
+                self.assertEqual(pref.serve_others_first, order == 'others')
+                self.assertTrue(pref.notify_ready)
+                body = self.client.get(f'{PAGE}?saved=1').content.decode()
+                self.assertEqual(_checked(body), order)
 
-        self.assertEqual(response.status_code, 302)
-        pref = ContributorPref.objects.get(account='lesha')
-        self.assertTrue(pref.serve_others_first)
-        self.assertTrue(pref.notify_ready)
-        body = self.client.get(f'{PAGE}?saved=1').content.decode()
-        self.assertIn('checked', _box(body))
-
-    def test_unchecking_turns_it_back_off(self):
-        ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True,
-                                       lifo_queue=True)
-
+    def test_the_old_checkbox_still_saves(self):
+        """A page loaded before the three choices posts ``serve``."""
+        self.client.post(PAGE, {'ready': ['0', '1'], 'serve': ['0', '1']})
+        self.assertEqual(
+            ContributorPref.objects.get(account='lesha').serve_order, 'others')
         self.client.post(PAGE, {'ready': ['0', '1'], 'serve': '0'})
-
-        pref = ContributorPref.objects.get(account='lesha')
-        self.assertFalse(pref.serve_others_first)
-        self.assertTrue(pref.lifo_queue)
+        self.assertEqual(
+            ContributorPref.objects.get(account='lesha').serve_order, 'own')
 
     def test_a_form_without_the_field_leaves_it_alone(self):
-        ContributorPref.objects.create(account='lesha',
-                                       serve_others_first=True)
+        ContributorPref.objects.create(account='lesha', serve_order='queue')
 
         self.client.post(PAGE, {'ready': '0'})
 
         pref = ContributorPref.objects.get(account='lesha')
-        self.assertTrue(pref.serve_others_first)
+        self.assertEqual(pref.serve_order, 'queue')
         self.assertFalse(pref.notify_ready)
+
+    def test_a_value_that_is_not_a_choice_changes_nothing(self):
+        ContributorPref.objects.create(account='lesha', serve_order='others')
+
+        self.client.post(PAGE, {'ready': '1', 'serve_order': 'mine!'})
+
+        self.assertEqual(
+            ContributorPref.objects.get(account='lesha').serve_order, 'others')
 
     def test_the_cog_links_to_the_page(self):
         body = self.client.get('/atomicdb/notifications/').content.decode()

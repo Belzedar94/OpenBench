@@ -317,11 +317,18 @@ class ContributorPref(models.Model):
     la banda USER como las de cualquiera.  Solo reordena, nunca excluye: sin
     nada ajeno esperando, lo propio se sirve igual.  Peticion de
     seaside_cliff (3-nov).  Apagado por defecto.
+
+    ``serve_order`` -- the same choice in three ways (cz_eclipsia, 3-Nov):
+    ``own`` first (the default), plain ``queue`` order, or ``others`` first.
+    It is what the lease reads; ``serve_others_first`` is kept in step with
+    it (true exactly for ``others``) so code that only knows the old field
+    still reads the same answer.
     """
     account      = models.CharField(max_length=64, unique=True)
     lifo_queue   = models.BooleanField(default=False)
     notify_ready = models.BooleanField(default=True)
     serve_others_first = models.BooleanField(default=False)
+    serve_order  = models.CharField(max_length=8, default='own')
 
 
 class AnalysisTask(models.Model):

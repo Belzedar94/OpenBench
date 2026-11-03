@@ -28,6 +28,12 @@
   --opening-border: #46523a;
   --opening-ink: #a8c98a;
   --opening-fill: rgba(127, 166, 80, .13);
+  /* Nav links to the site guide and to the places outside the site, each in
+     its own colour (cz_eclipsia, 3-Nov-2026): OpenBench's logo green and
+     Discord's blurple, lifted for a dark page. */
+  --nav-guide: #8fb3d9;
+  --nav-openbench: #94e196;
+  --nav-discord: #8c95f8;
   --shadow-board: 0 4px 18px rgba(0, 0, 0, .5);
   --scroll-thumb: #4b463f;
   --scroll-track: transparent;
@@ -74,6 +80,9 @@ html[data-theme="light"] {
   --opening-border: #bcccae;
   --opening-ink: #3f6526;
   --opening-fill: #e5f0d9;
+  --nav-guide: #2f5f8f;
+  --nav-openbench: #118c40;
+  --nav-discord: #4752c4;
   --shadow-board: 0 5px 20px rgba(67, 55, 38, .22);
   --scroll-thumb: #b7ada0;
   --scroll-track: transparent;
@@ -110,6 +119,9 @@ html[data-theme="light"] {
     --opening-border: #bcccae;
     --opening-ink: #3f6526;
   --opening-fill: #e5f0d9;
+  --nav-guide: #2f5f8f;
+  --nav-openbench: #118c40;
+  --nav-discord: #4752c4;
     --shadow-board: 0 5px 20px rgba(67, 55, 38, .22);
     --scroll-thumb: #b7ada0;
     --scroll-track: transparent;
@@ -256,6 +268,16 @@ header nav .navsep {
   height: 1.1em;
   background: var(--ink-muted);
   opacity: .45;
+}
+
+header nav a.nav-guide { color: var(--nav-guide); }
+header nav a.nav-openbench { color: var(--nav-openbench); }
+header nav a.nav-discord { color: var(--nav-discord); }
+
+header nav a.nav-guide:hover,
+header nav a.nav-openbench:hover,
+header nav a.nav-discord:hover {
+  color: var(--ink);
 }
 
 header nav a.nav-ext {
@@ -2666,4 +2688,57 @@ table.fleet-workers .qline {
     flex-direction: row;
     flex-wrap: wrap;
   }
+}
+/* The serve order of the account settings: three buttons in a row, each
+   radio hidden behind its label (cz_eclipsia, 3-Nov-2026). */
+.serve-order {
+  margin: 0 0 .2rem;
+  padding: 0;
+  border: 0;
+}
+
+.serve-order legend {
+  margin-bottom: .4rem;
+  padding: 0;
+}
+
+.serve-order-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  max-width: 32rem;
+}
+
+.serve-order-choices label {
+  position: relative;
+  flex: 1 1 8rem;
+}
+
+.serve-order-choices input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.serve-order-choices span {
+  display: block;
+  padding: .45rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-align: center;
+  color: var(--ink-muted);
+}
+
+.serve-order-choices input:checked + span {
+  border-color: var(--accent);
+  color: var(--ink);
+  background: var(--opening-fill);
+  font-weight: 600;
+}
+
+.serve-order-choices input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
