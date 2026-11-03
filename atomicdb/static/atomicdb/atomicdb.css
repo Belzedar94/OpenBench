@@ -1330,6 +1330,12 @@ details summary {
   padding: .4rem .7rem;
 }
 
+/* A move never breaks across lines: O-O-O wrapped at its hyphens in the
+   narrow move column (cz_eclipsia, 3-Nov-2026). */
+table[aria-labelledby="moves-heading"] td strong {
+  white-space: nowrap;
+}
+
 .fenbox-here .fen-icon {
   display: inline-flex;
   align-items: center;
