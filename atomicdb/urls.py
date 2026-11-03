@@ -129,6 +129,11 @@ urlpatterns = [
     # minuto, compartida y sin nada personal dentro (§ contributors.fleet).
     path('user/<str:username>/', views.contributor,
          name='atomicdb-contributor'),
+    # The rest of an account's workers, loaded by the profile's "Show all".
+    # Public and the same for everybody: a short cache absorbs repeat clicks.
+    path('user/<str:username>/workers/',
+         cache_page(30)(views.contributor_workers),
+         name='atomicdb-contributor-workers'),
     path('me/', views.contributor_me, name='atomicdb-me'),
     # La cola agrupada por CARRIL.  Publica y sin nada personal dentro: sus
     # agregados ya viven en un snapshot compartido de un minuto (§ lanes),

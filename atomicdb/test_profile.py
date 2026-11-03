@@ -12,6 +12,7 @@ import re
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import connections
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
@@ -538,7 +539,8 @@ class QueryCostTests(TestCase):
         for uci in self.PAWNS[:rows]:
             _completed(_child(uci), 'alice-box-atomicdb', 1_000_000, 1.0,
                        source=AnalysisTask.Source.USER, requested_by='alice')
-        contributors.reset_cache()
+        # Cold both times: the per-account aggregates are cached too.
+        cache.clear()
         alias = settings.ATOMICDB_DATABASE_ALIAS
         with CaptureQueriesContext(connections[alias]) as queries:
             response = self.client.get('/atomicdb/user/alice/')
@@ -630,3 +632,90 @@ class QueuePlaceMissingTests(TestCase):
         self.assertIn('1. a3', _reading(raw))
         self.assertNotIn('#None', raw)
         self.assertIn('No place yet', raw)
+
+
+class WorkerListTests(TestCase):
+    """A profile with many machines shows the most recently seen ones, and
+    "Show all" loads the rest from a small endpoint."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        now = timezone.now()
+        for index in range(contributors.WORKER_ROWS + 3):
+            ping = _ping(f'slot#{index:02d}', 'alice')
+            WorkerPing.objects.filter(pk=ping.pk).update(
+                last_seen=now - timedelta(hours=index))
+
+    def test_the_page_shows_the_most_recent_ones_and_offers_the_rest(self):
+        body = Client().get('/atomicdb/user/alice/').content.decode()
+
+        shown = contributors.WORKER_ROWS
+        for index in range(shown):
+            self.assertIn(f'slot#{index:02d}', body)
+        for index in range(shown, shown + 3):
+            self.assertNotIn(f'slot#{index:02d}', body)
+        self.assertIn(f'Show all {shown + 3} workers', body)
+        self.assertIn('data-src="/atomicdb/user/alice/workers/"', body)
+
+    def test_show_all_loads_every_worker(self):
+        response = Client().get('/atomicdb/user/alice/workers/')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        for index in range(contributors.WORKER_ROWS + 3):
+            self.assertIn(f'slot#{index:02d}', body)
+        self.assertNotIn('<header>', body)
+
+    def test_without_javascript_the_link_renders_them_all_in_place(self):
+        body = Client().get(
+            '/atomicdb/user/alice/?workers=all').content.decode()
+
+        self.assertIn('slot#12', body)
+        self.assertNotIn('Show all', body)
+
+    def test_an_unknown_account_has_no_worker_list(self):
+        response = Client().get('/atomicdb/user/nobody/workers/')
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_short_list_has_no_show_all(self):
+        WorkerPing.objects.filter(machine__gte='slot#03').delete()
+
+        body = Client().get('/atomicdb/user/alice/').content.decode()
+
+        self.assertNotIn('Show all', body)
+
+
+class CachedAggregateTests(TestCase):
+    """The per-account scans (daily chart, first date, request counts) are
+    paid once, not on every visit."""
+
+    def setUp(self):
+        contributors.reset_cache()
+        _ping('alice-box-atomicdb', 'alice')
+        for uci in ('a2a3', 'b2b3', 'c2c3'):
+            _completed(_child(uci), 'alice-box-atomicdb', 1_000_000, 1.0,
+                       source=AnalysisTask.Source.USER, requested_by='alice')
+
+    def _queries(self):
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            response = Client().get('/atomicdb/user/alice/')
+        self.assertEqual(response.status_code, 200)
+        return [query['sql'] for query in queries]
+
+    def test_a_second_visit_skips_the_cached_scans(self):
+        first = self._queries()
+        second = self._queries()
+
+        self.assertLess(len(second), len(first))
+        self.assertFalse([sql for sql in second if 'COUNT(' in sql.upper()
+                          and '"requested_by"' in sql and 'GROUP BY' not in sql.upper()])
+        self.assertFalse([sql for sql in second
+                          if 'django_datetime_cast_date' in sql
+                          or '::date' in sql.lower() or 'AT TIME ZONE' in sql])
+
+    def test_a_warm_profile_stays_under_its_query_budget(self):
+        self._queries()
+
+        self.assertLessEqual(len(self._queries()), 12)

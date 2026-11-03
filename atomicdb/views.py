@@ -6288,7 +6288,8 @@ def contributor(request, username):
         return render(request, 'atomicdb/missing.html', {
             'missing_note': 'No AtomicDB activity under that name (yet).',
         }, status=404)
-    context = contributors.present(username)
+    context = contributors.present(
+        username, every_worker=request.GET.get('workers') == 'all')
     context.update({
         **_suggestions_badge(request),
         **_queue_receipt(request, viewer == username),
@@ -6304,6 +6305,19 @@ def contributor(request, username):
         'owner_label': 'Your' if viewer == username else f'{username}’s',
     })
     return render(request, 'atomicdb/contributor.html', context)
+
+
+def contributor_workers(request, username):
+    """Every worker of an account, as the bare table: the profile's "Show all".
+
+    The profile shows the most recently seen machines only
+    (§ ``contributors.WORKER_ROWS``); this loads the rest on click.
+    """
+    username = (username or '')[:64]
+    if not contributors.has_activity(username):
+        return HttpResponse(status=404)
+    return render(request, 'atomicdb/_contributor_workers.html',
+                  contributors.all_workers(username))
 
 
 # Lo que se le dice a quien acaba de tocar su cola, por estado.  ``undo`` marca

@@ -25,6 +25,7 @@ mismo trabajo tantas veces como visitantes haya, y esta pagina
 deliberadamente NO lleva cache de pagina (§ urls): es personal.
 """
 
+import hashlib
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 from django.core.cache import cache
@@ -67,6 +68,15 @@ FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v1'
 # un directorio, y lo que hace falta en una portada es el cabecero honesto y
 # un camino a la pagina de cada cual.
 LEADERBOARD_ROWS = 10
+# The profile's workers table: the most recently seen machines, and a "Show
+# all" for the rest.  An account with dozens of slots made the page long and
+# paid a lease and speed read for every one of them.
+WORKER_ROWS = 10
+# Per-account aggregates that are scans growing with the account (§
+# ``_account_cached``): the daily chart, the request counts, the first date.
+ACCOUNT_CACHE_SECONDS = 300
+ACCOUNT_COUNT_SECONDS = 60
+FIRST_CACHE_SECONDS = 3600
 # Oro, plata y bronce sin escribir ninguna de las tres palabras y sin un solo
 # emoji: el numero del puesto se pinta con los colores que el sitio ya tiene.
 # Un empate en el segundo puesto da DOS platas y ningun bronce, que es
@@ -525,14 +535,99 @@ def speeds(pings, now):
             for row in rows}
 
 
-def present(username, now=None):
+def _account_cached(kind, username, build, seconds=ACCOUNT_CACHE_SECONDS):
+    """``build()`` for this account, kept ``seconds`` in the shared cache.
+
+    For the per-account aggregates that do not have to be live (the daily
+    chart, the first contribution, the request counts): each one is a scan
+    that grows with the account, and the page is loaded far more often than
+    those numbers move.  The value is wrapped so that ``None`` is cached too.
+    """
+    digest = hashlib.sha1(username.encode('utf-8')).hexdigest()
+    key = f'atomicdb.contributors.{kind}.v1.{digest}'
+    hit = cache.get(key)
+    if hit is None:
+        hit = (build(),)
+        cache.set(key, hit, seconds)
+    return hit[0]
+
+
+def _worker_rows(pings, snapshot, now):
+    """The rows of the workers table for ``pings``, sorted for display.
+
+    Two reads, both bounded by the machines given: what they have leased now
+    and their speed over the last hour.  The page asks for the most recently
+    seen ones only (§ ``WORKER_ROWS``); "Show all" asks for the rest.
+    """
+    machines = sorted({ping.machine for ping in pings})
+    running = {}
+    if machines:
+        for task in AnalysisTask.objects.filter(state=LEASED,
+                                                machine__in=machines):
+            running.setdefault(task.machine, task)
+    # The table names no opening, so the labels skip the community map.
+    labels = _labels([task.position_id for task in running.values()],
+                     opening=False)
+    online_cutoff = now - timedelta(seconds=ONLINE_SECONDS)
+    speed = speeds(pings, now)
+    workers = []
+    for ping in pings:
+        day = snapshot['machines_24h'].get(ping.machine,
+                                           {'nodes': 0, 'tasks': 0})
+        life = snapshot['machines_all'].get(
+            ping.machine, {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
+        task = running.get(ping.machine)
+        nps, searches = speed.get((ping.user, ping.machine), (0, 0))
+        row = {
+            'machine': ping.machine,
+            'threads': ping.threads,
+            'hash_mb': ping.hash_mb,
+            'os': ping.os,
+            'online': ping.last_seen >= online_cutoff,
+            'seen': _ago(ping.last_seen, now),
+            # El contador propio del ping (``tasks_done``) NO se pinta: cuenta
+            # entregas y el sitio entero cuenta tareas COMPLETADAS (la portada
+            # incluida), asi que ensenar los dos numeros seria publicar dos
+            # definiciones de "analisis" que no tienen por que coincidir.  El
+            # que sale es el que comparte denominador con los nodos de al lado.
+            'nodes_24h_h': human(day['nodes']),
+            'tasks_24h': day['tasks'],
+            'nodes_all': life['nodes'],
+            'nodes_all_h': human(life['nodes']),
+            'tasks_all': life['tasks'],
+            'nps_h': human(round(nps)) if nps else '',
+            'searches': searches,
+            'searches_h': human(searches),
+        }
+        if task is not None:
+            row['searching'] = _presented(task, labels, now)
+        workers.append(row)
+    # Lo vivo arriba y lo grande primero: una maquina apagada hace meses no
+    # puede encabezar la lista solo porque su nombre empiece por 'a'.
+    workers.sort(key=lambda row: (not row['online'], -row['nodes_all'],
+                                  row['machine']))
+    return workers
+
+
+def all_workers(username, now=None):
+    """Every worker of the account: what "Show all" loads."""
+    now = now or timezone.now()
+    pings = list(WorkerPing.objects.filter(user=username))
+    return {'workers': _worker_rows(pings, fleet(now=now), now),
+            'has_workers': bool(pings), 'workers_more': 0,
+            'profile_user': username}
+
+
+def present(username, now=None, every_worker=False):
     """Todo el contexto de la pagina de ``username``. Sin escribir nada."""
     from . import views
 
     now = now or timezone.now()
     snapshot = fleet(now=now)
-    machines = sorted(WorkerPing.objects.filter(user=username)
-                      .values_list('machine', flat=True))
+    # Most recently seen first: the table shows the first ``WORKER_ROWS``.
+    pings = list(WorkerPing.objects.filter(user=username)
+                 .order_by('-last_seen', 'machine'))
+    machines = sorted(ping.machine for ping in pings)
 
     pending, leased, done = _queue_rows(username)
     mine = _requests_of(username)
@@ -543,7 +638,15 @@ def present(username, now=None):
     # la banda entera.  Un ``count()`` aparte aqui seria un segundo recuento de
     # lo mismo en la pagina que menos se puede permitir consultas de sobra.
     pending_total = len(pending) + pending_more
-    done, done_more = _overflow(done, QUEUE_ROWS, mine.filter(state=COMPLETED))
+    if len(done) > QUEUE_ROWS:
+        # Only the "and N more served" line needs this count, and it is a
+        # count over everything the account was ever served: cached.
+        done_total = _account_cached(
+            'served', username, mine.filter(state=COMPLETED).count,
+            seconds=ACCOUNT_COUNT_SECONDS)
+        done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
+    else:
+        done_more = 0
 
     suggestions = list(OpeningNameSuggestion.objects
                        .filter(suggested_by=username)
@@ -552,19 +655,9 @@ def present(username, now=None):
         suggestions, SUGGESTION_ROWS,
         OpeningNameSuggestion.objects.filter(suggested_by=username))
 
-    # Lo que las maquinas de esta cuenta tienen arrendado AHORA: es otra
-    # pregunta que la cola de arriba (aquello es lo que PIDIO, esto lo que
-    # CORRE), y las dos caben en una consulta pequena cada una.
-    running = {}
-    if machines:
-        for task in AnalysisTask.objects.filter(state=LEASED,
-                                                machine__in=machines):
-            running.setdefault(task.machine, task)
-
     # Only a waiting row prints the opening of its line, and naming one reads
     # the community map: without waiting rows there is nothing to name.
     labels = _labels([task.position_id for task in pending + leased + done]
-                     + [task.position_id for task in running.values()]
                      + [row.position_id for row in suggestions],
                      opening=bool(pending))
 
@@ -612,11 +705,9 @@ def present(username, now=None):
                     'nodes': human(task.nodes_searched)})
         for task in done]
 
-    online_cutoff = now - timedelta(seconds=ONLINE_SECONDS)
-    workers = []
+    # The account totals add up every machine (dictionary lookups in the
+    # shared snapshot); the table itself shows the most recently seen ones.
     nodes_24h = tasks_24h = nodes_all = tasks_all = 0
-    pings = list(WorkerPing.objects.filter(user=username).order_by('machine'))
-    speed = speeds(pings, now)
     for ping in pings:
         day = snapshot['machines_24h'].get(ping.machine,
                                            {'nodes': 0, 'tasks': 0})
@@ -626,36 +717,9 @@ def present(username, now=None):
         tasks_24h += day['tasks']
         nodes_all += life['nodes']
         tasks_all += life['tasks']
-        task = running.get(ping.machine)
-        nps, searches = speed.get((ping.user, ping.machine), (0, 0))
-        row = {
-            'machine': ping.machine,
-            'threads': ping.threads,
-            'hash_mb': ping.hash_mb,
-            'os': ping.os,
-            'online': ping.last_seen >= online_cutoff,
-            'seen': _ago(ping.last_seen, now),
-            # El contador propio del ping (``tasks_done``) NO se pinta: cuenta
-            # entregas y el sitio entero cuenta tareas COMPLETADAS (la portada
-            # incluida), asi que ensenar los dos numeros seria publicar dos
-            # definiciones de "analisis" que no tienen por que coincidir.  El
-            # que sale es el que comparte denominador con los nodos de al lado.
-            'nodes_24h_h': human(day['nodes']),
-            'tasks_24h': day['tasks'],
-            'nodes_all': life['nodes'],
-            'nodes_all_h': human(life['nodes']),
-            'tasks_all': life['tasks'],
-            'nps_h': human(round(nps)) if nps else '',
-            'searches': searches,
-            'searches_h': human(searches),
-        }
-        if task is not None:
-            row['searching'] = _presented(task, labels, now)
-        workers.append(row)
-    # Lo vivo arriba y lo grande primero: una maquina apagada hace meses no
-    # puede encabezar la lista solo porque su nombre empiece por 'a'.
-    workers.sort(key=lambda row: (not row['online'], -row['nodes_all'],
-                                  row['machine']))
+    shown = pings if every_worker else pings[:WORKER_ROWS]
+    workers = _worker_rows(shown, snapshot, now)
+    workers_more = len(pings) - len(shown)
 
     rank_24h = _rank(snapshot['users_24h'], username)
     rank_all = _rank(snapshot['users_all'], username)
@@ -680,7 +744,8 @@ def present(username, now=None):
             'when': _ago(row.created, now),
         })
 
-    requests_total = mine.count()
+    requests_total = _account_cached('requests', username, mine.count,
+                                     seconds=ACCOUNT_COUNT_SECONDS)
     context = {
         'profile_user': username,
         'requests_total_h': human(requests_total),
@@ -694,6 +759,7 @@ def present(username, now=None):
         'queue_done': done_rows, 'queue_done_more': done_more,
         'has_queue': bool(pending_rows or leased_rows or done_rows),
         'workers': workers, 'has_workers': bool(workers),
+        'workers_more': workers_more, 'workers_total': len(pings),
         'fleet_share': share,
         'fleet_nodes_24h_h': human(snapshot['nodes_24h']),
         'nodes_24h_h': human(nodes_24h), 'tasks_24h_h': human(tasks_24h),
@@ -703,9 +769,15 @@ def present(username, now=None):
         'badges': _badges(nodes_all),
         'suggestions': suggestion_rows,
         'suggestions_more': suggestions_more,
-        'first_at': _first_contribution(username, machines),
+        # The first date cannot move once it exists, and the chart is per day:
+        # both are scans over the completed band, cached per account.
+        'first_at': _account_cached(
+            'first', username,
+            lambda: _first_contribution(username, machines),
+            seconds=FIRST_CACHE_SECONDS),
     }
-    context.update(_spark(machines, now))
+    context.update(_account_cached('spark', username,
+                                   lambda: _spark(machines, now)))
     return context
 
 
