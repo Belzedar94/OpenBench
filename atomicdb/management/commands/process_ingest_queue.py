@@ -8,12 +8,16 @@ tampoco acelera.
 """
 
 import json
+import logging
 import signal
 import time
 
 from django.core.management.base import BaseCommand
+from django.db import DatabaseError
 
 from atomicdb import ingest_queue
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -61,11 +65,21 @@ class Command(BaseCommand):
                 except (ValueError, OSError):
                     pass   # sin hilo principal: el bucle sale por --once
 
-        totals = {'done': 0, 'failed': 0}
+        totals = {'done': 0, 'failed': 0, 'tb_closed': 0}
+        next_tb_sweep = 0.0
         while not stopping['now']:
             result = ingest_queue.drain(limit=options['limit'])
             totals['done'] += result['done']
             totals['failed'] += result['failed']
+            if time.monotonic() >= next_tb_sweep:
+                next_tb_sweep = (time.monotonic()
+                                 + ingest_queue.TB_SWEEP_SECONDS)
+                try:
+                    totals['tb_closed'] += (
+                        ingest_queue.close_queued_by_tables())
+                except DatabaseError:
+                    # The next sweep tries again; the queue goes on.
+                    logger.exception('AtomicDB tablebase sweep failed')
             if options['once']:
                 break
             if result['done'] == 0 and result['failed'] == 0:

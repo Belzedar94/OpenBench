@@ -863,6 +863,14 @@ def api_lease(request):
                 # slot is never left idle by it (§ idle_repair.fits_slot).
                 if not idle_repair.fits_slot(candidate, slot_threads):
                     continue
+                # A position the server's own tables cover is never served:
+                # its exact result is on the server's disk, and the ingest
+                # process closes it from there (§ ingest_queue.
+                # close_queued_by_tables).  Only a probe that answers skips
+                # the row, so a position the tables fail on is served as
+                # before instead of waiting for a closure that never comes.
+                if ingest.server_tables_wdl(candidate.position.fen) is not None:
+                    continue
                 if first is None:
                     first = candidate
                 if supports_tb or not logic.tb_applicable(candidate.position.fen):

@@ -8581,6 +8581,11 @@ def _tb_rejected(position_key, reason, **payload):
         'key': position_key, 'reason': reason, **payload})
 
 
+def tb_server_max_men():
+    """The most pieces the server's own tables cover (5, or 6 with the six)."""
+    return int(getattr(settings, 'ATOMICDB_TB_SERVER_MAX_MEN', 5))
+
+
 def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
     """Validate and, within the server's tables, probe TB before any encompassing write tx.
 
@@ -8609,7 +8614,7 @@ def prepare_tb_closure(position_key, wdl, user=None, dtz=None):
         return None
 
     men = logic.piece_count(pos.fen)
-    server_max = int(getattr(settings, 'ATOMICDB_TB_SERVER_MAX_MEN', 5))
+    server_max = tb_server_max_men()
     if men <= server_max:
         server_wdl = tb.probe_wdl(pos.fen, max_pieces=server_max)
         if server_wdl is None or int(server_wdl) != wdl:
@@ -8642,13 +8647,24 @@ def prepare_server_tb_closure(position_key, fen):
     result goes through the same validation as a worker's WDL.  None when
     they don't, and the caller ingests the search as before.
     """
-    server_max = int(getattr(settings, 'ATOMICDB_TB_SERVER_MAX_MEN', 5))
-    if not logic.tb_applicable(fen, server_max):
-        return None
-    wdl = tb.probe_wdl(fen, max_pieces=server_max)
+    wdl = server_tables_wdl(fen)
     if wdl is None:
         return None
     return prepare_tb_closure(position_key, wdl)
+
+
+def server_tables_wdl(fen):
+    """The WDL the server's own tables give for ``fen``, or None.
+
+    None when the position is beyond ATOMICDB_TB_SERVER_MAX_MEN, carries
+    castling rights or an en-passant square, or the probe fails.  The piece
+    count is read from the FEN first, so a position the tables cannot cover
+    never touches the disk.
+    """
+    server_max = tb_server_max_men()
+    if not logic.tb_applicable(fen, server_max):
+        return None
+    return tb.probe_wdl(fen, max_pieces=server_max)
 
 
 def _apply_prepared_tb(position_key, prepared):
