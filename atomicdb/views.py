@@ -5365,24 +5365,48 @@ def _uci_for_san(fen, token):
     return matches[0] if len(matches) == 1 else None
 
 
+# Una partida que no empieza en la inicial lo dice en su cabecera FEN, y
+# caminarla desde la inicial es contestar otra pregunta (cz_eclipsia, 3-nov).
+_PGN_FEN_HEADER = re.compile(r'\[\s*FEN\s+"([^"]*)"\s*\]', re.IGNORECASE)
+
+
+def _pgn_start(raw):
+    """La posicion de salida del PGN y su numero de jugada."""
+    header = _PGN_FEN_HEADER.search(raw)
+    if header is None:
+        return logic.start_fen(), 1
+    try:
+        fen = _parse_public_fen(header.group(1))
+    except PublicFenError as error:
+        raise PublicFenError(error.reason,
+                             f'FEN header: {error}') from error
+    fields = header.group(1).split()
+    number = int(fields[5]) if len(fields) > 5 and fields[5].isdigit() else 1
+    return fen, max(1, number)
+
+
 def _parse_public_pgn(raw):
     if len(raw) > PGN_MAX_CHARS:
         raise PublicFenError('malformed', 'PGN is too long')
+    fen, number = _pgn_start(raw)
     tokens = _pgn_tokens(raw)
     if not tokens:
+        if _PGN_FEN_HEADER.search(raw):
+            return fen
         raise PublicFenError('empty', 'no moves found in the PGN')
     if len(tokens) > PGN_MAX_PLIES:
         raise PublicFenError('malformed',
                              f'PGN longer than {PGN_MAX_PLIES} plies')
-    fen = logic.start_fen()
-    for ply, token in enumerate(tokens):
+    for token in tokens:
         uci = _uci_for_san(fen, token)
         if uci is None:
-            side = 'White' if ply % 2 == 0 else 'Black'
+            side = 'White' if fen.split()[1] == 'w' else 'Black'
             raise PublicFenError(
                 'pgn-move',
-                f'move {ply // 2 + 1} for {side} ("{token}") is not a legal '
+                f'move {number} for {side} ("{token}") is not a legal '
                 'atomic move at that point of the line')
+        if fen.split()[1] == 'b':
+            number += 1
         fen = logic.apply_move(fen, uci)
     return logic.canonical_fen(fen)
 
