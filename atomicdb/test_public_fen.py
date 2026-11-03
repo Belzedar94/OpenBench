@@ -126,3 +126,19 @@ class FenJumpTests(TestCase):
         body = response.content.decode()
         self.assertIn('was not accepted', body)
         self.assertNotIn('not in the tree', body)
+
+    def test_an_empty_box_goes_to_the_start_position(self):
+        for raw in ('', '   '):
+            with self.subTest(raw=raw):
+                response = self.client.post('/atomicdb/fen/', {'fen': raw})
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    response['Location'],
+                    f'/atomicdb/explore/{logic.key_of(logic.start_fen())}/')
+
+    def test_the_home_box_lets_an_empty_go_through(self):
+        body = self.client.get('/atomicdb/').content.decode()
+        start = body.index('class="fenbox"')
+        form = body[start:body.index('</form>', start)]
+        self.assertIn('name="fen"', form)
+        self.assertNotIn('required', form)

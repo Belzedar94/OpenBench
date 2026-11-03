@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from django.conf import settings
@@ -56,16 +57,25 @@ class AtomicDBThemePageTests(SimpleTestCase):
 
         self.assertIn('id="theme-toggle"', base.read_text(encoding='utf-8'))
 
+        # Partials (``_name.html``) are included, not pages; a page may reach
+        # the base through a layout of its own (the docs pages do).
         pages = [
-            path for path in template_root.glob('*.html')
-            if path.name not in ('base.html', '_board.html')
+            path for path in template_root.rglob('*.html')
+            if path.name != 'base.html' and not path.name.startswith('_')
         ]
         self.assertGreaterEqual(len(pages), 5)
+        extends = re.compile(r'{% extends "atomicdb/([^"]+)" %}')
 
         for path in pages:
             source = path.read_text(encoding='utf-8')
             with self.subTest(template=path.name):
-                self.assertIn('{% extends "atomicdb/base.html" %}', source)
+                chain, parent = source, extends.search(source)
+                while parent and parent.group(1) != 'base.html':
+                    chain = (template_root / parent.group(1)).read_text(
+                        encoding='utf-8')
+                    self.assertNotIn('theme-toggle', chain)
+                    parent = extends.search(chain)
+                self.assertIsNotNone(parent)
                 self.assertNotIn('theme-toggle', source)
 
 

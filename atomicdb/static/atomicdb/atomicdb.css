@@ -1145,6 +1145,20 @@ details summary {
   outline-offset: 2px;
 }
 
+/* The same box under the explorer's board, as wide as the board: the board
+   column is sized by its content, and a narrower box would shrink the board. */
+.fenbox-here {
+  width: 440px;
+  max-width: 100%;
+  margin: .5rem 0;
+}
+
+.fenbox-here input {
+  min-width: 0;
+  max-width: none;
+  font-size: 11px;
+}
+
 .feed {
   list-style: none;
 }
@@ -1332,6 +1346,49 @@ h2 {
 .suggest-name .dim {
   flex: 1 1 100%;
   font-size: .75rem;
+}
+
+/* The explorer's row of small links above the board.  Closed, the two
+   proposals read as links; an open one drops to a full-width panel below the
+   row, so the links stay put. */
+.pos-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .2rem 1.1rem;
+  margin: 0 0 .7rem;
+  font-size: .8rem;
+}
+
+.pos-tools > .crumb {
+  margin: 0;
+  font-size: inherit;
+}
+
+.pos-tools > .suggest-name {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.pos-tools > .suggest-name > summary {
+  color: var(--accent);
+}
+
+.pos-tools > .suggest-name > summary:hover {
+  color: var(--accent-hover);
+}
+
+.pos-tools > .suggest-name[open] {
+  flex-basis: 100%;
+  order: 1;
+  padding: .55rem .85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  font-size: .88rem;
 }
 
 .suggest-status {
@@ -2107,5 +2164,70 @@ table.fleet-workers .qline {
   .lb-table th {
     font-size: .7rem;
     letter-spacing: 0;
+  }
+}
+
+/* Docs: a sidebar of pages beside the text, stacked above it on a phone. */
+.docs-layout {
+  display: grid;
+  grid-template-columns: 12rem minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.docs-nav {
+  position: sticky;
+  top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  padding: .6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  font-size: .9rem;
+}
+
+.docs-nav a {
+  padding: .25rem .5rem;
+  border-radius: 6px;
+  color: var(--ink);
+}
+
+.docs-nav a:hover {
+  background: var(--surface-hover);
+  text-decoration: none;
+}
+
+.docs-nav a[aria-current="page"] {
+  background: var(--surface-2);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.docs-body > h2:first-child {
+  margin-top: 0;
+}
+
+.docs-pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: .8rem;
+  border-top: 1px solid var(--border);
+  font-size: .9rem;
+}
+
+@media (max-width: 820px) {
+  .docs-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  .docs-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 }

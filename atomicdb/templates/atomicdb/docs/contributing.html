@@ -1,0 +1,18 @@
+{% extends "atomicdb/docs/_layout.html" %}
+{% block title %}Contributing and attribution · AtomicDB docs{% endblock %}
+{% block doc %}
+<h2 id="contributing">Contributing and attribution</h2>
+<p>Every completed analysis records the authenticated account that delivered
+it, and the boards on the front page group by that stamp.</p>
+<p>Machine names are chosen by the worker, and two accounts can announce the
+same one, so attribution never rests on a machine name where it can be avoided.
+Rows older than the stamp fall back to the machine map, and only for
+unambiguous machines: a disputed name attributes to nobody. Those nodes still
+count for the fleet, because they were really searched, and the page says out
+loud what belongs to nobody.</p>
+<p class="dim" style="font-size:.9rem">Contributing compute needs an account
+and the worker, and the instructions for both are on the
+<a href="/atomicdb/docs/method/">method page</a>. Contributing without hardware
+needs neither: every unsolved position has a request button, and that request
+rides the same queue as everything else.</p>
+{% endblock %}

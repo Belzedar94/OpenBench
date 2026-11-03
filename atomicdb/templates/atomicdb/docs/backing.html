@@ -1,0 +1,61 @@
+{% extends "atomicdb/docs/_layout.html" %}
+{% block title %}How a backed value is built · AtomicDB docs{% endblock %}
+{% block doc %}
+<h2 id="backing">How a backed value is built</h2>
+<p>Backing is a negamax over the graph, and it runs under five rules.</p>
+<ul style="margin:.8rem 0 .8rem 1.4rem">
+<li><strong>The best informed child always backs up.</strong> There is no depth
+  gate between a parent and its children: a child analysed at 128M nodes moves
+  a parent analysed at 2B. Between moves worth the same, a move whose chain
+  reaches a real analysis comes first (see <a href="/atomicdb/docs/repetition/">Repetition</a>);
+  then a proven win, the soonest mate first; then any move still open; then a
+  proven loss, the latest mate first, so a lost side resists longest and never
+  stands on a mate while a move is still open; then the heavier support, the
+  shallower chain, the move the position's own search chose and the move's
+  name, so the same graph always produces the same choice.</li>
+<li><strong>A multipv showcase bound grants permission, never a value.</strong>
+  When the last analysis of a position published two or more lines, the engine
+  asserted that no other move is better for the mover than the worst line of
+  that showcase. That bound lifts the partial coverage guards, so the negamax
+  runs over the informed children as if the table were complete. It never
+  competes as a value of its own: the number is always a real child's, and a
+  bound with no informed child under it backs nothing.</li>
+<li><strong>A mate band value against the mover backs nothing under partial
+  coverage without an anchor.</strong> A position with no evaluation of its own
+  whose only known reply loses knows nothing about itself: the mover still has
+  the rest of the legal moves unopened and is not going to choose that loss. A
+  gain for the mover still travels on a single child, as always.</li>
+<li><strong>A move nobody has searched cannot beat the lines of the position
+  above it.</strong> A position that was never searched and knows only the
+  replies somebody opened does not have a value yet. Its number is the best of
+  those replies: what the side to move there gets at least, a floor. Seen from
+  the position above, that same number is a ceiling on what the move can bring.
+  And when the position above published two or more lines, its own search
+  already said that no move outside them is better for the mover than the last
+  one. So an unsearched move outside those lines is not taken at a number that
+  beats them: the position stands on its other moves, and an analysis of that
+  move is queued to settle it. A move an engine did search always backs up, a
+  move that heads one of the lines refines its line as before, and a position
+  with fewer than two lines still shows what a walked line leads to.</li>
+<li><strong>Every backed value terminates in a real engine analysis, never in
+  a loop.</strong> That terminating analysis is the anchor, and where the chip
+  on the value is a link, the link goes to it. A value whose distance is longer
+  than any chain of moves can be (more than 256 plies) was counted round a
+  loop by a number that outlived its source: it is an echo, and the position
+  above reads that move as if it had no backed value.</li>
+</ul>
+<p class="dim" style="font-size:.9rem">One value never displaces another for
+free. While a position still has replies nobody has analysed, a favourable
+value with no engine nodes behind it, the band of a line a visitor walked, does
+not push aside a measured evaluation, and the analysis that would settle it is
+queued. It is set aside, not obeyed: the position is decided over its other
+moves as if that value were not there. So it keeps its own number unless a
+searched move beats it, except where a multipv bound vouches for the moves
+nobody opened: there its searched moves decide, even below its own number.
+When the value sits on the very move the position's own search chose, that
+search still values the move, and the position keeps its own number as
+before. The same when a favourable child
+carries far less search than the pass that produced the parent's own
+evaluation: the value propagates, the gap is recorded as an open question, and
+a deeper pass is bought for that child.</p>
+{% endblock %}

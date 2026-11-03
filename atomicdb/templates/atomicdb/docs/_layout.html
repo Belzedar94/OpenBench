@@ -1,0 +1,19 @@
+{% extends "atomicdb/base.html" %}
+{% block content %}
+<div class="docs-layout">
+  <nav class="docs-nav" aria-label="Documentation">
+    <a href="/atomicdb/docs/"{% if not doc_current %} aria-current="page"{% endif %}>Overview</a>
+    {% for page in doc_pages %}<a href="/atomicdb/docs/{{ page.slug }}/"{% if page.current %} aria-current="page"{% endif %}>{{ page.title }}</a>
+    {% endfor %}
+  </nav>
+  <article class="docs-body">
+    {% block doc %}{% endblock %}
+    {% if doc_current %}
+    <p class="docs-pager">
+      {% if doc_prev %}<a href="/atomicdb/docs/{{ doc_prev.slug }}/">&larr; {{ doc_prev.title }}</a>{% else %}<a href="/atomicdb/docs/">&larr; Overview</a>{% endif %}
+      {% if doc_next %}<a href="/atomicdb/docs/{{ doc_next.slug }}/">{{ doc_next.title }} &rarr;</a>{% endif %}
+    </p>
+    {% endif %}
+  </article>
+</div>
+{% endblock %}

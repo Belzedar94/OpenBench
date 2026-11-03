@@ -5575,6 +5575,9 @@ def fen_jump(request):
     crea como semilla."""
     if request.method != 'POST':
         return redirect('/atomicdb/')
+    # An empty box means "start from the beginning".
+    if not request.POST.get('fen', '').strip():
+        return redirect(f'/atomicdb/explore/{ingest.root_key()}/')
     try:
         fen = _parse_public_position(request.POST.get('fen', ''))
     except PublicFenError as error:
@@ -5918,6 +5921,15 @@ def queue_page(request):
         'served_minutes': table['served_minutes'],
         'has_served': bool(table['served_total']),
     })
+
+
+def queue_anonymous(request):
+    """The requests made without an account, listed like a profile's queue.
+
+    Public and the same for everybody, cached like the queue page (§ urls).
+    """
+    return render(request, 'atomicdb/queue_anonymous.html',
+                  contributors.present_anonymous())
 
 
 def _ago_text(moment):
@@ -6293,7 +6305,8 @@ def contributor(request, username):
         return render(request, 'atomicdb/missing.html', {
             'missing_note': 'No AtomicDB activity under that name (yet).',
         }, status=404)
-    context = contributors.present(username)
+    context = contributors.present(
+        username, every_worker=request.GET.get('workers') == 'all')
     context.update({
         **_suggestions_badge(request),
         **_queue_receipt(request, viewer == username),
@@ -6309,6 +6322,19 @@ def contributor(request, username):
         'owner_label': 'Your' if viewer == username else f'{username}’s',
     })
     return render(request, 'atomicdb/contributor.html', context)
+
+
+def contributor_workers(request, username):
+    """Every worker of an account, as the bare table: the profile's "Show all".
+
+    The profile shows the most recently seen machines only
+    (§ ``contributors.WORKER_ROWS``); this loads the rest on click.
+    """
+    username = (username or '')[:64]
+    if not contributors.has_activity(username):
+        return HttpResponse(status=404)
+    return render(request, 'atomicdb/_contributor_workers.html',
+                  contributors.all_workers(username))
 
 
 # Lo que se le dice a quien acaba de tocar su cola, por estado.  ``undo`` marca
@@ -7640,15 +7666,56 @@ def explore(request, key):
 
 
 def method(request):
-    # The number of searches the last request option buys comes from the
-    # constant that sizes it, as the queue cap of ``docs`` does.
-    return render(request, 'atomicdb/method.html', {
+    # The method page is one of the docs pages now; old links land there, and
+    # a fragment such as #api survives the redirect in the browser.
+    return redirect('/atomicdb/docs/method/', permanent=True)
+
+
+# The docs pages, in sidebar order: (slug, title).  Each one is the template
+# ``atomicdb/docs/<slug>.html``; the index is ``atomicdb/docs.html``.
+DOCS_PAGES = (
+    ('method', 'Method'),
+    ('rows', 'Position rows'),
+    ('backing', 'Backed values'),
+    ('repetition', 'Repetition'),
+    ('queue', 'The queue'),
+    ('contributing', 'Contributing'),
+    ('api', 'API'),
+    ('reading', 'Reading a page'),
+)
+
+
+def _docs_context(current=''):
+    """Sidebar, pager and the constants the pages quote."""
+    pages = [{'slug': slug, 'title': title, 'current': slug == current}
+             for slug, title in DOCS_PAGES]
+    context = {
+        'doc_pages': pages,
+        'doc_current': current,
+        'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
         'subtree_cap': ingest.SUBTREE_TASK_CAP,
-    })
+        'multi_request_cap': MULTI_REQUEST_CAP,
+    }
+    slugs = [slug for slug, _ in DOCS_PAGES]
+    if current in slugs:
+        at = slugs.index(current)
+        context['doc_prev'] = pages[at - 1] if at else None
+        context['doc_next'] = pages[at + 1] if at + 1 < len(pages) else None
+    return context
+
+
+def docs_page(request, page):
+    """One page of the docs.  Static like the index, and cached the same way."""
+    if page not in dict(DOCS_PAGES):
+        return render(request, 'atomicdb/missing.html', {
+            'missing_note': 'No documentation page by that name.',
+        }, status=404)
+    return render(request, f'atomicdb/docs/{page}.html', _docs_context(page))
 
 
 def docs(request):
-    """Que significa cada numero del explorador, en una sola pagina.
+    """Que significa cada numero del explorador: el indice de la documentacion,
+    con una pagina por seccion (§ ``docs_page``).
 
     Peticion de comunidad: "wish there was more verbose documentation".  Lo
     que faltaba no era el dato sino el sitio: las reglas de respaldo estan en
@@ -7668,11 +7735,7 @@ def docs(request):
     base y no tiene nada de nadie dentro, asi que lo unico que la cache absorbe
     aqui son las tormentas de F5 sobre un HTML que no cambia.
     """
-    return render(request, 'atomicdb/docs.html', {
-        'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
-        'subtree_cap': ingest.SUBTREE_TASK_CAP,
-        'multi_request_cap': MULTI_REQUEST_CAP,
-    })
+    return render(request, 'atomicdb/docs.html', _docs_context())
 
 
 def conquest_map(request):

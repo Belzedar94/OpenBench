@@ -1,0 +1,21 @@
+  <table class="contrib-workers">
+    <tr><th>Machine</th><th>State</th><th>Last 24h</th><th>All time</th>
+      <th title="Nodes per second over the searches the machine finished in the last hour">Speed</th></tr>
+    {% for w in workers %}
+    <tr>
+      <td><strong>{{ w.machine }}</strong>
+        <div class="dim contrib-spec">{% if w.threads %}{{ w.threads }} thread{{ w.threads|pluralize }}{% else %}threads not reported{% endif %}{% if w.hash_mb %} · {{ w.hash_mb }} MB hash{% endif %}{% if w.os %} · {{ w.os }}{% endif %}</div>
+        {% if w.searching %}<div class="contrib-spec">searching
+          <a class="qline" href="/atomicdb/explore/{{ w.searching.key }}/{% if w.searching.play %}?play={{ w.searching.play|urlencode }}{% endif %}" title="{{ w.searching.full }}">{{ w.searching.san }}</a>
+          <span class="dim">· {{ w.searching.budget }} nodes</span></div>{% endif %}</td>
+      <td><span class="chip {% if w.online %}won{% else %}cold{% endif %}"></span>{% if w.online %}online{% else %}offline{% endif %}
+        <div class="dim contrib-spec">seen {{ w.seen }}</div></td>
+      <td>{{ w.nodes_24h_h }} nodes
+        <div class="dim contrib-spec">{{ w.tasks_24h }} analys{{ w.tasks_24h|pluralize:"is,es" }}</div></td>
+      <td>{{ w.nodes_all_h }} nodes
+        <div class="dim contrib-spec">{{ w.tasks_all }} analys{{ w.tasks_all|pluralize:"is,es" }}</div></td>
+      <td>{% if w.nps_h %}{{ w.nps_h }} n/s{% else %}<span class="dim">no search in the last hour</span>{% endif %}
+        {% if w.nps_h %}<div class="dim contrib-spec">{{ w.searches_h }} search{{ w.searches|pluralize:"es" }} in the last hour</div>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>

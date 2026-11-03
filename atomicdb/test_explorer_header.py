@@ -91,7 +91,7 @@ class SuggestionsBadgeTests(TestCase):
         self._pending(2)
         self.client.login(username='mod', password='pw')
 
-        for path in ('/atomicdb/map/', '/atomicdb/method/'):
+        for path in ('/atomicdb/map/', '/atomicdb/docs/method/'):
             body = self.client.get(path).content.decode()
             self.assertNotIn('/atomicdb/suggestions/', body, path)
 
@@ -338,3 +338,39 @@ class NodeStoryTests(TestCase):
         self.assertEqual(response.context['node_story'], '')
         self.assertNotIn('This position: analysed', body)
         self.assertIn('>walked</span>', body)
+
+
+class CompactHeaderAndFenBoxTests(TestCase):
+    """The row above the board stays one row, and the FEN under it travels."""
+
+    def setUp(self):
+        self.root = ingest.get_or_create_position(logic.start_fen())
+
+    def test_the_proposals_sit_in_one_row_above_the_board(self):
+        body = self.client.get(
+            f'/atomicdb/explore/{self.root.key}/').content.decode()
+
+        row = body.index('class="pos-tools"')
+        self.assertLess(row, body.index('Suggest a name for this position'))
+        self.assertLess(body.index('Propose this line as an exploration '
+                                   'campaign'), body.index('id="board"'))
+        self.assertLess(row, body.index('root position'))
+
+    def test_the_fen_box_holds_this_position_and_posts_to_the_fen_jump(self):
+        response = self.client.get(f'/atomicdb/explore/{self.root.key}/')
+        body = response.content.decode()
+
+        box = body.index('fenbox-here')
+        self.assertLess(body.index('id="board"'), box)
+        form = body[body.rindex('<form', 0, box):body.index('</form>', box)]
+        self.assertIn('action="/atomicdb/fen/"', form)
+        self.assertIn(f'value="{self.root.fen}"', form)
+
+    def test_an_edited_fen_from_that_box_goes_there(self):
+        target = logic.apply_move(logic.start_fen(), 'e2e4')
+
+        response = self.client.post('/atomicdb/fen/', {'fen': target})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'],
+                         f'/atomicdb/explore/{logic.key_of(target)}/')

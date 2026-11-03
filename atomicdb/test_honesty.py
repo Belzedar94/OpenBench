@@ -10,7 +10,7 @@ class PublicHonestyTests(TestCase):
         home = self.client.get('/atomicdb/')
         self.assertContains(home, 'practically solved')
         self.assertNotContains(home, 'solved exactly')
-        method = self.client.get('/atomicdb/method/')
+        method = self.client.get('/atomicdb/docs/method/')
         self.assertContains(method, 'PRACTICAL')
         self.assertContains(method, 'ANDOR')
         self.assertContains(method, 'ENGINE')
@@ -64,7 +64,7 @@ class OnboardingInstructionsTests(TestCase):
                 'python atomicdb_worker.py ')
 
     def test_each_install_command_survives_the_minifier_on_its_own_line(self):
-        body = self.client.get('/atomicdb/method/').content.decode()
+        body = self.client.get('/atomicdb/docs/method/').content.decode()
 
         block = re.search(r'<div class="raw">(.*?)</div>\s*</div>', body,
                           re.S)
@@ -79,6 +79,6 @@ class OnboardingInstructionsTests(TestCase):
     def test_the_page_really_is_being_minified(self):
         # Si el minificador dejara de correr, el test de arriba pasaria por
         # el motivo equivocado y no probaria nada.
-        body = self.client.get('/atomicdb/method/').content.decode()
+        body = self.client.get('/atomicdb/docs/method/').content.decode()
 
         self.assertNotIn('\n<p ', body)

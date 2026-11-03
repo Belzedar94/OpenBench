@@ -94,7 +94,7 @@
 {% endif %}
 
 <form class="fenbox" method="post" action="/atomicdb/fen/">{% csrf_token %}
-  <input name="fen" placeholder="Paste a FEN or a PGN to jump to that position" required
+  <input name="fen" placeholder="Paste a FEN or a PGN to jump to that position, or Go for the start"
     spellcheck="false" autocomplete="off">
   <button class="reqbtn">Go</button>
 </form>

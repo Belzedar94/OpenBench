@@ -383,7 +383,7 @@ class HeaderTests(TestCase):
     def test_the_header_is_on_every_atomicdb_page(self):
         client = Client()
         client.login(username='lesha', password='pw')
-        pages = ('/atomicdb/', '/atomicdb/map/', '/atomicdb/method/',
+        pages = ('/atomicdb/', '/atomicdb/map/', '/atomicdb/docs/method/',
                  f'/atomicdb/explore/{self.position.key}/',
                  '/atomicdb/notifications/')
 
@@ -454,7 +454,7 @@ class CachedHeaderTests(TestCase):
         mine = self._client('lesha')
         theirs = self._client('otra')
 
-        for url in ('/atomicdb/map/', '/atomicdb/method/', '/atomicdb/'):
+        for url in ('/atomicdb/map/', '/atomicdb/docs/method/', '/atomicdb/'):
             with self.subTest(url=url):
                 mine.get(url)                     # calienta la entrada
                 mine_body = mine.get(url).content.decode()
@@ -468,7 +468,7 @@ class CachedHeaderTests(TestCase):
     def test_an_anonymous_visitor_is_never_served_a_signed_in_header(self):
         mine = self._client('lesha')
 
-        for url in ('/atomicdb/map/', '/atomicdb/method/'):
+        for url in ('/atomicdb/map/', '/atomicdb/docs/method/'):
             with self.subTest(url=url):
                 mine.get(url)
                 mine.get(url)
@@ -482,7 +482,7 @@ class CachedHeaderTests(TestCase):
         # la tormenta de F5 de un mismo visitante.
         client = self._client()
         for url, seconds in (('/atomicdb/map/', 30),
-                             ('/atomicdb/method/', 30)):
+                             ('/atomicdb/docs/method/', 30)):
             with self.subTest(url=url):
                 response = client.get(url)
                 self.assertIn(f'max-age={seconds}',

@@ -68,8 +68,9 @@ from .conquest_map import map_api
 _home_cached = page_cache.stale_while_revalidate(
     vary_on_cookie(csrf_protect(views.home)))
 _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
-_method_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.method)))
 _docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
+_docs_page_cached = cache_page(30)(vary_on_cookie(csrf_protect(
+    views.docs_page)))
 _queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
 # Mejor y peor valor de la posicion inicial y de cada primera jugada, y la
 # linea principal, que se registra una vez por hora.  Nada de lo que pinta
@@ -105,12 +106,14 @@ urlpatterns = [
     # reads, but any pass on one of those parents can move the destination,
     # so no cache either.
     path('borrowed-source/<str:key>/<str:uci>/', views.borrowed_source),
-    path('method/', _method_cached),
+    # The method page lives under the docs now: a plain redirect, no cache.
+    path('method/', views.method),
     # Que significa cada numero que se lee por ahi: filas, respaldo,
     # repeticion, cola, API.  Estatica salvo dos constantes que la vista trae
     # de donde se aplican, asi que entra en la misma cache de lectura que
-    # ``method`` y por las mismas razones.
+    # ``map`` y por las mismas razones.  One page per section, below.
     path('docs/', _docs_cached, name='atomicdb-docs'),
+    path('docs/<slug:page>/', _docs_page_cached, name='atomicdb-docs-page'),
     path('roots/', _roots_cached, name='atomicdb-roots'),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
@@ -126,11 +129,19 @@ urlpatterns = [
     # minuto, compartida y sin nada personal dentro (§ contributors.fleet).
     path('user/<str:username>/', views.contributor,
          name='atomicdb-contributor'),
+    # The rest of an account's workers, loaded by the profile's "Show all".
+    # Public and the same for everybody: a short cache absorbs repeat clicks.
+    path('user/<str:username>/workers/',
+         cache_page(30)(views.contributor_workers),
+         name='atomicdb-contributor-workers'),
     path('me/', views.contributor_me, name='atomicdb-me'),
     # La cola agrupada por CARRIL.  Publica y sin nada personal dentro: sus
     # agregados ya viven en un snapshot compartido de un minuto (§ lanes),
     # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
     path('queue/', _queue_cached, name='atomicdb-queue'),
+    # The "Anonymous" row of the queue, as a page of its own.
+    path('queue/anonymous/', cache_page(15)(vary_on_cookie(csrf_protect(
+        views.queue_anonymous))), name='atomicdb-queue-anonymous'),
     # The machines behind the "active workers" number of the home page.
     path('workers/', _workers_cached, name='atomicdb-workers'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de

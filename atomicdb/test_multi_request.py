@@ -912,7 +912,7 @@ class CsrfTests(TestCase):
 class DocsTests(TestCase):
 
     def test_the_docs_say_so_with_the_cap_that_applies(self):
-        response = Client().get('/atomicdb/docs/')
+        response = Client().get('/atomicdb/docs/queue/')
 
         self.assertContains(
             response, f'<strong>{views.MULTI_REQUEST_CAP}</strong> at a time')
