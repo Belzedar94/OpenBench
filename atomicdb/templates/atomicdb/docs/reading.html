@@ -1,46 +1,92 @@
 {% extends "atomicdb/docs/_layout.html" %}
+{% load static %}
 {% block title %}Reading a page · AtomicDB docs{% endblock %}
 {% block doc %}
 <h2 id="reading">Reading a page</h2>
-<p>Every value carries where it came from.</p>
-<ul style="margin:.8rem 0 .8rem 1.4rem">
-<li><strong>backed</strong>: the negamax of what the subtree already knows,
-  with the depth of the chain in the chip. Where the chip is a link, it jumps
-  to the position the value comes from.</li>
-<li><strong>walked</strong>: the same shape of value, carried up a line a
-  visitor walked. No engine search supports it yet, and verification is queued
-  automatically.</li>
-<li><strong>repetition</strong>: on a move row, the value of that move comes
-  back to the position you are looking at, so the line repeats and the move is
-  worth no more than 0 whatever its own page claims. In the header, the chain
-  that leads here returns to a position it has already been through. On a
-  disabled row, the move would re-enter the line you are playing.</li>
-<li>A <strong>muted, italic number that still carries a backed chip</strong>
-  is a floor the position does not take: nothing has searched that move, only
-  some replies to it are known, and its number would beat the lines the search
-  of the position you are looking at published. It keeps its place in the
-  table, the board arrow passes over it, and searching the move settles it.</li>
-<li><strong>borrowed</strong>: on a move row, a number nothing has searched and
-  no engine line of the position you are looking at gives. Another position's
-  search wrote it, and the chip links there; if no other position's lines give
-  it (an older pass of this one may have), the link lands on the move's
-  position, marked <em>chain breaks here</em>. The header and the board arrow
-  count only searched moves and the position's own analysis, so they can
-  disagree with it until the move is searched. A position with no search of
-  its own shows no such chip: every number in its table comes from elsewhere,
-  as its header already says.</li>
-<li>A plain number with no chip is the position's own analysis: an engine
-  searched this position itself, and that is what it reported.</li>
+<p class="docs-lead">Every number on a position page says where it came from.
+The small chip next to a value tells you whether an engine searched that
+position itself or the value was carried up from somewhere else.</p>
+
+<figure>
+<img src="{% static 'atomicdb/docs/explore-overview.webp' %}{% if static_version %}?v={{ static_version }}{% endif %}"
+  width="1080" height="790" loading="lazy"
+  alt="A position page in the explorer: the board with an arrow for the best move on the left, the header and the request button under it, and on the right the moves table with columns move, state, eval with BACKED chips, PN / DN and depth.">
+<figcaption>The start position: the board and its header on the left, the
+moves table on the right. Most values carry a <em>backed</em> chip; the depth
+column shows how much search each move has had.</figcaption>
+</figure>
+
+<h3 id="chips">What the chips mean</h3>
+<div class="docs-table-wrap"><table>
+<tr><th>You see</th><th>It means</th></tr>
+<tr><td>a plain number, no chip</td><td>The position's own analysis: an
+  engine searched this position itself, and that is what it
+  reported.</td></tr>
+<tr><td><strong>backed</strong></td><td>The value worked out from what the
+  moves below already know (see <a href="/atomicdb/docs/backing/">Backed
+  values</a>). The chip shows how deep the chain is. Where the chip is a link,
+  it jumps to the position the value comes from.</td></tr>
+<tr><td><strong>walked</strong></td><td>The same kind of value, carried up a
+  line a visitor walked. No engine search supports it yet, and verification is
+  queued automatically.</td></tr>
+<tr><td><strong>repetition</strong></td><td>The line repeats a position
+  (see <a href="/atomicdb/docs/repetition/">Repetition</a>); details
+  below.</td></tr>
+<tr><td>a muted, italic number with a backed chip</td><td>A floor the
+  position does not take; details below.</td></tr>
+<tr><td><strong>borrowed</strong></td><td>A number on a move row that another
+  position's search wrote; details below.</td></tr>
+</table></div>
+<details>
+<summary>The repetition chip, exactly</summary>
+<ul>
+<li>On a move row: the value of that move comes back to the position you are
+  looking at, so the line repeats and the move is worth no more than 0,
+  whatever its own page claims.</li>
+<li>In the header: the chain that leads here returns to a position it has
+  already been through.</li>
+<li>On a disabled row: the move would re-enter the line you are
+  playing.</li>
 </ul>
-<p>The line under the header says what the table below is made of: how many
-moves an engine searched itself, how many were seeded from an engine line
-running through this position, and how many are queued.</p>
-<p>Moves sort by best known value in the mover's perspective and by nothing
-else, so a value from a 2B node search sits beside one from a 128M node
-search and neither is hidden behind the other. That is why a deeply analysed
-value can disagree with a shallow sibling row: the two numbers were bought with
-very different amounts of search, and the shallow one is the one likely to
-move. The gap is not papered over, it is queued.</p>
+</details>
+<details>
+<summary>Muted, italic numbers (floors)</summary>
+<p>A <strong>muted, italic number that still carries a backed chip</strong> is
+a floor the position does not take. Nothing has searched that move, only some
+replies to it are known, and its number would beat the lines the search of the
+position you are looking at published. It keeps its place in the table, the
+board arrow passes over it, and searching the move settles it.</p>
+</details>
+<details>
+<summary>The borrowed chip, exactly</summary>
+<ul>
+<li>On a move row, a number nothing has searched and no engine line of the
+  position you are looking at gives. Another position's search wrote it, and
+  the chip links there.</li>
+<li>If no other position's lines give it (an older pass of this one may
+  have), the link lands on the move's position, marked <em>chain breaks
+  here</em>.</li>
+<li>The header and the board arrow count only searched moves and the
+  position's own analysis, so they can disagree with it until the move is
+  searched.</li>
+<li>A position with no search of its own shows no such chip: every number in
+  its table comes from elsewhere, as its header already says.</li>
+</ul>
+</details>
+
+<h3 id="table">The moves table</h3>
+<ul>
+<li>The line under the header says what the table below is made of: how many
+  moves an engine searched itself, how many were seeded from an engine line
+  running through this position, and how many are queued.</li>
+<li>Moves sort by best known value from the mover's side, and by nothing
+  else. A value from a 2B node search sits beside one from a 128M node search,
+  and neither is hidden behind the other.</li>
+<li>That is why a deeply analysed value can disagree with a shallow sibling
+  row: the two numbers were bought with very different amounts of search, and
+  the shallow one is the one likely to move. The gap is not papered over, it
+  is queued.</li>
+</ul>
 <p>The last column, <strong>depth</strong>, says how much search that is: the
 node budget of the deepest search the move's position has had (128M, 512M,
 2B), or a dash where no search has reached it yet. Only a search that really
