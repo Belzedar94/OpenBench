@@ -239,6 +239,38 @@ header nav a:hover {
   color: var(--ink);
 }
 
+/* The nav in three groups split by a bar, with no names (cz_eclipsia,
+   3-Nov-2026).  A group keeps the nav's own gap between its links and
+   wraps as one piece. */
+header nav .navgroup {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: inherit;
+}
+
+header nav .navsep {
+  flex: none;
+  align-self: center;
+  width: 1px;
+  height: 1.1em;
+  background: var(--ink-muted);
+  opacity: .45;
+}
+
+header nav a.nav-ext {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+}
+
+header nav a.nav-ext img,
+header nav a.nav-ext svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
 /* The fundraiser: the one nav link in the accent colour, so it can be found
    without shouting (MoKy, 3-Nov-2026). */
 header nav a.nav-support {

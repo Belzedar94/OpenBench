@@ -117,4 +117,5 @@ class DocsPageTests(TestCase):
         """Una pagina publica a la que no lleva ningun enlace no esta publicada."""
         response = self.client.get('/atomicdb/')
 
-        self.assertContains(response, 'href="/atomicdb/docs/">Docs</a>')
+        self.assertRegex(response.content.decode(),
+                         r'<a [^>]*href="/atomicdb/docs/"[^>]*>Site guide</a>')
