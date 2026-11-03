@@ -834,6 +834,48 @@ class RouteInheritanceTests(TestCase):
         self.assertNotIn('Reference:', reading)
         self.assertEqual(reading.count('2. Ng5 f5'), 1)
 
+    def test_the_name_links_to_the_position_that_bears_it(self):
+        nodes = _walk(REPORTED_LINE)
+        _approved(nodes[4], 'Villager Defense, Knight Attack Open')
+
+        below = self._page(nodes, REPORTED_LINE)
+        own = self._page(nodes[:5], REPORTED_LINE[:4])
+
+        # Down the line: the route up to the named ply, so the line reads on.
+        url = views._explore_url(nodes[4].key, list(REPORTED_LINE[:4]))
+        self.assertEqual(below.context['opening_url'], url)
+        self.assertContains(
+            below, f'<a href="{url}" style="color:inherit" '
+                   'title="Open the position this name belongs to">'
+                   'Villager Defense, Knight Attack Open</a></h2>', html=False)
+        # On the named position itself the name is plain text.
+        self.assertIsNone(own.context['opening_url'])
+        self.assertContains(own, 'Villager Defense, Knight Attack Open</h2>')
+
+    def test_a_transposed_name_keeps_the_order_the_visitor_played(self):
+        nodes = _walk(TRANSPOSED_TWO_KNIGHTS)
+
+        response = self._page(nodes, TRANSPOSED_TWO_KNIGHTS)
+
+        opening = response.context['opening']
+        self.assertNotEqual(list(opening['reference_line_uci']),
+                            list(TRANSPOSED_TWO_KNIGHTS[:3]))
+        self.assertEqual(response.context['opening_url'], views._explore_url(
+            opening['position_key'], list(TRANSPOSED_TWO_KNIGHTS[:3])))
+
+    def test_off_the_route_the_name_links_by_its_reference(self):
+        opening = {'position_key': 'named', 'matched_ply': 1,
+                   'reference_line_uci': ['g1f3']}
+
+        self.assertEqual(
+            views._opening_name_url(opening, 'here', None, None),
+            views._explore_url('named', ['g1f3']))
+        self.assertEqual(
+            views._opening_name_url(opening, 'here', ['b1c3'],
+                                    ['start', 'elsewhere']),
+            views._explore_url('named', ['g1f3']))
+        self.assertIsNone(views._opening_name_url(opening, 'named', None, None))
+
     def test_a_name_reached_by_another_order_shows_its_reference(self):
         nodes = _walk(TRANSPOSED_TWO_KNIGHTS[:3])
 
