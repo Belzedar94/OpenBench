@@ -252,8 +252,8 @@ class LiveStateIsNotCachedTests(TestCase):
         # from the cache on the second one...
         self.assertEqual(walk.call_count, 1)
         # ...and the number the visitor came for is still the current one.
-        self.assertNotIn('+777cp', first.content.decode())
-        self.assertIn('+777cp', second.content.decode())
+        self.assertNotEqual(first.context['eval_stm_str'], '+777cp')
+        self.assertEqual(second.context['eval_stm_str'], '+777cp')
 
     def test_a_new_child_move_row_shows_on_the_next_render(self):
         url = f'/atomicdb/explore/{self.target.key}/'

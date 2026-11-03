@@ -242,8 +242,8 @@ class UncachedViewTests(TestCase):
 
         second = self.client.get(f'/atomicdb/explore/{self.root.key}/')
 
-        self.assertNotIn('+777cp', first.content.decode())
-        self.assertIn('+777cp', second.content.decode())
+        self.assertNotEqual(first.context['eval_stm_str'], '+777cp')
+        self.assertEqual(second.context['eval_stm_str'], '+777cp')
 
     def test_the_worker_protocol_is_never_cached(self):
         for url in ('/atomicdb/api/lease', '/atomicdb/api/heartbeat',
