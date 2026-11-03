@@ -256,3 +256,28 @@ class UncachedViewTests(TestCase):
         response = self.client.post(f'/atomicdb/request/{self.root.key}/')
 
         self.assertNotIn('max-age', _max_age(response))
+
+
+class QueuePageCostTests(TestCase):
+    """The queue page reads one shared snapshot and nothing else."""
+
+    def _queries(self):
+        from django.db import connections
+        from django.test.utils import CaptureQueriesContext
+
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            response = Client().get('/atomicdb/queue/')
+        self.assertEqual(response.status_code, 200)
+        return len(queries)
+
+    def test_building_the_snapshot_costs_two_group_bys(self):
+        cache.clear()
+
+        self.assertLessEqual(self._queries(), 2)
+
+    def test_with_the_snapshot_built_the_page_reads_nothing(self):
+        cache.clear()
+        self._queries()
+
+        self.assertEqual(self._queries(), 0)
