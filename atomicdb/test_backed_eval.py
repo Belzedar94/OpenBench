@@ -2113,6 +2113,14 @@ class BorrowedNumberTests(TestCase):
                          ['h1h3', 'h1h6', 'f1f2'])
         self.assertEqual({uci: row['borrowed'] for uci, row in rows.items()},
                          {'h1h3': True, 'h1h6': True, 'f1f2': False})
+        # The API says the same of each move (Torom, 3-Nov-2026).
+        from unittest import mock
+        with mock.patch('atomicdb.views.logic.key_of',
+                        return_value=parent.key):
+            api = self.client.get('/atomicdb/api/query',
+                                  {'fen': parent.fen}).json()
+        self.assertEqual({m['uci']: m['borrowed'] for m in api['moves']},
+                         {'h1h3': True, 'h1h6': True, 'f1f2': False})
         # Line 2 named Rh6, so its note quotes what that line said...
         self.assertIn('engine line 2', rows['h1h6']['claim'])
         self.assertIn('has this move at 1250', rows['h1h6']['claim'])
