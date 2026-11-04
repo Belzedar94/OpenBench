@@ -125,7 +125,7 @@ most eight (§ views.explore).{% endcomment %}
       etiqueta de la tabla, que es la misma poblacion contada por el mismo
       predicado (§ ingest.is_unexplored).{% endcomment %}
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
-        title="Queues one engine search for each move in the table that no engine has searched yet">Analyse the {{ unexplored_count }} unanalysed move{{ unexplored_count|pluralize }}</button>{% endif %}
+        title="Queues one engine search for each move in the table that no engine has searched yet">Request {{ unexplored_count }} unanalysed</button>{% endif %}
       {% comment %}El tooltip cuenta las DOS formas de usarlo desde que hay
       selector: sin elegir sigue moviendose a la linea siguiente cuando la de
       antes esta entera, y con una elegida camina esa y para ahi.  Prometer lo
@@ -980,7 +980,7 @@ most eight (§ views.explore).{% endcomment %}
     the ones the queue left out stay ticked.
 
     "Select unanalysed" ticks the moves no engine has searched (the
-    population of the "Analyse the N unanalysed moves" button,
+    population of the "Request N unanalysed" button,
     § ingest.is_unexplored) and the replies not in the tree, folded or not:
     those are the rows the fold hides, so that is the point of the button.
     It ticks no more than the per-click cap, in table order, and the note
@@ -1016,9 +1016,9 @@ most eight (§ views.explore).{% endcomment %}
       <button type="button" class="reqbtn" id="msreq" disabled>Request 0 selected</button>
       {% if bar_rungs %}<span class="pvlinechoice"><label class="pvlinelab" for="msdepth">depth</label><select id="msdepth" class="pvline" autocomplete="off"
         title="The depth for every ticked move. A depth is a target: a move already searched that deep is skipped, and every other move gets exactly that depth"><option value="">each move's next rung</option>{% for rung in bar_rungs %}<option value="{{ rung.nodes }}">{{ rung.label }}</option>{% endfor %}</select></span>{% endif %}
-      <button type="button" class="reqbtn dim" id="msall" title="Ticks every move shown in the table">Select all</button>
-      <button type="button" class="reqbtn dim" id="msnew" style="display:none" title="Ticks every move no engine has searched yet and every reply not in the tree, folded rows included, up to {{ multi_request_cap }} per click">Select unanalysed</button>
-      <button type="button" class="reqbtn dim" id="msclear" style="display:none">Clear</button>
+      <button type="button" class="reqbtn" id="msall" title="Ticks every move shown in the table">Select all</button>
+      <button type="button" class="reqbtn" id="msnew" style="display:none" title="Ticks every move no engine has searched yet and every reply not in the tree, folded rows included, up to {{ multi_request_cap }} per click">Select unanalysed</button>
+      <button type="button" class="reqbtn" id="msclear" disabled>Clear</button>
       <span class="dim" id="msnote" style="font-size:.8rem"></span>
       <span class="reqnote" id="msdone" hidden></span>
     </div>
@@ -1124,7 +1124,9 @@ most eight (§ views.explore).{% endcomment %}
         // Stuck to the bottom of the screen while it has something to send
         // or something to say.
         const live = n > 0 || !done.hidden;
-        clear.style.display = live ? '' : 'none';
+        // Always in the row, so the buttons beside it never move; it is
+        // only greyed out with nothing to clear (cz_eclipsia, 3-Nov-2026).
+        clear.disabled = !live;
         bar.style.position = live ? 'sticky' : '';
         bar.style.borderTop = live ? '1px solid var(--border)' : '';
       }

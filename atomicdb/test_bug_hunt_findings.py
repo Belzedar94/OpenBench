@@ -294,7 +294,7 @@ class UnexploredLabelTests(TestCase):
         page = self.client.get(f'/atomicdb/explore/{root.key}/')
         body = page.content.decode()
 
-        advertised = re.search(r'Analyse the (\d+) unanalysed moves?', body)
+        advertised = re.search(r'Request (\d+) unanalysed<', body)
         self.assertIsNotNone(advertised, 'the button is not on the page')
         # explore.html:358 marca cada fila sin explorar con este texto.
         rows = len(re.findall(r'>unexplored<', body))

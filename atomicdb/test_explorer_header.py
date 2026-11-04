@@ -293,7 +293,7 @@ class BreadthButtonCopyTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{parent.key}/').content.decode()
 
-        self.assertIn('Analyse the 1 unanalysed move<', body)
+        self.assertIn('Request 1 unanalysed<', body)
 
 
 class NodeStoryTests(TestCase):
