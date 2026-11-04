@@ -261,9 +261,9 @@ class UnexploredButtonTests(TestCase):
 
         # The handler script always mentions the id; what must be gone is the
         # button itself.
-        self.assertNotIn('unanalysed moves', body)
+        self.assertNotIn('unanalysed</button>', body)
 
     def test_the_button_shows_the_count_it_would_queue(self):
         body = self.client.get(
             f'/atomicdb/explore/{self.root.key}/').content.decode()
-        self.assertIn('Analyse the 20 unanalysed moves', body)
+        self.assertIn('Request 20 unanalysed', body)
