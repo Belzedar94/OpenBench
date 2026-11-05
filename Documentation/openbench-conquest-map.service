@@ -1,0 +1,48 @@
+# AtomicDB move tree (/atomicdb/map/): build and publish its snapshot.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now openbench-conquest-map.timer
+#     journalctl -u openbench-conquest-map.service -f
+#
+# WHAT A RUN DOES.  ``build_conquest_map`` reads a bounded slice of the tree
+# outward from the start position (best-first by search invested, a parent's
+# children all together or not at all, 600,000 positions by default), builds
+# the display tree, validates it and publishes it with a same-directory
+# rename.  Then it stores the page's own view in the shared cache, so no
+# visitor pays the first load of the new artifact.  The receipt is one JSON
+# line on stdout: positions, edges, depth, projection and warmed views.
+#
+# WHY BOUNDED.  The old command read every position and every edge into
+# memory.  That fitted at 650 thousand positions (29-Jul-2026, 301 MB of
+# JSON) and has not fitted since: 114 million positions on 5-Nov-2026 would
+# be ~50 GB of artifact against the reader's 512 MB ceiling.  Reads are index
+# probes in batches, read-only, with a 60 s statement timeout.
+#
+# BOUNDS.  TimeoutStartSec is the hard stop and MemoryMax keeps a runaway
+# build from competing with PostgreSQL for the page cache.  One run at a
+# time: the timer never starts a oneshot that is still running.  If a run
+# fails, the previous artifact stays published (the rename never happened).
+
+[Unit]
+Description=Build AtomicDB Conquest Map snapshot
+Documentation=https://github.com/Belzedar94/OpenBench
+ConditionPathExists=/opt/openbench/manage.py
+After=network-online.target postgresql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u /opt/openbench/manage.py build_conquest_map
+TimeoutStartSec=45min
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+MemoryMax=8G

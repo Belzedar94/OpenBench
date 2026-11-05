@@ -1,0 +1,23 @@
+# Companion of openbench-conquest-map.service.
+#
+# ONCE A DAY, at 05:30 UTC.  The page is a picture of where the work went,
+# not a live view (the explorer is the live view), so a day old is fresh
+# enough, and one bounded build a day keeps its reads off the ingests.  The
+# old timer of this name ran every thirty minutes against the unbounded
+# build and was disabled; this replaces it.
+#
+# Without Persistent=: a build missed by a reboot does not need catching up,
+# the next one comes the next morning.
+
+[Unit]
+Description=Rebuild the AtomicDB move tree snapshot daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 UTC
+AccuracySec=5min
+RandomizedDelaySec=5min
+Persistent=false
+Unit=openbench-conquest-map.service
+
+[Install]
+WantedBy=timers.target

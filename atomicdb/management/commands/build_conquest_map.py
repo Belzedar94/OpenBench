@@ -7,10 +7,12 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from atomicdb.conquest_map import (
+    DEFAULT_MAX_POSITIONS,
     SnapshotError,
     build_snapshot_from_database,
     publish_snapshot,
     read_snapshot,
+    warm_map_cache,
 )
 
 
@@ -31,6 +33,20 @@ class Command(BaseCommand):
             action='store_true',
             help='Do not preserve valid display parents from the prior snapshot',
         )
+        parser.add_argument(
+            '--max-positions',
+            type=int,
+            default=DEFAULT_MAX_POSITIONS,
+            help=(
+                'Budget of the published slice, read best-first from the '
+                f'start position (default {DEFAULT_MAX_POSITIONS})'
+            ),
+        )
+        parser.add_argument(
+            '--no-warm',
+            action='store_true',
+            help="Do not store the page's own view in the shared cache",
+        )
 
     def handle(self, *args, **options):
         output = Path(options['output'])
@@ -48,10 +64,23 @@ class Command(BaseCommand):
                     )
                 )
         try:
-            snapshot = build_snapshot_from_database(prior_snapshot=prior)
+            snapshot = build_snapshot_from_database(
+                prior_snapshot=prior,
+                max_positions=options['max_positions'],
+            )
             publish_snapshot(snapshot, output)
         except SnapshotError as exc:
             raise CommandError(str(exc)) from exc
+        prior = None
+        warmed = 0
+        if not options['no_warm']:
+            try:
+                warmed = warm_map_cache(snapshot, output)
+            except SnapshotError as exc:
+                # The artifact is published either way; the first visitor
+                # then pays the load, as before the shared cache existed.
+                self.stderr.write(
+                    self.style.WARNING(f'Cache not warmed: {exc}'))
         metadata = snapshot['snapshot']
         result = {
             'schema': 'atomicdb.map.build-receipt.v1',
@@ -61,6 +90,8 @@ class Command(BaseCommand):
             'edges': metadata['edges'],
             'max_depth': metadata['max_depth'],
             'unreachable_positions': metadata['unreachable_positions'],
+            'projection': metadata.get('projection'),
+            'warmed_views': warmed,
             'output': str(output.resolve()),
         }
         self.stdout.write(json.dumps(result, sort_keys=True))

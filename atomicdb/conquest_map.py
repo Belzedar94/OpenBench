@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 import zlib
 from datetime import datetime, timezone as datetime_timezone
 
@@ -77,6 +78,13 @@ _EXACT_UTILITY = 10 ** 15
     M_DISPUTED,
     M_PROOF_NONE,
 ) = range(23)
+# Appended after the closure columns were frozen (Closure.SOLVE, a df-pn
+# certificate replayed on the server).  Artifacts written before it carry 23
+# columns and are read as having no SOLVE closures.
+M_SOLVE = 23
+METRIC_COLUMNS = 24
+_LEGACY_METRIC_COLUMNS = 23
+_CLOSURES = (None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL', 'SOLVE')
 
 logger = logging.getLogger(__name__)
 _snapshot_cache = {'signature': None, 'snapshot': None, 'error': None}
@@ -138,7 +146,8 @@ def _unsealed_copy(snapshot):
 
 
 def _validate_metric_vector(metrics):
-    if not isinstance(metrics, list) or len(metrics) != 23:
+    if not isinstance(metrics, list) or len(metrics) not in (
+            _LEGACY_METRIC_COLUMNS, METRIC_COLUMNS):
         raise SnapshotError('invalid aggregate metric vector')
     for index, value in enumerate(metrics):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -188,7 +197,7 @@ def validate_snapshot(snapshot):
             raise SnapshotError('invalid snapshot node')
         if node['s'] not in ('UNKNOWN', 'WHITE_WIN', 'BLACK_WIN', 'DRAW'):
             raise SnapshotError('invalid node status')
-        if node['c'] not in (None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL'):
+        if node['c'] not in _CLOSURES:
             raise SnapshotError('invalid node closure')
         if node['p'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
             raise SnapshotError('invalid node proof')
@@ -216,7 +225,8 @@ def validate_snapshot(snapshot):
             raise SnapshotError('closed/unknown aggregate mismatch')
         if sum(metrics[M_WHITE_WIN:M_STATUS_UNKNOWN + 1]) != metrics[M_POSITIONS]:
             raise SnapshotError('status aggregate mismatch')
-        if sum(metrics[M_TB:M_CLOSURE_NONE + 1]) != metrics[M_POSITIONS]:
+        if (sum(metrics[M_TB:M_CLOSURE_NONE + 1]) + _solve_count(metrics)
+                != metrics[M_POSITIONS]):
             raise SnapshotError('closure aggregate mismatch')
         if sum(metrics[M_ANDOR:M_PROOF_NONE + 1]) != metrics[M_POSITIONS]:
             raise SnapshotError('proof aggregate mismatch')
@@ -303,14 +313,19 @@ def read_snapshot(path):
     return validate_snapshot(snapshot)
 
 
-def published_snapshot(path=None):
-    """Load and process-cache the current immutable artifact by file identity."""
+def snapshot_signature(path=None):
+    """File identity of the published artifact (path, device, inode, times, size).
+
+    A publication is a same-directory rename, so a new artifact always has a
+    new inode and change time even when its size and mtime collide.  The
+    process cache and the shared response cache are both keyed by this.
+    """
     target = Path(path or settings.ATOMICDB_MAP_SNAPSHOT_PATH)
     try:
         stat = target.stat()
     except OSError as exc:
         raise SnapshotError('snapshot is unavailable') from exc
-    signature = (
+    return (
         str(target.resolve()),
         getattr(stat, 'st_dev', None),
         getattr(stat, 'st_ino', None),
@@ -318,11 +333,17 @@ def published_snapshot(path=None):
         stat.st_mtime_ns,
         stat.st_size,
     )
+
+
+def _load_published(path=None):
+    """Return ``(signature, snapshot)`` from the process cache or the file."""
+    target = Path(path or settings.ATOMICDB_MAP_SNAPSHOT_PATH)
+    signature = snapshot_signature(target)
     with _snapshot_cache_lock:
         if _snapshot_cache['signature'] == signature:
             if _snapshot_cache['error'] is not None:
                 raise SnapshotError(_snapshot_cache['error'])
-            return _snapshot_cache['snapshot']
+            return signature, _snapshot_cache['snapshot']
         try:
             snapshot = read_snapshot(target)
         except SnapshotError as exc:
@@ -331,7 +352,18 @@ def published_snapshot(path=None):
             raise
         _snapshot_cache.update(
             signature=signature, snapshot=snapshot, error=None)
-        return snapshot
+        return signature, snapshot
+
+
+def published_snapshot(path=None):
+    """Load and process-cache the current immutable artifact by file identity."""
+    return _load_published(path)[1]
+
+
+def _process_has_snapshot(signature):
+    """Is this exact artifact already loaded (or known corrupt) here?"""
+    with _snapshot_cache_lock:
+        return _snapshot_cache['signature'] == signature
 
 
 def reset_snapshot_cache():
@@ -420,8 +452,7 @@ def _validate_position(position):
         raise SnapshotError('invalid database position FEN')
     if position['status'] not in ('UNKNOWN', 'WHITE_WIN', 'BLACK_WIN', 'DRAW'):
         raise SnapshotError('invalid database status')
-    if position['closure'] not in (
-            None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL'):
+    if position['closure'] not in _CLOSURES:
         raise SnapshotError('invalid database closure')
     if position['proof'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
         raise SnapshotError('invalid database proof')
@@ -480,7 +511,11 @@ def _san_for_edge(parent_fen, move_uci):
 
 
 def _empty_metrics():
-    return [0] * 23
+    return [0] * METRIC_COLUMNS
+
+
+def _solve_count(metrics):
+    return metrics[M_SOLVE] if len(metrics) > M_SOLVE else 0
 
 
 def _own_metrics(position, active, queued, alternate_parents):
@@ -509,6 +544,7 @@ def _own_metrics(position, active, queued, alternate_parents):
         'MATE_PV': M_MATE_PV,
         'MINIMAX': M_MINIMAX,
         'TERMINAL': M_TERMINAL,
+        'SOLVE': M_SOLVE,
         None: M_CLOSURE_NONE,
     }[position['closure']]] = 1
     metrics[{
@@ -534,8 +570,27 @@ def _prior_parent(prior_snapshot, key):
     return node.get('r', node.get('display_parent'))
 
 
+def _prior_san(prior_snapshot, key, parent_key, move_uci):
+    """SAN of the same display edge in the prior snapshot, if it had one.
+
+    A key is the identity of a FEN, so the same parent key and move give the
+    same SAN.  ``pyffish.get_san`` costs about 2 ms a call on the production
+    box (87 % of a 20,000-position build, 5-Nov-2026); a daily rebuild keeps
+    most display parents, so this skips most of those calls.
+    """
+    if not prior_snapshot:
+        return None
+    node = (prior_snapshot.get('nodes') or {}).get(key)
+    if (not isinstance(node, dict) or node.get('r') != parent_key
+            or node.get('u') != move_uci):
+        return None
+    san = node.get('a')
+    return san if isinstance(san, str) and san else None
+
+
 def build_snapshot_data(position_rows, edge_rows, task_rows=(),
-                        prior_snapshot=None, root_key=None, generated_at=None):
+                        prior_snapshot=None, root_key=None, generated_at=None,
+                        projection=None):
     """Build one cycle-safe display tree and all post-order aggregates.
 
     ``position_rows`` and ``edge_rows`` are materialised bulk reads.  No
@@ -669,7 +724,8 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
             'u': move_uci,
             'a': (
                 None if parent_key is None
-                else _san_for_edge(positions[parent_key]['fen'], move_uci)
+                else _prior_san(prior_snapshot, key, parent_key, move_uci)
+                or _san_for_edge(positions[parent_key]['fen'], move_uci)
             ),
             'i': reachable_incoming,
             'x': alternate_parents,
@@ -710,6 +766,7 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
             'edges': reachable_edges,
             'max_depth': max(depth.values(), default=0),
             'unreachable_positions': len(positions) - len(reachable),
+            **({'projection': dict(projection)} if projection else {}),
             'work_keys': [
                 key
                 for key in sorted(
@@ -722,24 +779,158 @@ def build_snapshot_data(position_rows, edge_rows, task_rows=(),
     return seal_snapshot(unsealed)
 
 
-def build_snapshot_from_database(prior_snapshot=None, generated_at=None):
-    """Bulk-read current state without taking locks or writing model rows."""
+# Budget of the published projection.  The whole tree no longer fits in one
+# artifact: the 29-Jul-2026 snapshot held 649,587 positions in 301 MB of JSON
+# (about 464 bytes a node) against the 512 MB ceiling of ``read_snapshot``,
+# and the tree had 114 million positions on 5-Nov-2026.  600,000 positions is
+# about the size that artifact already proved to serve.
+DEFAULT_MAX_POSITIONS = 600_000
+# Rows per ``IN (...)`` read.  Every read is an index probe (position primary
+# key, ``uniq_parent_move``, the task ``position_id`` index), never a scan.
+BUILD_PARENT_BATCH = 500
+BUILD_ROW_BATCH = 2000
+# Per statement, so a cold cache or a lock wait cannot pin the database.
+BUILD_STATEMENT_TIMEOUT_MS = 60_000
+
+_POSITION_FIELDS = (
+    'key', 'fen', 'eval_cp', 'backed_eval', 'status', 'closure', 'proof',
+    'best_move', 'depth_invested', 'nodes_invested', 'time_invested',
+    'visits', 'priority', 'expanded',
+)
+_NODES_INVESTED = _POSITION_FIELDS.index('nodes_invested')
+
+
+def _chunks(items, size):
+    items = list(items)
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def bounded_database_rows(max_positions=DEFAULT_MAX_POSITIONS, root_key=None):
+    """Read a connected, budgeted slice of the tree outward from the start.
+
+    Best-first: among the included positions whose stored children have not
+    been read yet, the one with the most search invested goes next, ties
+    broken by discovery depth and key, so the result is deterministic.  A
+    parent's children are taken all together or not at all, which keeps the
+    frontier counts under every read parent exact.  It stops at the first
+    parent whose new children would exceed ``max_positions``.
+
+    Cost is bounded by the budget, not by the size of the tree: at most
+    ``max_positions`` position rows, the edges of the parents that were read
+    (plus one batch of overshoot), and the open tasks of the included
+    positions, all as primary-key or index probes in batches.
+    """
     from .models import AnalysisTask, Edge, Position
 
-    position_rows = list(Position.objects.values_list(
-        'key', 'fen', 'eval_cp', 'backed_eval', 'status', 'closure', 'proof',
-        'best_move', 'depth_invested', 'nodes_invested', 'time_invested',
-        'visits', 'priority', 'expanded',
-    ))
-    edge_rows = list(Edge.objects.values_list(
-        'parent_id', 'child_id', 'move_uci',
-    ))
-    task_rows = list(AnalysisTask.objects.filter(
-        state__in=('PENDING', 'LEASED'),
-    ).values_list('position_id', 'state'))
+    if max_positions < 1:
+        raise SnapshotError('max_positions must be positive')
+    root_key = root_key or logic.key_of(logic.start_fen())
+    rows = {}
+
+    def fetch(keys):
+        fetched = []
+        for chunk in _chunks(keys, BUILD_ROW_BATCH):
+            fetched.extend(Position.objects.filter(
+                key__in=chunk).values_list(*_POSITION_FIELDS))
+        return fetched
+
+    found = fetch([root_key])
+    if not found:
+        raise SnapshotError('Atomic start position is absent')
+    rows[root_key] = found[0]
+    heap = [(-int(found[0][_NODES_INVESTED] or 0), 0, root_key)]
+    edge_rows = []
+    parents_read = 0
+    complete = True
+    while heap:
+        batch = [heapq.heappop(heap)
+                 for _ in range(min(BUILD_PARENT_BATCH, len(heap)))]
+        children = defaultdict(list)
+        for chunk in _chunks([entry[2] for entry in batch], BUILD_ROW_BATCH):
+            for parent_key, child_key, move_uci in Edge.objects.filter(
+                    parent_id__in=chunk).values_list(
+                        'parent_id', 'child_id', 'move_uci'):
+                children[parent_key].append((move_uci, child_key))
+        accepted_new = []
+        pending = set()
+        stopped = False
+        for _priority, depth, parent_key in batch:
+            edges = sorted(children.get(parent_key, ()))
+            new = list(dict.fromkeys(
+                child_key for _move, child_key in edges
+                if child_key not in rows and child_key not in pending))
+            if len(rows) + len(pending) + len(new) > max_positions:
+                stopped = True
+                break
+            parents_read += 1
+            pending.update(new)
+            accepted_new.extend((depth + 1, key) for key in new)
+            edge_rows.extend(
+                (parent_key, child_key, move_uci)
+                for move_uci, child_key in edges)
+        depth_of = {key: depth for depth, key in accepted_new}
+        for row in fetch(list(depth_of)):
+            rows[row[0]] = row
+            heapq.heappush(heap, (
+                -int(row[_NODES_INVESTED] or 0), depth_of[row[0]], row[0]))
+        if stopped:
+            complete = False
+            break
+    # An edge to a child that vanished between the two reads is dropped by
+    # ``build_snapshot_data`` like any other edge that leaves the slice.
+    task_rows = []
+    for chunk in _chunks(rows, BUILD_ROW_BATCH):
+        task_rows.extend(AnalysisTask.objects.filter(
+            position_id__in=chunk, state__in=('PENDING', 'LEASED'),
+        ).values_list('position_id', 'state'))
+    projection = {
+        'max_positions': max_positions,
+        'parents_read': parents_read,
+        'complete': complete,
+    }
+    return list(rows.values()), edge_rows, task_rows, projection
+
+
+class _BoundedSession:
+    """Read-only session with a per-statement timeout, restored on exit."""
+
+    def __init__(self, timeout_ms):
+        self.timeout_ms = int(timeout_ms)
+        self.applied = False
+        self.connection = None
+
+    def __enter__(self):
+        from .database import connection
+        self.connection = connection
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f'SET statement_timeout = {self.timeout_ms}')
+                cursor.execute('SET default_transaction_read_only = on')
+            self.applied = True
+        return self
+
+    def __exit__(self, *exc_info):
+        if self.applied:
+            with self.connection.cursor() as cursor:
+                cursor.execute('RESET default_transaction_read_only')
+                cursor.execute('RESET statement_timeout')
+        return False
+
+
+def build_snapshot_from_database(
+        prior_snapshot=None, generated_at=None,
+        max_positions=DEFAULT_MAX_POSITIONS,
+        statement_timeout_ms=BUILD_STATEMENT_TIMEOUT_MS):
+    """Read a bounded slice without taking locks or writing model rows."""
+    with _BoundedSession(statement_timeout_ms):
+        position_rows, edge_rows, task_rows, projection = (
+            bounded_database_rows(max_positions=max_positions))
     return build_snapshot_data(
         position_rows, edge_rows, task_rows,
         prior_snapshot=prior_snapshot, generated_at=generated_at,
+        projection=projection,
     )
 
 
@@ -766,6 +957,7 @@ def _expanded_metrics(metrics):
             'MATE_PV': metrics[M_MATE_PV],
             'MINIMAX': metrics[M_MINIMAX],
             'TERMINAL': metrics[M_TERMINAL],
+            'SOLVE': _solve_count(metrics),
             'NONE': metrics[M_CLOSURE_NONE],
         },
         'proof': {
@@ -1220,6 +1412,179 @@ def _set_cache_headers(response, etag):
     response['Vary'] = 'Accept-Encoding'
 
 
+# Shared response cache.  Loading and validating the artifact costs one
+# process tens of seconds and every gunicorn worker holds its own copy, so a
+# cold worker (they recycle every ~2,000 requests and all restart on deploy)
+# used to make its first visitor wait for the whole load.  A rendered answer
+# is a pure function of the artifact and the normalised query, so it is kept
+# once for the fleet in the shared cache, keyed by the artifact's file
+# identity: publishing a new snapshot changes the key, nothing is invalidated
+# by hand.  Only successful renders are stored.
+MAP_CACHE_PREFIX = 'atomicdb:map:v1:'
+MAP_CACHE_SECONDS = 6 * 3600
+# One process renders a missing answer; the others wait for it instead of
+# all loading the artifact at once.  The lock outlives no render: gunicorn
+# kills a request after 120 s.
+MAP_CACHE_LOCK_SECONDS = 120
+MAP_CACHE_WAIT_SECONDS = 90.0
+MAP_CACHE_POLL_SECONDS = 0.25
+# What the page asks for (conquest-map.js) and what a bare call gets.
+WARM_QUERIES = (
+    {'weight': 'frontier', 'limit': MAX_MARKS, 'depth': DEFAULT_DEPTH},
+)
+
+
+def _map_cache():
+    from django.core.cache import cache
+    return cache
+
+
+def map_cache_key(signature, requested_root, weight, limit, depth):
+    identity = json.dumps(
+        [list(signature), requested_root or '', weight, limit, depth],
+        separators=(',', ':'),
+    )
+    return MAP_CACHE_PREFIX + hashlib.sha256(
+        identity.encode('utf-8')).hexdigest()
+
+
+def _entry_from_raw(raw):
+    return {
+        'etag': f'W/"{hashlib.sha256(raw).hexdigest()}"',
+        'gz': gzip.compress(raw, compresslevel=6, mtime=0),
+    }
+
+
+def _valid_entry(entry):
+    return (isinstance(entry, dict)
+            and isinstance(entry.get('etag'), str)
+            and isinstance(entry.get('gz'), bytes))
+
+
+def _cache_call(operation, *args, **kwargs):
+    """The shared cache is an optimisation: no failure of it is fatal."""
+    try:
+        return getattr(_map_cache(), operation)(*args, **kwargs)
+    except Exception:       # noqa: BLE001 - see docstring
+        logger.warning('Atomic move-tree cache %s failed', operation,
+                       exc_info=True)
+        return None
+
+
+def _unavailable():
+    response = _error(
+        'snapshot_unavailable',
+        'Atomic move-tree snapshot is temporarily unavailable',
+        503,
+    )
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+def _render_raw(snapshot, root_key, weight, limit, depth):
+    """Canonical JSON of one view, or ``None`` when it cannot be served."""
+    try:
+        document = render_map(snapshot, root_key, weight, limit, depth)
+        raw = _canonical_json(document)
+    except (KeyError, SnapshotError, RecursionError, ValueError):
+        logger.exception('Atomic move-tree snapshot cannot be rendered')
+        return None
+    return raw
+
+
+def _compute_entry(requested_root, weight, limit, depth):
+    """Render from this process' copy: ``(signature, entry, error)``."""
+    try:
+        signature, snapshot = _load_published()
+    except SnapshotError as exc:
+        logger.warning(
+            'Atomic move-tree snapshot unavailable or corrupt: %s', exc)
+        return None, None, _unavailable()
+    root_key = requested_root or snapshot['snapshot']['root_key']
+    if root_key not in snapshot['nodes']:
+        return signature, None, _error(
+            'root_not_found', 'root is not startpos-reachable', 404)
+    raw = _render_raw(snapshot, root_key, weight, limit, depth)
+    if raw is None:
+        return signature, None, _unavailable()
+    if len(raw) > MAX_API_BYTES:
+        logger.error('Atomic move-tree response exceeded %d bytes',
+                     MAX_API_BYTES)
+        return signature, None, _error(
+            'payload_budget_exceeded',
+            'Atomic move-tree response exceeds the payload budget',
+            503,
+        )
+    return signature, _entry_from_raw(raw), None
+
+
+def _cached_entry(requested_root, weight, limit, depth):
+    """``(entry, error)`` for one normalised query, shared across workers."""
+    try:
+        signature = snapshot_signature()
+    except SnapshotError:
+        return _compute_entry(requested_root, weight, limit, depth)[1:]
+    key = map_cache_key(signature, requested_root, weight, limit, depth)
+    entry = _cache_call('get', key)
+    if _valid_entry(entry):
+        return entry, None
+    lock = key + ':lock'
+    owner = False
+    if not _process_has_snapshot(signature):
+        owner = bool(_cache_call(
+            'add', lock, 1, timeout=MAP_CACHE_LOCK_SECONDS))
+        if not owner:
+            # Someone else is loading this artifact: wait for its answer,
+            # or for its lock to go (an error, which is not cached), then
+            # render here.
+            deadline = time.monotonic() + MAP_CACHE_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                time.sleep(MAP_CACHE_POLL_SECONDS)
+                entry = _cache_call('get', key)
+                if _valid_entry(entry):
+                    return entry, None
+                if not _cache_call('has_key', lock):
+                    break
+    try:
+        used, entry, error = _compute_entry(
+            requested_root, weight, limit, depth)
+        if entry is not None and used is not None:
+            _cache_call(
+                'set',
+                map_cache_key(used, requested_root, weight, limit, depth),
+                entry, timeout=MAP_CACHE_SECONDS,
+            )
+        return entry, error
+    finally:
+        if owner:
+            _cache_call('delete', lock)
+
+
+def warm_map_cache(snapshot, path=None, roots=None):
+    """Store the page's own views of a just-published artifact.
+
+    Called by the build command right after ``publish_snapshot`` so that no
+    visitor pays the first load.  Returns the number of views stored.
+    """
+    signature = snapshot_signature(path)
+    root_key = snapshot['snapshot']['root_key']
+    stored = 0
+    for requested_root in (roots or ('', root_key)):
+        for query in WARM_QUERIES:
+            raw = _render_raw(
+                snapshot, requested_root or root_key, query['weight'],
+                query['limit'], query['depth'])
+            if raw is None or len(raw) > MAX_API_BYTES:
+                continue
+            key = map_cache_key(
+                signature, requested_root, query['weight'], query['limit'],
+                query['depth'])
+            _cache_call('set', key, _entry_from_raw(raw),
+                        timeout=MAP_CACHE_SECONDS)
+            stored += 1
+    return stored
+
+
 def map_api(request):
     """Serve only a previously authenticated snapshot; never query live DB."""
     if request.method not in ('GET', 'HEAD'):
@@ -1249,44 +1614,11 @@ def map_api(request):
         if not HEX_KEY.fullmatch(requested_root):
             return _error('invalid_root', 'root must be a 64-hex key', 400)
 
-    try:
-        snapshot = published_snapshot()
-    except SnapshotError as exc:
-        logger.warning('Atomic move-tree snapshot unavailable or corrupt: %s', exc)
-        response = _error(
-            'snapshot_unavailable',
-            'Atomic move-tree snapshot is temporarily unavailable',
-            503,
-        )
-        response['Cache-Control'] = 'no-store'
-        return response
-    root_key = requested_root or snapshot['snapshot']['root_key']
-    if root_key not in snapshot['nodes']:
-        return _error('root_not_found', 'root is not startpos-reachable', 404)
-    try:
-        document = render_map(snapshot, root_key, weight, limit, depth)
-        raw = _canonical_json(document)
-    except (KeyError, SnapshotError, RecursionError, ValueError):
-        logger.exception('Atomic move-tree snapshot cannot be rendered')
-        response = _error(
-            'snapshot_unavailable',
-            'Atomic move-tree snapshot is temporarily unavailable',
-            503,
-        )
-        response['Cache-Control'] = 'no-store'
-        return response
-    if len(raw) > MAX_API_BYTES:
-        logger.error('Atomic move-tree response exceeded %d bytes', MAX_API_BYTES)
-        response = _error(
-            'payload_budget_exceeded',
-            'Atomic move-tree response exceeds the payload budget',
-            503,
-        )
-        response['Cache-Control'] = 'no-store'
-        return response
+    entry, error = _cached_entry(requested_root, weight, limit, depth)
+    if error is not None:
+        return error
 
-    representation = hashlib.sha256(raw).hexdigest()
-    etag = f'W/"{representation}"'
+    etag = entry['etag']
     if _etag_matches(request.headers.get('If-None-Match'), etag):
         response = HttpResponse(status=304)
         _set_cache_headers(response, etag)
@@ -1294,7 +1626,7 @@ def map_api(request):
 
     use_gzip = _accepts_gzip(request.headers.get('Accept-Encoding'))
     representation_body = (
-        gzip.compress(raw, compresslevel=6, mtime=0) if use_gzip else raw
+        entry['gz'] if use_gzip else gzip.decompress(entry['gz'])
     )
     response = HttpResponse(
         representation_body, content_type='application/json; charset=utf-8')
