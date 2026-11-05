@@ -5550,6 +5550,15 @@ def api_query(request):
         pos = Position.objects.get(key=logic.key_of(fen))
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
+    return JsonResponse(_query_block(pos))
+
+
+def _query_block(pos):
+    """The body of ``api_query`` for one position, as a dict.
+
+    Shared with ``api_principal_variations``, whose root is exactly what a
+    query of that position returns.
+    """
     stm_white = pos.fen.split()[1] == 'w'
     # ``score`` es el mejor conocimiento actual (status probado > respaldado >
     # eval puntual), el MISMO helper que titula la cabecera del explore y la
@@ -5579,7 +5588,7 @@ def api_query(request):
     # que llevaba el score de la primera (reporte del propietario, 13-ago;
     # misma leccion de la flecha del explore, 29-jul).
     # The top row yields to the move ``score`` comes from (§ _arrow_move).
-    return JsonResponse({
+    return {
         'fen': pos.fen, 'key': pos.key, 'status': pos.status,
         'closure': pos.closure, 'score': score, 'point': point,
         'backed_plies': pos.backed_plies,
@@ -5591,7 +5600,90 @@ def api_query(request):
         # ADITIVO: una clave mas al final, ``null`` en las posiciones que
         # ningun motor ha mirado.  Nada de lo de arriba cambia de forma ni de
         # nombre, asi que un consumidor anterior no se entera de que existe.
-        'analysis': _analysis_block(pos, stm_white)})
+        'analysis': _analysis_block(pos, stm_white)}
+
+
+# The most lines and plies one call of ``api_principal_variations`` walks.
+PV_API_MAX_LINES = 5
+PV_API_MAX_PLIES = 5
+
+
+def _bounded_int(raw, default, top):
+    """``raw`` as an int between 1 and ``top``; ``default`` when unreadable."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(top, value))
+
+
+def api_principal_variations(request):
+    """The root of a position and its best lines, in one call.
+
+    A site that shows a panel of candidate moves with a short continuation
+    for each used to query the root and then every position along every
+    line: 20 to 25 calls for one panel (seaside_cliff, for Atomic Puzzles,
+    4-Nov-2026).  This walks them here.
+
+    ``position`` is what ``/api/query`` returns for the root.  Its first
+    ``line_count`` moves (at most 5) each start a line, and every line then
+    follows the ``best_move`` of the position it reached, the move the
+    board arrow shows, until it holds ``ply_count`` moves (at most 5), the
+    tree has no such move, or the game is over.  A line the tree cannot
+    continue is returned as far as it got.  ``positions`` holds, by FEN,
+    every position the lines reach: its key, status, score from the side to
+    move and best move, without the move list.
+    """
+    try:
+        fen = _parse_public_fen(request.GET.get('fen', ''))
+    except Exception:
+        return JsonResponse({'error': 'invalid fen'}, status=400)
+    try:
+        root = Position.objects.get(key=logic.key_of(fen))
+    except Position.DoesNotExist:
+        return JsonResponse({'error': 'unknown position'}, status=404)
+    line_count = _bounded_int(request.GET.get('line_count'),
+                              PV_API_MAX_LINES, PV_API_MAX_LINES)
+    ply_count = _bounded_int(request.GET.get('ply_count'),
+                             PV_API_MAX_PLIES, PV_API_MAX_PLIES)
+    block = _query_block(root)
+    lines, positions, known = {}, {}, {}
+
+    def step(parent_key, uci):
+        """The position ``uci`` leads to from ``parent_key``, or None."""
+        edge = (Edge.objects.filter(parent_id=parent_key, move_uci=uci)
+                .select_related('child').first())
+        return edge.child if edge else None
+
+    def entry(pos):
+        """The compact record of ``pos``, read once per call."""
+        if pos.key not in known:
+            stm_white = pos.fen.split()[1] == 'w'
+            score = ingest.best_known_eval(pos)
+            best = (None if pos.closure == 'TERMINAL'
+                    else _arrow_move(_child_moves(pos), pos))
+            known[pos.key] = {
+                'key': pos.key, 'status': pos.status,
+                'closure': pos.closure,
+                'score': (None if score is None
+                          else (score if stm_white else -score)),
+                'best_move': best}
+        return known[pos.key]
+
+    for move in block['moves'][:line_count]:
+        line = [move['uci']]
+        current = step(root.key, move['uci'])
+        while current is not None:
+            record = entry(current)
+            positions[current.fen] = record
+            if len(line) >= ply_count or not record['best_move']:
+                break
+            line.append(record['best_move'])
+            current = step(current.key, record['best_move'])
+        lines[move['uci']] = line
+    return JsonResponse({'position': block, 'lines': lines,
+                         'positions': positions,
+                         'line_count': line_count, 'ply_count': ply_count})
 
 
 def api_frontier(request, key):
