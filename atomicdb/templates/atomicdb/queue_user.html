@@ -5,11 +5,10 @@
 <h2 class="contrib-name" style="margin-top:0">{{ profile_user }}'s queue</h2>
 <p class="contrib-lede"><a href="/atomicdb/user/{{ profile_user|urlencode }}/">Profile</a></p>
 
-<div class="metrics">
-  <div class="metric" title="Requests waiting for a worker"><div class="v">{{ waiting_total_h }}</div><div class="l">waiting</div></div>
-  <div class="metric" title="Requests on a worker right now"><div class="v">{{ running_total_h }}</div><div class="l">running</div></div>
-  <div class="metric" title="Requests already served"><div class="v">{{ served_total_h }}</div><div class="l">served</div></div>
-</div>
+{% comment %}One line, no boxes (seaside_cliff, 5-Nov-2026).{% endcomment %}
+<p class="queue-counts"><span title="Requests waiting for a worker"><strong>{{ waiting_total_h }}</strong> waiting</span>
+  <span title="Requests on a worker right now"><strong>{{ running_total_h }}</strong> running</span>
+  <span title="Requests already served"><strong>{{ served_total_h }}</strong> served</span></p>
 
 <section class="contrib-section">
   <h3 class="contrib-sub">Running now</h3>

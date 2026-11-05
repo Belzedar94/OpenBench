@@ -156,18 +156,15 @@
           </div>
         </fieldset>
         {% if user.is_authenticated %}
-        <form class="settings-row settings-lifo" method="post" action="/atomicdb/queue/lifo/">{% csrf_token %}
-          <input type="hidden" name="back" value="{{ identity_path }}">
-          <input type="hidden" name="lifo" value="0">
-          <label><input type="checkbox" name="lifo" value="1"{% if settings_lifo %} checked{% endif %}
-            onchange="this.form.submit()">Newest first in my queue</label>
-        </form>
         <a class="settings-link" href="/atomicdb/notifications/settings/">Account settings</a>
         {% endif %}
       </div>
     </div>
   </div>
-  <button type="button" class="theme-toggle" id="theme-toggle"
+  {% comment %}Light and dark live in the cog only (seaside_cliff,
+  5-Nov-2026).  The switch stays, hidden: theme.js keeps storage and the
+  browser colour on it, and the cog's choice clicks it.{% endcomment %}
+  <button type="button" class="theme-toggle" id="theme-toggle" hidden
     role="switch" aria-checked="true" aria-labelledby="theme-toggle-label"
     title="Switch to light mode">
     <svg class="theme-toggle-sun" viewBox="0 0 24 24" aria-hidden="true">

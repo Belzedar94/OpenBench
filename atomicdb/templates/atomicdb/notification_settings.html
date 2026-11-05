@@ -3,36 +3,33 @@
 {% block content %}
 
 <h2 style="margin-top:0">Account settings</h2>
-<p class="dim notif-lede">Notices appear under the bell at the top of every
-  page. <a href="/atomicdb/notifications/">See your notices</a></p>
 
-<form class="notif-settings" method="post" action="/atomicdb/notifications/settings/">{% csrf_token %}
-  {% comment %}Plain words, one line of help each (seaside_cliff,
-  4-Nov-2026).{% endcomment %}
-  <input type="hidden" name="ready" value="0">
-  <p><label><input type="checkbox" name="ready" value="1" id="notify-ready"
-    style="margin-right:.45rem"{% if notify_ready %} checked{% endif %}>
-    Notify me when my analyses are ready</label></p>
-  <input type="hidden" name="lifo" value="0">
-  <p><label><input type="checkbox" name="lifo" value="1" id="lifo-queue"
-    style="margin-right:.45rem"{% if lifo_on %} checked{% endif %}>
-    Newest first in my queue</label></p>
-  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Each new
-    request of yours goes to the front of your own queue.</p>
-  <fieldset class="serve-order">
+{% comment %}Settings only, no help text, a tick when saved (seaside_cliff,
+5-Nov-2026).  The notices page is one click away under the bell.{% endcomment %}
+<form class="notif-settings acct-settings" method="post" action="/atomicdb/notifications/settings/">{% csrf_token %}
+  <fieldset class="acct-group">
+    <legend>My requests</legend>
+    <input type="hidden" name="ready" value="0">
+    <label class="acct-check"><input type="checkbox" name="ready" value="1" id="notify-ready"{% if notify_ready %} checked{% endif %}>
+      Notify me when my analyses are ready</label>
+    <input type="hidden" name="lifo" value="0">
+    <label class="acct-check"><input type="checkbox" name="lifo" value="1" id="lifo-queue"{% if lifo_on %} checked{% endif %}>
+      Newest first in my queue</label>
+  </fieldset>
+  <fieldset class="acct-group serve-order">
     <legend>My workers take first</legend>
     <div class="serve-order-choices">
       <label><input type="radio" name="serve_order" value="own"{% if serve_order == 'own' %} checked{% endif %}><span>Mine first</span></label>
       <label><input type="radio" name="serve_order" value="queue"{% if serve_order == 'queue' %} checked{% endif %}><span>Queue order</span></label>
       <label><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
     </div>
+    <p class="serve-for"><input name="serve_for" value="{{ serve_for }}" maxlength="500"
+      aria-label="Accounts Others first serves before anyone"
+      placeholder="Others first: accounts to serve first, comma separated"
+      autocomplete="off" spellcheck="false"></p>
   </fieldset>
-  <p class="serve-for"><label>With Others first, serve these accounts before anyone
-    <input name="serve_for" value="{{ serve_for }}" maxlength="500"
-      placeholder="names, separated by commas; empty serves everyone alike"
-      autocomplete="off" spellcheck="false"></label></p>
-  <button type="submit" class="reqbtn">Save</button>
-  {% if saved %}<span class="dim" role="status" style="margin-left:.6rem">Saved.</span>{% endif %}
+  <p class="acct-save"><button type="submit" class="reqbtn">Save</button>
+  {% if saved %}<span class="acct-saved" role="status" aria-label="Saved"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>{% endif %}</p>
 </form>
 
 {% endblock %}
