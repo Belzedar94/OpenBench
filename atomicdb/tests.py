@@ -814,7 +814,7 @@ class PovTests(TestCase):
         moves = _child_moves(p)
         row = next(m for m in moves if m['key'] == a.key)
         # 1 ply de la fila + 3 de la linea = 4 plies -> mate en 2, del rival
-        self.assertEqual(row['mate_str'], '-≤M2')
+        self.assertEqual(row['mate_str'], '-M2')
         self.assertEqual(row['score'], -10_000)
 
     def test_query_api_start_position(self):
