@@ -118,4 +118,4 @@ class DocsPageTests(TestCase):
         response = self.client.get('/atomicdb/')
 
         self.assertRegex(response.content.decode(),
-                         r'<a [^>]*href="/atomicdb/docs/"[^>]*>Site guide</a>')
+                         r'<a [^>]*href="/atomicdb/docs/"[^>]*>Docs</a>')
