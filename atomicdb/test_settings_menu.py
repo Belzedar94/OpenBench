@@ -56,22 +56,19 @@ class SettingsCogTests(TestCase):
 
         panel = _panel(body)
         self.assertIn('name="settings-notation"', panel)
-        self.assertIn('action="/atomicdb/queue/lifo/"', panel)
         self.assertIn('href="/atomicdb/notifications/settings/"', panel)
-        self.assertIn('Newest first in my queue', panel)
-        self.assertRegex(panel, r'name="back"[^>]*value="' + re.escape(
-            self.url) + '"|value="' + re.escape(self.url) + '"[^>]*name="back"')
-        box = re.search(r'<input[^>]*name="lifo"[^>]*type="checkbox"[^>]*>',
-                        panel).group(0)
-        self.assertNotIn('checked', box)
+        # Newest first lives on the account settings page, not here
+        # (seaside_cliff, 5-Nov-2026).
+        self.assertNotIn('Newest first in my queue', panel)
+        self.assertNotIn('action="/atomicdb/queue/lifo/"', panel)
 
     def test_the_queue_box_shows_the_stored_option(self):
         ContributorPref.objects.create(account='lesha', lifo_queue=True)
 
-        panel = _panel(self._signed_in().get(self.url).content.decode())
+        body = self._signed_in().get(
+            '/atomicdb/notifications/settings/').content.decode()
 
-        box = re.search(r'<input[^>]*name="lifo"[^>]*type="checkbox"[^>]*>',
-                        panel).group(0)
+        box = re.search(r'<input[^>]*id="lifo-queue"[^>]*>', body).group(0)
         self.assertIn('checked', box)
 
     def test_the_cog_sits_beside_the_theme_switch(self):
@@ -178,8 +175,8 @@ class NewestFirstOnlyInTheMenuTests(TestCase):
         client.login(username='lesha', password='pw')
         body = client.get('/atomicdb/user/lesha/').content.decode()
         self.assertNotIn('lifo-toggle', body)
-        start = body.index('settings-panel')
-        self.assertIn('Newest first in my queue', body[start:])
+        settings = client.get('/atomicdb/notifications/settings/').content.decode()
+        self.assertIn('Newest first in my queue', settings)
 
 
 class EvalViewSettingTests(TestCase):

@@ -2870,3 +2870,66 @@ table.fleet-workers .qline {
   color: var(--ink);
   font: inherit;
 }
+
+/* The corner theme switch is kept for its script, never shown. */
+.theme-toggle[hidden] {
+  display: none !important;
+}
+
+.queue-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem 1.4rem;
+  margin: .2rem 0 1rem;
+  color: var(--ink-muted);
+}
+
+.queue-counts strong {
+  color: var(--ink);
+  font-size: 1.1rem;
+}
+
+.acct-settings {
+  max-width: 34rem;
+}
+
+.acct-group {
+  margin: 0 0 1.1rem;
+  padding: .8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.acct-group legend {
+  padding: 0 .3rem;
+  color: var(--ink-muted);
+  font-size: .8rem;
+}
+
+.acct-check {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .3rem 0;
+}
+
+.acct-settings .serve-for {
+  margin: .7rem 0 0;
+}
+
+.acct-settings .serve-for input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.acct-save {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+
+.acct-saved {
+  display: inline-flex;
+  color: var(--won, var(--accent));
+}

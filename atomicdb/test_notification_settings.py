@@ -113,7 +113,7 @@ class NotificationSettingsPageTests(TestCase):
             account='lesha').notify_ready)
         body = self.client.get(f'{PAGE}?saved=1').content.decode()
         self.assertNotIn('checked', _box(body))
-        self.assertIn('Saved.', body)
+        self.assertIn('aria-label="Saved"', body)
 
     def test_checking_it_again_turns_it_back_on(self):
         ContributorPref.objects.create(account='lesha', notify_ready=False,
