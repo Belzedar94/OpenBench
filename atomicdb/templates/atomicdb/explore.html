@@ -9,7 +9,7 @@ the visitor came by.{% endcomment %}
 
 {% if line %}
 <div class="linebox">
-  {% if not line_from_root %}<span class="dim">&hellip; </span>{% endif %}
+  {% if not line_from_root %}<a class="line-more" href="/atomicdb/explore/{{ line_top_key }}/" title="Earlier moves: open the position this line starts from" aria-label="Earlier moves">&hellip;</a> {% endif %}
   {% for st in line %}<a href="{% if st.url %}{{ st.url }}{% else %}/atomicdb/explore/{{ st.key }}/{% endif %}"
     {% if forloop.last %}class="cur"{% endif %}>{% if st.num %}<span class="dim">{{ st.num }}</span> {% endif %}{% if st.uci %}<span data-uci="{{ st.uci }}">{{ st.san }}</span>{% else %}{{ st.san }}{% endif %}</a>{% if not forloop.last %} {% endif %}{% endfor %}
 </div>
