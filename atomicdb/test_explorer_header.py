@@ -340,9 +340,10 @@ class NodeStoryTests(TestCase):
 
         self.assertEqual(response.context['node_story'], '')
         self.assertNotIn('This position: analysed', body)
-        # Nor a bare chip under the board: it qualified a value the header
-        # no longer quotes.
-        self.assertNotIn('>walked</span>', body)
+        # The value is quoted again above the board, so its walked chip is
+        # back beside it, once (cz_eclipsia, 5-Nov-2026).
+        tools = body[body.index('class="pos-tools"'):body.index('class="cols"')]
+        self.assertEqual(tools.count('>walked</span>'), 1)
 
 
 class CompactHeaderAndFenBoxTests(TestCase):
@@ -456,3 +457,22 @@ class ProposalTabsTests(TestCase):
         self.assertIn("button.className = 'pos-tab'", tools)
         self.assertIn('Propose campaign', tools)
         self.assertIn('Suggest name', tools)
+
+
+class PositionStateTests(TestCase):
+    """cz_eclipsia, 5-Nov-2026: an unanalysed position says so beside where
+    the eval would be."""
+
+    def test_an_unanalysed_position_says_unanalysed(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        body = self.client.get(f'/atomicdb/explore/{root.key}/').content.decode()
+        tools = body[body.index('class="pos-tools"'):body.index('class="cols"')]
+        self.assertIn('>unanalysed</span>', tools)
+
+    def test_a_searched_position_does_not(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        Position.objects.filter(key=root.key).update(
+            eval_cp=30, nodes_invested=128_000_000, visits=1)
+        body = self.client.get(f'/atomicdb/explore/{root.key}/').content.decode()
+        tools = body[body.index('class="pos-tools"'):body.index('class="cols"')]
+        self.assertNotIn('>unanalysed</span>', tools)
