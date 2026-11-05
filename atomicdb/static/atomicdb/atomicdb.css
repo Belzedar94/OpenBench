@@ -3105,3 +3105,16 @@ table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
   text-align: center;
   color: var(--ink-muted);
 }
+
+/* Select all, Select unanalysed and Clear: one group that wraps as a unit,
+   the buttons sharing its width (cz_eclipsia, 5-Nov-2026). */
+.ms-picks {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: .4rem;
+}
+
+.ms-picks > .reqbtn {
+  flex: 1 1 0;
+  white-space: nowrap;
+}

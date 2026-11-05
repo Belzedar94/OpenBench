@@ -1084,9 +1084,11 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       <button type="button" class="reqbtn" id="msreq" disabled>Request 0 selected</button>
       {% if bar_rungs %}<span class="pvlinechoice"><label class="pvlinelab" for="msdepth">depth</label><select id="msdepth" class="pvline" autocomplete="off"
         title="The depth for every ticked move. A depth is a target: a move already searched that deep is skipped, and every other move gets exactly that depth"><option value="">each move's next rung</option>{% for rung in bar_rungs %}<option value="{{ rung.nodes }}">{{ rung.label }}</option>{% endfor %}</select></span>{% endif %}
+      {% comment %}The three selection buttons as one group, so they wrap together and
+      line up (cz_eclipsia, 5-Nov-2026).{% endcomment %}<span class="ms-picks">
       <button type="button" class="reqbtn" id="msall" title="Ticks every move shown in the table">Select all</button>
       <button type="button" class="reqbtn" id="msnew" style="display:none" title="Ticks every move no engine has searched yet and every reply not in the tree, folded rows included, up to {{ multi_request_cap }} per click">Select unanalysed</button>
-      <button type="button" class="reqbtn" id="msclear" disabled>Clear</button>
+      <button type="button" class="reqbtn" id="msclear" disabled>Clear</button></span>
       <span class="dim" id="msnote" style="font-size:.8rem"></span>
       <span class="reqnote" id="msdone" hidden></span>
     </div>
