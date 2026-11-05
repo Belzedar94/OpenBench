@@ -93,7 +93,7 @@ class MaterialiseWonLineTests(TestCase):
 
         row = next(m for m in _child_moves(pos) if m['uci'] == line[0])
         self.assertEqual(row['status'], 'WHITE_WIN')
-        self.assertEqual(row['mate_str'], f'≤M{(len(line) + 1) // 2}')
+        self.assertEqual(row['mate_str'], f'M{(len(line) + 1) // 2}')
 
     def test_the_distance_shrinks_one_ply_at_a_time(self):
         line = self._line()

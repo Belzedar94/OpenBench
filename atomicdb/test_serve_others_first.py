@@ -243,14 +243,23 @@ class ServeForListTests(TestCase):
 
         self.assertEqual(self._lease('m1'), ally.id)
 
-    def test_the_list_means_nothing_without_others_first(self):
+    def test_with_mine_first_a_listed_account_shares_my_band(self):
+        """seaside_cliff, 5-Nov-2026: with Mine first the list shares my
+        workers with those accounts, ahead of strangers."""
         ContributorPref.objects.create(account='lesha', serve_order='own',
                                        serve_for='ally')
         self._request(self.a, 'w')
-        own = self._request(self.b, 'lesha')
+        ally = self._request(self.c, 'ally')
+
+        self.assertEqual(self._lease('m2'), ally.id)
+
+    def test_queue_order_ignores_the_list(self):
+        ContributorPref.objects.create(account='lesha', serve_order='queue',
+                                       serve_for='ally')
+        stranger = self._request(self.a, 'w')
         self._request(self.c, 'ally')
 
-        self.assertEqual(self._lease('m2'), own.id)
+        self.assertEqual(self._lease('m3'), stranger.id)
 
     def test_the_page_saves_a_clean_list_and_newest_first(self):
         worker_account('pagey', 'pw')

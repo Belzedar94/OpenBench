@@ -55,15 +55,16 @@ def parse_serve_for(raw):
 
 
 def serve_for(username):
-    """The accounts this account's workers serve first, or ``[]``.
+    """The accounts this account's workers favour, or ``[]``.
 
-    Only with "Others first": the list refines that choice.
+    With Others first they go before anyone; with Mine first they share the
+    account's own band (§ views.choose_pending).  Queue order ignores them.
     """
     if not username:
         return []
     row = (ContributorPref.objects.filter(account=username)
            .values_list('serve_order', 'serve_for').first())
-    if not row or row[0] != 'others':
+    if not row or row[0] not in ('others', 'own'):
         return []
     return parse_serve_for(row[1])
 

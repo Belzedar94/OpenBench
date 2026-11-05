@@ -766,9 +766,16 @@ def api_lease(request):
             favoured = Q()
             for name in serve_first:
                 favoured |= Q(requested_by__iexact=name)
+            # The listed accounts (§ preferences.serve_for): first of all
+            # with Others first; with Mine first they share this account's
+            # own band, so the fair share interleaves them with its own
+            # requests instead of making them wait behind all of them
+            # (seaside_cliff, 5-Nov-2026).  Queue order has no band to share.
+            listed_band = {'others': 2, 'own': 1}.get(serve_order)
             own_first = Case(
                 *([When(favoured, source=AnalysisTask.Source.USER,
-                        then=Value(2))] if serve_first else []),
+                        then=Value(listed_band))]
+                  if serve_first and listed_band else []),
                 When(source=AnalysisTask.Source.USER,
                      requested_by=user.username,
                      then=Value({'own': 1, 'queue': 0,
@@ -4970,7 +4977,10 @@ def _child_moves(pos):
                       'searched': searched,
                       'own_search': _own_search(point, c.nodes_invested),
                       'mate_str': None if mate is None else
-                      (f'≤M{mate}' if mate > 0 else f'-≤M{-mate}'),
+                      # "M3", not "≤M3" (seaside_cliff, 5-Nov-2026): the
+                      # distance is an upper bound, which the docs say once
+                      # instead of every row.
+                      (f'M{mate}' if mate > 0 else f'-M{-mate}'),
                       'visits': c.visits, 'css': _move_css(c.status, score, win)})
     # Value first and nothing else decides the order; what follows only
     # breaks ties (§ _first_among_equals).  Among equal ranks a row the
@@ -8054,7 +8064,7 @@ def explore(request, key):
         'request_due_nodes': ingest.request_ladder_state(pos)[1],
         'request_due_label': _human(ingest.request_ladder_state(pos)[1]),
         'subtree_cap': ingest.SUBTREE_TASK_CAP,
-        'verdict_mate': (f'≤M{(pos.mate_in + 1) // 2}'
+        'verdict_mate': (f'M{(pos.mate_in + 1) // 2}'
                          if pos.status != 'UNKNOWN' and pos.mate_in
                          else None),
         'verdict_css': _move_css(pos.status, eval_stm, win)})
