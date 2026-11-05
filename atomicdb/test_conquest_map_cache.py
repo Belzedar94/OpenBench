@@ -140,6 +140,40 @@ class BoundedBuildTests(_MapFixture):
         self.assertEqual(
             second['nodes'][self.children['g1f3'].key]['a'], 'Nf3')
 
+    def test_solve_closures_are_published_and_counted(self):
+        Position.objects.filter(key=self.children['d2d4'].key).update(
+            status='WHITE_WIN', closure='SOLVE', proof='ANDOR')
+        self._build()
+        snapshot = conquest_map.read_snapshot(self.path)
+        root = snapshot['nodes'][self.root.key]
+        self.assertEqual(
+            snapshot['nodes'][self.children['d2d4'].key]['c'], 'SOLVE')
+        self.assertEqual(len(root['m']), conquest_map.METRIC_COLUMNS)
+        self.assertEqual(root['m'][conquest_map.M_SOLVE], 1)
+        payload = json.loads(self.client.get(
+            API, {'root': self.root.key}).content)
+        self.assertEqual(
+            payload['root']['metrics']['closure']['SOLVE'], 1)
+
+    def test_artifacts_from_before_solve_still_validate(self):
+        self._build()
+        snapshot = conquest_map.read_snapshot(self.path)
+        legacy = conquest_map._unsealed_copy(snapshot)
+        legacy['nodes'] = {
+            key: dict(node, m=node['m'][:conquest_map.M_SOLVE])
+            for key, node in snapshot['nodes'].items()
+        }
+        sealed = conquest_map.seal_snapshot(legacy)
+        conquest_map.publish_snapshot(sealed, self.path)
+        self.assertEqual(
+            conquest_map.read_snapshot(self.path)['snapshot']['id'],
+            sealed['snapshot']['id'])
+        response = self.client.get(API, {'root': self.root.key})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads(response.content)['root']['metrics']['closure']
+            ['SOLVE'], 0)
+
     def test_build_never_writes_the_tree(self):
         before = (Position.objects.count(), Edge.objects.count(),
                   list(Position.objects.order_by('key').values_list(

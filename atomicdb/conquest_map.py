@@ -78,6 +78,13 @@ _EXACT_UTILITY = 10 ** 15
     M_DISPUTED,
     M_PROOF_NONE,
 ) = range(23)
+# Appended after the closure columns were frozen (Closure.SOLVE, a df-pn
+# certificate replayed on the server).  Artifacts written before it carry 23
+# columns and are read as having no SOLVE closures.
+M_SOLVE = 23
+METRIC_COLUMNS = 24
+_LEGACY_METRIC_COLUMNS = 23
+_CLOSURES = (None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL', 'SOLVE')
 
 logger = logging.getLogger(__name__)
 _snapshot_cache = {'signature': None, 'snapshot': None, 'error': None}
@@ -139,7 +146,8 @@ def _unsealed_copy(snapshot):
 
 
 def _validate_metric_vector(metrics):
-    if not isinstance(metrics, list) or len(metrics) != 23:
+    if not isinstance(metrics, list) or len(metrics) not in (
+            _LEGACY_METRIC_COLUMNS, METRIC_COLUMNS):
         raise SnapshotError('invalid aggregate metric vector')
     for index, value in enumerate(metrics):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -189,7 +197,7 @@ def validate_snapshot(snapshot):
             raise SnapshotError('invalid snapshot node')
         if node['s'] not in ('UNKNOWN', 'WHITE_WIN', 'BLACK_WIN', 'DRAW'):
             raise SnapshotError('invalid node status')
-        if node['c'] not in (None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL'):
+        if node['c'] not in _CLOSURES:
             raise SnapshotError('invalid node closure')
         if node['p'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
             raise SnapshotError('invalid node proof')
@@ -217,7 +225,8 @@ def validate_snapshot(snapshot):
             raise SnapshotError('closed/unknown aggregate mismatch')
         if sum(metrics[M_WHITE_WIN:M_STATUS_UNKNOWN + 1]) != metrics[M_POSITIONS]:
             raise SnapshotError('status aggregate mismatch')
-        if sum(metrics[M_TB:M_CLOSURE_NONE + 1]) != metrics[M_POSITIONS]:
+        if (sum(metrics[M_TB:M_CLOSURE_NONE + 1]) + _solve_count(metrics)
+                != metrics[M_POSITIONS]):
             raise SnapshotError('closure aggregate mismatch')
         if sum(metrics[M_ANDOR:M_PROOF_NONE + 1]) != metrics[M_POSITIONS]:
             raise SnapshotError('proof aggregate mismatch')
@@ -443,8 +452,7 @@ def _validate_position(position):
         raise SnapshotError('invalid database position FEN')
     if position['status'] not in ('UNKNOWN', 'WHITE_WIN', 'BLACK_WIN', 'DRAW'):
         raise SnapshotError('invalid database status')
-    if position['closure'] not in (
-            None, 'TB', 'MATE_PV', 'MINIMAX', 'TERMINAL'):
+    if position['closure'] not in _CLOSURES:
         raise SnapshotError('invalid database closure')
     if position['proof'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
         raise SnapshotError('invalid database proof')
@@ -503,7 +511,11 @@ def _san_for_edge(parent_fen, move_uci):
 
 
 def _empty_metrics():
-    return [0] * 23
+    return [0] * METRIC_COLUMNS
+
+
+def _solve_count(metrics):
+    return metrics[M_SOLVE] if len(metrics) > M_SOLVE else 0
 
 
 def _own_metrics(position, active, queued, alternate_parents):
@@ -532,6 +544,7 @@ def _own_metrics(position, active, queued, alternate_parents):
         'MATE_PV': M_MATE_PV,
         'MINIMAX': M_MINIMAX,
         'TERMINAL': M_TERMINAL,
+        'SOLVE': M_SOLVE,
         None: M_CLOSURE_NONE,
     }[position['closure']]] = 1
     metrics[{
@@ -944,6 +957,7 @@ def _expanded_metrics(metrics):
             'MATE_PV': metrics[M_MATE_PV],
             'MINIMAX': metrics[M_MINIMAX],
             'TERMINAL': metrics[M_TERMINAL],
+            'SOLVE': _solve_count(metrics),
             'NONE': metrics[M_CLOSURE_NONE],
         },
         'proof': {
