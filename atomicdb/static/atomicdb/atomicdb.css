@@ -3096,3 +3096,12 @@ table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
   border-color: var(--warn, #b4762a);
   color: var(--warn, #b4762a);
 }
+
+/* The "…" before a line that starts mid-game: a link the size of a move
+   (midbored, 5-Nov-2026). */
+.linebox a.line-more {
+  display: inline-block;
+  min-width: 2.2em;
+  text-align: center;
+  color: var(--ink-muted);
+}

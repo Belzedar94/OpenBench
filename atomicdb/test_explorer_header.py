@@ -476,3 +476,24 @@ class PositionStateTests(TestCase):
         body = self.client.get(f'/atomicdb/explore/{root.key}/').content.decode()
         tools = body[body.index('class="pos-tools"'):body.index('class="cols"')]
         self.assertNotIn('>unanalysed</span>', tools)
+
+
+class LineEllipsisTests(TestCase):
+    """midbored, 5-Nov-2026: the "…" before a line that does not start at
+    the start position is a link to where the line starts."""
+
+    def test_a_line_from_the_start_has_no_ellipsis(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        child = Edge.objects.filter(parent=root).first().child
+        body = self.client.get(f'/atomicdb/explore/{child.key}/').content.decode()
+        self.assertNotIn('class="line-more"', body)
+
+    def test_a_headless_line_links_its_first_position(self):
+        fen = '4k3/8/8/8/8/8/4P3/4K3 w - - 0 1'
+        top = ingest.get_or_create_position(logic.canonical_fen(fen))
+        ingest.expand(top)
+        child = Edge.objects.filter(parent=top).first().child
+        body = self.client.get(f'/atomicdb/explore/{child.key}/').content.decode()
+        self.assertRegex(body, r'<a[^>]*class="line-more"[^>]*>|<a[^>]*href="/atomicdb/explore/%s/"[^>]*class="line-more"' % top.key)
+        self.assertIn(f'href="/atomicdb/explore/{top.key}/"', body)

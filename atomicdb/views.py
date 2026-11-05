@@ -7954,6 +7954,10 @@ def explore(request, key):
         'node_story': _node_story(pos),
         'moves_summary': _moves_summary(moves),
         'line': numbered, 'line_from_root': top.fen == logic.start_fen(),
+        # Where the "…" before a line that does not start at the start
+        # position leads: the position the line starts from, whose page
+        # shows the moves before it (midbored, 5-Nov-2026).
+        'line_top_key': top.key,
         'active_play': active_ucis, 'board_play': board_play,
         'opening': current_opening,
         'opening_url': _opening_name_url(current_opening, pos.key,
