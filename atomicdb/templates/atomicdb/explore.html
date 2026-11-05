@@ -48,6 +48,10 @@ jump to where the value comes from.{% endcomment %}
     href="{{ backed_source_url }}"
     aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
     title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from">{% if eval_backed_light %}walked{% else %}backed{% endif %} {{ eval_backed_plies }}</a>{% endif %}</span>{% endif %}
+{% comment %}What kind of number that is, where the eval alone does not
+say (cz_eclipsia, 5-Nov-2026): nothing searched yet, or a value that came up
+a walked line and no search of this position.{% endcomment %}
+{% if pos.status == 'UNKNOWN' %}{% if not eval_stm_str %}<span class="crumb pos-state" title="No engine has searched this position yet. Request analysis to get a value">unanalysed</span>{% elif eval_walked and not eval_backed %}<span class="crumb pos-state walked" title="The value comes from a line that passes through here, not from a search of this position">walked</span>{% endif %}{% endif %}
 {% if not line %}{% if not line_from_root %}<span class="crumb">&hellip; move order unknown</span>{% elif opening %}<span class="crumb">root position</span>{% endif %}{% endif %}
 {% comment %}The other parents fold into a toggle like the two proposals
 beside it, with their count; open, it takes the row under them and lists

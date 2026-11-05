@@ -3081,3 +3081,18 @@ table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
   font-size: .85rem;
   font-weight: 400;
 }
+
+/* The status beside the eval: unanalysed, or walked (cz_eclipsia,
+   5-Nov-2026). */
+.pos-state {
+  padding: .05rem .4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--ink-muted);
+}
+
+.pos-state.walked {
+  border-style: dashed;
+  border-color: var(--warn, #b4762a);
+  color: var(--warn, #b4762a);
+}
