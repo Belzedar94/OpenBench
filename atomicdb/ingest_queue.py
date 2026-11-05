@@ -261,7 +261,7 @@ def apply_job(job):
     # misma fila.
     task = AnalysisTask.objects.filter(pk=job.task_id).values(
         'source', 'requested_by', 'also_requested_by', 'budget_nodes',
-        'route').first()
+        'route', 'then_verify').first()
     source = (task or {}).get('source')
 
     with ingest.carried_cuts() as cut, atomic(), \
@@ -318,7 +318,44 @@ def apply_job(job):
         except DatabaseError:
             logger.exception('AtomicDB ingest job %s: carrying %d cut keys '
                              'on failed', job.pk, len(set(cut)))
+    if (task or {}).get('then_verify') and not summary.get('tb_rejected'):
+        verified = _verify_after(job, task)
+        if verified is not None:
+            summary = {**summary, 'then_verify': verified}
+            IngestJob.objects.filter(pk=job.pk).update(summary=summary)
     return summary
+
+
+def _verify_after(job, task):
+    """Walk the line this job's search found, for its requester.
+
+    "Request + verify PV" (seaside_cliff, 4-Nov-2026): the request asked
+    for its line to be verified once the search landed.  This is the Verify
+    PV button's purchase (§ ``ingest.enqueue_pv_verification``), run after
+    the job has committed so the walk reads the new line, in its own short
+    transaction so a failure here never touches the job.  It respects the
+    requester's queue cap like the button does, and does nothing on a
+    position the search closed.  Returns the number of searches queued, or
+    None when nothing was attempted.
+    """
+    from .views import _account_queue_full
+    requested_by = task.get('requested_by') or ''
+    if _account_queue_full(requested_by):
+        return None
+    try:
+        with atomic():
+            pos = (Position.objects.select_for_update()
+                   .filter(key=job.position_id).first())
+            if pos is None or pos.status != 'UNKNOWN':
+                return None
+            outcome = ingest.enqueue_pv_verification(
+                pos, requested_by=requested_by,
+                route=task.get('route') or '')
+        return int(outcome)
+    except DatabaseError:
+        logger.exception('AtomicDB ingest job %s: verifying the line of '
+                         '%s failed', job.pk, job.position_id)
+        return None
 
 
 def process_job(job):

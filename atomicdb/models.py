@@ -382,6 +382,10 @@ class AnalysisTask(models.Model):
     nodes_searched = models.BigIntegerField(default=0)  # nodos REALES buscados
     elapsed_seconds = models.FloatField(default=0.0)  # tiempo reportado por el motor
     multipv      = models.IntegerField(default=5)
+    # Verify the line this search finds once it lands (seaside_cliff,
+    # 4-Nov-2026): the ingest then walks the new PV the way the Verify PV
+    # button does, for the same requester (§ ingest_queue._verify_after).
+    then_verify  = models.BooleanField(default=False)
     generation   = models.IntegerField(default=0)   # visita n-esima (escalera)
     source       = models.CharField(max_length=4, choices=Source.choices,
                                     default=Source.AUTO, db_index=True)
