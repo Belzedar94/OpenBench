@@ -108,6 +108,42 @@ most eight (§ views.explore).{% endcomment %}
       overview page; the site owner decides which one the solver runs.</span>
   </form>
 </details>
+{% comment %}Tabs, not stacked popups (cz_eclipsia, 3-Nov-2026): each panel
+of the row gets a button in its place, at most one panel is open, and a
+click on another button switches to it.  The summaries hide behind the
+buttons; without JavaScript they are the plain toggles they were.{% endcomment %}
+<script>
+(function () {
+  const row = document.currentScript.parentNode;
+  const panels = Array.from(row.querySelectorAll(':scope > details.suggest-name'));
+  if (!panels.length) { return; }
+  const buttons = panels.map(function (panel) {
+    const summary = panel.querySelector(':scope > summary');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'pos-tab';
+    button.textContent = summary.textContent;
+    button.title = summary.title;
+    panel.classList.add('tabbed');
+    panel.before(button);
+    return button;
+  });
+  function show(index) {
+    panels.forEach(function (panel, i) {
+      const on = i === index;
+      panel.open = on;
+      buttons[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  buttons.forEach(function (button, i) {
+    button.addEventListener('click', function () {
+      show(panels[i].open ? -1 : i);
+    });
+  });
+  // A panel the server opened (a refused name) keeps its tab pressed.
+  show(panels.findIndex(function (panel) { return panel.open; }));
+}());
+</script>
 </div>
 
 {% comment %}A little less room between the board and the table than the
