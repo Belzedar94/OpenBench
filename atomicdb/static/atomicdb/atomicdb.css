@@ -2988,3 +2988,60 @@ table.fleet-workers .qline {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
+
+.cols > .board-col {
+  width: min-content;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* The move table's first column: as narrow as its mark, circles and
+   checkboxes on one centre line (seaside_cliff, 5-Nov-2026). */
+table[aria-labelledby="moves-heading"] td:first-child,
+table[aria-labelledby="moves-heading"] th:first-child {
+  width: 1.4rem;
+  padding-left: .2rem;
+  padding-right: .2rem;
+  text-align: center;
+}
+
+table[aria-labelledby="moves-heading"] td:first-child .chip {
+  margin-right: 0;
+  vertical-align: middle;
+}
+
+table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
+  padding: .45rem .3rem;
+  margin: -.45rem -.3rem;
+}
+
+/* A profile's numbers: one labelled row per kind (seaside_cliff,
+   5-Nov-2026). */
+.contrib-stats {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .35rem 1.2rem;
+  margin: .4rem 0 1.2rem;
+}
+
+.contrib-stats > div {
+  display: contents;
+}
+
+.contrib-stats dt {
+  color: var(--ink-muted);
+  font-size: .8rem;
+  align-self: baseline;
+}
+
+.contrib-stats dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem 1.2rem;
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.contrib-stats strong {
+  color: var(--ink);
+}

@@ -3,7 +3,6 @@
 {% block content %}
 
 <h2 class="contrib-name" style="margin-top:0">{{ profile_user }}</h2>
-<p class="dim contrib-lede"><a href="/user/{{ profile_user|urlencode }}/">OpenBench profile</a></p>
 
 {% if badges %}
 <div class="contrib-badges">
@@ -12,20 +11,16 @@
 </div>
 {% endif %}
 
-{% comment %}One quiet line like the queue counts, the ranks first
-(seaside_cliff, 5-Nov-2026).{% endcomment %}
-{% if has_counters %}<p class="queue-counts contrib-counts">
-{% if rank_all %}  <span title="Standing among every account with workers, by engine nodes, all time"><strong>#{{ rank_all.rank }}</strong> of {{ rank_all.of }} all time</span>
-{% endif %}{% if rank_24h %}  <span title="Standing among the accounts whose workers searched anything in the last 24 hours"><strong>#{{ rank_24h.rank }}</strong> of {{ rank_24h.of }} today</span>
-{% endif %}  <span title="Analyses this account asked for from the explorer"><strong>{{ requests_total_h }}</strong> requests made</span>
-{% if has_nodes %}  <span title="Engine nodes searched by this account's workers, all time"><strong>{{ nodes_all_h }}</strong> engine nodes</span>
-  <span title="Analyses served by this account's workers, all time"><strong>{{ tasks_all_h }}</strong> analyses served</span>
-  <span title="Engine nodes searched by this account's workers in the last 24 hours"><strong>{{ nodes_24h_h }}</strong> nodes last 24h</span>
-  <span title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><strong>{{ fleet_share }}%</strong> of the fleet, 24h</span>
-{% endif %}</p>{% endif %}
-
-{% if first_at %}<p class="dim contrib-since">First contribution
-  {{ first_at|date:"M d, Y" }}.</p>{% endif %}
+{% comment %}The numbers in labelled rows, the standing first and the
+first contribution with them (seaside_cliff, 5-Nov-2026).  The OpenBench
+profile link went: for an AtomicDB contributor it led to an empty page.{% endcomment %}
+{% if has_counters or first_at %}<dl class="contrib-stats">
+{% if rank_all or rank_24h %}  <div><dt>Rank</dt><dd>{% if rank_all %}<span title="Standing among every account with workers, by engine nodes, all time"><strong>#{{ rank_all.rank }}</strong> of {{ rank_all.of }} all time</span>{% endif %}{% if rank_24h %}<span title="Standing among the accounts whose workers searched anything in the last 24 hours"><strong>#{{ rank_24h.rank }}</strong> of {{ rank_24h.of }} today</span>{% endif %}</dd></div>
+{% endif %}{% if has_nodes %}  <div><dt>Workers</dt><dd><span title="Engine nodes searched by this account's workers, all time"><strong>{{ nodes_all_h }}</strong> nodes</span><span title="Analyses served by this account's workers, all time"><strong>{{ tasks_all_h }}</strong> analyses</span></dd></div>
+  <div><dt>Last 24h</dt><dd><span title="Engine nodes searched by this account's workers in the last 24 hours"><strong>{{ nodes_24h_h }}</strong> nodes</span><span title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><strong>{{ fleet_share }}%</strong> of the fleet</span></dd></div>
+{% endif %}{% if has_counters %}  <div><dt>Requests</dt><dd><span title="Analyses this account asked for from the explorer"><strong>{{ requests_total_h }}</strong> made</span></dd></div>
+{% endif %}{% if first_at %}  <div><dt>Since</dt><dd><span title="First contribution"><strong>{{ first_at|date:"M d, Y" }}</strong></span></dd></div>
+{% endif %}</dl>{% endif %}
 
 {% if has_spark %}
 <section class="contrib-section">

@@ -149,7 +149,11 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
 {% comment %}A little less room between the board and the table than the
 .cols default; inline, so a cached copy of the sheet cannot undo it.{% endcomment %}
 <div class="cols" style="column-gap:1.1rem">
-  <div>
+  {% comment %}As wide as the board and no wider: the text under it wraps
+  instead of widening the column, so the move table keeps its room and does
+  not jump when the cascade line fills in after load (seaside_cliff,
+  5-Nov-2026).{% endcomment %}
+  <div class="board-col">
     {% include "atomicdb/_board.html" with no_keyboard_list=True %}
     {% if pos.status == 'UNKNOWN' %}
     <p class="reqrow">
