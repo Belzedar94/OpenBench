@@ -2832,3 +2832,23 @@ table.fleet-workers .qline {
   font-size: .8rem;
   cursor: pointer;
 }
+
+/* The accounts "Others first" serves before anyone (seaside_cliff,
+   4-Nov-2026). */
+.serve-for label {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  max-width: 32rem;
+  color: var(--ink-muted);
+  font-size: .84rem;
+}
+
+.serve-for input {
+  padding: .4rem .6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+}

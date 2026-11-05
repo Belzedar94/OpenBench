@@ -329,6 +329,10 @@ class ContributorPref(models.Model):
     notify_ready = models.BooleanField(default=True)
     serve_others_first = models.BooleanField(default=False)
     serve_order  = models.CharField(max_length=8, default='own')
+    # With "Others first": the accounts this account's workers serve before
+    # anyone else, comma separated, compared without case (seaside_cliff,
+    # 4-Nov-2026).  Empty is every other account alike.
+    serve_for    = models.CharField(max_length=500, blank=True, default='')
 
 
 class AnalysisTask(models.Model):

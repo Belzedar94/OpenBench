@@ -163,7 +163,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       {% if not frontier_exhausted %}{% comment %}Request + verify PV
       (seaside_cliff, 4-Nov-2026): ticked, the search's line is verified
       as soon as it lands, as if Verify PV were clicked then.  Remembered
-      in this browser.{% endcomment %}<label class="then-verify" title="When this search lands, verify the line it finds, as the Verify PV button does"><input type="checkbox" id="thenverify" autocomplete="off"> then verify its line</label>{% endif %}
+      in this browser.{% endcomment %}<label class="then-verify" title="When this search lands, queue analysis along the line it finds, so the whole line gets checked"><input type="checkbox" id="thenverify" autocomplete="off"> then verify its line</label>{% endif %}
       {% if unexplored_count %}<button class="reqbtn" id="allbtn"
         title="Queues one engine search for each move in the table that no engine has searched yet">Request {{ unexplored_count }} unanalysed</button>{% endif %}
       {% comment %}El tooltip cuenta las DOS formas de usarlo desde que hay

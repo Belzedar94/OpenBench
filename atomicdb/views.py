@@ -730,6 +730,8 @@ def api_lease(request):
         # la cuenta renuncia al own-first de abajo.  Una lectura por lease.
         # Three ways since 3-Nov: own first, queue order, others first.
         serve_order = preferences.serve_order(user.username)
+        # ...and with "Others first", the accounts to serve before anyone.
+        serve_first = preferences.serve_for(user.username)
 
         def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -761,7 +763,12 @@ def api_lease(request):
             # while anyone else's are waiting", lo prometido a seaside_cliff
             # el 3-nov).  Solo reordena: sin ajenas, lo propio sale igual, y
             # sigue por delante de AUTO/FILL, que miran -source antes.
+            favoured = Q()
+            for name in serve_first:
+                favoured |= Q(requested_by__iexact=name)
             own_first = Case(
+                *([When(favoured, source=AnalysisTask.Source.USER,
+                        then=Value(2))] if serve_first else []),
                 When(source=AnalysisTask.Source.USER,
                      requested_by=user.username,
                      then=Value({'own': 1, 'queue': 0,
