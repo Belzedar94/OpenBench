@@ -47,7 +47,7 @@ jump to where the value comes from.{% endcomment %}
     class="backed-mark{% if eval_backed_light %} light{% endif %}"
     href="{{ backed_source_url }}"
     aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
-    title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from">{% if eval_backed_light %}walked{% else %}backed{% endif %} ·{{ eval_backed_plies }}</a>{% endif %}</span>{% endif %}
+    title="{% if eval_backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below{% endif %}. Click to jump to the position this value comes from">{% if eval_backed_light %}walked{% else %}backed{% endif %} {{ eval_backed_plies }}</a>{% endif %}</span>{% endif %}
 {% if not line %}{% if not line_from_root %}<span class="crumb">&hellip; move order unknown</span>{% elif opening %}<span class="crumb">root position</span>{% endif %}{% endif %}
 {% comment %}The other parents fold into a toggle like the two proposals
 beside it, with their count; open, it takes the row under them and lists
@@ -279,8 +279,18 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
         <button type="submit">Undo</button>
       </form>{% endif %}</div>
     {% endif %}
+    {% comment %}Shown under the FEN row (seaside_cliff, 4-Nov-2026); it
+    sits here so the script below finds it, and moves once the page has
+    loaded.{% endcomment %}
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const row = document.querySelector('.fenbox-here');
+      const line = document.getElementById('cascade');
+      if (row && line) { row.after(line); }
+    });
+    </script>
     <script>
     (function () {
       const btn = document.getElementById('reqbtn');
@@ -901,7 +911,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
           title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
-          {% if m.enters_opening %}<span class="opening-enters">enters {{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
+          {% if m.enters_opening %}<span class="opening-enters">{{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td>{% if m.unexplored %}<span class="dim">unexplored</span>
             {% elif m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
             {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
@@ -937,7 +947,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}
-            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} ·{{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.borrowed %}<{% if m.borrowed_url %}a{% else %}span{% endif %}
+            title="{% if m.backed_light %}value carried up a line a visitor walked. No engine search supports it yet; verification is queued automatically{% else %}negamax of what the subtree already knows, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below{% endif %}{% if m.backed_url %}. Click to jump to the position this value comes from{% endif %}{% if not m.backed_light %} · {{ m.own_search }}{% endif %}">{% if m.backed_light %}walked{% else %}backed{% endif %} {{ m.backed_plies }}</{% if m.backed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.borrowed %}<{% if m.borrowed_url %}a{% else %}span{% endif %}
             class="backed-mark light eval-borrowed"{% if m.borrowed_url %}
             href="{{ m.borrowed_url }}"
             aria-label="jump to the position whose search wrote this number"{% endif %}
@@ -961,7 +971,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
           title="Enters {{ u.enters_opening }}"{% endif %}><strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong></a>
-          {% if u.enters_opening %}<span class="opening-enters">enters {{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
+          {% if u.enters_opening %}<span class="opening-enters">{{ u.enters_opening }}</span>{% endif %}{% endif %}</td>
         <td><span class="dim" title="This reply is not a node yet. Following it creates one.">not in tree</span></td>
         <td><span class="dim" data-fold>-</span></td>
         <td class="dim proofnums"></td>

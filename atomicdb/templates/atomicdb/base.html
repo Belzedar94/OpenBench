@@ -148,11 +148,11 @@
         {% comment %}How numbers read (cz_eclipsia, 4-Nov-2026): centipawns
         from the side to move, as the site has always printed them, or the
         classic White-side eval in pawns.{% endcomment %}
-        <fieldset class="settings-row">
+        <fieldset class="settings-row" title="Centipawns from the side to move, or pawns from White's side">
           <legend>Eval</legend>
           <div class="settings-choice">
-            <label><input type="radio" name="settings-eval" value="stm" checked><span>Side to move, cp</span></label>
-            <label><input type="radio" name="settings-eval" value="white"><span>White, pawns</span></label>
+            <label><input type="radio" name="settings-eval" value="stm" checked><span>Centipawns</span></label>
+            <label><input type="radio" name="settings-eval" value="white"><span>Pawns</span></label>
           </div>
         </fieldset>
         {% if user.is_authenticated %}

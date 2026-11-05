@@ -198,7 +198,7 @@ header {
   display: flex;
   align-items: center;
   gap: 1.35rem;
-  padding: .9rem 1.4rem;
+  padding: .6rem 1.4rem;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
 }
@@ -1892,13 +1892,11 @@ h2 {
 /* Marca sobria de "este numero lo respalda el subarbol, no la eval puntual" */
 .backed-mark {
   margin-left: .35rem;
-  padding: 0 .28rem;
+  padding: .08rem .32rem;
   border: 1px solid var(--border-strong);
   border-radius: 3px;
   color: var(--ink-muted);
-  font-size: .62rem;
-  letter-spacing: .04em;
-  text-transform: uppercase;
+  font-size: .66rem;
   vertical-align: .08em;
   /* Con los plies DENTRO, el chip es una sola pieza: si el renglon se acaba
      salta entero, nunca partido en dos recuadros a medio borde. */

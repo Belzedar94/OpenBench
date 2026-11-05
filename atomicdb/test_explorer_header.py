@@ -420,7 +420,7 @@ class StatusUnderTheBoardTests(TestCase):
         body = self._body()
 
         self.assertNotIn('class="verdict', body)
-        self.assertNotIn('backed ·3</a>', body[body.index('class="cols"'):])
+        self.assertNotIn('backed 3</a>', body[body.index('class="cols"'):])
 
     def test_the_request_buttons_sit_right_under_the_board(self):
         Position.objects.filter(key=self.root.key).update(

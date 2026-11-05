@@ -541,7 +541,7 @@ class BackedDisplayTests(TestCase):
         # The value and its backed chip are the table's; the box under the
         # board no longer repeats the chip.
         self.assertEqual(page.context['eval_stm_str'], '+94cp')
-        self.assertNotIn('backed ·3', body)
+        self.assertNotIn('backed 3', body)
 
     def test_explore_header_falls_back_to_the_point_eval(self):
         # Con busqueda propia detras: sin respaldo no hay chip que pintar, y
@@ -1618,7 +1618,7 @@ class RepetitionZeroContractTests(TestCase):
 
         self.assertEqual(page.context['eval_stm_str'], '+0cp')
         self.assertIsNotNone(
-            re.search(r'<td>0\s*<span[^>]*>repetition</span>', body))
+            re.search(r'<td>(?:<span[^>]*class=\"ev\"[^>]*>)?0(?:</span>)?\s*<span[^>]*>repetition</span>', body))
 
     def test_a_node_that_is_not_standing_on_a_draw_pays_for_no_walk(self):
         # La pregunta cuesta un paseo, asi que solo se hace cuando hay un
@@ -1653,13 +1653,13 @@ class WalkedChipTests(TestCase):
                        .content.decode()
 
         # El chip ES el enlace al origen, y lleva sus plies dentro.
-        self.assertIn('walked ·5</a>', body)
-        self.assertIn('backed ·2</a>', body)
+        self.assertIn('walked 5</a>', body)
+        self.assertIn('backed 2</a>', body)
         self.assertIsNotNone(
-            re.search(r'<a\b[^>]*class="backed-mark light"[^>]*>walked ·5</a>',
+            re.search(r'<a\b[^>]*class="backed-mark light"[^>]*>walked 5</a>',
                       body))
         self.assertIsNotNone(
-            re.search(r'<a\b[^>]*class="backed-mark"[^>]*>backed ·2</a>',
+            re.search(r'<a\b[^>]*class="backed-mark"[^>]*>backed 2</a>',
                       body))
         self.assertIn(f'href="/atomicdb/backed-source/{walked.key}/"', body)
         self.assertIn(f'href="/atomicdb/backed-source/{verified.key}/"', body)
@@ -1732,7 +1732,7 @@ class SeededValueTests(TestCase):
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        self.assertRegex(body, r'<td><em class="dim eval-claim"[^>]*>900</em>')
+        self.assertRegex(body, r'<td><em class="dim eval-claim"[^>]*>(?:<span[^>]*>)?900(?:</span>)?</em>')
         self.assertIn('no direct search yet', body)
         # Ni una palabra suelta en la fila.
         self.assertNotIn('>walked</span>', body)
@@ -1819,7 +1819,7 @@ class LineProvenanceTests(TestCase):
             body,
             r'<td><em class="dim eval-claim"[^>]*'
             r'title="from engine line 2 of this node\S+s current analysis; '
-            r'no direct search of the resulting position yet"[^>]*>40</em>')
+            r'no direct search of the resulting position yet"[^>]*>(?:<span[^>]*>)?40(?:</span>)?</em>')
         # Y ni "line 2" ni "walked" ocupan sitio en la fila.
         self.assertNotIn('>line 2</span>', body)
         self.assertNotIn('>walked</span>', body)
@@ -1843,7 +1843,7 @@ class LineProvenanceTests(TestCase):
             r'<td><em class="dim eval-claim"[^>]*'
             r'title="engine line 2 of this node\S+s current analysis has this '
             r'move at 40; the number shown is from another position\S+s '
-            r'search; no direct search yet"[^>]*>30</em>')
+            r'search; no direct search yet"[^>]*>(?:<span[^>]*>)?30(?:</span>)?</em>')
         self.assertNotIn('title="from engine line 2', body)
 
     def test_a_seed_with_no_line_left_says_it_came_from_an_older_pass(self):
@@ -1884,7 +1884,8 @@ class LineProvenanceTests(TestCase):
         body = Client().get(f'/atomicdb/explore/{parent.key}/') \
                        .content.decode()
 
-        self.assertIn('<td>40</td>', body)
+        # The number sits in an eval span since the cog's eval view.
+        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?</td>')
         self.assertNotIn('eval-claim', body)
         self.assertNotIn('>line 1</span>', body)
         self.assertNotIn('>walked</span>', body)
@@ -1932,8 +1933,9 @@ class LineProvenanceTests(TestCase):
         # Dos filas con tinta de reclamacion, una pelada, y el chip-enlace
         # entero en la suya.
         self.assertEqual(sum('eval-claim' in row for row in rows), 2)
-        self.assertIn('<td>40</td>', body)
-        self.assertIn('walked ·5</a>', body)
+        # The number sits in an eval span since the cog's eval view.
+        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?</td>')
+        self.assertIn('walked 5</a>', body)
 
     def test_the_refreshed_value_orders_where_its_number_says(self):
         """El criterio de orden es el numero y nada mas.  Lo que arregla el
@@ -2189,7 +2191,7 @@ class BorrowedNumberTests(TestCase):
         body = self._page(parent)
 
         self.assertNotIn('eval-borrowed', body)
-        self.assertIn('walked ·4</a>', body)
+        self.assertIn('walked 4</a>', body)
 
     def test_a_position_no_search_has_reached_labels_nothing_e08e2d14(self):
         """The report of 29-Oct-2026: a position with no search of its own
