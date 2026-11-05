@@ -1,0 +1,16 @@
+{% load l10n %}<div class="contrib-scroll">
+    <table class="lb-table">
+      <tr><th class="lb-place"><span class="visually-hidden">Place</span><span aria-hidden="true">#</span></th>
+        <th>Contributor</th><th class="n">Nodes</th><th class="n">Analyses</th></tr>
+      {% for r in rows %}
+      <tr>
+        <td class="lb-place"><span class="lb-medal {{ r.medal }}">{{ r.rank }}</span></td>
+        <td><a class="lb-name" href="/atomicdb/user/{{ r.name|urlencode }}/">{{ r.name }}</a>
+          <div class="lb-bar" aria-hidden="true"><span style="width:{{ r.share|unlocalize }}%"></span></div>
+          <div class="dim contrib-spec">{{ r.share_h }}% of the fleet</div></td>
+        <td class="n">{{ r.nodes_h }}</td>
+        <td class="n">{{ r.tasks_h }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>

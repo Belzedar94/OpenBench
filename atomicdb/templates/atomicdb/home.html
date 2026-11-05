@@ -156,7 +156,25 @@
   </div>
 </div>
 
+{% comment %}The top of both boards, back on the home page
+(seaside_cliff, 3-Nov-2026), with the full page one click away.{% endcomment %}
+{% if has_contrib_board %}
+<h2 id="contributors">Contributors <span class="dim">by engine nodes</span> <a href="/atomicdb/contributors/" style="font-size:.8rem;font-weight:400">all contributors</a></h2>
+<div class="lb-grid">
+  {% for b in contrib_boards %}
+  <section>
+    <h3 class="contrib-sub">{{ b.window }}</h3>
+    {% if b.rows %}{% include "atomicdb/_contrib_rows.html" with rows=b.rows %}
+    {% else %}<p class="dim">{{ b.empty }}</p>{% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% else %}
 <p class="dim home-elsewhere"><a href="/atomicdb/contributors/">Contributors</a> <span class="dim">by engine nodes</span></p>
+{% endif %}
+{% comment %}The move tree left the nav (seaside_cliff, 3-Nov-2026: "not a
+commonly used page"); this is its door now.{% endcomment %}
+<p class="dim home-elsewhere"><a href="/atomicdb/map/">Move tree</a> <span class="dim">the explored tree drawn as a map</span></p>
 
 <h2 id="campaigns">Proposed campaigns</h2>
 {% if campaigns_proposed %}

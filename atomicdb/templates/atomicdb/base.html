@@ -55,10 +55,12 @@
   {% comment %}Three groups, split by a bar and not named (cz_eclipsia,
   3-Nov-2026): the tree itself, what people do with it, and the places
   outside this site.{% endcomment %}
-  <nav>
+  {% comment %}On a phone the nav folds behind this button
+  (seaside_cliff, 3-Nov-2026); wider screens never see it.{% endcomment %}
+  <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Menu</span></button>
+  <nav id="site-nav">
     <span class="navgroup">
     <a href="{{ start_url|default:'/atomicdb/' }}">Analyze</a>
-    <a href="/atomicdb/map/">Move tree</a>
     <a href="/atomicdb/roots/">Openings</a>
     </span><span class="navsep" aria-hidden="true"></span><span class="navgroup">
     <a href="/atomicdb/queue/">Queue</a>
@@ -210,6 +212,13 @@
     root.classList.add("notation-ready");
   };
   window.atomicdbNotation(root.dataset.notation === "uci" ? "uci" : "san");
+  var navToggle = document.getElementById("nav-toggle");
+  if (navToggle) {
+    navToggle.addEventListener("click", function () {
+      var open = document.body.classList.toggle("nav-open");
+      navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
   // Evals carry their centipawns and the side they are measured from
   // (class "ev"). "white" shows them from White's side in pawns, "stm"
   // as printed: centipawns from the side to move.

@@ -306,7 +306,15 @@ def _standings(totals, fleet_nodes, limit=LEADERBOARD_ROWS):
     }
 
 
-def leaderboard(now=None):
+# The home page's short boards (seaside_cliff, 3-Nov-2026: "bring back
+# contributors to home page").
+HOME_LEADERBOARD_ROWS = 5
+# The contributors page: the all-time board keeps every account, the ones
+# past LEADERBOARD_ROWS behind a "show more" (seaside_cliff, 3-Nov-2026).
+FULL_LEADERBOARD_ROWS = 500
+
+
+def leaderboard(now=None, limit=LEADERBOARD_ROWS, all_time_limit=None):
     """Las dos tablas de la portada, del MISMO snapshot que ya se calcula.
 
     Ni una consulta por fila ni una consulta por ventana: los dos ordenes
@@ -324,10 +332,11 @@ def leaderboard(now=None):
     boards = [
         {'window': 'Last 24 hours',
          'empty': 'No worker has searched anything in the last 24 hours.',
-         **_standings(snapshot['users_24h'], snapshot['nodes_24h'])},
+         **_standings(snapshot['users_24h'], snapshot['nodes_24h'], limit)},
         {'window': 'All time',
          'empty': 'No worker has searched anything yet.',
-         **_standings(snapshot['users_all'], snapshot['nodes_all'])},
+         **_standings(snapshot['users_all'], snapshot['nodes_all'],
+                      all_time_limit or limit)},
     ]
     return {'contrib_boards': boards,
             'has_contrib_board': any(board['rows'] for board in boards)}
