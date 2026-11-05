@@ -12,15 +12,17 @@
 </div>
 {% endif %}
 
-{% if has_counters %}<div class="metrics">
-  <div class="metric" title="Analyses this account asked for from the explorer"><div class="v">{{ requests_total_h }}</div><div class="l">requests made</div></div>
-{% if has_nodes %}  <div class="metric" title="Engine nodes searched by this account's workers, all time"><div class="v">{{ nodes_all_h }}</div><div class="l">engine nodes</div></div>
-  <div class="metric" title="Analyses served by this account's workers, all time"><div class="v">{{ tasks_all_h }}</div><div class="l">analyses served</div></div>
-  <div class="metric" title="Engine nodes searched by this account's workers in the last 24 hours"><div class="v">{{ nodes_24h_h }}</div><div class="l">nodes last 24h</div></div>
-  <div class="metric" title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><div class="v">{{ fleet_share }}%</div><div class="l">of the fleet, 24h</div></div>
-{% endif %}{% if rank_all %}  <div class="metric" title="Standing among every account with workers, by engine nodes, all time"><div class="v">#{{ rank_all.rank }}</div><div class="l">of {{ rank_all.of }} all time</div></div>
-{% endif %}{% if rank_24h %}  <div class="metric" title="Standing among the accounts whose workers searched anything in the last 24 hours"><div class="v">#{{ rank_24h.rank }}</div><div class="l">of {{ rank_24h.of }} today</div></div>
-{% endif %}</div>{% endif %}
+{% comment %}One quiet line like the queue counts, the ranks first
+(seaside_cliff, 5-Nov-2026).{% endcomment %}
+{% if has_counters %}<p class="queue-counts contrib-counts">
+{% if rank_all %}  <span title="Standing among every account with workers, by engine nodes, all time"><strong>#{{ rank_all.rank }}</strong> of {{ rank_all.of }} all time</span>
+{% endif %}{% if rank_24h %}  <span title="Standing among the accounts whose workers searched anything in the last 24 hours"><strong>#{{ rank_24h.rank }}</strong> of {{ rank_24h.of }} today</span>
+{% endif %}  <span title="Analyses this account asked for from the explorer"><strong>{{ requests_total_h }}</strong> requests made</span>
+{% if has_nodes %}  <span title="Engine nodes searched by this account's workers, all time"><strong>{{ nodes_all_h }}</strong> engine nodes</span>
+  <span title="Analyses served by this account's workers, all time"><strong>{{ tasks_all_h }}</strong> analyses served</span>
+  <span title="Engine nodes searched by this account's workers in the last 24 hours"><strong>{{ nodes_24h_h }}</strong> nodes last 24h</span>
+  <span title="Share of the {{ fleet_nodes_24h_h }} nodes the whole fleet searched in the last 24 hours"><strong>{{ fleet_share }}%</strong> of the fleet, 24h</span>
+{% endif %}</p>{% endif %}
 
 {% if first_at %}<p class="dim contrib-since">First contribution
   {{ first_at|date:"M d, Y" }}.</p>{% endif %}
@@ -75,6 +77,7 @@
   </ul>
   {% else %}<p class="dim">Nothing of {% if is_self %}yours{% else %}theirs{% endif %} is on a worker right now.</p>{% endif %}
 
+  <div class="queue-cols"><div>
   <h3 class="contrib-sub">Waiting</h3>
   {% if queue_pending %}
   <ul class="feed">
@@ -129,6 +132,7 @@
   {% endif %}
   {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
 
+  </div><div>
   <h3 class="contrib-sub">Served</h3>
   {% if queue_done %}
   <ul class="feed">
@@ -140,6 +144,7 @@
   </ul>
   {% if queue_done_more %}<p class="dim">and {{ queue_done_more }} more served.</p>{% endif %}
   {% else %}<p class="dim">Nothing served yet.</p>{% endif %}
+  </div></div>
   {% else %}
   <p class="dim">No analysis requests yet. Open any position in the explorer and
     ask for one: it lands in this queue, and a worker picks it up before the

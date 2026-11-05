@@ -899,7 +899,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       back with negative margins so the row does not grow.{% endcomment %}
       {% for m in moves %}
       <tr>
-        <td><span class="chip {{ m.css }}"></span>{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ m.uci }}"{% if m.unexplored %} data-unanalysed{% endif %} aria-label="Select {{ m.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td>{% comment %}One mark per row (seaside_cliff, 5-Nov-2026): a row that can be ticked is its checkbox, coloured like its chip, inside the chip's span so every row still opens with it; a solved row keeps its plain chip.{% endcomment %}{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<span class="chip {{ m.css }} ms-host"><label class="ms-pick"><input type="checkbox" class="ms-box {{ m.css }}" data-ms="{{ m.uci }}"{% if m.unexplored %} data-unanalysed{% endif %} aria-label="Select {{ m.san }}" autocomplete="off"></label></span>{% else %}<span class="chip {{ m.css }}"></span>{% endif %}</td>
         {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
         conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
         vuelve a una posicion que ya esta en la linea actual y las
@@ -966,7 +966,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       {% endfor %}
       {% for u in offtree %}
       <tr>
-        <td><span class="chip cold"></span>{% if multi_request and not u.blocked %}<label style="display:inline-block;padding:.45rem .5rem;margin:-.45rem -.5rem -.45rem 0;cursor:pointer;vertical-align:middle"><input type="checkbox" data-ms="{{ u.uci }}" data-unanalysed aria-label="Select {{ u.san }}" autocomplete="off" style="width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--accent)"></label>{% endif %}</td>
+        <td>{% if multi_request and not u.blocked %}<span class="chip cold ms-host"><label class="ms-pick"><input type="checkbox" class="ms-box cold" data-ms="{{ u.uci }}" data-unanalysed aria-label="Select {{ u.san }}" autocomplete="off"></label></span>{% else %}<span class="chip cold"></span>{% endif %}</td>
         <td>{% if u.blocked %}<strong{% if u.san != u.uci %} title="{{ u.uci }}" data-uci="{{ u.uci }}"{% endif %}>{{ u.san }}</strong> <span class="backed-mark"
           title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ u.url }}"{% if u.enters_opening %}
