@@ -93,3 +93,20 @@ class ThenVerifyRequestTests(TestCase):
         page = Client().get(f'/atomicdb/explore/{self.root.key}/').content.decode()
         self.assertRegex(page, r'<input[^>]*id="thenverify"')
         self.assertIn('then verify its line', page)
+
+
+class VerifyHonoursNewestFirstTests(TestCase):
+    """seaside_cliff, 4-Nov-2026: "make sure that newest first feature is
+    working properly on verify pv stuff".  A line walk's purchase goes
+    through the same newest-first step as any other request."""
+
+    def test_a_bought_verification_is_offered_to_newest_first(self):
+        from unittest import mock
+        root = ingest.get_or_create_position(logic.start_fen())
+        child = ingest.get_or_create_position(
+            logic.apply_move(root.fen, logic.legal_moves(root.fen)[0]))
+        with mock.patch.object(ingest, '_apply_lifo_preference') as lifo:
+            state, _budget = ingest._buy_verification(child, 'lesha', '')
+        self.assertEqual(state, 'queued')
+        lifo.assert_called_once()
+        self.assertEqual(lifo.call_args[0][1], 'lesha')

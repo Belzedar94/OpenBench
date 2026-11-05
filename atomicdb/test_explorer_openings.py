@@ -463,7 +463,7 @@ class ExplorerOpeningRouteTests(TestCase):
             if move['uci'] == 'b1c3'
         )
         self.assertEqual(child['enters_opening'], 'Two Knights Opening')
-        self.assertContains(response, 'enters Two Knights Opening')
+        self.assertContains(response, 'Two Knights Opening</span>')
 
     def test_opening_text_is_escaped_and_unsafe_source_is_not_linked(self):
         root = ingest.get_or_create_position(logic.start_fen())

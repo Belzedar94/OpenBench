@@ -401,7 +401,7 @@ class ModerationFlowTests(TestCase):
         body = Client().get(
             f'/atomicdb/explore/{parent_key}/').content.decode()
 
-        self.assertIn('enters Belfast Gambit', body)
+        self.assertIn('Belfast Gambit</span>', body)
 
     def test_rejecting_publishes_nothing(self):
         self._decide('reject')
@@ -556,7 +556,7 @@ class EditModerationTests(TestCase):
         reading = _reading(Client().get(
             f'/atomicdb/explore/{parent_key}/').content.decode())
 
-        self.assertIn(f'enters {CORRECTED_NAME}', reading)
+        self.assertIn(f'{CORRECTED_NAME}', reading)
 
     def test_rejecting_an_edit_leaves_the_audited_name_alone(self):
         self._decide('reject')

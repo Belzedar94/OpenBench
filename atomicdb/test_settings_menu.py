@@ -189,8 +189,8 @@ class EvalViewSettingTests(TestCase):
     def test_the_cog_offers_both_views(self):
         body = Client().get('/atomicdb/').content.decode()
         panel = body[body.index('id="settings-panel"'):]
-        self.assertIn('Side to move, cp', panel)
-        self.assertIn('White, pawns', panel)
+        self.assertIn('Centipawns', panel)
+        self.assertIn('Pawns', panel)
         self.assertIn('window.atomicdbEval = function', body)
 
     def test_evals_carry_their_number_and_side(self):

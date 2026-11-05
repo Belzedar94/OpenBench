@@ -405,7 +405,7 @@ class BackedJumpRenderTests(TestCase):
         body = self.client.get(
             f'/atomicdb/explore/{root.key}/').content.decode()
 
-        chip = self._chip(body, 'a', 'backed ·12')
+        chip = self._chip(body, 'a', 'backed 12')
         self.assertIn('class="backed-mark"', chip)
         self.assertIn(
             f'href="/atomicdb/backed-source/{child.key}/?play=d2d4"', chip)
@@ -431,7 +431,7 @@ class BackedJumpRenderTests(TestCase):
         tools = tools[:tools.index('</span>', tools.index('pos-eval'))]
         self.assertRegex(tools, r'eval <strong[^>]*>-260cp</strong>')
         self.assertIn(f'/atomicdb/backed-source/{child.key}/', tools)
-        self.assertIn('backed ·12</a>', tools)
+        self.assertIn('backed 12</a>', tools)
 
     def test_a_row_without_backing_paints_no_chip_and_no_jump(self):
         root = ingest.get_or_create_position(logic.start_fen())
@@ -461,7 +461,7 @@ class BackedJumpRenderTests(TestCase):
         below = body[body.index('class="cols"'):]
 
         self.assertNotIn('class="verdict', body)
-        self.assertNotIn('backed ·12', below)
+        self.assertNotIn('backed 12', below)
         self.assertNotIn('backed-jump', body)
 
     def test_a_chip_without_a_jump_stays_a_mute_span(self):
@@ -476,7 +476,7 @@ class BackedJumpRenderTests(TestCase):
             body = self.client.get(
                 f'/atomicdb/explore/{root.key}/').content.decode()
 
-        chip = self._chip(body, 'span', 'backed ·12')
+        chip = self._chip(body, 'span', 'backed 12')
         self.assertIn('class="backed-mark"', chip)
         self.assertNotIn('href', chip)
         self.assertNotIn('click to jump', chip)

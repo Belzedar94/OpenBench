@@ -8303,6 +8303,10 @@ def _buy_verification(child, requested_by='', route=''):
                   'requested_by': requested_by,
                   'route': route})
     if created:
+        # "Newest first" holds for the searches a line walk buys too
+        # (seaside_cliff, 4-Nov-2026): they were the one purchase that
+        # skipped it.
+        _apply_lifo_preference(task, requested_by)
         return 'queued', budget
     if task.state == AnalysisTask.TState.CANCELLED:
         # A withdrawn request is not work in flight: nothing is queued and
@@ -8311,6 +8315,7 @@ def _buy_verification(child, requested_by='', route=''):
         _revive_withdrawn(task, budget,
                           multipv_for(child.visits, budget, clamp=clamp),
                           requested_by, route)
+        _apply_lifo_preference(task, requested_by)
         return 'queued', budget
     if task.state == 'PENDING' and task.source != AnalysisTask.Source.USER:
         task.source = AnalysisTask.Source.USER
@@ -8319,6 +8324,7 @@ def _buy_verification(child, requested_by='', route=''):
         if route and not task.route:
             task.route = route
         task.save(update_fields=['source', 'requested_by', 'route'])
+        _apply_lifo_preference(task, requested_by)
         return 'queued', budget
     return 'in-flight', budget
 
