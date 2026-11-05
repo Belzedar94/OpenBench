@@ -2933,3 +2933,58 @@ table.fleet-workers .qline {
   display: inline-flex;
   color: var(--won, var(--accent));
 }
+
+/* The move table's checkbox in the colour of the chip it replaces
+   (seaside_cliff, 5-Nov-2026).  The label is the hit area; ticked, the box
+   gets a dark tick and a ring. */
+/* The chip span that carries a checkbox draws no dot of its own. */
+.chip.ms-host {
+  min-width: 0;
+  height: auto;
+  margin-right: .2rem;
+  background: none;
+  border-radius: 0;
+}
+
+.ms-pick {
+  display: inline-block;
+  padding: .45rem .5rem;
+  margin: -.45rem -.5rem -.45rem 0;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.ms-box {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-1);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.ms-box.won { background-color: var(--won); }
+.ms-box.lost { background-color: var(--lost); }
+.ms-box.draw { background-color: var(--draw); }
+.ms-box.hot { background-color: var(--hot); }
+.ms-box.warm { background-color: var(--warm); }
+.ms-box.cold { background-color: var(--cold); }
+
+.ms-box:checked {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5' fill='none' stroke='%23141310' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 85%;
+}
+
+.ms-box:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
