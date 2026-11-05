@@ -863,8 +863,9 @@ class HomeCampaignTests(TestCase):
         root = ingest.get_or_create_position(logic.start_fen())
         explore = self.client.get(
             f'/atomicdb/explore/{root.key}/').content.decode()
-        self.assertIn('the site owner decides which one the solver runs',
-                      _reading(explore))
+        # Since 5-Nov-2026 the vote decides (§ community_campaign).
+        self.assertIn('the most voted open line is the one the automatic '
+                      'queue works on', _reading(explore))
 
     def test_an_outcome_from_a_button_comes_back_as_a_sentence(self):
         cache.clear()
