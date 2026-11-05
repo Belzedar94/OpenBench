@@ -152,7 +152,10 @@ MAX_REPORTED_NPS = 1_000_000_000_000
 #
 # Solo se rechaza lo que pide una PERSONA: el selector y los brazos
 # automaticos siguen encolando pase lo que pase.
-REQUEST_QUEUE_MAX = 5000
+# 10.000 desde el 5-nov-2026 (seaside_cliff lo alcanzaba una y otra vez; OK
+# del propietario): el reparto justo por nodos ya hace que quien llena su cola
+# espere el, asi que doblar el cupo no le quita turno a nadie con sesion.
+REQUEST_QUEUE_MAX = 10_000
 # UN recibo de negativa por cuenta y minuto, no uno por negativa
 # (§ _queue_full_payload).  Una cuenta en el tope no deja de pedir: un cliente
 # que reintenta sin pausa escribia una fila por intento, unas 110 por minuto
