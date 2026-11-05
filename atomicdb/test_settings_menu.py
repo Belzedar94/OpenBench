@@ -180,3 +180,28 @@ class NewestFirstOnlyInTheMenuTests(TestCase):
         self.assertNotIn('lifo-toggle', body)
         start = body.index('settings-panel')
         self.assertIn('Newest first in my queue', body[start:])
+
+
+class EvalViewSettingTests(TestCase):
+    """cz_eclipsia, 4-Nov-2026: the cog switches evals between centipawns
+    from the side to move and White's side in pawns."""
+
+    def test_the_cog_offers_both_views(self):
+        body = Client().get('/atomicdb/').content.decode()
+        panel = body[body.index('id="settings-panel"'):]
+        self.assertIn('Side to move, cp', panel)
+        self.assertIn('White, pawns', panel)
+        self.assertIn('window.atomicdbEval = function', body)
+
+    def test_evals_carry_their_number_and_side(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        from .models import Position
+        child = Edge.objects.filter(parent=root).first().child
+        Position.objects.filter(key=child.key).update(
+            eval_cp=40, nodes_invested=128_000_000, visits=1)
+        Position.objects.filter(key=root.key).update(
+            eval_cp=30, nodes_invested=128_000_000, visits=1)
+        body = Client().get(f'/atomicdb/explore/{root.key}/').content.decode()
+        self.assertRegex(body, r'<span[^>]*class="ev"[^>]*data-cp="40"')
+        self.assertRegex(body, r'class="ev"[^>]*data-stm="w"|data-stm="w"[^>]*class="ev"')

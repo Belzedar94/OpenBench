@@ -7944,6 +7944,10 @@ def explore(request, key):
         'best_move': (None if pos.closure == 'TERMINAL'
                       else _arrow_move(moves, pos)),
         'stm': 'White' if stm_white else 'Black',
+        # ``w`` or ``b``: the side every number on this page is measured
+        # from, for the cog's "White, in pawns" view (§ base.html).
+        'stm_char': 'w' if stm_white else 'b',
+        'eval_stm': eval_stm,
         'eval_stm_str': None if eval_stm is None else f'{eval_stm:+d}cp',
         'eval_backed': eval_backed,
         'eval_backed_plies': pos.backed_plies,

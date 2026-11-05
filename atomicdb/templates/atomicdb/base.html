@@ -143,6 +143,16 @@
             <label><input type="radio" name="settings-notation" value="uci"><span>UCI</span></label>
           </div>
         </fieldset>
+        {% comment %}How numbers read (cz_eclipsia, 4-Nov-2026): centipawns
+        from the side to move, as the site has always printed them, or the
+        classic White-side eval in pawns.{% endcomment %}
+        <fieldset class="settings-row">
+          <legend>Eval</legend>
+          <div class="settings-choice">
+            <label><input type="radio" name="settings-eval" value="stm" checked><span>Side to move, cp</span></label>
+            <label><input type="radio" name="settings-eval" value="white"><span>White, pawns</span></label>
+          </div>
+        </fieldset>
         {% if user.is_authenticated %}
         <form class="settings-row settings-lifo" method="post" action="/atomicdb/queue/lifo/">{% csrf_token %}
           <input type="hidden" name="back" value="{{ identity_path }}">
@@ -200,6 +210,32 @@
     root.classList.add("notation-ready");
   };
   window.atomicdbNotation(root.dataset.notation === "uci" ? "uci" : "san");
+  // Evals carry their centipawns and the side they are measured from
+  // (class "ev"). "white" shows them from White's side in pawns, "stm"
+  // as printed: centipawns from the side to move.
+  window.atomicdbEval = function (mode) {
+    var white = mode === "white";
+    var nodes = document.querySelectorAll(".ev[data-cp]");
+    Array.prototype.forEach.call(nodes, function (node) {
+      var cp = parseInt(node.getAttribute("data-cp"), 10);
+      var shown = node.getAttribute("data-orig");
+      if (white && !isNaN(cp)) {
+        var v = node.getAttribute("data-stm") === "b" ? -cp : cp;
+        shown = (v > 0 ? "+" : v < 0 ? "\u2212" : "") + (Math.abs(v) / 100).toFixed(2);
+      }
+      if (node.textContent !== shown) node.textContent = shown;
+    });
+    if (white) {
+      root.dataset.eval = "white";
+    } else {
+      delete root.dataset.eval;
+    }
+  };
+  try {
+    if (window.localStorage.getItem("atomicdb-eval") === "white") {
+      window.atomicdbEval("white");
+    }
+  } catch (_error) {}
 }());
 </script>
 {% block extra_scripts %}{% endblock %}
