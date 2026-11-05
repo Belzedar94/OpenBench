@@ -38,6 +38,36 @@ def serve_order(username):
     return value if value in SERVE_ORDERS else 'own'
 
 
+# The most accounts one "serve these first" list keeps.
+SERVE_FOR_MAX = 20
+
+
+def parse_serve_for(raw):
+    """The account names in a comma (or space) separated list, deduplicated
+    without case, in the order given, at most SERVE_FOR_MAX."""
+    names, seen = [], set()
+    for part in (raw or '').replace(',', ' ').split():
+        name = part.strip()[:64]
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    return names[:SERVE_FOR_MAX]
+
+
+def serve_for(username):
+    """The accounts this account's workers serve first, or ``[]``.
+
+    Only with "Others first": the list refines that choice.
+    """
+    if not username:
+        return []
+    row = (ContributorPref.objects.filter(account=username)
+           .values_list('serve_order', 'serve_for').first())
+    if not row or row[0] != 'others':
+        return []
+    return parse_serve_for(row[1])
+
+
 def serves_others_first(username):
     """Whether this account's workers serve everybody else's requests first."""
     return serve_order(username) == 'others'
@@ -79,6 +109,15 @@ def notification_settings(request):
             pref.serve_order = order
             pref.serve_others_first = order == 'others'
             fields += ['serve_order', 'serve_others_first']
+        if 'serve_for' in request.POST:
+            pref.serve_for = ', '.join(
+                parse_serve_for(request.POST.get('serve_for')))
+            fields.append('serve_for')
+        # Newest first lives here too now (seaside_cliff, 4-Nov-2026), with
+        # the same reading as the cog's switch.
+        if 'lifo' in request.POST:
+            pref.lifo_queue = request.POST.get('lifo') == '1'
+            fields.append('lifo_queue')
         pref.save(update_fields=fields)
         return redirect(f'{path}?saved=1')
     pref = ContributorPref.objects.filter(account=username).first()
@@ -86,5 +125,7 @@ def notification_settings(request):
         'notify_ready': pref.notify_ready if pref else True,
         'serve_order': (pref.serve_order if pref
                         and pref.serve_order in SERVE_ORDERS else 'own'),
+        'serve_for': pref.serve_for if pref else '',
+        'lifo_on': bool(pref and pref.lifo_queue),
         'saved': request.GET.get('saved') == '1',
     })

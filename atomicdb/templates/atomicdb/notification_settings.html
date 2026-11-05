@@ -7,28 +7,30 @@
   page. <a href="/atomicdb/notifications/">See your notices</a></p>
 
 <form class="notif-settings" method="post" action="/atomicdb/notifications/settings/">{% csrf_token %}
+  {% comment %}Plain words, one line of help each (seaside_cliff,
+  4-Nov-2026).{% endcomment %}
   <input type="hidden" name="ready" value="0">
   <p><label><input type="checkbox" name="ready" value="1" id="notify-ready"
     style="margin-right:.45rem"{% if notify_ready %} checked{% endif %}>
-    Tell me when an analysis I asked for is ready</label></p>
-  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Turned off, new
-    results stop arriving under the bell. The notices you already have stay.</p>
-  {% comment %}Three buttons in a row, as cz_eclipsia drew it (3-Nov-2026):
-  the old checkbox was the first and the last of these.{% endcomment %}
+    Notify me when my analyses are ready</label></p>
+  <input type="hidden" name="lifo" value="0">
+  <p><label><input type="checkbox" name="lifo" value="1" id="lifo-queue"
+    style="margin-right:.45rem"{% if lifo_on %} checked{% endif %}>
+    Newest first in my queue</label></p>
+  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Each new
+    request of yours goes to the front of your own queue.</p>
   <fieldset class="serve-order">
-    <legend>Which requests my workers take first</legend>
+    <legend>My workers take first</legend>
     <div class="serve-order-choices">
       <label><input type="radio" name="serve_order" value="own"{% if serve_order == 'own' %} checked{% endif %}><span>Mine first</span></label>
       <label><input type="radio" name="serve_order" value="queue"{% if serve_order == 'queue' %} checked{% endif %}><span>Queue order</span></label>
       <label><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
     </div>
   </fieldset>
-  <p class="dim" style="margin:.2rem 0 .9rem;font-size:.84rem">Mine first,
-    the default: the workers you run take your own requests before anyone
-    else's. Queue order: they take requests in the order the queue serves
-    everybody, yours included. Others first: they take everyone else's
-    first, signed in or anonymous, and go back to yours when nobody else is
-    waiting.</p>
+  <p class="serve-for"><label>With Others first, serve these accounts before anyone
+    <input name="serve_for" value="{{ serve_for }}" maxlength="500"
+      placeholder="names, separated by commas; empty serves everyone alike"
+      autocomplete="off" spellcheck="false"></label></p>
   <button type="submit" class="reqbtn">Save</button>
   {% if saved %}<span class="dim" role="status" style="margin-left:.6rem">Saved.</span>{% endif %}
 </form>

@@ -207,3 +207,58 @@ class ServeOthersFirstSettingPageTests(TestCase):
         body = self.client.get('/atomicdb/notifications/').content.decode()
 
         self.assertIn(f'href="{PAGE}"', body)
+
+
+class ServeForListTests(TestCase):
+    """seaside_cliff, 4-Nov-2026: with Others first, name the accounts to
+    serve before anyone; empty serves everyone alike."""
+
+    def setUp(self):
+        worker_account('w', 'p')
+        worker_account('lesha', 'p')
+        worker_account('ally', 'p')
+        self.client = Client()
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        edges = list(Edge.objects.filter(parent=root).order_by('move_uci')[:3])
+        self.a, self.b, self.c = (e.child for e in edges)
+
+    def _request(self, position, requested_by):
+        return AnalysisTask.objects.create(
+            position=position, generation=0, budget_nodes=8_000_000,
+            source=AnalysisTask.Source.USER, requested_by=requested_by)
+
+    def _lease(self, machine):
+        return self.client.post('/atomicdb/api/lease', {
+            'username': 'lesha', 'password': 'p', 'machine': machine,
+            'worker_build': '2026072203', 'lease_session': machine,
+        }).json()['tasks'][0]['id']
+
+    def test_a_listed_account_is_served_before_anyone_else(self):
+        ContributorPref.objects.create(account='lesha', serve_order='others',
+                                       serve_for='ALLY')
+        self._request(self.a, 'w')
+        self._request(self.b, 'lesha')
+        ally = self._request(self.c, 'ally')
+
+        self.assertEqual(self._lease('m1'), ally.id)
+
+    def test_the_list_means_nothing_without_others_first(self):
+        ContributorPref.objects.create(account='lesha', serve_order='own',
+                                       serve_for='ally')
+        self._request(self.a, 'w')
+        own = self._request(self.b, 'lesha')
+        self._request(self.c, 'ally')
+
+        self.assertEqual(self._lease('m2'), own.id)
+
+    def test_the_page_saves_a_clean_list_and_newest_first(self):
+        worker_account('pagey', 'pw')
+        client = Client()
+        client.login(username='pagey', password='pw')
+        client.post(PAGE, {'ready': '1', 'serve_order': 'others',
+                           'serve_for': ' ally,  Ally , bob ', 'lifo': ['0', '1']})
+        pref = ContributorPref.objects.get(account='pagey')
+        self.assertEqual(pref.serve_for, 'ally, bob')
+        self.assertTrue(pref.lifo_queue)
+        self.assertEqual(preferences.serve_for('pagey'), ['ally', 'bob'])

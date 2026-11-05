@@ -101,7 +101,7 @@ class NotificationSettingsPageTests(TestCase):
     def test_the_box_starts_checked(self):
         body = self.client.get(PAGE).content.decode()
 
-        self.assertIn('Tell me when an analysis I asked for is ready', body)
+        self.assertIn('Notify me when my analyses are ready', body)
         self.assertIn('checked', _box(body))
 
     def test_unchecking_and_saving_turns_it_off(self):
