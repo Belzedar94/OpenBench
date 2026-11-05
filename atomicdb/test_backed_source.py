@@ -429,7 +429,7 @@ class BackedJumpRenderTests(TestCase):
 
         tools = body[body.index('class="pos-tools"'):]
         tools = tools[:tools.index('</span>', tools.index('pos-eval'))]
-        self.assertIn('eval <strong>-260cp</strong>', tools)
+        self.assertRegex(tools, r'eval <strong[^>]*>-260cp</strong>')
         self.assertIn(f'/atomicdb/backed-source/{child.key}/', tools)
         self.assertIn('backed ·12</a>', tools)
 

@@ -43,7 +43,7 @@ own under the row.{% endcomment %}
 (cz_eclipsia, 3-Nov-2026): under the board it hung loose (seaside_cliff),
 but the number is what most visitors come for.  The backed chip is the
 jump to where the value comes from.{% endcomment %}
-{% if pos.status == 'UNKNOWN' and eval_stm_str %}<span class="crumb pos-eval" title="the value of this position for the side to move ({{ stm }})">eval <strong>{{ eval_stm_str }}</strong>{% if eval_backed and backed_source_url %} <a
+{% if pos.status == 'UNKNOWN' and eval_stm_str %}<span class="crumb pos-eval" title="the value of this position for the side to move ({{ stm }})">eval <strong class="ev" data-cp="{{ eval_stm }}" data-stm="{{ stm_char }}" data-orig="{{ eval_stm_str }}">{{ eval_stm_str }}</strong>{% if eval_backed and backed_source_url %} <a
     class="backed-mark{% if eval_backed_light %} light{% endif %}"
     href="{{ backed_source_url }}"
     aria-label="jump to the position this value comes from, {{ eval_backed_plies }} pl{{ eval_backed_plies|pluralize:"y,ies" }} below"
@@ -883,7 +883,7 @@ most eight (§ views.explore).{% endcomment %}
            no jump.{% endcomment %}
         <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}{% if m.claim %}<em
             class="dim eval-claim" style="font-style:italic"
-            title="{{ m.claim }}">{{ m.score }}</em>{% else %}{{ m.score }}{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
+            title="{{ m.claim }}"><span class="ev" data-cp="{{ m.score }}" data-stm="{{ stm_char }}" data-orig="{{ m.score }}">{{ m.score }}</span></em>{% else %}<span class="ev" data-cp="{{ m.score }}" data-stm="{{ stm_char }}" data-orig="{{ m.score }}">{{ m.score }}</span>{% endif %}{% if m.backed %}<{% if m.backed_url %}a{% else %}span{% endif %}
             class="backed-mark{% if m.backed_light %} light{% endif %}"{% if m.backed_url %}
             href="{{ m.backed_url }}"
             aria-label="jump to the position this value comes from, {{ m.backed_plies }} pl{{ m.backed_plies|pluralize:"y,ies" }} below"{% endif %}

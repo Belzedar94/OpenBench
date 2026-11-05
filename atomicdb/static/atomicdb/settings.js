@@ -23,6 +23,8 @@
   const themeInputs = panel.querySelectorAll('input[name="settings-theme"]');
   const notationInputs = panel.querySelectorAll(
     'input[name="settings-notation"]');
+  const evalKey = 'atomicdb-eval';
+  const evalInputs = panel.querySelectorAll('input[name="settings-eval"]');
 
   function check(inputs, value) {
     inputs.forEach(function (input) {
@@ -37,6 +39,7 @@
   function sync() {
     check(themeInputs, root.dataset.theme === 'light' ? 'light' : 'dark');
     check(notationInputs, currentNotation());
+    check(evalInputs, root.dataset.eval === 'white' ? 'white' : 'stm');
   }
 
   function open() {
@@ -95,7 +98,32 @@
     });
   });
 
+  function applyEval(mode) {
+    if (window.atomicdbEval) window.atomicdbEval(mode);
+  }
+
+  evalInputs.forEach(function (input) {
+    input.addEventListener('change', function () {
+      if (!input.checked) return;
+      applyEval(input.value);
+      try {
+        if (input.value === 'white') {
+          window.localStorage.setItem(evalKey, 'white');
+        } else {
+          window.localStorage.removeItem(evalKey);
+        }
+      } catch (_error) {
+        // Without storage the choice holds for this page only.
+      }
+    });
+  });
+
   window.addEventListener('storage', function (event) {
+    if (event.key === evalKey) {
+      applyEval(event.newValue === 'white' ? 'white' : 'stm');
+      if (open()) sync();
+      return;
+    }
     if (event.key !== notationKey && event.key !== null) return;
     applyNotation(event.newValue === 'uci' ? 'uci' : 'san');
     if (open()) sync();
