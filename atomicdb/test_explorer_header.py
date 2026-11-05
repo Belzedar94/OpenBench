@@ -443,3 +443,16 @@ class StatusUnderTheBoardTests(TestCase):
         self.assertIn('title="practical verdict, closed via TB">White wins · '
                       'TB</span> · <strong>≤M5</strong>', body)
         self.assertNotIn('WHITE_WIN <span', body)
+
+class ProposalTabsTests(TestCase):
+    """cz_eclipsia, 3-Nov-2026: the proposals switch as tabs, one at a time,
+    instead of stacking popups."""
+
+    def test_the_row_carries_the_tab_script(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        body = self.client.get(f'/atomicdb/explore/{root.key}/').content.decode()
+        tools = body[body.index('class="pos-tools"'):]
+        tools = tools[:tools.index('class="cols"')]
+        self.assertIn("button.className = 'pos-tab'", tools)
+        self.assertIn('Propose campaign', tools)
+        self.assertIn('Suggest name', tools)
