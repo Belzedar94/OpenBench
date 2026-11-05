@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 from django.urls import resolve, reverse
 
 from . import views
+from .testing import TestCase as _DbTestCase
 
 
 class AtomicMoveTreePageTests(SimpleTestCase):
@@ -85,13 +86,6 @@ class AtomicMoveTreePageTests(SimpleTestCase):
         ]:
             self.assertNotContains(response, retired_markup, html=False)
 
-    def test_atomicdb_navigation_names_the_product_not_the_old_chart(self):
-        response = self.client.get('/atomicdb/map/')
-
-        self.assertContains(
-            response,
-            'href="/atomicdb/map/">Move tree</a>',
-        )
 
     def test_the_first_nav_item_opens_the_start_position(self):
         """The logo already goes home; the nav goes straight to analysis."""
@@ -257,3 +251,16 @@ class AtomicMoveTreeStaticContractTests(SimpleTestCase):
             'https://d3js.org v7.9.0',
             script.read_text(encoding='utf-8')[:100],
         )
+
+
+
+class MoveTreeLinkTests(_DbTestCase):
+
+    def test_the_move_tree_is_linked_from_home_not_the_nav(self):
+        """seaside_cliff, 3-Nov-2026: not a commonly used page, so it left
+        the nav for a link on the home page, under its product name."""
+        body = self.client.get('/atomicdb/').content.decode()
+
+        nav = body[body.index('<nav'):body.index('</nav>')]
+        self.assertNotIn('/atomicdb/map/', nav)
+        self.assertIn('href="/atomicdb/map/">Move tree</a>', body)

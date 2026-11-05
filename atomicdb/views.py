@@ -5169,7 +5169,10 @@ def home(request):
         **_proof_health(now),
         **_campaign_context(request),
         # The contributors leaderboard and the milestones have pages of their
-        # own now (§ contributors_page, milestones_page); home links to them.
+        # own (§ contributors_page, milestones_page).  Home shows the top of
+        # both boards again and links to the full page.
+        **contributors.leaderboard(
+            now=now, limit=contributors.HOME_LEADERBOARD_ROWS),
         'root_pn_h': proof.format_number(root_pn),
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,
@@ -5216,7 +5219,13 @@ def contributors_page(request):
     """
     return render(request, 'atomicdb/contributors.html', {
         **_suggestions_badge(request),
-        **contributors.leaderboard(now=timezone.now()),
+        **contributors.leaderboard(
+            now=timezone.now(),
+            all_time_limit=contributors.FULL_LEADERBOARD_ROWS),
+        'contrib_shown': contributors.LEADERBOARD_ROWS,
+        'contrib_shown_neg': -contributors.LEADERBOARD_ROWS,
+        'contrib_shown_slice': f':{contributors.LEADERBOARD_ROWS}',
+        'contrib_rest_slice': f'{contributors.LEADERBOARD_ROWS}:',
     })
 
 

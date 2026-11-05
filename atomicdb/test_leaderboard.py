@@ -297,9 +297,10 @@ class PageTests(TestCase):
         self.assertIn('2.50B', body)
         self.assertIn('2 accounts · 3.00B nodes', body)
 
-    def test_the_home_page_links_it_where_the_section_was(self):
-        """The leaderboard has a page of its own; the home page keeps a link
-        between the tree and the campaigns, and no table."""
+    def test_the_home_page_shows_the_top_and_links_the_page(self):
+        """seaside_cliff, 3-Nov-2026: the top of both boards is back on the
+        home page, between the tree and the campaigns, with a link to the
+        full page."""
         _searched('alice', 4_000_000)
 
         body = self.client.get('/atomicdb/').content.decode()
@@ -307,14 +308,13 @@ class PageTests(TestCase):
         for marker in ('Now analyzing', 'Up next', 'First moves',
                        'Proposed campaigns'):
             self.assertIn(marker, body)
-        # The nav links it too (Torom, 3-Nov-2026); this is the one in the page.
-        self.assertLess(body.index('href="/atomicdb/contributors/"'),
-                        body.index('First moves'))
-        here = body.index('href="/atomicdb/contributors/"',
-                          body.index('First moves'))
-        self.assertLess(here, body.index('id="campaigns"'))
-        self.assertNotIn('lb-table', body)
-        self.assertNotIn('href="/atomicdb/user/alice/"', body)
+        board = body.index('id="contributors"')
+        self.assertLess(body.index('First moves'), board)
+        self.assertLess(board, body.index('id="campaigns"'))
+        section = body[board:body.index('id="campaigns"')]
+        self.assertIn('lb-table', section)
+        self.assertIn('alice', section)
+        self.assertIn('href="/atomicdb/contributors/"', section)
 
 
 class MobileOverflowTests(TestCase):
@@ -412,3 +412,19 @@ class QueryCostTests(TestCase):
         self.assertEqual(three, twelve)
         # Y no por servir menos: la segunda portada trae la tabla llena.
         self.assertIn('and 2 more', body)
+
+
+class FullBoardTests(TestCase):
+    """seaside_cliff, 3-Nov-2026: the all-time board keeps every account,
+    the ones past the first ten behind "show more"."""
+
+    def test_past_ten_the_rest_wait_behind_show_more(self):
+        for i in range(13):
+            _searched(f'user{i:02d}', 1_000_000 * (i + 1))
+
+        body = Client().get('/atomicdb/contributors/').content.decode()
+
+        self.assertIn('Show 3 more', body)
+        fold = body[body.index('class="lb-more"'):]
+        self.assertIn('user00', fold)
+        self.assertNotIn('user12', fold[:fold.index('</details>')])

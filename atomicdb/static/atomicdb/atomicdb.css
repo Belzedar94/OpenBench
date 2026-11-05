@@ -254,6 +254,28 @@ header nav a:hover {
   color: var(--ink);
 }
 
+/* The phone menu button: hidden until the phone rules show it. */
+header .nav-toggle {
+  display: none;
+  order: 3;
+  align-items: center;
+  gap: .35rem;
+  padding: .35rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: .86rem;
+  cursor: pointer;
+}
+
+.lb-more summary {
+  margin: .5rem 0;
+  cursor: pointer;
+  color: var(--accent);
+}
+
 /* The nav in three groups split by a bar, with no names (cz_eclipsia,
    3-Nov-2026).  A group keeps the nav's own gap between its links and
    wraps as one piece. */
@@ -1955,6 +1977,30 @@ html.theme-ready .tile {
     display: inline-flex;
     align-items: center;
     min-height: 2.75rem;
+  }
+
+  /* Folded behind the Menu button; opened, the groups stack as rows. */
+  header .nav-toggle {
+    display: inline-flex;
+  }
+
+  header nav {
+    display: none;
+  }
+
+  body.nav-open header nav {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  body.nav-open header nav .navgroup {
+    flex-wrap: wrap;
+  }
+
+  body.nav-open header nav .navsep {
+    width: 100%;
+    height: 1px;
   }
 
   header nav {

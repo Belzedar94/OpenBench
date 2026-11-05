@@ -10,22 +10,13 @@
   <section>
     <h3 class="contrib-sub">{{ b.window }}</h3>
     {% if b.rows %}
-    <div class="contrib-scroll">
-    <table class="lb-table">
-      <tr><th class="lb-place"><span class="visually-hidden">Place</span><span aria-hidden="true">#</span></th>
-        <th>Contributor</th><th class="n">Nodes</th><th class="n">Analyses</th></tr>
-      {% for r in b.rows %}
-      <tr>
-        <td class="lb-place"><span class="lb-medal {{ r.medal }}">{{ r.rank }}</span></td>
-        <td><a class="lb-name" href="/atomicdb/user/{{ r.name|urlencode }}/">{{ r.name }}</a>
-          <div class="lb-bar" aria-hidden="true"><span style="width:{{ r.share|unlocalize }}%"></span></div>
-          <div class="dim contrib-spec">{{ r.share_h }}% of the fleet</div></td>
-        <td class="n">{{ r.nodes_h }}</td>
-        <td class="n">{{ r.tasks_h }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-    </div>
+    {% comment %}Every account on the all-time board; past the usual ten
+    they wait behind "show more" (seaside_cliff, 3-Nov-2026).{% endcomment %}
+    {% include "atomicdb/_contrib_rows.html" with rows=b.rows|slice:contrib_shown_slice %}
+    {% if b.rows|length > contrib_shown %}<details class="lb-more">
+      <summary>Show {{ b.rows|length|add:contrib_shown_neg }} more</summary>
+      {% include "atomicdb/_contrib_rows.html" with rows=b.rows|slice:contrib_rest_slice %}
+    </details>{% endif %}
     {% if b.more %}<p class="dim lb-foot">and {{ b.more }} more.</p>{% endif %}
     <p class="dim lb-foot">{{ b.accounts }} account{{ b.accounts|pluralize }} ·
       {{ b.fleet_h }} nodes{% if b.unclaimed_h %},
