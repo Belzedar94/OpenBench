@@ -83,6 +83,12 @@ it with the request endpoint below, the FEN box or the explorer.</p>
 <tr><td><code>moves</code></td><td>One entry per move; see below.</td></tr>
 <tr><td><code>analysis</code></td><td>The engine's own output on this
   position, or <code>null</code> where no engine has looked yet.</td></tr>
+<tr><td><code>moves[].backed_plies</code></td><td>The depth the
+  row's "backed" chip shows: 0 when the move's value is its own search, or
+  the move is solved or a repetition.</td></tr>
+<tr><td><code>moves[].node_backed_plies</code></td><td>The move position's
+  own backing depth, whatever the chip shows; <code>null</code> when that
+  position has no backed value.</td></tr>
 </table></div>
 
 <p>Each entry of <code>moves</code> carries, among others:</p>

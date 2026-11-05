@@ -4940,6 +4940,16 @@ def _child_moves(pos):
                       'tier': tier,
                       'mate': mate, 'point': point,
                       'backed_plies': backed_plies,
+                      # The move's own backing depth, whatever the chip
+                      # shows: ``backed_plies`` above is the chip's (zero
+                      # where the backed value is the move's own search, or
+                      # the move is solved or a repetition).  None when the
+                      # position has no backed value at all (seaside_cliff,
+                      # 5-Nov-2026: an API client read the chip's zero as the
+                      # node's).
+                      'node_backed_plies': (c.backed_plies
+                                            if c.backed_eval is not None
+                                            else None),
                       'backed': bool(backed_plies),
                       'backed_light': backed_light,
                       # Esta jugada vuelve a la posicion que la esta valorando
@@ -5613,7 +5623,9 @@ def _query_block(pos):
     # and the explorer's own poller reads them (§ explore.html).
     moves = [{'uci': m['uci'], 'status': m['status'], 'closure': m['closure'],
               'score': m['score'], 'point': m['point'], 'mate': m['mate'],
-              'backed_plies': m['backed_plies'], 'visits': m['visits'],
+              'backed_plies': m['backed_plies'],
+              'node_backed_plies': m['node_backed_plies'],
+              'visits': m['visits'],
               'searched_nodes': m['searched_nodes'], 'floor': m['floor'],
               # The explorer's ``borrowed`` chip (§ _child_moves): a number
               # another position's search wrote.  Additive, after the rest.
