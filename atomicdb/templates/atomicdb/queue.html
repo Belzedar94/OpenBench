@@ -9,6 +9,9 @@
     title="Every active worker, what it is searching and who asked for it">workers</a></h2>
 
 {% if account_rows %}
+{% comment %}The table scrolls on its own on a phone, so the page and its
+nav do not (seaside_cliff, 5-Nov-2026).{% endcomment %}
+<div class="contrib-scroll">
 <table>
   <tr>
     <th>Account</th><th>Waiting</th><th>Running</th>
@@ -28,6 +31,7 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 {% else %}
 <p class="dim">Nothing is queued right now.</p>
 {% endif %}

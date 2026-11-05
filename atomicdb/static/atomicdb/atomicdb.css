@@ -1918,10 +1918,30 @@ a.backed-mark:hover,
 a.backed-mark:focus-visible {
   border-color: var(--accent);
   color: var(--accent);
-  /* Subrayado del TEXTO, no del borde: el recuadro ya se pinta de acento. */
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: .18em;
+  /* The accent outline is the whole hover (seaside_cliff, 5-Nov-2026). */
+  text-decoration: none;
+}
+
+.queue-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 1.6rem;
+}
+
+.queue-cols > div + div {
+  padding-left: 1.6rem;
+  border-left: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .queue-cols {
+    grid-template-columns: 1fr;
+  }
+
+  .queue-cols > div + div {
+    padding-left: 0;
+    border-left: 0;
+  }
 }
 
 /* Respaldo sin peso de busqueda: valor subido por una linea CAMINADA por un

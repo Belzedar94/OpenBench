@@ -23,6 +23,9 @@
   </ul>
   {% else %}<p class="dim">Nothing on a worker right now.</p>{% endif %}
 
+  {% comment %}Waiting and served side by side, split by a line
+  (seaside_cliff, 5-Nov-2026); one column on a phone.{% endcomment %}
+  <div class="queue-cols"><div>
   <h3 class="contrib-sub">Waiting</h3>
   {% if queue_pending %}
   <ul class="feed">
@@ -35,6 +38,7 @@
   {% if queue_pending_more %}<p class="dim">and {{ queue_pending_more }} more waiting.</p>{% endif %}
   {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
 
+  </div><div>
   <h3 class="contrib-sub">Served</h3>
   {% if queue_done %}
   <ul class="feed">
@@ -46,6 +50,7 @@
   </ul>
   {% if queue_done_more %}<p class="dim">and {{ queue_done_more }} more served.</p>{% endif %}
   {% else %}<p class="dim">Nothing served yet.</p>{% endif %}
+  </div></div>
 </section>
 
 {% endblock %}
