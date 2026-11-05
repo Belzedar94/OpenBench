@@ -2821,3 +2821,14 @@ table.fleet-workers .qline {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* "then verify its line" beside the Request button (seaside_cliff,
+   4-Nov-2026). */
+.then-verify {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  color: var(--ink-muted);
+  font-size: .8rem;
+  cursor: pointer;
+}

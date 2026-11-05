@@ -2111,6 +2111,18 @@ def _api_request_once(request, key):
     payload, status = _queue_request(
         pos, ip, requested_by=requested_by, chosen=chosen,
         raw_route=request.POST.get('route'))
+    # "...and verify its line" (seaside_cliff, 4-Nov-2026): the live request
+    # on this position carries the flag, and when its search lands the
+    # ingest walks the new PV like the Verify PV button would.
+    if request.POST.get('then_verify') == '1' and payload.get('status') in (
+            'queued', 'already-queued', 'already-requested'):
+        marked = (AnalysisTask.objects
+                  .filter(position=pos, source=AnalysisTask.Source.USER,
+                          state__in=(AnalysisTask.TState.PENDING,
+                                     AnalysisTask.TState.LEASED))
+                  .update(then_verify=True))
+        if marked:
+            payload['then_verify'] = True
     return JsonResponse(payload, status=status)
 
 
