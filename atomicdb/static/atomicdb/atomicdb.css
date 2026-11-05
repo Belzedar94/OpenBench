@@ -3045,3 +3045,39 @@ table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
 .contrib-stats strong {
   color: var(--ink);
 }
+
+/* The line above the explorer: as wide as its moves, no wider
+   (seaside_cliff, 5-Nov-2026). */
+.linebox {
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.contrib-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1.6rem;
+  align-items: start;
+}
+
+.contrib-top .contrib-section {
+  margin-top: 0;
+}
+
+.contrib-top .contrib-section h2 {
+  margin-top: 0;
+}
+
+@media (max-width: 720px) {
+  .contrib-top {
+    grid-template-columns: 1fr;
+  }
+}
+
+.queue-counts-inline {
+  display: inline-flex;
+  margin: 0 0 0 .6rem;
+  font-size: .85rem;
+  font-weight: 400;
+}

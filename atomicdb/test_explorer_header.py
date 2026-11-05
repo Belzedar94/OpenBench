@@ -441,7 +441,7 @@ class StatusUnderTheBoardTests(TestCase):
         body = self._body()
 
         self.assertIn('title="practical verdict, closed via TB">White wins · '
-                      'TB</span> · <strong>≤M5</strong>', body)
+                      'TB</span> · <strong>M5</strong>', body)
         self.assertNotIn('WHITE_WIN <span', body)
 
 class ProposalTabsTests(TestCase):

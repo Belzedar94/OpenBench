@@ -24,8 +24,8 @@
       <label><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
     </div>
     <p class="serve-for"><input name="serve_for" value="{{ serve_for }}" maxlength="500"
-      aria-label="Accounts Others first serves before anyone"
-      placeholder="Others first: accounts to serve first, comma separated"
+      aria-label="Accounts to share my workers with: first with Others first, alongside mine with Mine first"
+      placeholder="Accounts to share my workers with, comma separated"
       autocomplete="off" spellcheck="false"></p>
   </fieldset>
   <p class="acct-save"><button type="submit" class="reqbtn">Save</button>
