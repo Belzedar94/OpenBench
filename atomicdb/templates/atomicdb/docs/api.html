@@ -11,6 +11,8 @@ reading and requesting work without an account.</p>
 <tr><th>Endpoint</th><th>What it does</th></tr>
 <tr><td><code>GET /atomicdb/api/query?fen=...</code></td><td>Read what the
   database knows about one position.</td></tr>
+<tr><td><code>GET /atomicdb/api/principal-variations?fen=...</code></td><td>One
+  position and its best lines, a few plies deep, in one call.</td></tr>
 <tr><td><code>POST /atomicdb/api/request</code></td><td>Ask for analysis of a
   position, exactly like the explorer button.</td></tr>
 <tr><td><code>POST /atomicdb/api/my-queue/</code></td><td>List your own
@@ -28,7 +30,7 @@ reading and requesting work without an account.</p>
 <h3 id="pace">Rate limit</h3>
 <ul>
 <li>The endpoints a script can call (<code>query</code>,
-  <code>request</code>, <code>live-request</code>, <code>frontier</code>,
+  <code>principal-variations</code>, <code>request</code>, <code>live-request</code>, <code>frontier</code>,
   <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code> and
   <code>map</code>) take 5 requests a second from one address, with bursts of
   up to 50.</li>
@@ -39,6 +41,24 @@ reading and requesting work without an account.</p>
 <li>The pace is about calls a second, not about how much you may ask for
   (see the request endpoint below).</li>
 </ul>
+
+<h3 id="principal-variations">Best lines of a position</h3>
+<p><code>GET /atomicdb/api/principal-variations?fen=...&amp;line_count=5&amp;ply_count=5</code>
+returns what a query of the position returns, under <code>position</code>, and
+its best lines. Each of the first <code>line_count</code> moves (at most 5)
+starts a line, which then follows the best move of each position it reaches,
+the move the board arrow shows, up to <code>ply_count</code> moves (at most 5).
+A line the tree cannot continue comes back as far as it got.</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>position</code></td><td>The root, exactly as
+  <code>/api/query</code> returns it.</td></tr>
+<tr><td><code>lines</code></td><td>For each starting move, the line in UCI,
+  starting with that move.</td></tr>
+<tr><td><code>positions</code></td><td>By FEN, every position the lines
+  reach: <code>key</code>, <code>status</code>, <code>closure</code>,
+  <code>score</code> from the side to move and <code>best_move</code>.</td></tr>
+</table></div>
 
 <h3 id="query">Query a position</h3>
 <p><code>GET /atomicdb/api/query?fen=...</code> returns the position row and
