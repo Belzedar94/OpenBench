@@ -1,0 +1,65 @@
+"""Queue pages are live for a signed-in visitor and cached for the rest.
+
+seaside_cliff, 6-Nov-2026: "it would be better if u didnt cache the queue
+sizes when im requesting".  Somebody signed in is watching their own requests
+move, so the counts they see must be the counts of now; crawler bursts and
+F5 storms come without a session, and keep the short cache.
+"""
+from django.contrib.auth.models import User
+from django.core.cache import cache
+from django.test import Client
+
+from . import logic
+from .models import AnalysisTask, Position
+from .testing import TestCase, worker_account
+
+
+class QueueLiveForMembersTests(TestCase):
+
+    def setUp(self):
+        cache.clear()
+        worker_account('miner', 'p')
+        self.offset = 0
+
+    def _queue(self, owner, count):
+        rows = [Position(key=f'{index + self.offset:064d}',
+                         fen=logic.start_fen(), status='UNKNOWN',
+                         expanded=False)
+                for index in range(count)]
+        self.offset += count
+        Position.objects.bulk_create(rows)
+        AnalysisTask.objects.bulk_create([
+            AnalysisTask(position=position, generation=0,
+                         budget_nodes=128_000_000,
+                         source=AnalysisTask.Source.USER, requested_by=owner,
+                         state='PENDING')
+            for position in rows])
+
+    def _waiting(self, client, url):
+        body = client.get(url).content.decode()
+        return body
+
+    def test_signed_in_queue_page_shows_new_requests_at_once(self):
+        member = Client()
+        member.force_login(User.objects.get(username='miner'))
+        self._queue('miner', 2)
+        first = self._waiting(member, '/atomicdb/queue/')
+        self._queue('miner', 3)
+        second = self._waiting(member, '/atomicdb/queue/')
+        self.assertNotEqual(first, second)
+        self.assertIn('>5<', second.replace(' ', ''))
+
+    def test_anonymous_queue_page_stays_cached(self):
+        visitor = Client()
+        self._queue('miner', 2)
+        first = self._waiting(visitor, '/atomicdb/queue/')
+        self._queue('miner', 3)
+        self.assertEqual(first, self._waiting(visitor, '/atomicdb/queue/'))
+
+    def test_signed_in_account_queue_page_is_live(self):
+        member = Client()
+        member.force_login(User.objects.get(username='miner'))
+        self._queue('miner', 1)
+        first = self._waiting(member, '/atomicdb/queue/miner/')
+        self._queue('miner', 2)
+        self.assertNotEqual(first, self._waiting(member, '/atomicdb/queue/miner/'))
