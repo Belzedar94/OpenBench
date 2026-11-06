@@ -790,11 +790,15 @@ def present(username, now=None, every_worker=False):
     return context
 
 
-def present_queue(username, now=None):
+def present_queue(username, now=None, live=False):
     """Only the queue of ``username``: running, waiting and served.
 
     The profile's three lists without the rest of the profile (workers,
     counters, chart, names), so it costs the queue reads and nothing else.
+
+    ``live`` counts the served total now instead of reading the one-minute
+    copy: a signed-in visitor gets every number fresh (seaside_cliff,
+    6-Nov-2026), and that count is 0.2 s on the largest account.
     """
     now = now or timezone.now()
     pending, leased, done = _queue_rows(username)
@@ -802,9 +806,9 @@ def present_queue(username, now=None):
     pending, pending_more = _overflow(pending, QUEUE_ROWS,
                                       mine.filter(state=PENDING))
     if len(done) > QUEUE_ROWS:
-        done_total = _account_cached(
-            'served', username, mine.filter(state=COMPLETED).count,
-            seconds=ACCOUNT_COUNT_SECONDS)
+        served = mine.filter(state=COMPLETED).count
+        done_total = (served() if live else _account_cached(
+            'served', username, served, seconds=ACCOUNT_COUNT_SECONDS))
         done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
     else:
         done_more = 0

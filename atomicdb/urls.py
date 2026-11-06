@@ -71,7 +71,27 @@ _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
 _docs_page_cached = cache_page(30)(vary_on_cookie(csrf_protect(
     views.docs_page)))
-_queue_cached = cache_page(15)(vary_on_cookie(csrf_protect(views.queue_page)))
+def _live_for_members(view, seconds=15):
+    """``view`` behind the short page cache for visitors without a session,
+    and straight through for signed-in ones.
+
+    The cache is there for crawler bursts and F5 storms, which come without a
+    session.  Someone signed in is usually watching their own requests move,
+    and fifteen seconds of an old count reads as the site lying
+    (seaside_cliff, 6-Nov-2026).  Uncached these pages measured 0.1-1.5 s.
+    """
+    cached = cache_page(seconds)(vary_on_cookie(csrf_protect(view)))
+    fresh = csrf_protect(view)
+
+    def wrapper(request, *args, **kwargs):
+        user = getattr(request, 'user', None)
+        if user is not None and user.is_authenticated:
+            return fresh(request, *args, **kwargs)
+        return cached(request, *args, **kwargs)
+    return wrapper
+
+
+_queue_cached = _live_for_members(views.queue_page)
 # Mejor y peor valor de la posicion inicial y de cada primera jugada, y la
 # linea principal, que se registra una vez por hora.  Nada de lo que pinta
 # tiene que ser mas fresco que la misma cache corta de ``docs``, variada por
@@ -144,8 +164,8 @@ urlpatterns = [
     # asi que la cache de pagina de 15s solo absorbe las tormentas de F5.
     path('queue/', _queue_cached, name='atomicdb-queue'),
     # The "Anonymous" row of the queue, as a page of its own.
-    path('queue/anonymous/', cache_page(15)(vary_on_cookie(csrf_protect(
-        views.queue_anonymous))), name='atomicdb-queue-anonymous'),
+    path('queue/anonymous/', _live_for_members(views.queue_anonymous),
+         name='atomicdb-queue-anonymous'),
     # The machines behind the "active workers" number of the home page.
     path('workers/', _workers_cached, name='atomicdb-workers'),
     # The two sections the home page used to end with, as pages of their own.
@@ -185,8 +205,8 @@ urlpatterns = [
     # One account's requests only, without the rest of its profile.  After
     # every fixed ``queue/<word>/`` route above, so none of them is shadowed;
     # same short cache as the anonymous page.
-    path('queue/<str:username>/', cache_page(15)(vary_on_cookie(csrf_protect(
-        views.queue_user))), name='atomicdb-queue-user'),
+    path('queue/<str:username>/', _live_for_members(views.queue_user),
+         name='atomicdb-queue-user'),
     path('user/<str:username>/queue/', views.queue_user_redirect,
          name='atomicdb-contributor-queue'),
     # Campanas de exploracion: las dos primeras son publicas, la tercera es

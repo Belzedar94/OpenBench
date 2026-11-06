@@ -6227,8 +6227,11 @@ def queue_page(request):
 
     Public and cached like the rest of the read views: the numbers behind it
     are two GROUP BY, and one visitor should not pay them for everybody.
+    A signed-in visitor skips both caches and reads the table live (0.05 s
+    warm, seaside_cliff 6-Nov-2026); § ``urls._live_for_members``.
     """
-    table = lanes.queue_table()
+    table = (lanes.measure_queue(timezone.now())
+             if request.user.is_authenticated else lanes.queue_table())
     rows = []
     for row in table['rows']:
         rows.append({
@@ -6270,7 +6273,8 @@ def queue_user(request, username):
             'missing_note': 'No AtomicDB requests under that name (yet).',
         }, status=404)
     return render(request, 'atomicdb/queue_user.html',
-                  contributors.present_queue(username))
+                  contributors.present_queue(
+                      username, live=request.user.is_authenticated))
 
 
 def queue_user_redirect(request, username):
