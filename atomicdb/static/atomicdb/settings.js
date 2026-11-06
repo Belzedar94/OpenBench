@@ -118,7 +118,77 @@
     });
   });
 
+  // Board colours: two pickers, kept in this browser.  The inline script in
+  // base.html applies the stored pair before the first paint; this keeps the
+  // page and the stored value in step while the pickers move.
+  const boardKey = 'atomicdb-board';
+  const boardLight = document.getElementById('settings-board-l');
+  const boardDark = document.getElementById('settings-board-d');
+  const boardReset = document.getElementById('settings-board-reset');
+  const BOARD_DEFAULT = {l: '#f0d9b5', d: '#b58863'};
+
+  function applyBoard(colours) {
+    if (colours) {
+      root.style.setProperty('--sq-l', colours.l);
+      root.style.setProperty('--sq-d', colours.d);
+      root.dataset.board = 'custom';
+    } else {
+      root.style.removeProperty('--sq-l');
+      root.style.removeProperty('--sq-d');
+      delete root.dataset.board;
+    }
+  }
+
+  function storedBoard() {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(boardKey) || 'null');
+      const hex = /^#[0-9a-f]{6}$/i;
+      if (value && hex.test(value.l) && hex.test(value.d)) return value;
+    } catch (_error) {
+      // Unreadable or no storage: the default board.
+    }
+    return null;
+  }
+
+  function syncBoard() {
+    const colours = storedBoard() || BOARD_DEFAULT;
+    if (boardLight) boardLight.value = colours.l;
+    if (boardDark) boardDark.value = colours.d;
+  }
+
+  function saveBoard() {
+    const colours = {l: boardLight.value, d: boardDark.value};
+    applyBoard(colours);
+    try {
+      window.localStorage.setItem(boardKey, JSON.stringify(colours));
+    } catch (_error) {
+      // Without storage the colours hold for this page only.
+    }
+  }
+
+  if (boardLight && boardDark) {
+    syncBoard();
+    boardLight.addEventListener('input', saveBoard);
+    boardDark.addEventListener('input', saveBoard);
+  }
+  if (boardReset) {
+    boardReset.addEventListener('click', function () {
+      applyBoard(null);
+      try {
+        window.localStorage.removeItem(boardKey);
+      } catch (_error) {
+        // Nothing stored to forget.
+      }
+      syncBoard();
+    });
+  }
+
   window.addEventListener('storage', function (event) {
+    if (event.key === boardKey) {
+      applyBoard(storedBoard());
+      syncBoard();
+      return;
+    }
     if (event.key === evalKey) {
       applyEval(event.newValue === 'white' ? 'white' : 'stm');
       if (open()) sync();

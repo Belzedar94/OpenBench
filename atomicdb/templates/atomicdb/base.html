@@ -38,6 +38,17 @@
       root.dataset.notation = "uci";
     }
   } catch (_error) {}
+  // Board colours (seaside_cliff, 6-Nov-2026): set before the first paint so
+  // a custom board never flashes brown.  settings.js owns the same key.
+  try {
+    var board = JSON.parse(window.localStorage.getItem("atomicdb-board") || "null");
+    var hex = /^#[0-9a-f]{6}$/i;
+    if (board && hex.test(board.l) && hex.test(board.d)) {
+      root.style.setProperty("--sq-l", board.l);
+      root.style.setProperty("--sq-d", board.d);
+      root.dataset.board = "custom";
+    }
+  } catch (_error) {}
 }());
 </script>
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.base.css' %}">
@@ -153,6 +164,14 @@
           <div class="settings-choice">
             <label><input type="radio" name="settings-eval" value="stm" checked><span>Centipawns</span></label>
             <label><input type="radio" name="settings-eval" value="white"><span>Pawns</span></label>
+          </div>
+        </fieldset>
+        <fieldset class="settings-row settings-board">
+          <legend>Board</legend>
+          <div class="settings-colours">
+            <label><input type="color" id="settings-board-l" value="#f0d9b5"><span>Light</span></label>
+            <label><input type="color" id="settings-board-d" value="#b58863"><span>Dark</span></label>
+            <button type="button" class="settings-reset" id="settings-board-reset">Reset</button>
           </div>
         </fieldset>
         {% if user.is_authenticated %}
