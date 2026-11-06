@@ -769,7 +769,12 @@ def api_lease(request):
             # sigue por delante de AUTO/FILL, que miran -source antes.
             favoured = Q()
             for name in serve_first:
-                favoured |= Q(requested_by__iexact=name)
+                # "anonymous" names the requests made without an account,
+                # which carry no name at all (seaside_cliff, 6-Nov-2026);
+                # no account is called that (checked 6-Nov-2026).
+                favoured |= (Q(requested_by='')
+                             if name.lower() == 'anonymous'
+                             else Q(requested_by__iexact=name))
             # The listed accounts (§ preferences.serve_for): first of all
             # with Others first; with Mine first they share this account's
             # own band, so the fair share interleaves them with its own
