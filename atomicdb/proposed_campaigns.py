@@ -16,6 +16,13 @@ never for a page view.  The page only reads the stored result.
 
 When the walk hits the cap the totals are LOWER BOUNDS (``capped``), and the
 page says so with a ``+``.  Transpositions reached twice count once.
+
+THE WALK STOPS AT A SOLVED POSITION (BManBJ, 6-Nov-2026): the solved one is
+counted, what hangs under it is not.  Below a proven node nothing is left to
+solve, so counting its subtree only inflated "solved" — a mate with a big
+tree under it could read as most of the line — and pushed the cap onto
+territory nobody needs to search.  The numbers are therefore the OPEN tree
+plus its solved boundary: how much of what still matters is done.
 """
 
 from django.core.cache import cache
@@ -43,21 +50,24 @@ def walk_subtree(root_key, *, cap=MAX_NODES, batch=EDGE_BATCH):
     than one batch of child ids beyond the cap.
     """
     seen = {root_key}
-    frontier = [root_key]
+    # A solved root has nothing open under it (§ module docstring).
+    frontier = ([] if Position.objects.filter(key=root_key)
+                .exclude(status='UNKNOWN').exists() else [root_key])
     capped = False
     while frontier and not capped:
         nxt = []
         for start in range(0, len(frontier), batch):
-            for child in Edge.objects.filter(
+            for child, status in Edge.objects.filter(
                     parent_id__in=frontier[start:start + batch],
-            ).values_list('child_id', flat=True):
+            ).values_list('child_id', 'child__status'):
                 if child in seen:
                     continue
                 if len(seen) >= cap:
                     capped = True
                     break
                 seen.add(child)
-                nxt.append(child)
+                if status == 'UNKNOWN':
+                    nxt.append(child)
             if capped:
                 break
         frontier = nxt
