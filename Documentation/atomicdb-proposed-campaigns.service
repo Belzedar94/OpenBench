@@ -1,0 +1,45 @@
+# AtomicDB campaigns page (/atomicdb/campaigns/): reach of the PROPOSED lines.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-proposed-campaigns.timer
+#     journalctl -u atomicdb-proposed-campaigns.service -f
+#
+# WHAT A RUN DOES.  ``measure_proposed_campaigns`` walks the subtree of each
+# proposed campaign from its root over the edges (read-only, capped at
+# 300,000 positions per line) and counts positions, explored and solved over
+# what it reached.  Results go to the shared cache, one campaign at a time,
+# and the page only reads them.  Proposed lines are never tagged: tagging is
+# what activation does.  One JSON line per campaign on stdout.
+#
+# COST.  Measured on the live tree (6-Nov-2026): a line capped at ~538K
+# positions took 35 s to walk and 38 s to count.  Reads are batched index
+# probes with a 60 s statement timeout in a read-only session.
+#
+# BOUNDS.  Same shape as openbench-conquest-map: TimeoutStartSec is the hard
+# stop, MemoryMax keeps it away from PostgreSQL's page cache, idle I/O and
+# Nice 15 keep it behind the ingests.  The timer never starts a oneshot that
+# is still running.  A failed run leaves the previous numbers up.
+
+[Unit]
+Description=Measure AtomicDB proposed campaigns
+Documentation=https://github.com/Belzedar94/OpenBench
+ConditionPathExists=/opt/openbench/manage.py
+After=network-online.target postgresql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u /opt/openbench/manage.py measure_proposed_campaigns
+TimeoutStartSec=90min
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+MemoryMax=4G
