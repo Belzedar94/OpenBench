@@ -253,6 +253,14 @@ class ServeForListTests(TestCase):
 
         self.assertEqual(self._lease('m2'), ally.id)
 
+    def test_anonymous_in_the_list_means_requests_without_an_account(self):
+        ContributorPref.objects.create(account='lesha', serve_order='others',
+                                       serve_for='Anonymous')
+        self._request(self.a, 'w')
+        anonymous = self._request(self.c, '')
+
+        self.assertEqual(self._lease('m3'), anonymous.id)
+
     def test_queue_order_ignores_the_list(self):
         ContributorPref.objects.create(account='lesha', serve_order='queue',
                                        serve_for='ally')
