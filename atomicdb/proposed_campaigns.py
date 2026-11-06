@@ -25,10 +25,10 @@ from django.utils import timezone
 from .models import Campaign, Edge, Position
 
 CACHE_KEY = 'atomicdb.proposed-campaign-stats.v1'
-# The timer runs every 6 hours.  Four runs of life: a run or two that fail
+# The timer runs once a day.  Three days of life: a run or two that fail
 # leave the last good numbers up (with their age on the page) instead of
-# blanking the list; after a day without a run they go away.
-CACHE_TTL_SECONDS = 24 * 3600
+# blanking the list; after three days without a run they go away.
+CACHE_TTL_SECONDS = 72 * 3600
 MAX_NODES = 300_000
 EDGE_BATCH = 2000
 COUNT_BATCH = 5000
