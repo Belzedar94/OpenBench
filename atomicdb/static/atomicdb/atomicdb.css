@@ -3118,3 +3118,49 @@ table[aria-labelledby="moves-heading"] td:first-child .ms-pick {
   flex: 1 1 0;
   white-space: nowrap;
 }
+
+
+/* Board colours chosen in the cog (seaside_cliff, 6-Nov-2026).  Chessground's
+   brown board is a background image; a custom pair replaces it with a
+   checkerboard drawn from the two colours.  The conic order puts a light
+   square top-left, as on every board in both orientations. */
+html[data-board="custom"] cg-board {
+  background-color: var(--sq-l);
+  background-image: repeating-conic-gradient(var(--sq-d) 0 25%, var(--sq-l) 0 50%);
+  background-size: 25% 25%;
+}
+
+.settings-colours {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem .8rem;
+}
+
+.settings-colours label {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  cursor: pointer;
+}
+
+.settings-colours input[type="color"] {
+  width: 2rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.settings-reset {
+  font: inherit;
+  font-size: .8rem;
+  color: var(--ink-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .15rem .5rem;
+  cursor: pointer;
+}
