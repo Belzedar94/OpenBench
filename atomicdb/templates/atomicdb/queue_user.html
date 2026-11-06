@@ -8,7 +8,7 @@
 {% comment %}One line, no boxes (seaside_cliff, 5-Nov-2026).{% endcomment %}
 <p class="queue-counts"><span title="Requests waiting for a worker"><strong>{{ waiting_total_h }}</strong> waiting</span>
   <span title="Requests on a worker right now"><strong>{{ running_total_h }}</strong> running</span>
-  <span title="Requests already served"><strong>{{ served_total_h }}</strong> served</span></p>
+  <span title="{{ served_total_h }} served in total"><strong>{{ served_hour_h }}</strong> served in the last hour</span></p>
 
 <section class="contrib-section">
   <h3 class="contrib-sub">Running now</h3>

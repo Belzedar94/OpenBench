@@ -812,6 +812,12 @@ def present_queue(username, now=None, live=False):
         done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
     else:
         done_more = 0
+    # The rate is what a queue owner watches; the lifetime total only
+    # grows (seaside_cliff, 6-Nov-2026).  Same freshness rule as the total.
+    hour = mine.filter(state=COMPLETED,
+                       completed__gte=now - timedelta(hours=1)).count
+    served_hour = (hour() if live else _account_cached(
+        'served-hour', username, hour, seconds=ACCOUNT_COUNT_SECONDS))
     labels = _labels([task.position_id for task in pending + leased + done],
                      opening=bool(pending))
     from . import views
@@ -843,6 +849,7 @@ def present_queue(username, now=None, live=False):
         'waiting_total_h': human(len(pending_rows) + pending_more),
         'running_total_h': human(len(leased_rows)),
         'served_total_h': human(len(done_rows) + done_more),
+        'served_hour_h': human(served_hour),
     }
 
 

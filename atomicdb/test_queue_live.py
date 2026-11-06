@@ -63,3 +63,25 @@ class QueueLiveForMembersTests(TestCase):
         first = self._waiting(member, '/atomicdb/queue/miner/')
         self._queue('miner', 2)
         self.assertNotEqual(first, self._waiting(member, '/atomicdb/queue/miner/'))
+
+
+class ServedLastHourTests(QueueLiveForMembersTests):
+    """seaside_cliff, 6-Nov-2026: the served count that helps is the rate."""
+
+    def test_account_queue_shows_served_in_the_last_hour(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        self._queue('miner', 3)
+        now = timezone.now()
+        tasks = list(AnalysisTask.objects.filter(requested_by='miner')
+                     .order_by('id'))
+        AnalysisTask.objects.filter(id=tasks[0].id).update(
+            state='COMPLETED', completed=now - timedelta(minutes=10))
+        AnalysisTask.objects.filter(id=tasks[1].id).update(
+            state='COMPLETED', completed=now - timedelta(hours=3))
+        member = Client()
+        member.force_login(User.objects.get(username='miner'))
+        body = ' '.join(member.get('/atomicdb/queue/miner/')
+                        .content.decode().split())
+        self.assertIn('<strong>1</strong> served in the last hour', body)
+        self.assertIn('2 served in total', body)
