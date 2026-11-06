@@ -1,0 +1,21 @@
+# Companion of atomicdb-proposed-campaigns.service.
+#
+# ONCE A DAY, at 03:30 UTC.  The campaigns page shows how old the numbers
+# are, and a proposal does not change size fast enough to need more.  Off
+# peak, and two hours clear of the conquest map build (05:30).
+#
+# Without Persistent=: a run missed by a reboot is not caught up, the next
+# one comes at its time.
+
+[Unit]
+Description=Measure AtomicDB proposed campaigns daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+AccuracySec=5min
+RandomizedDelaySec=5min
+Persistent=false
+Unit=atomicdb-proposed-campaigns.service
+
+[Install]
+WantedBy=timers.target

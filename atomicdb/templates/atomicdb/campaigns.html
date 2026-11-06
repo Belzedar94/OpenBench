@@ -14,6 +14,21 @@
     <div class="campaign-row-line">
       <a class="qline" href="/atomicdb/explore/{{ c.root_key }}/">{{ c.title }}</a>
       {% if c.line_shown %}<div class="campaign-row-san dim">{{ c.line_shown }}</div>{% endif %}
+      {% with r=c.reach %}{% if r %}
+      <div class="campaign-stats dim">
+        {% if r.capped %}
+        <span>{{ r.total_h }}+ positions</span>
+        <span>{{ r.explored_h }}+ explored</span>
+        <span>{{ r.resolved_h }}+ solved</span>
+        <span>{{ r.solved_pct }}% of the positions counted solved</span>
+        {% else %}
+        <span>{{ r.explored_h }} of {{ r.total_h }} positions explored</span>
+        <span>{{ r.resolved_h }} solved</span>
+        <span>{{ r.solved_pct }}% of the line solved</span>
+        {% endif %}
+        {% if r.measured_at %}<span>measured {{ r.measured_at|timesince }} ago</span>{% endif %}
+      </div>
+      {% endif %}{% endwith %}
     </div>
     <div class="campaign-row-votes dim">proposed by {{ c.proposed_by_h }} · {{ c.votes }} vote{{ c.votes|pluralize }}</div>
     <div class="campaign-actions">

@@ -37,6 +37,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
 from . import idle_repair
+from . import proposed_campaigns
 from . import san as move_names
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
@@ -7192,6 +7193,26 @@ def _campaign_context(request):
             'campaign_message': CAMPAIGN_MESSAGES.get(outcome, '')}
 
 
+def _proposed_reach(row):
+    """The stored reach of a proposed line, formatted like the home card.
+
+    ``None`` when it has not been measured yet: the row then shows nothing
+    rather than zeros.  Measured by a timer (§ proposed_campaigns), never here.
+    """
+    if not row:
+        return None
+    total = row.get('total', 0)
+    resolved = row.get('resolved', 0)
+    return {
+        'total_h': _human(total),
+        'explored_h': _human(row.get('explored', 0)),
+        'resolved_h': _human(resolved),
+        'solved_pct': round(100.0 * resolved / total, 1) if total else 0.0,
+        'capped': bool(row.get('capped')),
+        'measured_at': row.get('measured_at'),
+    }
+
+
 def campaigns(request):
     """La lista ENTERA de campanas propuestas, con los mismos botones.
 
@@ -7201,7 +7222,10 @@ def campaigns(request):
     podia llegar a ella para votarla.  Aqui estan todas, mas votadas primero
     y a igualdad la mas nueva, sin recorte y sin cache (es una consulta).
     """
-    rows = [_campaign_identity(campaign) for campaign in Campaign.objects
+    reach = proposed_campaigns.stored()
+    rows = [{**_campaign_identity(campaign),
+             'reach': _proposed_reach(reach.get(campaign.id))}
+            for campaign in Campaign.objects
             .filter(state=Campaign.CState.PROPOSED)
             .order_by('-votes', '-created')]
     user = getattr(request, 'user', None)
