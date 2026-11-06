@@ -74,6 +74,23 @@ class WalkTests(TreeFixture):
         self.assertEqual(row['resolved'], 1)
         self.assertFalse(row['capped'])
 
+    def test_nothing_under_a_solved_position_is_counted(self):
+        # d6 solved: d6 itself counts, its Ng5 child is reached only through
+        # the h6 transposition from f6, which is still open.
+        Position.objects.filter(key=self.d6.key).update(status='BLACK_WIN')
+        grand = _child(self.d6_ng5, 'e7e6')
+        keys, _ = proposed_campaigns.walk_subtree(self.root.key)
+        self.assertIn(self.d6.key, keys)
+        self.assertIn(self.d6_ng5.key, keys)
+        # d6_ng5 is solved too, so its child is not walked.
+        self.assertNotIn(grand.key, keys)
+
+    def test_a_solved_root_counts_only_itself(self):
+        Position.objects.filter(key=self.root.key).update(status='WHITE_WIN')
+        keys, capped = proposed_campaigns.walk_subtree(self.root.key)
+        self.assertEqual(keys, {self.root.key})
+        self.assertFalse(capped)
+
     def test_the_walk_stops_at_its_cap_and_says_so(self):
         keys, capped = proposed_campaigns.walk_subtree(self.root.key, cap=3)
         self.assertEqual(len(keys), 3)
