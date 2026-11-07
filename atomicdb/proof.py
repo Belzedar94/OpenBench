@@ -84,6 +84,7 @@ from django.conf import settings
 from django.db.models import Q
 
 from . import logic, solve_estimate
+from .database import connection
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      ProofCampaign, ProofNode)
 
@@ -807,6 +808,32 @@ def _refresh_campaign(campaign, seeds, max_plies):
         if create:
             ProofNode.objects.bulk_create(create, ignore_conflicts=True)
             written += len(create)
+        if update:
+            # SKIP WHAT ANOTHER INGEST HOLDS (7-Nov-2026).  This refresh runs
+            # inside the ingest transaction, so its row locks live until that
+            # commit, one ply after another.  Two ingests climbing the same
+            # campaign spine in a different order deadlocked on these rows
+            # (52 in one hour, the write queue at 518 and results 10-14
+            # minutes late).  A row another transaction is updating right now
+            # is skipped instead of waited for: that transaction is moving it
+            # anyway, and stale pn/dn only order worse (see the hook in
+            # ingest.backup_cascade).  On a backend without row locks the
+            # filter keeps every row.
+            # Outside a transaction (the post-commit hook in ingest_queue)
+            # each statement commits on its own and holds nothing, so there
+            # is nothing to skip.
+            if (connection.features.has_select_for_update_skip_locked
+                    and connection.in_atomic_block):
+                held = set(ProofNode.objects
+                           .select_for_update(skip_locked=True)
+                           .filter(id__in=[node.id for node in update])
+                           .values_list('id', flat=True))
+                skipped = {node.position_id for node in update
+                           if node.id not in held}
+                update = [node for node in update if node.id in held]
+                if skipped:
+                    propagate = [key for key in propagate
+                                 if key not in skipped]
         if update:
             ProofNode.objects.bulk_update(
                 update, ['pn', 'dn', 'expanded_in_proof', 'selected_child'],
