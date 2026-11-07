@@ -261,7 +261,24 @@ def measure_queue(now):
                                         row['account'] or '~')),
         'served_total': total_served,
         'served_minutes': int(SERVED_WINDOW.total_seconds() // 60),
+        **_write_backlog(),
     }
+
+
+def _write_backlog():
+    """Finished searches waiting to be stored, and the oldest one's arrival.
+
+    BManBJ and cz_eclipsia, 7-Nov-2026: when the writers collide on shared
+    ancestors, results land minutes late and the only sign was a request
+    that seemed stuck.  ONE aggregate over the indexed state column, carried
+    by the same snapshot as the table, so the page still reads nothing else.
+    """
+    from django.db.models import Count, Min
+    from .models import IngestJob
+    row = IngestJob.objects.filter(state=IngestJob.JState.PENDING).aggregate(
+        waiting=Count('id'), oldest=Min('created'))
+    return {'waiting_writes': row['waiting'] or 0,
+            'oldest_write': row['oldest']}
 
 
 def queue_table(now=None):
