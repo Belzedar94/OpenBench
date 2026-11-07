@@ -272,9 +272,11 @@ class QueuePageCostTests(TestCase):
         return len(queries)
 
     def test_building_the_snapshot_costs_two_group_bys(self):
+        """Two GROUP BY plus the one aggregate of the write backlog
+        (7-Nov-2026), all inside the snapshot."""
         cache.clear()
 
-        self.assertLessEqual(self._queries(), 2)
+        self.assertLessEqual(self._queries(), 3)
 
     def test_with_the_snapshot_built_the_page_reads_nothing(self):
         cache.clear()
