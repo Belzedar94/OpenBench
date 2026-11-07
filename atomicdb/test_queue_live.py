@@ -85,3 +85,25 @@ class ServedLastHourTests(QueueLiveForMembersTests):
                         .content.decode().split())
         self.assertIn('<strong>1</strong> served in the last hour', body)
         self.assertIn('2 served in total', body)
+
+
+class WriteBacklogLineTests(QueueLiveForMembersTests):
+    """BManBJ and cz_eclipsia, 7-Nov-2026: show the write delay."""
+
+    def test_queue_page_says_when_nothing_is_waiting(self):
+        body = Client().get('/atomicdb/queue/').content.decode()
+        self.assertIn('Finished searches are stored as they arrive.', body)
+
+    def test_queue_page_counts_waiting_writes(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .models import IngestJob
+        self._queue('miner', 2)
+        tasks = list(AnalysisTask.objects.order_by('id'))
+        for task in tasks:
+            IngestJob.objects.create(task=task, position=task.position,
+                                     payload={}, state=IngestJob.JState.PENDING)
+        IngestJob.objects.update(created=timezone.now() - timedelta(minutes=12))
+        body = ' '.join(Client().get('/atomicdb/queue/').content.decode().split())
+        self.assertIn('<strong>2</strong> finished searches waiting to be stored', body)
+        self.assertIn('the oldest for 12', body)

@@ -6248,10 +6248,21 @@ def queue_page(request):
             'served_h': _human(row['served']),
             'waited': (_ago_text(row['oldest']) if row['oldest'] else ''),
         })
+    # The write backlog (BManBJ and cz_eclipsia, 7-Nov-2026): finished
+    # searches waiting to be stored.  When writers collide on shared
+    # ancestors results land minutes late, and without this line the only
+    # sign was a request that seemed stuck.  One indexed count and one min.
+    from .models import IngestJob
+    backlog = IngestJob.objects.filter(state=IngestJob.JState.PENDING)
+    waiting_writes = backlog.count()
+    oldest_write = (backlog.order_by('created').values_list('created', flat=True)
+                    .first() if waiting_writes else None)
     return render(request, 'atomicdb/queue.html', {
         'account_rows': rows,
         'served_minutes': table['served_minutes'],
         'has_served': bool(table['served_total']),
+        'waiting_writes': waiting_writes,
+        'oldest_write': (_ago_text(oldest_write) if oldest_write else '').replace('just now', ''),
     })
 
 
