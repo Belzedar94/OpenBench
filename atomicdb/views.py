@@ -6249,7 +6249,9 @@ def queue_page(request):
             'waited': (_ago_text(row['oldest']) if row['oldest'] else ''),
         })
     # The write backlog rides in the same snapshot (§ lanes._write_backlog).
-    waiting_writes = table.get('waiting_writes', 0)
+    # None (a snapshot built before this field existed) shows nothing rather
+    # than a reassuring "stored as they arrive".
+    waiting_writes = table.get('waiting_writes')
     oldest_write = table.get('oldest_write') if waiting_writes else None
     return render(request, 'atomicdb/queue.html', {
         'account_rows': rows,
