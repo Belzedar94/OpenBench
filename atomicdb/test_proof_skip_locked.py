@@ -38,7 +38,9 @@ class OutsideTransactionTests(TestCase):
 class SkipLockedTests(TransactionTestCase):
 
     def test_a_row_held_elsewhere_is_skipped_not_waited_for(self):
-        campaign = ProofCampaign.objects.get(name=proof.DEFAULT_CAMPAIGN_NAME)
+        # A TransactionTestCase flushes the data migration's rows, so the
+        # campaign is recreated here when an earlier test removed it.
+        campaign = proof.default_campaign()
         root = ingest.get_or_create_position(logic.start_fen())
         ingest.expand(root)
         child = Edge.objects.filter(parent=root).first().child
