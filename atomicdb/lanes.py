@@ -38,6 +38,7 @@ import logging
 from datetime import timedelta
 
 from django.db.models import Count, Min, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import AnalysisTask, WorkerPing
@@ -181,8 +182,12 @@ def _charged_by_requester(now):
             .filter(source=AnalysisTask.Source.USER)
             .filter(CHARGED).filter(SERVEABLE)
             .values('requested_by', 'state')
+            # Aged from when the row became a REQUEST, not from when it was
+            # born: a revived or promoted row is old and its request is not
+            # (§ ``AnalysisTask.requested_at``).  Rows from before the column
+            # fall back to ``created``.
             .annotate(rows=Count('id'), nodes=Sum('budget_nodes'),
-                      oldest=Min('created'))
+                      oldest=Min(Coalesce('requested_at', 'created')))
             .order_by())
     folded = {}
     for row in rows:

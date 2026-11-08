@@ -5701,8 +5701,11 @@ def bootstrap_root(budget=None):
         task = AnalysisTask.objects.filter(position=c, state='PENDING').first()
         if task:
             task.budget_nodes = max(task.budget_nodes, budget)
+            fields = ['budget_nodes', 'source']
+            if task.source != 'USER':
+                fields.append(_stamp_request(task))
             task.source = 'USER'
-            task.save(update_fields=['budget_nodes', 'source'])
+            task.save(update_fields=fields)
         else:
             gen = c.visits
             while AnalysisTask.objects.filter(position=c,
@@ -5711,6 +5714,7 @@ def bootstrap_root(budget=None):
             # Sembrando la raiz: la anchura ES el producto aqui.
             AnalysisTask.objects.create(position=c, generation=gen,
                                         budget_nodes=budget, source='USER',
+                                        requested_at=timezone.now(),
                                         multipv=multipv_for(0, seeding=True))
         made += 1
     return made
@@ -5873,8 +5877,10 @@ def _record_requester(task, username):
                                           AnalysisTask.TState.LEASED):
         return False
     if not task.requested_by:
+        # Adopting is not joining: the row becomes this name's request, and
+        # its wait in that name's queue starts now.
         task.requested_by = username
-        task.save(update_fields=['requested_by'])
+        task.save(update_fields=['requested_by', _stamp_request(task)])
         return False
     if username == task.requested_by or username in (task.also_requested_by
                                                      or []):
@@ -6129,6 +6135,21 @@ def _apply_lifo_preference(task, requested_by):
         task.save(update_fields=['queue_seq'])
 
 
+def _stamp_request(task, now=None):
+    """Mark ``task`` as a request made NOW.  Returns the field to save.
+
+    For the paths that turn a row which already exists into somebody's
+    request: a revived withdrawal, a server row promoted to USER, an
+    anonymous request a name adopts.  ``created`` still says when the row was
+    born; ``requested_at`` is what every "how long has this waited" reads
+    (§ ``AnalysisTask.requested_at``).  Joining a request, moving it to the
+    front and undoing a withdrawal do not come here: none of them is a new
+    request.
+    """
+    task.requested_at = now or timezone.now()
+    return 'requested_at'
+
+
 def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
                       source=AnalysisTask.Source.USER):
     """Bring a withdrawn row back as the request being made NOW.
@@ -6167,9 +6188,11 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
     task.queue_seq = 0
     task.route = route
     task.multipv = multipv
+    _stamp_request(task)
     task.save(update_fields=['state', 'completed', 'budget_nodes',
                              'source', 'requested_by', 'also_requested_by',
-                             'backers', 'queue_seq', 'route', 'multipv'])
+                             'backers', 'queue_seq', 'route', 'multipv',
+                             'requested_at'])
 
 
 def _request_rung(pos, requested_by='', route='', budget_floor=None,
@@ -6246,6 +6269,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
                   'requested_by': requested_by, 'route': route,
+                  'requested_at': timezone.now(),
                   'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
         _apply_lifo_preference(task, requested_by)
@@ -6296,8 +6320,12 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
             task.requested_by = requested_by
         if route and not task.route:
             task.route = route
-        task.save(update_fields=['source', 'budget_nodes', 'requested_by',
-                                 'route'])
+        fields = ['source', 'budget_nodes', 'requested_by', 'route']
+        if promoted or adopted:
+            # Server work becoming a request, or an anonymous request taking
+            # a name: either way a request made now, on an old row.
+            fields.append(_stamp_request(task))
+        task.save(update_fields=fields)
         # OTRA PERSONA pidiendo lo mismo.  No se crea una fila paralela — dos
         # motores buscando la misma posicion con el mismo presupuesto es
         # trabajo tirado, y la fila de mas acababa siendo un zombi que la
@@ -6326,23 +6354,27 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
                     requested_by=requested_by, route=route,
+                    requested_at=timezone.now(),
                     multipv=multipv_for(generation, floor, clamp=clamp))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
+                fields = ['budget_nodes', 'source', 'requested_by', 'route']
+                if follow_up.source != 'USER' or (
+                        requested_by and not follow_up.requested_by):
+                    fields.append(_stamp_request(follow_up))
                 follow_up.source = 'USER'
                 if requested_by and not follow_up.requested_by:
                     follow_up.requested_by = requested_by
                 if route and not follow_up.route:
                     follow_up.route = route
-                follow_up.save(update_fields=['budget_nodes', 'source',
-                                              'requested_by', 'route'])
+                follow_up.save(update_fields=fields)
             return 'queued'
         # The existing lease already satisfies the requested rung. Mark it
         # as visitor-requested so subsequent clicks can be deduplicated
         # without consuming the hourly allowance repeatedly.
         if task.source != 'USER':
             task.source = 'USER'
-            task.save(update_fields=['source'])
+            task.save(update_fields=['source', _stamp_request(task)])
         # Sumarse a algo que YA esta en un motor no cambia ningun orden, pero
         # sigue habiendo alguien esperando el resultado: sin su nombre en la
         # fila, la campana solo sonaba para el primero.
@@ -8145,7 +8177,10 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
                 vivo.source = source
                 if child_route and not vivo.route:
                     vivo.route = child_route
-                vivo.save(update_fields=['source', 'route'])
+                fields = ['source', 'route']
+                if source == AnalysisTask.Source.USER:
+                    fields.append(_stamp_request(vivo))
+                vivo.save(update_fields=fields)
                 queued += 1
             elif respaldado:
                 queued += 1
@@ -8162,7 +8197,10 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
                     budget_nodes=budget,
                     multipv=multipv_for(child.visits, budget, clamp=clamp),
                     source=source, requested_by=requested_by,
-                    route=child_route)
+                    route=child_route,
+                    requested_at=(timezone.now()
+                                  if source == AnalysisTask.Source.USER
+                                  else None))
         except IntegrityError:
             # Carrera perdida: otra tarea de la MISMA generacion (otro padre
             # por transposicion, o el selector) nacio entre el dedup de
@@ -8425,7 +8463,8 @@ def _buy_verification(child, requested_by='', route=''):
                   'multipv': multipv_for(child.visits, budget, clamp=clamp),
                   'source': AnalysisTask.Source.USER,
                   'requested_by': requested_by,
-                  'route': route})
+                  'route': route,
+                  'requested_at': timezone.now()})
     if created:
         # "Newest first" holds for the searches a line walk buys too
         # (seaside_cliff, 4-Nov-2026): they were the one purchase that
@@ -8447,7 +8486,8 @@ def _buy_verification(child, requested_by='', route=''):
             task.requested_by = requested_by
         if route and not task.route:
             task.route = route
-        task.save(update_fields=['source', 'requested_by', 'route'])
+        task.save(update_fields=['source', 'requested_by', 'route',
+                                 _stamp_request(task)])
         _apply_lifo_preference(task, requested_by)
         return 'queued', budget
     return 'in-flight', budget

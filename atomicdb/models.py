@@ -527,7 +527,24 @@ class AnalysisTask(models.Model):
     # aqui, para que produccion pueda crearlo antes con CONCURRENTLY
     # (§ migrations/0048_analysistask_arm_rate_index.py).
     created      = models.DateTimeField(auto_now_add=True)
+    # When this row last became a person's request.  ``created`` cannot say
+    # it: a withdrawn or absorbed row comes back as the request being made now
+    # (§ ``ingest._revive_withdrawn``), and a row the server queued itself
+    # becomes a request when somebody asks for it, both on the row that
+    # already holds the slot.  Aged from ``created``, a request made a minute
+    # ago showed a wait of a day or more ("Oldest wait", Torom, 8-Nov-2026).
+    # Stamped where a request is created, revived, promoted to USER or adopted
+    # by a name; joining one, moving it to the front or undoing a withdrawal
+    # leaves it alone.  NULL on rows from before the column: read through
+    # ``request_time`` (or ``Coalesce('requested_at', 'created')`` in SQL).
+    # Display only: the queue order never reads it.
+    requested_at = models.DateTimeField(null=True, blank=True)
     completed    = models.DateTimeField(null=True)
+
+    @property
+    def request_time(self):
+        """How long this request has waited is measured from here."""
+        return self.requested_at or self.created
 
     class Meta:
         constraints = [models.UniqueConstraint(
