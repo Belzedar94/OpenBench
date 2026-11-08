@@ -2923,6 +2923,66 @@ table.fleet-workers .qline {
   box-sizing: border-box;
 }
 
+/* The campaign an account's workers take next, and each worker's own
+   setting (cz_eclipsia, 8-Nov-2026). */
+.serve-campaign {
+  margin: .7rem 0 0;
+}
+
+.serve-campaign label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+  color: var(--ink-muted);
+  font-size: .84rem;
+}
+
+.acct-settings select {
+  padding: .35rem .5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  max-width: 100%;
+}
+
+.serve-campaign select {
+  flex: 1 1 12rem;
+}
+
+.worker-serving-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.worker-serving-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4rem .5rem;
+  padding: .45rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.worker-serving-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.worker-serving-name {
+  flex: 1 1 8rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-serving-list select {
+  flex: 0 1 auto;
+}
+
 .acct-save {
   display: flex;
   align-items: center;

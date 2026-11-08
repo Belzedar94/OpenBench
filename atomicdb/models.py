@@ -333,6 +333,43 @@ class ContributorPref(models.Model):
     # anyone else, comma separated, compared without case (seaside_cliff,
     # 4-Nov-2026).  Empty is every other account alike.
     serve_for    = models.CharField(max_length=500, blank=True, default='')
+    # The exploration campaign (``Campaign.id``) this account's workers take
+    # before the selector's other work once they have no request to serve
+    # (cz_eclipsia, 8-Nov-2026).  NULL or 0 is none, today's behaviour.  A
+    # plain id rather than a foreign key: a campaign that goes away leaves an
+    # id that matches no task, so the workers simply fall back.
+    serve_campaign = models.IntegerField(null=True, blank=True)
+
+
+class WorkerServing(models.Model):
+    """How ONE of an account's workers picks its tasks, instead of the
+    account-wide setting (cz_eclipsia, 8-Nov-2026).  Opt-in: a worker
+    without a row follows its account, exactly as before this table.
+
+    ``machine`` is the identity the worker sends with every lease, cut at
+    the slot (``views.machine_base``), so every ``--jobs`` slot of one
+    machine shares its row.  The pair is unique per account: the machine
+    names are chosen by the client and two accounts may well send the same
+    one.
+
+    ``mode``: ``''`` follows the account (today's behaviour), ``server``
+    serves the queue with no preference for the account's own requests or
+    its listed accounts, ``personal`` takes only the account's own requests
+    and those of its listed accounts, and nothing else (§
+    ``views.choose_pending``).
+
+    ``campaign``: NULL follows the account's ``serve_campaign``, 0 is none,
+    anything else is a ``Campaign.id``.
+    """
+    account  = models.CharField(max_length=64)
+    machine  = models.CharField(max_length=64)
+    mode     = models.CharField(max_length=8, blank=True, default='')
+    campaign = models.IntegerField(null=True, blank=True)
+    updated  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['account', 'machine'], name='uniq_worker_serving')]
 
 
 class AnalysisTask(models.Model):
