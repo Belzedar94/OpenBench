@@ -760,12 +760,31 @@ def api_lease(request):
             # "anonymous" names the requests made without an account, which
             # carry no name at all (seaside_cliff, 6-Nov-2026); no account
             # is called that (checked 6-Nov-2026).
+            #
+            # Since 8-Nov a listed account's requests include the ones it
+            # only BACKED (Torom): what that account's own worker would
+            # take as its own, a worker that serves it takes as its too.
+            # The requests made without an account have nobody backing them.
             listed = Q(pk__in=[])
             for name in names:
                 listed |= (Q(requested_by='')
                            if name.lower() == 'anonymous'
                            else Q(requested_by__iexact=name))
-            return listed
+            return listed | _backed_q(_account_names(
+                [name for name in names if name.lower() != 'anonymous']))
+
+        # "Mine" is the account's own requests AND the ones it backed (Torom,
+        # 8-Nov-2026): joining a request is asking for it, so this worker
+        # treats it as the account's own under every setting — Mine first,
+        # Mine only, and behind the rest with Others first.  Only the
+        # preference of this worker changes: the owner stays the one charged
+        # (``requested_by`` in the fair share) and every other worker sees
+        # the queue as before.  Built once per lease, outside
+        # ``choose_pending``, which can run up to three times.
+        own_q = Q(requested_by=user.username) | _backed_q([user.username])
+        favoured = requester_q(serve_first) if serve_first else Q()
+        personal_q = (requester_q(personal_for)
+                      if worker_mode == 'personal' else Q(pk__in=[]))
 
         def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -797,14 +816,6 @@ def api_lease(request):
             # while anyone else's are waiting", lo prometido a seaside_cliff
             # el 3-nov).  Solo reordena: sin ajenas, lo propio sale igual, y
             # sigue por delante de AUTO/FILL, que miran -source antes.
-            favoured = Q()
-            for name in serve_first:
-                # "anonymous" names the requests made without an account,
-                # which carry no name at all (seaside_cliff, 6-Nov-2026);
-                # no account is called that (checked 6-Nov-2026).
-                favoured |= (Q(requested_by='')
-                             if name.lower() == 'anonymous'
-                             else Q(requested_by__iexact=name))
             # The listed accounts (§ preferences.serve_for): first of all
             # with Others first; with Mine first they share this account's
             # own band, so the fair share interleaves them with its own
@@ -815,8 +826,7 @@ def api_lease(request):
                 *([When(favoured, source=AnalysisTask.Source.USER,
                         then=Value(listed_band))]
                   if serve_first and listed_band else []),
-                When(source=AnalysisTask.Source.USER,
-                     requested_by=user.username,
+                When(own_q, source=AnalysisTask.Source.USER,
                      then=Value({'own': 1, 'queue': 0,
                                  'others': -1}[serve_order])),
                 default=Value(0), output_field=IntegerField())
@@ -890,13 +900,16 @@ def api_lease(request):
             #
             # The personal filter keeps EVERY row of each requester it keeps,
             # leased ones included, so the fair-share sums of those requesters
-            # are the ones every other worker sees.
+            # are the ones every other worker sees.  A backed request is the
+            # exception: its owner's other rows stay out, so here it sums only
+            # what this worker could take.  That orders it among this
+            # worker's own candidates and nowhere else; no other worker reads
+            # this query.
             in_campaign = (Q(position__campaign_id=worker_campaign)
                            if worker_campaign else None)
             first_band = Q(source=AnalysisTask.Source.USER)
             if worker_mode == 'personal':
-                first_band &= (Q(requested_by=user.username)
-                               | requester_q(personal_for))
+                first_band &= own_q | personal_q
                 ordered = ordered.filter(
                     first_band | in_campaign if in_campaign is not None
                     else first_band)
@@ -1777,6 +1790,53 @@ def api_my_queue(request):
          'cancel': None}
         for t in _backed_by(account, live)[:max(0, 200 - len(tasks))])
     return JsonResponse({'account': account, 'tasks': tasks})
+
+
+def _account_names(names):
+    """``names`` plus the account names they match without case.
+
+    The serve-for list is matched without case against ``requested_by``
+    (§ ``requester_q`` in ``api_lease``), but a backer is stored under its
+    exact account name and JSON containment compares exactly.  One read of
+    the (small) user table, and only when a list is set.
+    """
+    names = [name for name in names if name]
+    if not names:
+        return []
+    from django.contrib.auth.models import User
+    from functools import reduce
+    from operator import or_
+    exact = User.objects.filter(
+        reduce(or_, (Q(username__iexact=name) for name in names)))
+    return list(dict.fromkeys(names + list(
+        exact.values_list('username', flat=True))))
+
+
+def _backed_q(names):
+    """The tasks any of ``names`` backed (``also_requested_by``), as a Q.
+
+    On PostgreSQL that is JSON containment (``jsonb @>``), evaluated on the
+    live rows the lease query already narrowed to (``CHARGED``): it costs a
+    comparison per live row and needs no index.  SQLite (the test runs) has
+    no JSON containment, so there the few live rows with backers are read
+    and matched here, exactly as ``_backed_by`` does, and the Q names their
+    ids.  An empty name (a request made without an account) never matches.
+    """
+    from django.db import connections
+    names = [name for name in names if name]
+    if not names:
+        return Q(pk__in=[])
+    if connections[AnalysisTask.objects.all().db].vendor == 'postgresql':
+        backed = Q(pk__in=[])
+        for name in names:
+            backed |= Q(also_requested_by__contains=[name])
+        return backed
+    wanted = set(names)
+    return Q(pk__in=[
+        pk for pk, backers in (AnalysisTask.objects
+                               .filter(live_request.CHARGED, backers__gt=0)
+                               .values_list('id', 'also_requested_by'))
+        if wanted.intersection(backers or [])])
 
 
 def _backed_by(account, states):

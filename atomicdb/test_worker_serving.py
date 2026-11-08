@@ -13,7 +13,7 @@ from unittest import mock
 
 from django.test import Client
 
-from . import ingest, logic, preferences
+from . import ingest, logic, preferences, views
 from .models import (AnalysisTask, Campaign, ContributorPref, Edge, Position,
                      WorkerPing, WorkerServing)
 from .testing import TestCase, worker_account
@@ -241,6 +241,158 @@ class WorkerServingLeaseTests(TestCase):
 
         self.assertEqual(
             self._lease('w-box-atomicdb', username='w')[0]['id'], best.id)
+
+
+class BackedCountsAsOwnTests(TestCase):
+    """A request the account only BACKED counts as its own (Torom, 8-Nov).
+
+    Joining somebody's request (``also_requested_by``) is asking for it, so
+    the account's worker prefers it as it prefers its own requests: Mine
+    first, Mine only, and the accounts listed to be served.  The owner is
+    still the one charged in the fair share, and every other worker leases
+    exactly as before.
+    """
+
+    setUp = WorkerServingLeaseTests.setUp
+    _lease = WorkerServingLeaseTests._lease
+    _task = WorkerServingLeaseTests._task
+    _request = WorkerServingLeaseTests._request
+    _auto = WorkerServingLeaseTests._auto
+    _mode = WorkerServingLeaseTests._mode
+
+    def _backed(self, position, owner, *backers):
+        task = self._request(position, owner)
+        AnalysisTask.objects.filter(pk=task.pk).update(
+            also_requested_by=list(backers), backers=len(backers))
+        return task
+
+    def _queue(self):
+        # ``w`` owns both; its second is behind its first in the fair share
+        # (8M of its own ahead), and lesha only backed the second.
+        first = self._request(self.p[0], 'w')
+        backed = self._backed(self.p[1], 'w', 'lesha')
+        return first, backed
+
+    # ---- Mine first -----------------------------------------------------
+
+    def test_mine_first_takes_the_backed_request_before_the_queue(self):
+        _first, backed = self._queue()
+
+        self.assertEqual(self._lease()[0]['id'], backed.id)
+
+    def test_another_account_still_leases_in_queue_order(self):
+        first, backed = self._queue()
+
+        self.assertEqual(self._lease('friend-box', 'friend')[0]['id'],
+                         first.id)
+        # ...and each request goes out once: the backer's worker gets the
+        # one it backed, and a third lease gets neither (the selector's
+        # refill, if anything).
+        self.assertEqual(self._lease()[0]['id'], backed.id)
+        third = [t['id'] for t in self._lease('friend-box', 'friend')]
+        self.assertNotIn(first.id, third)
+        self.assertNotIn(backed.id, third)
+        self.assertEqual(AnalysisTask.objects.filter(
+            pk__in=[first.id, backed.id], state='LEASED', attempts=1).count(),
+            2)
+
+    def test_the_owner_is_still_the_one_charged(self):
+        _first, backed = self._queue()
+        self._lease()
+
+        backed.refresh_from_db()
+        self.assertEqual(backed.requested_by, 'w')
+        self.assertEqual(backed.also_requested_by, ['lesha'])
+
+    def test_queue_order_gives_the_backed_request_no_preference(self):
+        ContributorPref.objects.create(account='lesha', serve_order='queue')
+        first, _backed = self._queue()
+
+        self.assertEqual(self._lease()[0]['id'], first.id)
+
+    def test_others_first_puts_the_backed_request_behind_the_rest(self):
+        # The backed request is "mine" there too, so it waits.
+        ContributorPref.objects.create(account='lesha', serve_order='others')
+        backed = self._backed(self.p[0], 'w', 'lesha')
+        stranger = self._request(self.p[1], 'friend')
+
+        self.assertEqual(self._lease()[0]['id'], stranger.id)
+        self.assertEqual(self._lease()[0]['id'], backed.id)
+
+    def test_a_request_backed_by_someone_else_is_not_mine(self):
+        first = self._request(self.p[0], 'w')
+        self._backed(self.p[1], 'w', 'friend')
+
+        self.assertEqual(self._lease()[0]['id'], first.id)
+
+    # ---- Mine only ------------------------------------------------------
+
+    def test_mine_only_takes_the_backed_request(self):
+        _first, backed = self._queue()
+        self._auto(self.p[3])
+        self._mode('personal')
+
+        with mock.patch.object(ingest, 'next_tasks') as refill:
+            self.assertEqual(self._lease()[0]['id'], backed.id)
+            self.assertEqual(self._lease(), [])
+        refill.assert_not_called()
+
+    def test_mine_only_idles_with_nothing_own_or_backed(self):
+        self._request(self.p[0], 'w')
+        self._backed(self.p[1], 'w', 'friend')
+        self._auto(self.p[3])
+        self._mode('personal')
+
+        with mock.patch.object(ingest, 'next_tasks') as refill:
+            self.assertEqual(self._lease(), [])
+        refill.assert_not_called()
+        self.assertFalse(AnalysisTask.objects.filter(state='LEASED').exists())
+
+    # ---- the listed accounts --------------------------------------------
+
+    def test_mine_only_serves_what_a_listed_account_backed(self):
+        # Listed in another case: the list is matched without case.
+        ContributorPref.objects.create(account='lesha', serve_order='queue',
+                                       serve_for='Friend')
+        self._request(self.p[0], 'w')
+        theirs = self._backed(self.p[1], 'w', 'friend')
+        self._mode('personal')
+
+        self.assertEqual(self._lease()[0]['id'], theirs.id)
+        self.assertEqual(self._lease(), [])
+
+    def test_others_first_serves_what_a_listed_account_backed_first(self):
+        ContributorPref.objects.create(account='lesha', serve_order='others',
+                                       serve_for='friend')
+        self._request(self.p[0], 'w')
+        theirs = self._backed(self.p[1], 'w', 'friend')
+
+        self.assertEqual(self._lease()[0]['id'], theirs.id)
+
+    # ---- nobody ---------------------------------------------------------
+
+    def test_an_anonymous_backer_is_never_matched(self):
+        # "anonymous" in the list names the requests made without an
+        # account; a backer without a name is nobody's.
+        ContributorPref.objects.create(account='lesha', serve_order='queue',
+                                       serve_for='anonymous')
+        self._backed(self.p[0], 'w', '')
+        self._mode('personal')
+
+        self.assertEqual(self._lease(), [])
+        self.assertFalse(AnalysisTask.objects.filter(
+            views._backed_q(['']) | views._backed_q([])).exists())
+
+    def test_postgres_uses_json_containment(self):
+        connections = mock.MagicMock()
+        connections.__getitem__.return_value = mock.Mock(vendor='postgresql')
+        with mock.patch('django.db.connections', connections):
+            backed = views._backed_q(['lesha', ''])
+
+        self.assertIn(('also_requested_by__contains', ['lesha']),
+                      backed.children)
+        self.assertNotIn(('also_requested_by__contains', ['']),
+                         backed.children)
 
 
 class WorkerServingSettingPageTests(TestCase):

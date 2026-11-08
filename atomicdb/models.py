@@ -355,6 +355,7 @@ class WorkerServing(models.Model):
     ``mode``: ``''`` follows the account (today's behaviour), ``server``
     serves the queue with no preference for the account's own requests or
     its listed accounts, ``personal`` takes only the account's own requests
+    (the ones it backed included)
     and those of its listed accounts, and nothing else (§
     ``views.choose_pending``).
 
