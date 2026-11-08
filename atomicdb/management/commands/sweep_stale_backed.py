@@ -108,7 +108,7 @@ from django.core.management.base import BaseCommand
 from django.db import DatabaseError, OperationalError, transaction
 from django.utils import timezone
 
-from atomicdb import ingest, logic
+from atomicdb import ingest, logic, propagation_queue
 from atomicdb.database import atomic, connection, current_alias
 from atomicdb.models import DBEvent, Edge, IngestJob, Position
 
@@ -693,6 +693,11 @@ class Command(BaseCommand):
                     state__in=(IngestJob.JState.PENDING,
                                IngestJob.JState.PROCESSING))
                     .values_list('position_id', flat=True))
+                # So is one whose landing has stored its result and left
+                # its climb in the propagation queue: the drainer is about to
+                # recompute exactly this neighbourhood.
+                flight |= propagation_queue.pending_positions(
+                    confirmed + to_close)
                 self.counts['in_flight'] = len(flight)
                 confirmed = sorted(key for key in confirmed
                                    if key not in flight)

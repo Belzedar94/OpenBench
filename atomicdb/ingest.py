@@ -618,7 +618,7 @@ def _other_parents(closed_keys, writer_key):
 
 
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
-                    mate_proofs=None, restricted=False):
+                    mate_proofs=None, restricted=False, defer_propagation=None):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
     Devuelve dict con resumen.
@@ -630,6 +630,14 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     alimenta budget_for, el breadth-swap, witness-refuted y la incertidumbre.
     Un pase asi puede MEJORAR ``eval_cp`` para el que mueve — eso lo ha
     demostrado — pero nunca empeorarlo, que es lo unico que no ha mirado.
+
+    ``defer_propagation``: None (the default) climbs the ancestors right
+    here, in the caller's transaction, exactly as it always did.  A dict
+    stores the search on its own position and leaves the climb as a
+    PropagationSeed row in the same transaction, with the dict's entries
+    (the ``job`` and an optional ``verify``) beside the seeds; the drainer
+    runs it later through the very same ``propagate_landings``
+    (§ propagation_queue).
     """
     if mate_proofs is None:
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
@@ -873,73 +881,189 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                                 'analysis_passes', 'best_move', 'eval_cp',
                                 'updated'])
 
-    # The OTHER parents of what this pass closed (transpositions) are neither
-    # ``pos`` nor above it, so the ascent starts at them too.  Without them
-    # they stayed UNKNOWN beside a proven winning child.
-    others = _other_parents(closed_keys, pos.key)
-    # And the closed positions THEMSELVES.  Each was closed with the length
-    # of its own part of the line as its distance, the links of a
-    # materialised chain included, and the cascade only re-derives the nodes
-    # it visits, which were their parents.  A position that already had a
-    # faster mate below it (another proven child) kept the longer distance
-    # for good: live on 26-Oct, a page sample put it at about 0.15% of the
-    # closed positions, some of them 20 plies or more too long.  Seeding them
-    # lets ``mate_distance_refresh`` compare each with all its children, and
-    # a change climbs the chain from there as any other does.
-    cascade = {}
-    changed = backup_cascade([pos.key, *closed_keys, *others], report=cascade)
-    # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo no
-    # cambia necesariamente el backed de este nodo (un autoeco bloqueado se
-    # queda igual y no propaga), pero SI cambia ``nodes_invested`` — que es
-    # exactamente lo que las guardas de calidad de los padres esperan.  Sin
-    # esta semilla, la compra de convergencia analizaba al hijo y el padre
-    # bloqueado no se enteraba jamas.
-    parent_keys = list(Edge.objects.filter(child_id=pos.key)
-                       .values_list('parent_id', flat=True))
-    # ``others`` too: their value stands on a child that is exact now.
-    backed = backup_backed_evals([pos.key, *parent_keys, *others,
-                                  *_seed_audience(reseeded, pos.key)])
-    uncertainty = _uncertainty_expand([pos.key, *parent_keys])
-    refuted = _witness_refuted_revisit(pos, parent_keys)
-    # La cascada corta del descenso por valor: el nodo que se acaba de mirar a
-    # fondo deja sus respuestas sin juzgar en la cola a precio de mirada, que
-    # es como el walker encuentra el siguiente cuello de botella en vez de
-    # volver a la misma punta.  Con el descenso df-pn no hace nada.
-    cascaded = _queue_value_cascade(pos)
-    # The idle fleet's repairs: a shallow search this position now shows, or
-    # a parent with no search of its own between it and a searched position,
-    # is bought one more search for when nobody is requesting (§ idle_repair).
-    from . import idle_repair
-    repaired = idle_repair.queue_from_landing(pos, parent_keys)
-    # A mate this position now shows, in its own first line or in the line
-    # through a child, is bought one pass of the solver (§ autosolve).
-    from . import autosolve
-    autosolved = autosolve.queue_from_landing(pos)
-    # Once this landing has committed, the positions its ascents read are
-    # read again: a landing beside it may have changed another of their
-    # children where this one could not see it (see the block above
-    # RECHECK_MAX_KEYS).  The parents of ``closed_keys`` are this position
-    # and ``others``, already on the list.
-    closed_set = set(closed_keys)
-    _recheck_once_committed(
-        pos.key, [pos.key, *parent_keys, *others],
-        [key for key in cascade.get('changed', ())
-         if key != pos.key and key not in closed_set])
-    summary = {'closed_children': closed_here, 'backed_up': changed,
-               'backed_evals': backed, 'uncertainty_expanded': uncertainty,
-               'witness_refuted': refuted}
-    if cascaded:
-        summary['cascaded'] = cascaded
-    if repaired:
-        summary['repaired'] = repaired
-    if autosolved:
-        summary['autosolved'] = autosolved
+    # STAGE (a) ENDS HERE.  Everything above is this position's own search
+    # and the closures of its own children (the mates of its PV, revocations,
+    # certified lines): facts about the position itself, committed together.
+    # Everything below climbs through its ancestors and is the landing's
+    # stage (b).  It runs right here by default, in this same transaction, as
+    # it always did; with ``defer_propagation`` it waits in the durable queue
+    # instead (§ propagation_queue), so a slow climb delays the parents'
+    # numbers and never this result.
+    landing = Landing.of(pos, closed_keys, reseeded)
+    summary = {'closed_children': closed_here}
+    if defer_propagation is None:
+        summary.update(propagate_landings([landing])[pos.key])
+    else:
+        from . import propagation_queue
+        propagation_queue.defer(landing, extra=defer_propagation)
+        summary['propagation'] = 'deferred'
     if revoked_here:
         summary['revoked'] = len(revoked_here)
     if certified_here:
         summary['certified'] = certified_here
     return summary
 
+
+class Landing:
+    """What a landing's climb through its ancestors needs, and nothing else.
+
+    The seed lists are computed where the search lands, right after its own
+    position is written and inside the same transaction, with the very
+    queries the inline climb always ran: ``others`` (the other parents of
+    what it closed), ``parents`` and the audience of the children it
+    re-seeded.  They are reads of the edge table, and nothing in the climb
+    writes an edge, so reading them before the cascade (here) or after it
+    (where the inline code used to read ``parents`` and the audience) gives
+    the same lists.
+    """
+
+    __slots__ = ('key', 'pos', 'closed', 'others', 'parents', 'audience',
+                 'source', 'extra')
+
+    def __init__(self, key, closed, others, parents, audience, pos=None,
+                 source=None, extra=None):
+        self.key = key
+        self.pos = pos
+        self.closed = list(closed)
+        self.others = list(others)
+        self.parents = list(parents)
+        self.audience = list(audience)
+        self.source = source
+        self.extra = dict(extra or {})
+
+    @classmethod
+    def of(cls, pos, closed_keys, reseeded):
+        # The OTHER parents of what this pass closed (transpositions) are
+        # neither ``pos`` nor above it, so the ascent starts at them too.
+        # Without them they stayed UNKNOWN beside a proven winning child.
+        others = _other_parents(closed_keys, pos.key)
+        # El respaldo se siembra tambien con los PADRES.  Un analisis nuevo
+        # no cambia necesariamente el backed de este nodo (un autoeco
+        # bloqueado se queda igual y no propaga), pero SI cambia
+        # ``nodes_invested`` — que es exactamente lo que las guardas de
+        # calidad de los padres esperan.  Sin esta semilla, la compra de
+        # convergencia analizaba al hijo y el padre bloqueado no se enteraba
+        # jamas.
+        parent_keys = list(Edge.objects.filter(child_id=pos.key)
+                           .values_list('parent_id', flat=True))
+        return cls(pos.key, closed_keys, others, parent_keys,
+                   _seed_audience(reseeded, pos.key), pos=pos,
+                   source=current_closure_source())
+
+    def cascade_seeds(self):
+        # And the closed positions THEMSELVES.  Each was closed with the
+        # length of its own part of the line as its distance, the links of a
+        # materialised chain included, and the cascade only re-derives the
+        # nodes it visits, which were their parents.  A position that already
+        # had a faster mate below it (another proven child) kept the longer
+        # distance for good: live on 26-Oct, a page sample put it at about
+        # 0.15% of the closed positions, some of them 20 plies or more too
+        # long.  Seeding them lets ``mate_distance_refresh`` compare each with
+        # all its children, and a change climbs the chain from there as any
+        # other does.
+        return [self.key, *self.closed, *self.others]
+
+    def backed_seeds(self):
+        # ``others`` too: their value stands on a child that is exact now.
+        return [self.key, *self.parents, *self.others, *self.audience]
+
+    def to_payload(self):
+        return {'cascade': self.cascade_seeds(), 'backed': self.backed_seeds(),
+                'closed': self.closed, 'others': self.others,
+                'parents': self.parents, 'audience': self.audience,
+                **self.extra}
+
+    @classmethod
+    def from_payload(cls, key, payload, source=None, pos=None):
+        payload = payload or {}
+        return cls(key, payload.get('closed') or (),
+                   payload.get('others') or (), payload.get('parents') or (),
+                   payload.get('audience') or (), pos=pos, source=source,
+                   extra={name: payload[name] for name in ('job', 'verify')
+                          if name in payload})
+
+
+def propagate_landings(landings):
+    """Stage (b) of one or more landings: the climb through their ancestors.
+
+    This is, call for call and in the same order, the code that ran at the
+    end of ``ingest_analysis`` (the status cascade, the backed values, the
+    arms that read them, the recheck once committed), moved and not
+    rewritten.  For one landing it is the inline climb exactly, with the
+    seed lists in the order they always had.  For several (a batch of the
+    drainer, all with the same closure source) the seeds of all of them go
+    into ONE cascade and ONE backed ascent, merged without duplicates and in
+    key order, and the arms of each landing run after them in landing order
+    (see propagation_queue for why that reaches the same values).
+
+    Each landing's ``pos`` is its row as its own stage (a) left it: the
+    inline caller passes the very object it saved, and the drainer reads the
+    rows before the climb starts, because the arms below read it that way.
+
+    Returns ``{landed key: summary}``, each with the keys the inline ingest
+    always returned.  The cascade and backed counts are the whole call's,
+    shared by every landing in a batch.
+    """
+    landings = list(landings)
+    if not landings:
+        return {}
+    if len(landings) == 1:
+        cascade_seeds = landings[0].cascade_seeds()
+        backed_seeds = landings[0].backed_seeds()
+    else:
+        cascade_seeds = sorted({key for landing in landings
+                                for key in landing.cascade_seeds() if key})
+        backed_seeds = sorted({key for landing in landings
+                               for key in landing.backed_seeds() if key})
+    cascade = {}
+    changed = backup_cascade(cascade_seeds, report=cascade)
+    backed = backup_backed_evals(backed_seeds)
+    from . import autosolve, idle_repair
+    landed = {landing.key for landing in landings}
+    closed_all = {key for landing in landings for key in landing.closed}
+    summaries = {}
+    for landing in landings:
+        pos, parent_keys = landing.pos, landing.parents
+        uncertainty = _uncertainty_expand([pos.key, *parent_keys])
+        refuted = _witness_refuted_revisit(pos, parent_keys)
+        # La cascada corta del descenso por valor: el nodo que se acaba de
+        # mirar a fondo deja sus respuestas sin juzgar en la cola a precio de
+        # mirada, que es como el walker encuentra el siguiente cuello de
+        # botella en vez de volver a la misma punta.  Con el descenso df-pn
+        # no hace nada.
+        cascaded = _queue_value_cascade(pos)
+        # The idle fleet's repairs: a shallow search this position now shows,
+        # or a parent with no search of its own between it and a searched
+        # position, is bought one more search for when nobody is requesting
+        # (§ idle_repair).
+        repaired = idle_repair.queue_from_landing(pos, parent_keys)
+        # A mate this position now shows, in its own first line or in the
+        # line through a child, is bought one pass of the solver
+        # (§ autosolve).
+        autosolved = autosolve.queue_from_landing(pos)
+        # Once this landing has committed, the positions its ascents read
+        # are read again: a landing beside it may have changed another of
+        # their children where this one could not see it (see the block
+        # above RECHECK_MAX_KEYS).  The parents of ``closed_keys`` are this
+        # position and ``others``, already on the list.  In a batch the
+        # cascade climbed for every landing at once, so what it changed
+        # leaves out every landed and every closed position of the batch.
+        skip = ({pos.key, *landing.closed} if len(landings) == 1
+                else landed | closed_all)
+        _recheck_once_committed(
+            pos.key, [pos.key, *parent_keys, *landing.others],
+            [key for key in cascade.get('changed', ()) if key not in skip])
+        summary = {'backed_up': changed, 'backed_evals': backed,
+                   'uncertainty_expanded': uncertainty,
+                   'witness_refuted': refuted}
+        if cascaded:
+            summary['cascaded'] = cascaded
+        if repaired:
+            summary['repaired'] = repaired
+        if autosolved:
+            summary['autosolved'] = autosolved
+        summaries[pos.key] = summary
+    return summaries
 
 def _revoke_contradicted_mate(child, parent, prepared_proof):
     """Retira un cierre de mate que esta busqueda exhaustiva acaba de refutar.

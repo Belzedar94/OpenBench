@@ -262,6 +262,7 @@ def measure_queue(now):
         'served_total': total_served,
         'served_minutes': int(SERVED_WINDOW.total_seconds() // 60),
         **_write_backlog(),
+        **_propagation_backlog(),
     }
 
 
@@ -279,6 +280,21 @@ def _write_backlog():
         waiting=Count('id'), oldest=Min('created'))
     return {'waiting_writes': row['waiting'] or 0,
             'oldest_write': row['oldest']}
+
+
+def _propagation_backlog():
+    """Stored searches whose climb through the ancestors is still waiting.
+
+    With ``ATOMICDB_DEFER_PROPAGATION`` on, a result is on its own position
+    at once and its parents catch up when the drainer reaches it (§
+    ``propagation_queue``): this is how far behind they are.  One aggregate,
+    like the write backlog above, inside the same snapshot; no page shows it
+    yet.
+    """
+    from . import propagation_queue
+    backlog = propagation_queue.backlog()
+    return {'waiting_propagation': backlog['waiting'],
+            'oldest_propagation': backlog['oldest']}
 
 
 def queue_table(now=None):
