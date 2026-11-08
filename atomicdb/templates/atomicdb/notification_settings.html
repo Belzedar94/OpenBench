@@ -19,15 +19,15 @@
   <fieldset class="acct-group serve-order">
     <legend>My workers take first</legend>
     <div class="serve-order-choices">
-      <label><input type="radio" name="serve_order" value="own"{% if serve_order == 'own' %} checked{% endif %}><span>Mine first</span></label>
-      <label><input type="radio" name="serve_order" value="queue"{% if serve_order == 'queue' %} checked{% endif %}><span>Queue order</span></label>
-      <label><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
+      <label title="Your workers search your own requests (and the accounts listed below) before anyone else's"><input type="radio" name="serve_order" value="own"{% if serve_order == 'own' %} checked{% endif %}><span>Mine first</span></label>
+      <label title="Your workers take requests in the shared queue order, yours included"><input type="radio" name="serve_order" value="queue"{% if serve_order == 'queue' %} checked{% endif %}><span>Queue order</span></label>
+      <label title="Your workers serve other people's requests first, starting with the accounts listed below, then yours"><input type="radio" name="serve_order" value="others"{% if serve_order == 'others' %} checked{% endif %}><span>Others first</span></label>
     </div>
     <p class="serve-for"><input name="serve_for" value="{{ serve_for }}" maxlength="500"
       aria-label="Accounts to share my workers with: first with Others first, alongside mine with Mine first"
       placeholder="Accounts to share my workers with, comma separated"
       autocomplete="off" spellcheck="false"></p>
-    <p class="serve-campaign"><label>Then campaign
+    <p class="serve-campaign"><label title="When there are no requests to take, your workers prefer this campaign's positions before other server work">Then campaign
       <select name="serve_campaign">
         <option value="0">None</option>
         {% for c in campaigns %}<option value="{{ c.id }}"{% if serve_campaign == c.id|stringformat:"d" %} selected{% endif %}>{{ c.name }}</option>{% endfor %}
@@ -41,12 +41,12 @@
       <li>
         <input type="hidden" name="worker" value="{{ w.machine }}">
         <span class="worker-serving-name" title="{{ w.machine }}">{{ w.label }}</span>
-        <select name="mode:{{ w.machine }}" aria-label="{{ w.label }}: takes">
-          <option value=""{% if not w.mode %} selected{% endif %}>Account setting</option>
-          <option value="server"{% if w.mode == 'server' %} selected{% endif %}>Server queue</option>
-          <option value="personal"{% if w.mode == 'personal' %} selected{% endif %}>Mine only</option>
+        <select name="mode:{{ w.machine }}" aria-label="{{ w.label }}: takes" title="Account setting: follows the setting above. Server queue: shared queue order, your requests wait their turn. Mine only: your requests and the listed accounts, idles when there are none.">
+          <option value=""{% if not w.mode %} selected{% endif %} title="Follows the account setting above">Account setting</option>
+          <option value="server"{% if w.mode == 'server' %} selected{% endif %} title="Takes the shared queue in order; your own requests wait their turn like anyone's">Server queue</option>
+          <option value="personal"{% if w.mode == 'personal' %} selected{% endif %} title="Only your requests and the accounts listed above; idles when there are none">Mine only</option>
         </select>
-        <select name="campaign:{{ w.machine }}" aria-label="{{ w.label }}: then campaign">
+        <select name="campaign:{{ w.machine }}" aria-label="{{ w.label }}: then campaign" title="Campaign this worker prefers when it has no requests to take">
           <option value=""{% if w.campaign == '' %} selected{% endif %}>Account campaign</option>
           <option value="0"{% if w.campaign == '0' %} selected{% endif %}>No campaign</option>
           {% for c in campaigns %}<option value="{{ c.id }}"{% if w.campaign == c.id|stringformat:"d" %} selected{% endif %}>{{ c.name }}</option>{% endfor %}
