@@ -18,7 +18,7 @@ import worker
 
 BOOK_SHA256 = "BCD89D9FC3EA81FEB95932EB64D6B6F15AD25CC04CDCC9E0440F097CFFB8CCF6"
 NETWORK = "alice_run2rl_e40_l09.nnue"
-ENGINE_COMMIT = "627888f33f6d1bc8191e507d8ea413c9c536eba3"
+ENGINE_COMMIT = "590839557d88ac9ab948f034a79e86d0fb1ff934"
 AUDIT_PRESETS = {
     "VSTC Adjudication Audit": ("2.0+0.02", "Hash=16"),
     "STC Adjudication Audit": ("10.0+0.1", "Hash=32"),
@@ -82,7 +82,7 @@ class AliceOnboardingTests(unittest.TestCase):
         self.assertEqual(self.engine["source"], "https://github.com/Belzedar94/Alice-Stockfish")
         self.assertEqual(self.engine["build"]["cpuflags"], [])
         self.assertEqual(set(self.engine["build"]["systems"]), {"Windows", "Linux"})
-        self.assertEqual(defaults["both_bench"], 162582)
+        self.assertEqual(defaults["both_bench"], 202963)
         self.assertEqual(defaults["both_network"], NETWORK)
         self.assertEqual(defaults["base_branch"], ENGINE_COMMIT)
         self.assertEqual(
