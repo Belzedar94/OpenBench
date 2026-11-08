@@ -15,8 +15,8 @@
 
     "test_presets": {
         "default": {
-            "base_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
-            "both_bench": 162582,
+            "base_branch": "590839557d88ac9ab948f034a79e86d0fb1ff934",
+            "both_bench": 202963,
             "both_network": "alice_run2rl_e40_l09.nnue",
             "book_name": "ALICE_openings.epd",
             "test_bounds": "[1.00, 6.00]",
@@ -79,8 +79,8 @@
 
     "tune_presets": {
         "default": {
-            "dev_branch": "627888f33f6d1bc8191e507d8ea413c9c536eba3",
-            "dev_bench": 162582,
+            "dev_branch": "590839557d88ac9ab948f034a79e86d0fb1ff934",
+            "dev_bench": 202963,
             "dev_network": "alice_run2rl_e40_l09.nnue",
             "book_name": "ALICE_openings.epd",
             "win_adj": "movecount=4 score=800",
