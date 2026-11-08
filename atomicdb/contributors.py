@@ -695,7 +695,7 @@ def present(username, now=None, every_worker=False):
                    # Sin sitio (fuera de la banda servible, § queue_ahead_map)
                    # se pinta un guion, no un 500 (reporte de Eclipsia, 5-sep).
                    {'place': None if task.ahead is None else task.ahead + 1,
-                    'when': _ago(task.created, now),
+                    'when': _ago(task.request_time, now),
                     # RETIRAR SI SE QUEDA AQUI, y la asimetria con el boton
                     # que se acaba de ir no es un descuido.  Adelantar en esta
                     # lista no servia porque la lista YA esta ordenada por
@@ -833,7 +833,7 @@ def present_queue(username, now=None, live=False):
     pending_rows = [
         _presented(task, labels, now,
                    {'place': None if task.ahead is None else task.ahead + 1,
-                    'when': _ago(task.created, now),
+                    'when': _ago(task.request_time, now),
                     'backers': task.backers})
         for task in pending]
     done_rows = [_presented(task, labels, now,
@@ -891,7 +891,7 @@ def present_anonymous(now=None):
         place = places.get(task.id)
         pending_rows.append(_presented(task, labels, now, {
             'place': None if place is None else place[0] + 1,
-            'when': _ago(task.created, now),
+            'when': _ago(task.request_time, now),
             'backers': task.backers}))
     done_rows = [_presented(task, labels, now,
                             {'when': _ago(task.completed, now),
