@@ -1757,6 +1757,26 @@ class ScriptedQueueDoorTests(_QueueHarness):
         self.assertEqual([row['task_id'] for row in payload['tasks']],
                          [mine[0].id, mine[1].id])
 
+    def test_my_queue_lists_requests_this_account_backed(self):
+        """Torom, 8-Nov-2026: a script that backed a position (already-queued,
+        backed) could not follow it, because my-queue listed only its own."""
+        mine = self._queue('alice', [self.RUNG])
+        theirs = self._queue('bob', [self.RUNG], offset=100)
+        AnalysisTask.objects.filter(pk=theirs[0].pk).update(
+            also_requested_by=['alice'], backers=1)
+        stranger = self._queue('bob', [self.RUNG], offset=200)
+
+        rows = self.script.post('/atomicdb/api/my-queue/',
+                                self.alice).json()['tasks']
+
+        by_id = {row['task_id']: row for row in rows}
+        self.assertFalse(by_id[mine[0].id]['backed'])
+        self.assertTrue(by_id[theirs[0].id]['backed'])
+        self.assertIsNone(by_id[theirs[0].id]['bump'])
+        self.assertIsNone(by_id[theirs[0].id]['cancel'])
+        self.assertNotIn(stranger[0].id, by_id)
+        self.assertEqual(rows[0]['task_id'], mine[0].id)
+
     def test_my_queue_answers_json_credentials(self):
         mine = self._queue('alice', [self.RUNG])
 

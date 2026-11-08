@@ -1745,10 +1745,9 @@ def api_my_queue(request):
         return JsonResponse({'error': 'login required'}, status=401)
     running_first = Case(When(state=AnalysisTask.TState.LEASED, then=Value(0)),
                          default=Value(1), output_field=IntegerField())
+    live = (AnalysisTask.TState.PENDING, AnalysisTask.TState.LEASED)
     rows = (AnalysisTask.objects
-            .filter(requested_by=account,
-                    state__in=(AnalysisTask.TState.PENDING,
-                               AnalysisTask.TState.LEASED))
+            .filter(requested_by=account, state__in=live)
             .select_related('position')
             .annotate(_run=running_first)
             .order_by('_run', 'queue_seq', 'id'))
@@ -1758,10 +1757,44 @@ def api_my_queue(request):
               'budget_nodes': t.budget_nodes,
               'state': t.state,
               'queue_seq': t.queue_seq,
+              'backed': False,
               'bump': '/atomicdb/api/queue-bump/%d/' % t.id,
               'cancel': '/atomicdb/api/queue-cancel/%d/' % t.id}
              for t in rows[:200]]
+    # Requests this account joined (``already-queued`` with ``backed``):
+    # someone else owns them, so they carry no bump or cancel, but a script
+    # that backed a position can follow it here like its own (Torom,
+    # 8-Nov-2026).
+    tasks.extend(
+        {'task_id': t.id,
+         'position': t.position.key,
+         'fen': t.position.fen,
+         'budget_nodes': t.budget_nodes,
+         'state': t.state,
+         'queue_seq': t.queue_seq,
+         'backed': True,
+         'bump': None,
+         'cancel': None}
+        for t in _backed_by(account, live)[:max(0, 200 - len(tasks))])
     return JsonResponse({'account': account, 'tasks': tasks})
+
+
+def _backed_by(account, states):
+    """Live tasks owned by someone else that ``account`` joined.
+
+    ``also_requested_by`` is a JSON list.  Postgres answers the containment
+    with its index-friendly operator; other backends (the SQLite test runs)
+    have no JSON containment, so the few live rows with backers are filtered
+    here.
+    """
+    from django.db import connections
+    base = (AnalysisTask.objects.filter(state__in=states)
+            .exclude(requested_by=account)
+            .select_related('position').order_by('id'))
+    if connections[base.db].vendor == 'postgresql':
+        return list(base.filter(also_requested_by__contains=[account])[:200])
+    return [t for t in base.filter(backers__gt=0)
+            if account in (t.also_requested_by or [])][:200]
 
 
 def _resolve_script_account(request):
