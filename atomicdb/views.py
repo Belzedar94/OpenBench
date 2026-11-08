@@ -736,6 +736,36 @@ def api_lease(request):
         serve_order = preferences.serve_order(user.username)
         # ...and with "Others first", the accounts to serve before anyone.
         serve_first = preferences.serve_for(user.username)
+        # ...and, since 8-Nov, what THIS worker was told to do instead
+        # (§ ``WorkerServing``, cz_eclipsia).  A worker without a row, on an
+        # account without a campaign, reads ('', None) and leases exactly as
+        # before: none of the branches below is taken.
+        #
+        # ``server`` drops the account's affinity: its own requests and its
+        # listed accounts' wait their turn like anybody's (queue order with
+        # no list).  ``personal`` takes only the account's own requests and
+        # its listed accounts', under every serve order, and is idle without
+        # them: the contributor kept that machine for its own work, so it is
+        # never handed somebody else's.  A campaign is then the one thing
+        # it takes besides them.
+        worker_mode, worker_campaign = preferences.worker_serving(
+            user.username, machine)
+        personal_for = []
+        if worker_mode == 'server':
+            serve_order, serve_first = 'queue', []
+        elif worker_mode == 'personal':
+            personal_for = preferences.serve_for_names(user.username)
+
+        def requester_q(names):
+            # "anonymous" names the requests made without an account, which
+            # carry no name at all (seaside_cliff, 6-Nov-2026); no account
+            # is called that (checked 6-Nov-2026).
+            listed = Q(pk__in=[])
+            for name in names:
+                listed |= (Q(requested_by='')
+                           if name.lower() == 'anonymous'
+                           else Q(requested_by__iexact=name))
+            return listed
 
         def choose_pending(honour_deep_cap=True):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -853,6 +883,30 @@ def api_lease(request):
                 ordered = ordered.exclude(
                     Q(source=AnalysisTask.Source.USER)
                     & ~Q(requested_by=user.username))
+            # The worker's own setting (§ ``worker_mode`` above).  A band key
+            # goes in front of ``-source`` only when a campaign is followed:
+            # its tasks are selector work, AUTO or FILL, and have to beat
+            # the other selector work without passing any request.
+            #
+            # The personal filter keeps EVERY row of each requester it keeps,
+            # leased ones included, so the fair-share sums of those requesters
+            # are the ones every other worker sees.
+            in_campaign = (Q(position__campaign_id=worker_campaign)
+                           if worker_campaign else None)
+            first_band = Q(source=AnalysisTask.Source.USER)
+            if worker_mode == 'personal':
+                first_band &= (Q(requested_by=user.username)
+                               | requester_q(personal_for))
+                ordered = ordered.filter(
+                    first_band | in_campaign if in_campaign is not None
+                    else first_band)
+            band_keys = ()
+            if in_campaign is not None:
+                ordered = ordered.annotate(serve_band=Case(
+                    When(first_band, then=Value(2)),
+                    When(in_campaign, then=Value(1)),
+                    default=Value(0), output_field=IntegerField()))
+                band_keys = ('-serve_band',)
             # Los dos escalones del medio se leen de ``live_request`` — son
             # LOS MISMOS objetos que usa el estimador, no una copia parecida.
             #
@@ -863,7 +917,7 @@ def api_lease(request):
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
             ordered = (live_request.fair_share(ordered)
-                       .order_by('-source', '-own_first',
+                       .order_by(*band_keys, '-source', '-own_first',
                                  *live_request.SERVICE_KEYS,
                                  '-queue_rank', 'id'))
             for candidate in _locked_in_order(ordered):
@@ -958,7 +1012,10 @@ def api_lease(request):
                 pass
             else:
                 chosen = choose_pending()
-                if chosen is None:
+                # A personal worker with nothing to take does not refill the
+                # selector's pool: it would not take those tasks either, and
+                # every idle poll of it would add another handful.
+                if chosen is None and worker_mode != 'personal':
                     ingest.next_tasks(TASK_REFILL_COUNT)
                     chosen = choose_pending()
                 if chosen is None:

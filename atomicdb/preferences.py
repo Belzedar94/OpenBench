@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from django.shortcuts import redirect, render
 
-from .models import ContributorPref
+from .models import Campaign, ContributorPref, WorkerPing, WorkerServing
 
 
 def lifo_on(username):
@@ -69,6 +69,141 @@ def serve_for(username):
     return parse_serve_for(row[1])
 
 
+def serve_for_names(username):
+    """The account's listed accounts whatever its serve order.
+
+    A ``personal`` worker serves them beside the account's own requests
+    under every order, since they are the accounts it shares its workers
+    with (§ views.choose_pending).
+    """
+    if not username:
+        return []
+    raw = (ContributorPref.objects.filter(account=username)
+           .values_list('serve_for', flat=True).first())
+    return parse_serve_for(raw)
+
+
+# How one worker picks its tasks (§ ``WorkerServing``): ``''`` as the
+# account says, ``server`` with no preference for the account's own requests
+# or its listed accounts, ``personal`` only those.
+WORKER_MODES = ('', 'server', 'personal')
+
+
+def _machine_base(machine):
+    """``base#3`` -> ``base``, as ``views.machine_base``: the slots of one
+    machine share its setting."""
+    return (machine or '').split('#', 1)[0][:64]
+
+
+def worker_serving(username, machine):
+    """``(mode, campaign_id)`` for the worker that sends ``machine``.
+
+    ``mode`` is one of WORKER_MODES and ``campaign_id`` a ``Campaign.id`` or
+    None.  Without a row for the worker, ``('', None)`` unless the account
+    picked a campaign, so a worker nobody configured leases as before.
+    """
+    if not username:
+        return '', None
+    row = (WorkerServing.objects
+           .filter(account=username, machine=_machine_base(machine))
+           .values_list('mode', 'campaign').first())
+    mode, pick = row if row else ('', None)
+    if mode not in WORKER_MODES:
+        mode = ''
+    if pick is None:
+        pick = (ContributorPref.objects.filter(account=username)
+                .values_list('serve_campaign', flat=True).first())
+    return mode, (pick if pick and pick > 0 else None)
+
+
+# The most workers the settings page lists, most recently seen first.
+WORKERS_LISTED = 30
+
+
+def _known_workers(username):
+    """The account's machines (slot-free names), most recently seen first,
+    then any configured machine not seen lately, so it can be reset."""
+    names, seen = [], set()
+    for machine in (WorkerPing.objects.filter(user=username)
+                    .order_by('-last_seen')
+                    .values_list('machine', flat=True)[:500]):
+        base = _machine_base(machine)
+        if base and base not in seen:
+            seen.add(base)
+            names.append(base)
+            if len(names) >= WORKERS_LISTED:
+                break
+    for base in (WorkerServing.objects.filter(account=username)
+                 .order_by('machine').values_list('machine', flat=True)):
+        if base not in seen:
+            seen.add(base)
+            names.append(base)
+    return names
+
+
+def _worker_label(username, machine):
+    """``lesha-desk-atomicdb`` -> ``desk``: the host name the client puts
+    between the account and its suffix, or the whole name otherwise."""
+    label = machine
+    prefix = f'{username}-'
+    if label.startswith(prefix) and len(label) > len(prefix):
+        label = label[len(prefix):]
+    if label.endswith('-atomicdb') and len(label) > len('-atomicdb'):
+        label = label[:-len('-atomicdb')]
+    return label
+
+
+def _campaign_choices(selected):
+    """The campaigns a worker can follow: the open ones that have a subtree
+    (active or paused) on an unsolved root, most voted first, plus any
+    already picked."""
+    rows = list(Campaign.objects
+                .filter(state__in=(Campaign.CState.ACTIVE,
+                                   Campaign.CState.PAUSED),
+                        root__status='UNKNOWN')
+                .order_by('-votes', 'id').values_list('id', 'name')[:50])
+    have = {cid for cid, _name in rows}
+    missing = [cid for cid in selected if cid and cid > 0 and cid not in have]
+    if missing:
+        rows += list(Campaign.objects.filter(id__in=missing)
+                     .order_by('id').values_list('id', 'name'))
+    return [{'id': cid, 'name': name} for cid, name in rows]
+
+
+def _parse_pick(raw, allow_inherit):
+    """A campaign select's value: '' follows the account (None) where that
+    exists, '0' is none, a number is that campaign."""
+    raw = (raw or '').strip()
+    if raw == '' and allow_inherit:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None if allow_inherit else 0
+    return value if value > 0 else 0
+
+
+def _save_workers(request, username):
+    """The per-worker rows from the settings form.  Only machines the
+    account is known to run are written; a worker set back to the account's
+    defaults loses its row."""
+    known = set(_known_workers(username))
+    for machine in request.POST.getlist('worker'):
+        if machine not in known:
+            continue
+        mode = request.POST.get(f'mode:{machine}', '')
+        if mode not in WORKER_MODES:
+            mode = ''
+        pick = _parse_pick(request.POST.get(f'campaign:{machine}'), True)
+        if mode == '' and pick is None:
+            WorkerServing.objects.filter(account=username,
+                                         machine=machine).delete()
+        else:
+            WorkerServing.objects.update_or_create(
+                account=username, machine=machine,
+                defaults={'mode': mode, 'campaign': pick})
+
+
 def serves_others_first(username):
     """Whether this account's workers serve everybody else's requests first."""
     return serve_order(username) == 'others'
@@ -119,10 +254,34 @@ def notification_settings(request):
         if 'lifo' in request.POST:
             pref.lifo_queue = request.POST.get('lifo') == '1'
             fields.append('lifo_queue')
+        if 'serve_campaign' in request.POST:
+            pick = _parse_pick(request.POST.get('serve_campaign'), False)
+            pref.serve_campaign = pick or None
+            fields.append('serve_campaign')
         pref.save(update_fields=fields)
+        _save_workers(request, username)
         return redirect(f'{path}?saved=1')
     pref = ContributorPref.objects.filter(account=username).first()
+    configured = {row.machine: row for row in
+                  WorkerServing.objects.filter(account=username)}
+    workers = []
+    for machine in _known_workers(username):
+        row = configured.get(machine)
+        workers.append({
+            'machine': machine,
+            'label': _worker_label(username, machine),
+            'mode': row.mode if row and row.mode in WORKER_MODES else '',
+            # '' follows the account, '0' is none, else the campaign id.
+            'campaign': ('' if row is None or row.campaign is None
+                         else str(row.campaign)),
+        })
+    account_campaign = pref.serve_campaign if pref else None
+    campaigns = _campaign_choices(
+        [account_campaign] + [row.campaign for row in configured.values()])
     return render(request, 'atomicdb/notification_settings.html', {
+        'workers': workers,
+        'campaigns': campaigns,
+        'serve_campaign': str(account_campaign) if account_campaign else '',
         'notify_ready': pref.notify_ready if pref else True,
         'serve_order': (pref.serve_order if pref
                         and pref.serve_order in SERVE_ORDERS else 'own'),
