@@ -184,6 +184,14 @@ ATOMICDB_ADVERSARIAL = os.environ.get(
 # clasica sin residuo.
 ATOMICDB_BREADTH_SWAP = os.environ.get(
     'ATOMICDB_BREADTH_SWAP', '').lower() in ('1', 'true', 'yes')
+# A landing commits its result on its own position at once and leaves the
+# climb through its ancestors to the propagation queue, drained by
+# ``manage.py process_propagation`` (§ atomicdb/propagation_queue.py).  OFF by
+# default: the landing climbs inline as it always did.  Turn it on in the env
+# file of the ingest services only once atomicdb-propagate is running;
+# removing the line is the whole rollback (the writers drain any rows left).
+ATOMICDB_DEFER_PROPAGATION = os.environ.get(
+    'ATOMICDB_DEFER_PROPAGATION', '').lower() in ('1', 'true', 'yes')
 # Puerta doble de exploracion (idea de Wolfram, 30-jul-2026): un nodo se
 # explora PARA RESOLVER solo cuando el eval del motor y un estimador
 # INDEPENDIENTE de coste de resolver (atomicdb/solve_estimate.py) coinciden en

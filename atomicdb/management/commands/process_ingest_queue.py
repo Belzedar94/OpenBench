@@ -15,7 +15,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError
 
-from atomicdb import ingest_queue
+from atomicdb import ingest_queue, propagation_queue
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,22 @@ class Command(BaseCommand):
                 except DatabaseError:
                     # The next sweep tries again; the queue goes on.
                     logger.exception('AtomicDB tablebase sweep failed')
+                # Climbs left in the propagation queue while deferral is
+                # off (a rollback of ATOMICDB_DEFER_PROPAGATION, or the
+                # drainer stopped with it) are never stranded: the writers
+                # take them a batch at a time.  With deferral on they are
+                # the drainer's alone (§ propagation_queue).
+                if not propagation_queue.deferral_enabled():
+                    try:
+                        settled = propagation_queue.drain(
+                            max_batches=1)['settled']
+                        if settled:
+                            totals['propagation_settled'] = (
+                                totals.get('propagation_settled', 0)
+                                + settled)
+                    except DatabaseError:
+                        logger.exception('AtomicDB leftover propagation '
+                                         'failed')
             if options['once']:
                 break
             if result['done'] == 0 and result['failed'] == 0:

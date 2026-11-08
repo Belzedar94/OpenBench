@@ -620,6 +620,42 @@ class IngestJob(models.Model):
         return f'ingest job {self.pk} for task {self.task_id} ({self.state})'
 
 
+class PropagationSeed(models.Model):
+    """The climb a landed search still owes its ancestors.
+
+    A landing stores its search on its own position and commits at once; the
+    ascent through the ancestors it seeds (the status cascade, the backed
+    values, the arms that read them) waits here, written in the SAME commit
+    as the landing, so a process that dies in between loses nothing
+    (§ ``propagation_queue``).  The drainer takes many rows at a time, under
+    a row lock that is its only claim, merges their seeds and deletes the
+    rows in the transaction that climbs: a drainer that dies mid-climb rolls
+    the climb back and leaves the rows where they were.
+
+    ``payload`` holds the seed lists the landing computed, exactly as the
+    inline ascent would have used them: ``cascade``, ``backed``,
+    ``parents``, ``others`` and ``closed``, plus the ``job`` it came from and
+    an optional ``verify`` request.  ``source`` is the closure attribution
+    of the landing (§ ``ingest.closure_attribution``).
+    """
+
+    position = models.ForeignKey(Position, on_delete=models.CASCADE,
+                                 related_name='propagation_seeds')
+    source = models.CharField(max_length=16, blank=True, default='')
+    payload = models.JSONField()
+    attempts = models.IntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True)
+    last_error = models.TextField(blank=True, default='')
+    created = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['next_attempt_at', 'id'],
+                                name='atomic_propagation_ready')]
+
+    def __str__(self):
+        return f'propagation seed {self.pk} for {self.position_id[:12]}'
+
+
 class SolveTask(models.Model):
     """Una peticion de PRUEBA exhaustiva. Tabla aparte de ``AnalysisTask``.
 

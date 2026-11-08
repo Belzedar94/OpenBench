@@ -37,7 +37,7 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import ingest, logic, preferences
+from . import ingest, logic, preferences, propagation_queue
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -263,6 +263,17 @@ def apply_job(job):
         'source', 'requested_by', 'also_requested_by', 'budget_nodes',
         'route', 'then_verify').first()
     source = (task or {}).get('source')
+    # Stage (b), the climb through the ancestors, waits in its own durable
+    # queue when deferral is on (§ propagation_queue); the job then commits
+    # its result on its own position only, and the requested PV
+    # verification rides with the climb, because it must read the position
+    # after the cascade has had its say.
+    deferral = None
+    if propagation_queue.deferral_enabled():
+        deferral = {'job': job.pk}
+        if (task or {}).get('then_verify'):
+            deferral['verify'] = {'requested_by': task.get('requested_by'),
+                                  'route': task.get('route')}
 
     with ingest.carried_cuts() as cut, atomic(), \
             ingest.closure_attribution(source):
@@ -278,7 +289,8 @@ def apply_job(job):
         else:
             summary = ingest.ingest_analysis(
                 job.position_id, lines, searched, machine=machine,
-                mate_proofs=mate_proofs, restricted=restricted)
+                mate_proofs=mate_proofs, restricted=restricted,
+                defer_propagation=deferral)
             # Las peticiones que este pase deja sin trabajo se cierran AQUI,
             # dentro de la misma transaccion que lo aplica: si el analisis se
             # revierte, vuelven enteras a su cola.
@@ -299,11 +311,16 @@ def apply_job(job):
                                     'next_attempt_at', 'last_error',
                                     'updated'])
         _notify_requester(job, task)
+    # A deferred climb does what follows itself, once it has run
+    # (§ propagation_queue._after_commit): the proof numbers read what the
+    # cascade decides, and the verification reads the position after it.
+    climb_pending = summary.get('propagation') == 'deferred'
     # Hook del gestor de prueba.  ``backup_cascade`` ya refresca el cono que
     # cambio, pero un trabajo puede no cascadear nada (WDL rechazado, posicion
     # ya cerrada) y aun asi haber movido la eval que inicializa la hoja.  Esto
     # es lo que garantiza que TODO submit toca los pn/dn de su posicion.
-    ingest.proof.refresh_proof_numbers([job.position_id])
+    if not climb_pending:
+        ingest.proof.refresh_proof_numbers([job.position_id])
     # An ascent this job cut short is carried on now that the job has
     # committed, instead of waiting for the sweep (see the block above
     # ingest.CARRY_MAX_KEYS).  The job is applied whatever happens here: a
@@ -318,7 +335,8 @@ def apply_job(job):
         except DatabaseError:
             logger.exception('AtomicDB ingest job %s: carrying %d cut keys '
                              'on failed', job.pk, len(set(cut)))
-    if (task or {}).get('then_verify') and not summary.get('tb_rejected'):
+    if ((task or {}).get('then_verify') and not summary.get('tb_rejected')
+            and not climb_pending):
         verified = _verify_after(job, task)
         if verified is not None:
             summary = {**summary, 'then_verify': verified}

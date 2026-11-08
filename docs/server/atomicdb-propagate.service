@@ -1,0 +1,62 @@
+# AtomicDB propagation drainer: the deferred climb through the ancestors.
+#
+# Install at /etc/systemd/system/atomicdb-propagate.service, with the SAME
+# User, WorkingDirectory, interpreter and EnvironmentFile as the
+# atomicdb-ingest units on the host (copy them from `systemctl cat
+# atomicdb-ingest`; the values below are placeholders), then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-propagate
+#     journalctl -u atomicdb-propagate -f
+#
+# What it does: with ATOMICDB_DEFER_PROPAGATION=1 in the ingest units'
+# environment, every ingest commits a result on its own position at once and
+# leaves the climb through its ancestors (status cascade, backed values, the
+# arms that read them, proof numbers) in the atomicdb_propagationseed table.
+# This service climbs them, many landings merged into one climb per batch
+# (see atomicdb/propagation_queue.py).  If it is stopped, results keep
+# landing and nothing is lost: the parents' numbers simply lag until it runs
+# again.  `manage.py process_propagation --status` prints the backlog.
+#
+# ONE instance.  The point of the queue is a single climber with nobody to
+# deadlock against; a second instance is safe (batches are claimed under row
+# locks) but brings the contention back.
+#
+# Start order: after `manage.py migrate` (migration 0058).  Enable the
+# environment flag on the ingest units only once this unit is running.
+
+[Unit]
+Description=AtomicDB propagation drainer (deferred ancestor climb)
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openbench
+Group=openbench
+WorkingDirectory=/opt/openbench
+
+Environment=PYTHONUNBUFFERED=1
+# The same environment file as the web and ingest units (database aliases,
+# secret key).  ATOMICDB_DEFER_PROPAGATION is not needed here: this unit
+# drains whatever is queued.
+# EnvironmentFile=/etc/openbench/openbench.env
+
+ExecStart=/opt/openbench/.venv/bin/python manage.py process_propagation \
+    --idle-seconds 1
+
+# It finishes the batch it is climbing and exits on SIGTERM; a batch
+# interrupted before its commit rolls back whole and is climbed again.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

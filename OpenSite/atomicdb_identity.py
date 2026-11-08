@@ -58,6 +58,7 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_mainlinesnapshot',        # 0050_root_extremes
     'atomicdb_rootextreme',             # 0050_root_extremes
     'atomicdb_watchedkey',              # 0052_watched_keys
+    'atomicdb_propagationseed',         # 0058_propagationseed
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.

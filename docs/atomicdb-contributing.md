@@ -123,11 +123,17 @@ python manage.py migrate --noinput
 OpenBench artifact and PGN watchers. `Config/config.json`, `Engines/*.json`
 and `Books/*.json` are read at startup.
 
-In production three more processes work on the AtomicDB data. The unit files
+In production more processes work on the AtomicDB data. The unit files
 in `Documentation/` show the commands:
 
 - `manage.py process_ingest_queue` applies worker submissions to the graph
   (`atomicdb-ingest.service`). `--once` drains what is ready and exits.
+- `manage.py process_propagation` climbs the ancestors of landed results
+  when `ATOMICDB_DEFER_PROPAGATION=1` is set on the ingest units: each
+  result is then stored on its own position at once and the climb waits in
+  `atomicdb_propagationseed` (`atomicdb/propagation_queue.py`). One instance,
+  `docs/server/atomicdb-propagate.service`; `--status` prints the backlog.
+  With the flag off (the default) the ingest climbs inline as before.
 - `manage.py refresh_selector --loop` recomputes the exploration priorities
   (`atomicdb-selector.service`). Setting `ATOMICDB_INLINE_SELECTOR=1` makes
   the web process do it inline. Production bounds its reserve of automatic
