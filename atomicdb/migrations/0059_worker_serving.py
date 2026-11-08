@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('atomicdb', '0057_contributorpref_serve_for'),
+        ('atomicdb', '0058_propagationseed'),
     ]
 
     operations = [
