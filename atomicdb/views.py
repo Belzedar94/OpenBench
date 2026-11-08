@@ -7282,6 +7282,35 @@ def _proposed_reach(row):
     }
 
 
+def _campaign_proof_numbers(root_keys):
+    """Proof and disproof numbers of each line's root, in one query.
+
+    "How many positions would we need to solve to prove it's a win for White"
+    (BManBJ, 8-Nov-2026) is exactly the proof number the default proof
+    campaign already keeps for every position: the fewest unsolved positions
+    whose solving would prove a White win, along the cheapest lines.  The
+    disproof number is the same count for showing White cannot win.
+    """
+    campaign = proof.default_campaign(create=False)
+    if campaign is None:
+        return {}
+    keys = [key for key in root_keys if key]
+    if not keys:
+        return {}
+    out = {}
+    for row in (ProofNode.objects.filter(campaign=campaign,
+                                         position_id__in=keys)
+                .values('position_id', 'pn', 'dn')):
+        pn, dn = row['pn'], row['dn']
+        out[row['position_id']] = {
+            'proven': pn == 0,
+            'refuted': dn == 0,
+            'pn_h': proof.format_number(pn),
+            'dn_h': proof.format_number(dn),
+        }
+    return out
+
+
 def campaigns(request):
     """La lista ENTERA de campanas propuestas, con los mismos botones.
 
@@ -7292,11 +7321,14 @@ def campaigns(request):
     y a igualdad la mas nueva, sin recorte y sin cache (es una consulta).
     """
     reach = proposed_campaigns.stored()
+    proposed = list(Campaign.objects
+                    .filter(state=Campaign.CState.PROPOSED)
+                    .order_by('-votes', '-created'))
+    proofs = _campaign_proof_numbers(campaign.root_id for campaign in proposed)
     rows = [{**_campaign_identity(campaign),
-             'reach': _proposed_reach(reach.get(campaign.id))}
-            for campaign in Campaign.objects
-            .filter(state=Campaign.CState.PROPOSED)
-            .order_by('-votes', '-created')]
+             'reach': _proposed_reach(reach.get(campaign.id)),
+             'proof': proofs.get(campaign.root_id)}
+            for campaign in proposed]
     user = getattr(request, 'user', None)
     is_owner = bool(user is not None and user.is_authenticated
                     and user.is_staff)

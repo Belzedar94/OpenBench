@@ -29,6 +29,14 @@
         {% if r.measured_at %}<span>measured {{ r.measured_at|timesince }} ago</span>{% endif %}
       </div>
       {% endif %}{% endwith %}
+      {% with pr=c.proof %}{% if pr %}
+      <div class="campaign-stats dim campaign-proof">
+        {% if pr.proven %}<span>Proven win for White</span>
+        {% elif pr.refuted %}<span>Shown White cannot win</span>
+        {% else %}<span title="The fewest unsolved positions whose solving would prove a White win, along the cheapest lines">{{ pr.pn_h }} positions to prove a White win</span>
+        <span title="The fewest unsolved positions whose solving would show White cannot win">{{ pr.dn_h }} to show it is not</span>{% endif %}
+      </div>
+      {% endif %}{% endwith %}
     </div>
     <div class="campaign-row-votes dim">proposed by {{ c.proposed_by_h }} · {{ c.votes }} vote{{ c.votes|pluralize }}</div>
     <div class="campaign-actions">
