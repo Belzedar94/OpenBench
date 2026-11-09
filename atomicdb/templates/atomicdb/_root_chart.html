@@ -4,10 +4,13 @@
     <h2 id="root-chart-title">Start position best record <span class="root-chart-now">{{ c.record_h }}</span></h2>
     <div class="root-chart-sub dim">White's side, in pawns · set {{ c.record_at|date:"j M Y H:i" }} UTC</div>
   </div>
-  <div class="root-chart-plot">
+  <div class="root-chart-plot{% if c.node_ticks %} has-node-axis{% endif %}">
     <div class="root-chart-ticks dim" aria-hidden="true">
       {% for t in c.ticks %}<span style="top:{{ t.top }}%">{{ t.label }}</span>{% endfor %}
     </div>
+    {% if c.node_ticks %}<div class="root-chart-ticks root-chart-ticks-nodes dim" aria-hidden="true">
+      {% for t in c.node_ticks %}<span style="top:{{ t.top }}%">{{ t.label }}</span>{% endfor %}
+    </div>{% endif %}
     <svg class="root-chart-svg" viewBox="0 0 {{ c.width }} {{ c.height }}" preserveAspectRatio="none"
       role="img" aria-label="Start position best record from {{ c.first_at|date:"j M Y" }} to {{ c.last_at|date:"j M Y" }}: {{ c.records }} record{{ c.records|pluralize }}, now {{ c.record_h }}">
       {% for y in c.gridlines %}<line class="rc-grid" x1="0" x2="{{ c.width }}" y1="{{ y }}" y2="{{ y }}" vector-effect="non-scaling-stroke"/>{% endfor %}

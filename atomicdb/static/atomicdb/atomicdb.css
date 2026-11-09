@@ -3344,6 +3344,20 @@ html[data-board="custom"] cg-board {
   white-space: nowrap;
 }
 
+.root-chart-plot.has-node-axis {
+  padding-right: 3.4rem;
+}
+
+.root-chart-ticks-nodes {
+  left: auto;
+  right: 0;
+}
+
+.root-chart-ticks-nodes span {
+  right: auto;
+  left: 0;
+}
+
 .root-chart-svg {
   display: block;
   width: 100%;

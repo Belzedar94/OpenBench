@@ -25,7 +25,7 @@ from django.utils import timezone
 from . import logic, metrics, roots
 from .models import ProgressSnapshot, RootRecord
 
-CACHE_KEY = 'atomicdb.root-chart.v4'
+CACHE_KEY = 'atomicdb.root-chart.v5'
 # Records arrive at most once an hour; ten minutes keeps a new one visible
 # soon without measuring per visitor.
 FRESH_SECONDS = 600
@@ -131,6 +131,7 @@ def measure(now=None):
                             max(3600.0, (span + 1) / MAX_POINTS))
     node_area = ''
     nodes_last = None
+    node_ticks = []
     if len(node_rows) >= 2:
         n_lo = node_rows[0][1]
         n_hi = max(n for _at, n in node_rows)
@@ -141,6 +142,11 @@ def measure(now=None):
                      + f' L{_fmt(coords[-1][0])} {HEIGHT}'
                      + f' L{_fmt(coords[0][0])} {HEIGHT} Z')
         nodes_last = node_rows[-1][1]
+        # The nodes' own scale, on the right edge (rhaxier, 9-Nov-2026).
+        for n in (n_hi, (n_hi + n_lo) / 2, n_lo):
+            y = HEIGHT - INSET - (n - n_lo) / n_span * usable
+            node_ticks.append({'label': _human(int(n)),
+                               'top': _fmt(y / HEIGHT * 100)})
 
     tick_values = range(hi, lo - 1, -step)
     latest_at, latest, latest_status = records[-1]
@@ -149,6 +155,7 @@ def measure(now=None):
         'line': line,
         'node_area': node_area,
         'nodes_last_h': _human(nodes_last) if nodes_last is not None else '',
+        'node_ticks': node_ticks,
         'columns': columns,
         'ticks': [{'label': roots.value_text(v),
                    'top': _fmt(y_of(v) / HEIGHT * 100)} for v in tick_values],

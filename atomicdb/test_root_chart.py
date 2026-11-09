@@ -307,3 +307,16 @@ class SeedRootRecordsTests(TestCase):
     def test_dry_run_writes_nothing(self):
         self.assertIn('would add 3 of 3', self._seed('--dry-run'))
         self.assertFalse(RootRecord.objects.exists())
+
+
+class NodeAxisTests(TestCase):
+
+    def test_the_node_scale_is_labelled_on_the_right(self):
+        _best(0, 1257)
+        _best(24, 1275)
+        _nodes([(0, 1_000_000_000_000), (24, 3_000_000_000_000)])
+        chart = root_chart.measure()['chart']
+        labels = [t['label'] for t in chart['node_ticks']]
+        self.assertEqual(labels, ['3.00T', '2.00T', '1.00T'])
+        body = self.client.get('/atomicdb/roots/').content.decode()
+        self.assertIn('root-chart-ticks-nodes', body)
