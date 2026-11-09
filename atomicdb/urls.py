@@ -175,6 +175,13 @@ urlpatterns = [
     # short cache only absorbs F5 storms, varied by cookie for the header.
     path('contributors/', cache_page(30)(vary_on_cookie(csrf_protect(
         views.contributors_page))), name='atomicdb-contributors'),
+    # The node clubs of the profile badges, and the members of each.  Same
+    # treatment as the contributors page: built from the shared fleet
+    # snapshot, so the short page cache only absorbs F5 storms.
+    path('clubs/', cache_page(30)(vary_on_cookie(csrf_protect(
+        views.clubs_page))), name='atomicdb-clubs'),
+    path('clubs/<str:slug>/', cache_page(30)(vary_on_cookie(csrf_protect(
+        views.clubs_page))), name='atomicdb-club'),
     path('milestones/', cache_page(15)(vary_on_cookie(csrf_protect(
         views.milestones_page))), name='atomicdb-milestones'),
     # Adelantar una peticion propia dentro de la cola propia.  Escribe y es de

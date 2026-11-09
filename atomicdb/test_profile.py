@@ -820,3 +820,92 @@ class AccountQueueTests(TestCase):
 
         # Cold, with nothing cached: the profile's warm budget is 12.
         self.assertLessEqual(len(queries), 10)
+
+class ClubPageTests(TestCase):
+    """The node clubs: the profile badge links to a page with every member."""
+
+    def setUp(self):
+        cache.clear()
+        contributors.reset_cache()
+        self.client = Client()
+        _ping('alice-box-atomicdb', 'alice')
+        _ping('bob-box-atomicdb', 'bob')
+        _ping('carol-box-atomicdb', 'carol')
+        _completed(_child('a2a3'), 'alice-box-atomicdb',
+                   2_000_000_000_000, 100.0)
+        _completed(_child('b2b3'), 'bob-box-atomicdb', 300_000_000_000, 50.0)
+        _completed(_child('c2c3'), 'carol-box-atomicdb', 5_000_000, 1.0)
+
+    def test_the_profile_badge_links_to_its_club(self):
+        body = self.client.get('/atomicdb/user/alice/').content.decode()
+
+        self.assertIn('href="/atomicdb/clubs/1t/"', body)
+        self.assertIn('>1T club</a>', body)
+
+    def test_a_club_lists_everyone_at_or_above_its_threshold(self):
+        response = self.client.get('/atomicdb/clubs/100b/')
+
+        self.assertEqual(response.status_code, 200)
+        names = [row['name'] for row in response.context['club']['rows']]
+        self.assertEqual(names, ['alice', 'bob'])
+        body = response.content.decode()
+        self.assertIn('href="/atomicdb/user/alice/"', body)
+        self.assertIn('href="/atomicdb/user/bob/"', body)
+        self.assertNotIn('href="/atomicdb/user/carol/"', body)
+        reading = _reading(body)
+        self.assertIn('2.00T', reading)
+        self.assertIn('300.00B', reading)
+
+    def test_every_club_is_offered_with_its_member_count(self):
+        response = self.client.get('/atomicdb/clubs/')
+
+        self.assertEqual(response.status_code, 200)
+        counts = {c['slug']: c['count'] for c in response.context['clubs']}
+        self.assertEqual(counts, {'10t': 0, '1t': 1, '100b': 2, '1b': 2})
+        body = response.content.decode()
+        for slug in counts:
+            self.assertIn(f'href="/atomicdb/clubs/{slug}/"', body)
+
+    def test_the_clubs_are_the_profile_milestones(self):
+        slugs = [c['slug'] for c in contributors.present_clubs()['clubs']]
+
+        self.assertEqual(slugs, [contributors.club_slug(label)
+                                 for _t, label in contributors.MILESTONES])
+
+    def test_membership_follows_the_profile_total(self):
+        # The same machine attribution as the profile: the badge and the
+        # club page never disagree.
+        WorkerPing.objects.filter(machine='bob-box-atomicdb').update(
+            user='carol')
+        contributors.reset_cache()
+
+        rows = contributors.present_clubs('100b')['club']['rows']
+
+        self.assertEqual([row['name'] for row in rows], ['alice', 'carol'])
+        self.assertEqual(contributors.present('carol')['badges'],
+                         ['100B club'])
+
+    def test_an_empty_club_says_so(self):
+        body = _reading(
+            self.client.get('/atomicdb/clubs/10t/').content.decode())
+
+        self.assertIn('Nobody has reached the 10T club yet.', body)
+
+    def test_an_unknown_club_is_a_missing_page(self):
+        response = self.client.get('/atomicdb/clubs/7q/')
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_slug_is_case_insensitive(self):
+        response = self.client.get('/atomicdb/clubs/1T/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['club']['label'], '1T club')
+
+    def test_the_members_are_cached_between_visits(self):
+        contributors.present_clubs('1b')
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            contributors.present_clubs('1b')
+
+        self.assertEqual(len(queries), 0)

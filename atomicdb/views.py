@@ -5427,6 +5427,23 @@ def contributors_page(request):
     })
 
 
+def clubs_page(request, slug=None):
+    """The node clubs and, for one of them, every account in it.
+
+    Built from the shared fleet snapshot plus one read of the small
+    worker/account pairs, kept for a minute (§ contributors.clubs); the URL
+    adds the same short page cache as the contributors page.
+    """
+    context = contributors.present_clubs(
+        slug=None if slug is None else slug.lower()[:16])
+    if context is None:
+        return render(request, 'atomicdb/missing.html', {
+            'missing_note': 'There is no club with that name.',
+        }, status=404)
+    return render(request, 'atomicdb/clubs.html', {
+        **_suggestions_badge(request), **context})
+
+
 def milestones_page(request):
     """The latest milestones, the feed the home page used to end with.
 

@@ -240,7 +240,8 @@ def reset_cache():
     encontrase sin entrada y con el refresco "ya cogido" por un proceso que no
     existe.
     """
-    cache.delete_many([FLEET_CACHE_KEY, FLEET_CACHE_KEY + '.lock'])
+    cache.delete_many([FLEET_CACHE_KEY, FLEET_CACHE_KEY + '.lock',
+                       CLUBS_CACHE_KEY])
 
 
 def _rank(totals, username):
@@ -472,6 +473,109 @@ def _badges(nodes_total):
         if nodes_total >= threshold:
             return [label]
     return []
+
+
+# The clubs page (rhaxier on Discord, Nov-2026): a profile's club badge links
+# to the list of every account in that club.  Same clubs as ``MILESTONES``,
+# addressed by a short slug ("1T club" -> "1t").
+CLUBS_CACHE_SECONDS = FLEET_CACHE_SECONDS
+CLUBS_CACHE_KEY = 'atomicdb.contributors.clubs.v1'
+
+
+def club_slug(label):
+    """'1T club' -> '1t': the club's address on the clubs page."""
+    return label.split()[0].lower()
+
+
+CLUB_BY_SLUG = {club_slug(label): (threshold, label)
+                for threshold, label in MILESTONES}
+
+
+def _club_badges(badges):
+    return [{'label': label, 'slug': club_slug(label)} for label in badges]
+
+
+def _account_totals(snapshot):
+    """``{cuenta: {'nodes', 'tasks'}}`` all time, summed EXACTLY like a profile.
+
+    A profile's club comes from the machines its account has a ``WorkerPing``
+    for (§ ``present``), so the clubs page sums the same way: one read of the
+    small ``(machine, user)`` pairs plus dictionary lookups in the shared
+    fleet snapshot.  Any other attribution (the leaderboard's stamped
+    ``delivered_by``) could put an account on the club page whose profile
+    shows no badge, or the reverse.
+    """
+    machines = snapshot['machines_all']
+    totals = {}
+    for machine, user in WorkerPing.objects.values_list('machine', 'user'):
+        life = machines.get(machine)
+        if life and life['nodes']:
+            _fold(totals, user, life['nodes'], life['tasks'])
+    return totals
+
+
+def _measure_clubs(now):
+    totals = _account_totals(fleet(now=now))
+    clubs = []
+    for threshold, label in MILESTONES:
+        members = sorted(((row['nodes'], row['tasks'], name)
+                          for name, row in totals.items()
+                          if row['nodes'] >= threshold),
+                         key=lambda item: (-item[0], item[2]))
+        clubs.append({'slug': club_slug(label), 'label': label,
+                      'threshold_h': label.split()[0],
+                      'members': members})
+    return clubs
+
+
+def clubs(now=None):
+    """Every club with its members, from the shared fleet snapshot.
+
+    The only read of its own is the ``(machine, user)`` pairs, and the result
+    is kept for a minute, the freshness of the snapshot it is built from.
+    """
+    cached = cache.get(CLUBS_CACHE_KEY)
+    if cached is None:
+        cached = _measure_clubs(now or timezone.now())
+        cache.set(CLUBS_CACHE_KEY, cached, CLUBS_CACHE_SECONDS)
+    return cached
+
+
+def present_clubs(slug=None, now=None):
+    """The clubs page: the list of clubs, and the members of ``slug`` if any.
+
+    ``None`` when ``slug`` names no club.  A member's place is shared on ties,
+    the same ladder as the leaderboard (§ ``_standings``).
+    """
+    every = clubs(now=now)
+    current = None
+    if slug is not None:
+        current = next((club for club in every if club['slug'] == slug),
+                       None)
+        if current is None:
+            return None
+    context = {
+        'clubs': [{'slug': club['slug'], 'label': club['label'],
+                   'threshold_h': club['threshold_h'],
+                   'count': len(club['members']),
+                   'current': current is not None
+                   and club['slug'] == current['slug']}
+                  for club in every],
+        'club': None,
+    }
+    if current is not None:
+        ladder = [nodes for nodes, _tasks, _name in current['members']]
+        rows = []
+        for nodes, tasks, name in current['members']:
+            rank = ladder.index(nodes) + 1
+            rows.append({'rank': rank, 'medal': MEDALS.get(rank, ''),
+                         'name': name, 'nodes_h': human(nodes),
+                         'tasks_h': human(tasks)})
+        context['club'] = {'slug': current['slug'],
+                           'label': current['label'],
+                           'threshold_h': current['threshold_h'],
+                           'rows': rows}
+    return context
 
 
 def _labels(keys, opening=True):
@@ -776,6 +880,7 @@ def present(username, now=None, every_worker=False):
         'has_nodes': bool(nodes_all),
         'rank_24h': rank_24h, 'rank_all': rank_all,
         'badges': _badges(nodes_all),
+        'club_badges': _club_badges(_badges(nodes_all)),
         'suggestions': suggestion_rows,
         'suggestions_more': suggestions_more,
         # The first date cannot move once it exists, and the chart is per day:
