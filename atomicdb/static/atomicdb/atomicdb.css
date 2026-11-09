@@ -3016,13 +3016,16 @@ table.fleet-workers .qline {
 
 /* The accounts "Others first" serves before anyone (seaside_cliff,
    4-Nov-2026). */
-.serve-for label {
+.serve-for {
   display: flex;
   flex-direction: column;
   gap: .3rem;
   max-width: 32rem;
-  color: var(--ink-muted);
-  font-size: .84rem;
+}
+
+.serve-for label {
+  color: var(--ink);
+  font-size: .9rem;
 }
 
 .serve-for input {
@@ -3092,13 +3095,15 @@ table.fleet-workers .qline {
   margin: .7rem 0 0;
 }
 
-.serve-campaign label {
+.serve-campaign {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .5rem;
-  color: var(--ink-muted);
-  font-size: .84rem;
+  flex-direction: column;
+  gap: .3rem;
+}
+
+.serve-campaign label {
+  color: var(--ink);
+  font-size: .9rem;
 }
 
 .acct-settings select {
@@ -3111,7 +3116,58 @@ table.fleet-workers .qline {
 }
 
 .serve-campaign select {
-  flex: 1 1 12rem;
+  width: 100%;
+}
+
+/* One plain line under each control, and the short glossary of the serve
+   orders (cz_eclipsia, 9-Nov-2026). */
+.acct-hint {
+  margin: .25rem 0 0;
+  color: var(--ink-muted);
+  font-size: .8rem;
+  line-height: 1.4;
+}
+
+.acct-hint-check {
+  margin: 0 0 .5rem 1.6rem;
+}
+
+.acct-intro {
+  margin: 0 0 .6rem;
+}
+
+.acct-hint code {
+  font-size: .95em;
+}
+
+.acct-defs {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: .2rem .7rem;
+  margin: .6rem 0 0;
+  color: var(--ink-muted);
+  font-size: .8rem;
+  line-height: 1.4;
+}
+
+.acct-defs dt {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.acct-defs dd {
+  margin: 0;
+}
+
+@media (max-width: 480px) {
+  .acct-defs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .acct-defs dd {
+    margin-bottom: .35rem;
+  }
 }
 
 .worker-serving-list {
@@ -3120,12 +3176,15 @@ table.fleet-workers .qline {
   list-style: none;
 }
 
+.worker-serving-list {
+  margin-top: .7rem;
+}
+
 .worker-serving-list li {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: .4rem .5rem;
-  padding: .45rem 0;
+  flex-direction: column;
+  gap: .35rem;
+  padding: .6rem 0;
   border-top: 1px solid var(--border);
 }
 
@@ -3134,16 +3193,60 @@ table.fleet-workers .qline {
   padding-top: 0;
 }
 
-.worker-serving-name {
-  flex: 1 1 8rem;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.worker-serving-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .1rem .6rem;
 }
 
-.worker-serving-list select {
-  flex: 0 1 auto;
+.worker-serving-name {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.worker-serving-seen {
+  color: var(--ink-muted);
+  font-size: .78rem;
+}
+
+.worker-serving-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem .8rem;
+}
+
+.worker-serving-pick {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  flex: 1 1 100%;
+  min-width: 0;
+  color: var(--ink-muted);
+  font-size: .8rem;
+}
+
+.worker-serving-pick > span {
+  flex: 0 0 4.2rem;
+}
+
+.worker-serving-pick select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  font-size: .85rem;
+}
+
+.worker-serving-older {
+  margin-top: .7rem;
+}
+
+.worker-serving-older summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  font-size: .85rem;
 }
 
 .acct-save {

@@ -9,9 +9,11 @@ whose selector tasks then go before the rest of the selector's work.
 Nothing changes for a worker or account that set none of this.
 """
 
+from datetime import timedelta
 from unittest import mock
 
 from django.test import Client
+from django.utils import timezone
 
 from . import ingest, logic, preferences, views
 from .models import (AnalysisTask, Campaign, ContributorPref, Edge, Position,
@@ -414,12 +416,12 @@ class WorkerServingSettingPageTests(TestCase):
         self.assertEqual(body.count(f'name="mode:{BOX}"'), 1)
         self.assertNotIn('w-box-atomicdb', body)
         self.assertIn('kings-gambit', body)
-        self.assertIn('Each worker', body)
+        self.assertIn('Per machine', body)
 
     def test_no_worker_no_list(self):
         WorkerPing.objects.all().delete()
 
-        self.assertNotIn('Each worker', self.client.get(PAGE).content.decode())
+        self.assertNotIn('Per machine', self.client.get(PAGE).content.decode())
 
     def test_a_worker_mode_and_campaign_save(self):
         self.client.post(PAGE, {
@@ -467,3 +469,107 @@ class WorkerServingSettingPageTests(TestCase):
         self.assertEqual(
             ContributorPref.objects.get(account='lesha').serve_campaign,
             self.campaign.id)
+
+
+class WorkerServingPageWordingTests(TestCase):
+    """The per-machine section reads on its own (cz_eclipsia, 9-Nov-2026):
+    each select says what it is and what its default resolves to, stale
+    machines fold away, and odd machine names are shown tidily."""
+
+    def setUp(self):
+        worker_account('lesha', 'pw')
+        self.client = Client()
+        self.client.login(username='lesha', password='pw')
+        WorkerPing.objects.create(machine=BOX + '#0', user='lesha')
+        root = ingest.get_or_create_position(logic.start_fen())
+        self.campaign = Campaign.objects.create(
+            name='kings-gambit', root=root, state=Campaign.CState.ACTIVE)
+
+    def _age(self, machine, days):
+        # ``last_seen`` is auto_now, so it is moved with an update.
+        WorkerPing.objects.filter(machine=machine).update(
+            last_seen=timezone.now() - timedelta(days=days))
+
+    def _older(self, body):
+        return body[body.index('<details'):body.index('</details>')]
+
+    def test_the_defaults_name_what_they_resolve_to(self):
+        ContributorPref.objects.create(account='lesha', serve_order='others',
+                                       serve_campaign=self.campaign.id)
+
+        body = self.client.get(PAGE).content.decode()
+
+        self.assertIn('Same as account (Others first)', body)
+        self.assertIn('Same as account (kings-gambit)', body)
+
+    def test_without_a_row_the_defaults_are_mine_first_and_no_campaign(self):
+        body = self.client.get(PAGE).content.decode()
+
+        self.assertIn('Same as account (Mine first)', body)
+        self.assertIn('Same as account (no campaign)', body)
+
+    def test_both_selects_are_labelled(self):
+        body = self.client.get(PAGE).content.decode()
+
+        self.assertIn('<span>Order</span>', body)
+        self.assertIn('<span>Campaign</span>', body)
+        self.assertNotIn('>Account setting<', body)
+        self.assertNotIn('>Account campaign<', body)
+
+    def test_each_machine_shows_when_it_was_seen(self):
+        self._age(BOX + '#0', 3)
+
+        body = self.client.get(PAGE).content.decode()
+
+        self.assertIn('seen 3\xa0days ago', body)
+
+    def test_a_stale_machine_goes_under_older_machines(self):
+        WorkerPing.objects.create(machine='lesha-old-atomicdb#0', user='lesha')
+        self._age('lesha-old-atomicdb#0', preferences.WORKER_RECENT_DAYS + 5)
+
+        body = self.client.get(PAGE).content.decode()
+
+        older = self._older(body)
+        self.assertIn('Older machines (1)', older)
+        self.assertIn('name="mode:lesha-old-atomicdb"', older)
+        self.assertNotIn(f'name="mode:{BOX}"', older)
+        self.assertIn(f'name="mode:{BOX}"', body)
+
+    def test_no_stale_machine_no_older_section(self):
+        self.assertNotIn('Older machines',
+                         self.client.get(PAGE).content.decode())
+
+    def test_a_configured_machine_never_seen_is_listed_under_older(self):
+        WorkerServing.objects.create(account='lesha', machine='gone',
+                                     mode='server')
+
+        older = self._older(self.client.get(PAGE).content.decode())
+
+        self.assertIn('name="mode:gone"', older)
+        self.assertIn('not seen lately', older)
+
+    def test_a_stale_machine_still_saves(self):
+        WorkerPing.objects.create(machine='lesha-old-atomicdb#0', user='lesha')
+        self._age('lesha-old-atomicdb#0', preferences.WORKER_RECENT_DAYS + 5)
+
+        self.client.post(PAGE, {'ready': ['0', '1'],
+                                'worker': 'lesha-old-atomicdb',
+                                'mode:lesha-old-atomicdb': 'personal',
+                                'campaign:lesha-old-atomicdb': ''})
+
+        self.assertEqual(WorkerServing.objects.get().mode, 'personal')
+
+    def test_odd_names_are_escaped_and_tidied(self):
+        WorkerPing.objects.create(machine='<h1>Odd   worker</h1>',
+                                  user='lesha')
+        WorkerPing.objects.create(machine='  spaced \t out ', user='lesha')
+
+        body = self.client.get(PAGE).content.decode()
+
+        self.assertNotIn('<h1>Odd', body)
+        self.assertIn('&lt;h1&gt;Odd worker&lt;/h1&gt;', body)
+        self.assertIn('>spaced out<', body)
+
+    def test_a_blank_name_still_has_a_label(self):
+        self.assertEqual(preferences._worker_label('lesha', '   '),
+                         '(no name)')

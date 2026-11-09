@@ -1,0 +1,21 @@
+<li>
+  <input type="hidden" name="worker" value="{{ w.machine }}">
+  <div class="worker-serving-head">
+    <span class="worker-serving-name" title="{{ w.machine }}">{{ w.label }}</span>
+    <span class="worker-serving-seen">{% if w.seen %}seen {{ w.seen }}{% else %}not seen lately{% endif %}</span>
+  </div>
+  <div class="worker-serving-picks">
+    <label class="worker-serving-pick"><span>Order</span>
+      <select name="mode:{{ w.machine }}" aria-label="{{ w.label }}: order">
+        <option value=""{% if not w.mode %} selected{% endif %}>Same as account ({{ serve_order_name }})</option>
+        <option value="server"{% if w.mode == 'server' %} selected{% endif %}>Queue order</option>
+        <option value="personal"{% if w.mode == 'personal' %} selected{% endif %}>Mine only</option>
+      </select></label>
+    <label class="worker-serving-pick"><span>Campaign</span>
+      <select name="campaign:{{ w.machine }}" aria-label="{{ w.label }}: campaign">
+        <option value=""{% if w.campaign == '' %} selected{% endif %}>Same as account ({{ account_campaign_name }})</option>
+        <option value="0"{% if w.campaign == '0' %} selected{% endif %}>No campaign</option>
+        {% for c in campaigns %}<option value="{{ c.id }}"{% if w.campaign == c.id|stringformat:"d" %} selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      </select></label>
+  </div>
+</li>

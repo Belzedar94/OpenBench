@@ -5,9 +5,12 @@ the same row the "newest first" queue option already uses.  An account
 without a row has every default, so reading a setting never writes.
 """
 
+from datetime import timedelta
 from urllib.parse import quote
 
 from django.shortcuts import redirect, render
+from django.utils import timezone
+from django.utils.timesince import timesince
 
 from .models import Campaign, ContributorPref, WorkerPing, WorkerServing
 
@@ -119,20 +122,30 @@ def worker_serving(username, machine):
 # The most workers the settings page lists, most recently seen first.
 WORKERS_LISTED = 30
 
+# A machine last seen longer ago than this goes under "Older machines".
+WORKER_RECENT_DAYS = 30
 
-def _known_workers(username):
+
+def _worker_pings(username):
+    """``{base: last_seen}`` for the account's machines (slot-free names),
+    most recently seen first, at most WORKERS_LISTED."""
+    pings = {}
+    for machine, when in (WorkerPing.objects.filter(user=username)
+                          .order_by('-last_seen')
+                          .values_list('machine', 'last_seen')[:500]):
+        base = _machine_base(machine)
+        if base and base not in pings:
+            pings[base] = when
+            if len(pings) >= WORKERS_LISTED:
+                break
+    return pings
+
+
+def _known_workers(username, pings=None):
     """The account's machines (slot-free names), most recently seen first,
     then any configured machine not seen lately, so it can be reset."""
-    names, seen = [], set()
-    for machine in (WorkerPing.objects.filter(user=username)
-                    .order_by('-last_seen')
-                    .values_list('machine', flat=True)[:500]):
-        base = _machine_base(machine)
-        if base and base not in seen:
-            seen.add(base)
-            names.append(base)
-            if len(names) >= WORKERS_LISTED:
-                break
+    names = list(_worker_pings(username) if pings is None else pings)
+    seen = set(names)
     for base in (WorkerServing.objects.filter(account=username)
                  .order_by('machine').values_list('machine', flat=True)):
         if base not in seen:
@@ -150,7 +163,24 @@ def _worker_label(username, machine):
         label = label[len(prefix):]
     if label.endswith('-atomicdb') and len(label) > len('-atomicdb'):
         label = label[:-len('-atomicdb')]
-    return label
+    # The client sends whatever the contributor typed: runs of spaces, tabs
+    # or line breaks are shown as one space (the template escapes the rest).
+    return ' '.join(label.split()) or ' '.join(machine.split()) or '(no name)'
+
+
+def _seen_ago(moment, now):
+    """"3 days ago" in one unit, "just now", or '' for never."""
+    if moment is None:
+        return ''
+    text = timesince(moment, now=now, depth=1)
+    if text.split()[:1] == ['0']:
+        return 'just now'
+    return f'{text} ago'
+
+
+# How the page names each serve order.
+SERVE_ORDER_NAMES = {'own': 'Mine first', 'queue': 'Queue order',
+                     'others': 'Others first'}
 
 
 def _campaign_choices(selected):
@@ -264,9 +294,13 @@ def notification_settings(request):
     pref = ContributorPref.objects.filter(account=username).first()
     configured = {row.machine: row for row in
                   WorkerServing.objects.filter(account=username)}
+    now = timezone.now()
+    recent_after = now - timedelta(days=WORKER_RECENT_DAYS)
+    pings = _worker_pings(username)
     workers = []
-    for machine in _known_workers(username):
+    for machine in _known_workers(username, pings):
         row = configured.get(machine)
+        last_seen = pings.get(machine)
         workers.append({
             'machine': machine,
             'label': _worker_label(username, machine),
@@ -274,17 +308,28 @@ def notification_settings(request):
             # '' follows the account, '0' is none, else the campaign id.
             'campaign': ('' if row is None or row.campaign is None
                          else str(row.campaign)),
+            'seen': _seen_ago(last_seen, now),
+            'recent': last_seen is not None and last_seen >= recent_after,
         })
     account_campaign = pref.serve_campaign if pref else None
     campaigns = _campaign_choices(
         [account_campaign] + [row.campaign for row in configured.values()])
+    order = (pref.serve_order if pref
+             and pref.serve_order in SERVE_ORDERS else 'own')
+    campaign_name = next((c['name'] for c in campaigns
+                          if account_campaign and c['id'] == account_campaign),
+                         'no campaign')
     return render(request, 'atomicdb/notification_settings.html', {
         'workers': workers,
+        'recent_workers': [w for w in workers if w['recent']],
+        'older_workers': [w for w in workers if not w['recent']],
+        'recent_days': WORKER_RECENT_DAYS,
         'campaigns': campaigns,
         'serve_campaign': str(account_campaign) if account_campaign else '',
+        'account_campaign_name': campaign_name,
         'notify_ready': pref.notify_ready if pref else True,
-        'serve_order': (pref.serve_order if pref
-                        and pref.serve_order in SERVE_ORDERS else 'own'),
+        'serve_order': order,
+        'serve_order_name': SERVE_ORDER_NAMES[order],
         'serve_for': pref.serve_for if pref else '',
         'lifo_on': bool(pref and pref.lifo_queue),
         'saved': request.GET.get('saved') == '1',
