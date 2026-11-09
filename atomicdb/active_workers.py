@@ -25,11 +25,11 @@ other pages publish one at a time:
   the hour.  The contributor page shows the same figure.
 
 THE ROWS GO BY ACCOUNT (cz_eclipsia, 9-Nov-2026).  One collapsed row per
-account, three cells like the worker table's: the account, its workers'
-speed added up and the searches they finished in the last hour (the same
-hour and the same read as the speed).  Opening it says how many of its
-workers are live, their threads and what they are doing, then shows that
-account's rows.  The accounts with the most
+account, as wide and as tall as a worker row: the account and how many of
+its workers are searching, its live workers and their threads, their speed
+added up and the searches they finished in the last hour (the same hour
+and the same read as the speed).  Opening it splits the searches into
+requests and the server's own picks, then shows that account's rows.  The accounts with the most
 workers come first, then the fastest.  The groups are built from the rows
 above, so they cost no read of their own.
 

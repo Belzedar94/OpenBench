@@ -320,12 +320,12 @@ class GroupTests(TestCase):
         summary = raw[raw.index('<summary class="fleet-owner-row">'):]
         summary = summary[:summary.index('</summary>')]
         self.assertEqual(_reading(summary),
-                         f'alice {views._human(1_500_000)} nodes/s '
-                         '3 searches')
-        self.assertIn('4 workers · 40 threads · 3 searching (1 request, '
-                      '2 server) · 1 between tasks', _reading(raw))
+                         'alice 3 searching 4 workers 40 threads '
+                         f'{views._human(1_500_000)} nodes/s 3 searches')
+        self.assertIn('3 searching (1 request, 2 server) · 1 between tasks',
+                      _reading(raw))
 
-    def test_the_row_has_three_cells_under_a_matching_header(self):
+    def test_the_row_has_four_cells_under_a_matching_header(self):
         _ping('a1', 'alice')
 
         raw = _page()
@@ -335,7 +335,7 @@ class GroupTests(TestCase):
         summary = raw[raw.index('<summary class="fleet-owner-row">'):]
         summary = summary[:summary.index('</summary>')]
         self.assertEqual(_reading(head.split('>', 1)[1]),
-                         'Account Speed Last hour')
+                         'Account Workers Speed Last hour')
         # The cells are the spans directly under the summary.
         depth, cells = 0, 0
         for tag in re.findall(r'</?span\b', summary):
@@ -344,15 +344,17 @@ class GroupTests(TestCase):
                 depth += 1
             else:
                 depth -= 1
-        self.assertEqual(cells, 3)
+        self.assertEqual(cells, 4)
 
     def test_an_account_with_nothing_finished_says_so(self):
         _ping('idle-box', 'alice', threads=1)
 
         body = _reading(_page())
 
-        self.assertIn('alice no search finished 0 searches '
-                      '1 worker · 1 thread · between tasks', body)
+        self.assertIn('alice between tasks 1 worker 1 thread '
+                      'no search finished 0 searches', body)
+        # Nothing running: no breakdown of searches under the row.
+        self.assertNotIn('fleet-owner-work', _page())
 
     def test_groups_are_collapsed_details_linking_the_profile(self):
         _ping('a1', 'alice')
@@ -399,7 +401,7 @@ class SpeedTests(TestCase):
                   for row in _rows()}
 
         self.assertEqual(speeds, {'alice': ('6.0M', 1), 'bob': ('1.0M', 1)})
-        self.assertIn('bob 1.0M nodes/s 1 search 1 worker · 8 threads · between tasks',
+        self.assertIn('bob between tasks 1 worker 8 threads 1.0M nodes/s 1 search',
                       _reading(_page()))
 
     def test_a_worker_with_no_search_finished_lately_says_so(self):

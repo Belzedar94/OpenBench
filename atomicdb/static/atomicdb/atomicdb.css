@@ -2501,32 +2501,36 @@ table.fleet-workers .qline {
   white-space: normal;
 }
 
-/* One collapsed row per account (cz_eclipsia, 9-Nov-2026), drawn like a
-   row of the worker table: three cells, the same padding, rule and header
-   type, with fixed shares so the rows of every account line up.  Opened,
-   the account's facts and its table sit under its row. */
-.fleet-owners {
-  font-size: .92rem;
-}
-
+/* One collapsed row per account (cz_eclipsia, 9-Nov-2026), drawn as a row
+   of the worker table: the table's full width, its cell padding and rule,
+   its header type, and a second dim line under the first like a worker's,
+   so an account row stands as tall as a worker row.  Four cells with fixed
+   shares, so the rows of every account line up.  Opened, the account's
+   table sits under its row. */
 .fleet-owner-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
-  align-items: baseline;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr)
+                         minmax(0, 1fr);
+  align-items: start;
+  width: 100%;
   border-bottom: 1px solid var(--border);
 }
 
 .fleet-owner-row > span {
   min-width: 0;
-  padding: .45rem .6rem;
+  padding: .5rem .6rem;
   overflow-wrap: anywhere;
 }
 
-.fleet-owner-head {
+.fleet-owner-row .contrib-spec {
+  display: block;
+}
+
+.fleet-owner-head > span {
+  padding: .45rem .6rem;
   color: var(--ink-muted);
-  font-size: .75rem;
-  font-weight: 600;
-  letter-spacing: .04em;
+  font-size: .78rem;
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
@@ -2546,7 +2550,7 @@ table.fleet-workers .qline {
    padding, turning when opened. */
 .fleet-owner > summary::before {
   position: absolute;
-  top: .8rem;
+  top: .85rem;
   left: 0;
   border-width: .28rem 0 .28rem .4rem;
   border-style: solid;
@@ -2573,12 +2577,14 @@ table.fleet-workers .qline {
   margin: 0 0 .7rem;
 }
 
+/* The phone sizes of the worker table, cell for cell. */
 @media (max-width: 560px) {
-  .fleet-owners {
+  .fleet-owner-row {
     font-size: .84rem;
   }
 
-  .fleet-owner-row > span {
+  .fleet-owner-row > span,
+  .fleet-owner-head > span {
     padding: .4rem .25rem;
   }
 
@@ -2586,9 +2592,13 @@ table.fleet-workers .qline {
     padding-left: .7rem;
   }
 
-  .fleet-owner-head {
+  .fleet-owner-head > span {
     font-size: .7rem;
     letter-spacing: 0;
+  }
+
+  .fleet-owner-row .contrib-spec {
+    font-size: .74rem;
   }
 }
 
