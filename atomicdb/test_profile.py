@@ -818,8 +818,9 @@ class AccountQueueTests(TestCase):
         with CaptureQueriesContext(connections[alias]) as queries:
             Client().get('/atomicdb/queue/alice/')
 
-        # Cold, with nothing cached: the profile's warm budget is 12.
-        self.assertLessEqual(len(queries), 10)
+        # Cold, with nothing cached: the profile's warm budget is 12.  One
+        # of these is the ``served_rank`` aggregate of the queue order.
+        self.assertLessEqual(len(queries), 11)
 
 class ClubPageTests(TestCase):
     """The node clubs: the profile badge links to a page with every member."""
