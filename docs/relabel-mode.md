@@ -110,6 +110,11 @@ The steps below use the T349 data already audited under `D:\alice-train\t349`.
   `./.venv/bin/python manage.py migrate --database default` (not
   `--database=atomicdb`: these are OpenBench core models). Restart the service so `Engines/Alice-Stockfish.json`
   (`relabel_formats`) is reloaded.
+- `0012_relabel_mode` depends only on `0010_test_variant_contract`, so it
+  can be applied to a server that does not have `0011` (protocol v42) yet,
+  which is how production gets it. `0013_merge_v42_relabel` is an empty
+  merge of `0011` and `0012`. Whichever of the two is applied first, a later
+  full `migrate` reaches the same history.
 - Publish a worker that speaks RELABEL. The PR does not change the client
   version or the pin. Either bump `CLIENT_VERSION` in `Client/worker.py` and
   `client_version` in `Config/config.json` to 54 together with

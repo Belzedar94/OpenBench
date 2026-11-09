@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('OpenBench', '0011_datagen_publication_contract_v42'),
+        ('OpenBench', '0010_test_variant_contract'),
     ]
 
     operations = [
