@@ -40,6 +40,8 @@
 <p class="dim">Nothing recorded yet.</p>
 {% endif %}
 
+{% if root_chart %}{% include "atomicdb/_root_chart.html" %}{% endif %}
+
 <h2>Main line by day</h2>
 <p class="dim campaign-lede">The last recording of each day (UTC), for the
   last {{ history_days }} days.</p>

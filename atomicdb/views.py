@@ -38,7 +38,6 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
 from .models import ContributorPref
 from . import idle_repair
 from . import proposed_campaigns
-from . import root_chart
 from . import san as move_names
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
@@ -5377,7 +5376,6 @@ def home(request):
         'root_dn_h': proof.format_number(root_dn),
         'has_proof_numbers': root_pn is not None,
         # The start position's value over time, from the shared cache.
-        'root_chart': root_chart.chart(now=now),
         'analyzing': analyzing, 'upnext': upnext,
         'total_h': _human(total), 'closed_h': _human(closed),
         'analyses_h': _human(analyses), 'nodes_h': _human(nodes),

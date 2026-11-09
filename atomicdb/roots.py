@@ -748,5 +748,9 @@ def roots_page(request):
     """Public page: the start position, first moves and named openings with
     their best and worst, and the main line.  Cached in ``urls`` like the
     other read views; the sort order is part of the URL."""
-    return render(request, 'atomicdb/roots.html',
-                  page_context(sort=request.GET.get('sort', DEFAULT_SORT)))
+    # The eval chart lives here, not on the home page (Torom and rhaxier,
+    # 9-Nov-2026).  Imported here: ``root_chart`` imports this module.
+    from . import root_chart
+    context = page_context(sort=request.GET.get('sort', DEFAULT_SORT))
+    context['root_chart'] = root_chart.chart()
+    return render(request, 'atomicdb/roots.html', context)

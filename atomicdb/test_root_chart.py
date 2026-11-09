@@ -1,4 +1,4 @@
-"""The start position's eval chart on the home page (§ root_chart)."""
+"""The start position's eval chart on the roots page (§ root_chart)."""
 
 import re
 from unittest import mock
@@ -130,10 +130,10 @@ class CacheTests(TestCase):
         self.assertEqual(root_chart.chart(force=True)['latest_h'], '+12.50')
 
 
-class HomePageTests(TestCase):
+class RootsPageTests(TestCase):
 
     def _home(self):
-        response = self.client.get('/atomicdb/')
+        response = self.client.get('/atomicdb/roots/')
         self.assertEqual(response.status_code, 200)
         return response.content.decode()
 
@@ -153,6 +153,11 @@ class HomePageTests(TestCase):
         self.assertEqual(svg.group(0).count('class="rc-hit"'), 2)
         # Nothing on it loads anything from elsewhere.
         self.assertNotIn('<script', svg.group(0))
+
+    def test_the_home_page_has_no_chart(self):
+        _record([(0, 1244), (24, 1156)])
+        body = self.client.get('/atomicdb/').content.decode()
+        self.assertNotIn('class="root-chart"', body)
 
 
 class DailyMedianTests(TestCase):
