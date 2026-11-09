@@ -107,7 +107,7 @@ class WalkTests(TreeFixture):
         self.assertFalse(Position.objects.filter(
             campaign__isnull=False).exists())
 
-    def test_only_proposed_campaigns_are_measured(self):
+    def test_proposed_and_paused_campaigns_are_measured(self):
         proposed = _campaign(self.root)
         active = _campaign(self.d6, state=Campaign.CState.ACTIVE, name='x')
         paused = _campaign(self.f6, state=Campaign.CState.PAUSED, name='y')
@@ -115,7 +115,9 @@ class WalkTests(TreeFixture):
         stored = proposed_campaigns.stored()
         self.assertIn(proposed.id, stored)
         self.assertNotIn(active.id, stored)
-        self.assertNotIn(paused.id, stored)
+        # A paused campaign is listed with the proposed ones (it can win the
+        # lead back), so its reach is measured too.
+        self.assertIn(paused.id, stored)
 
     def test_a_line_no_longer_proposed_drops_out_of_the_store(self):
         campaign = _campaign(self.root)
@@ -181,3 +183,13 @@ class PageTests(TreeFixture):
         proposed_campaigns.measure_all()
         body = _reading(Client().get('/atomicdb/').content.decode())
         self.assertNotIn('positions explored', body)
+
+
+class PausedListedTests(TestCase):
+
+    def test_a_paused_campaign_is_on_the_campaigns_page(self):
+        root = ingest.get_or_create_position(logic.start_fen())
+        Campaign.objects.create(root=root, name='Paused line', line_san='',
+                                state=Campaign.CState.PAUSED, votes=8)
+        body = self.client.get('/atomicdb/campaigns/').content.decode()
+        self.assertIn('Paused line', body)

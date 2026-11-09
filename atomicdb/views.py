@@ -339,6 +339,9 @@ CAMPAIGN_TAG_MAX_NODES = 50_000
 CAMPAIGN_TAG_BATCH = 500
 HOME_ACTIVE_CAMPAIGNS = 2
 HOME_PROPOSED_CAMPAIGNS = 6
+# Open campaigns that are not the active one: proposed, or paused after
+# losing the lead.  Both are listed and can be voted back in.
+WAITING_CAMPAIGN_STATES = (Campaign.CState.PROPOSED, Campaign.CState.PAUSED)
 
 logger = logging.getLogger(__name__)
 
@@ -7359,7 +7362,9 @@ def _campaign_context(request):
     # que se queda fuera se cuenta para que la portada lo diga y enlace la
     # lista entera — una propuesta nueva tiene cero votos y sin ese enlace no
     # aparecia en ningun sitio.
-    waiting = list(Campaign.objects.filter(state=Campaign.CState.PROPOSED)
+    # PAUSED too: a campaign that lost the lead is still open and can win it
+    # back on votes (§ community_campaign), so it has to stay where people vote.
+    waiting = list(Campaign.objects.filter(state__in=WAITING_CAMPAIGN_STATES)
                    .order_by('-votes', '-created'))
     proposed = [_campaign_identity(campaign)
                 for campaign in waiting[:HOME_PROPOSED_CAMPAIGNS]]
@@ -7434,7 +7439,7 @@ def campaigns(request):
     """
     reach = proposed_campaigns.stored()
     proposed = list(Campaign.objects
-                    .filter(state=Campaign.CState.PROPOSED)
+                    .filter(state__in=WAITING_CAMPAIGN_STATES)
                     .order_by('-votes', '-created'))
     proofs = _campaign_proof_numbers(campaign.root_id for campaign in proposed)
     rows = [{**_campaign_identity(campaign),
