@@ -862,7 +862,7 @@ class ClubPageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         counts = {c['slug']: c['count'] for c in response.context['clubs']}
-        self.assertEqual(counts, {'10t': 0, '1t': 1, '100b': 1, '1b': 0})
+        self.assertEqual(counts, {'100t': 0, '10t': 0, '1t': 1, '100b': 1, '10b': 0, '1b': 0})
         body = response.content.decode()
         for slug in counts:
             self.assertIn(f'href="/atomicdb/clubs/{slug}/"', body)

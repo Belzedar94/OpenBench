@@ -84,9 +84,11 @@ FIRST_CACHE_SECONDS = 3600
 MEDALS = {1: 'first', 2: 'second', 3: 'third'}
 # Clubes de nodos.  De mayor a menor: se pintan todos los alcanzados, y el
 # primero de la lista es el que manda en el titulo.
-MILESTONES = ((10_000_000_000_000, '10T club'),
+MILESTONES = ((100_000_000_000_000, '100T club'),
+              (10_000_000_000_000, '10T club'),
               (1_000_000_000_000, '1T club'),
               (100_000_000_000, '100B club'),
+              (10_000_000_000, '10B club'),
               (1_000_000_000, '1B club'))
 
 CANCELLED = AnalysisTask.TState.CANCELLED

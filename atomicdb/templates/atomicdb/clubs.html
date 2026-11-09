@@ -5,7 +5,7 @@
 <h2 id="clubs" style="margin-top:0">{% if club %}{{ club.label }}{% else %}Node clubs{% endif %} <a href="/atomicdb/contributors/" style="font-size:.8rem;font-weight:400" title="Every account, ranked by engine nodes">contributors</a></h2>
 <p class="dim club-intro">{% if club %}Accounts whose highest club is the {{ club.label }}: their workers
   have searched at least {{ club.threshold_h }} engine nodes, all time.{% else %}Each account sits in the
-  highest club it has reached: 1B, 100B, 1T or 10T engine nodes, all time.{% endif %}</p>
+  highest club it has reached: 1B, 10B, 100B, 1T, 10T or 100T engine nodes, all time.{% endif %}</p>
 
 <nav class="club-picker" aria-label="Node clubs">
   {% for c in clubs %}<a class="contrib-badge club-pick{% if c.current %} current{% endif %}"
