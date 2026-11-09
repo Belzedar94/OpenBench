@@ -1,0 +1,40 @@
+{% extends "atomicdb/base.html" %}
+{% block title %}{% if club %}{{ club.label }}{% else %}Node clubs{% endif %} · AtomicDB{% endblock %}
+{% block content %}
+
+<h2 id="clubs" style="margin-top:0">{% if club %}{{ club.label }}{% else %}Node clubs{% endif %} <a href="/atomicdb/contributors/" style="font-size:.8rem;font-weight:400" title="Every account, ranked by engine nodes">contributors</a></h2>
+<p class="dim club-intro">Accounts whose workers have searched at least
+  {% if club %}{{ club.threshold_h }}{% else %}1B, 100B, 1T or 10T{% endif %} engine
+  nodes, all time.</p>
+
+<nav class="club-picker" aria-label="Node clubs">
+  {% for c in clubs %}<a class="contrib-badge club-pick{% if c.current %} current{% endif %}"
+    href="/atomicdb/clubs/{{ c.slug }}/"{% if c.current %} aria-current="page"{% endif %}
+    title="{{ c.count }} account{{ c.count|pluralize }} with at least {{ c.threshold_h }} nodes">{{ c.label }} <span class="club-count">{{ c.count }}</span></a>{% endfor %}
+</nav>
+
+{% if club %}
+{% if club.rows %}
+<div class="contrib-scroll">
+<table class="lb-table club-table">
+  <tr><th class="lb-place"><span class="visually-hidden">Place</span><span aria-hidden="true">#</span></th>
+    <th>Contributor</th><th class="n">Nodes</th><th class="n">Analyses</th></tr>
+  {% for r in club.rows %}
+  <tr>
+    <td class="lb-place"><span class="lb-medal {{ r.medal }}">{{ r.rank }}</span></td>
+    <td><a class="lb-name" href="/atomicdb/user/{{ r.name|urlencode }}/">{{ r.name }}</a></td>
+    <td class="n">{{ r.nodes_h }}</td>
+    <td class="n">{{ r.tasks_h }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+<p class="dim lb-foot">{{ club.rows|length }} account{{ club.rows|length|pluralize }} in the {{ club.label }}.</p>
+{% else %}
+<p class="dim">Nobody has reached the {{ club.label }} yet.</p>
+{% endif %}
+{% else %}
+<p class="dim">Pick a club to see who is in it.</p>
+{% endif %}
+
+{% endblock %}

@@ -4,10 +4,10 @@
 
 <h2 class="contrib-name" style="margin-top:0">{{ profile_user }}</h2>
 
-{% if badges %}
+{% if club_badges %}
 <div class="contrib-badges">
-  {% for badge in badges %}<span class="contrib-badge"
-    title="Engine nodes searched by this account's workers">{{ badge }}</span>{% endfor %}
+  {% for badge in club_badges %}<a class="contrib-badge" href="/atomicdb/clubs/{{ badge.slug }}/"
+    title="Engine nodes searched by this account's workers. Every account in the {{ badge.label }}">{{ badge.label }}</a>{% endfor %}
 </div>
 {% endif %}
 

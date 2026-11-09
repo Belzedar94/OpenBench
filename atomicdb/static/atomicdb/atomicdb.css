@@ -2225,6 +2225,49 @@ html.theme-ready .tile {
   letter-spacing: .5px;
 }
 
+/* A club badge is a link to the clubs page: same pill, no underline. */
+a.contrib-badge {
+  text-decoration: none;
+}
+
+a.contrib-badge:hover,
+a.contrib-badge:focus-visible {
+  border-color: var(--opening-ink);
+}
+
+/* The clubs page: the clubs as a row of pills that wraps on a phone, the
+   chosen one filled in. */
+.club-intro {
+  margin-top: -.4rem;
+  font-size: .85rem;
+}
+
+.club-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin: .6rem 0 1rem;
+}
+
+.club-pick {
+  white-space: nowrap;
+}
+
+.club-pick.current {
+  border-color: var(--opening-ink);
+  font-weight: 600;
+}
+
+.club-count {
+  margin-left: .25rem;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.club-table {
+  max-width: 36rem;
+}
+
 .contrib-section {
   margin-bottom: 2rem;
 }
