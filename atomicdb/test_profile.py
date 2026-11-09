@@ -842,26 +842,26 @@ class ClubPageTests(TestCase):
         self.assertIn('href="/atomicdb/clubs/1t/"', body)
         self.assertIn('>1T club</a>', body)
 
-    def test_a_club_lists_everyone_at_or_above_its_threshold(self):
+    def test_a_club_lists_only_accounts_whose_highest_club_it_is(self):
         response = self.client.get('/atomicdb/clubs/100b/')
 
         self.assertEqual(response.status_code, 200)
         names = [row['name'] for row in response.context['club']['rows']]
-        self.assertEqual(names, ['alice', 'bob'])
+        self.assertEqual(names, ['bob'])
         body = response.content.decode()
-        self.assertIn('href="/atomicdb/user/alice/"', body)
         self.assertIn('href="/atomicdb/user/bob/"', body)
+        self.assertNotIn('href="/atomicdb/user/alice/"', body)
         self.assertNotIn('href="/atomicdb/user/carol/"', body)
         reading = _reading(body)
-        self.assertIn('2.00T', reading)
         self.assertIn('300.00B', reading)
+        self.assertNotIn('2.00T', reading)
 
     def test_every_club_is_offered_with_its_member_count(self):
         response = self.client.get('/atomicdb/clubs/')
 
         self.assertEqual(response.status_code, 200)
         counts = {c['slug']: c['count'] for c in response.context['clubs']}
-        self.assertEqual(counts, {'10t': 0, '1t': 1, '100b': 2, '1b': 2})
+        self.assertEqual(counts, {'10t': 0, '1t': 1, '100b': 1, '1b': 0})
         body = response.content.decode()
         for slug in counts:
             self.assertIn(f'href="/atomicdb/clubs/{slug}/"', body)
@@ -881,7 +881,7 @@ class ClubPageTests(TestCase):
 
         rows = contributors.present_clubs('100b')['club']['rows']
 
-        self.assertEqual([row['name'] for row in rows], ['alice', 'carol'])
+        self.assertEqual([row['name'] for row in rows], ['carol'])
         self.assertEqual(contributors.present('carol')['badges'],
                          ['100B club'])
 

@@ -517,14 +517,17 @@ def _account_totals(snapshot):
 def _measure_clubs(now):
     totals = _account_totals(fleet(now=now))
     clubs = []
+    ceiling = None  # clubs are exclusive: an account sits only in its highest club
     for threshold, label in MILESTONES:
         members = sorted(((row['nodes'], row['tasks'], name)
                           for name, row in totals.items()
-                          if row['nodes'] >= threshold),
+                          if row['nodes'] >= threshold
+                          and (ceiling is None or row['nodes'] < ceiling)),
                          key=lambda item: (-item[0], item[2]))
         clubs.append({'slug': club_slug(label), 'label': label,
                       'threshold_h': label.split()[0],
                       'members': members})
+        ceiling = threshold
     return clubs
 
 
