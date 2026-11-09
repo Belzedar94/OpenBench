@@ -34,6 +34,7 @@ import psutil
 import queue
 import re
 import requests
+import shlex
 import shutil
 import stat
 import struct
@@ -54,6 +55,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import bench
 import genfens as client_genfens
 import pgn_util as client_pgn_util
+import relabel as client_relabel
 import utils as client_utils
 
 # ``client.py`` is intentionally not replaced by the hot updater.  Older
@@ -66,6 +68,7 @@ client_utils = importlib.reload(client_utils)
 bench = importlib.reload(bench)
 client_genfens = importlib.reload(client_genfens)
 client_pgn_util = importlib.reload(client_pgn_util)
+client_relabel = importlib.reload(client_relabel)
 
 from client import BadVersionException
 from client import url_join
@@ -77,7 +80,7 @@ from genfens import create_genfens_opening_book
 
 ## Basic configuration of the Client. These timeouts can be changed at will
 
-CLIENT_VERSION   = 52 # Client version to send to the Server
+CLIENT_VERSION   = 53 # Client version to send to the Server
 # 90s rides out shared-sqlite write-lock waits on the server (AtomicDB batch
 # jobs hold multi-second transactions; heartbeats were dying at 30s while the
 # server would have answered shortly after).
@@ -2018,6 +2021,10 @@ def server_configure_worker(config):
         },
         'focus'          : config.focus,          # List of engines we have a preference to help
         'client_ver'     : CLIENT_VERSION,        # Version of the Client, which the server may reject
+        # RELABEL chunks are only leased to workers that list the protocol
+        # and the record format, so older workers never receive them.
+        'relabel_protocols': [client_relabel.RELABEL_PROTOCOL],
+        'relabel_formats': sorted(client_relabel.FORMATS),
     }
 
     payload = {
@@ -2104,8 +2111,9 @@ def server_request_workload(config):
                 datagen['total_count'] + datagen['positions_per_chunk'] - 1
             ) // datagen['positions_per_chunk']
             print(
-                'Workload DATAGEN [%s] %s - chunk %d/%d (test #%d)\n'
+                'Workload %s [%s] %s - chunk %d/%d (test #%d)\n'
                 % (
+                    'RELABEL' if datagen.get('relabel') else 'DATAGEN',
                     dev_engine,
                     dev_name,
                     datagen['chunk_idx'] + 1,
@@ -3770,6 +3778,301 @@ def complete_datagen_workload(config):
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#                                   RELABEL                                   #
+#                                                                             #
+# A RELABEL chunk is a slice of an existing training set. The worker searches #
+# every position with the playing engine over UCI, one single-threaded engine #
+# per worker thread, and uploads the same records with only the score         #
+# replaced. The server refuses anything else. Leases, heartbeats, retries and #
+# the upload path are DATAGEN's.                                              #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+def relabel_engine_options(options):
+
+    ## Split an OpenBench options string such as 'Threads=1 Hash=64
+    ## "Use NNUE=true"' into (hash_mb, [(name, value), ...]). Threads is
+    ## always 1 per engine; the worker runs one engine per thread instead.
+
+    hash_mb = 16
+    extra = []
+    for token in shlex.split(options or ''):
+        name, sep, value = token.partition('=')
+        if not sep:
+            continue
+        if name.lower() == 'hash':
+            hash_mb = int(value)
+        elif name.lower() != 'threads':
+            extra.append((name, value))
+    return hash_mb, extra
+
+
+def relabel_engine_count(config, engine_name, requested):
+
+    ## Lower the engine count until every engine fits in this machine's free
+    ## memory, as memory_capped_concurrency() does for games. Never raises it.
+
+    try:
+        per_engine_mb = engine_memory_mb(config, 'dev', engine_name)
+        if not per_engine_mb:
+            return requested
+        available_mb = psutil.virtual_memory().available // (1024 ** 2)
+        budget_mb = max(0, available_mb - memory_margin_mb(config.ram_total_mb))
+        commit_mb = available_commit_mb()
+        if commit_mb is not None:
+            budget_mb = min(budget_mb, max(commit_mb - 2048, per_engine_mb))
+        allowed = max(1, budget_mb // per_engine_mb)
+        if allowed < requested:
+            print('[Note] Memory cap: %d -> %d RELABEL engines (%d MB each, %d MB budget)'
+                  % (requested, allowed, per_engine_mb, budget_mb))
+            return allowed
+        return requested
+    except Exception as error:              # noqa: BLE001 - never block work
+        print('[Note] Memory cap skipped: %s' % (error))
+        return requested
+
+
+def download_relabel_input(config, path, expected_sha256, expected_bytes):
+
+    ## Fetch this lease's input chunk and authenticate it against the identity
+    ## frozen in the workload before a single position is searched.
+
+    data = config.workload['test']['datagen']
+    payload = {
+        'machine_id': config.machine_id,
+        'secret': config.secret_token,
+        'test_id': config.workload['test']['id'],
+        'chunk_idx': data['chunk_idx'],
+        'attempt': data['attempt'],
+    }
+    target = url_join(config.server, 'clientRelabelInput')
+    with requests.post(target, data=payload, stream=True,
+                       timeout=(TIMEOUT_HTTP, 600)) as response:
+        if response.status_code != 200 or 'json' in response.headers.get('Content-Type', ''):
+            try:
+                error = response.json().get('error', 'RELABEL input download failed')
+            except Exception:
+                error = 'RELABEL input download failed (HTTP %d)' % response.status_code
+            if 'Bad Client Version' in error:
+                raise BadVersionException()
+            raise RuntimeError(error)
+        digest = hashlib.sha256()
+        byte_count = 0
+        with open(path, 'wb') as output:
+            for block in response.iter_content(1 << 20):
+                digest.update(block)
+                byte_count += len(block)
+                if byte_count > expected_bytes:
+                    raise RuntimeError('RELABEL input is larger than its frozen size')
+                output.write(block)
+    if (digest.hexdigest(), byte_count) != (expected_sha256, expected_bytes):
+        raise RuntimeError('RELABEL input does not match its frozen SHA-256/bytes')
+
+
+def read_relabel_input(path, chunk_input, record_bytes):
+
+    expected = chunk_input['records'] * record_bytes
+    decompressor = bz2.BZ2Decompressor()
+    parts = []
+    produced = 0
+    with open(path, 'rb') as source:
+        while not decompressor.eof:
+            raw = source.read(1 << 20)
+            if not raw:
+                raise client_relabel.RelabelFormatError('RELABEL input is truncated')
+            piece = decompressor.decompress(raw)
+            produced += len(piece)
+            if produced > expected:
+                raise client_relabel.RelabelFormatError('RELABEL input inflates past its record count')
+            parts.append(piece)
+        if decompressor.unused_data or source.read(1):
+            raise client_relabel.RelabelFormatError('RELABEL input has trailing data')
+    data = b''.join(parts)
+    if len(data) != expected:
+        raise client_relabel.RelabelFormatError('RELABEL input holds the wrong number of records')
+    if hashlib.sha256(data).hexdigest() != chunk_input['raw_sha256']:
+        raise client_relabel.RelabelFormatError('RELABEL input records do not match their frozen SHA-256')
+    return data
+
+
+class RelabelRejected(RuntimeError):
+    """The server refused the chunk as not a pure relabel of its input."""
+
+
+def upload_relabel_output(config, path, sha256, byte_count, heartbeat):
+
+    ## As upload_datagen_output(), but a content rejection is final: the server
+    ## has already released the lease, so resending the same bytes is useless.
+
+    for attempt in range(DATAGEN_TRANSFER_RETRIES):
+        try:
+            response = ServerReporter.report_datagen(config, path, sha256, byte_count)
+            for field in ('completed_chunks', 'total_chunks'):
+                if field not in response:
+                    raise RuntimeError('RELABEL upload response omitted %s' % field)
+            return response
+        except BadVersionException:
+            raise
+        except Exception as error:
+            if 'RELABEL chunk' in str(error) and 'rejected' in str(error):
+                raise RelabelRejected(str(error)) from error
+            if attempt + 1 == DATAGEN_TRANSFER_RETRIES:
+                raise DatagenTransientError(
+                    'RELABEL upload failed after %d attempts: %s'
+                    % (DATAGEN_TRANSFER_RETRIES, error)
+                ) from error
+            traceback.print_exc()
+            if heartbeat.stop_requested.wait(DATAGEN_TRANSFER_RETRY_DELAY):
+                raise DatagenStopped()
+
+
+def complete_relabel_workload(config):
+
+    test = config.workload['test']
+    chunk = test['datagen']
+    spec = chunk['relabel']
+    stem = 'test_%d_chunk_%d' % (test['id'], chunk['chunk_idx'])
+    output_path = os.path.join('Datagen', stem + '.bin')
+    input_path = output_path + '.input.bz2'
+    compressed_path = output_path + '.bz2'
+    log_path = os.path.join('Datagen', stem + '.log')
+    setup_complete = False
+
+    try:
+        if (spec.get('protocol') != client_relabel.RELABEL_PROTOCOL
+                or spec.get('format') not in client_relabel.FORMATS
+                or spec.get('record_bytes')
+                != client_relabel.FORMATS[spec['format']]['record_bytes']):
+            raise DatagenConfigurationError(
+                'RELABEL protocol %r / format %r is not supported by this worker'
+                % (spec.get('protocol'), spec.get('format'))
+            )
+
+        os.makedirs('Datagen', exist_ok=True)
+        cleanup_errors = clean_datagen_workspace(output_path)
+        if cleanup_errors:
+            raise DatagenTransientError(
+                'RELABEL workspace cleanup failed: %s' % '; '.join(cleanup_errors)
+            )
+
+        with DatagenHeartbeat(config) as heartbeat:
+            dev_network = safe_download_network_weights(config, 'dev')
+            dev_name = safe_download_engine(config, 'dev', dev_network)
+            setup_complete = True
+            dev_nps = safe_run_benchmarks(
+                config, 'dev', dev_name, dev_network, bench_threads=1
+            )
+            try:
+                ServerReporter.report_nps(config, dev_nps, dev_nps).raise_for_status()
+            except BadVersionException:
+                raise
+            except Exception as error:
+                raise DatagenTransientError('RELABEL NPS report failed: %s' % error) from error
+
+            chunk_input = spec['input']
+            try:
+                download_relabel_input(
+                    config, input_path, chunk_input['sha256'], chunk_input['bytes']
+                )
+            except BadVersionException:
+                raise
+            except Exception as error:
+                raise DatagenTransientError('RELABEL input download failed: %s' % error) from error
+            data = read_relabel_input(input_path, chunk_input, spec['record_bytes'])
+
+            requested = max(1, config.threads)
+            if spec.get('max_engines'):
+                requested = min(requested, spec['max_engines'])
+            engines = relabel_engine_count(config, dev_name, requested)
+            hash_mb, options = relabel_engine_options(test['dev']['options'])
+            limit = ('depth %d' % spec['depth']) if spec['depth'] else ('nodes %d' % spec['nodes'])
+            print('RELABEL chunk %d: %d positions, %s, %d engines x Threads=1 Hash=%d'
+                  % (chunk['chunk_idx'], chunk_input['records'], limit, engines, hash_mb))
+
+            started = time.time()
+            relabelled = client_relabel.relabel_chunk(
+                data,
+                spec['format'],
+                os.path.abspath(os.path.join('Engines', dev_name)),
+                depth=spec['depth'],
+                nodes=spec['nodes'],
+                engines=engines,
+                hash_mb=hash_mb,
+                evalfile=os.path.abspath(dev_network) if dev_network else None,
+                options=options,
+                should_stop=lambda: (
+                    heartbeat.stop_requested.is_set() or os.path.isfile('openbench.exit')
+                ),
+                progress=client_relabel.RelabelProgress(chunk_input['records']),
+            )
+            elapsed = max(1e-9, time.time() - started)
+            print('RELABEL chunk %d searched in %.0f s: %.1f pos/s (%.2f per engine)'
+                  % (chunk['chunk_idx'], elapsed, chunk_input['records'] / elapsed,
+                     chunk_input['records'] / elapsed / engines))
+
+            with open(output_path, 'wb') as output:
+                output.write(relabelled)
+            compress_datagen_output(
+                output_path, compressed_path, heartbeat,
+                expected_source=(
+                    hashlib.sha256(relabelled).hexdigest(), len(relabelled),
+                ),
+            )
+            try:
+                sha256, byte_count = datagen_file_sha256(compressed_path)
+            except Exception as error:
+                raise DatagenTransientError('RELABEL archive hashing failed: %s' % error) from error
+            response = upload_relabel_output(
+                config, compressed_path, sha256, byte_count, heartbeat
+            )
+            print('Uploaded RELABEL chunk %d: %d bytes, sha256 %s (%d/%d complete)'
+                  % (chunk['chunk_idx'], byte_count, sha256,
+                     response['completed_chunks'], response['total_chunks']))
+
+    except (DatagenStopped, client_relabel.RelabelStopped):
+        print('RELABEL chunk stopped by server; local engines were terminated')
+        return
+
+    except BadVersionException:
+        raise
+
+    except (OpenBenchBuildFailedException,
+            OpenBenchMissingArtifactException,
+            OpenBenchBadBenchException):
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    except DatagenTransientError as error:
+        handle_datagen_transient_failure(config, chunk, log_path, error)
+        raise
+
+    except Exception as error:
+        if (not setup_complete
+                and not isinstance(error, DATAGEN_DETERMINISTIC_SETUP_ERRORS)):
+            transient_error = DatagenTransientError(
+                'RELABEL setup failed before the search: %s' % error
+            )
+            handle_datagen_transient_failure(config, chunk, log_path, transient_error)
+            raise transient_error from error
+
+        # A record the codec refuses, or an engine that dies on a position, is
+        # deterministic for this worker: report it, release the chunk, and
+        # stop taking this workload until the worker restarts.
+        summary = 'RELABEL chunk %d failed: %s' % (chunk['chunk_idx'], error)
+        try:
+            ServerReporter.report_engine_error(config, summary, traceback.format_exc())
+        except Exception:
+            traceback.print_exc()
+        if test['id'] not in config.blacklist:
+            config.blacklist.append(test['id'])
+        raise
+
+    finally:
+        for cleanup_error in clean_datagen_workspace(output_path):
+            print('[Note] RELABEL cleanup deferred: %s' % cleanup_error)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                          MEMORY-CAPPED CONCURRENCY                          #
 #                                                                             #
 # CPU and RAM do not scale together, and -T only speaks for the CPU. Without  #
@@ -4058,6 +4361,8 @@ def memory_capped_concurrency(config, dev_name, base_name,
 def complete_workload(config):
 
     if config.workload['test']['type'] == 'DATAGEN' and config.workload['test'].get('datagen'):
+        if config.workload['test']['datagen'].get('relabel'):
+            return complete_relabel_workload(config)
         return complete_datagen_workload(config)
 
     # Download the opening book, throws an exception on corruption
@@ -4202,6 +4507,7 @@ def safe_download_engine(config, branch, net_path, build_role=None):
     generic_datagen = (
         config.workload['test']['type'] == 'DATAGEN'
         and bool(config.workload['test'].get('datagen'))
+        and not config.workload['test']['datagen'].get('relabel')
     )
     if build_role is None:
         build_role = 'datagen' if generic_datagen else 'play'
