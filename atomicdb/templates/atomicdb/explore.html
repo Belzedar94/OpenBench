@@ -894,6 +894,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
     floor goes on the header cell because the cells of the rows take no
     attributes (see the rows below), and it is content-box because browsers
     disagree on whether a cell's min-width counts its padding.{% endcomment %}
+    <div class="table-scroll">
     <table aria-labelledby="moves-heading">
       <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
         <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
@@ -990,6 +991,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       <tr><td colspan="6" class="dim">Terminal position: the game ended here.</td></tr>
       {% endif %}
     </table>
+    </div>
     {% comment %}Pliegue de las jugadas sin nada que ensenar.  En casi todas
     las posiciones la mayoria de filas dicen "not analysed" (ni busqueda
     propia, ni linea sembrada, ni respaldo) o "not in tree", y empujan fuera

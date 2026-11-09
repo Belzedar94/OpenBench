@@ -136,6 +136,7 @@
   <div>
 <h2 style="margin-top:0">First moves</h2>
 {% if first_moves %}
+<div class="table-scroll">
 <table>
   <tr><th></th><th>move</th><th>state</th><th>eval</th><th>visits</th></tr>
   {% for m in first_moves %}
@@ -149,6 +150,7 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 {% else %}
 <p class="dim">The tree does not include the starting position yet.
   <a href="/atomicdb/explore/{{ root_key }}/">Explore the root</a>.</p>
