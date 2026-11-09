@@ -3287,7 +3287,7 @@ html[data-board="custom"] cg-board {
   cursor: pointer;
 }
 
-/* The start position's eval over time (home page).  The SVG stretches to
+/* The start position's best record over time (roots page).  The SVG stretches to
    the box and its strokes do not scale; the labels are HTML, so they keep
    their size on a phone. */
 .root-chart {
@@ -3358,22 +3358,15 @@ html[data-board="custom"] cg-board {
 
 .rc-nodes {
   fill: var(--draw);
-  opacity: .14;
+  opacity: .1;
 }
 
-.rc-line {
+.rc-best {
   fill: none;
   stroke: var(--accent);
   stroke-width: 2;
   stroke-linejoin: round;
   stroke-linecap: round;
-}
-
-.rc-best {
-  fill: none;
-  stroke: var(--hot);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
 }
 
 .rc-hit {
@@ -3414,16 +3407,6 @@ html[data-board="custom"] cg-board {
   width: .9rem;
   height: .5rem;
   border-radius: 2px;
-}
-
-.rc-swatch-line {
-  height: 2px !important;
-  background: var(--accent);
-}
-
-.rc-swatch-best {
-  height: 2px !important;
-  background: var(--hot);
 }
 
 .rc-swatch-nodes {

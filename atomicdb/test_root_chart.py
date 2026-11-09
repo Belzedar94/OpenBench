@@ -1,4 +1,4 @@
-"""The start position's eval chart on the roots page (§ root_chart)."""
+"""The start position's best record chart on the roots page (§ root_chart)."""
 
 import io
 import re
@@ -29,167 +29,13 @@ def _best(hours, value, status='UNKNOWN'):
                                      at=T0 + timedelta(hours=hours))
 
 
-def _record(hours_values, nodes=True):
-    for hours, value in hours_values:
-        at = T0 + timedelta(hours=hours)
-        MainLineSnapshot.objects.create(bucket_start=at, value=value)
-        if nodes:
-            ProgressSnapshot.objects.create(
-                bucket_start=at, engine_nodes_total=1_000_000_000 * (hours + 1))
+NOW = T0 + timedelta(hours=10)
 
 
-class MeasureTests(TestCase):
-
-    def setUp(self):
-        super().setUp()
-        # These tests read the hourly record point by point; the daily
-        # median has its own tests (DailyMedianTests).
-        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_no_chart_under_two_points(self):
-        self.assertEqual(root_chart.measure(), {'chart': None})
-        _record([(0, 1200)])
-        self.assertEqual(root_chart.measure(), {'chart': None})
-
-    def test_a_row_without_a_value_is_left_out(self):
-        _record([(0, 1200), (1, 1180)])
-        MainLineSnapshot.objects.create(bucket_start=T0 + timedelta(hours=2),
-                                        value=None)
-        chart = root_chart.measure()['chart']
-        self.assertEqual(len(chart['columns']), 2)
-        self.assertEqual(chart['last_at'], T0 + timedelta(hours=1))
-
-    def test_values_are_white_side_pawns_and_the_axis_snaps(self):
-        _record([(0, 1244), (1, 1156), (2, 1172)])
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['first_h'], '+12.44')
-        self.assertEqual(chart['latest_h'], '+11.72')
-        # 1156..1244 snaps outward to 11.50..12.50.
-        self.assertEqual([t['label'] for t in chart['ticks']],
-                         ['+12.50', '+12.00', '+11.50'])
-        self.assertEqual(chart['ticks'][0]['top'], '5')     # INSET / HEIGHT
-        self.assertEqual(chart['nodes_last_h'], '3.00B')
-        self.assertIn('+11.56', chart['columns'][1]['title'])
-        self.assertIn('2.00B engine nodes', chart['columns'][1]['title'])
-
-    def test_the_line_spans_the_whole_width_and_stays_inside(self):
-        _record([(0, -300), (5, 0), (10, 450)])
-        chart = root_chart.measure()['chart']
-        coords = [tuple(map(float, pair.split()))
-                  for pair in chart['line'][1:].split(' L')]
-        self.assertEqual(coords[0][0], 0)
-        self.assertEqual(coords[-1][0], root_chart.WIDTH)
-        for _x, y in coords:
-            self.assertGreaterEqual(y, root_chart.INSET)
-            self.assertLessEqual(y, root_chart.HEIGHT - root_chart.INSET)
-        # The lowest value is drawn lowest.
-        self.assertEqual(coords[0][1], root_chart.HEIGHT - root_chart.INSET)
-
-    def test_a_flat_series_still_has_an_axis(self):
-        _record([(0, 1200), (1, 1200)])
-        chart = root_chart.measure()['chart']
-        self.assertEqual([t['label'] for t in chart['ticks']],
-                         ['+12.25', '+12.00', '+11.75'])
-
-    def test_a_long_history_is_downsampled_to_the_last_of_each_slot(self):
-        hours = root_chart.MAX_POINTS * 3
-        _record([(h, 1000 + h) for h in range(hours)], nodes=False)
-        chart = root_chart.measure()['chart']
-        self.assertLessEqual(len(chart['columns']), root_chart.MAX_POINTS)
-        self.assertEqual(chart['step_hours'], 3)
-        # The newest hour is always the last point.
-        self.assertEqual(chart['last_at'], T0 + timedelta(hours=hours - 1))
-        self.assertEqual(chart['node_area'], '')
-
-    def test_missing_progress_rows_drop_only_the_node_series(self):
-        _record([(0, 1200), (1, 1190), (2, 1210)], nodes=False)
-        ProgressSnapshot.objects.create(bucket_start=T0, engine_nodes_total=5)
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['node_area'], '')
-        self.assertEqual(chart['nodes_last_h'], '')
-        self.assertIn('5 engine nodes', chart['columns'][0]['title'])
-        self.assertNotIn('engine nodes', chart['columns'][1]['title'])
-
-
-class CacheTests(TestCase):
-
-    def setUp(self):
-        super().setUp()
-        # These tests read the hourly record point by point; the daily
-        # median has its own tests (DailyMedianTests).
-        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_a_warm_entry_costs_no_query(self):
-        _record([(0, 1200), (1, 1190)])
-        first = root_chart.chart()
-        self.assertIsNotNone(first)
-        alias = settings.ATOMICDB_DATABASE_ALIAS
-        with CaptureQueriesContext(connections[alias]) as atomicdb_queries, \
-                CaptureQueriesContext(connections['default']) as default_queries:
-            again = root_chart.chart()
-        self.assertEqual(again, first)
-        self.assertEqual(len(atomicdb_queries), 0)
-        self.assertEqual(len(default_queries), 0)
-
-    def test_a_new_hour_shows_once_the_entry_is_refreshed(self):
-        _record([(0, 1200), (1, 1190)])
-        self.assertEqual(root_chart.chart()['latest_h'], '+11.90')
-        _record([(2, 1250)])
-        self.assertEqual(root_chart.chart()['latest_h'], '+11.90')
-        self.assertEqual(root_chart.chart(force=True)['latest_h'], '+12.50')
-
-
-class RootsPageTests(TestCase):
-
-    def _home(self):
-        response = self.client.get('/atomicdb/roots/')
-        self.assertEqual(response.status_code, 200)
-        return response.content.decode()
-
-    def test_no_history_no_chart(self):
-        self.assertNotIn('class="root-chart"', self._home())
-
-    def test_the_chart_is_drawn_inline(self):
-        _record([(0, 1244), (24, 1156)])
-        body = self._home()
-        self.assertIn('class="root-chart"', body)
-        self.assertIn('Start position eval', body)
-        self.assertIn('+11.56', body)
-        self.assertIn('26 Oct 2026', body)
-        svg = re.search(r'<svg[^>]*class="root-chart-svg".*?</svg>', body, re.S)
-        self.assertIsNotNone(svg)
-        self.assertIn('preserveAspectRatio="none"', svg.group(0))
-        self.assertEqual(svg.group(0).count('class="rc-hit"'), 2)
-        # Nothing on it loads anything from elsewhere.
-        self.assertNotIn('<script', svg.group(0))
-
-    def test_the_home_page_has_no_chart(self):
-        _record([(0, 1244), (24, 1156)])
-        body = self.client.get('/atomicdb/').content.decode()
-        self.assertNotIn('class="root-chart"', body)
-
-
-class DailyMedianTests(TestCase):
-
-    def test_one_point_per_day_at_the_median_of_the_day(self):
-        # Day 0: 1100, 1300, 1200 -> median 1200; day 1: 900, 1000 -> 950.
-        _record([(0, 1100), (1, 1300), (2, 1200), (24, 900), (25, 1000)])
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['step_hours'], 24)
-        self.assertEqual(len(chart['columns']), 2)
-        self.assertIn('+12.00', chart['columns'][0]['title'])
-        self.assertIn('median of the day', chart['columns'][0]['title'])
-        self.assertIn('+9.50', chart['columns'][1]['title'])
-
-    def test_the_headline_keeps_the_real_first_and_latest_readings(self):
-        _record([(0, 1100), (1, 1300), (24, 900), (25, 1000)])
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['first_h'], '+11.00')
-        self.assertEqual(chart['latest_h'], '+10.00')
+def _nodes(hours_totals):
+    for hours, total in hours_totals:
+        ProgressSnapshot.objects.create(bucket_start=T0 + timedelta(hours=hours),
+                                        engine_nodes_total=total)
 
 
 def _steps(path):
@@ -208,28 +54,18 @@ def _steps(path):
     return corners
 
 
-class BestRecordTests(TestCase):
+class MeasureTests(TestCase):
 
-    def setUp(self):
-        super().setUp()
-        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_no_record_no_line(self):
-        _record([(0, 1200), (10, 1190)])
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['best_line'], '')
-        self.assertEqual(chart['best_h'], '')
-        self.assertNotIn('best record', chart['columns'][0]['title'])
+    def test_no_record_no_chart(self):
+        MainLineSnapshot.objects.create(bucket_start=T0, value=1200)
+        self.assertEqual(root_chart.measure(NOW), {'chart': None})
 
     def test_a_step_per_record_held_to_the_right_edge(self):
-        _record([(0, 1100), (5, 1150), (10, 1120)])
-        _best(-3, 1180)        # before the chart: where the line begins
-        _best(5, 1200)
-        _best(8, 1210)
-        chart = root_chart.measure()['chart']
-        corners = _steps(chart['best_line'])
+        _best(0, 1257)
+        _best(5, 1258)
+        _best(8, 1275)
+        chart = root_chart.measure(NOW)['chart']
+        corners = _steps(chart['line'])
         self.assertEqual(corners[0][0], 0)
         self.assertEqual(corners[-1][0], root_chart.WIDTH)
         xs = [x for x, _y in corners]
@@ -239,48 +75,161 @@ class BestRecordTests(TestCase):
         self.assertEqual(ys, sorted(ys, reverse=True))
         # The second record steps up exactly at its time, half way across.
         self.assertIn(root_chart.WIDTH / 2, xs)
-        self.assertEqual(chart['best_h'], '+12.10')
-        # The axis stretches to the record: 1100..1210 -> 11.00..12.25.
-        self.assertEqual(chart['ticks'][0]['label'], '+12.25')
-        # Each hover column names the record in force at its time.
-        self.assertIn('best record +11.80', chart['columns'][0]['title'])
-        self.assertIn('best record +12.00', chart['columns'][1]['title'])
-        self.assertIn('best record +12.10', chart['columns'][2]['title'])
+        for _x, y in corners:
+            self.assertGreaterEqual(y, root_chart.INSET)
+            self.assertLessEqual(y, root_chart.HEIGHT - root_chart.INSET)
+        # The latest record is drawn highest.
+        self.assertEqual(corners[-1][1], root_chart.INSET)
 
-    def test_a_record_after_the_last_point_lands_on_the_edge(self):
-        _record([(0, 1100), (10, 1120)])
-        _best(11, 1250)
-        chart = root_chart.measure()['chart']
-        corners = _steps(chart['best_line'])
-        self.assertEqual(corners[0][0], root_chart.WIDTH)
-        self.assertEqual(chart['best_h'], '+12.50')
+    def test_the_axis_fits_the_records_with_a_readable_step(self):
+        _best(0, 1257)
+        _best(5, 1275)
+        chart = root_chart.measure(NOW)['chart']
+        # 12.57..12.75 snaps outward to 12.55..12.75 in steps of 0.05.
+        self.assertEqual([t['label'] for t in chart['ticks']],
+                         ['+12.75', '+12.70', '+12.65', '+12.60', '+12.55'])
+        self.assertEqual(chart['ticks'][0]['top'], '5')     # INSET / HEIGHT
+        self.assertEqual(len(chart['gridlines']), 5)
+
+    def test_a_wide_range_takes_a_wider_step(self):
+        _best(0, 1100)
+        _best(5, 1290)
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual([t['label'] for t in chart['ticks']],
+                         ['+13.00', '+12.50', '+12.00', '+11.50', '+11.00'])
+
+    def test_a_single_record_still_has_an_axis(self):
+        _best(0, 1260)
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual([t['label'] for t in chart['ticks']],
+                         ['+12.61', '+12.60', '+12.59'])
+        self.assertEqual(_steps(chart['line'])[-1][0], root_chart.WIDTH)
+
+    def test_the_header_is_the_latest_record_and_its_time(self):
+        _best(0, 1257)
+        latest = _best(8, 1275)
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual(chart['record_h'], '+12.75')
+        self.assertEqual(chart['record_at'], latest.at)
+        self.assertEqual(chart['first_at'], T0)
+        self.assertEqual(chart['last_at'], NOW)
+        self.assertEqual(chart['records'], 2)
+
+    def test_each_step_has_a_hover_title_with_its_time_and_value(self):
+        _best(0, 1257)
+        _best(5, 1275)
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual([c['title'] for c in chart['columns']],
+                         ['2026-10-26 15:00 UTC · record +12.57',
+                          '2026-10-26 20:00 UTC · record +12.75'])
+        self.assertEqual([c['x'] for c in chart['columns']], ['0', '300'])
+        self.assertEqual([c['w'] for c in chart['columns']], ['300', '300'])
 
     def test_a_proven_record_does_not_stretch_the_axis(self):
-        _record([(0, 1100), (10, 1120)])
         _best(2, 1150)
         _best(6, 10000, 'WHITE_WIN')
-        chart = root_chart.measure()['chart']
-        self.assertEqual(chart['ticks'][0]['label'], '+11.50')
-        self.assertEqual(chart['best_h'], 'White win')
-        for _x, y in _steps(chart['best_line']):
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual(chart['ticks'][0]['label'], '+11.51')
+        self.assertEqual(chart['record_h'], 'White win')
+        self.assertIn('record White win', chart['columns'][1]['title'])
+        for _x, y in _steps(chart['line']):
             self.assertGreaterEqual(y, root_chart.INSET)
             self.assertLessEqual(y, root_chart.HEIGHT - root_chart.INSET)
 
     def test_another_position_is_not_the_start(self):
-        _record([(0, 1100), (10, 1120)])
         RootRecord.objects.create(key='x' * 64, value=1300, at=T0)
-        self.assertEqual(root_chart.measure()['chart']['best_line'], '')
+        self.assertEqual(root_chart.measure(NOW), {'chart': None})
+
+    def test_engine_nodes_are_a_faint_area_over_the_same_window(self):
+        _best(0, 1257)
+        _nodes([(-5, 1), (0, 2_000_000_000), (5, 3_000_000_000),
+                (10, 4_000_000_000)])
+        chart = root_chart.measure(NOW)['chart']
+        self.assertTrue(chart['node_area'].startswith('M0 '))
+        self.assertTrue(chart['node_area'].endswith(' Z'))
+        self.assertEqual(chart['nodes_last_h'], '4.00B')
+
+    def test_under_two_node_rows_no_area(self):
+        _best(0, 1257)
+        _nodes([(5, 3_000_000_000)])
+        chart = root_chart.measure(NOW)['chart']
+        self.assertEqual(chart['node_area'], '')
+        self.assertEqual(chart['nodes_last_h'], '')
+
+    def test_a_long_node_history_is_downsampled(self):
+        _best(0, 1257)
+        hours = root_chart.MAX_POINTS * 3
+        _nodes([(h, h + 1) for h in range(hours)])
+        chart = root_chart.measure(T0 + timedelta(hours=hours - 1))['chart']
+        # The area is the points plus two corners on the bottom edge.
+        points = chart['node_area'].count(' L') + 1 - 2
+        self.assertLessEqual(points, root_chart.MAX_POINTS + 1)
+        self.assertEqual(chart['nodes_last_h'], f'{hours:,}')
 
     def test_the_cache_key_moved_with_the_shape(self):
-        self.assertEqual(root_chart.CACHE_KEY, 'atomicdb.root-chart.v3')
+        self.assertEqual(root_chart.CACHE_KEY, 'atomicdb.root-chart.v4')
 
-    def test_the_page_draws_it_with_a_legend_entry(self):
-        _record([(0, 1244), (24, 1156)])
+
+class CacheTests(TestCase):
+
+    def test_a_warm_entry_costs_no_query(self):
+        _best(0, 1257)
+        _nodes([(0, 1), (1, 2)])
+        first = root_chart.chart()
+        self.assertIsNotNone(first)
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as atomicdb_queries, \
+                CaptureQueriesContext(connections['default']) as default_queries:
+            again = root_chart.chart()
+        self.assertEqual(again, first)
+        self.assertEqual(len(atomicdb_queries), 0)
+        self.assertEqual(len(default_queries), 0)
+
+    def test_a_new_record_shows_once_the_entry_is_refreshed(self):
+        _best(0, 1257)
+        self.assertEqual(root_chart.chart()['record_h'], '+12.57')
         _best(1, 1275)
-        body = self.client.get('/atomicdb/roots/').content.decode()
-        self.assertIn('class="rc-best"', body)
-        self.assertIn('best record +12.75', body)
-        self.assertIn('class="root-chart-legend"', body)
+        self.assertEqual(root_chart.chart()['record_h'], '+12.57')
+        self.assertEqual(root_chart.chart(force=True)['record_h'], '+12.75')
+
+
+class RootsPageTests(TestCase):
+
+    def _roots(self):
+        response = self.client.get('/atomicdb/roots/')
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_no_record_no_chart(self):
+        MainLineSnapshot.objects.create(bucket_start=T0, value=1200)
+        self.assertNotIn('class="root-chart"', self._roots())
+
+    def test_the_chart_is_drawn_inline(self):
+        _best(0, 1257)
+        _best(24, 1275)
+        _nodes([(0, 1_000_000_000), (24, 2_000_000_000)])
+        body = self._roots()
+        self.assertIn('class="root-chart"', body)
+        self.assertIn('Start position best record', body)
+        self.assertIn('+12.75', body)
+        self.assertIn('set 27 Oct 2026 15:00 UTC', body)
+        svg = re.search(r'<svg[^>]*class="root-chart-svg".*?</svg>', body, re.S)
+        self.assertIsNotNone(svg)
+        self.assertIn('preserveAspectRatio="none"', svg.group(0))
+        self.assertIn('class="rc-best"', svg.group(0))
+        self.assertIn('class="rc-nodes"', svg.group(0))
+        self.assertNotIn('rc-line', svg.group(0))
+        self.assertEqual(svg.group(0).count('class="rc-hit"'), 2)
+        self.assertIn('record +12.57', svg.group(0))
+        # Nothing on it loads anything from elsewhere.
+        self.assertNotIn('<script', svg.group(0))
+        self.assertIn('engine nodes, 2.00B now', body)
+        self.assertNotIn('median', body)
+
+    def test_the_home_page_has_no_chart(self):
+        _best(0, 1257)
+        body = self.client.get('/atomicdb/').content.decode()
+        self.assertNotIn('class="root-chart"', body)
 
 
 class CaptureBestRecordTests(TestCase):
