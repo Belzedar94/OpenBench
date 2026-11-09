@@ -2501,30 +2501,53 @@ table.fleet-workers .qline {
   white-space: normal;
 }
 
-/* One collapsed line per account (cz_eclipsia, 9-Nov-2026): the name, then
-   the facts and what its workers are doing.  The line wraps as whole pieces,
-   so at 375px the name keeps its own line and nothing scrolls sideways.
-   Opened, the account's table sits under its line. */
-.fleet-owner {
+/* One collapsed row per account (cz_eclipsia, 9-Nov-2026), drawn like a
+   row of the worker table: three cells, the same padding, rule and header
+   type, with fixed shares so the rows of every account line up.  Opened,
+   the account's facts and its table sit under its row. */
+.fleet-owners {
+  font-size: .92rem;
+}
+
+.fleet-owner-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
   border-bottom: 1px solid var(--border);
 }
 
+.fleet-owner-row > span {
+  min-width: 0;
+  padding: .45rem .6rem;
+  overflow-wrap: anywhere;
+}
+
+.fleet-owner-head {
+  color: var(--ink-muted);
+  font-size: .75rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
 .fleet-owner > summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: .15rem .9rem;
+  position: relative;
   margin: 0;
-  padding: .55rem .2rem;
   color: var(--ink);
-  font-size: .92rem;
+  font-size: inherit;
   list-style: none;
 }
 
-/* The same drawn arrow as the milestone lines, turning when opened. */
+.fleet-owner > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* The same drawn arrow as the milestone lines, in the first cell's
+   padding, turning when opened. */
 .fleet-owner > summary::before {
-  display: inline-block;
-  align-self: center;
+  position: absolute;
+  top: .8rem;
+  left: 0;
   border-width: .28rem 0 .28rem .4rem;
   border-style: solid;
   border-color: transparent transparent transparent var(--ink-muted);
@@ -2537,21 +2560,36 @@ table.fleet-workers .qline {
   transform: rotate(90deg);
 }
 
-.fleet-owner > summary::-webkit-details-marker {
-  display: none;
-}
-
 .fleet-owner-name {
   font-weight: 600;
-  overflow-wrap: anywhere;
 }
 
 .fleet-owner-work {
+  margin: .45rem .6rem .3rem;
   font-size: .85rem;
 }
 
 .fleet-owner > .contrib-scroll {
   margin: 0 0 .7rem;
+}
+
+@media (max-width: 560px) {
+  .fleet-owners {
+    font-size: .84rem;
+  }
+
+  .fleet-owner-row > span {
+    padding: .4rem .25rem;
+  }
+
+  .fleet-owner-row > span:first-child {
+    padding-left: .7rem;
+  }
+
+  .fleet-owner-head {
+    font-size: .7rem;
+    letter-spacing: 0;
+  }
 }
 
 /* Ranking de contribuidores de la portada.  Dos ventanas de la MISMA pregunta,
