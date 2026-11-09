@@ -24,6 +24,13 @@ other pages publish one at a time:
   next nor drops to zero between tasks, and a faster machine shows within
   the hour.  The contributor page shows the same figure.
 
+THE ROWS GO BY ACCOUNT (cz_eclipsia, 9-Nov-2026).  One collapsed line per
+account says how many of its workers are live, their threads, their speed
+added up and how many are searching, split into requests and the server's
+own picks; opening it shows that account's rows.  The accounts with the most
+workers come first, then the fastest.  The groups are built from the rows
+above, so they cost no read of their own.
+
 Nothing else of the ping reaches the template: the rows are built here from
 named fields, and the lease token never leaves the database (the query only
 asks whether there is one).
@@ -182,9 +189,12 @@ def present(now=None):
     pings = live_pings(now)
     tasks = _task_rows(current_tasks(pings, now), now)
     speed = contributors.speeds(pings, now)
-    workers = []
+    workers, groups = [], {}
     for ping in pings:
         nps, searches = speed.get((ping.user, ping.machine), (0, 0))
+        group = groups.setdefault(ping.user, {'owner': ping.user, 'nps': 0.0,
+                                              'workers': []})
+        group['nps'] += nps
         workers.append({
             'machine': ping.machine,
             'owner': ping.user,
@@ -199,9 +209,11 @@ def present(now=None):
             'searches': searches,
             'searches_h': views._human(searches),
         })
+        group['workers'].append(workers[-1])
     threads = sum(worker['threads'] for worker in workers)
     return {
         'workers': workers,
+        'groups': _groups(groups.values()),
         'count': len(workers),
         'busy': sum(1 for worker in workers if worker['task']),
         'accounts': len({worker['owner'] for worker in workers}),
@@ -209,6 +221,38 @@ def present(now=None):
         'threads_h': views._human(threads),
         'live_minutes': metrics.LIVE_SECONDS // 60,
     }
+
+
+def _groups(groups):
+    """One summary per account, the most workers first, then the fastest.
+
+    Within an account the rows keep the order of ``live_pings``.
+    """
+    presented = []
+    for group in groups:
+        rows = group['workers']
+        tasks = [row['task'] for row in rows if row['task']]
+        threads = sum(row['threads'] for row in rows)
+        requests = sum(1 for task in tasks if task['source'] == USER)
+        presented.append({
+            'owner': group['owner'],
+            'workers': rows,
+            'count': len(rows),
+            'threads': threads,
+            'threads_h': views._human(threads),
+            'nps': group['nps'],
+            'nps_h': (views._human(round(group['nps']))
+                      if group['nps'] else ''),
+            'busy': len(tasks),
+            'requests': requests,
+            'server': len(tasks) - requests,
+            'idle': len(rows) - len(tasks),
+        })
+    presented.sort(key=lambda group: (-group['count'], -group['nps'],
+                                      group['owner'].lower(), group['owner']))
+    for group in presented:
+        del group['nps']
+    return presented
 
 
 def workers_page(request):
