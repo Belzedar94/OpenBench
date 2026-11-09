@@ -249,7 +249,7 @@ class RowTests(TestCase):
         _ping('idle-box', 'alice')
 
         self.assertIsNone(_rows()[0]['task'])
-        self.assertIn('idle-box 8 threads · 1024 MB hash · Linux alice '
+        self.assertIn('idle-box 8 threads · 1024 MB hash · Linux '
                       'no search finished in the last hour between tasks',
                       _reading(_page()))
 
@@ -260,6 +260,78 @@ class RowTests(TestCase):
 
         self.assertEqual([row['machine'] for row in _rows()],
                          ['zed', 'box#2', 'box#10'])
+
+
+class GroupTests(TestCase):
+    """One collapsed line per account, opened to its own rows."""
+
+    def _groups(self):
+        return active_workers.present()['groups']
+
+    def test_each_account_is_one_group_with_its_own_rows(self):
+        _ping('box#10', 'bob')
+        _ping('box#2', 'bob')
+        _ping('zed', 'alice')
+
+        groups = self._groups()
+
+        self.assertEqual(
+            [(g['owner'], [w['machine'] for w in g['workers']])
+             for g in groups],
+            [('bob', ['box#2', 'box#10']), ('alice', ['zed'])])
+        self.assertEqual(sum(g['count'] for g in groups),
+                         active_workers.present()['count'])
+
+    def test_the_most_workers_first_then_the_fastest(self):
+        _ping('a1', 'alice')
+        _ping('b1', 'bob')
+        _ping('b2', 'bob')
+        _ping('c1', 'carol')
+        _done('c1', 'carol', nodes=60_000_000, seconds=60)
+        _done('a1', 'alice', nodes=6_000_000, seconds=60)
+
+        self.assertEqual([g['owner'] for g in self._groups()],
+                         ['bob', 'carol', 'alice'])
+
+    def test_the_line_adds_up_threads_speed_and_searches(self):
+        _busy('w1', 'alice', 'a2a3', source=USER, requested_by='bob')
+        _busy('w2', 'alice', 'b2b3', source=AUTO)
+        _busy('w3', 'alice', 'c2c3', source=AUTO)
+        _ping('w4', 'alice', threads=16)
+        _done('w1', 'alice', nodes=60_000_000, seconds=60)
+        _done('w2', 'alice', nodes=30_000_000, seconds=60)
+
+        group = self._groups()[0]
+
+        self.assertEqual(
+            {key: group[key] for key in ('count', 'threads_h', 'nps_h',
+                                         'busy', 'requests', 'server',
+                                         'idle')},
+            {'count': 4, 'threads_h': '40', 'nps_h': views._human(1_500_000),
+             'busy': 3, 'requests': 1, 'server': 2, 'idle': 1})
+        self.assertIn(
+            f'alice 4 workers · 40 threads · {views._human(1_500_000)} '
+            'nodes/s 3 searching (1 request, 2 server) · 1 between tasks',
+            _reading(_page()))
+
+    def test_an_account_with_nothing_running_is_between_tasks(self):
+        _ping('idle-box', 'alice', threads=1)
+
+        body = _reading(_page())
+
+        self.assertIn('alice 1 worker · 1 thread between tasks', body)
+        self.assertNotIn('nodes/s', body.split('between tasks')[0])
+
+    def test_groups_are_collapsed_details_linking_the_profile(self):
+        _ping('a1', 'alice')
+        _ping('b1', 'bob')
+
+        raw = _page()
+
+        self.assertEqual(raw.count('<details class="fleet-owner">'), 2)
+        self.assertNotIn('<details class="fleet-owner" open', raw)
+        summary = raw[raw.index('<summary>'):raw.index('</summary>')]
+        self.assertIn('href="/atomicdb/user/alice/"', summary)
 
 
 class SpeedTests(TestCase):
@@ -275,7 +347,7 @@ class SpeedTests(TestCase):
         # 150M nodes in 25 s, not the 7.5M mean of the two ratios: each
         # search weighs by the time it ran.
         self.assertEqual((row['nps_h'], row['searches']), ('6.0M', 2))
-        self.assertIn('alice 6.0M nodes/s 2 searches in the last hour',
+        self.assertIn('Linux 6.0M nodes/s 2 searches in the last hour',
                       _reading(_page()))
 
     def test_only_the_workers_own_searches_of_the_hour_count(self):
@@ -295,14 +367,14 @@ class SpeedTests(TestCase):
                   for row in _rows()}
 
         self.assertEqual(speeds, {'alice': ('6.0M', 1), 'bob': ('1.0M', 1)})
-        self.assertIn('bob 1.0M nodes/s 1 search in the last hour',
+        self.assertIn('bob 1 worker · 8 threads · 1.0M nodes/s between tasks',
                       _reading(_page()))
 
     def test_a_worker_with_no_search_finished_lately_says_so(self):
         _ping('new-box', 'alice')
 
         self.assertEqual(_rows()[0]['nps_h'], '')
-        self.assertIn('alice no search finished in the last hour between '
+        self.assertIn('Linux no search finished in the last hour between '
                       'tasks',
                       _reading(_page()))
 

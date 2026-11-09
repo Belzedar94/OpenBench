@@ -9,14 +9,20 @@
 <p class="dim">{{ count }} worker{{ count|pluralize }} from {{ accounts }}
   account{{ accounts|pluralize }} · {{ threads_h }} thread{{ threads|pluralize }} ·
   {{ busy }} searching right now</p>
+{% for g in groups %}
+<details class="fleet-owner">
+  <summary>
+    <span class="fleet-owner-name"><a href="/atomicdb/user/{{ g.owner|urlencode }}/">{{ g.owner }}</a></span>
+    <span class="fleet-owner-facts">{{ g.count }} worker{{ g.count|pluralize }} · {{ g.threads_h }} thread{{ g.threads|pluralize }}{% if g.nps_h %} · <span title="Nodes per second of these workers added up, over the searches each finished in the last hour">{{ g.nps_h }} nodes/s</span>{% endif %}</span>
+    <span class="fleet-owner-work dim">{% if g.busy %}{{ g.busy }} searching{% if g.requests and g.server %} ({{ g.requests }} request{{ g.requests|pluralize }}, {{ g.server }} server){% elif g.requests %} (request{{ g.requests|pluralize }}){% else %} (server){% endif %}{% if g.idle %} · {{ g.idle }} between tasks{% endif %}{% else %}between tasks{% endif %}</span>
+  </summary>
 <div class="contrib-scroll">
 <table class="contrib-workers fleet-workers">
-  <tr><th>Worker</th><th>Owner</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th title="The position it is searching right now">Searching</th><th title="Who asked for that search">Requester</th></tr>
-  {% for w in workers %}
+  <tr><th>Worker</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th title="The position it is searching right now">Searching</th><th title="Who asked for that search">Requester</th></tr>
+  {% for w in g.workers %}
   <tr>
     <td><strong>{{ w.machine }}</strong>
       <div class="dim contrib-spec">{% if w.threads %}{{ w.threads }} thread{{ w.threads|pluralize }}{% else %}threads not reported{% endif %}{% if w.hash_mb %} · {{ w.hash_mb }} MB hash{% endif %}{% if w.os %} · {{ w.os }}{% endif %}</div></td>
-    <td><a href="/atomicdb/user/{{ w.owner|urlencode }}/">{{ w.owner }}</a></td>
     <td>{% if w.nps_h %}{{ w.nps_h }} nodes/s
       <div class="dim contrib-spec">{{ w.searches_h }} search{{ w.searches|pluralize:"es" }} in the last hour</div>{% else %}<span class="dim">no search finished in the last hour</span>{% endif %}</td>
     {% if w.task %}
@@ -32,6 +38,8 @@
   {% endfor %}
 </table>
 </div>
+</details>
+{% endfor %}
 {% else %}
 <p class="dim">No worker has sent a heartbeat in the last {{ live_minutes }}
   minutes.</p>

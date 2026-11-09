@@ -2501,6 +2501,59 @@ table.fleet-workers .qline {
   white-space: normal;
 }
 
+/* One collapsed line per account (cz_eclipsia, 9-Nov-2026): the name, then
+   the facts and what its workers are doing.  The line wraps as whole pieces,
+   so at 375px the name keeps its own line and nothing scrolls sideways.
+   Opened, the account's table sits under its line. */
+.fleet-owner {
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-owner > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .15rem .9rem;
+  margin: 0;
+  padding: .55rem .2rem;
+  color: var(--ink);
+  font-size: .92rem;
+  list-style: none;
+}
+
+/* The same drawn arrow as the milestone lines, turning when opened. */
+.fleet-owner > summary::before {
+  display: inline-block;
+  align-self: center;
+  border-width: .28rem 0 .28rem .4rem;
+  border-style: solid;
+  border-color: transparent transparent transparent var(--ink-muted);
+  content: "";
+  transform-origin: 40% 50%;
+  transition: transform .12s ease;
+}
+
+.fleet-owner[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.fleet-owner > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fleet-owner-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.fleet-owner-work {
+  font-size: .85rem;
+}
+
+.fleet-owner > .contrib-scroll {
+  margin: 0 0 .7rem;
+}
+
 /* Ranking de contribuidores de la portada.  Dos ventanas de la MISMA pregunta,
    una al lado de la otra, y casi todo prestado de lo que ya existe:
    .contrib-scroll para el desbordamiento, .contrib-sub para el titulillo y
