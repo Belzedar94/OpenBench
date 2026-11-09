@@ -1,6 +1,7 @@
 """The start position's eval chart on the home page (§ root_chart)."""
 
 import re
+from unittest import mock
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
 from django.db import connections
@@ -25,6 +26,14 @@ def _record(hours_values, nodes=True):
 
 
 class MeasureTests(TestCase):
+
+    def setUp(self):
+        super().setUp()
+        # These tests read the hourly record point by point; the daily
+        # median has its own tests (DailyMedianTests).
+        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_no_chart_under_two_points(self):
         self.assertEqual(root_chart.measure(), {'chart': None})
@@ -93,6 +102,14 @@ class MeasureTests(TestCase):
 
 class CacheTests(TestCase):
 
+    def setUp(self):
+        super().setUp()
+        # These tests read the hourly record point by point; the daily
+        # median has its own tests (DailyMedianTests).
+        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_a_warm_entry_costs_no_query(self):
         _record([(0, 1200), (1, 1190)])
         first = root_chart.chart()
@@ -136,3 +153,22 @@ class HomePageTests(TestCase):
         self.assertEqual(svg.group(0).count('class="rc-hit"'), 2)
         # Nothing on it loads anything from elsewhere.
         self.assertNotIn('<script', svg.group(0))
+
+
+class DailyMedianTests(TestCase):
+
+    def test_one_point_per_day_at_the_median_of_the_day(self):
+        # Day 0: 1100, 1300, 1200 -> median 1200; day 1: 900, 1000 -> 950.
+        _record([(0, 1100), (1, 1300), (2, 1200), (24, 900), (25, 1000)])
+        chart = root_chart.measure()['chart']
+        self.assertEqual(chart['step_hours'], 24)
+        self.assertEqual(len(chart['columns']), 2)
+        self.assertIn('+12.00', chart['columns'][0]['title'])
+        self.assertIn('median of the day', chart['columns'][0]['title'])
+        self.assertIn('+9.50', chart['columns'][1]['title'])
+
+    def test_the_headline_keeps_the_real_first_and_latest_readings(self):
+        _record([(0, 1100), (1, 1300), (24, 900), (25, 1000)])
+        chart = root_chart.measure()['chart']
+        self.assertEqual(chart['first_h'], '+11.00')
+        self.assertEqual(chart['latest_h'], '+10.00')
