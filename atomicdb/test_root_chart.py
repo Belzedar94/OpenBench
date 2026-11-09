@@ -1,19 +1,32 @@
 """The start position's eval chart on the roots page (§ root_chart)."""
 
+import io
 import re
 from unittest import mock
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
+from django.core.management import call_command
 from django.db import connections
 from django.conf import settings
 from django.test.utils import CaptureQueriesContext
 
-from . import root_chart
-from .models import MainLineSnapshot, ProgressSnapshot
+from . import logic, root_chart, roots
+from .models import (MainLineSnapshot, ProgressSnapshot, RootExtreme,
+                     RootRecord)
 from .testing import TestCase
 
 UTC = datetime_timezone.utc
 T0 = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+
+
+def _start_key():
+    return logic.key_of(logic.start_fen())
+
+
+def _best(hours, value, status='UNKNOWN'):
+    return RootRecord.objects.create(key=_start_key(), value=value,
+                                     status=status,
+                                     at=T0 + timedelta(hours=hours))
 
 
 def _record(hours_values, nodes=True):
@@ -177,3 +190,171 @@ class DailyMedianTests(TestCase):
         chart = root_chart.measure()['chart']
         self.assertEqual(chart['first_h'], '+11.00')
         self.assertEqual(chart['latest_h'], '+10.00')
+
+
+def _steps(path):
+    """``[(x, y)]`` corners of a step path ``M x y H x V y ... H x``."""
+    x = y = None
+    corners = []
+    for token in re.findall(r'[MHV][^MHV]+', path):
+        op, args = token[0], token[1:].split()
+        if op == 'M':
+            x, y = float(args[0]), float(args[1])
+        elif op == 'H':
+            x = float(args[0])
+        else:
+            y = float(args[0])
+        corners.append((x, y))
+    return corners
+
+
+class BestRecordTests(TestCase):
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(root_chart, 'DAY_HOURS', 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_no_record_no_line(self):
+        _record([(0, 1200), (10, 1190)])
+        chart = root_chart.measure()['chart']
+        self.assertEqual(chart['best_line'], '')
+        self.assertEqual(chart['best_h'], '')
+        self.assertNotIn('best record', chart['columns'][0]['title'])
+
+    def test_a_step_per_record_held_to_the_right_edge(self):
+        _record([(0, 1100), (5, 1150), (10, 1120)])
+        _best(-3, 1180)        # before the chart: where the line begins
+        _best(5, 1200)
+        _best(8, 1210)
+        chart = root_chart.measure()['chart']
+        corners = _steps(chart['best_line'])
+        self.assertEqual(corners[0][0], 0)
+        self.assertEqual(corners[-1][0], root_chart.WIDTH)
+        xs = [x for x, _y in corners]
+        self.assertEqual(xs, sorted(xs))
+        # Up the screen at each record, never down.
+        ys = [y for _x, y in corners]
+        self.assertEqual(ys, sorted(ys, reverse=True))
+        # The second record steps up exactly at its time, half way across.
+        self.assertIn(root_chart.WIDTH / 2, xs)
+        self.assertEqual(chart['best_h'], '+12.10')
+        # The axis stretches to the record: 1100..1210 -> 11.00..12.25.
+        self.assertEqual(chart['ticks'][0]['label'], '+12.25')
+        # Each hover column names the record in force at its time.
+        self.assertIn('best record +11.80', chart['columns'][0]['title'])
+        self.assertIn('best record +12.00', chart['columns'][1]['title'])
+        self.assertIn('best record +12.10', chart['columns'][2]['title'])
+
+    def test_a_record_after_the_last_point_lands_on_the_edge(self):
+        _record([(0, 1100), (10, 1120)])
+        _best(11, 1250)
+        chart = root_chart.measure()['chart']
+        corners = _steps(chart['best_line'])
+        self.assertEqual(corners[0][0], root_chart.WIDTH)
+        self.assertEqual(chart['best_h'], '+12.50')
+
+    def test_a_proven_record_does_not_stretch_the_axis(self):
+        _record([(0, 1100), (10, 1120)])
+        _best(2, 1150)
+        _best(6, 10000, 'WHITE_WIN')
+        chart = root_chart.measure()['chart']
+        self.assertEqual(chart['ticks'][0]['label'], '+11.50')
+        self.assertEqual(chart['best_h'], 'White win')
+        for _x, y in _steps(chart['best_line']):
+            self.assertGreaterEqual(y, root_chart.INSET)
+            self.assertLessEqual(y, root_chart.HEIGHT - root_chart.INSET)
+
+    def test_another_position_is_not_the_start(self):
+        _record([(0, 1100), (10, 1120)])
+        RootRecord.objects.create(key='x' * 64, value=1300, at=T0)
+        self.assertEqual(root_chart.measure()['chart']['best_line'], '')
+
+    def test_the_cache_key_moved_with_the_shape(self):
+        self.assertEqual(root_chart.CACHE_KEY, 'atomicdb.root-chart.v3')
+
+    def test_the_page_draws_it_with_a_legend_entry(self):
+        _record([(0, 1244), (24, 1156)])
+        _best(1, 1275)
+        body = self.client.get('/atomicdb/roots/').content.decode()
+        self.assertIn('class="rc-best"', body)
+        self.assertIn('best record +12.75', body)
+        self.assertIn('class="root-chart-legend"', body)
+
+
+class CaptureBestRecordTests(TestCase):
+
+    def _extreme(self, value, at, status='UNKNOWN'):
+        RootExtreme.objects.update_or_create(key=_start_key(), defaults=dict(
+            best_value=value, best_status=status, best_at=at,
+            worst_value=0, worst_status='UNKNOWN', worst_at=T0,
+            last_value=value, last_status=status, changed_at=at, since=T0))
+
+    def test_nothing_without_an_extremes_row(self):
+        self.assertIsNone(roots.capture_best_record())
+        self.assertFalse(RootRecord.objects.exists())
+
+    def test_a_new_best_is_appended_once_with_its_own_time(self):
+        at = T0 + timedelta(minutes=17)
+        self._extreme(1270, at)
+        row = roots.capture_best_record()
+        self.assertEqual((row.value, row.at), (1270, at))
+        self.assertIsNone(roots.capture_best_record())
+        self._extreme(1275, at + timedelta(hours=3))
+        self.assertEqual(roots.capture_best_record().value, 1275)
+        self.assertEqual(list(RootRecord.objects.values_list('value',
+                                                             flat=True)),
+                         [1270, 1275])
+
+    def test_the_hourly_command_records_it(self):
+        self._extreme(1270, T0)
+        out = io.StringIO()
+        call_command('capture_atomicdb_progress', stdout=out)
+        self.assertIn('start record: 1270', out.getvalue())
+        self.assertEqual(RootRecord.objects.count(), 1)
+
+    def test_records_are_append_only(self):
+        row = _best(0, 1200)
+        row.value = 1300
+        with self.assertRaises(Exception):
+            row.save()
+        with self.assertRaises(Exception):
+            row.delete()
+
+
+class SeedRootRecordsTests(TestCase):
+
+    LOG = (
+        '2026-11-01T22:02:59+00:00 host systemd[1]: Starting feed...\n'
+        '2026-11-01T23:36:54+00:00 host python[1]: evento [record] New record'
+        ' for the start position: +12.57\n'
+        '2026-11-02T02:22:23+00:00 host python[2]: evento [record] New record'
+        ' for the start position: +12.58\n'
+        '2026-11-09T15:50:12+00:00 host python[3]: evento [record] New record'
+        ' for the start position: +12.75\n'
+    )
+
+    def _seed(self, *args):
+        out = io.StringIO()
+        with mock.patch('sys.stdin', io.StringIO(self.LOG)):
+            call_command('seed_root_records', *args, stdout=out)
+        return out.getvalue()
+
+    def test_seeds_from_the_log_once(self):
+        self.assertIn('added 3 of 3', self._seed())
+        rows = list(RootRecord.objects.values_list('at', 'value'))
+        self.assertEqual(rows[0], (datetime(2026, 11, 1, 23, 36, 54,
+                                            tzinfo=UTC), 1257))
+        self.assertEqual([v for _at, v in rows], [1257, 1258, 1275])
+        self.assertIn('added 0 of 3', self._seed())
+
+    def test_a_value_the_capture_already_has_is_skipped(self):
+        exact = datetime(2026, 11, 9, 15, 43, tzinfo=UTC)
+        RootRecord.objects.create(key=_start_key(), value=1275, at=exact)
+        self.assertIn('added 2 of 3', self._seed())
+        self.assertEqual(RootRecord.objects.get(value=1275).at, exact)
+
+    def test_dry_run_writes_nothing(self):
+        self.assertIn('would add 3 of 3', self._seed('--dry-run'))
+        self.assertFalse(RootRecord.objects.exists())

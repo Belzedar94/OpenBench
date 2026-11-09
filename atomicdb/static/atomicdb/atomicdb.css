@@ -3369,6 +3369,13 @@ html[data-board="custom"] cg-board {
   stroke-linecap: round;
 }
 
+.rc-best {
+  fill: none;
+  stroke: var(--hot);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
 .rc-hit {
   fill: transparent;
 }
@@ -3390,8 +3397,16 @@ html[data-board="custom"] cg-board {
 
 .root-chart-legend {
   display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .1rem .8rem;
+}
+
+.rc-key {
+  display: inline-flex;
   align-items: center;
   gap: .35rem;
+  white-space: nowrap;
 }
 
 .root-chart-legend i {
@@ -3406,8 +3421,12 @@ html[data-board="custom"] cg-board {
   background: var(--accent);
 }
 
+.rc-swatch-best {
+  height: 2px !important;
+  background: var(--hot);
+}
+
 .rc-swatch-nodes {
-  margin-left: .4rem;
   background: var(--draw);
   opacity: .45;
 }

@@ -12,13 +12,14 @@
       role="img" aria-label="Start position eval from {{ c.first_at|date:"j M Y" }} to {{ c.last_at|date:"j M Y" }}: {{ c.first_h }} then {{ c.latest_h }}">
       {% for y in c.gridlines %}<line class="rc-grid" x1="0" x2="{{ c.width }}" y1="{{ y }}" y2="{{ y }}" vector-effect="non-scaling-stroke"/>{% endfor %}
       {% if c.node_area %}<path class="rc-nodes" d="{{ c.node_area }}"/>{% endif %}
+      {% if c.best_line %}<path class="rc-best" d="{{ c.best_line }}" vector-effect="non-scaling-stroke"/>{% endif %}
       <path class="rc-line" d="{{ c.line }}" vector-effect="non-scaling-stroke"/>
       {% for col in c.columns %}<rect class="rc-hit" x="{{ col.x }}" y="0" width="{{ col.w }}" height="{{ c.height }}"><title>{{ col.title }}</title></rect>{% endfor %}
     </svg>
   </div>
   <div class="root-chart-foot dim">
     <span>{{ c.first_at|date:"j M" }}</span>
-    {% if c.node_area %}<span class="root-chart-legend"><i class="rc-swatch-line"></i>eval <i class="rc-swatch-nodes"></i>engine nodes, {{ c.nodes_last_h }} now</span>{% endif %}
+    {% if c.node_area or c.best_line %}<span class="root-chart-legend"><span class="rc-key"><i class="rc-swatch-line"></i>eval</span>{% if c.best_line %} <span class="rc-key"><i class="rc-swatch-best"></i>best record {{ c.best_h }}</span>{% endif %}{% if c.node_area %} <span class="rc-key"><i class="rc-swatch-nodes"></i>engine nodes, {{ c.nodes_last_h }} now</span>{% endif %}</span>{% endif %}
     <span>{{ c.last_at|date:"j M H:i" }} UTC</span>
   </div>
 </section>

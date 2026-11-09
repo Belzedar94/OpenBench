@@ -225,9 +225,15 @@ class Command(BaseCommand):
         # After the progress row has committed, and in its own transactions:
         # whatever happens to the main line cannot cost this hour's counters.
         line, line_created, folded, added = roots.capture(now=now)
+        # After the extremes are current: the record is read from them.
+        record = roots.capture_best_record()
         payload = _payload(snapshot, created)
         payload['main_line'] = _main_line_payload(line, line_created)
         payload['extremes'] = _extremes_payload(folded, added)
+        payload['start_record'] = (
+            None if record is None
+            else {'value': record.value, 'status': record.status,
+                  'at': record.at.isoformat()})
         if options['json']:
             self.stdout.write(json.dumps(
                 payload, sort_keys=True, separators=(',', ':')))
@@ -251,3 +257,7 @@ class Command(BaseCommand):
                 f"changed={extremes['changed']}")
         if added:
             self.stdout.write(f'watch list: added {added}')
+        if record is not None:
+            self.stdout.write(
+                f'start record: {record.value} {record.status} '
+                f'at {record.at.isoformat()}')

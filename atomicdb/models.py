@@ -1273,6 +1273,43 @@ class RootExtreme(models.Model):
                 f'worst={self.worst_value}')
 
 
+class RootRecord(models.Model):
+    """Each best value the start position has reached, one row per record.
+
+    ``RootExtreme`` keeps only the current best.  The hourly capture
+    (``roots.capture_best_record``) compares that best with the newest row
+    here and appends one when it differs, stamped with ``best_at``, the
+    instant the trigger saw the value.  Two records inside the same hour
+    leave only the second.  Rows older than this table were seeded once from
+    the log of the record announcements (``seed_root_records``), stamped with
+    the announcement time, up to 15 minutes after the value.
+
+    Append-only, like ``MainLineSnapshot``.
+    """
+
+    key = models.CharField(max_length=64)
+    value = models.IntegerField()
+    status = models.CharField(max_length=10, default='UNKNOWN')
+    at = models.DateTimeField()
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['key', 'at']
+        indexes = [models.Index(fields=['key', 'at'],
+                                name='atomicdb_rootrec_key_at')]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('RootRecord rows are append-only')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('RootRecord rows are append-only')
+
+    def __str__(self):
+        return f'{self.key[:12]} record={self.value} at {self.at.isoformat()}'
+
+
 class WatchedKey(models.Model):
     """A position ``RootExtreme`` follows.  The trigger asks this table.
 

@@ -36,7 +36,7 @@ from django.utils import timezone
 from . import community_names, ingest, logic, openings
 from .database import atomic, connection
 from .models import (Edge, MainLineSnapshot, OpeningNameSuggestion, Position,
-                     RootExtreme, WatchedKey)
+                     RootExtreme, RootRecord, WatchedKey)
 
 logger = logging.getLogger(__name__)
 
@@ -402,10 +402,33 @@ def capture_main_line(*, now=None):
             bucket_start=bucket, defaults=line)
 
 
+def capture_best_record():
+    """Append the start position's best to ``RootRecord`` when it is new.
+
+    New means different from the newest row: a best that went down is a
+    reset ``RootExtreme`` row, and the history says so too.  The row is
+    stamped with ``best_at``.  ``None`` when nothing was appended.
+    """
+    key = logic.key_of(logic.start_fen())
+    best = (RootExtreme.objects.filter(key=key)
+            .values_list('best_value', 'best_status', 'best_at').first())
+    if best is None:
+        return None
+    value, status, at = best
+    with atomic():
+        newest = (RootRecord.objects.select_for_update().filter(key=key)
+                  .order_by('-at').values_list('value', 'status').first())
+        if newest == (value, status):
+            return None
+        return RootRecord.objects.create(key=key, value=value,
+                                         status=status, at=at)
+
+
 def capture(*, now=None):
     """The hourly part of the capture command: the main line, what is
     missing from the watch list, and the extremes where no trigger keeps
-    them.  ``(snapshot, created, folded, added)``.
+    them.  ``(snapshot, created, folded, added)``.  The start position's
+    record (``capture_best_record``) is the command's next step.
 
     The main line goes first, in its own transaction: whatever happens to
     the watch list cannot cost this hour's line.
