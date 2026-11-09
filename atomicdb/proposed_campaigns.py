@@ -115,7 +115,7 @@ def measure_all(*, cap=MAX_NODES, log=None):
     run that dies half way leaves the page as complete as it was.  Never
     writes to the database.
     """
-    proposed = list(Campaign.objects.filter(state=Campaign.CState.PROPOSED)
+    proposed = list(Campaign.objects.filter(state__in=(Campaign.CState.PROPOSED, Campaign.CState.PAUSED))
                     .order_by('id'))
     ids = {campaign.id for campaign in proposed}
     rows = {cid: row for cid, row in stored().items() if cid in ids}
