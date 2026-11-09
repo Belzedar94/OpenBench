@@ -3286,3 +3286,143 @@ html[data-board="custom"] cg-board {
   padding: .15rem .5rem;
   cursor: pointer;
 }
+
+/* The start position's eval over time (home page).  The SVG stretches to
+   the box and its strokes do not scale; the labels are HTML, so they keep
+   their size on a phone. */
+.root-chart {
+  margin: 0 0 1.4rem;
+  padding: .8rem 1rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  min-width: 0;
+}
+
+.root-chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .2rem 1rem;
+  margin-bottom: .5rem;
+}
+
+.root-chart-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.root-chart-now {
+  margin-left: .35rem;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.root-chart-sub {
+  font-size: .8rem;
+}
+
+.root-chart-plot {
+  position: relative;
+  padding-left: 3.4rem;
+}
+
+.root-chart-ticks {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3rem;
+  font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.root-chart-ticks span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.root-chart-svg {
+  display: block;
+  width: 100%;
+  height: 150px;
+  overflow: visible;
+}
+
+.rc-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.rc-nodes {
+  fill: var(--draw);
+  opacity: .14;
+}
+
+.rc-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.rc-hit {
+  fill: transparent;
+}
+
+.rc-hit:hover {
+  fill: var(--ink);
+  fill-opacity: .06;
+}
+
+.root-chart-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: .2rem .8rem;
+  margin-top: .35rem;
+  padding-left: 3.4rem;
+  font-size: .72rem;
+}
+
+.root-chart-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+}
+
+.root-chart-legend i {
+  display: inline-block;
+  width: .9rem;
+  height: .5rem;
+  border-radius: 2px;
+}
+
+.rc-swatch-line {
+  height: 2px !important;
+  background: var(--accent);
+}
+
+.rc-swatch-nodes {
+  margin-left: .4rem;
+  background: var(--draw);
+  opacity: .45;
+}
+
+@media (max-width: 480px) {
+  .root-chart {
+    padding: .7rem .7rem .5rem;
+  }
+
+  .root-chart-svg {
+    height: 120px;
+  }
+
+  .root-chart-legend {
+    order: 3;
+    flex-basis: 100%;
+  }
+}

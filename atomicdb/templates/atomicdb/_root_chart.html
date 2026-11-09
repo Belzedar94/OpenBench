@@ -1,0 +1,25 @@
+{% with c=root_chart %}
+<section class="root-chart" aria-labelledby="root-chart-title">
+  <div class="root-chart-head">
+    <h2 id="root-chart-title">Start position eval <span class="root-chart-now">{{ c.latest_h }}</span></h2>
+    <div class="root-chart-sub dim">White's side, in pawns · {{ c.first_h }} on {{ c.first_at|date:"j M Y" }}</div>
+  </div>
+  <div class="root-chart-plot">
+    <div class="root-chart-ticks dim" aria-hidden="true">
+      {% for t in c.ticks %}<span style="top:{{ t.top }}%">{{ t.label }}</span>{% endfor %}
+    </div>
+    <svg class="root-chart-svg" viewBox="0 0 {{ c.width }} {{ c.height }}" preserveAspectRatio="none"
+      role="img" aria-label="Start position eval from {{ c.first_at|date:"j M Y" }} to {{ c.last_at|date:"j M Y" }}: {{ c.first_h }} then {{ c.latest_h }}">
+      {% for y in c.gridlines %}<line class="rc-grid" x1="0" x2="{{ c.width }}" y1="{{ y }}" y2="{{ y }}" vector-effect="non-scaling-stroke"/>{% endfor %}
+      {% if c.node_area %}<path class="rc-nodes" d="{{ c.node_area }}"/>{% endif %}
+      <path class="rc-line" d="{{ c.line }}" vector-effect="non-scaling-stroke"/>
+      {% for col in c.columns %}<rect class="rc-hit" x="{{ col.x }}" y="0" width="{{ col.w }}" height="{{ c.height }}"><title>{{ col.title }}</title></rect>{% endfor %}
+    </svg>
+  </div>
+  <div class="root-chart-foot dim">
+    <span>{{ c.first_at|date:"j M" }}</span>
+    {% if c.node_area %}<span class="root-chart-legend"><i class="rc-swatch-line"></i>eval <i class="rc-swatch-nodes"></i>engine nodes, {{ c.nodes_last_h }} now</span>{% endif %}
+    <span>{{ c.last_at|date:"j M H:i" }} UTC</span>
+  </div>
+</section>
+{% endwith %}
