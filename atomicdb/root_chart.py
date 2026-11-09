@@ -22,12 +22,14 @@ from django.utils import timezone
 from . import metrics, roots
 from .models import MainLineSnapshot, ProgressSnapshot
 
-CACHE_KEY = 'atomicdb.root-chart.v1'
+CACHE_KEY = 'atomicdb.root-chart.v2'
 # The source changes once an hour; ten minutes keeps a new hour visible soon
 # without measuring per visitor.
 FRESH_SECONDS = 600
 TTL_SECONDS = 6 * 3600
 MAX_POINTS = 180
+# One point per UTC-aligned day of the record (see ``_slots``).
+DAY_HOURS = 24
 # SVG user units.  The drawing is stretched (``preserveAspectRatio="none"``)
 # and its strokes do not scale, so only the proportions matter.
 WIDTH = 600
@@ -39,15 +41,26 @@ VALUE_STEP = 25
 
 
 def _slots(rows, first, step_hours):
-    """The last row of each ``step_hours`` slot, in order."""
-    points = []
+    """One point per ``step_hours`` slot: the MEDIAN value of the slot, placed
+    at its last row.  Hour to hour the headline value swings with whichever
+    line was just searched (Torom: "very noisy with every change"); the
+    median of a day is the level it sits at."""
+    slots = []
     for at, value in rows:
         slot = int((at - first).total_seconds() // 3600) // step_hours
-        if points and points[-1][0] == slot:
-            points[-1] = (slot, at, value)
+        if slots and slots[-1][0] == slot:
+            slots[-1][1] = at
+            slots[-1][2].append(value)
         else:
-            points.append((slot, at, value))
-    return [(at, value) for _slot, at, value in points]
+            slots.append([slot, at, [value]])
+    points = []
+    for _slot, at, values in slots:
+        values = sorted(values)
+        mid = len(values) // 2
+        median = (values[mid] if len(values) % 2
+                  else (values[mid - 1] + values[mid]) / 2)
+        points.append((at, median))
+    return points
 
 
 def _axis(values):
@@ -77,7 +90,7 @@ def measure(now=None):
     first, last = rows[0][0], rows[-1][0]
     span = (last - first).total_seconds()
     span_hours = span / 3600
-    step_hours = max(1, math.ceil((span_hours + 1) / MAX_POINTS))
+    step_hours = max(DAY_HOURS, math.ceil((span_hours + 1) / MAX_POINTS))
     points = _slots(rows, first, step_hours)
     nodes = dict(ProgressSnapshot.objects
                  .filter(bucket_start__gte=first, bucket_start__lte=last)
@@ -117,7 +130,8 @@ def measure(now=None):
         left = 0.0 if i == 0 else (xs[i - 1] + xs[i]) / 2
         right = WIDTH if i == len(points) - 1 else (xs[i] + xs[i + 1]) / 2
         title = (f'{at:%Y-%m-%d %H:%M} UTC · '
-                 f'{roots.value_text(value)}')
+                 f'{roots.value_text(round(value))}'
+                 + (' (median of the day)' if step_hours >= DAY_HOURS else ''))
         if at in nodes:
             title += f' · {_human(nodes[at])} engine nodes'
         columns.append({'x': _fmt(left), 'w': _fmt(max(right - left, 0.1)),
@@ -126,7 +140,9 @@ def measure(now=None):
     mid = (lo + hi) / 2
     ticks = [{'label': roots.value_text(round(v)),
               'top': _fmt(y_of(v) / HEIGHT * 100)} for v in (hi, mid, lo)]
-    latest_at, latest = points[-1]
+    latest_at = points[-1][0]
+    # The headline numbers are the real first and latest readings, not medians.
+    latest = rows[-1][1]
     return {'chart': {
         'width': WIDTH, 'height': HEIGHT,
         'line': _path(line),
@@ -137,7 +153,7 @@ def measure(now=None):
         'gridlines': [_fmt(y_of(v)) for v in (hi, mid, lo)],
         'first_at': first, 'last_at': latest_at,
         'latest_h': roots.value_text(latest),
-        'first_h': roots.value_text(points[0][1]),
+        'first_h': roots.value_text(rows[0][1]),
         'step_hours': step_hours,
     }}
 
