@@ -1082,11 +1082,52 @@ def api_lease(request):
             last_seen=timezone.now(),
         )
 
+    lines = _lease_lines(batch)
     return JsonResponse({'tasks': [
         {'id': t.id, 'fen': t.position.fen, 'budget_nodes': t.budget_nodes,
          'multipv': t.multipv, 'searchmoves': _live_moves(t),
-         'lease_token': t.lease_token}
+         'lease_token': t.lease_token,
+         # For the worker's console only, and additive: a worker that does
+         # not know these keys never reads them (§ ``_lease_lines``).
+         'source': t.source, 'requested_by': t.requested_by,
+         'line': lines.get(t.id, '')}
         for t in batch]})
+
+
+def _lease_lines(batch):
+    """``{task id: SAN line from the root}`` for the tasks just leased.
+
+    The worker prints it when the search starts, so its owner can see which
+    position is being analysed (cz_eclipsia, 9-Nov-2026).  It is the line the
+    workers page shows for the same task: the declared route when it still
+    holds, otherwise the canonical lineage.
+
+    A lease never waits for it.  The labels come from the caches the home
+    page and the workers page fill; a label that is not cached yet is walked
+    in the background and left out here, and the worker then prints the FEN.
+    Nor can it fail a lease: the tasks are already committed to this worker,
+    and a broken label must not turn that into an error response.
+    """
+    if not batch:
+        return {}
+    try:
+        routes = _route_labels_many(
+            [(t.route, t.position_id) for t in batch if t.route], wait=False)
+        plain = [t.position_id for t in batch
+                 if (t.route, t.position_id) not in routes]
+        labels = _line_labels_many(plain, wait=False) if plain else {}
+        lines = {}
+        for t in batch:
+            routed = routes.get((t.route, t.position_id))
+            if routed is not None:
+                lines[t.id] = routed[1]
+            elif t.position_id in labels:
+                lines[t.id] = labels[t.position_id][1]
+        return lines
+    except Exception:                   # noqa: BLE001
+        logger.exception('atomicdb: no lease line for tasks %s',
+                         [t.id for t in batch])
+        return {}
 
 
 @csrf_exempt
@@ -4120,8 +4161,12 @@ def _lineage_from_payload(payload):
     return top, [dict(step) for step in payload['line']]
 
 
-def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
+def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES, wait=True):
     """Cached front door to the reverse walk.
+
+    ``wait=False`` answers from the cache only and walks what is missing in
+    the background (§ revalidate.resolve_many), so a key with no entry yet
+    is absent from the answer; without a cache it answers nothing.
 
     Everything the explorer shows about the CURRENT position — evals, move
     rows, proof numbers — stays uncached and is read fresh on every render.
@@ -4140,6 +4185,8 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
         return {}
     budget = min(max_plies, LINEAGE_SEARCH_MAX_PLIES)
     if LINEAGE_CACHE_SECONDS <= 0:
+        if not wait:
+            return {}
         return _walk_lines_to_root(keys, max_plies=max_plies)
 
     def compute(wanted):
@@ -4158,7 +4205,7 @@ def _lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
         stale_seconds=LINEAGE_STALE_SECONDS,
         ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
         lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
-        name='atomicdb-lineage-refresh')
+        name='atomicdb-lineage-refresh', wait=wait)
 
     # Se reconstruye desde el payload TAMBIEN en el fallo, para que un acierto
     # y un fallo sean la misma forma de objeto.
@@ -4198,7 +4245,7 @@ def _opening_name_for_keys(keys, names=None):
     return '' if match is None else str(match['name'])
 
 
-def _line_readings_many(keys, preview_plies=10, opening=True):
+def _line_readings_many(keys, preview_plies=10, opening=True, wait=True):
     """``{key: (preview, full, opening)}`` from ONE walk per lineage.
 
     All three come out of the same breadcrumb on purpose.  A row that prints
@@ -4212,7 +4259,7 @@ def _line_readings_many(keys, preview_plies=10, opening=True):
     a trip to the shared cache, and a page that only prints the line has no
     reason to pay it.
     """
-    lineages = _lines_to_root(keys)
+    lineages = _lines_to_root(keys, wait=wait)
     names = (community_names.approved_map() if opening and lineages
              else None)
     readings = {}
@@ -4229,10 +4276,10 @@ def _line_readings_many(keys, preview_plies=10, opening=True):
     return readings
 
 
-def _line_labels_many(keys, preview_plies=10):
+def _line_labels_many(keys, preview_plies=10, wait=True):
     return {key: reading[:2] for key, reading
             in _line_readings_many(keys, preview_plies,
-                                   opening=False).items()}
+                                   opening=False, wait=wait).items()}
 
 
 def _line_labels(key, preview_plies=10):
@@ -4258,7 +4305,7 @@ def _route_label_cache_key(route, target_key, preview_plies):
             f'.{preview_plies}.{target_key}.{digest}')
 
 
-def _route_labels_many(pairs, preview_plies=10):
+def _route_labels_many(pairs, preview_plies=10, wait=True):
     """``{(route, target_key): (preview, full, opening)}``, varias de golpe.
 
     ESTO ERA EL GASTO MAYOR DE LA PORTADA.  Cada fila de "Now analyzing" y de
@@ -4289,6 +4336,8 @@ def _route_labels_many(pairs, preview_plies=10):
     if not wanted:
         return {}
     if LINEAGE_CACHE_SECONDS <= 0:
+        if not wait:
+            return {}
         names = community_names.approved_map()
         return {pair: labels for pair in wanted
                 if (labels := _walk_route_labels(*pair, preview_plies,
@@ -4313,7 +4362,7 @@ def _route_labels_many(pairs, preview_plies=10):
         stale_seconds=LINEAGE_STALE_SECONDS,
         ttl_seconds=LINEAGE_CACHE_TTL_SECONDS,
         lock_seconds=LINEAGE_REFRESH_LOCK_SECONDS,
-        name='atomicdb-routelabel-refresh')
+        name='atomicdb-routelabel-refresh', wait=wait)
     return {pair: tuple(payloads[pair]) for pair in wanted
             if pair in payloads}
 

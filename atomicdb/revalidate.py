@@ -129,7 +129,7 @@ def revalidate(cache_keys, tokens, compute, *, ttl_seconds, lock_seconds,
 
 
 def resolve_many(cache_keys, compute, *, fresh_seconds, stale_seconds,
-                 ttl_seconds, lock_seconds, name):
+                 ttl_seconds, lock_seconds, name, wait=True):
     """``{token: payload}`` de todo lo que se pudo resolver, sin esperas.
 
     ``cache_keys`` es ``{token: clave de cache}``.  El token es lo que maneja
@@ -151,6 +151,11 @@ def resolve_many(cache_keys, compute, *, fresh_seconds, stale_seconds,
       recalcula sincrono, porque el tope existe para el caso en que los
       refrescos fallen EN CADENA, y ahi es preferible esperar a afirmar algo
       de hace media hora.
+
+    ``wait=False`` is for a caller that must never pay the walk, such as the
+    worker lease, which only wants the line for a console message: what is
+    missing is computed in the background, like a stale entry, and left out
+    of the answer.
     """
     if not cache_keys:
         return {}
@@ -170,7 +175,9 @@ def resolve_many(cache_keys, compute, *, fresh_seconds, stale_seconds,
         if age > fresh_seconds:
             stale.append(token)
 
-    if missing:
+    if missing and not wait:
+        stale.extend(missing)
+    elif missing:
         fresh = compute(missing)
         if fresh:
             store_many(cache_keys, fresh, ttl_seconds)

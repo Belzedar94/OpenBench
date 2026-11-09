@@ -15,6 +15,9 @@ y cada analisis lo toma entre tareas (--no-engine-update lo desactiva).
 
 Stopping it (Ctrl+C, SIGTERM, Ctrl+Break or closing its console window) ends
 the engines and hands the tasks it holds back to the server at once.
+
+Each search prints one line when it starts and one when it ends, plus a
+short status every few minutes; -v/--verbose adds the server's raw replies.
 """
 
 import argparse
@@ -53,7 +56,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026102701
+ATOMICDB_WORKER_BUILD = 2026110901
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -634,6 +637,8 @@ def _heartbeat_loop(server, auth, current_task, stop):
                     .raise_for_status()
         except requests.RequestException as exc:
             print(f'heartbeat skipped: {exc}', flush=True)
+        if SESSION.due():
+            _say(SESSION.status_line())
 
 
 def _request_tasks(server, auth, lease_session):
@@ -2350,8 +2355,261 @@ def probe_tb(tb, fen):
     return wdl, dtz
 
 
+# ---------------------------------------------------------------------------
+# What the console says
+# ---------------------------------------------------------------------------
+#
+# One line when a search starts (which position, how deep, for whom) and one
+# when it ends (how long, how fast, what it found, what the server did with
+# it).  The server's raw reply and its timings are for debugging and only
+# print with --verbose (cz_eclipsia, 9-Nov-2026: "nobody knows what the dict
+# means, and you can't see which position is being analysed").
+#
+# Everything here is plain ASCII: a console on Windows, or a log file a
+# launcher redirects the output to, may not be able to encode anything else,
+# and a print that raises would end the job that called it.
+
+# How often the one-line session status prints, at most.  It rides on the
+# analysis heartbeat, which wakes once a minute.
+STATUS_INTERVAL_SECONDS = 5 * 60
+# Longest line of moves printed when a search starts; a longer one keeps its
+# head and its tail.
+CONSOLE_LINE_CHARS = 100
+ATOMIC_START_BOARD = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w'
+_ASCII_SUBSTITUTES = {
+    '\u2026': '...', '\u2265': '>=', '\u2264': '<=', '\u00b7': '-',
+    '\u2013': '-', '\u2014': '-', '\u2212': '-', '\u00a0': ' ',
+}
+# What a definitive rejection of a submit means, in words.
+_SUBMIT_REJECTIONS = {
+    'not-leased': 'not accepted: the task is no longer leased '
+                  '(it expired, or was cancelled)',
+    'not-your-lease': 'not accepted: the task was handed to another worker',
+    'stale-lease': 'not accepted: this lease expired and the task was '
+                   'handed out again',
+    'engine-not-accepted': 'not accepted: the server does not take results '
+                           'from this engine build',
+    'bad credentials': 'not accepted: wrong username or password',
+}
+_TB_RESULTS = {2: 'win', 1: 'win, but drawn by the 50-move rule',
+               0: 'draw', -1: 'loss, but drawn by the 50-move rule',
+               -2: 'loss'}
+
+
+def ascii_text(text):
+    """``text`` with nothing a console could fail to encode."""
+    text = str(text)
+    for char, substitute in _ASCII_SUBSTITUTES.items():
+        text = text.replace(char, substitute)
+    return text.encode('ascii', 'replace').decode('ascii')
+
+
+def human_count(n, decimals=None):
+    """128000000 -> '128M', 2190000 -> '2.19M'; ``decimals`` fixes them."""
+    n = float(n or 0)
+    for size, unit in ((1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k')):
+        if abs(n) >= size:
+            value = n / size
+            break
+    else:
+        value, unit = n, ''
+    if decimals is None:
+        if value == int(value):
+            return f'{int(value)}{unit}'
+        decimals = 2 if abs(value) < 10 else 1 if abs(value) < 100 else 0
+    return f'{value:.{decimals}f}{unit}'
+
+
+def human_duration(seconds):
+    """58.5 -> '58.5s', 3725 -> '1h02m', 90061 -> '1d01h'."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f'{seconds:.1f}s'
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f'{minutes}m{int(seconds % 60):02d}s'
+    hours = minutes // 60
+    if hours < 24:
+        return f'{hours}h{minutes % 60:02d}m'
+    return f'{hours // 24}d{hours % 24:02d}h'
+
+
+def short_fen(fen):
+    """The board and the side to move: what tells a position apart."""
+    return ' '.join(str(fen).split()[:2])
+
+
+def shorten_line(line, limit=CONSOLE_LINE_CHARS):
+    """A long line of moves keeps its opening and where it ends up."""
+    line = ascii_text(line).strip()
+    if len(line) <= limit:
+        return line
+    head = line[:limit * 2 // 5].rsplit(' ', 1)[0]
+    tail = line[-(limit * 3 // 5):].split(' ', 1)[-1]
+    return f'{head} ... {tail}'
+
+
+def task_position(task):
+    """The moves from the start position, or else the FEN.
+
+    ``line`` comes from servers that know it (an older one never sends it,
+    and a newer one leaves it empty when the line is not ready yet).  An
+    empty line on the start position is the start position.
+    """
+    line = str(task.get('line') or '').strip()
+    if line:
+        return shorten_line(line)
+    if short_fen(task.get('fen', '')) == ATOMIC_START_BOARD:
+        return 'the start position'
+    return 'FEN ' + ascii_text(short_fen(task.get('fen', '')))
+
+
+def task_requester(task, username):
+    """Who the search is for, or '' when the server does not say."""
+    source = task.get('source')
+    if not source:
+        return ''
+    if source != 'USER':
+        return 'server work'
+    requested_by = str(task.get('requested_by') or '')
+    if not requested_by:
+        return 'an anonymous request'
+    if requested_by.lower() == str(username or '').lower():
+        return 'your request'
+    return f"{ascii_text(requested_by)}'s request"
+
+
+def slot_prefix(slot, jobs):
+    """'[1] ' when several jobs share the console, nothing with one."""
+    return f'[{slot}] ' if jobs > 1 else ''
+
+
+def format_task_start(task, username, slot=0, jobs=1):
+    """The line that says what a search is about to look at."""
+    parts = [f'searching {task_position(task)}',
+             f"{human_count(task.get('budget_nodes', 0))} nodes"]
+    restricted = task.get('searchmoves') or ()
+    if restricted:
+        parts.append(f'{len(restricted)} root move'
+                     + ('' if len(restricted) == 1 else 's'))
+    requester = task_requester(task, username)
+    if requester:
+        parts.append(requester)
+    return slot_prefix(slot, jobs) + ' | '.join(parts)
+
+
+def format_eval(line):
+    """'+1.23', '-0.40' or '#5' / '#-3', from White's point of view."""
+    if line.get('mate') is not None:
+        return f"#{line['mate']}"
+    if line.get('eval_cp') is None:
+        return '?'
+    return f"{line['eval_cp'] / 100:+.2f}"
+
+
+def describe_submit_reply(status, body):
+    """What the server did with a result, in words."""
+    if not isinstance(body, dict):
+        return f'unexpected server answer (HTTP {status})'
+    if 200 <= status < 300 and body.get('ok'):
+        if body.get('dup'):
+            return 'already delivered earlier; nothing more to do'
+        summary = body.get('summary')
+        if not isinstance(summary, dict):
+            return 'sent'
+        if summary.get('ingest_error'):
+            return ('sent, but the server could not add it to the tree: '
+                    + ascii_text(summary['ingest_error']))
+        if summary.get('queued'):
+            return 'sent, queued for the tree'
+        return 'sent, added to the tree'
+    error = str(body.get('error') or '')
+    if error in _SUBMIT_REJECTIONS:
+        detail = body.get('detail')
+        return _SUBMIT_REJECTIONS[error] + (
+            f' ({ascii_text(detail)})' if detail else '')
+    if error.startswith('malformed'):
+        return 'rejected as malformed: ' + ascii_text(
+            error.partition(':')[2].strip() or error)
+    return (f'not accepted (HTTP {status})'
+            + (f': {ascii_text(error)}' if error else ''))
+
+
+def format_task_done(elapsed, nodes, lines, outcome, slot=0, jobs=1):
+    """The line that says how a search went and where its result went."""
+    parts = [f'done in {human_duration(elapsed)}']
+    if nodes:
+        parts.append(f'{human_count(nodes, 1)} nodes')
+        if elapsed > 0:
+            parts.append(f'{human_count(nodes / elapsed, 2)} nodes/s')
+    if lines:
+        best = lines[0]
+        parts.append(f"best move {best.get('move', '?')} "
+                     f'({format_eval(best)})')
+    parts.append(outcome)
+    return slot_prefix(slot, jobs) + ' | '.join(parts)
+
+
+def format_tb_done(wdl, dtz, outcome, slot=0, jobs=1):
+    """The line for a position the tablebases answered without a search."""
+    result = _TB_RESULTS.get(wdl, f'wdl {wdl}')
+    parts = [f'tablebase: {result} for the side to move'
+             + (f' (dtz {dtz})' if dtz is not None else ''), outcome]
+    return slot_prefix(slot, jobs) + ' | '.join(parts)
+
+
+class SessionStats:
+    """What this worker did since it started, for the periodic status."""
+
+    def __init__(self, clock=time.monotonic, interval=STATUS_INTERVAL_SECONDS):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.started = clock()
+        self.interval = interval
+        self._next_report = self.started + interval
+        self.tasks = 0
+        self.nodes = 0
+        self.seconds = 0.0
+
+    def record(self, nodes, seconds):
+        with self._lock:
+            self.tasks += 1
+            if nodes > 0 and seconds > 0:
+                self.nodes += nodes
+                self.seconds += seconds
+
+    def status_line(self):
+        with self._lock:
+            tasks, nodes, seconds = self.tasks, self.nodes, self.seconds
+        parts = [f'status: up {human_duration(self._clock() - self.started)}',
+                 f"{tasks} task{'' if tasks == 1 else 's'} done"]
+        if seconds > 0:
+            parts.append(f'average {human_count(nodes / seconds, 2)} nodes/s')
+        return ' | '.join(parts)
+
+    def due(self):
+        """True at most once per ``interval``, whichever thread asks."""
+        with self._lock:
+            now = self._clock()
+            if now < self._next_report:
+                return False
+            self._next_report = now + self.interval
+            return True
+
+
+SESSION = SessionStats()
+
+
+def _reply_body(response):
+    """The JSON body of a server reply, or None when it has none."""
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
 def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
-                   owns_updates, engines=None, held=None):
+                   owns_updates, engines=None, held=None, jobs=1):
     """One independent leaseholder: its own engine, lease and heartbeat.
 
     A slot is a worker in every sense the server cares about.  It has its own
@@ -2373,6 +2631,9 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     still print ``bestmove``, and what it searched by then is cut short.
     """
     machine = auth.get('machine', '')
+    username = auth.get('username', '')
+    verbose = getattr(a, 'verbose', False)
+    prefix = slot_prefix(slot, jobs)
     engine_path = a.engine
     generation = 0
     eng = Engine(engine_path, threads=engine_threads, hash_mb=a.hash,
@@ -2462,6 +2723,12 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 break          # still held: the stop hands it back
             current_task.start(t['id'], t.get('lease_token', ''))
             t0 = time.time()
+            print(format_task_start(t, username, slot, jobs), flush=True)
+            if verbose:
+                print(f"[{slot}] task {t['id']}: fen {t['fen']} | multipv "
+                      f"{t['multipv']} | searchmoves "
+                      f"{' '.join(t.get('searchmoves') or ()) or '-'}",
+                      flush=True)
             wdl, dtz = probe_tb(tb, t['fen'])
             if wdl is not None:
                 payload = {
@@ -2476,10 +2743,19 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     rr = _submit_until_definitive(a.S, payload, t['id'])
                     if held is not None:
                         held.drop('analysis', machine, t['id'])
-                    print(f"[{slot}] task {t['id']} TB wdl={wdl} dtz={dtz} -> "
-                          f"{rr.json().get('summary')}", flush=True)
+                    body = _reply_body(rr)
+                    SESSION.record(0, 0)
+                    print(format_tb_done(
+                        wdl, dtz, describe_submit_reply(rr.status_code, body),
+                        slot, jobs), flush=True)
+                    if verbose:
+                        raw = (body.get('summary', body)
+                               if isinstance(body, dict) else rr.text[:200])
+                        print(f"[{slot}] task {t['id']} TB wdl={wdl} "
+                              f"dtz={dtz} -> {raw}", flush=True)
                 except Exception as e:
-                    print(f'[{slot}] tb submit error: {e}', flush=True)
+                    print(f'{prefix}tablebase result not sent: '
+                          f'{ascii_text(e)}', flush=True)
                 current_task.clear()
                 continue
             try:
@@ -2488,6 +2764,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     t.get('searchmoves'),
                     progress=current_task.progress,
                 )
+                search_seconds = time.time() - t0
             except Exception as e:
                 # Nothing is submitted: the task comes back by itself when
                 # its lease expires, instead of a truncated search being
@@ -2564,11 +2841,19 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 }, t['id'])
                 if held is not None:
                     held.drop('analysis', machine, t['id'])
-                s = rr.json().get('summary', rr.json())
+                body = _reply_body(rr)
+                s = (body.get('summary', body) if isinstance(body, dict)
+                     else f'HTTP {rr.status_code}: {rr.text[:200]}')
+                outcome = describe_submit_reply(rr.status_code, body)
             except Exception as e:
                 s = f'submit error: {e}'
-            print(f"[{slot}] task {t['id']} ({t['budget_nodes']}n, "
-                  f"{time.time()-t0:.1f}s) -> {s}", flush=True)
+                outcome = f'not sent: {ascii_text(e)}'
+            SESSION.record(searched, search_seconds)
+            print(format_task_done(search_seconds, searched, lines, outcome,
+                                   slot, jobs), flush=True)
+            if verbose:
+                print(f"[{slot}] task {t['id']} ({t['budget_nodes']}n, "
+                      f"{time.time()-t0:.1f}s) -> {s}", flush=True)
             current_task.clear()
         if a.once:
             break
@@ -2625,6 +2910,9 @@ def main():
                     help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
                          'when --syzygy was not given')
     ap.add_argument('--once', action='store_true')
+    ap.add_argument('-v', '--verbose', action='store_true',
+                    help="also print the server's raw replies and timings, "
+                         'for debugging')
     ap.add_argument('--no-auto-update', action='store_true',
                     help='do not update this file from the official server')
     ap.add_argument('--no-engine-update', action='store_true',
@@ -2776,7 +3064,7 @@ def main():
                     _analysis_slot(0, a, tb,
                                    dict(auth_base, machine=machines[0]),
                                    provenance, slot_threads[0], stop,
-                                   owns_updates=False, held=held)
+                                   owns_updates=False, held=held, jobs=1)
             except KeyboardInterrupt:
                 graceful.run()
                 raise
@@ -2795,7 +3083,7 @@ def main():
                            threads=slot_threads[slot]),
                       provenance, slot_threads[slot], stop, slot == 0,
                       engines),
-                kwargs={'held': held},
+                kwargs={'held': held, 'jobs': jobs},
                 name=f'atomicdb-analysis-{slot}')
             for slot in range(jobs)]
         graceful.threads = threads
