@@ -54,7 +54,7 @@ contradicting the other.
 from datetime import timedelta
 
 from django.db.models import (BigIntegerField, Case, CharField, F,
-                              IntegerField, Q, Sum, Value, When, Window)
+                              IntegerField, Max, Q, Sum, Value, When, Window)
 from django.utils import timezone
 
 from .ingest import notification_deserved
@@ -62,6 +62,7 @@ from .models import AnalysisTask, WorkerPing
 
 PENDING = AnalysisTask.TState.PENDING
 LEASED = AnalysisTask.TState.LEASED
+COMPLETED = AnalysisTask.TState.COMPLETED
 USER = AnalysisTask.Source.USER
 
 # Cuanto espera una peticion antes de que la cola deje de tener estratos.
@@ -86,6 +87,9 @@ SERVEABLE = Q(position__status='UNKNOWN')
 # COMPLETADO no cuenta a proposito: si contase, la deuda no dejaria de crecer y
 # quien mas ha usado el proyecto acabaria detras de todo el mundo para siempre.
 CHARGED = Q(state__in=(PENDING, LEASED))
+# How far back ``served_rank`` looks for an account's last lease.  An account
+# not leased within it counts as never served and goes first among its ties.
+SERVED_WINDOW = timedelta(hours=1)
 # Cuanto silencio invalida una PROMESA de tiempo.  Tres intervalos de heartbeat
 # del worker (60s, § Client/atomicdb_worker HEARTBEAT_INTERVAL_SECONDS) y
 # exactamente la ventana con la que § metrics decide si una lectura de nps
@@ -139,7 +143,7 @@ def _effective_account():
                 default=F('lane_account'), output_field=CharField())
 
 
-def fair_share(queryset):
+def fair_share(queryset, now=None):
     """Anota ``lane_ahead``: los NODOS que ese mismo peticionario ya tiene
     encolados por delante de cada fila.
 
@@ -226,7 +230,59 @@ def fair_share(queryset):
             # mandar en esa banda.
             .annotate(backer_rank=Case(
                 When(source=USER, then=F('backers')),
-                default=Value(0), output_field=IntegerField())))
+                default=Value(0), output_field=IntegerField()))
+            .annotate(served_rank=served_rank(now)))
+
+
+def _account_q(account):
+    """The rows whose ``_effective_account()`` is ``account``, on raw columns.
+
+    '' is the anonymous tide: blank author AND blank lane, never "any row
+    with a blank lane".
+    """
+    if not account:
+        return Q(lane_account='', requested_by='')
+    return Q(lane_account=account) | Q(lane_account='', requested_by=account)
+
+
+def served_rank(now=None):
+    """0 for an account not leased in ``SERVED_WINDOW``, else 1, 2, ... from
+    the one served longest ago to the one served last.  0 outside USER.
+
+    WHY (9-Nov-2026).  ``lane_ahead`` only counts PENDING + LEASED, so once a
+    task completes its account owes nothing again.  With the shared queue
+    served by about one worker, every lease found the 10,000-row account and
+    a one-request account both at ``lane_ahead`` 0, and ``id`` (older rows)
+    gave it to the big account every time: 29 leases to 3 in one morning.
+    Breaking that tie by who was served least recently restores the turn.
+
+    It sits after every other service key, so it only orders rows that would
+    otherwise fall to ``id``; equal timestamps share a rank and still do.
+
+    ONE aggregate per call, keyed by account (the same partition as the fair
+    share: USER only, so '' is the anonymous tide alone), read through the
+    ``atomic_task_state_done`` index: LEASED rows plus COMPLETED rows that
+    finished inside the window (a lease inside the window can only have
+    completed inside it).  The result is a handful of accounts, turned into a
+    ``Case``.
+    """
+    cutoff = (now or timezone.now()) - SERVED_WINDOW
+    last = list(AnalysisTask.objects
+                .filter(source=USER, leased_at__gte=cutoff)
+                .filter(Q(state=LEASED)
+                        | Q(state=COMPLETED, completed__gte=cutoff))
+                .annotate(_served_account=_effective_account())
+                .order_by().values('_served_account')
+                .annotate(last=Max('leased_at'))
+                .values_list('_served_account', 'last'))
+    stamps = sorted({stamp for _account, stamp in last})
+    rank = {stamp: index + 1 for index, stamp in enumerate(stamps)}
+    whens = [When(Q(source=USER) & _account_q(account),
+                  then=Value(rank[stamp]))
+             for account, stamp in last]
+    if not whens:
+        return Value(0, output_field=IntegerField())
+    return Case(*whens, default=Value(0), output_field=IntegerField())
 
 
 # Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
@@ -248,7 +304,10 @@ def fair_share(queryset):
 # encuentren empatadas no es casualidad — sumarse a una peticion ajena la manda
 # al frente de la cola de SU autor (§ ``ingest.add_requester``), que es justo
 # donde estan los ceros de todo el mundo.
-SERVICE_KEYS = ('-named_first', 'lane_ahead', '-backer_rank')
+#
+# ``served_rank`` goes last: among rows still tied, the account served least
+# recently first, then ``id`` (§ ``served_rank``).
+SERVICE_KEYS = ('-named_first', 'lane_ahead', '-backer_rank', 'served_rank')
 
 
 def named_first_rank(now=None, band_only=False):
@@ -273,7 +332,8 @@ def service_order(queryset, now=None):
     Solo vale para la banda USER: fuera de ella el orden lleva ademas
     ``-source`` y la prioridad de posicion, que aqui no pintan nada.
     """
-    return (fair_share(queryset).annotate(named_first=named_first_rank(now))
+    return (fair_share(queryset, now)
+            .annotate(named_first=named_first_rank(now))
             .order_by(*SERVICE_KEYS, 'id'))
 
 

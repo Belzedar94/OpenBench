@@ -43,6 +43,9 @@ from .testing import TestCase
 # de borrarse para que el test que la suma siga contando el dia que alguien
 # vuelva a colgar consultas del render de una peticion viva.
 LANE_LAYOUT_QUERIES = 0
+# The aggregate behind ``served_rank``: who was served least recently
+# (§ ``live_request.served_rank``).  One statement, not one per row.
+SERVED_RANK_QUERIES = 1
 
 # El texto de la linea, tal y como sale del minificador (que reordena
 # atributos, asi que no se asume ningun orden).
@@ -543,7 +546,8 @@ class CostTests(TestCase):
         _waiting(self.pos)
 
         self.assertEqual(self._queries(),
-                         self._queries(silent=True) + 2 + LANE_LAYOUT_QUERIES)
+                         self._queries(silent=True) + 2 + LANE_LAYOUT_QUERIES
+                         + SERVED_RANK_QUERIES)
 
     def test_a_running_search_costs_two(self):
         _searching(self.pos, started_ago=30)

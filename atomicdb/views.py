@@ -927,6 +927,7 @@ def api_lease(request):
             # sale es EL MISMO: dentro de la banda USER vale 0.0 en todas las
             # filas, asi que da igual donde este; fuera de ella ``named_first``
             # y ``fair_ahead`` valen 0 en todas, asi que sigue siendo el unico
+            # (``served_rank`` tambien: vale 0 fuera de USER.)
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
             ordered = (live_request.fair_share(ordered)

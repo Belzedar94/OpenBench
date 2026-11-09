@@ -495,6 +495,83 @@ class FairShareTests(_QueueHarness):
                          list(range(len(served))))
 
 
+class LeastRecentlyServedTests(_QueueHarness):
+    """Ties on ``lane_ahead`` go to the account served least recently.
+
+    Production, 9-Nov-2026: with the shared queue served by about one worker,
+    every lease found the 10,000-row account and a one-request account both
+    at ``lane_ahead`` 0 (completed work does not count), and ``id`` handed it
+    to the older rows every time: 29 leases to 3 while the small account had
+    requests pending throughout.
+    """
+
+    def _serve_and_complete(self, count):
+        """One worker, one task at a time, each finished before the next.
+
+        The clock is advanced by hand: a real search takes minutes, and
+        leases stamped in the same tick would tie on ``leased_at``.
+        """
+        clock = timezone.now() - timedelta(minutes=50)
+        owners = []
+        for _ in range(count):
+            tasks = self._lease('solo')
+            if not tasks:
+                break
+            clock += timedelta(minutes=1)
+            task = AnalysisTask.objects.get(pk=tasks[0]['id'])
+            AnalysisTask.objects.filter(pk=task.pk).update(
+                state='COMPLETED', leased_at=clock,
+                completed=clock + timedelta(seconds=30))
+            owners.append(task.requested_by)
+        return owners
+
+    def test_a_single_worker_does_not_starve_the_small_account(self):
+        self._queue('moky', [self.RUNG] * 20)
+        self._queue('soothdest', [self.RUNG] * 4, offset=100)
+
+        owners = self._serve_and_complete(12)
+
+        self.assertIn('soothdest', owners[:2])
+        self.assertEqual(owners[:8], ['moky', 'soothdest'] * 4)
+        self.assertEqual(owners[8:], ['moky'] * 4)
+
+    def test_the_estimator_sees_the_same_turn(self):
+        moky = self._queue('moky', [self.RUNG] * 5)
+        small, = self._queue('soothdest', [self.RUNG], offset=100)
+        self._serve_and_complete(1)
+
+        self.assertEqual(live_request.queue_ahead(small), 0)
+        self.assertEqual(live_request.queue_ahead(moky[1]), 1)
+        self.assertEqual(self._lease('next')[0]['id'], small.id)
+
+    def test_a_lease_older_than_the_window_does_not_count(self):
+        moky = self._queue('moky', [self.RUNG] * 3)
+        small, = self._queue('soothdest', [self.RUNG], offset=100)
+        AnalysisTask.objects.filter(pk=moky[0].pk).update(
+            state='COMPLETED',
+            leased_at=timezone.now() - live_request.SERVED_WINDOW
+            - timedelta(minutes=5),
+            completed=timezone.now() - timedelta(minutes=1))
+
+        # Neither account was served inside the window: ``id`` decides.
+        self.assertEqual(self._lease('m')[0]['id'], moky[1].id)
+
+    def test_the_selector_bands_ignore_who_was_served(self):
+        auto = [AnalysisTask.objects.create(
+            position=position, generation=0, budget_nodes=self.RUNG,
+            source=AnalysisTask.Source.AUTO)
+            for position in self._positions(2, offset=300)]
+        Position.objects.filter(key=auto[0].position.key).update(priority=1.0)
+        Position.objects.filter(key=auto[1].position.key).update(priority=5.0)
+
+        self.assertTrue(all(
+            rank == 0 for rank in AnalysisTask.objects
+            .filter(source=AnalysisTask.Source.AUTO)
+            .annotate(served_rank=live_request.served_rank())
+            .values_list('served_rank', flat=True)))
+        self.assertEqual(self._lease('m')[0]['id'], auto[1].id)
+
+
 class HouseWorkerPolicyTests(TestCase):
     """House iron serves background or its own clicks, never foreign USER."""
 
