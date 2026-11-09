@@ -218,6 +218,14 @@ class Test(Model):
     datagen_book_raw_sha256 = CharField(
         max_length=64, default='', blank=True,
     )
+    # RELABEL sub-mode: rescore an installed input set instead of generating.
+    # An empty format means an ordinary DATAGEN workload. The manifest hash
+    # freezes the input set the chunk map was built from.
+    relabel_input_set = CharField(max_length=64, default='', blank=True)
+    relabel_format = CharField(max_length=64, default='', blank=True)
+    relabel_depth = IntegerField(default=0)
+    relabel_nodes = BigIntegerField(default=0)
+    relabel_manifest_sha256 = CharField(max_length=64, default='', blank=True)
 
     # Collection of all individual Result() objects
     games  = BigIntegerField(default=0) # Overall / generic DATAGEN positions
@@ -264,6 +272,9 @@ class Test(Model):
 
     def is_generic_datagen(self):
         return self.test_mode == 'DATAGEN' and bool(self.datagen_command)
+
+    def is_relabel(self):
+        return self.is_generic_datagen() and bool(self.relabel_format)
 
     def is_publication_datagen(self):
         return (
@@ -460,6 +471,9 @@ class DatagenChunk(Model):
     environment_lease_sha256 = CharField(
         max_length=64, default='', blank=True,
     )
+    # RELABEL only: frozen identity of this chunk's input file (name, record
+    # count, compressed and raw SHA-256, and the SHA-256 of its position keys).
+    relabel_input = JSONField(default=dict, blank=True)
     machine     = ForeignKey(
         'Machine', SET_NULL, related_name='datagen_chunks', null=True, blank=True)
     attempts    = IntegerField(default=0)
@@ -479,6 +493,8 @@ class DatagenChunk(Model):
         return 'Datagen #%d chunk %d (%s)' % (self.test_id, self.idx, self.status)
 
     def filename(self):
+        if self.relabel_input:
+            return 'relabel/%d/out/chunk_%d.bz2' % (self.test_id, self.idx)
         return 'datagen/%d/chunk_%d.bz2' % (self.test_id, self.idx)
 
     def seed(self):

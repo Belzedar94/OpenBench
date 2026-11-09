@@ -42,9 +42,12 @@ import requests
 import string
 import traceback
 
+from django.conf import settings
+
 import OpenBench.config
 import OpenBench.datagen
 import OpenBench.datagen_publication
+import OpenBench.relabel
 import OpenBench.utils
 import OpenBench.variant_contract
 
@@ -65,6 +68,14 @@ def verify_workload(request, workload_type):
     if workload_type == 'TUNE':
         verify_tune_creation(errors, request)
         engine = collect_github_info(errors, request, 'dev')
+        return errors, engine
+
+    if workload_type == 'DATAGEN' and relabel_requested(request):
+        verify_relabel_creation(errors, request)
+        if errors:
+            return errors, (None, None)
+        # RELABEL searches with the ordinary playing engine.
+        engine = collect_github_info(errors, request, 'dev', 'play')
         return errors, engine
 
     if workload_type == 'DATAGEN':
@@ -198,6 +209,62 @@ def verify_datagen_creation(errors, request):
         OpenBench.datagen_publication.validate_publication_request(request.POST)
     )
 
+
+def relabel_requested(request):
+    return bool(request.POST.get('relabel_input_set', '').strip())
+
+def verify_relabel_creation(errors, request):
+
+    verifications = [
+        (verify_configuration  , 'dev_engine', 'Engine', 'engines'),
+        (verify_github_repo    , 'dev_repo'),
+        (verify_network        , 'dev_network', 'Network', 'dev_engine'),
+        (verify_integer        , 'priority', 'Priority'),
+        (verify_greater_than   , 'throughput', 'Throughput', 0),
+    ]
+    for verification in verifications:
+        verification[0](errors, request, *verification[1:])
+    if errors:
+        return
+
+    try:
+        depth = int(request.POST.get('relabel_depth', '0') or 0)
+        nodes = int(request.POST.get('relabel_nodes', '0') or 0)
+        assert 0 <= depth <= OpenBench.relabel.MAX_RELABEL_DEPTH
+        assert 0 <= nodes <= OpenBench.relabel.MAX_RELABEL_NODES
+        assert (depth > 0) != (nodes > 0)
+    except (TypeError, ValueError, AssertionError):
+        errors.append(
+            'RELABEL needs exactly one of depth (1-%d) or nodes'
+            % OpenBench.relabel.MAX_RELABEL_DEPTH
+        )
+
+    if str(request.POST.get('datagen_publication_protocol', '0')).strip() not in ('', '0'):
+        errors.append('RELABEL workloads do not use a publication contract')
+
+    engine_name = request.POST.get('dev_engine')
+    engine_config = OpenBench.config.OPENBENCH_CONFIG['engines'][engine_name]
+    if not request.POST.get('dev_network', ''):
+        errors.append('RELABEL requires the network that will label the positions')
+
+    try:
+        manifest = OpenBench.relabel.load_manifest(
+            settings.MEDIA_ROOT, request.POST['relabel_input_set'].strip()
+        )
+    except OpenBench.relabel.RelabelError as error:
+        errors.append(str(error))
+        return
+
+    if manifest['format'] not in engine_config.get('relabel_formats', []):
+        errors.append(
+            '%s does not declare the %s RELABEL format'
+            % (engine_name, manifest['format'])
+        )
+    if len(manifest['chunks']) > OpenBench.datagen.MAX_DATAGEN_CHUNKS:
+        errors.append(
+            'RELABEL input sets may hold at most %d chunks'
+            % OpenBench.datagen.MAX_DATAGEN_CHUNKS
+        )
 
 def verify_integer(errors, request, field, field_name):
     try: int(request.POST[field])

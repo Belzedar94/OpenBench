@@ -34,6 +34,7 @@ import math
 import OpenBench.utils
 import OpenBench.views
 import OpenBench.datagen_publication
+import OpenBench.relabel
 import OpenBench.variant_contract
 
 from django.conf import settings
@@ -41,7 +42,7 @@ from django.db import IntegrityError, transaction
 from OpenBench.datagen import MAX_LEGACY_DATAGEN_GAMES, initialize_chunks
 from OpenBench.models import *
 from OpenBench.config import OPENBENCH_CONFIG
-from OpenBench.workloads.verify_workload import verify_workload
+from OpenBench.workloads.verify_workload import relabel_requested, verify_workload
 
 def create_workload(request, workload_type):
 
@@ -234,7 +235,92 @@ def create_new_tune(request):
 
     return test, None
 
+def create_new_relabel(request):
+
+    # RELABEL is a DATAGEN sub-mode: the chunk map comes from an installed
+    # input set instead of a uniform generator split, and the workload command
+    # is a placeholder-free descriptor that only RELABEL-capable workers lease.
+    errors, engine_info = verify_workload(request, 'DATAGEN')
+    dev_info, dev_has_all = engine_info
+
+    if errors:
+        return None, errors
+
+    set_name = request.POST['relabel_input_set'].strip()
+    try:
+        manifest = OpenBench.relabel.load_manifest(settings.MEDIA_ROOT, set_name)
+    except OpenBench.relabel.RelabelError as error:
+        return None, [str(error)]
+
+    depth = int(request.POST.get('relabel_depth', '0') or 0)
+    nodes = int(request.POST.get('relabel_nodes', '0') or 0)
+
+    with transaction.atomic():
+        test = Test()
+        test.author = request.user.username
+        test.book_name = 'NONE'
+        test.upload_pgns = 'FALSE'
+
+        engine = get_engine(*dev_info)
+        test.dev = test.base = engine
+        test.dev_repo = test.base_repo = request.POST['dev_repo']
+        test.dev_engine = test.base_engine = request.POST['dev_engine']
+        test.dev_options = test.base_options = request.POST.get('dev_options', '')
+        test.dev_network = test.base_network = request.POST.get('dev_network', '')
+        test.dev_time_control = test.base_time_control = ''
+        test.variant_contract = OpenBench.variant_contract.configured_variant_contract(
+            OPENBENCH_CONFIG, test.dev_engine, test.base_engine, test.book_name
+        ) or ''
+
+        test.relabel_input_set = set_name
+        test.relabel_format = manifest['format']
+        test.relabel_depth = depth
+        test.relabel_nodes = nodes
+        test.relabel_manifest_sha256 = OpenBench.relabel.manifest_sha256(manifest)
+        test.datagen_command = OpenBench.relabel.relabel_command(
+            set_name, manifest['format'], depth, nodes
+        )
+        test.datagen_total_count = manifest['total_records']
+        test.datagen_positions_per_chunk = manifest['records_per_chunk']
+        test.datagen_base_seed = 0
+        test.max_games = min(test.datagen_total_count, MAX_LEGACY_DATAGEN_GAMES)
+        test.workload_size = 1
+        test.priority = int(request.POST['priority'])
+        test.throughput = int(request.POST['throughput'])
+
+        test.syzygy_wdl = 'DISABLED'
+        test.syzygy_adj = 'DISABLED'
+        test.win_adj = 'None'
+        test.draw_adj = 'None'
+        test.freeze_datagen_environment_contract('', 0, '', '')
+
+        test.test_mode = 'DATAGEN'
+        test.awaiting = not dev_has_all
+        test.use_tri = False
+        test.use_penta = False
+
+        if test.dev_network:
+            name = Network.objects.get(
+                engine=test.dev_engine, sha256=test.dev_network
+            ).name
+            test.dev_netname = test.base_netname = name
+
+        test.save()
+        initialize_chunks(test, [
+            OpenBench.relabel.chunk_input_record(manifest, chunk)
+            for chunk in manifest['chunks']
+        ])
+
+        profile = Profile.objects.get(user=request.user)
+        profile.tests += 1
+        profile.save()
+
+    return test, None
+
 def create_new_datagen(request):
+
+    if relabel_requested(request):
+        return create_new_relabel(request)
 
     # Collects erros, and collects all data from the Github API
     errors, engine_info = verify_workload(request, 'DATAGEN')

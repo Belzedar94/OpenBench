@@ -133,8 +133,12 @@ def valid_publication_assignment(test, machine):
     )
 
 
-def initialize_chunks(test):
-    """Create the immutable chunk map for a newly saved generic DATAGEN test."""
+def initialize_chunks(test, relabel_inputs=None):
+    """Create the immutable chunk map for a newly saved generic DATAGEN test.
+
+    A RELABEL workload passes one frozen input identity per chunk; their
+    record counts must equal the uniform chunk split computed below.
+    """
 
     assert test.pk and is_generic_datagen(test)
 
@@ -171,6 +175,10 @@ def initialize_chunks(test):
             raise ValueError(
                 'DATAGEN publication contract is missing, malformed, or stale'
             )
+        if bool(persisted.relabel_format) != (relabel_inputs is not None):
+            raise ValueError('RELABEL workloads need exactly one input per chunk')
+        if relabel_inputs is not None and len(relabel_inputs) != total_chunks:
+            raise ValueError('RELABEL input set does not match the chunk count')
         Test.objects.filter(pk=test.pk).update(
             datagen_producer_required=persisted.datagen_producer_required,
             datagen_producer_contract_sha256=(
@@ -208,8 +216,17 @@ def initialize_chunks(test):
                 persisted.datagen_positions_per_chunk,
                 persisted.datagen_total_count - offset,
             )
+            relabel_input = {}
+            if relabel_inputs is not None:
+                relabel_input = relabel_inputs[idx]
+                if relabel_input.get('records') != count:
+                    raise ValueError(
+                        'RELABEL input chunk %d holds %r records, expected %d'
+                        % (idx, relabel_input.get('records'), count)
+                    )
             chunks.append(DatagenChunk(
-                test=persisted, idx=idx, position_count=count
+                test=persisted, idx=idx, position_count=count,
+                relabel_input=relabel_input,
             ))
 
             if len(chunks) == DATAGEN_CHUNK_CREATE_BATCH:
@@ -255,7 +272,7 @@ def _next_claim_candidate(test, now):
         assignable_chunks(test, now)
         .only(
             'id', 'test_id', 'idx', 'position_count', 'status', 'assigned',
-            'attempts',
+            'attempts', 'relabel_input',
         )
         .order_by('idx')
         .first()
