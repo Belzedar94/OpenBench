@@ -10,16 +10,19 @@
   account{{ accounts|pluralize }} · {{ threads_h }} thread{{ threads|pluralize }} ·
   {{ busy }} searching right now</p>
 <div class="fleet-owners">
-<div class="fleet-owner-row fleet-owner-head"><span>Account</span><span title="Nodes per second of the account's workers added up, over the searches each finished in the last hour">Speed</span><span title="Searches the account's workers finished in the last hour">Last hour</span></div>
+<div class="fleet-owner-row fleet-owner-head"><span>Account</span><span>Workers</span><span title="Nodes per second of the account's workers added up, over the searches each finished in the last hour">Speed</span><span title="Searches the account's workers finished in the last hour">Last hour</span></div>
 {% for g in groups %}
 <details class="fleet-owner">
   <summary class="fleet-owner-row">
-    <span class="fleet-owner-name"><a href="/atomicdb/user/{{ g.owner|urlencode }}/">{{ g.owner }}</a></span>
+    <span class="fleet-owner-name"><a href="/atomicdb/user/{{ g.owner|urlencode }}/">{{ g.owner }}</a>
+      <span class="dim contrib-spec">{% if g.busy %}{{ g.busy }} searching{% else %}between tasks{% endif %}</span></span>
+    <span>{{ g.count }} worker{{ g.count|pluralize }}
+      <span class="dim contrib-spec">{{ g.threads_h }} thread{{ g.threads|pluralize }}</span></span>
     <span>{% if g.nps_h %}{{ g.nps_h }} nodes/s{% else %}<span class="dim">no search finished</span>{% endif %}</span>
     <span>{{ g.searches_h }} search{{ g.searches|pluralize:"es" }}</span>
   </summary>
-<p class="dim fleet-owner-work">{{ g.count }} worker{{ g.count|pluralize }} · {{ g.threads_h }} thread{{ g.threads|pluralize }} · {% if g.busy %}{{ g.busy }} searching{% if g.requests and g.server %} ({{ g.requests }} request{{ g.requests|pluralize }}, {{ g.server }} server){% elif g.requests %} (request{{ g.requests|pluralize }}){% else %} (server){% endif %}{% if g.idle %} · {{ g.idle }} between tasks{% endif %}{% else %}between tasks{% endif %}</p>
-<div class="contrib-scroll">
+{% if g.busy %}<p class="dim fleet-owner-work">{{ g.busy }} searching{% if g.requests and g.server %} ({{ g.requests }} request{{ g.requests|pluralize }}, {{ g.server }} server){% elif g.requests %} (request{{ g.requests|pluralize }}){% else %} (server){% endif %}{% if g.idle %} · {{ g.idle }} between tasks{% endif %}</p>
+{% endif %}<div class="contrib-scroll">
 <table class="contrib-workers fleet-workers">
   <tr><th>Worker</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th title="The position it is searching right now">Searching</th><th title="Who asked for that search">Requester</th></tr>
   {% for w in g.workers %}
