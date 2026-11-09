@@ -2003,6 +2003,25 @@ html.theme-ready .tile {
   .cols > * {
     min-width: 0;
   }
+
+  /* ...pero eso no bastaba: `1fr` es `minmax(auto, 1fr)`, y el `auto` toma la
+     contribucion minima de cada hijo, que con un ancho DECLARADO es ese ancho
+     (los 440px del tablero en la portada, el `min-content` de .board-col en
+     el explorador, que hereda los 440px del cuadro FEN).  La pista crecia a
+     440 y la pagina entera se desplazaba de lado en cualquier telefono
+     (Torom, nov-2026: 459 de scroll en 375).  Con suelo 0 la pista mide lo
+     que mide la pantalla y los `max-width: 100%` de dentro encogen el
+     tablero con ella. */
+  .cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Una tabla de jugadas mas ancha que la pantalla se desplaza dentro de su
+     caja; la pagina no. */
+  .table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+  }
 }
 
 @media (max-width: 560px) {
