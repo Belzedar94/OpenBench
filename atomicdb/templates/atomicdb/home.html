@@ -63,6 +63,8 @@
 </div>
 {% endif %}
 
+{% if root_chart %}{% include "atomicdb/_root_chart.html" %}{% endif %}
+
 {% if has_frontier or has_attribution %}
 <details class="proof-health">
   <summary class="dim">Proof health &amp; closures by source</summary>
