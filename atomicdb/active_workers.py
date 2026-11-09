@@ -24,10 +24,12 @@ other pages publish one at a time:
   next nor drops to zero between tasks, and a faster machine shows within
   the hour.  The contributor page shows the same figure.
 
-THE ROWS GO BY ACCOUNT (cz_eclipsia, 9-Nov-2026).  One collapsed line per
-account says how many of its workers are live, their threads, their speed
-added up and how many are searching, split into requests and the server's
-own picks; opening it shows that account's rows.  The accounts with the most
+THE ROWS GO BY ACCOUNT (cz_eclipsia, 9-Nov-2026).  One collapsed row per
+account, three cells like the worker table's: the account, its workers'
+speed added up and the searches they finished in the last hour (the same
+hour and the same read as the speed).  Opening it says how many of its
+workers are live, their threads and what they are doing, then shows that
+account's rows.  The accounts with the most
 workers come first, then the fastest.  The groups are built from the rows
 above, so they cost no read of their own.
 
@@ -193,8 +195,9 @@ def present(now=None):
     for ping in pings:
         nps, searches = speed.get((ping.user, ping.machine), (0, 0))
         group = groups.setdefault(ping.user, {'owner': ping.user, 'nps': 0.0,
-                                              'workers': []})
+                                              'searches': 0, 'workers': []})
         group['nps'] += nps
+        group['searches'] += searches
         workers.append({
             'machine': ping.machine,
             'owner': ping.user,
@@ -243,6 +246,8 @@ def _groups(groups):
             'nps': group['nps'],
             'nps_h': (views._human(round(group['nps']))
                       if group['nps'] else ''),
+            'searches': group['searches'],
+            'searches_h': views._human(group['searches']),
             'busy': len(tasks),
             'requests': requests,
             'server': len(tasks) - requests,
