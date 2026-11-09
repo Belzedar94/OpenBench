@@ -167,7 +167,7 @@ class MeasureTests(TestCase):
         self.assertEqual(chart['nodes_last_h'], f'{hours:,}')
 
     def test_the_cache_key_moved_with_the_shape(self):
-        self.assertEqual(root_chart.CACHE_KEY, 'atomicdb.root-chart.v4')
+        self.assertEqual(root_chart.CACHE_KEY, 'atomicdb.root-chart.v5')
 
 
 class CacheTests(TestCase):
