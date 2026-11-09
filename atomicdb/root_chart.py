@@ -13,16 +13,21 @@ of each slot), drawn once into SVG coordinates and kept in the shared cache
 for ``FRESH_SECONDS``, so a visitor never pays a query for it while the entry
 is warm.  The SVG stretches to the width of its box; the labels are HTML
 around it, so they keep their size on a phone.
+
+Community request (rhaxier, 9-Nov-2026): the best value too, which is what
+matters for a solution.  It is drawn as a step line from ``RootRecord``, the
+history of the start position's best, over the same time axis: each step is
+a new record, and the line holds to the right edge.
 """
 
 import math
 
 from django.utils import timezone
 
-from . import metrics, roots
-from .models import MainLineSnapshot, ProgressSnapshot
+from . import logic, metrics, roots
+from .models import MainLineSnapshot, ProgressSnapshot, RootRecord
 
-CACHE_KEY = 'atomicdb.root-chart.v2'
+CACHE_KEY = 'atomicdb.root-chart.v3'
 # The source changes once an hour; ten minutes keeps a new hour visible soon
 # without measuring per visitor.
 FRESH_SECONDS = 600
@@ -79,6 +84,16 @@ def _path(coords):
     return 'M' + ' L'.join(f'{_fmt(x)} {_fmt(y)}' for x, y in coords)
 
 
+def _record_at(records, at):
+    """The record in force at ``at``: the newest one not after it."""
+    held = None
+    for record_at, value, status in records:
+        if record_at > at:
+            break
+        held = (value, status)
+    return held
+
+
 def measure(now=None):
     """The chart, ready to render; ``{'chart': None}`` with under two points."""
     rows = list(MainLineSnapshot.objects
@@ -95,8 +110,21 @@ def measure(now=None):
     nodes = dict(ProgressSnapshot.objects
                  .filter(bucket_start__gte=first, bucket_start__lte=last)
                  .values_list('bucket_start', 'engine_nodes_total'))
+    records = list(RootRecord.objects
+                   .filter(key=logic.key_of(logic.start_fen()))
+                   .order_by('at')
+                   .values_list('at', 'value', 'status'))
+    # A record from before the chart starts only sets where the step line
+    # begins; one after its last point lands on the right edge.
+    shown = [r for r in records if r[0] > first]
+    carried = _record_at(records, first)
+    # A proven status (+10000) would flatten everything else: it is named in
+    # the legend and drawn at the edge, but does not stretch the axis.
+    scaled = [v for _at, v, st in shown if st == 'UNKNOWN']
+    if carried is not None and carried[1] == 'UNKNOWN':
+        scaled.append(carried[0])
 
-    lo, hi = _axis([value for _at, value in points])
+    lo, hi = _axis([value for _at, value in points] + scaled)
     usable = HEIGHT - 2 * INSET
 
     def x_of(at):
@@ -106,6 +134,19 @@ def measure(now=None):
         return INSET + (hi - value) / (hi - lo) * usable
 
     line = [(x_of(at), y_of(value)) for at, value in points]
+
+    best_line = ''
+    if carried is not None or shown:
+        def y_clamped(value):
+            return min(max(y_of(value), INSET), HEIGHT - INSET)
+
+        if carried is not None:
+            best_line = f'M0 {_fmt(y_clamped(carried[0]))}'
+        for at, value, _status in shown:
+            x = _fmt(min(x_of(at), WIDTH))
+            best_line += (f' H{x} V{_fmt(y_clamped(value))}' if best_line
+                          else f'M{x} {_fmt(y_clamped(value))}')
+        best_line += f' H{WIDTH}'
 
     # Engine nodes, cumulative, on their own scale from the lowest to the
     # highest total in the window: the shape is what reads, not the zero.
@@ -134,6 +175,9 @@ def measure(now=None):
                  + (' (median of the day)' if step_hours >= DAY_HOURS else ''))
         if at in nodes:
             title += f' · {_human(nodes[at])} engine nodes'
+        held = _record_at(records, at)
+        if held is not None:
+            title += f' · best record {roots.value_text(*held)}'
         columns.append({'x': _fmt(left), 'w': _fmt(max(right - left, 0.1)),
                         'title': title})
 
@@ -147,6 +191,9 @@ def measure(now=None):
         'width': WIDTH, 'height': HEIGHT,
         'line': _path(line),
         'node_area': node_area,
+        'best_line': best_line,
+        'best_h': (roots.value_text(records[-1][1], records[-1][2])
+                   if best_line else ''),
         'nodes_last_h': _human(nodes_last) if nodes_last is not None else '',
         'columns': columns,
         'ticks': ticks,
