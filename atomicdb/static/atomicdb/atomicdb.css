@@ -1924,8 +1924,15 @@ a.backed-mark:focus-visible {
 
 .queue-cols {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, 1fr): a plain 1fr never shrinks below its longest line, so a
+     long served line widened its column and squeezed Waiting (MoKy,
+     10-Nov-2026). */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0 1.6rem;
+}
+
+.queue-cols > div {
+  min-width: 0;
 }
 
 .queue-cols > div + div {
