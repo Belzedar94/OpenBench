@@ -5363,7 +5363,9 @@ def home(request):
         if len(upnext_keys) >= 5:
             break
     # The milestones moved to a page of their own (§ milestones_page).
-    labels = _line_labels_many(
+    # Con el nombre de apertura, como las colas (rhaxier, 10-nov-2026): sale
+    # de la misma lectura que el rotulo, asi que nombra la linea que se pinta.
+    labels = _line_readings_many(
         [task.position_id for task in leased] + upnext_keys)
     pending_meta = {}
     for pid, source, route in (AnalysisTask.objects.filter(
@@ -5382,28 +5384,30 @@ def home(request):
         + [(pending_meta.get(key, ('', ''))[1], key) for key in upnext_keys])
     analyzing = []
     for task in leased:
-        preview, full = labels.get(task.position_id, ('', ''))
+        preview, full, opening = labels.get(task.position_id, ('', '', ''))
         routed = routes.get((task.route, task.position_id))
         if routed is not None:
-            preview, full = routed[:2]
+            preview, full, opening = routed[:3]
         analyzing.append({'key': task.position_id,
                           'san': preview or 'start position',
                           'full': full or 'start position',
                           'budget': _human(task.budget_nodes),
                           'machine': task.machine,
                           'source': task.source,
+                          'opening': opening,
                           'play': task.route if routed is not None else ''})
     upnext = []
     for key in upnext_keys:
-        preview, full = labels.get(key, ('', ''))
+        preview, full, opening = labels.get(key, ('', '', ''))
         source, route = pending_meta.get(key, ('', ''))
         routed = routes.get((route, key))
         if routed is not None:
-            preview, full = routed[:2]
+            preview, full, opening = routed[:3]
         upnext.append({'key': key,
                        'san': preview or 'start position',
                        'full': full or 'start position',
                        'source': source,
+                       'opening': opening,
                        'play': route if routed is not None else ''})
     root_legal_ucis = logic.legal_moves(root.fen)
     # The first moves in SAN, read off the root with its legal moves: no
