@@ -5415,8 +5415,13 @@ def home(request):
     root_sans = move_names.sans(root.fen, root_legal_ucis
                                 + [m['uci'] for m in first_moves],
                                 legal=root_legal_ucis)
+    # The name a first move enters, as the explorer prints under its moves
+    # (rhaxier, 10-Nov-2026): one read of the approved map for the table.
+    names = community_names.approved_map()
     for move in first_moves:
         move['san'] = root_sans.get(move['uci'], move['uci'])
+        move['enters_opening'] = _exact_child_opening(
+            move['key'], None, names=names)
     compute = worker_metrics()
     root_pn, root_dn = proof.headline_numbers()
     return render(request, 'atomicdb/home.html', {
