@@ -143,7 +143,8 @@
   {% for m in first_moves %}
   <tr>
     <td><span class="chip {{ m.css }}"></span></td>
-    <td><a href="/atomicdb/explore/{{ m.key }}/"><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san|default:m.uci }}</strong></a></td>
+    <td><a href="/atomicdb/explore/{{ m.key }}/"{% if m.enters_opening %} title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san|default:m.uci }}</strong></a>
+      {% if m.enters_opening %}<span class="opening-enters">{{ m.enters_opening }}</span>{% endif %}</td>
     <td>{% if m.status == 'UNKNOWN' %}<span class="dim">unsolved</span>
         {% else %}{{ m.status }} <span class="dim">{{ m.closure }}</span>{% endif %}</td>
     <td>{% if m.mate_str %}<strong>{{ m.mate_str }}</strong>{% elif m.score is not None %}<span class="ev" data-cp="{{ m.score }}" data-stm="w" data-orig="{{ m.score }}">{{ m.score }}</span>{% else %}<span class="dim">not analysed</span>{% endif %}</td>
