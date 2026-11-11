@@ -89,8 +89,9 @@ def export(pct=4.0, per_stratum=200, event_cap=1500, node_cap=2500,
     pg = connection.vendor == 'postgresql'
     with connection.cursor() as cur, read_only_session(cur, connection):
         if pg:
+            # pct >= 100 reads every searched position (no sampling)
             sample = ('TABLESAMPLE SYSTEM (%s) REPEATABLE (%d)'
-                      % (float(pct), int(seed)))
+                      % (float(pct), int(seed))) if pct < 100 else ''
             own = "(last_analysis->0->>'eval_cp')::int"
             raw = "last_analysis->0->>'raw'"
         else:                                    # tests: every row

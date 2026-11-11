@@ -161,7 +161,7 @@ class CalibrationDatabaseTest(TestCase):
     def test_export_reads_only(self):
         conn = connections[current_alias()]
         with CaptureQueriesContext(conn) as ctx:
-            summary, recs = calibrate.export(time_limit=60)
+            summary, recs = calibrate.export(pct=100, time_limit=60)
         for q in ctx.captured_queries:
             self.assertTrue(_READ.match(q['sql']), q['sql'][:120])
         self.assertEqual(summary['searched_rows'], 7)
