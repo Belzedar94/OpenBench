@@ -258,6 +258,7 @@ class DepthColumnCostTests(TestCase):
     def test_the_query_api_too(self):
         url = '/atomicdb/api/query?' + urlencode({'fen': self.root.fen})
         self._searched_children(self.moves[:3])
+        Client().get(url)               # warm the line cache (opening name)
         narrow = self._page_statements(url)
 
         self._searched_children(self.moves[3:])

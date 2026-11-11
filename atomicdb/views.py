@@ -5837,7 +5837,13 @@ def api_query(request):
         pos = Position.objects.get(key=logic.key_of(fen))
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
-    return JsonResponse(_query_block(pos))
+    block = _query_block(pos)
+    # Additive, last key: the last named Atomic opening on the canonical line
+    # to this position (the label the home queue shows), ``null`` when the
+    # line crosses no named position or is not walkable (rhaxier, 11-nov).
+    reading = _line_readings_many([pos.key]).get(pos.key)
+    block['opening'] = (reading[2] or None) if reading else None
+    return JsonResponse(block)
 
 
 def _query_block(pos):
