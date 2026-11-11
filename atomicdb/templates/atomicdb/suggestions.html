@@ -8,6 +8,45 @@
   (<strong>EDIT</strong>, written as <em>current &rarr; proposed</em>).
   Approving one publishes it on that position as a community name.</p>
 
+<h2 id="review">Names under review <span class="dim">({{ flags_total }})</span></h2>
+<p class="dim">Names with at least {{ flag_min_votes }} votes on the
+  <a href="/atomicdb/roots/?sort=disputed#openings">Openings page</a>, three
+  quarters of them thumbs down, widest margin first. Each one is posted once
+  as a poll in #opening-names. The votes and the poll only advise: each button
+  below is an ordinary approval, recorded under your name.</p>
+{% if review_outcome %}<p class="campaign-status" role="status">{% if review_outcome == 'kept' %}Kept: the name stays and the review is closed.{% elif review_outcome == 'restored' %}Restored: the catalogue name is shown again.{% elif review_outcome == 'removed' %}Removed: the community name is off the position.{% elif review_outcome == 'renamed' %}Renamed.{% elif review_outcome == 'moved' %}The name changed since it was flagged, so nothing was done.{% elif review_outcome == 'done' %}That review was already closed.{% else %}That action could not be applied.{% endif %}</p>{% endif %}
+{% if flags %}
+<div class="contrib-scroll">
+<table class="review-flags">
+  <tr><th>Name</th><th>Position</th><th class="n">Votes</th><th>Poll</th><th></th></tr>
+  {% for item in flags %}
+  <tr>
+    <td><strong>{{ item.flag.name }}</strong>
+      <div class="dim contrib-spec">{% if item.community %}community name · named by {{ item.flag.named_by|default:"anonymous" }}{% else %}catalogue name{% endif %}{% if item.catalogue and item.catalogue != item.flag.name %} · catalogue: {{ item.catalogue }}{% endif %}</div></td>
+    <td><a class="qline" href="/atomicdb/explore/{{ item.flag.position_key }}/"
+        title="{{ item.full }}">{{ item.san }}</a></td>
+    <td class="n">&#128077; {{ item.up }} / &#128078; {{ item.down }}
+      <div class="dim contrib-spec">flagged {{ item.flag.flagged_at|date:"M d H:i" }}</div></td>
+    <td>{% if item.poll_url %}<a href="{{ item.poll_url }}" rel="noopener">Discord poll</a>{% elif item.flag.post_error %}<span class="dim" title="{{ item.flag.post_error }}">not posted ({{ item.flag.post_attempts }} tries)</span>{% else %}<span class="dim">waiting to be posted</span>{% endif %}</td>
+    <td>
+      <form method="post" action="/atomicdb/suggestions/flags/" class="review-actions">{% csrf_token %}
+        <input type="hidden" name="flag" value="{{ item.flag.id }}">
+        <button class="reqbtn ghost" name="action" value="keep">Keep</button>
+        {% if item.can_restore %}<button class="reqbtn" name="action" value="restore" title="Show '{{ item.catalogue }}' again">Restore catalogue name</button>{% endif %}
+        {% if item.can_remove %}<button class="reqbtn" name="action" value="remove">Remove</button>{% endif %}
+      </form>
+      <form method="post" action="/atomicdb/suggestions/flags/" class="review-actions">{% csrf_token %}
+        <input type="hidden" name="flag" value="{{ item.flag.id }}">
+        <input type="text" name="name" maxlength="60" placeholder="New name" aria-label="New name for {{ item.flag.name }}" required>
+        <button class="reqbtn" name="action" value="rename">Rename</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}<p class="dim">No name is under review.</p>{% endif %}
+
 <h2>Pending <span class="dim">({{ pending_total }})</span></h2>
 {% if pending %}
 <table>
@@ -40,7 +79,7 @@
   <tr><th>Name</th><th>Position</th><th>State</th><th>By</th></tr>
   {% for item in history %}
   <tr>
-    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; '{{ item.row.proposed_name }}'{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; '{{ item.row.proposed_name }}'{% elif item.row.kind == 'DEL' %}<span class="dim">REMOVE:</span> '{{ item.row.previous_name }}'{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td>{% if item.row.status == 'APPROVED' %}<span class="chip won"></span>approved

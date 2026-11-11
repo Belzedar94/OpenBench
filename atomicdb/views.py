@@ -27,8 +27,8 @@ from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, engine_policy, ingest,
                ingest_queue, lanes, live_request, logic, metrics,
-               notifications, openings, preferences, proof, revalidate,
-               solve, solve_estimate)
+               name_votes, notifications, openings, preferences, proof,
+               revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
@@ -6582,22 +6582,12 @@ def suggestions(request):
                                status=OpeningNameSuggestion.SState.PENDING)
                        .first())
                 if row is not None:
-                    # El catalogo auditado pudo nombrarla mientras esperaba, y
-                    # un nombre NUEVO no lo pisa: la aprobacion se convierte en
-                    # rechazo, igual que siempre.  Una CORRECCION no cae aqui —
-                    # nacio contra un nombre existente y el moderador acaba de
-                    # leer cual y cual lo sustituye.
-                    if (decision == OpeningNameSuggestion.SState.APPROVED
-                            and row.kind != OpeningNameSuggestion.SKind.EDIT
-                            and openings.lookup_key(row.position_id)
-                            is not None):
-                        decision = OpeningNameSuggestion.SState.REJECTED
-                    row.status = decision
-                    row.resolved_by = request.user.username[:64]
-                    row.resolved_at = timezone.now()
-                    row.save(update_fields=['status', 'resolved_by',
-                                            'resolved_at'])
-        community_names.invalidate()
+                    # One approval path for the queue and for the review
+                    # actions of the opening-name votes, so both leave the
+                    # same trail (§ name_votes.resolve_suggestion).
+                    name_votes.resolve_suggestion(row, decision,
+                                                  request.user.username)
+        name_votes.invalidate_names()
         return redirect('/atomicdb/suggestions/')
 
     pending = list(OpeningNameSuggestion.objects
@@ -6625,10 +6615,13 @@ def suggestions(request):
 
     rows = [presented(row, live=True) for row in pending]
     history = [presented(row) for row in resolved]
+    from . import name_vote_views
     return render(request, 'atomicdb/suggestions.html', {
         'pending': rows, 'history': history,
         'pending_total': OpeningNameSuggestion.objects.filter(
             status=OpeningNameSuggestion.SState.PENDING).count(),
+        'review_outcome': request.GET.get('review', ''),
+        **name_vote_views.flags_context(),
     })
 
 

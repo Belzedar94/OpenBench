@@ -1208,6 +1208,13 @@ class OpeningNameSuggestion(models.Model):
     class SKind(models.TextChoices):
         NEW  = 'NEW'
         EDIT = 'EDIT'
+        # Takes the community name off the position (owner, 11-Nov-2026: the
+        # opening-name votes).  Only ever created by an approver from the
+        # moderation page, and approved in the same step through the same
+        # code as any other suggestion.  ``previous_name`` holds the name
+        # taken off; ``proposed_name`` stays empty.  The latest approval on a
+        # position still wins, so a later NEW or EDIT names it again.
+        REMOVE = 'DEL'
 
     position      = models.ForeignKey(Position, on_delete=models.CASCADE,
                                       related_name='name_suggestions')
@@ -1235,6 +1242,8 @@ class OpeningNameSuggestion(models.Model):
                                 name='atomic_suggestion_state')]
 
     def __str__(self):
+        if self.kind == self.SKind.REMOVE:
+            return f'{self.previous_name} -> (removed) ({self.status})'
         if self.kind == self.SKind.EDIT:
             return (f'{self.previous_name} -> {self.proposed_name} '
                     f'({self.status})')
@@ -1535,3 +1544,96 @@ class MainLineSnapshot(models.Model):
 
     def __str__(self):
         return f'AtomicDB main line {self.bucket_start.isoformat()}'
+
+
+class OpeningNameVote(models.Model):
+    """A thumbs up or down on the name a position shows (owner, 11-Nov-2026).
+
+    One row per voter and position: ``voter`` is ``u:<account>`` for a
+    signed-in visitor and ``t:<cookie token>`` otherwise, the same opaque
+    cookie the campaign votes use.  Changing the vote rewrites the row and
+    withdrawing it deletes the row.
+
+    ``name`` is the name the vote was about.  Tallies only count rows whose
+    name is the one the position shows now, so a rename starts a fresh count
+    without deleting anybody's history.  ``position_key`` is a plain key and
+    not a foreign key: a catalogue name can stand on a position the tree does
+    not have yet, and it can be voted on all the same.
+
+    ``ip`` is kept only for the anti-abuse caps (a few anonymous votes per
+    address and position) and is never shown.
+    """
+
+    position_key = models.CharField(max_length=64)
+    voter = models.CharField(max_length=80)
+    name = models.CharField(max_length=60)
+    value = models.SmallIntegerField()        # +1 up, -1 down
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    # The cookie was minted by this very request: the visitor did not send
+    # one back, so the per-address cap is the only thing grouping its votes.
+    minted = models.BooleanField(default=False)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['position_key', 'voter'], name='uniq_opening_name_vote')]
+        indexes = [
+            models.Index(fields=['position_key', 'name'],
+                         name='atomic_namevote_pos'),
+            models.Index(fields=['ip', 'created'],
+                         name='atomic_namevote_ip'),
+        ]
+
+    def __str__(self):
+        return f'{self.value:+d} on {self.name} ({self.position_key[:12]})'
+
+
+class OpeningNameFlag(models.Model):
+    """A name the votes put under review, and its Discord poll.
+
+    Born the first time a name crosses the threshold (``name_votes``), once
+    per position and name: the unique pair is the dedupe, so a name is never
+    posted twice even if its votes go down and up again.  The poster
+    (``post_opening_name_flags``) fills ``discord_message_id`` once the poll
+    is out.  An approver closes it from the moderation page, and
+    ``resolution`` says how.  A flag whose position no longer shows ``name``
+    is closed as ``STALE``.
+
+    Votes and polls are advisory.  Nothing here changes a name: an approver's
+    action goes through the ordinary approval of ``OpeningNameSuggestion``.
+    """
+
+    class Resolution(models.TextChoices):
+        KEEP = 'KEEP'
+        RESTORE = 'RESTORE'
+        REMOVE = 'REMOVE'
+        RENAME = 'RENAME'
+        STALE = 'STALE'
+
+    position_key = models.CharField(max_length=64)
+    name = models.CharField(max_length=60)
+    catalogue_name = models.CharField(max_length=120, blank=True, default='')
+    named_by = models.CharField(max_length=64, blank=True, default='')
+    community = models.BooleanField(default=False)
+    up = models.IntegerField(default=0)
+    down = models.IntegerField(default=0)
+    flagged_at = models.DateTimeField(default=timezone.now, db_index=True)
+    discord_message_id = models.CharField(max_length=32, blank=True,
+                                          default='')
+    discord_thread_id = models.CharField(max_length=32, blank=True,
+                                         default='')
+    posted_at = models.DateTimeField(null=True, blank=True)
+    post_attempts = models.IntegerField(default=0)
+    post_error = models.CharField(max_length=200, blank=True, default='')
+    resolution = models.CharField(max_length=8, choices=Resolution.choices,
+                                  blank=True, default='')
+    resolved_by = models.CharField(max_length=64, blank=True, default='')
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['position_key', 'name'], name='uniq_opening_name_flag')]
+
+    def __str__(self):
+        return f'{self.name} under review ({self.position_key[:12]})'

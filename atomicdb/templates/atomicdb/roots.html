@@ -1,4 +1,5 @@
 {% extends "atomicdb/base.html" %}
+{% load static %}
 {% block title %}AtomicDB, start position and openings{% endblock %}
 {% block content %}
 
@@ -70,11 +71,22 @@
   explorer shows, from White's side, and the highest and lowest it has had
   since it was first recorded. A name approved here joins the list as soon as
   it is approved. Click a column to sort.</p>
+<p class="dim campaign-lede" id="name-votes">Do you like a name? Give it a
+  thumbs up or a thumbs down: one vote per person and name, and pressing your
+  thumb again takes the vote back. A name with at least {{ name_min_votes }}
+  votes, three quarters of them down, goes under review: it is put to a poll
+  in the <strong>#opening-names</strong> channel of our Discord, and a
+  moderator decides whether to keep it, go back to the catalogue name, remove
+  it or rename it. Sort by <a href="?sort={{ sort_links.disputed }}#openings">most
+  disputed</a> to see the names with the most thumbs down.</p>
+{% if vote_message %}<p class="campaign-status" role="status">{{ vote_message }}</p>{% endif %}
 {% if openings %}
 <div class="contrib-scroll">
-<table class="lb-table">
+<table class="lb-table namevote-table" data-votes-url="/atomicdb/names/votes/">
   <tr>
     <th style="width:40%"><a href="?sort={{ sort_links.name }}#openings">Opening</a>{{ sort_arrows.name }}</th>
+    <th class="namevote-head"><a href="?sort={{ sort_links.disputed }}#openings"
+      title="Most thumbs down first">Votes</a>{{ sort_arrows.disputed }}</th>
     <th class="n"><a href="?sort={{ sort_links.now }}#openings">Now</a>{{ sort_arrows.now }}</th>
     <th class="n"><a href="?sort={{ sort_links.best }}#openings">Best</a>{{ sort_arrows.best }}</th>
     <th class="n"><a href="?sort={{ sort_links.worst }}#openings">Worst</a>{{ sort_arrows.worst }}</th>
@@ -82,8 +94,9 @@
       title="How many times the value has changed">Changes</a>{{ sort_arrows.changes }}</th>
   </tr>
   {% for r in openings %}
-  <tr>
-    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if r.community %}{% if r.line_san %} · {% endif %}community name · named by {{ r.named_by }}{% endif %}{% if not r.present %}{% if r.line_san or r.community %} · {% endif %}not in the tree yet{% endif %}</div></td>
+  <tr id="op-{{ r.key }}">
+    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if r.community %}{% if r.line_san %} · {% endif %}community name · named by {{ r.named_by }}{% endif %}{% if not r.present %}{% if r.line_san or r.community %} · {% endif %}not in the tree yet{% endif %}</div>{% if r.votable %}<div class="namevote-marks"><span class="namevote-flag"{% if not r.under_review %} hidden{% endif %}>under review{% if r.poll_url %} · <a href="{{ r.poll_url }}" rel="noopener">Discord poll</a>{% endif %}</span>{% if r.review_hint %}<span class="namevote-hint" title="{{ r.review_hint }}">suggested for review: {{ r.review_hint }}</span>{% endif %}</div>{% endif %}</td>
+    <td class="namevote-cell">{% if r.votable %}<form class="namevote" method="post" action="/atomicdb/names/vote/{{ r.key }}/" data-key="{{ r.key }}">{% csrf_token %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="toggle" value="1"><button class="namevote-btn" name="vote" value="up" aria-pressed="false" title="Good name" aria-label="Thumbs up for {{ r.label }}">&#128077;<span class="namevote-n">{{ r.votes_up }}</span></button><button class="namevote-btn" name="vote" value="down" aria-pressed="false" title="Not a good name" aria-label="Thumbs down for {{ r.label }}">&#128078;<span class="namevote-n">{{ r.votes_down }}</span></button></form>{% endif %}</td>
     <td class="n">{{ r.now_h }}</td>
     <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
     <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
@@ -96,4 +109,8 @@
 <p class="dim">The opening catalogue is not available right now.</p>
 {% endif %}
 
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{% static 'atomicdb/name-votes.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 {% endblock %}

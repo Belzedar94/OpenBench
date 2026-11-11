@@ -113,6 +113,13 @@ def approved_map():
                           # credit can never belong to a superseded one, and
                           # it expires with the name in ``invalidate``.
                           'suggested_by': suggested_by}
+            # An approved removal (opening-name votes, 11-Nov-2026) wins like
+            # any later approval, and what it leaves is no community name at
+            # all: the position goes back to its catalogue name, or to the
+            # name it inherits from its line.  Dropped here, so no reader of
+            # the map ever sees it.
+            if kind == OpeningNameSuggestion.SKind.REMOVE:
+                del names[key]
     except Exception:
         logger.exception('community opening names unavailable')
         return {}

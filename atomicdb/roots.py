@@ -640,8 +640,18 @@ SORTS = {
     'best': (lambda row: row['best_value'], True),
     'worst': (lambda row: row['worst_value'], False),
     'changes': (lambda row: row['changes'], True),
+    # Opening-name votes (owner, 11-Nov-2026): most thumbs down first, then
+    # the lowest share of thumbs up.  Names nobody voted on go last.
+    'disputed': (lambda row: row.get('dispute'), True),
 }
 DEFAULT_SORT = 'name'
+VOTE_MESSAGES = {
+    'voted': 'Your vote is in.',
+    'withdrawn': 'Your vote is withdrawn.',
+    'rate-limited': 'Too many votes from your network on this name.',
+    'unnamed': 'That position has no name of its own any more.',
+    'invalid': 'That vote was not understood.',
+}
 
 
 def _sorted(rows, sort):
@@ -690,6 +700,7 @@ def _opening_rows(records, sort):
         rows.append(_row(Watched(key, 'opening',
                                  entry['name'] if entry else _UNNAMED),
                          record, community=entry))
+    _attach_votes(rows)
     rows, column, descending = _sorted(rows, sort)
     # Each header sorts by its column; the column in force flips instead.
     links = {}
@@ -702,6 +713,41 @@ def _opening_rows(records, sort):
     arrows = {name: '' for name in SORTS}
     arrows[column] = ' ▾' if descending else ' ▴'
     return rows, links, arrows
+
+
+def _attach_votes(rows):
+    """Thumbs up and down, the review flag and the review hint of each row
+    with a name of its own (§ ``name_votes``, ``name_review``).
+
+    Fail-open: without the votes the table is the table it always was.
+    """
+    from . import name_review, name_votes
+    named = {row['key']: row['label'] for row in rows
+             if row['label'] != _UNNAMED}
+    try:
+        counts = name_votes.tallies(named)
+        flagged = {flag.position_key: name_votes.poll_url(flag)
+                   for flag in name_votes.open_flags()
+                   if named.get(flag.position_key) == flag.name}
+        marks = name_review.suggested()
+    except Exception:
+        logger.exception('opening-name votes unavailable')
+        counts, flagged, marks = {}, {}, {}
+    for row in rows:
+        votable = row['key'] in named
+        up, down = counts.get(row['key'], (0, 0))
+        share = name_votes.approval(up, down)
+        row.update({
+            'votable': votable,
+            'votes_up': up,
+            'votes_down': down,
+            'dispute': ((down, -share) if votable and share is not None
+                        else None),
+            'under_review': votable and row['key'] in flagged,
+            'poll_url': flagged.get(row['key'], ''),
+            'review_hint': (', '.join(marks.get(row['key'], ()))
+                            if row['community'] else ''),
+        })
 
 
 def _since(records, first_rows):
@@ -736,10 +782,15 @@ API_FIELDS = ('key', 'label', 'kind', 'line', 'line_san', 'community',
               'named_by', 'present', 'value', 'status', 'best_value',
               'best_status', 'best_at', 'worst_value', 'worst_status',
               'worst_at', 'changes')
+# The opening-name votes, on the rows of the openings table only.
+API_VOTE_FIELDS = ('votes_up', 'votes_down', 'under_review')
 
 
 def _api_row(row):
     entry = {field: row[field] for field in API_FIELDS}
+    for field in API_VOTE_FIELDS:
+        if field in row:
+            entry[field] = row[field]
     for field in ('best_at', 'worst_at'):
         entry[field] = entry[field].isoformat() if entry[field] else None
     return entry
@@ -780,6 +831,14 @@ def roots_page(request):
     # The eval chart lives here, not on the home page (Torom and rhaxier,
     # 9-Nov-2026).  Imported here: ``root_chart`` imports this module.
     from . import root_chart
-    context = page_context(sort=request.GET.get('sort', DEFAULT_SORT))
+    sort = request.GET.get('sort', DEFAULT_SORT)
+    context = page_context(sort=sort)
     context['root_chart'] = root_chart.chart()
+    # What the vote buttons need: the sort to come back to, and the line
+    # that answers a vote sent without the page's script.
+    context['sort'] = sort if sort.lstrip('-') in SORTS else DEFAULT_SORT
+    context['vote_message'] = VOTE_MESSAGES.get(request.GET.get('voted', ''),
+                                                '')
+    from . import name_votes
+    context['name_min_votes'] = name_votes.min_votes()
     return render(request, 'atomicdb/roots.html', context)
