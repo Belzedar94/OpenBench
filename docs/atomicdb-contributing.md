@@ -155,7 +155,10 @@ holds are handed back, and it exits.
 By default every thread of `-T` runs its own engine of one thread (at most 32
 engines, the server's cap per machine), each with a hash sized to the free
 memory; `--jobs K` runs K engines and splits `-T` between them (`--jobs 1` is
-the old single engine) and `--hash` fixes the table size. Every task starts
+the old single engine) and `--hash` fixes the table size per engine. An
+explicit `--hash` that the free memory cannot hold is reduced (and, if need
+be, so is the number of jobs), with a warning; `--allow-hash-overcommit` keeps
+it as given. Every task starts
 from a cleared engine (`ucinewgame`), the search stops at the first mate
 (`go nodes N mate 250`), and only the lines of the last complete iteration are
 sent, never a `lowerbound`/`upperbound` line. An engine that dies hands its

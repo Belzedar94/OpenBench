@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111101
+ATOMICDB_WORKER_BUILD = 2026111102
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3153,6 +3153,50 @@ def auto_hash_mb(engines, memory=None):
     return max(AUTO_HASH_MIN_MB, min(AUTO_HASH_MAX_MB, size))
 
 
+# What the memory guard counts per engine besides an explicit --hash: the net,
+# the binary, its stacks and the slack a real process carries past its table.
+# Deliberately above ENGINE_BASE_MB: the guard is overriding a number the
+# contributor chose, so it only acts when the machine clearly cannot hold it.
+GUARD_ENGINE_OVERHEAD_MB = 300
+
+
+def usable_memory_mb(memory=None):
+    """Free memory minus the margin left to the machine, or None if unknown.
+
+    The same measure and margin the automatic hash uses (``auto_hash_mb``).
+    """
+    total, available = memory if memory is not None else memory_mb()
+    if not total or available is None:
+        return None
+    return available - max(MEMORY_MARGIN_MIN_MB, total // MEMORY_MARGIN_RAM_DIV)
+
+
+def fit_hash(engines, hash_mb, memory=None):
+    """(engines, hash_mb) that fit in the free memory, for an explicit --hash.
+
+    Since build 2026111101 -T without --jobs runs one engine per thread, and
+    --hash is per engine: an old ``-T 8 --hash 4096`` (one engine, 4 GB)
+    became eight engines asking for 32 GB, on a laptop.  When ``engines``
+    tables of ``hash_mb`` plus ``GUARD_ENGINE_OVERHEAD_MB`` each do not fit,
+    the hash comes down to the largest power of two that does (never below
+    ``AUTO_HASH_MIN_MB``); when not even that fits, the engines come down too.
+    Unknown memory changes nothing: the guard never invents a limit.
+    """
+    engines = max(1, int(engines))
+    hash_mb = max(1, int(hash_mb))
+    usable = usable_memory_mb(memory)
+    if usable is None:
+        return engines, hash_mb
+    if engines * (hash_mb + GUARD_ENGINE_OVERHEAD_MB) <= usable:
+        return engines, hash_mb
+    share = usable // engines - GUARD_ENGINE_OVERHEAD_MB
+    if share >= AUTO_HASH_MIN_MB:
+        size = 1 << (int(min(share, hash_mb)).bit_length() - 1)
+        return engines, max(AUTO_HASH_MIN_MB, size)
+    room = max(1, usable // (AUTO_HASH_MIN_MB + GUARD_ENGINE_OVERHEAD_MB))
+    return min(engines, room), min(hash_mb, AUTO_HASH_MIN_MB)
+
+
 def plan_threads(total, jobs, solve):
     """Split the contributor's -T promise honestly, and spend all of it.
 
@@ -3234,6 +3278,10 @@ def main():
                     help='also serve SOLVE tasks (exhaustive proofs) besides '
                          'analysis; without this flag the worker behaves '
                          'exactly as before')
+    ap.add_argument('--allow-hash-overcommit', action='store_true',
+                    help='keep --hash as given even when the engines would '
+                         'not fit in the free memory (by default the hash, '
+                         'and if need be the number of jobs, is reduced)')
     ap.add_argument('--skip-engine-check', action='store_true',
                     help='start even if the engine does not identify itself '
                          'as an Atomic-Stockfish build')
@@ -3301,6 +3349,28 @@ def main():
         a.hash = auto_hash_mb(jobs + (1 if a.solve else 0))
         hash_note = f'hash {a.hash} MB each, sized to the free memory'
     else:
+        solver_engines = 1 if a.solve else 0
+        engines = jobs + solver_engines
+        asked = a.hash
+        fit_engines, fit_mb = ((engines, asked) if a.allow_hash_overcommit
+                               else fit_hash(engines, asked))
+        if (fit_engines, fit_mb) != (engines, asked):
+            need_gb = engines * (asked + GUARD_ENGINE_OVERHEAD_MB) / 1024
+            if fit_engines < engines:
+                fewer = max(1, fit_engines - solver_engines)
+                jobs, slot_threads, solver_cores = plan_threads(
+                    a.T, fewer, a.solve)
+                change = (f'using {jobs} jobs of {fit_mb} MB each, the most '
+                          'that fit')
+            else:
+                change = f'using {fit_mb} MB each'
+            print(f'warning: --hash is per engine since build 2026111101; '
+                  f'{engines} engines x {asked} MB would need '
+                  f'{need_gb:.1f} GB and this machine does not have it free; '
+                  f'{change}. Pass --jobs 1 for one big engine, or '
+                  '--allow-hash-overcommit to keep --hash as given.',
+                  flush=True)
+            a.hash = fit_mb
         hash_note = f'hash {a.hash} MB each'
     if a.solve and a.T < 2:
         print('note: --solve with -T 1 shares the single thread between '
