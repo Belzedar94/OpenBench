@@ -4233,19 +4233,27 @@ def _opening_name_for_keys(keys, names=None):
     a queue row exists to say what was asked for, and it is not allowed to
     take a page down because a line has no name.
     """
+    return _opening_and_credit_for_keys(keys, names=names)[0]
+
+
+def _opening_and_credit_for_keys(keys, names=None):
+    """``(name, named_by)`` for an already replayed line: the name
+    ``_opening_name_for_keys`` gives, and who proposed it when it is a
+    community name (§ ``community_names.credit``), else ``None``."""
     try:
         match = openings.match_line_keys(keys)
     except (openings.InvalidOpeningLine, openings.OpeningCatalogError):
-        return ''
+        return '', None
     floor = 0 if match is None else match['matched_ply']
     _ply, entry = community_names.deepest_on_line(keys, names=names,
                                                   floor=floor)
     if entry is not None:
-        return str(entry['name'])
-    return '' if match is None else str(match['name'])
+        return str(entry['name']), community_names.credit(entry)
+    return ('' if match is None else str(match['name'])), None
 
 
-def _line_readings_many(keys, preview_plies=10, opening=True, wait=True):
+def _line_readings_many(keys, preview_plies=10, opening=True, wait=True,
+                        credit=False):
     """``{key: (preview, full, opening)}`` from ONE walk per lineage.
 
     All three come out of the same breadcrumb on purpose.  A row that prints
@@ -4258,6 +4266,10 @@ def _line_readings_many(keys, preview_plies=10, opening=True, wait=True):
     ``opening=False`` leaves the name empty.  Naming reads the community map,
     a trip to the shared cache, and a page that only prints the line has no
     reason to pay it.
+
+    ``credit=True`` adds a fourth element: who proposed the name when it is
+    a community name, else ``None`` (§ ``_opening_and_credit_for_keys``).
+    It comes from the same map read, so it costs no extra query.
     """
     lineages = _lines_to_root(keys, wait=wait)
     names = (community_names.approved_map() if opening and lineages
@@ -4269,10 +4281,11 @@ def _line_readings_many(keys, preview_plies=10, opening=True, wait=True):
         # cola dice DONDE va — dos posiciones distintas de la misma linea
         # profunda nunca deben compartir label.
         preview = _format_san_line(top, line, max_plies=preview_plies)
-        name = (_opening_name_for_keys(
+        name, named_by = (_opening_and_credit_for_keys(
             [top.key, *(step['key'] for step in line)], names=names)
-            if opening else '')
-        readings[key] = (preview, full, name)
+            if opening else ('', None))
+        readings[key] = ((preview, full, name, named_by) if credit
+                         else (preview, full, name))
     return readings
 
 
@@ -5841,8 +5854,12 @@ def api_query(request):
     # Additive, last key: the last named Atomic opening on the canonical line
     # to this position (the label the home queue shows), ``null`` when the
     # line crosses no named position or is not walkable (rhaxier, 11-nov).
-    reading = _line_readings_many([pos.key]).get(pos.key)
+    reading = _line_readings_many([pos.key], credit=True).get(pos.key)
     block['opening'] = (reading[2] or None) if reading else None
+    # Additive too: who proposed that name when it is a community name
+    # ("anonymous" without an account), ``null`` on a catalogue name or none.
+    block['opening_named_by'] = (reading[3] if reading and reading[2]
+                                 else None)
     return JsonResponse(block)
 
 

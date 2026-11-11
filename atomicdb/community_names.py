@@ -62,7 +62,9 @@ from . import openings
 
 logger = logging.getLogger(__name__)
 
-CACHE_KEY = 'atomicdb.community-opening-names.v1'
+# v2: each entry gained ``suggested_by``.  A new key, so no process reads a
+# v1 map without it from a shared cache during a deploy.
+CACHE_KEY = 'atomicdb.community-opening-names.v2'
 # El backend por defecto es LocMem: UNA cache POR PROCESO.  Con varios workers
 # de gunicorn, ``invalidate()`` solo borra la entrada del proceso que atendio
 # la moderacion — los demas ni se enteran.  El limite real de obsolescencia
@@ -75,7 +77,7 @@ CACHE_SECONDS = 5
 
 def approved_map():
     """{position_key: {'name', 'kind', 'corrects', 'approved_by',
-    'approved_at'}} — fail-open.
+    'approved_at', 'suggested_by'}} — fail-open.
 
     UNA VEZ POR RENDER, NO UNA POR FILA.  El mapa entero es la unidad: se pide
     completo, cabe en memoria y responde por cualquier posicion.  La tabla del
@@ -94,20 +96,40 @@ def approved_map():
                 .filter(status=OpeningNameSuggestion.SState.APPROVED)
                 .order_by('resolved_at', 'id')
                 .values_list('position_id', 'proposed_name', 'resolved_by',
-                             'resolved_at', 'kind', 'previous_name'))
+                             'resolved_at', 'kind', 'previous_name',
+                             'suggested_by'))
         names = {}
-        for key, name, approved_by, approved_at, kind, previous in rows:
+        for (key, name, approved_by, approved_at, kind, previous,
+             suggested_by) in rows:
             # Una aprobacion posterior sobre la misma posicion manda.  Y eso
             # ya era, por si solo, el camino de escritura de una edicion de
             # nombre COMUNITARIO: aprobar la siguiente sustituye a la anterior.
             names[key] = {'name': name, 'kind': kind, 'corrects': previous,
                           'approved_by': approved_by,
-                          'approved_at': approved_at}
+                          'approved_at': approved_at,
+                          # Who proposed the name in force, shown with it
+                          # (owner, 11-Nov-2026).  It rides on the same
+                          # latest-approval-wins row as the name, so the
+                          # credit can never belong to a superseded one, and
+                          # it expires with the name in ``invalidate``.
+                          'suggested_by': suggested_by}
     except Exception:
         logger.exception('community opening names unavailable')
         return {}
     cache.set(CACHE_KEY, names, CACHE_SECONDS)
     return names
+
+
+ANONYMOUS_CREDIT = 'anonymous'
+
+
+def credit(entry):
+    """Who a community name is credited to: the account that proposed the
+    approved suggestion in force, or ``'anonymous'`` when it was proposed
+    without one.  Only the account name is public; the rest of the
+    suggestion row (address, comment) never leaves the moderation queue.
+    """
+    return (entry.get('suggested_by') or '').strip() or ANONYMOUS_CREDIT
 
 
 def invalidate():
@@ -257,4 +279,5 @@ def _record(position_key, entry, fen=''):
         'catalog_name': catalog_name(position_key) or '',
         'approved_by': entry['approved_by'],
         'approved_at': entry['approved_at'],
+        'named_by': credit(entry),
     }

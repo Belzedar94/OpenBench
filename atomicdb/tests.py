@@ -827,6 +827,7 @@ class PovTests(TestCase):
         self.assertEqual(len(d['moves']), 20)
         self.assertIn('opening', d)
         self.assertIsNone(d['opening'])
+        self.assertIsNone(d['opening_named_by'])
 
     def test_query_api_rejects_garbage(self):
         r = self.client.get('/atomicdb/api/query', {'fen': 'lol nope'})
