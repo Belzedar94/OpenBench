@@ -19,6 +19,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import Client, override_settings
+from django.utils import timezone
 
 from OpenBench.models import Profile
 
@@ -43,6 +44,10 @@ def _position(route):
 
 
 def _approved(pos, name, kind=OpeningNameSuggestion.SKind.NEW, **fields):
+    # With its approval time, like every approved row in production: the
+    # latest approval wins by ``resolved_at``, and PostgreSQL sorts a NULL
+    # after every date where SQLite sorts it first.
+    fields.setdefault('resolved_at', timezone.now())
     return OpeningNameSuggestion.objects.create(
         position=pos, proposed_name=name, kind=kind, ip='127.0.0.1',
         status=OpeningNameSuggestion.SState.APPROVED, **fields)
