@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE_NAME = "TaikyokuShogi-Stockfish"
 ENGINE_REF = "b2014c422f4aae7420636ab17884dfb862cf4c15"
-CLIENT_REF = "cf95098c580cd2775f5826466c64e9a5302906f8"
+CLIENT_REF = "bec9c577ede855ab930796490d7fde2bff962852"
 CAMPAIGN = "taikyoku-material-regime-20260812"
 COHORT = "material-n8000-startpos-v1"
 TEACHER = "taikyoku-material-advance-v1"
