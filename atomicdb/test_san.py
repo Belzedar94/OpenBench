@@ -225,6 +225,7 @@ class HomeSanTests(TestCase):
     def test_the_first_moves_read_in_san(self):
         body = Client().get('/atomicdb/').content.decode()
 
-        self.assertIn(f'<a href="/atomicdb/explore/{self.child.key}/">'
-                      '<strong data-uci="g1f3" title="g1f3">Nf3</strong></a>', body)
+        # The link may carry an "Enters <opening>" title (#218).
+        self.assertRegex(body, f'<a href="/atomicdb/explore/{self.child.key}/"'
+                         '[^>]*><strong data-uci="g1f3" title="g1f3">Nf3</strong></a>')
         self.assertNotIn('<strong>g1f3</strong>', body)
