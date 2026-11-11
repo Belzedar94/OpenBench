@@ -282,8 +282,18 @@ def apply_job(job):
     # misma fila.
     task = AnalysisTask.objects.filter(pk=job.task_id).values(
         'source', 'requested_by', 'also_requested_by', 'budget_nodes',
-        'route', 'then_verify').first()
+        'route', 'then_verify', 'delivered_by', 'engine_sha').first()
     source = (task or {}).get('source')
+    # WHO produced this result, recorded on every closure it causes
+    # (see ingest.closure_attribution), and whether that account may close
+    # positions with lines the server could not prove (see the trust gate in
+    # ingest.ingest_analysis).  The account is the authenticated one the
+    # submit stamped on the task; the payload carries the same name.
+    account = ((task or {}).get('delivered_by')
+               or payload.get('username') or '')
+    provenance = {'task': job.task_id, 'account': account,
+                  'engine_sha': (task or {}).get('engine_sha') or ''}
+    trusted = ingest.account_trusted(account)
     # Stage (b), the climb through the ancestors, waits in its own durable
     # queue when deferral is on (§ propagation_queue); the job then commits
     # its result on its own position only, and the requested PV
@@ -297,7 +307,7 @@ def apply_job(job):
                                   'route': task.get('route')}
 
     with ingest.carried_cuts() as cut, atomic(), \
-            ingest.closure_attribution(source):
+            ingest.closure_attribution(source, provenance):
         current = IngestJob.objects.select_for_update().get(pk=job.pk)
         if current.state == IngestJob.JState.DONE:
             return current.summary or {}
@@ -313,7 +323,8 @@ def apply_job(job):
             summary = ingest.ingest_analysis(
                 job.position_id, lines, searched, machine=machine,
                 mate_proofs=mate_proofs, restricted=restricted,
-                defer_propagation=deferral, arbiter_budget=arbiter)
+                defer_propagation=deferral, trusted=trusted,
+                arbiter_budget=arbiter)
             # Las peticiones que este pase deja sin trabajo se cierran AQUI,
             # dentro de la misma transaccion que lo aplica: si el analisis se
             # revierte, vuelven enteras a su cola.

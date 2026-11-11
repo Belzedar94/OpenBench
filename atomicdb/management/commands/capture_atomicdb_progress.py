@@ -53,7 +53,7 @@ def _snapshot_values(observed_at):
             'key',
             filter=(closed_filter
                     & ~Q(closure__in=('TERMINAL', 'TB'))
-                    & Q(proof='ENGINE'))),
+                    & Q(proof__in=('ENGINE', 'TB_LINE')))),
         trust_disputed=Count(
             'key',
             filter=(closed_filter
