@@ -380,6 +380,7 @@ class SweepDripTests(TestCase):
             self._swept().update(state=COMPLETED)
             self.assertEqual(sweep.drip(), 0)
 
+    @override_settings(ATOMICDB_SWEEP16_SHARE='0')
     def test_it_waits_while_the_requests_pile_up(self):
         self._plan()
         AnalysisTask.objects.create(position=self.root, generation=0,
@@ -387,6 +388,14 @@ class SweepDripTests(TestCase):
 
         self.assertEqual(sweep.drip(user_backlog_max=0), 0)
         self.assertEqual(sweep.drip(user_backlog_max=1), 5)
+
+    def test_with_a_share_it_queues_whatever_the_requests(self):
+        self._plan()
+        AnalysisTask.objects.create(position=self.root, generation=0,
+                                    budget_nodes=M128, source=USER)
+
+        self.assertEqual(sweep.drip(user_backlog_max=0), 5)
+        self.assertTrue(sweep.has_waiting())
 
     def test_the_scan_is_bounded(self):
         Position.objects.filter(key__in=self.keys[:3]).update(visits=2)
@@ -478,6 +487,7 @@ class SweepDripTests(TestCase):
 # ---------------------------------------------------------------------------
 # Where it goes in the queue, and how it shows.
 # ---------------------------------------------------------------------------
+@override_settings(ATOMICDB_SWEEP16_SHARE='0')
 class SweepServiceOrderTests(TestCase):
 
     def setUp(self):
@@ -515,3 +525,137 @@ class SweepServiceOrderTests(TestCase):
 
     def test_its_receipt_stays_out_of_the_feed(self):
         self.assertIn(sweep.SWEEP_EVENT, views.FEED_HIDDEN_KINDS)
+
+
+# ---------------------------------------------------------------------------
+# The fleet share: a fixed fraction of the leases, ahead of the requests.
+# ---------------------------------------------------------------------------
+class SweepShareRuleTests(TestCase):
+
+    def setUp(self):
+        self.root = _root()
+
+    def _waiting(self):
+        AnalysisTask.objects.create(
+            position=_play(self.root, 'a2a3', **_candidate()), generation=1,
+            budget_nodes=M128, multipv=1, source=FILL, arm=sweep.SWEEP_ARM)
+
+    def test_the_share_reads_its_setting(self):
+        self.assertEqual(sweep.share(), sweep.SHARE_DEFAULT)
+        for raw, value in (('0', 0.0), ('0.3', 0.3), ('7', 1.0),
+                           ('-1', 0.0), ('nonsense', sweep.SHARE_DEFAULT)):
+            with override_settings(ATOMICDB_SWEEP16_SHARE=raw):
+                self.assertEqual(sweep.share(), value)
+
+    def test_zero_never_takes_it(self):
+        self._waiting()
+        self.assertFalse(any(sweep.take_share(0.0) for _ in range(50)))
+
+    def test_one_always_takes_it_when_there_is_something(self):
+        self._waiting()
+        self.assertTrue(all(sweep.take_share(1.0) for _ in range(50)))
+
+    def test_nothing_waiting_nothing_taken(self):
+        self.assertFalse(sweep.take_share(1.0))
+
+    def test_the_fraction_is_exact_and_spread(self):
+        self._waiting()
+        taken = [sweep.take_share(0.14) for _ in range(1000)]
+
+        self.assertEqual(sum(taken), 140)
+        # Evenly spread: never two in a row at 14%.
+        self.assertFalse(any(a and b for a, b in zip(taken, taken[1:])))
+
+    def test_without_a_cache_it_falls_back_to_a_coin(self):
+        self._waiting()
+        with patch.object(sweep, '_next_lease_number', return_value=None):
+            taken = sum(sweep.take_share(0.5) for _ in range(2000))
+        self.assertGreater(taken, 850)
+        self.assertLess(taken, 1150)
+
+    def test_waiting_is_cached(self):
+        sweep.note_waiting(False)
+        self._waiting()
+        with self.assertNumQueries(0, using=sweep.AnalysisTask.objects.db):
+            self.assertFalse(sweep.has_waiting())
+        from django.core.cache import cache
+        cache.delete(sweep.WAITING_CACHE_KEY)
+        self.assertTrue(sweep.has_waiting())
+
+
+class SweepShareLeaseTests(TestCase):
+
+    def setUp(self):
+        worker_account('w', 'pw')
+        self.root = _root()
+        self.clicked = AnalysisTask.objects.create(
+            position=_play(self.root, 'c2c3'), generation=0,
+            budget_nodes=M128, source=USER, requested_by='alice')
+
+    def _sweep_task(self, uci='a2a3'):
+        return AnalysisTask.objects.create(
+            position=_play(self.root, uci, **_candidate()), generation=1,
+            budget_nodes=M128, multipv=1, source=FILL, arm=sweep.SWEEP_ARM)
+
+    def _lease(self, machine='box', threads='4'):
+        response = self.client.post('/atomicdb/api/lease', {
+            'username': 'w', 'password': 'pw', 'machine': machine,
+            'worker_build': '2026072203', 'lease_session': machine,
+            'threads': threads})
+        self.assertEqual(response.status_code, 200)
+        return [task['id'] for task in response.json()['tasks']]
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='1')
+    def test_a_share_of_one_serves_the_sweep_before_a_request(self):
+        swept = self._sweep_task()
+
+        self.assertEqual(self._lease(), [swept.id])
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='0')
+    def test_a_share_of_zero_keeps_the_old_order(self):
+        self._sweep_task()
+
+        self.assertEqual(self._lease(), [self.clicked.id])
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='1')
+    def test_with_the_sweep_empty_the_request_is_served(self):
+        self.assertEqual(self._lease(), [self.clicked.id])
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='1')
+    def test_a_stale_yes_is_corrected_by_the_lease(self):
+        sweep.note_waiting(True)
+
+        self.assertEqual(self._lease(), [self.clicked.id])
+        from django.core.cache import cache
+        self.assertIs(cache.get(sweep.WAITING_CACHE_KEY), False)
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='1')
+    def test_a_closed_position_is_not_served_by_the_share(self):
+        swept = self._sweep_task()
+        Position.objects.filter(key=swept.position_id).update(
+            status='WHITE_WIN')
+
+        self.assertEqual(self._lease(), [self.clicked.id])
+
+    @override_settings(ATOMICDB_SWEEP16_SHARE='0.25')
+    def test_over_many_leases_the_share_is_kept(self):
+        # Forty requests on forty distinct positions: the replies to two
+        # first moves the sweep does not use.
+        replies = []
+        for first in ('c2c3', 'g1f3'):
+            parent = _play(self.root, first)
+            replies.extend(_play(parent, uci)
+                           for uci in logic.legal_moves(parent.fen)[:20])
+        for pos in replies:
+            AnalysisTask.objects.create(position=pos, generation=0,
+                                        budget_nodes=M128, source=USER,
+                                        requested_by='bob')
+        swept = [self._sweep_task(uci).id
+                 for uci in ('a2a3', 'b2b3', 'd2d3', 'e2e3', 'f2f3',
+                             'g2g3', 'h2h3', 'a2a4', 'b2b4', 'd2d4')]
+
+        served = []
+        for index in range(40):
+            served.extend(self._lease(machine=f'box{index}'))
+
+        self.assertEqual(sum(1 for task in served if task in swept), 10)

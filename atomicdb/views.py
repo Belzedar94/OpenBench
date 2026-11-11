@@ -37,6 +37,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      SolveTask, WorkerPing)
 from .models import ContributorPref
 from . import idle_repair
+from . import sweep
 from . import proposed_campaigns
 from . import san as move_names
 
@@ -789,7 +790,7 @@ def api_lease(request):
         personal_q = (requester_q(personal_for)
                       if worker_mode == 'personal' else Q(pk__in=[]))
 
-        def choose_pending(honour_deep_cap=True):
+        def choose_pending(honour_deep_cap=True, sweep_only=False):
             # Scan the ordered queue, rather than an arbitrary prefix: a
             # non-TB worker must not receive a TB task merely because several
             # TB positions happen to be ahead of the first compatible task.
@@ -933,10 +934,15 @@ def api_lease(request):
             # (``served_rank`` tambien: vale 0 fuera de USER.)
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
-            ordered = (live_request.fair_share(ordered)
-                       .order_by(*band_keys, '-source', '-own_first',
-                                 *live_request.SERVICE_KEYS,
-                                 '-queue_rank', 'id'))
+            if sweep_only:
+                # The +16 sweep's share of the fleet (see atomicdb.sweep):
+                # its own tasks, oldest first, through the same checks below.
+                ordered = sweep.waiting_tasks()
+            else:
+                ordered = (live_request.fair_share(ordered)
+                           .order_by(*band_keys, '-source', '-own_first',
+                                     *live_request.SERVICE_KEYS,
+                                     '-queue_rank', 'id'))
             for candidate in _locked_in_order(ordered):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
@@ -1028,7 +1034,16 @@ def api_lease(request):
                 # fallar.
                 pass
             else:
-                chosen = choose_pending()
+                chosen = None
+                # The +16 sweep's fixed share of the leases, ahead of the
+                # requests (owner and community, 11-Nov-2026).  A personal
+                # worker never takes it: it serves its own account only.
+                if worker_mode != 'personal' and sweep.take_share():
+                    chosen = choose_pending(sweep_only=True)
+                    if chosen is None:
+                        sweep.note_waiting(False)
+                if chosen is None:
+                    chosen = choose_pending()
                 # A personal worker with nothing to take does not refill the
                 # selector's pool: it would not take those tasks either, and
                 # every idle poll of it would add another handful.

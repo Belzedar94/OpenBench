@@ -39,13 +39,15 @@ HOW.  Two halves, so that nothing heavy runs on a clock that matters:
   that still qualify, up to the room it has.
 
 HOW MUCH, AND THE VALVES.  A task is one search of ``SWEEP_NODES`` (128M) with
-one line, in the FILL band: behind every request, ahead of the selector's own
+one line, in the FILL band.  ``ATOMICDB_SWEEP16_SHARE`` of the leases (0.14
+by default) take a sweep task first, requests or not (see the fleet share
+below); every other lease serves it behind every request, ahead of the selector's own
 AUTO pool, beside the other arms that close nodes (coverage, quality).  The
 drip only TOPS UP its own PENDING tasks to ``SWEEP_PENDING_CAP`` (256), like
 the analysis pool and never as a dump (the 512-task floods of 8 and 11
 October), pays the hourly ceiling of its arm (``ATOMICDB_ARM_RATE_SWEEP16``,
 § ``ingest.arm_rate``), and does nothing while more than
-``SWEEP_USER_BACKLOG_MAX`` requests are waiting.  The analysis pool does not
+``SWEEP_USER_BACKLOG_MAX`` requests are waiting when the share is 0.  The pool does not
 count these tasks (it counts AUTO only), so ``--pool-target`` keeps meaning
 what it meant.
 
@@ -393,6 +395,107 @@ def forget_plan():
 
 # ------------------------------------------------------------- the drip ------
 
+# ------------------------------------------------------- the fleet share ---
+#
+# Owner and community, 11-Nov-2026: the sweep gets a FIXED SHARE of the leases
+# even while requests are waiting, about the compute the mate-stop worker
+# (2026111101) frees on closures.  Without it the sweep would never run: the
+# request queue has not been empty for weeks.
+#
+# HOW A LEASE DECIDES.  A counter shared by every web process (the site's
+# cache, Redis in production) counts the leases that could have taken a sweep
+# task; lease ``n`` takes one when ``floor(n * share)`` steps up.  That is
+# exactly ``share`` of those leases, evenly spread, the same for every worker
+# whatever its size.  Without a working cache it falls back to a coin.
+#
+# CHEAP WHEN THERE IS NOTHING.  Whether the sweep has waiting tasks is cached
+# for ``WAITING_CACHE_SECONDS``: the drip says yes as soon as it queues, and a
+# lease that found nothing says no, so a lease with an empty sweep costs one
+# cache read and no query.
+#
+# ``ATOMICDB_SWEEP16_SHARE`` (environment or settings), a fraction between 0
+# and 1; ``0`` turns the share off and leaves the order of service as before.
+SHARE_SETTING = 'ATOMICDB_SWEEP16_SHARE'
+SHARE_DEFAULT = 0.14
+WAITING_CACHE_KEY = 'atomicdb:sweep16:waiting'
+COUNTER_CACHE_KEY = 'atomicdb:sweep16:leases'
+WAITING_CACHE_SECONDS = 60
+
+
+def share():
+    """The fraction of leases that serve the sweep first, 0 to 1."""
+    raw = getattr(settings, SHARE_SETTING, None)
+    if raw is None:
+        raw = os.environ.get(SHARE_SETTING, '')
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return SHARE_DEFAULT
+    if value != value:          # NaN
+        return SHARE_DEFAULT
+    return min(1.0, max(0.0, value))
+
+
+def _cache():
+    from django.core.cache import cache
+    return cache
+
+
+def note_waiting(waiting):
+    try:
+        _cache().set(WAITING_CACHE_KEY, bool(waiting), WAITING_CACHE_SECONDS)
+    except Exception:           # noqa: BLE001 - a cache is never required
+        pass
+
+
+def has_waiting():
+    """Are sweep tasks waiting?  Cached; one indexed query on a miss."""
+    try:
+        cached = _cache().get(WAITING_CACHE_KEY)
+    except Exception:           # noqa: BLE001
+        cached = None
+    if cached is not None:
+        return bool(cached)
+    waiting = waiting_tasks().exists()
+    note_waiting(waiting)
+    return waiting
+
+
+def waiting_tasks():
+    """The sweep tasks a lease may take, oldest first."""
+    return (AnalysisTask.objects
+            .filter(state='PENDING', arm=SWEEP_ARM,
+                    source=AnalysisTask.Source.FILL,
+                    position__status='UNKNOWN')
+            .order_by('id'))
+
+
+def _next_lease_number():
+    try:
+        cache = _cache()
+        try:
+            return cache.incr(COUNTER_CACHE_KEY)
+        except ValueError:
+            cache.add(COUNTER_CACHE_KEY, 0, None)
+            return cache.incr(COUNTER_CACHE_KEY)
+    except Exception:           # noqa: BLE001
+        return None
+
+
+def take_share(fraction=None):
+    """Should this lease serve the sweep first?"""
+    fraction = share() if fraction is None else fraction
+    if fraction <= 0 or not has_waiting():
+        return False
+    if fraction >= 1:
+        return True
+    number = _next_lease_number()
+    if number is None:
+        import random
+        return random.random() < fraction
+    return int(number * fraction) != int((number - 1) * fraction)
+
+
 def user_backlog():
     return AnalysisTask.objects.filter(
         state='PENDING', source=AnalysisTask.Source.USER).count()
@@ -408,7 +511,9 @@ def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
 
     Tops the sweep's own PENDING tasks up to ``cap``, within the hourly
     ceiling of its arm, and only while at most ``user_backlog_max`` requests
-    are waiting (a negative value skips that check).  Reads at most ``scan``
+    are waiting (a negative value skips that check; so does a fleet share
+    above zero, which serves the sweep whatever the requests).  Reads at most
+    ``scan``
     keys, each checked again against the database: a position that closed,
     was searched again, or already has a live task is passed over for good.
     """
@@ -421,7 +526,8 @@ def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
     room = cap - pending
     if room <= 0:
         return 0
-    if user_backlog_max >= 0 and user_backlog() > user_backlog_max:
+    if (user_backlog_max >= 0 and share() <= 0
+            and user_backlog() > user_backlog_max):
         return 0
     room = min(room, ingest._arm_budget_room(SWEEP_ARM))
     if room <= 0:
@@ -461,6 +567,7 @@ def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
         cursor += used
     _save_cursor(build_id, cursor)
     if made:
+        note_waiting(True)
         DBEvent.objects.create(kind=SWEEP_EVENT, payload={
             'queued': made, 'pending_before': pending, 'cap': cap,
             'cursor': cursor, 'total': len(keys)})
