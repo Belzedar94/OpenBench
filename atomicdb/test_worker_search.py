@@ -532,3 +532,75 @@ class StartupTests(SimpleTestCase):
         self.assertEqual(slot.call_count, 1)
         self.assertEqual(slot.call_args.args[5], 6)
         self.assertEqual(slot.call_args.args[1].hash, 64)
+
+
+class HashGuardTests(SimpleTestCase):
+    """An explicit --hash that the free memory cannot hold (build 2026111102).
+
+    The memory in these tests: 32 GB installed, 12 GB free, so the margin is
+    4 GB and 8192 MB are usable.
+    """
+
+    MEMORY = (32768, 12288)
+
+    def test_a_hash_that_fits_is_kept(self):
+        self.assertEqual(worker.fit_hash(8, 512, self.MEMORY), (8, 512))
+
+    def test_the_old_single_engine_hash_shrinks_per_engine(self):
+        # -T 8 --hash 4096 from before 2026111101: 8 x 4396 MB is too much;
+        # 8192 / 8 - 300 = 724 -> 512.
+        self.assertEqual(worker.fit_hash(8, 4096, self.MEMORY), (8, 512))
+
+    def test_jobs_come_down_when_not_even_the_minimum_fits(self):
+        # 8192 / (16 + 300) = 25 engines at most.
+        self.assertEqual(worker.fit_hash(32, 4096, self.MEMORY), (25, 16))
+        self.assertEqual(worker.fit_hash(32, 4096, (8192, 100)), (1, 16))
+
+    def test_unknown_memory_changes_nothing(self):
+        self.assertEqual(worker.fit_hash(8, 4096, (None, None)), (8, 4096))
+
+    def run_main(self, *flags, memory=MEMORY):
+        argv = ['atomicdb_worker.py', '-U', 'user', '-P', 'pass', '-S',
+                'https://server', '--engine', 'my-engine',
+                '--no-auto-update', '--no-fetch-syzygy', *flags]
+        with mock.patch.object(worker.sys, 'argv', argv), \
+                mock.patch.object(worker, 'check_engine_identity',
+                                  return_value=None), \
+                mock.patch.object(worker, '_file_sha256', return_value=''), \
+                mock.patch.object(worker, '_net_sha256', return_value=''), \
+                mock.patch.object(worker, 'memory_mb', return_value=memory), \
+                mock.patch.object(worker, '_analysis_slot') as slot, \
+                redirect_stdout(io.StringIO()) as out:
+            worker.main()
+        return slot, out.getvalue()
+
+    def test_main_shrinks_the_hash_and_says_why(self):
+        slot, out = self.run_main('-T', '8', '--hash', '4096')
+        self.assertEqual(slot.call_count, 8)
+        self.assertEqual(slot.call_args.args[1].hash, 512)
+        self.assertIn('--hash is per engine since build 2026111101', out)
+        self.assertIn('8 engines x 4096 MB would need 34.3 GB', out)
+        self.assertIn('using 512 MB each', out)
+        self.assertIn('--jobs 1', out)
+        self.assertEqual(out.count('warning:'), 1)
+
+    def test_main_reduces_the_jobs_when_it_must(self):
+        slot, out = self.run_main('-T', '32', '--hash', '4096')
+        self.assertEqual(slot.call_count, 25)
+        self.assertEqual(slot.call_args.args[1].hash, 16)
+        self.assertEqual(sum(call.args[5] for call in slot.call_args_list),
+                         32)
+        self.assertIn('using 25 jobs of 16 MB each', out)
+
+    def test_one_big_engine_that_fits_is_left_alone(self):
+        slot, out = self.run_main('-T', '8', '--jobs', '1', '--hash', '4096')
+        self.assertEqual(slot.call_count, 1)
+        self.assertEqual(slot.call_args.args[1].hash, 4096)
+        self.assertNotIn('warning:', out)
+
+    def test_the_override_keeps_the_hash(self):
+        slot, out = self.run_main('-T', '8', '--hash', '4096',
+                                  '--allow-hash-overcommit')
+        self.assertEqual(slot.call_count, 8)
+        self.assertEqual(slot.call_args.args[1].hash, 4096)
+        self.assertNotIn('warning:', out)
