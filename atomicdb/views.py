@@ -5143,7 +5143,8 @@ def _child_moves(pos):
                 plies = 1 + c.mate_in
             elif c.closure == 'TERMINAL':
                 plies = 1
-            elif c.closure == 'MATE_PV' and c.won_line:
+            elif (c.closure == 'MATE_PV' and c.won_line
+                  and c.proof != 'TB_LINE'):
                 plies = 1 + len(c.won_line.split())
             if plies is not None:
                 n = (plies + 1) // 2

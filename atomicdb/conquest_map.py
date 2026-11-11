@@ -199,7 +199,7 @@ def validate_snapshot(snapshot):
             raise SnapshotError('invalid node status')
         if node['c'] not in _CLOSURES:
             raise SnapshotError('invalid node closure')
-        if node['p'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
+        if node['p'] not in (None, 'ANDOR', 'ENGINE', 'TB_LINE', 'DISPUTED'):
             raise SnapshotError('invalid node proof')
         if not isinstance(node['d'], int) or node['d'] < 0:
             raise SnapshotError('invalid node depth')
@@ -454,7 +454,7 @@ def _validate_position(position):
         raise SnapshotError('invalid database status')
     if position['closure'] not in _CLOSURES:
         raise SnapshotError('invalid database closure')
-    if position['proof'] not in (None, 'ANDOR', 'ENGINE', 'DISPUTED'):
+    if position['proof'] not in (None, 'ANDOR', 'ENGINE', 'TB_LINE', 'DISPUTED'):
         raise SnapshotError('invalid database proof')
     for eval_field in ('eval_cp', 'backed_eval'):
         if (position[eval_field] is not None
@@ -550,6 +550,8 @@ def _own_metrics(position, active, queued, alternate_parents):
     metrics[{
         'ANDOR': M_ANDOR,
         'ENGINE': M_ENGINE,
+        # An engine line into a tablebase win: engine evidence, like ENGINE.
+        'TB_LINE': M_ENGINE,
         'DISPUTED': M_DISPUTED,
         None: M_PROOF_NONE,
     }[position['proof']]] = 1

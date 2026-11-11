@@ -20,12 +20,13 @@ from datetime import datetime, timedelta
 from django.conf import settings
 from django.db import (DatabaseError, IntegrityError, OperationalError, router,
                        transaction)
-from django.db.models import Max, Q
+from django.db.models import Case, Max, Q, Value, When
 from django.utils import timezone
 
 from . import logic, proof, solve_estimate, tb
 from .database import atomic, connection, current_alias
-from .models import AnalysisTask, Campaign, DBEvent, Edge, Position
+from .models import (AnalysisTask, Campaign, ClosureProvenance, DBEvent,
+                     Edge, PendingClaim, Position, TrustedAccount)
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +530,92 @@ def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
                 budget_positions=budget_positions, hint_pv=pv_rest,
                 deadline=deadline, return_run=True)
         prepared[index] = (winner_white, pv_rest, proof_result, worst_run)
+    for index, line in enumerate(lines):
+        if index in prepared:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        tb_line = prepare_tb_line(parent_fen, line, legal, deadline=deadline)
+        if tb_line is not None:
+            prepared[index] = tb_line
     return prepared
+
+
+# ---------------- lines that end in a tablebase win ----------------
+#
+# A line does not have to end in mate to decide a position.  If it ends in a
+# position the server's own tables cover, and the tables score it as a win
+# for the side the engine says is winning, the line is as good a witness as
+# a mate line: legal move by move, the defender's moves are the engine's,
+# and the end is a fact the server checked itself.  It closes exactly like
+# an uncertified mate line (so only for a trusted account, see the trust
+# gate in ``ingest_analysis``), with the grade ``TB_LINE`` so that nothing
+# that re-judges mate lines by searching for mate ever re-judges it.
+#
+# The engine has to claim a decided result (|eval| in the mate band, where
+# the worker also puts its own tablebase scores): a line of a +3 search
+# that happens to wander into a won ending is not a claim that the defender
+# could not do better.
+#
+# THE 50-MOVE COUNTER.  A WDL from the tables holds from a fresh counter
+# only, so the end keeps slack 0 and the line has to reach it with a capture
+# or a pawn move.  Walking back, every quiet move spends one ply of margin
+# (``logic.line_clock_slack``); a line that would need a negative margin is
+# refused instead of being clamped to zero.  The closed nodes all get the
+# smallest margin of the line, which is what lets every link of the chain
+# inherit it safely when the line is materialised.
+TB_LINE_VERDICT = 'TB_LINE'
+
+
+def _tb_line_rejected(reason, **payload):
+    DBEvent.objects.create(kind='TB_LINE_REJECTED',
+                           payload={'reason': reason, **payload})
+
+
+def prepare_tb_line(parent_fen, line, legal=None, deadline=None):
+    """``(winner_white, pv_rest, 'TB_LINE', clock_slack)`` or None.
+
+    ``line`` is one MultiPV line of a search of ``parent_fen``.  Lines with a
+    mate score go through the mate checks instead; this only looks at lines
+    whose score claims a decided result without a mate distance.  A line
+    whose end the server's tables score differently from the claim is
+    refused and recorded (``TB_LINE_REJECTED``).
+    """
+    move, pv, ev = line.get('move'), line.get('pv'), line.get('eval_cp')
+    if (line.get('mate') is not None or not isinstance(ev, int)
+            or isinstance(ev, bool) or abs(ev) < MATE_BAND
+            or not isinstance(pv, list) or len(pv) < 2 or pv[0] != move):
+        return None
+    if legal is None:
+        legal = set(logic.legal_moves(parent_fen))
+    if move not in legal:
+        return None
+    fens = logic.walk_pv(parent_fen, pv, deadline=deadline)
+    if fens is None:
+        return None
+    end = fens[-1]
+    if (logic.terminal_status(end) is not None
+            or not logic.tb_applicable(end, tb_server_max_men())):
+        return None
+    wdl = server_tables_wdl(end)
+    if wdl is None:
+        return None
+    winner_white = ev > 0
+    claimed = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
+    actual = logic.wdl_to_status(int(wdl), end.split()[1] == 'w')
+    parent_key = logic.key_of(parent_fen)
+    if actual != claimed:
+        _tb_line_rejected('wdl-contradicts-claim', key=parent_key,
+                          move=move, claimed=claimed, server_wdl=int(wdl))
+        return None
+    # The child is the first node the line would close; the slack walk
+    # starts at the end (slack 0: a bare WDL) and stops at the child.
+    slack = logic.line_clock_slack(fens[1:], pv[1:], 0)
+    if slack is None:
+        _tb_line_rejected('fifty-move-margin', key=parent_key, move=move,
+                          plies=len(pv))
+        return None
+    return (winner_white, pv[1:], TB_LINE_VERDICT, slack)
 
 
 def _seed_child_eval(child, ev, refresh=True):
@@ -618,7 +704,8 @@ def _other_parents(closed_keys, writer_key):
 
 
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
-                    mate_proofs=None, restricted=False, defer_propagation=None):
+                    mate_proofs=None, restricted=False, defer_propagation=None,
+                    trusted=True):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
     Devuelve dict con resumen.
@@ -638,6 +725,11 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     (the ``job`` and an optional ``verify``) beside the seeds; the drainer
     runs it later through the very same ``propagate_landings``
     (§ propagation_queue).
+
+    ``trusted``: whether the account that delivered this search may close
+    positions with lines the server could not prove (see the trust gate
+    below).  The default keeps internal callers as they were; the ingest
+    queue passes the delivering account's real standing.
     """
     if mate_proofs is None:
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
@@ -731,11 +823,27 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                         'winner': 'WHITE' if winner_white else 'BLACK',
                         'max_plies': len(pv_rest) + 2,
                     })
+                    _refute_pending_claims(child.key, pv_rest)
                     _queue_disputed_reanalysis(child)
                     continue
+                tb_line = proof_result == TB_LINE_VERDICT
+            if (child.status == 'UNKNOWN' and prepared_proof is not None
+                    and proof_result != 'PROVEN' and not trusted):
+                # THE TRUST GATE.  The server could not prove this line in
+                # its online budget, so closing on it would take the word of
+                # the engine and of whoever ran it.  That word is taken only
+                # from a trusted account (§ TrustedAccount).  From anyone
+                # else the line is kept as a pending claim and the tree does
+                # not move: the child stays open with the engine's score, so
+                # it is searched again, and the claim resolves when the
+                # child closes by any route.
+                _record_pending_claim(child.key, pos.key, winner_white,
+                                      pv_rest, tb_line)
+            elif child.status == 'UNKNOWN' and prepared_proof is not None:
                 child.status = 'WHITE_WIN' if winner_white else 'BLACK_WIN'
                 child.closure = 'MATE_PV'
                 child.proof = ('ANDOR' if proof_result == 'PROVEN'
+                               else TB_LINE_VERDICT if tb_line
                                else 'ENGINE')
                 child.won_line = ' '.join(pv_rest)
                 # LONGITUD DEL TESTIGO que se acaba de guardar, ni mas ni
@@ -756,6 +864,12 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                     logic.slack_from_run(worst_run)
                     if proof_result == 'PROVEN' and worst_run is not None
                     else logic.slack_from_witness_length(len(pv_rest)))
+                if tb_line:
+                    # A line into a tablebase win names no mate distance,
+                    # exactly like a TB closure, and its clock margin was
+                    # measured along the line (``prepare_tb_line``).
+                    child.mate_in = None
+                    child.clock_slack = worst_run
                 if pv_rest:
                     child.best_move = pv_rest[0]
                 # CAS sobre el estado leido: el DAG transpone y el MISMO hijo
@@ -1438,6 +1552,8 @@ def _own_witness_plies(pos):
     """
     if pos.closure != 'MATE_PV':
         return None
+    if pos.proof == TB_LINE_VERDICT:
+        return None             # the line ends in a TB win, not in mate
     line = (pos.won_line or '').split()
     return len(line) if line else pos.mate_in
 
@@ -3855,14 +3971,17 @@ def _recheck_once_committed(landed, keys, climbed):
     """
     keys, climbed = list(keys), list(climbed)
     source = current_closure_source()
+    provenance = current_closure_provenance()
 
     def recheck():
-        recheck_after_commit(landed, keys, climbed=climbed, source=source)
+        recheck_after_commit(landed, keys, climbed=climbed, source=source,
+                             provenance=provenance)
 
     transaction.on_commit(recheck, using=current_alias(), robust=True)
 
 
-def recheck_after_commit(landed, keys, climbed=(), source=None):
+def recheck_after_commit(landed, keys, climbed=(), source=None,
+                         provenance=None):
     """Both rules again on what a landing read, once it has committed.
 
     Registered by ingest_analysis and by a TB landing (_apply_prepared_tb)
@@ -3877,7 +3996,7 @@ def recheck_after_commit(landed, keys, climbed=(), source=None):
     follows has committed, and what a failed recheck leaves is the sweep's.
     """
     try:
-        with closure_attribution(source):
+        with closure_attribution(source, provenance):
             return _recheck(landed, keys, climbed)
     except Exception:       # noqa: BLE001 - the landing stands without it
         logger.exception('AtomicDB recheck after the landing on %s failed',
@@ -3996,12 +4115,15 @@ def materialise_won_line(pos, verify=False):
     if not won_line_materialisable(pos):
         return {'created_edges': 0, 'closed': 0, 'plies': 0,
                 'closed_keys': []}
-    if verify and not logic.verify_mate_pv(
-            pos.fen, line, pos.status == 'WHITE_WIN'):
+    tb_line = pos.proof == TB_LINE_VERDICT
+    if verify and not (_tb_line_still_wins(pos, line) if tb_line
+                       else logic.verify_mate_pv(
+                           pos.fen, line, pos.status == 'WHITE_WIN')):
         return {'created_edges': 0, 'closed': 0, 'plies': 0,
                 'closed_keys': [], 'rejected': 'witness-does-not-verify'}
 
-    grade = pos.proof if pos.proof in ('ANDOR', 'ENGINE') else None
+    grade = (pos.proof if pos.proof in ('ANDOR', 'ENGINE', TB_LINE_VERDICT)
+             else None)
     slack = pos.clock_slack
     created_edges = closed = 0
     closed_keys = []
@@ -4021,12 +4143,16 @@ def materialise_won_line(pos, verify=False):
             created_edges += 1
         walked += 1
         suffix = line[index + 1:]
+        if (tb_line and not suffix and child.status == 'UNKNOWN'
+                and _close_tb_line_end(child, pos.status)):
+            closed += 1
+            closed_keys.append(child.key)
         if suffix and child.status == 'UNKNOWN':
             child.status = pos.status
             child.closure = 'MATE_PV'
             child.proof = grade
             child.won_line = ' '.join(suffix)
-            child.mate_in = len(suffix)
+            child.mate_in = None if tb_line else len(suffix)
             child.best_move = suffix[0]
             child.clock_slack = slack
             # Mismo CAS que el cierre de hijos del ingest: por transposicion
@@ -4045,6 +4171,36 @@ def materialise_won_line(pos, verify=False):
         node = child
     return {'created_edges': created_edges, 'closed': closed, 'plies': walked,
             'closed_keys': closed_keys}
+
+
+def _tb_line_still_wins(pos, line):
+    """A ``TB_LINE`` witness, checked again: legal, and its end still won."""
+    fens = logic.walk_pv(pos.fen, line)
+    if not fens or len(fens) < 2:
+        return False
+    wdl = server_tables_wdl(fens[-1])
+    return (wdl is not None and logic.wdl_to_status(
+        int(wdl), fens[-1].split()[1] == 'w') == pos.status)
+
+
+def _close_tb_line_end(end, status):
+    """Close the last node of a ``TB_LINE`` from the server's own tables.
+
+    It is the one node of the chain that does not rest on the line: the
+    tables settle it on their own, so it closes as ``TB`` (slack 0, a bare
+    WDL), and only if they still give the line's verdict.
+    """
+    wdl = server_tables_wdl(end.fen)
+    if wdl is None or logic.wdl_to_status(
+            int(wdl), end.fen.split()[1] == 'w') != status:
+        return False
+    claimed = Position.objects.filter(key=end.key, status='UNKNOWN').update(
+        status=status, closure='TB', clock_slack=0, updated=timezone.now())
+    if not claimed:
+        return False
+    end.status, end.closure, end.clock_slack = status, 'TB', 0
+    _emit_closure_events(end, dtz=None, dtz_verified=False, clock_slack=0)
+    return True
 
 
 def _child_is_verified(child):
@@ -4289,27 +4445,146 @@ CLOSURE_SOURCES = ('USER', 'FILL', 'AUTO', CLOSURE_SOURCE_SOLVE,
 
 _closure_source = contextvars.ContextVar('atomicdb_closure_source',
                                          default=CLOSURE_SOURCE_NONE)
+# WHO, beside WHICH QUEUE.  The source says which queue a closure came from;
+# the provenance says which task, which account and which engine build
+# produced it, so that a bad build or a hostile account can be traced to
+# exactly what it closed (``ClosureProvenance``).  It rides the same
+# contextvar route, for the same reason: the closure happens five calls
+# below the place that knows.
+_closure_provenance = contextvars.ContextVar('atomicdb_closure_provenance',
+                                             default=None)
+
+
+def _clean_provenance(provenance):
+    if not provenance:
+        return None
+    task = provenance.get('task')
+    try:
+        task = None if task in (None, '') else int(task)
+    except (TypeError, ValueError):
+        task = None
+    return {'task': task,
+            'account': str(provenance.get('account') or '')[:64],
+            'engine_sha': str(provenance.get('engine_sha') or '')[:64]}
 
 
 @contextlib.contextmanager
-def closure_attribution(source):
+def closure_attribution(source, provenance=None):
     """Marca a quien se le apuntan los cierres que ocurran aqui dentro.
 
     Se restaura siempre, incluso si la aplicacion revienta: un token de
     contextvar no es un global que haya que acordarse de limpiar.
+
+    ``provenance`` is ``{'task', 'account', 'engine_sha'}`` of the analysis
+    whose result is being applied, or None when no task produced it.
     """
     label = str(source or CLOSURE_SOURCE_NONE).upper()
     if label not in CLOSURE_SOURCES:
         label = CLOSURE_SOURCE_NONE
     token = _closure_source.set(label)
+    provenance_token = _closure_provenance.set(_clean_provenance(provenance))
     try:
         yield label
     finally:
+        _closure_provenance.reset(provenance_token)
         _closure_source.reset(token)
 
 
 def current_closure_source():
     return _closure_source.get()
+
+
+def current_closure_provenance():
+    return _closure_provenance.get()
+
+
+# ---------------- the trust gate ----------------
+#
+# Registration is open and any account can run a worker.  A line that ends
+# in mate is checked move by move, and the server then tries to prove the
+# mate exhaustively; that proof has a few seconds online and usually runs
+# out (``INCONCLUSIVE``), and until now the line closed the position anyway
+# on the engine's word.  A single submission with the cooperative line
+# 1.Nf3 a6 2.Ng5 a5 3.Nxf7 closed the start position that way.
+#
+# Now an unproven line closes only when the account that delivered it is
+# trusted (``TrustedAccount``, managed with ``manage.py atomicdb_trust``).
+# Any other account's line is stored as a ``PendingClaim`` and changes
+# nothing in the tree.  Proven closures are untouched: terminal positions,
+# an exhaustive AND/OR proof, minimax over closed children, tablebases and
+# replayed certificates close for everybody, as before.
+#
+# ``ATOMICDB_CLOSURE_TRUST_GATE = False`` in settings turns the gate off
+# (every account trusted, the behaviour before it), as an emergency valve
+# that needs a restart and no deploy.
+
+def trust_gate_enabled():
+    return bool(getattr(settings, 'ATOMICDB_CLOSURE_TRUST_GATE', True))
+
+
+def account_trusted(username):
+    """May this account close positions with lines the server did not prove?"""
+    if not trust_gate_enabled():
+        return True
+    if not username:
+        return False
+    return TrustedAccount.objects.filter(username=username).exists()
+
+
+def _record_pending_claim(position_key, parent_key, winner_white, pv_rest,
+                          tb_line=False):
+    """Keep an unproven line from an untrusted account, without using it.
+
+    One open claim per position, account and line: the same search
+    delivered twice is one claim.
+    """
+    provenance = current_closure_provenance() or {}
+    account = provenance.get('account') or ''
+    line = ' '.join(pv_rest)
+    if PendingClaim.objects.filter(position_key=position_key,
+                                   resolved__isnull=True, account=account,
+                                   pv=line).exists():
+        return None
+    return PendingClaim.objects.create(
+        position_key=position_key, parent_key=parent_key,
+        task_id=provenance.get('task'), account=account,
+        engine_sha=provenance.get('engine_sha') or '',
+        kind=(PendingClaim.Kind.TB if tb_line else PendingClaim.Kind.MATE),
+        winner='WHITE' if winner_white else 'BLACK', pv=line)
+
+
+def _refute_pending_claims(position_key, pv_rest):
+    """An exhaustive search found no mate on exactly this line."""
+    return PendingClaim.objects.filter(
+        position_key=position_key, resolved__isnull=True,
+        pv=' '.join(pv_rest),
+    ).update(resolved=timezone.now(),
+             resolution=PendingClaim.Resolution.REFUTED)
+
+
+def _resolve_pending_claims(pos):
+    """The position closed: its open claims were right or wrong."""
+    winner = {'WHITE_WIN': 'WHITE', 'BLACK_WIN': 'BLACK'}.get(pos.status)
+    return PendingClaim.objects.filter(
+        position_key=pos.key, resolved__isnull=True,
+    ).update(resolved=timezone.now(), resolution=Case(
+        When(winner=winner, then=Value(PendingClaim.Resolution.CONFIRMED)),
+        default=Value(PendingClaim.Resolution.CONTRADICTED)))
+
+
+def _record_provenance(pos):
+    """Who closed ``pos``: one row per position, the latest closure wins."""
+    provenance = current_closure_provenance() or {}
+    row = ClosureProvenance(
+        key=pos.key, closed_at=timezone.now(), status=pos.status or '',
+        closure=pos.closure or '', proof=pos.proof or '',
+        source=_closure_source.get(), task_id=provenance.get('task'),
+        account=provenance.get('account') or '',
+        engine_sha=provenance.get('engine_sha') or '')
+    ClosureProvenance.objects.bulk_create(
+        [row], update_conflicts=True, unique_fields=['key'],
+        update_fields=['closed_at', 'status', 'closure', 'proof', 'source',
+                       'task_id', 'account', 'engine_sha'])
 
 
 def absorb_tasks(queryset):
@@ -4367,6 +4642,8 @@ def _emit_closure_events(pos, **extra):
     DBEvent.objects.create(kind='NODE_CLOSED', payload={
         'key': pos.key, 'status': pos.status, 'closure': pos.closure,
         'source': _closure_source.get(), **extra})
+    _record_provenance(pos)
+    _resolve_pending_claims(pos)
     absorb_tasks(AnalysisTask.objects.filter(position_id=pos.key))
     for camp in Campaign.objects.filter(root=pos,
                                         state=Campaign.CState.ACTIVE):
