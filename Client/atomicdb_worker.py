@@ -5,7 +5,9 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
   python atomicdb_worker.py -U user -P pass -S https://servidor -T 8
 
---jobs K corre K analisis a la vez repartiendo -T entre ellos.
+By default every thread of -T runs its own engine (-T 8 = 8 analyses of one
+thread each), each with a hash sized to the free memory; --jobs K runs K
+analyses instead, splitting -T between them, and --hash fixes the hash.
 
 --engine ruta/binario permite usar una build propia en su lugar.
 
@@ -56,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026110901
+ATOMICDB_WORKER_BUILD = 2026111101
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -114,6 +116,12 @@ SOLVER_ENGINE_FAILURE_LIMIT = 3
 ENGINE_QUIT_SECONDS = 1.0
 STOP_JOIN_SECONDS = 0.5
 RELEASE_TIMEOUT_SECONDS = 3
+# After a failed search the job waits before it asks for more work, doubling
+# up to the cap: a position that crashes the engine is handed back at once
+# (``_hand_back``), and without a pause the same job would take it straight
+# back and crash on it in a loop.
+ENGINE_FAILURE_BACKOFF_SECONDS = 10
+ENGINE_FAILURE_BACKOFF_MAX_SECONDS = 300
 CONSOLE_CLOSE_WAIT_SECONDS = 4.5
 # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT: Windows ends
 # the process as soon as its console handlers return.
@@ -1031,6 +1039,106 @@ def _exit_now(code, exit_process=os._exit):
     exit_process(code)
 
 
+# ``go nodes N mate MATE_STOP_MOVES``: the search ends at the first completed
+# iteration whose best line is a mate, for either side.  250 moves is beyond any
+# mate a search can report, so in practice it means "stop at any mate": past
+# the mate there is nothing left to learn, and before this build every closure
+# went on to burn the rest of its budget (a median of ~2,400 nodes to the mate
+# against 128M spent, audit of 11-Nov-2026, section 2.7).
+MATE_STOP_MOVES = 250
+
+# One ``info`` line of a MultiPV search.  The group between the score and the
+# PV holds whatever the engine put there: ``lowerbound``/``upperbound``,
+# ``nodes``, ``wdl``...
+_INFO_PV = re.compile(
+    r'info depth (\d+) seldepth \d+ multipv (\d+) score (cp|mate) (-?\d+)'
+    r'(.*?) pv (.+)')
+_INFO_BOUND = re.compile(r'\b(?:lower|upper)bound\b')
+_INFO_NODES = re.compile(r' nodes (\d+)')
+
+
+def last_complete_iteration(snapshots):
+    """The lines of the last complete, exact iteration in ``snapshots``.
+
+    The engine prints its MultiPV lines in groups that each start again at
+    ``multipv 1``.  Only some groups are a finished iteration: a fail-high or
+    fail-low prints a single line marked ``lowerbound``/``upperbound``, a long
+    search prints partial groups in which the lines not yet searched at the
+    new depth repeat the previous one, and the search that a node limit cuts
+    short prints a last group that mixes both.  Storing any of those as an
+    exact line put scores in the tree that the engine never claimed (5 of 9
+    searches cut by nodes with MultiPV >= 2 had one, audit of 11-Nov-2026).
+
+    A group counts when it has every line (1..width, the most the search ever
+    printed), all at one depth and none of them a bound.  Returns that group's
+    entries in MultiPV order, or [] when no group qualifies.
+    """
+    width = max((entry['_multipv'] for group in snapshots for entry in group),
+                default=0)
+    for group in reversed(snapshots):
+        if [entry['_multipv'] for entry in group] != list(range(1, width + 1)):
+            continue
+        if len({entry['_depth'] for entry in group}) != 1:
+            continue
+        if any(entry['_bound'] for entry in group):
+            continue
+        return [{key: value for key, value in entry.items()
+                 if not key.startswith('_')} for entry in group]
+    return []
+
+
+def engine_identity_problem(output):
+    """Why the ``uci`` answer in ``output`` is not an engine for AtomicDB.
+
+    None when it is.  AtomicDB stores atomic-chess analysis, and a chess or
+    multi-variant engine answers the same protocol with confident numbers
+    about another game -- so the worker refuses to start on one rather than
+    fill the tree with them.  The name must say Atomic, and an engine with a
+    ``UCI_Variant`` option (Fairy-Stockfish and friends) must default to
+    atomic, because this worker never sets it.
+    """
+    name = ''
+    variant_default = None
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith('id name '):
+            name = line[len('id name '):].strip()
+        elif line.startswith('option name UCI_Variant '):
+            found = re.search(r'\bdefault (\S+)', line)
+            variant_default = found.group(1) if found else ''
+    if not name:
+        return 'it did not answer "uci" with an "id name"'
+    if 'atomic' not in name.lower():
+        return f'it calls itself "{name}", not an Atomic-Stockfish build'
+    if variant_default is not None and variant_default.lower() != 'atomic':
+        return (f'"{name}" plays "{variant_default or "?"}" by default and '
+                'this worker does not choose a variant')
+    return None
+
+
+def check_engine_identity(path, timeout=60):
+    """``uci`` once, then quit: None if ``path`` is an engine for AtomicDB,
+    otherwise the reason it is not (see ``engine_identity_problem``)."""
+    try:
+        process = subprocess.Popen(
+            [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True)
+    except OSError as exc:
+        return f'it cannot be started: {exc}'
+    try:
+        output, _ = process.communicate('uci\nquit\n', timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.communicate(timeout=10)
+        except Exception:
+            pass
+        return f'it did not answer "uci" within {timeout:g}s'
+    except (OSError, ValueError) as exc:
+        return f'it stopped answering: {exc}'
+    return engine_identity_problem(output)
+
+
 class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
 
@@ -1038,6 +1146,8 @@ class Engine:
         self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
         _ENGINE_PROCESSES.add(self.p)
+        # The most nodes the last search reported, whatever its lines said.
+        self.last_nodes = 0
         self._send('uci')
         self._wait('uciok')
         self._send(f'setoption name Threads value {threads}')
@@ -1061,18 +1171,46 @@ class Engine:
             if line.startswith(token):
                 return True
 
-    def analyse(self, fen, nodes, multipv, searchmoves=None, progress=None):
+    def _died(self, when):
+        """The EngineExited for a process whose output ended ``when``."""
+        try:
+            code = self.p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = 'unknown'
+        return EngineExited(f'the engine stopped {when} (exit code {code})',
+                            code)
+
+    def analyse(self, fen, nodes, multipv, searchmoves=None, progress=None,
+                mate=MATE_STOP_MOVES):
         """Devuelve lines=[{'move','eval_cp','mate','pv','raw'}] White-POV.
-        Sin ucinewgame a proposito: la TT sobrevive entre tareas.
+
+        Every task starts from a cleared engine (``ucinewgame``, then
+        ``isready`` so the clearing is over before the search starts): a hash
+        table still warm from another position changes scores and move order,
+        and a result nobody can reproduce cannot be audited.
+
+        The search stops at the first mate (``mate``; 0 or None searches the
+        whole budget) and only the lines of the last complete, exact
+        iteration are returned (``last_complete_iteration``).  The nodes the
+        search really ran are left in ``self.last_nodes``.
+
         searchmoves restringe la raiz a las jugadas vivas (no pegajoso:
-        aplica solo a este go, verificado empiricamente)."""
+        aplica solo a este go, verificado empiricamente).  It goes last on
+        the ``go`` line because every word after it is read as a move."""
+        self.last_nodes = 0
+        self._send('ucinewgame')
         self._send(f'setoption name MultiPV value {multipv}')
+        self._send('isready')
+        if not self._wait('readyok'):
+            raise self._died('before a search')
         self._send(f'position fen {fen}')
         go = f'go nodes {nodes}'
+        if mate:
+            go += f' mate {int(mate)}'
         if searchmoves:
             go += ' searchmoves ' + ' '.join(searchmoves)
         self._send(go)
-        lines = {}
+        snapshots = []
         started = time.monotonic()
         stm_white = fen.split()[1] == 'w'
         while True:
@@ -1081,29 +1219,25 @@ class Engine:
                 # Output ended without ``bestmove``: the process died (a
                 # crash, a kill, Ctrl+C on the shared console).  What came
                 # before is a truncated search, never a result to submit.
-                try:
-                    code = self.p.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    code = 'unknown'
-                raise EngineExited('the engine stopped in the middle of a '
-                                   f'search (exit code {code})', code)
+                raise self._died('in the middle of a search')
             if line.startswith('bestmove'):
                 break
-            if progress:
-                found_nodes = re.search(r' nodes (\d+)', line)
-                if found_nodes:
-                    progress(int(found_nodes.group(1)),
-                             max(time.monotonic() - started, 1e-6))
-            m = re.match(
-                r'info depth \d+ seldepth \d+ multipv (\d+) score '
-                r'(cp|mate) (-?\d+) .*? pv (.+)', line)
+            found_nodes = _INFO_NODES.search(line)
+            if found_nodes:
+                searched = int(found_nodes.group(1))
+                self.last_nodes = max(self.last_nodes, searched)
+                if progress:
+                    progress(searched, max(time.monotonic() - started, 1e-6))
+            m = _INFO_PV.match(line)
             if m:
-                idx = int(m.group(1))
-                kind, val = m.group(2), int(m.group(3))
-                pv = m.group(4).split()
+                depth, idx = int(m.group(1)), int(m.group(2))
+                kind, val = m.group(3), int(m.group(4))
+                pv = m.group(6).split()
                 entry = {'move': pv[0], 'pv': pv,
                          'eval_cp': None, 'mate': None,
-                         'raw': line.strip()}
+                         'raw': line.strip(),
+                         '_depth': depth, '_multipv': idx,
+                         '_bound': bool(_INFO_BOUND.search(m.group(5)))}
                 if kind == 'cp':
                     # scores TB fuera de escala de mate: clamp para priorizar
                     # (banda >=9000) sin fingir distancia de mate
@@ -1113,8 +1247,12 @@ class Engine:
                     entry['mate'] = val if stm_white else -val
                     entry['eval_cp'] = (10_000 - abs(val)) * (
                         1 if entry['mate'] > 0 else -1)
-                lines[idx] = entry
-        return [lines[i] for i in sorted(lines)]
+                # A group starts again at multipv 1 (or at any index that
+                # does not follow the line before it).
+                if not snapshots or idx <= snapshots[-1][-1]['_multipv']:
+                    snapshots.append([])
+                snapshots[-1].append(entry)
+        return last_complete_iteration(snapshots)
 
     def close(self):
         try:
@@ -2608,6 +2746,34 @@ def _reply_body(response):
         return None
 
 
+def _hand_back(server, auth, machine, task, held=None, slot=0,
+               release=None):
+    """Give one analysis lease back to the server now; True if it took it.
+
+    For a lease this worker cannot finish -- its engine died, or the search
+    produced nothing worth sending -- so the task goes to another worker at
+    once instead of when its lease times out.  A server without
+    ``api/release``, or one that does not answer, changes nothing: the lease
+    then expires as it always did.
+    """
+    token = task.get('lease_token') or ''
+    if not token:
+        return False         # only a token proves to the server whose it is
+    release = release or _release_leases
+    released, problem = release(server, auth, [{
+        'kind': 'analysis', 'machine': machine, 'task_id': task['id'],
+        'lease_token': token}])
+    if released is None:
+        print(f"[{slot}] task {task['id']} not handed back ({problem}); it "
+              'returns to the queue when its lease expires', flush=True)
+        return False
+    if held is not None:
+        held.drop('analysis', machine, task['id'])
+    print(f"[{slot}] task {task['id']} handed back to the server",
+          flush=True)
+    return True
+
+
 def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                    owns_updates, engines=None, held=None, jobs=1):
     """One independent leaseholder: its own engine, lease and heartbeat.
@@ -2691,6 +2857,14 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 failed_offer = offered[0]
                 engine_retry_at = (time.monotonic()
                                    + ENGINE_SWITCH_RETRY_SECONDS)
+        if engine_failures:
+            # The last search failed and its task went back: give the engine
+            # (or the position that broke it) a moment before the next lease.
+            delay = min(ENGINE_FAILURE_BACKOFF_SECONDS
+                        * (2 ** min(engine_failures - 1, 5)),
+                        ENGINE_FAILURE_BACKOFF_MAX_SECONDS)
+            if stop.wait(delay):
+                break
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
         except LeaseRequestError as e:
@@ -2766,9 +2940,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 )
                 search_seconds = time.time() - t0
             except Exception as e:
-                # Nothing is submitted: the task comes back by itself when
-                # its lease expires, instead of a truncated search being
-                # stored as if it were a result.
+                # Nothing is submitted: a truncated search is never stored as
+                # if it were a result.
                 current_task.clear()
                 engine_failures += 1
                 # Ctrl+C reaches the engines too, and as fast as this worker:
@@ -2781,6 +2954,10 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     print(f"[{slot}] task {t['id']} interrupted by the stop",
                           flush=True)
                     break
+                # The engine is gone, so the task goes back to the server now
+                # instead of when its lease expires.  A stop never gets here:
+                # it hands back everything held itself.
+                _hand_back(a.S, auth, machine, t, held, slot)
                 # A newly offered engine that keeps failing real searches is
                 # taken back for every job (no-op for the engine the worker
                 # started with, or one that already is a return).
@@ -2802,7 +2979,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                         failed_offer = offered[0]
                         engine_retry_at = (time.monotonic()
                                            + ENGINE_SWITCH_RETRY_SECONDS)
-                    continue   # la tarea vuelve sola al caducar su lease
+                    continue
                 print(f'[{slot}] engine failure: {e}; restarting the engine',
                       flush=True)
                 try:
@@ -2811,7 +2988,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     pass
                 eng = Engine(engine_path, threads=engine_threads,
                              hash_mb=a.hash, syzygy=a.syzygy)
-                continue   # la tarea vuelve sola al caducar su lease
+                continue
             if stop.is_set():
                 # The stop told the engine to quit, and the ``bestmove`` it
                 # printed on the way out ends a search cut short: not a
@@ -2820,12 +2997,25 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                       flush=True)
                 current_task.clear()
                 break
-            engine_failures = 0
-            searched = 0
+            # The nodes the search really ran: fewer than the budget when it
+            # stopped at a mate, which the server accepts as it is.
+            searched = int(getattr(eng, 'last_nodes', 0) or 0)
             for ln in lines:
                 m = re.search(r' nodes (\d+)', ln.get('raw', ''))
                 if m:
                     searched = max(searched, int(m.group(1)))
+            if not lines:
+                # The engine answered ``bestmove`` without one complete, exact
+                # iteration.  An empty result would be stored as an analysis
+                # that says nothing, and it would count as the search this
+                # task bought: the task goes back for someone else instead.
+                current_task.clear()
+                engine_failures += 1
+                print(f"[{slot}] task {t['id']}: the engine finished without "
+                      'a complete line; not sent', flush=True)
+                _hand_back(a.S, auth, machine, t, held, slot)
+                continue
+            engine_failures = 0
             try:
                 rr = _submit_until_definitive(a.S, {
                     **auth, **provenance,
@@ -2860,6 +3050,109 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     eng.close()
 
 
+# The server hands one physical machine at most this many live analyses at once
+# (``views.LEASES_PER_MACHINE``), shared by all its slots: an automatic job
+# beyond it would only sit idle.  -T above it gives the jobs more threads.
+AUTO_JOBS_MAX = 32
+# Hash per engine when it is sized automatically: never more than the old
+# default, never less than a table worth having.
+AUTO_HASH_MAX_MB = 512
+AUTO_HASH_MIN_MB = 16
+# What one engine process holds besides its hash: the net (48 MB today), the
+# binary and its stacks.
+ENGINE_BASE_MB = 128
+# What is left free for the rest of the machine, as the OpenBench client does
+# (``memory_margin_mb`` in Client/worker.py): 2 GB, or an eighth of the RAM.
+MEMORY_MARGIN_MIN_MB = 2048
+MEMORY_MARGIN_RAM_DIV = 8
+
+
+def default_jobs(total, solve):
+    """How many analyses -T runs when --jobs is not given: one per thread.
+
+    A single atomic position scales poorly with threads, and at a fixed node
+    budget extra threads cost nodes rather than closures (1.7x the nodes to
+    the mate with 6 threads, 2.1x with 4, audit of 11-Nov-2026), so one
+    engine per thread is what a lent machine is worth most as.  The solver,
+    when on, keeps its core; the count stops at ``AUTO_JOBS_MAX``.
+    """
+    total = max(1, int(total))
+    available = max(1, total - (1 if solve else 0))
+    return min(available, AUTO_JOBS_MAX)
+
+
+def memory_mb():
+    """(total, available) physical memory in MB, or (None, None).
+
+    Windows counts what can still be committed too, because that is the
+    limit an allocation dies against (the OpenBench client learned it the
+    hard way); elsewhere ``MemAvailable``.  Never raises: not knowing is an
+    answer, and the caller falls back to a conservative size.
+    """
+    try:
+        if os.name == 'nt':
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [('dwLength', ctypes.c_uint32),
+                            ('dwMemoryLoad', ctypes.c_uint32),
+                            ('ullTotalPhys', ctypes.c_uint64),
+                            ('ullAvailPhys', ctypes.c_uint64),
+                            ('ullTotalPageFile', ctypes.c_uint64),
+                            ('ullAvailPageFile', ctypes.c_uint64),
+                            ('ullTotalVirtual', ctypes.c_uint64),
+                            ('ullAvailVirtual', ctypes.c_uint64),
+                            ('ullAvailExtendedVirtual', ctypes.c_uint64)]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(
+                    ctypes.byref(status)):
+                return None, None
+            mb = 1024 ** 2
+            return (int(status.ullTotalPhys) // mb,
+                    min(int(status.ullAvailPhys),
+                        int(status.ullAvailPageFile)) // mb)
+        info = {}
+        with open('/proc/meminfo', encoding='ascii') as handle:
+            for line in handle:
+                key, _, value = line.partition(':')
+                info[key] = int(value.split()[0]) // 1024
+        if 'MemTotal' in info and 'MemAvailable' in info:
+            return info['MemTotal'], info['MemAvailable']
+    except Exception:
+        pass
+    try:
+        pages = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        total = pages // 1024 ** 2
+        # No figure for what is free: assume half of it is.
+        return total, total // 2
+    except (AttributeError, ValueError, OSError):
+        return None, None
+
+
+def auto_hash_mb(engines, memory=None):
+    """The hash each of ``engines`` engines gets when --hash is not given.
+
+    The memory free now, minus the margin left to the machine and what each
+    engine holds besides its table, shared out and rounded down to a power of
+    two, between ``AUTO_HASH_MIN_MB`` and ``AUTO_HASH_MAX_MB``.  Unknown
+    memory gets the size that four gigabytes would give.
+    """
+    engines = max(1, int(engines))
+    total, available = memory if memory is not None else memory_mb()
+    if not total or available is None:
+        budget = 4096
+    else:
+        margin = max(MEMORY_MARGIN_MIN_MB, total // MEMORY_MARGIN_RAM_DIV)
+        budget = available - margin
+    share = (budget - engines * ENGINE_BASE_MB) // engines
+    if share < AUTO_HASH_MIN_MB:
+        return AUTO_HASH_MIN_MB
+    size = 1 << (int(share).bit_length() - 1)
+    return max(AUTO_HASH_MIN_MB, min(AUTO_HASH_MAX_MB, size))
+
+
 def plan_threads(total, jobs, solve):
     """Split the contributor's -T promise honestly, and spend all of it.
 
@@ -2890,19 +3183,33 @@ def plan_threads(total, jobs, solve):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description='AtomicDB worker: leases positions, analyses them with '
+                    'Atomic-Stockfish and sends the lines back.',
+        epilog='Defaults: every thread of -T runs its own engine (one engine '
+               'of one thread per analysis), up to '
+               f'{AUTO_JOBS_MAX}, each with a hash sized to the free memory. '
+               'Give --jobs to run fewer, wider engines and --hash to fix '
+               'the table size.')
     ap.add_argument('-U', required=True)
     ap.add_argument('-P', required=True)
     ap.add_argument('-S', required=True)
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
                          'reference build is downloaded)')
-    ap.add_argument('-T', type=int, default=4)
-    ap.add_argument('--jobs', type=int, default=1,
+    ap.add_argument('-T', type=int, default=4,
+                    help='threads this machine lends, in total '
+                         '(default %(default)s)')
+    ap.add_argument('--jobs', type=int, default=None,
                     help='concurrent analyses; -T is SPLIT between them. '
-                         'A single position scales poorly with many threads, '
-                         'so K analyses of T/K threads outperform one of T')
-    ap.add_argument('--hash', type=int, default=512)
+                         'Default: one per thread of -T (at most '
+                         f'{AUTO_JOBS_MAX}), because a single position '
+                         'scales poorly with threads.  --jobs 1 runs one '
+                         'engine with all of -T, as before this default')
+    ap.add_argument('--hash', type=int, default=None,
+                    help='hash per engine in MB.  Default: sized to the free '
+                         f'memory, between {AUTO_HASH_MIN_MB} and '
+                         f'{AUTO_HASH_MAX_MB}')
     ap.add_argument('--syzygy', default='',
                     help='atomic TB dirs separated by ; (when given, it is '
                          'used as-is and nothing is downloaded)')
@@ -2927,6 +3234,9 @@ def main():
                     help='also serve SOLVE tasks (exhaustive proofs) besides '
                          'analysis; without this flag the worker behaves '
                          'exactly as before')
+    ap.add_argument('--skip-engine-check', action='store_true',
+                    help='start even if the engine does not identify itself '
+                         'as an Atomic-Stockfish build')
     a = ap.parse_args()
 
     if not a.no_auto_update and _install_worker_update(a.S):
@@ -2965,13 +3275,33 @@ def main():
         provisioned = _provision_engine(a.S)
         a.engine = provisioned['path']
 
+    # The engine has to be one for this game before anything is leased: a
+    # chess or multi-variant build answers UCI just as well, with numbers
+    # about something else.
+    if not a.skip_engine_check:
+        problem = check_engine_identity(a.engine)
+        if problem:
+            print(f'error: {a.engine} cannot analyse for AtomicDB: {problem}.'
+                  '\nRun without --engine to use the reference build (it is '
+                  'downloaded by itself), or pass --skip-engine-check if you '
+                  'know this binary plays atomic chess.', flush=True)
+            sys.exit(2)
+
     # --once keeps the historical smoke semantics, which are single-slot.
+    auto_jobs = a.jobs is None
     if a.once:
         a.jobs = 1
+    elif auto_jobs:
+        a.jobs = default_jobs(a.T, a.solve)
     jobs, slot_threads, solver_cores = plan_threads(a.T, a.jobs, a.solve)
     if jobs < a.jobs:
         print(f'note: --jobs {a.jobs} reduced to {jobs}: -T {a.T} does not '
               f'give each job a full thread', flush=True)
+    if a.hash is None:
+        a.hash = auto_hash_mb(jobs + (1 if a.solve else 0))
+        hash_note = f'hash {a.hash} MB each, sized to the free memory'
+    else:
+        hash_note = f'hash {a.hash} MB each'
     if a.solve and a.T < 2:
         print('note: --solve with -T 1 shares the single thread between '
               'analysis and proofs', flush=True)
@@ -3025,7 +3355,10 @@ def main():
     print(f'AtomicDB worker: {a.engine} T={a.T} -> {jobs} jobs of '
           f'{spread} threads ({sum(slot_threads) + solver_cores} in total)'
           + (f' + {solver_cores} solver' if solver_cores else '')
-          + f' -> {a.S}', flush=True)
+          + f', {hash_note} -> {a.S}', flush=True)
+    if auto_jobs and jobs > 1:
+        print(f'jobs: one engine per thread by default; --jobs 1 runs a '
+              f'single engine of {a.T} threads instead', flush=True)
     if engines is not None:
         print(f'engine updates: a newly published engine is installed while '
               f'running (checked every {engines.interval / 60:g} min; '

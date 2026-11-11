@@ -672,7 +672,7 @@ for line in sys.stdin:
     if not words:
         continue
     if words[0] == 'uci':
-        print('id name Stand-in', flush=True)
+        print('id name Atomic-Stockfish stand-in', flush=True)
         print('uciok', flush=True)
     elif words[0] == 'isready':
         print('readyok', flush=True)

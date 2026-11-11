@@ -952,8 +952,8 @@ class EngineProcessTests(SimpleTestCase):
                 self.assertIs(worker.Engine('engine').ready, ready)
 
     def test_a_search_cut_short_raises_instead_of_returning_lines(self):
-        engine = self.engine('info depth 1 seldepth 1 multipv 1 score cp 12 '
-                             'nodes 100 pv e2e4\n')
+        engine = self.engine('readyok\ninfo depth 1 seldepth 1 multipv 1 '
+                             'score cp 12 nodes 100 pv e2e4\n')
 
         with self.assertRaises(worker.EngineExited) as caught:
             engine.analyse(FENS[0], 1000, 1)
@@ -961,8 +961,9 @@ class EngineProcessTests(SimpleTestCase):
         self.assertIn('exit code 3', str(caught.exception))
 
     def test_a_finished_search_still_returns_its_lines(self):
-        engine = self.engine('info depth 1 seldepth 1 multipv 1 score cp 12 '
-                             'nodes 100 pv e2e4\nbestmove e2e4\n')
+        engine = self.engine('readyok\ninfo depth 1 seldepth 1 multipv 1 '
+                             'score cp 12 nodes 100 pv e2e4\n'
+                             'bestmove e2e4\n')
 
         lines = engine.analyse(FENS[0], 1000, 1)
 
@@ -1222,6 +1223,8 @@ class MainWiringTests(_EngineCase):
                 mock.patch.object(worker, 'EngineUpdater') as updater, \
                 mock.patch.object(worker, '_analysis_slot') as slot, \
                 mock.patch.object(worker, '_solve_loop') as solve_loop, \
+                mock.patch.object(worker, 'check_engine_identity',
+                                  return_value=None), \
                 redirect_stdout(io.StringIO()):
             updater.return_value.interval = 900.0
             worker.main()

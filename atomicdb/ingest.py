@@ -618,7 +618,8 @@ def _other_parents(closed_keys, writer_key):
 
 
 def ingest_analysis(position_key, lines, nodes_budget, machine='',
-                    mate_proofs=None, restricted=False, defer_propagation=None):
+                    mate_proofs=None, restricted=False, defer_propagation=None,
+                    arbiter_budget=None):
     """lines = [{'move': uci, 'eval_cp': int|None, 'mate': int|None,
                  'pv': [uci...]}] del MultiPV del motor (perspectiva blanca).
     Devuelve dict con resumen.
@@ -638,6 +639,15 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
     (the ``job`` and an optional ``verify``) beside the seeds; the drainer
     runs it later through the very same ``propagate_landings``
     (§ propagation_queue).
+
+    ``arbiter_budget``: the budget this pass ARBITRATES with, when it is not
+    the nodes it ran (§ ``ingest_queue.arbiter_budget``).  A search that
+    stopped at a mate ran a few thousand nodes of a 128M purchase, and as
+    nodes it would lose the showcase to any older, mate-blind pass.  It
+    decides the showcase, ``eval_cp``, ``best_move`` and the child seeds, and
+    it is the ``_budget`` the showcase keeps; ``nodes_invested`` and the pass
+    history keep counting the nodes that were really run.  None (the
+    default) arbitrates with ``nodes_budget``, exactly as before.
     """
     if mate_proofs is None:
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
@@ -645,6 +655,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
             return {'skipped': 'already-closed'}
         mate_proofs = prepare_mate_proofs(snapshot.fen, lines)
 
+    arbiter = (nodes_budget if arbiter_budget is None
+               else max(nodes_budget, arbiter_budget))
     with atomic():
         pos = Position.objects.select_for_update().get(key=position_key)
         if pos.status != 'UNKNOWN':
@@ -667,7 +679,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # la foto vigente se vuelve a mirar abajo, en su sitio, sin cambios.
         showcase = [ln for ln in (pos.last_analysis or [])
                     if isinstance(ln, dict) and not ln.get('prior_pass')]
-        seed_arbitrates = not (showcase and nodes_budget
+        seed_arbitrates = not (showcase and arbiter
                                < showcase[0].get('_budget', 0))
 
         # evals de hijos reportados por el motor
@@ -821,7 +833,7 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         # segunda con la evidencia peor.
         snapshot = capped_analysis(lines[:8])
         if snapshot:
-            snapshot[0]['_budget'] = nodes_budget
+            snapshot[0]['_budget'] = arbiter
         stored = pos.last_analysis or []
         current = [ln for ln in stored
                    if not (isinstance(ln, dict) and ln.get('prior_pass'))]
@@ -829,9 +841,9 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
                  if isinstance(ln, dict) and ln.get('prior_pass')]
         stored_budget = (current[0].get('_budget', 0)
                          if current and isinstance(current[0], dict) else 0)
-        shallower = bool(current) and nodes_budget < stored_budget
+        shallower = bool(current) and arbiter < stored_budget
         took_showcase = not shallower and (
-            not current or nodes_budget > stored_budget
+            not current or arbiter > stored_budget
             or len(snapshot) >= len(current))
         # LA SERIE DE PASES, y se anota SIEMPRE, gane o pierda el arbitraje: el
         # pase que pierde es exactamente el que responde "que evaluacion dio el
