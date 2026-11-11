@@ -825,7 +825,11 @@ class PovTests(TestCase):
         d = r.json()
         self.assertEqual(d['status'], 'UNKNOWN')
         self.assertEqual(len(d['moves']), 20)
-        self.assertIn('opening', d)
+        # The opening name is opt-in: the plain query does not walk the line.
+        self.assertNotIn('opening', d)
+        self.assertNotIn('opening_named_by', d)
+        d = self.client.get('/atomicdb/api/query',
+                            {'fen': logic.start_fen(), 'opening': '1'}).json()
         self.assertIsNone(d['opening'])
         self.assertIsNone(d['opening_named_by'])
 
