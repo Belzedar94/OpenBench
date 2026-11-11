@@ -64,7 +64,7 @@ from django.db.models import BooleanField, Case, Q, Value, When
 from django.shortcuts import render
 from django.utils import timezone
 
-from . import contributors, idle_repair, metrics, views
+from . import contributors, idle_repair, ingest, metrics, views
 from .models import AnalysisTask, WorkerPing
 
 USER = AnalysisTask.Source.USER
@@ -145,6 +145,8 @@ def _requester(row):
         # had once (§ idle_repair).
         if row.get('arm') == idle_repair.REPAIR_ARM:
             return {'requester': 'server', 'reason': 'repair'}
+        if row.get('arm') == ingest.SWEEP16_ARM:
+            return {'requester': 'server', 'reason': 'sweep'}
         return {'requester': 'server'}
     if not row['requested_by']:
         return {'requester': 'anonymous'}

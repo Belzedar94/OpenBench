@@ -1,0 +1,48 @@
+# AtomicDB +16 sweep, the daily rebuild of its list (sweep_plus16), example unit.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-sweep16.timer
+#     journalctl -u atomicdb-sweep16.service -f
+#
+# WHAT A RUN DOES.  It walks White's strategy tree from the start position
+# and scans the open positions once, by key prefix (256 short statements),
+# and stores the ordered list of the positions worth searching again in
+# $ATOMICDB_STATE_DIR/sweep16.json.  It writes nothing to the database.  The
+# selector service (refresh_selector) then queues from that list on every
+# pass, a few at a time.  The docstring of atomicdb/sweep.py has the rule,
+# the order and the valves.
+#
+# COST, measured on 11-Nov-2026 (124M positions, 37 GB table): about 3.5 s per
+# key prefix, so about 15 minutes for the scan, plus the tree walk (about
+# 1.75M open positions).  Low CPU and I/O weight below.
+#
+# ON AND OFF.  Without this list nothing is queued: enabling the timer is
+# turning the sweep on.  To stop it at once:
+#
+#     manage.py sweep_plus16 --stop        (or --withdraw to drop the queue)
+#
+# and disable the timer, or it builds a new list the next day.
+
+[Unit]
+Description=AtomicDB +16 sweep: rebuild the list
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u manage.py sweep_plus16 --rebuild
+TimeoutStartSec=9000
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+MemoryMax=2G
