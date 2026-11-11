@@ -71,6 +71,15 @@ class SettingsCogTests(TestCase):
         box = re.search(r'<input[^>]*id="lifo-queue"[^>]*>', body).group(0)
         self.assertIn('checked', box)
 
+    def test_the_explorer_columns_can_be_hidden(self):
+        # BManBJ, 11-Nov-2026: state, pn / dn and depth can be switched off.
+        body = Client().get(self.url).content.decode()
+        panel = _panel(body)
+        for col in ('state', 'pn', 'depth'):
+            self.assertIn(f'class="settings-col" value="{col}"', panel)
+            self.assertIn(f'data-hidecols~="{col}"', body)
+        self.assertIn('class="table-scroll movecols"', body)
+
     def test_the_cog_sits_beside_the_theme_switch(self):
         body = Client().get(self.url).content.decode()
 

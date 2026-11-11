@@ -38,6 +38,13 @@
       root.dataset.notation = "uci";
     }
   } catch (_error) {}
+  // Hidden explorer columns (BManBJ, 11-Nov-2026), before the first paint so
+  // a hidden column never flashes.  The settings panel below owns the key.
+  try {
+    var hide = (window.localStorage.getItem("atomicdb-hidecols") || "")
+      .split(" ").filter(function (c) { return /^(state|pn|depth)$/.test(c); });
+    if (hide.length) root.dataset.hidecols = hide.join(" ");
+  } catch (_error) {}
   // Board colours (seaside_cliff, 6-Nov-2026): set before the first paint so
   // a custom board never flashes brown.  settings.js owns the same key.
   try {
@@ -55,6 +62,15 @@
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.brown.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/vendor/chessground/chessground.cburnett.css' %}">
 <link rel="stylesheet" href="{% static 'atomicdb/atomicdb.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
+{% comment %}Inline on purpose: atomicdb.css is not in the static digest
+(OpenBench.config), so a rule added there would not reach a cached sheet.{% endcomment %}
+<style>
+:root[data-hidecols~="state"] .movecols table tr > :nth-child(3),
+:root[data-hidecols~="pn"] .movecols table tr > :nth-child(5),
+:root[data-hidecols~="depth"] .movecols table tr > :nth-child(6) { display: none; }
+.settings-cols { display: flex; flex-wrap: wrap; gap: .2rem .9rem; }
+.settings-cols label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
+</style>
 <script src="{% static 'atomicdb/theme.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 <script src="{% static 'atomicdb/notifications.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
 <script src="{% static 'atomicdb/settings.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
@@ -166,6 +182,14 @@
             <label><input type="radio" name="settings-eval" value="white"><span>Pawns</span></label>
           </div>
         </fieldset>
+        <fieldset class="settings-row" title="Columns shown in the explorer's move table">
+          <legend>Explorer columns</legend>
+          <div class="settings-cols">
+            <label><input type="checkbox" class="settings-col" value="state" checked><span>State</span></label>
+            <label><input type="checkbox" class="settings-col" value="pn" checked><span>pn / dn</span></label>
+            <label><input type="checkbox" class="settings-col" value="depth" checked><span>Depth</span></label>
+          </div>
+        </fieldset>
         <fieldset class="settings-row settings-board">
           <legend>Board</legend>
           <div class="settings-colours">
@@ -264,5 +288,37 @@
 }());
 </script>
 {% block extra_scripts %}{% endblock %}
+<script>
+(function () {
+  // Explorer columns: a ticked box shows its column.  Inline rather than in
+  // settings.js, which is not in the static digest either.
+  var root = document.documentElement;
+  var boxes = document.querySelectorAll(".settings-col");
+  function hidden() {
+    return (root.dataset.hidecols || "").split(" ").filter(Boolean);
+  }
+  function apply(list) {
+    if (list.length) root.dataset.hidecols = list.join(" ");
+    else delete root.dataset.hidecols;
+    Array.prototype.forEach.call(boxes, function (box) {
+      box.checked = list.indexOf(box.value) < 0;
+    });
+  }
+  apply(hidden());
+  Array.prototype.forEach.call(boxes, function (box) {
+    box.addEventListener("change", function () {
+      var list = [];
+      Array.prototype.forEach.call(boxes, function (b) {
+        if (!b.checked) list.push(b.value);
+      });
+      apply(list);
+      try {
+        if (list.length) window.localStorage.setItem("atomicdb-hidecols", list.join(" "));
+        else window.localStorage.removeItem("atomicdb-hidecols");
+      } catch (_error) {}
+    });
+  });
+}());
+</script>
 </body>
 </html>
