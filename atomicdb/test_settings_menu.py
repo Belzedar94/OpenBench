@@ -76,7 +76,7 @@ class SettingsCogTests(TestCase):
         body = Client().get(self.url).content.decode()
         panel = _panel(body)
         for col in ('state', 'pn', 'depth'):
-            self.assertIn(f'class="settings-col" value="{col}"', panel)
+            self.assertIn(f'class="settings-col" type="checkbox" value="{col}"', panel)
             self.assertIn(f'data-hidecols~="{col}"', body)
         self.assertIn('class="table-scroll movecols"', body)
 
