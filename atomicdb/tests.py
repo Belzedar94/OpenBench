@@ -825,6 +825,8 @@ class PovTests(TestCase):
         d = r.json()
         self.assertEqual(d['status'], 'UNKNOWN')
         self.assertEqual(len(d['moves']), 20)
+        self.assertIn('opening', d)
+        self.assertIsNone(d['opening'])
 
     def test_query_api_rejects_garbage(self):
         r = self.client.get('/atomicdb/api/query', {'fen': 'lol nope'})
