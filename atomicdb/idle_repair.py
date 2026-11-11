@@ -152,15 +152,22 @@ def shallow_showcase(last_analysis):
     return searched
 
 
-def repair_budget(searched):
+def repair_budget(searched, interior=False):
     """What the repair of a showcase that ran ``searched`` nodes buys.
 
     ``None`` when there is nothing worth buying: a rung above
     ``REPAIR_MAX_RUNG``, or a search reported so far past its rung that the
-    overbid would not clear it.
+    overbid would not clear it.  On an ``interior`` position (its value
+    already stands on a child) nothing above the first request rung is
+    bought, like every other automatic purchase (see
+    ``ingest.server_picked_budget``): the overbid has to beat the wide search
+    it repairs, so a repair held below that search would buy nothing.
     """
     rung = ingest._rung_matching(searched)
     if rung > REPAIR_MAX_RUNG:
+        return None
+    if (interior and rung > ingest.AUTO_INTERIOR_MAX_NODES
+            and not ingest.auto_interior_deep_rungs()):
         return None
     budget = rung * (1000 + REPAIR_OVERBID_PER_MILLE) // 1000
     return budget if budget > searched else None
@@ -295,7 +302,8 @@ def queue_from_landing(pos, parent_keys):
         return 0
     targets = []
     searched = shallow_showcase(pos.last_analysis)
-    budget = repair_budget(searched) if searched is not None else None
+    budget = (repair_budget(searched, interior=ingest.is_interior(pos))
+              if searched is not None else None)
     if budget is not None:
         targets.append((pos.key, SHALLOW, budget, REPAIR_MULTIPV))
     if parent_keys:
@@ -427,8 +435,13 @@ def drip_backlog(target=REPAIR_BACKLOG_TARGET, scan=REPAIR_BACKLOG_SCAN,
     keys = list(dict.fromkeys(key for _id, key in rows))
     made = []
     with atomic():
-        showcases = dict(Position.objects.filter(key__in=keys, **_OPEN)
-                         .values_list('key', 'last_analysis'))
+        showcases, interior = {}, set()
+        for key, showcase, backed_move in (
+                Position.objects.filter(key__in=keys, **_OPEN)
+                .values_list('key', 'last_analysis', 'backed_move')):
+            showcases[key] = showcase
+            if backed_move:
+                interior.add(key)
         connectors = _connectors_of(keys) if keys else {}
         seen = _already_repaired(
             set(showcases) | {parent for parents in connectors.values()
@@ -438,7 +451,9 @@ def drip_backlog(target=REPAIR_BACKLOG_TARGET, scan=REPAIR_BACKLOG_SCAN,
             targets = []
             if key in showcases and key not in seen:
                 searched = shallow_showcase(showcases[key])
-                budget = (repair_budget(searched) if searched is not None
+                budget = (repair_budget(searched,
+                                        interior=key in interior)
+                          if searched is not None
                           else None)
                 if budget is not None:
                     targets.append((key, SHALLOW, budget, REPAIR_MULTIPV))

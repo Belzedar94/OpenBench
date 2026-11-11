@@ -85,7 +85,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import connections
 
-from atomicdb import autosolve, idle_repair, ingest, metrics
+from atomicdb import autosolve, idle_repair, ingest, metrics, sweep
 from atomicdb.database import connection
 from atomicdb.models import Position
 
@@ -185,6 +185,19 @@ class Command(BaseCommand):
             help='Do not walk the backlog of shallow and unanalysed '
                  'positions for the idle fleet. Repairs found when a search '
                  'lands go on; ATOMICDB_ARM_RATE_REPAIR=0 stops both.')
+        parser.add_argument(
+            '--sweep16-cap', type=int, default=sweep.SWEEP_PENDING_CAP,
+            help='PENDING tasks of the +16 sweep this pass tops up to; 0 '
+                 'skips the step. Nothing is queued until `sweep_plus16 '
+                 '--rebuild` has stored its list; '
+                 'ATOMICDB_ARM_RATE_SWEEP16=0 stops it (default: '
+                 '%(default)s).')
+        parser.add_argument(
+            '--sweep16-user-backlog', type=int,
+            default=sweep.SWEEP_USER_BACKLOG_MAX,
+            help='The +16 sweep queues nothing while more requests than '
+                 'this are waiting; a negative value drops the check '
+                 '(default: %(default)s).')
         parser.add_argument(
             '--status', action='store_true',
             help='Print how many live positions carry a priority and exit.')
@@ -315,6 +328,14 @@ class Command(BaseCommand):
             if not options['no_repair_backlog']:
                 repair_backlog = step('repair-backlog',
                                       idle_repair.drip_backlog)
+            # The +16 sweep, before the pool for the same reason: it tops up
+            # its own queue only, in the FILL band, and the pool does not
+            # count it (see atomicdb.sweep).
+            swept = 0
+            if options['sweep16_cap'] > 0:
+                swept = step('sweep16', lambda: sweep.drip(
+                    cap=options['sweep16_cap'],
+                    user_backlog_max=options['sweep16_user_backlog']))
             # Colchon de analisis, DETRAS de los brazos con cupo: la flota
             # no debe esperar al minteo inline del lease (4 con cola vacia
             # = valles de utilizacion), pero el colchon tampoco debe
@@ -357,6 +378,7 @@ class Command(BaseCommand):
                       'fragile_enqueued': fragile,
                       'autosolve95_enqueued': autosolved,
                       'repair_backlog_enqueued': repair_backlog,
+                      'sweep16_enqueued': swept,
                       'public_counters_published': published}
             if failures:
                 report['failed_steps'] = failures

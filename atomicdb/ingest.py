@@ -373,14 +373,64 @@ def multipv_for(visits, budget_nodes=None, seeding=False, clamp=None):
 SERVER_PICKED_MIN_NODES = REQUEST_BUDGET_LADDER[0]
 
 
-def server_picked_budget(budget, clamp=None):
+# ---------------- no deep rungs on interior positions, server-picked ----------
+#
+# Audit of 11-Nov-2026 (section 3.4): the automatic policy spent about 10T
+# nodes a week, 16% of the fleet, on 512M and 2B searches of INTERIOR
+# positions.  An interior position is one whose published value already stands
+# on a child (``backed_move`` set, § ``_backed_for``): from then on its own
+# search only refreshes ``eval_cp``, which the backup ignores, so buying it
+# deeper moves nothing that is published.  The visit ladder of ``budget_for``,
+# the request rungs the value walker climbs and the rungs the quality arm
+# matches all reached those sizes on their own.
+#
+# THE SAME CHOKE POINT AS THE FLOOR ABOVE.  Every task the server mints goes
+# through ``server_picked_budget``; the callers that know the position pass it
+# as ``pos`` and an interior one is held at the first request rung.  A leaf
+# keeps every rung, and so does anything a person asks for: a request never
+# comes through here (``_request_rung``, the frontier button, Verify PV).
+# The reanalysis of a refuted mate witness (``_queue_disputed_reanalysis``)
+# is a deliberate depth purchase and does not come through here either, and
+# neither does the pass that breaks a chosen repetition
+# (``_queue_cycle_disambiguation``), which needs a deeper rung by design.
+#
+# ROLLBACK: ``ATOMICDB_AUTO_INTERIOR_DEEP_RUNGS=1`` in the environment (or the
+# same name in settings) and a restart restores the old prices.
+AUTO_INTERIOR_MAX_NODES = REQUEST_BUDGET_LADDER[0]
+AUTO_INTERIOR_DEEP_RUNGS_SETTING = 'ATOMICDB_AUTO_INTERIOR_DEEP_RUNGS'
+
+
+def auto_interior_deep_rungs():
+    """Is the old behaviour (deep rungs on interior positions) restored?"""
+    raw = getattr(settings, AUTO_INTERIOR_DEEP_RUNGS_SETTING, None)
+    if raw is None:
+        raw = os.environ.get(AUTO_INTERIOR_DEEP_RUNGS_SETTING, '')
+    return str(raw).strip().lower() in ('1', 'true', 'yes')
+
+
+def is_interior(pos):
+    """Does this position's published value stand on a child already?"""
+    return bool(getattr(pos, 'backed_move', None))
+
+
+def caps_interior(pos, budget):
+    """Would the automatic policy hold this purchase at the first rung?"""
+    return (pos is not None and budget > AUTO_INTERIOR_MAX_NODES
+            and is_interior(pos) and not auto_interior_deep_rungs())
+
+
+def server_picked_budget(budget, clamp=None, pos=None):
     """The budget of a task the server mints on its own (AUTO or FILL).
 
     ``clamp`` is the ``(budget_nodes, multipv)`` pair the caller hands to
-    ``multipv_for`` for the same task, if any.
+    ``multipv_for`` for the same task, if any.  ``pos`` is the position the
+    task searches, when the caller has it: an interior one never gets more
+    than ``AUTO_INTERIOR_MAX_NODES`` (§ the block above).
     """
     if clamp is not None and budget <= clamp[0]:
         return budget
+    if caps_interior(pos, budget):
+        budget = AUTO_INTERIOR_MAX_NODES
     return max(budget, SERVER_PICKED_MIN_NODES)
 
 
@@ -3270,6 +3320,11 @@ def _queue_cycle_disambiguation(picks):
             continue
         budget = _rung_at_least(max(floor_quality,
                                     (child.nodes_invested or 0) + 1))
+        # No ``pos`` on purpose: the child here is interior by construction
+        # (its value is the cycle), and what this buys is a pass that
+        # re-orders its replies, which repeating its rung would not do.  It
+        # is a small, targeted purchase under the quality arm's own ceiling,
+        # not the visit ladder the interior cap is about.
         budget = server_picked_budget(budget)
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
@@ -3333,10 +3388,14 @@ def _queue_quality_convergence(discrepancies):
         if child.status != 'UNKNOWN':
             continue
         budget = _rung_matching(own_quality)
+        if caps_interior(child, budget):
+            # Before the check: held at the first rung, a child that already
+            # has it needs nothing (see ``server_picked_budget``).
+            budget = AUTO_INTERIOR_MAX_NODES
         if (child.nodes_invested or 0) >= budget:
             continue                  # ya se le compro esa profundidad
         # After the check: the floor deepens a purchase, it never adds one.
-        budget = server_picked_budget(budget)
+        budget = server_picked_budget(budget, pos=child)
         task, created = AnalysisTask.objects.get_or_create(
             position=child, generation=child.visits,
             defaults={'budget_nodes': budget,
@@ -5683,7 +5742,7 @@ def next_tasks(n):
             pos.save(update_fields=['priority'])
             continue
         clamp = _short_mate_clamp(pos)
-        budget = server_picked_budget(budget_for(pos), clamp)
+        budget = server_picked_budget(budget_for(pos), clamp, pos=pos)
         task, _ = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
@@ -5962,7 +6021,7 @@ def _next_tasks_by_proof(n):
             # todavia le importa a la prueba; este dice que a la prueba ya no
             # le importa el nodo.  Cerrarlo exacto no compra nada.
             budget, clamp = min(budget, or_clamp[0]), or_clamp
-        budget = server_picked_budget(budget, clamp)
+        budget = server_picked_budget(budget, clamp, pos=pos)
         task, _created = AnalysisTask.objects.get_or_create(
             position=pos, generation=pos.visits,
             defaults={'budget_nodes': budget,
@@ -7266,7 +7325,7 @@ def _witness_refuted_revisit(pos, parent_keys):
         if not refuted:
             continue
         budget = max(BUDGET_LADDER[1], budget_for(parent))
-        budget = server_picked_budget(budget)
+        budget = server_picked_budget(budget, pos=parent)
         task, created = AnalysisTask.objects.get_or_create(
             position=parent, generation=parent.visits,
             defaults={'budget_nodes': budget, 'multipv': DEPTH_MULTIPV,
@@ -7864,7 +7923,13 @@ ARM_RATE_EVENT = 'ARM_RATE_BUDGET'
 # runs to its budget, 20 to 80 seconds on one core: sixty an hour keep one
 # solver thread busy, and leave the debt and the fragile claims to any other.
 IDLE_REPAIR_ARM = 'repair'
+# The +16 sweep (§ atomicdb.sweep) pays here as well, though it does not feed
+# on its own results: its ceiling is the share of the fleet it may take from
+# the selector's own work while nobody is requesting, about half the tasks an
+# hour the fleet serves.  ``0`` stops it.
+SWEEP16_ARM = 'sweep16'
 ARM_RATE_SETTING = {
+    SWEEP16_ARM: ('ATOMICDB_ARM_RATE_SWEEP16', 1200),
     VALUE_CASCADE_ARM: ('ATOMICDB_ARM_RATE_CASCADE', 240),
     QUALITY_ARM: ('ATOMICDB_ARM_RATE_QUALITY', 120),
     VALUE_DESCEND_ARM: ('ATOMICDB_ARM_RATE_DESCEND', 120),
@@ -8024,7 +8089,8 @@ def enqueue_coverage_completion(cap=COVERAGE_QUEUE_CAP,
             task, created = AnalysisTask.objects.get_or_create(
                 position_id=child_id, generation=child.visits,
                 defaults={'budget_nodes': server_picked_budget(
-                              max(COVERAGE_SEED_NODES, budget_for(child))),
+                              max(COVERAGE_SEED_NODES, budget_for(child)),
+                              pos=child),
                           'multipv': DEPTH_MULTIPV,
                           'source': AnalysisTask.Source.FILL,
                           'arm': COVERAGE_ARM})
@@ -8162,7 +8228,7 @@ def enqueue_dn_repair(cap=DN_REPAIR_QUEUE_CAP, floor=DN_REPAIR_FLOOR,
                 if made >= room:
                     break
                 budget = max(DN_REPAIR_SEED_NODES, budget_for(child))
-                budget = server_picked_budget(budget)
+                budget = server_picked_budget(budget, pos=child)
                 task, created = AnalysisTask.objects.get_or_create(
                     position=child, generation=child.visits,
                     defaults={'budget_nodes': budget,
@@ -8440,7 +8506,7 @@ def enqueue_unexplored_children(pos, cap=UNEXPLORED_CLICK_CAP,
             budget = budget_for(child)
         if source != AnalysisTask.Source.USER:
             # A system arm (the uncertainty expansion) mints through here.
-            budget = server_picked_budget(budget, clamp)
+            budget = server_picked_budget(budget, clamp, pos=child)
         child_route = ''
         if route and child.key in edges_by_child:
             child_route = route + ',' + edges_by_child[child.key]

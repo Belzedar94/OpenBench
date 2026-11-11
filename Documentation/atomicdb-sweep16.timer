@@ -1,0 +1,17 @@
+# Companion of atomicdb-sweep16.service.
+#
+# ONCE A DAY, at night.  The list is a snapshot: positions that close or are
+# searched again are passed over when the selector service reaches them, and
+# the ones that became candidates during the day wait for the next list.
+# No Persistent=: a run missed to a reboot is not owed.
+
+[Unit]
+Description=AtomicDB +16 sweep: rebuild the list once a day
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+AccuracySec=5min
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
