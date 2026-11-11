@@ -36,6 +36,10 @@ verifica el artefacto recibido como un blob opaco y conserva cada chunk. No
 conoce el formato de entrenamiento ni concatena archivos; esas responsabilidades
 pertenecen al proyecto del motor.
 
+El sub-modo RELABEL (re-puntuar a profundidad fija un set de posiciones ya
+existente, p. ej. Alice T349) reutiliza este scheduler, leases y uploads; su
+contrato y runbook están en `docs/relabel-mode.md`.
+
 ## Contrato del motor
 
 El creador del test proporciona una plantilla UCI de una sola línea. Se permiten

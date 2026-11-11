@@ -100,6 +100,7 @@ urlpatterns = [
     django.urls.path(r'clientSubmitPGN/', OpenBench.views.client_submit_pgn),
     django.urls.path(r'clientSubmitDatagenProducer/', OpenBench.views.client_submit_datagen_producer),
     django.urls.path(r'clientSubmitDatagen/', OpenBench.views.client_submit_datagen),
+    django.urls.path(r'clientRelabelInput/', OpenBench.views.client_relabel_input),
 
     # Nice endpoints, which can be hit from the website or with credentials cleanly
     django.urls.path(r'api/config/', OpenBench.views.api_configs),

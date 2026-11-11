@@ -28,6 +28,7 @@ import random
 import re
 import sys
 
+import OpenBench.relabel
 import OpenBench.utils
 import OpenBench.variant_contract
 
@@ -198,6 +199,10 @@ def focus_refusal(test_id, machine, blacklisted):
     if not valid_tablebase_assignment(test, machine):
         return 'Test #%d needs tablebases this worker does not provide' % (test_id)
 
+    if not valid_relabel_assignment(test, machine):
+        return ('Test #%d is a RELABEL workload this worker version cannot run'
+                % (test_id))
+
     if not valid_hardware_assignment(test, machine):
         return 'Test #%d needs more threads than this worker offers' % (test_id)
 
@@ -236,6 +241,7 @@ def filter_valid_workloads(request, machine):
         x for x in workloads
         if valid_tablebase_assignment(x, machine)
         and valid_publication_assignment(x, machine)
+        and valid_relabel_assignment(x, machine)
         and valid_hardware_assignment(x, machine)
         and has_assignable_chunk(x)
     ]
@@ -360,6 +366,15 @@ def valid_tablebase_assignment(workload, machine):
             return False
 
     return True
+
+def valid_relabel_assignment(workload, machine):
+
+    # Only workers that advertise the RELABEL protocol and this record format
+    # may lease a RELABEL chunk. An older worker would hand the descriptor to
+    # the engine as a generator command and fail every chunk it touched.
+    if not OpenBench.relabel.is_relabel(workload):
+        return True
+    return OpenBench.relabel.machine_supports(machine, workload.relabel_format)
 
 def valid_hardware_assignment(workload, machine):
 
@@ -566,6 +581,10 @@ def workload_to_dictionary(
                 if publication_datagen else None
             ),
         }
+        if OpenBench.relabel.is_relabel(test):
+            workload['test']['datagen']['relabel'] = relabel_to_dictionary(
+                test, datagen_chunk
+            )
         workload['distribution'] = None
         workload['spsa'] = None
         workload['reporting_type'] = None
@@ -594,6 +613,23 @@ def workload_to_dictionary(
         test.save()
 
     return workload
+
+def relabel_to_dictionary(test, chunk):
+
+    fmt = OpenBench.relabel.RELABEL_FORMATS[test.relabel_format]
+    engine = OPENBENCH_CONFIG['engines'][test.dev_engine]
+    return {
+        'protocol'     : OpenBench.relabel.RELABEL_PROTOCOL,
+        'set'          : test.relabel_input_set,
+        'format'       : test.relabel_format,
+        'variant'      : fmt['variant'],
+        'record_bytes' : fmt['record_bytes'],
+        'depth'        : test.relabel_depth,
+        'nodes'        : test.relabel_nodes,
+        'input'        : dict(chunk.relabel_input),
+        # One single-threaded engine per worker thread, capped like games.
+        'max_engines'  : engine.get('worker_max_concurrency', 0),
+    }
 
 def spsa_to_dictionary(test, workload):
 

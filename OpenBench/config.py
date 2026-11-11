@@ -26,6 +26,7 @@ import sys
 import traceback
 
 from OpenSite.settings import PROJECT_PATH
+from OpenBench.relabel import RELABEL_FORMATS
 
 # Assets that base.html links with the cache-busting token below.
 OPENBENCH_STATIC_ASSETS = [
@@ -181,6 +182,10 @@ def verify_engine_basics(conf):
     assert 0 <= conf.get('cutechess_launch_stagger_ms', 0) <= 60000
     manifest = conf.get('tablebase_manifest_sha256')
     assert manifest is None or re.fullmatch('[0-9a-fA-F]{64}', manifest)
+    # Record formats this engine can rescore in a RELABEL workload.
+    relabel_formats = conf.get('relabel_formats', [])
+    assert type(relabel_formats) == list
+    assert all(name in RELABEL_FORMATS for name in relabel_formats)
 
 def verify_engine_build(engine_name, conf):
 

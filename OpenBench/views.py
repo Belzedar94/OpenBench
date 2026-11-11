@@ -31,6 +31,7 @@ import OpenBench.datagen
 import OpenBench.datagen_publication
 import OpenBench.index_metrics
 import OpenBench.live_elo
+import OpenBench.relabel
 import OpenBench.stats
 import OpenBench.utils
 
@@ -2376,6 +2377,38 @@ def client_submit_datagen(request, machine):
             {'error': 'Unable to verify staged DATAGEN chunk'}, status=500,
         )
 
+    # RELABEL: the output must be the input chunk with only scores changed.
+    # Check it while it is still a staging file, outside any transaction.
+    if test.is_relabel():
+        rejection = None
+        try:
+            OpenBench.relabel.verify_relabel_chunk(
+                storage.path(OpenBench.relabel.input_filename(
+                    test.relabel_input_set, chunk.relabel_input
+                )),
+                storage.path(staging_name),
+                chunk.relabel_input,
+                test.relabel_format,
+            )
+        except (OpenBench.relabel.RelabelError, OSError, EOFError) as error:
+            rejection = 'RELABEL chunk %d rejected: %s' % (chunk_idx, error)
+        if rejection is not None:
+            cleanup_staging(staging_name)
+            # The worker produced a chunk that is not a pure relabel of its
+            # input. Release the lease now and leave an event that says why,
+            # so the chunk is redone instead of retried with the same bytes.
+            if OpenBench.datagen.requeue_chunk(
+                test.id, chunk_idx, machine, lease_attempt, rejection
+            ):
+                LogEvent.objects.create(
+                    author=machine.user.username,
+                    summary=rejection[:128],
+                    log_file='',
+                    machine_id=machine.id,
+                    test_id=test.id,
+                )
+            return JsonResponse({'error': rejection}, status=422)
+
     def commit_staged_upload():
         nonlocal staging_name
         with transaction.atomic():
@@ -2518,6 +2551,44 @@ def client_submit_datagen(request, machine):
                 ))
     finally:
         cleanup_staging(staging_name)
+
+@csrf_exempt
+@verify_worker
+def client_relabel_input(request, machine):
+
+    # Serve the frozen input chunk of a RELABEL lease, only to its owner.
+    try:
+        test_id = int(request.POST['test_id'])
+        chunk_idx = int(request.POST['chunk_idx'])
+        lease_attempt = int(request.POST['attempt'])
+    except (KeyError, ValueError):
+        return JsonResponse({'error': 'Malformed RELABEL input request'}, status=400)
+
+    test = Test.objects.filter(id=test_id).first()
+    chunk = DatagenChunk.objects.filter(test_id=test_id, idx=chunk_idx).first()
+    if test is None or chunk is None or not test.is_relabel():
+        return JsonResponse({'error': 'Unknown RELABEL chunk'}, status=404)
+    if (
+        test.finished or test.deleted
+        or chunk.status != DatagenChunk.RUNNING
+        or chunk.machine_id != machine.id
+        or chunk.attempts != lease_attempt
+    ):
+        return JsonResponse(
+            {'error': 'RELABEL chunk lease is not owned by this attempt'}, status=409
+        )
+
+    path = FileSystemStorage().path(OpenBench.relabel.input_filename(
+        test.relabel_input_set, chunk.relabel_input
+    ))
+    try:
+        handle = open(path, 'rb')
+    except OSError:
+        return JsonResponse({'error': 'RELABEL input file is missing'}, status=500)
+    response = FileResponse(handle, content_type='application/x-bzip2')
+    response['Content-Length'] = os.fstat(handle.fileno()).st_size
+    response['Content-Disposition'] = 'attachment; filename=%s' % chunk.relabel_input['file']
+    return response
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #                                                                             #
@@ -2910,6 +2981,19 @@ def api_datagen_manifest(request, test_id):
             for chunk in chunks
         ],
     }
+    if test.is_relabel():
+        document['relabel'] = {
+            'set': test.relabel_input_set,
+            'format': test.relabel_format,
+            'depth': test.relabel_depth,
+            'nodes': test.relabel_nodes,
+            'input_manifest_sha256': test.relabel_manifest_sha256,
+            'network': test.dev_network,
+            'netname': test.dev_netname,
+            'engine_commit': test.dev.sha,
+        }
+        for entry, chunk in zip(document['chunks'], chunks):
+            entry['relabel_input'] = chunk.relabel_input
     if test.is_publication_datagen():
         if test.datagen_publication_protocol == 42:
             document['environment'].update({

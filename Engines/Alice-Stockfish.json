@@ -5,6 +5,7 @@
     "worker_max_concurrency": 8,
     "cutechess_max_concurrency": 2,
     "cutechess_launch_stagger_ms": 500,
+    "relabel_formats": ["alice-v2-record-v1"],
 
     "build": {
         "path": "src",

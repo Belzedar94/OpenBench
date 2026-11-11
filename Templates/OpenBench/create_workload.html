@@ -324,6 +324,25 @@
                             <label for="datagen_cohort"> Cohort </label>
                             <input id="datagen_cohort" name="datagen_cohort">
                         </div>
+                        <h3> Relabel </h3>
+                        <div class="row">
+                            <label for="relabel_input_set"> Input Set </label>
+                            <input id="relabel_input_set" name="relabel_input_set">
+                            <small>
+                                Name of an installed set under
+                                <code>Media/relabel/inputs/</code>. When set, the
+                                workload rescores those positions: command,
+                                counts, seed, book and publication fields are ignored.
+                            </small>
+                        </div>
+                        <div class="row">
+                            <label for="relabel_depth"> Depth </label>
+                            <input value="0" id="relabel_depth" name="relabel_depth">
+                        </div>
+                        <div class="row">
+                            <label for="relabel_nodes"> Nodes </label>
+                            <input value="0" id="relabel_nodes" name="relabel_nodes">
+                        </div>
                     </div>
 
                 {% endif %}
