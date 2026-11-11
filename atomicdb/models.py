@@ -29,6 +29,11 @@ class Proof(models.TextChoices):
     ANDOR    = 'ANDOR'     # mate forzado verificado exhaustivamente
     ENGINE   = 'ENGINE'    # witness legal; certificacion agoto su presupuesto
     DISPUTED = 'DISPUTED'  # busqueda exhaustiva contradijo el witness
+    # A legal engine line that ends in a position the server's own tables
+    # score as won for the claimed side.  Like ENGINE, the defender's moves
+    # are the engine's, not an exhaustive search; unlike ENGINE, the line
+    # does not end in mate, so mate checks must never re-judge it.
+    TB_LINE  = 'TB_LINE'
 
 
 class Position(models.Model):
@@ -908,6 +913,95 @@ class DBEvent(models.Model):
             # (§ metrics.closure_attribution_totals).
             models.Index(fields=['kind', 'ts'], name='atomic_event_kind_ts'),
         ]
+
+
+class TrustedAccount(models.Model):
+    """An account whose uncertified mate lines may close positions.
+
+    A submitted mate line that the server's exhaustive check cannot settle
+    in its online budget (``INCONCLUSIVE``) closes a position on the word of
+    the engine that found it.  That word is only taken from the accounts
+    listed here; any other account's line is kept as a ``PendingClaim``.
+    Proven closures (terminal, exhaustive AND/OR, minimax over closed
+    children, tablebase, replayed certificate) never look at this table.
+
+    Managed with ``manage.py atomicdb_trust``, no deploy needed.
+    """
+    username = models.CharField(max_length=64, unique=True)
+    note     = models.CharField(max_length=200, blank=True, default='')
+    added    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['username']
+
+    def __str__(self):
+        return self.username
+
+
+class PendingClaim(models.Model):
+    """An uncertified closing line from an account that is not trusted.
+
+    Nothing in the tree changes when one is stored: the position stays open
+    and keeps the engine's score, so it is searched again.  The claim is
+    resolved when the position closes by any route (``CONFIRMED`` with the
+    claimed winner, ``CONTRADICTED`` otherwise) or when an exhaustive search
+    refutes the very line (``REFUTED``).
+    """
+
+    class Kind(models.TextChoices):
+        MATE = 'MATE'   # the line ends in mate
+        TB   = 'TB'     # the line ends in a server tablebase win
+
+    class Resolution(models.TextChoices):
+        OPEN         = ''
+        CONFIRMED    = 'CONFIRMED'
+        CONTRADICTED = 'CONTRADICTED'
+        REFUTED      = 'REFUTED'
+
+    position_key = models.CharField(max_length=64)   # the position it would close
+    parent_key   = models.CharField(max_length=64)   # the position that was searched
+    task_id      = models.BigIntegerField(null=True)
+    account      = models.CharField(max_length=64)
+    engine_sha   = models.CharField(max_length=64, blank=True, default='')
+    kind         = models.CharField(max_length=4, choices=Kind.choices)
+    winner       = models.CharField(max_length=5)    # WHITE / BLACK
+    pv           = models.TextField()                # from position_key
+    created      = models.DateTimeField(auto_now_add=True, db_index=True)
+    resolved     = models.DateTimeField(null=True)
+    resolution   = models.CharField(max_length=12, choices=Resolution.choices,
+                                    blank=True, default='')
+
+    class Meta:
+        indexes = [models.Index(fields=['position_key', 'resolved'],
+                                name='atomic_claim_pos_open')]
+
+
+class ClosureProvenance(models.Model):
+    """Who produced the latest closure of a position.
+
+    One row per closed position, written by the single closure emitter
+    (``ingest._emit_closure_events``) and overwritten if the position is
+    reopened and closed again.  ``task_id``, ``account`` and ``engine_sha``
+    are empty for closures that no analysis task produced (maintenance
+    commands, a climb the propagation queue ran later).
+    """
+    key        = models.CharField(max_length=64, primary_key=True)
+    closed_at  = models.DateTimeField(default=timezone.now)
+    status     = models.CharField(max_length=10)
+    closure    = models.CharField(max_length=8, blank=True, default='')
+    proof      = models.CharField(max_length=8, blank=True, default='')
+    source     = models.CharField(max_length=8, blank=True, default='')
+    task_id    = models.BigIntegerField(null=True)
+    account    = models.CharField(max_length=64, blank=True, default='')
+    engine_sha = models.CharField(max_length=64, blank=True, default='')
+
+    class Meta:
+        # The two questions this table exists for: everything one account
+        # closed, and everything one engine build closed.
+        indexes = [models.Index(fields=['account', 'closed_at'],
+                                name='atomic_prov_account'),
+                   models.Index(fields=['engine_sha', 'closed_at'],
+                                name='atomic_prov_engine')]
 
 
 class RequestLog(models.Model):

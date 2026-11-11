@@ -317,6 +317,52 @@ def verify_mate_pv(root_fen, pv_ucis, winner_is_white, deadline=None):
     return t[0] == want
 
 
+def walk_pv(root_fen, pv_ucis, deadline=None):
+    """The positions of a PV, ``[root, after 1 ply, ...]``, or None.
+
+    The same checks as ``verify_mate_pv`` up to its last ply: every move is
+    legal, no position repeats and no position before the end is terminal.
+    It says nothing about the end itself; the caller judges that.
+    """
+    fen = canonical_fen(root_fen)
+    fens = [fen]
+    seen = {fen}
+    for uci in pv_ucis:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        if terminal_status(fen) is not None:
+            return None
+        if uci not in legal_moves(fen):
+            return None
+        fen = apply_move(fen, uci)
+        if fen in seen:
+            return None
+        seen.add(fen)
+        fens.append(fen)
+    return fens
+
+
+def line_clock_slack(fens, pv_ucis, end_slack):
+    """``clock_slack`` a line keeps at EVERY node, from the slack of its end.
+
+    Walks back from the end with ``edge_slack``: a capture or pawn move
+    resets the clock, a quiet move spends one ply.  Returns the smallest
+    slack of the nodes before the end, so any of them may inherit the
+    value (the end keeps its own), or None for an empty line or
+    when a quiet move would need a negative margin: the line does not hold
+    for any entry clock and must not close anything.
+    """
+    slack = end_slack
+    smallest = None
+    for index in range(len(pv_ucis) - 1, -1, -1):
+        fen, uci = fens[index], pv_ucis[index]
+        if not edge_supports(fen, uci, slack):
+            return None
+        slack = edge_slack(fen, uci, slack)
+        smallest = slack if smallest is None else min(smallest, slack)
+    return smallest
+
+
 def prove_forced_mate(fen, winner_is_white, max_plies,
                       budget_positions=200_000, hint_pv=None,
                       deadline=None, return_run=False):

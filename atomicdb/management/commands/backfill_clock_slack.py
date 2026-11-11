@@ -147,6 +147,10 @@ class Command(BaseCommand):
             return logic.CLOCK_SLACK_MAX, 'TERMINAL'
         if closure == 'TB':
             return logic.slack_from_dtz(dtz_by_key.get(row['key'])), 'TB'
+        if closure == 'MATE_PV' and row['proof'] == 'TB_LINE':
+            # Measured along the line when it closed; the witness length
+            # says nothing about a line that ends in a tablebase win.
+            return None, 'MATE_PV'
         if closure == 'MATE_PV':
             witness = (row['won_line'] or '').split()
             if options['reprove'] and row['proof'] == 'ANDOR' and witness:
