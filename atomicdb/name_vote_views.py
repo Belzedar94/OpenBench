@@ -151,4 +151,3 @@ def flag_action(request):
             flag_id, action, approver=request.user.username,
             ip=views._client_ip(request), new_name=new_name)
     return redirect(f'/atomicdb/suggestions/?review={outcome}#review')
-
