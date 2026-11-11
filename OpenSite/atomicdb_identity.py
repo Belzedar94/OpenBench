@@ -61,6 +61,9 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_propagationseed',         # 0058_propagationseed
     'atomicdb_workerserving',           # 0059_worker_serving
     'atomicdb_rootrecord',              # 0061_rootrecord
+    'atomicdb_trustedaccount',          # 0062_closure_trust
+    'atomicdb_pendingclaim',            # 0062_closure_trust
+    'atomicdb_closureprovenance',       # 0062_closure_trust
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
