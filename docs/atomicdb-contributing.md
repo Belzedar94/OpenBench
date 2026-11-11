@@ -152,6 +152,17 @@ Ctrl+C, SIGTERM, a closed terminal and, on Windows, Ctrl+Break or closing the
 console window all stop it the same way: the engines are ended, the tasks it
 holds are handed back, and it exits.
 
+By default every thread of `-T` runs its own engine of one thread (at most 32
+engines, the server's cap per machine), each with a hash sized to the free
+memory; `--jobs K` runs K engines and splits `-T` between them (`--jobs 1` is
+the old single engine) and `--hash` fixes the table size. Every task starts
+from a cleared engine (`ucinewgame`), the search stops at the first mate
+(`go nodes N mate 250`), and only the lines of the last complete iteration are
+sent, never a `lowerbound`/`upperbound` line. An engine that dies hands its
+task back at once, and the worker refuses to start on an engine that does not
+identify itself as an Atomic-Stockfish build (`--skip-engine-check` overrides
+that).
+
 A local instance is for disposable testing. `docs/operations.md` sets the
 rule: never point a development worker at production, and never run workers
 against a copy of the live queue.

@@ -187,6 +187,27 @@ def _mark_failure(job, error):
     return exhausted
 
 
+def arbiter_budget(lines, searched, budget):
+    """The budget a pass arbitrates and absorbs with: ``searched``, or the
+    task's ``budget`` for a search that stopped at a mate.
+
+    Since worker build 2026111101 a search ends at the first completed
+    iteration whose best line is a mate (``go nodes N mate 250``), a few
+    thousand nodes into a 128M purchase.  What it found is what the whole
+    budget would have found -- the mate -- so it arbitrates the showcase and
+    absorbs the requests at or below that budget as if it had run it, instead
+    of losing to a mate-blind 8M pass.  Its credit, its nodes per second and
+    ``nodes_invested`` still count the nodes it ran.  A pass whose best line
+    is no mate, or one that ran its budget anyway (every earlier build),
+    arbitrates with its nodes, exactly as before.
+    """
+    first = lines[0] if lines and isinstance(lines[0], dict) else None
+    if (first is None or first.get('mate') is None
+            or not isinstance(budget, int) or budget <= searched):
+        return searched
+    return budget
+
+
 def _absorb_shadowed(job, searched):
     """Cierra las peticiones que este analisis acaba de dejar sin trabajo.
 
@@ -297,14 +318,17 @@ def apply_job(job):
             summary = ({'tb_closed': True} if closed
                        else {'tb_rejected': True})
         else:
+            arbiter = arbiter_budget(lines, searched,
+                                     (task or {}).get('budget_nodes'))
             summary = ingest.ingest_analysis(
                 job.position_id, lines, searched, machine=machine,
                 mate_proofs=mate_proofs, restricted=restricted,
-                defer_propagation=deferral, trusted=trusted)
+                defer_propagation=deferral, trusted=trusted,
+                arbiter_budget=arbiter)
             # Las peticiones que este pase deja sin trabajo se cierran AQUI,
             # dentro de la misma transaccion que lo aplica: si el analisis se
             # revierte, vuelven enteras a su cola.
-            absorbed = _absorb_shadowed(job, searched)
+            absorbed = _absorb_shadowed(job, arbiter)
             if absorbed:
                 summary['absorbed'] = absorbed
         # El tiempo de motor solo se contabiliza cuando el resultado entra:
