@@ -5851,15 +5851,19 @@ def api_query(request):
     except Position.DoesNotExist:
         return JsonResponse({'error': 'unknown position'}, status=404)
     block = _query_block(pos)
-    # Additive, last key: the last named Atomic opening on the canonical line
-    # to this position (the label the home queue shows), ``null`` when the
-    # line crosses no named position or is not walkable (rhaxier, 11-nov).
-    reading = _line_readings_many([pos.key], credit=True).get(pos.key)
-    block['opening'] = (reading[2] or None) if reading else None
-    # Additive too: who proposed that name when it is a community name
-    # ("anonymous" without an account), ``null`` on a catalogue name or none.
-    block['opening_named_by'] = (reading[3] if reading and reading[2]
-                                 else None)
+    # Opt-in, ``?opening=1``: the last named Atomic opening on the canonical
+    # line to this position, ``null`` when the line crosses no named position
+    # or is not walkable (rhaxier, 11-nov), and who proposed it when it is a
+    # community name.  Naming walks the line back to the root, which costs
+    # 200-300 ms cold on a position 40 plies deep against ~10-40 ms for the
+    # rest of this view, and bots poll this endpoint many times a second
+    # (torom, 11-nov).  So the plain query stays cheap and the walk is paid
+    # only by whoever asks for the name.
+    if request.GET.get('opening') == '1':
+        reading = _line_readings_many([pos.key], credit=True).get(pos.key)
+        block['opening'] = (reading[2] or None) if reading else None
+        block['opening_named_by'] = (reading[3] if reading and reading[2]
+                                     else None)
     return JsonResponse(block)
 
 

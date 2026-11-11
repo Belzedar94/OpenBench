@@ -49,9 +49,6 @@ class PrincipalVariationsTests(TestCase):
         body = self._get().json()
         query = self.client.get('/atomicdb/api/query',
                                 {'fen': self.root.fen}).json()
-        # ``opening`` is the query API's own last key, not part of the root.
-        query.pop('opening')
-        query.pop('opening_named_by')
         self.assertEqual(body['position'], query)
 
     def test_each_top_move_follows_the_arrow(self):

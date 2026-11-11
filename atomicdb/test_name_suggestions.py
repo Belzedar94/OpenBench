@@ -1056,7 +1056,7 @@ class NameCreditTests(TestCase):
 
     def _api(self, pos):
         return self.client.get('/atomicdb/api/query',
-                               {'fen': pos.fen}).json()
+                               {'fen': pos.fen, 'opening': '1'}).json()
 
     def test_the_proposer_is_credited_on_the_page(self):
         pos = _unnamed_position()
