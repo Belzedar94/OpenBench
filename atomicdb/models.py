@@ -1004,6 +1004,59 @@ class ClosureProvenance(models.Model):
                                 name='atomic_prov_engine')]
 
 
+class PlannerShadowCycle(models.Model):
+    """One cycle of the proof-directed planner in shadow mode.
+
+    Written ONLY by ``run_planner --mode shadow`` (§ atomicdb.planner):
+    the batch it would have served, the root's expected cost and the
+    metrics of the cycle.  Nothing reads these rows to decide anything; they
+    exist to compare the planner with what the fleet was actually given
+    before any of it is switched on.  Old cycles are pruned by the same
+    process (``--retention-days``).
+    """
+    started = models.DateTimeField(db_index=True)
+    finished = models.DateTimeField()
+    mode = models.CharField(max_length=8, default='shadow')
+    model_version = models.CharField(max_length=64, blank=True, default='')
+    root_key = models.CharField(max_length=64, blank=True, default='')
+    # Expected engine nodes still missing to close the root (None = inf).
+    root_pn = models.FloatField(null=True)
+    root_dn = models.FloatField(null=True)
+    fleet_nodes_per_day = models.FloatField(null=True)
+    picks = models.IntegerField(default=0)
+    metrics = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-started']
+
+
+class PlannerShadowPick(models.Model):
+    """One position the planner would have served in a shadow cycle.
+
+    ``kind``: NODE re-searches a searched leaf, LEAF searches a named but
+    unsearched child (``parent_key`` + ``move_uci``), REST is a
+    ``searchmoves`` pass over the moves nobody named at ``position_key``.
+    ``pn``/``dn`` are the leaf's numbers when it was picked (None = inf).
+    """
+    cycle = models.ForeignKey(PlannerShadowCycle, on_delete=models.CASCADE,
+                              related_name='pick_rows')
+    rank = models.IntegerField()
+    kind = models.CharField(max_length=4)
+    position_key = models.CharField(max_length=64)
+    parent_key = models.CharField(max_length=64, blank=True, default='')
+    move_uci = models.CharField(max_length=8, blank=True, default='')
+    ply = models.IntegerField(default=0)
+    pn = models.FloatField(null=True)
+    dn = models.FloatField(null=True)
+    eval_cp = models.IntegerField(null=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['cycle', 'rank'], name='uniq_planner_pick_rank')]
+        indexes = [models.Index(fields=['position_key'],
+                                name='atomic_planner_pick_pos')]
+
+
 class RequestLog(models.Model):
     """Peticiones publicas de analisis (rate-limit y dedup por IP)."""
     ip       = models.GenericIPAddressField(db_index=True)

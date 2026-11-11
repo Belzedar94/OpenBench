@@ -1,0 +1,80 @@
+# AtomicDB proof-directed planner, SHADOW mode — example systemd unit.
+#
+# NOT INSTALLED.  Copy to /etc/systemd/system/atomicdb-planner.service, adjust
+# User, paths and the environment block, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-planner
+#     journalctl -u atomicdb-planner -f
+#     .venv/bin/python manage.py planner_status
+#
+# What it does: keeps the searched subgraph of AtomicDB in memory, computes
+# cost-unit proof numbers for WHITE_WIN and, every --interval seconds,
+# selects the batch of work it WOULD serve.  It records that batch and the
+# cycle's metrics in two tables of its own (PlannerShadowCycle,
+# PlannerShadowPick) and serves NOTHING: the lease path does not know it
+# exists.  See atomicdb/planner/__init__.py and
+# docs/atomicdb-planner-design.md.
+#
+# Start order: after `manage.py migrate` (migration 0063).  Optional:
+# `manage.py calibrate_planner` first (read-only, ~45 min, writes
+# $STATE_DIRECTORY/planner_costmodel.json); without it the planner uses the
+# prototype fit of 11-Nov-2026.
+#
+# Cost on start: one sequential read of the searched positions and the named
+# children of the ~2.6M open ones, all read-only; 20 to 75 minutes on the
+# production database depending on how warm its cache is.  After that each
+# cycle reads only what moved (the `updated` index).  Memory: well under
+# 1.5 GB RSS for the production graph; --max-rss-mb stops it past 4 GB.
+#
+# ONE process, enforced: an exclusive lock file in the state directory.
+# Lifetime cap (--max-hours): a clean exit, and Restart=always brings it back
+# with a fresh full load — which is also the reconciliation of anything the
+# incremental refresh missed.
+#
+# Off switch: stop the unit, or set ATOMICDB_PLANNER=off.  Nothing else
+# depends on it.
+
+[Unit]
+Description=AtomicDB proof-directed planner (shadow)
+Documentation=https://github.com/Belzedar94/OpenBench
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+Environment=ATOMICDB_PLANNER=shadow
+Environment=ATOMICDB_STATE_DIR=/var/lib/atomicdb-planner
+StateDirectory=atomicdb-planner
+# The loader's reads are sequential scans: no parallel workers, like the
+# selector.
+Environment="PGOPTIONS=-c max_parallel_workers_per_gather=0"
+
+ExecStart=/opt/openbench/.venv/bin/python manage.py run_planner \
+    --mode shadow --interval 300 --batch 512 --max-hours 72 \
+    --max-rss-mb 4096 --retention-days 7
+
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=60
+
+# A background heuristic: it yields to the site and to PostgreSQL.
+Nice=10
+CPUWeight=30
+IOSchedulingClass=idle
+OOMScoreAdjust=800
+MemoryMax=6G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

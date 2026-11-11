@@ -64,6 +64,8 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_trustedaccount',          # 0062_closure_trust
     'atomicdb_pendingclaim',            # 0062_closure_trust
     'atomicdb_closureprovenance',       # 0062_closure_trust
+    'atomicdb_plannershadowcycle',      # 0063_planner_shadow
+    'atomicdb_plannershadowpick',       # 0063_planner_shadow
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
