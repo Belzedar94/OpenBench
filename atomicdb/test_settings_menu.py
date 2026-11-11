@@ -77,7 +77,7 @@ class SettingsCogTests(TestCase):
         panel = _panel(body)
         for col in ('state', 'pn', 'depth'):
             self.assertIn(f'class="settings-col" type="checkbox" value="{col}"', panel)
-            self.assertIn(f'data-hidecols~="{col}"', body)
+        self.assertIn('atomicdb-hidecols', body)
         self.assertIn('class="table-scroll movecols"', body)
 
     def test_the_cog_sits_beside_the_theme_switch(self):
