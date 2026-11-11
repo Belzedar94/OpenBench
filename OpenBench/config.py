@@ -31,6 +31,9 @@ from OpenSite.settings import PROJECT_PATH
 OPENBENCH_STATIC_ASSETS = [
     os.path.join(PROJECT_PATH, 'OpenBench', 'static'),
     os.path.join(PROJECT_PATH, 'atomicdb', 'static', 'atomicdb', 'theme.js'),
+    # The AtomicDB sheet too: without it a new rule there never reaches a
+    # browser holding the old sheet under the same ?v= token.
+    os.path.join(PROJECT_PATH, 'atomicdb', 'static', 'atomicdb', 'atomicdb.css'),
 ]
 
 def compute_static_version(base='v7'):

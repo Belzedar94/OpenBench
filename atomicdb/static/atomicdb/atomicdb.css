@@ -3653,3 +3653,11 @@ html[data-board="custom"] cg-board {
     flex-basis: 100%;
   }
 }
+
+/* Explorer columns a visitor switched off in the settings panel (BManBJ,
+   11-Nov-2026).  The hook class sits on the table's wrapper. */
+:root[data-hidecols~="state"] .movecols table tr > :nth-child(3),
+:root[data-hidecols~="pn"] .movecols table tr > :nth-child(5),
+:root[data-hidecols~="depth"] .movecols table tr > :nth-child(6) { display: none; }
+.settings-cols { display: flex; flex-wrap: wrap; gap: .2rem .9rem; }
+.settings-cols label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
