@@ -3661,3 +3661,41 @@ html[data-board="custom"] cg-board {
 :root[data-hidecols~="depth"] .movecols table tr > :nth-child(6) { display: none; }
 .settings-cols { display: flex; flex-wrap: wrap; gap: .2rem .9rem; }
 .settings-cols label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
+
+/* Opening-name votes on the Openings page (/atomicdb/roots/#openings). */
+.namevote-head { white-space: nowrap; }
+.namevote-cell { white-space: nowrap; vertical-align: top; }
+.namevote { display: inline-flex; gap: .3rem; margin: 0; }
+.namevote-btn {
+  display: inline-flex; align-items: center; gap: .25rem;
+  min-height: 2rem; padding: .15rem .5rem;
+  font: inherit; font-size: .9rem; line-height: 1;
+  color: var(--ink); background: transparent;
+  border: 1px solid var(--border); border-radius: 999px;
+  cursor: pointer;
+}
+.namevote-btn:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-hover); }
+.namevote-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.namevote-btn:disabled { opacity: .6; cursor: wait; }
+.namevote-btn.is-mine, .namevote-btn[aria-pressed="true"] {
+  border-color: var(--accent); background: var(--opening-fill); color: var(--ink-strong);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.namevote-btn[value="down"].is-mine, .namevote-btn[value="down"][aria-pressed="true"] {
+  border-color: var(--lost); box-shadow: inset 0 0 0 1px var(--lost);
+}
+.namevote-n { font-variant-numeric: tabular-nums; min-width: 1ch; }
+.namevote-marks { display: flex; flex-wrap: wrap; gap: .25rem .5rem; margin-top: .2rem; font-size: .8rem; }
+.namevote-flag {
+  color: var(--hot); border: 1px solid var(--hot); border-radius: 999px;
+  padding: 0 .45rem; white-space: nowrap;
+}
+.namevote-flag[hidden] { display: none; }
+.namevote-hint { color: var(--ink-muted); font-style: italic; }
+.review-flags td { vertical-align: top; }
+.review-flags td.n { white-space: nowrap; }
+.review-actions { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; margin: 0; }
+.review-actions input[type="text"] { min-width: 10rem; max-width: 100%; }
+@media (max-width: 640px) {
+  .namevote-btn { padding: .15rem .4rem; }
+}

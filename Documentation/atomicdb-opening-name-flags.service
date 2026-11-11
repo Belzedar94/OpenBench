@@ -1,0 +1,42 @@
+# AtomicDB opening names under review -> Discord polls in #opening-names.
+#
+# Copy this and its .timer to /etc/systemd/system/, then:
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-opening-name-flags.timer
+#     journalctl -u atomicdb-opening-name-flags.service -f
+#
+# WHAT A RUN DOES.  ``post_opening_name_flags`` brings the review flags in
+# line with the votes (a name with at least ATOMICDB_NAME_REVIEW_MIN_VOTES
+# votes, three quarters of them down, gets one; a flag whose position no
+# longer shows its name is closed as STALE), then posts each open flag that
+# has no Discord message yet as a native poll, at most 5 per run.  The message
+# id is stored on the flag, so a name is posted once.  A failed post is tried
+# again on the next runs, 5 times at most.  Nothing ever changes a name: an
+# approver applies outcomes from /atomicdb/suggestions/.
+#
+# SECRETS.  The bot token is read from /etc/openbench/discord-bot.token
+# (root, 600), the same file as the queue ping; override the path with
+# ATOMICDB_DISCORD_TOKEN_FILE.  It is never printed or logged.
+#
+# COST.  Two small reads (the vote table and the open flags) and at most a
+# handful of HTTPS calls.  `--dry-run` prints the posts without sending.
+
+[Unit]
+Description=Post AtomicDB opening names under review to Discord
+Documentation=https://github.com/Belzedar94/OpenBench
+ConditionPathExists=/opt/openbench/manage.py
+After=network-online.target postgresql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=OPENBENCH_DEBUG=False
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/bash -c "systemctl set-environment OPENBENCH_SECRET_KEY=$(cat /opt/openbench/Config/secret.key)"
+ExecStart=/opt/openbench/.venv/bin/python -u /opt/openbench/manage.py post_opening_name_flags
+TimeoutStartSec=5min
+Nice=10
+MemoryMax=1G

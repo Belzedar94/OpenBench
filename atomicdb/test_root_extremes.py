@@ -968,14 +968,16 @@ class RootsPageTests(TestCase):
 
     def test_the_page_costs_a_fixed_handful_of_queries(self):
         """One read for every watched position of both tables, one for the
-        community names, one for the latest line and two for its history."""
+        community names, one for the latest line, two for its history, and
+        two for the opening-name votes (the tallies and the open review
+        flags; the review hints come from a shared cache)."""
         _set(self.root, eval_cp=545, backed_move='g1f3')
         roots.capture(now=T0)
         roots.capture(now=T0 + timedelta(days=1))
         self.assertTrue(RootExtreme.objects.exists())
 
         with self.assertNumQueries(
-                5, using=settings.ATOMICDB_DATABASE_ALIAS):
+                7, using=settings.ATOMICDB_DATABASE_ALIAS):
             roots.page_context(now=T0 + timedelta(days=1))
 
     def test_without_the_catalogue_the_page_goes_on(self):

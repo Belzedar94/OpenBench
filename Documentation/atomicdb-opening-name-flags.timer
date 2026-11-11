@@ -1,0 +1,17 @@
+# Companion of atomicdb-opening-name-flags.service.
+#
+# Every 10 minutes: a name that crosses the review threshold reaches the
+# Discord channel within that time.  A run with nothing to post is two small
+# reads.
+
+[Unit]
+Description=Post AtomicDB opening names under review to Discord every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=atomicdb-opening-name-flags.service
+
+[Install]
+WantedBy=timers.target

@@ -3,7 +3,8 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
-from . import active_workers, page_cache, preferences, roots, views
+from . import (active_workers, name_vote_views, page_cache, preferences,
+               roots, views)
 from .conquest_map import map_api
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
@@ -137,6 +138,15 @@ urlpatterns = [
     path('roots/', _roots_cached, name='atomicdb-roots'),
     path('suggest/<str:key>/', views.suggest_opening_name),
     path('suggestions/', views.suggestions, name='atomicdb-suggestions'),
+    # Opening-name votes: an approver's decision on a name under review, a
+    # thumbs up or down from the Openings page, and the live tallies the
+    # cached page reads.  The first two write and the third is the live
+    # half of a cached page: no cache on any of them.
+    path('suggestions/flags/', name_vote_views.flag_action,
+         name='atomicdb-name-flags'),
+    path('names/vote/<str:key>/', name_vote_views.vote,
+         name='atomicdb-name-vote'),
+    path('names/votes/', name_vote_views.votes, name='atomicdb-name-votes'),
     # Avisos: la lista entera y el POST que los marca vistos, en la misma
     # ruta.  Escribe, y ademas es de una sola persona: sin cache.
     path('notifications/', views.notifications_page,
