@@ -566,7 +566,9 @@ def _explore_url(row):
     return url
 
 
-def _row(watched, record, label=None, community=False):
+def _row(watched, record, label=None, community=None):
+    """One table row.  ``community`` is the community entry in force on the
+    position (§ ``community_names.in_force``), or ``None``."""
     record = record or {}
     tracked = record.get('best_value') is not None
     return {
@@ -576,8 +578,11 @@ def _row(watched, record, label=None, community=False):
         'line': list(watched.line),
         'line_san': watched.line_san,
         'url': _explore_url(watched),
-        # The name shown comes from an approved community suggestion.
-        'community': community,
+        # The name shown comes from an approved community suggestion, and
+        # who proposed it (``None`` on a catalogue name).
+        'community': community is not None,
+        'named_by': (community_names.credit(community)
+                     if community is not None else None),
         'present': record.get('present', False),
         'value': record.get('value'),
         'status': record.get('status', 'UNKNOWN'),
@@ -672,7 +677,7 @@ def _opening_rows(records, sort):
         entry = community_names.in_force(watched.key, names=names)
         rows.append(_row(watched, records.get(watched.key),
                          label=entry['name'] if entry else None,
-                         community=entry is not None))
+                         community=entry))
     # Then the positions only the community names.  A key watched for a
     # community name keeps its row even if that name is withdrawn later: its
     # history stays where it is, under a plain label.
@@ -684,7 +689,7 @@ def _opening_rows(records, sort):
             continue
         rows.append(_row(Watched(key, 'opening',
                                  entry['name'] if entry else _UNNAMED),
-                         record, community=entry is not None))
+                         record, community=entry))
     rows, column, descending = _sorted(rows, sort)
     # Each header sorts by its column; the column in force flips instead.
     links = {}
@@ -728,8 +733,9 @@ def page_context(now=None, sort=DEFAULT_SORT):
 
 # What a row of the API carries, in this order (§ api_context).
 API_FIELDS = ('key', 'label', 'kind', 'line', 'line_san', 'community',
-              'present', 'value', 'status', 'best_value', 'best_status',
-              'best_at', 'worst_value', 'worst_status', 'worst_at', 'changes')
+              'named_by', 'present', 'value', 'status', 'best_value',
+              'best_status', 'best_at', 'worst_value', 'worst_status',
+              'worst_at', 'changes')
 
 
 def _api_row(row):

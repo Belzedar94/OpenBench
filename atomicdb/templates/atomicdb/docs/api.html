@@ -276,6 +276,10 @@ a target (the rung you picked, or the first one):</p>
 <li>The values are centipawns from White's side, as on the page, with a proven
   win as +10000 or -10000 and a proven draw as 0. (The <code>score</code> of
   <code>query</code> is from the side to move instead.)</li>
+<li><code>community</code> is true when the name shown comes from an
+  approved community suggestion, and <code>named_by</code> is then the account
+  that proposed it (<code>"anonymous"</code> when it was proposed without one;
+  <code>null</code> on a catalogue name).</li>
 <li><code>since</code> is when tracking began.</li>
 </ul>
 {% endblock %}

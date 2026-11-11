@@ -83,7 +83,7 @@
   </tr>
   {% for r in openings %}
   <tr>
-    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if r.community %}{% if r.line_san %} · {% endif %}community name{% endif %}{% if not r.present %}{% if r.line_san or r.community %} · {% endif %}not in the tree yet{% endif %}</div></td>
+    <td style="overflow-wrap:anywhere"><a href="{{ r.url }}">{{ r.label }}</a><div class="dim contrib-spec">{{ r.line_san }}{% if r.community %}{% if r.line_san %} · {% endif %}community name · named by {{ r.named_by }}{% endif %}{% if not r.present %}{% if r.line_san or r.community %} · {% endif %}not in the tree yet{% endif %}</div></td>
     <td class="n">{{ r.now_h }}</td>
     <td class="n">{{ r.best_h }}{% if r.best_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.best_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>
     <td class="n">{{ r.worst_h }}{% if r.worst_at %}<div class="dim contrib-spec" style="white-space:normal">{{ r.worst_at|date:"Y-m-d H:i" }}</div>{% endif %}</td>

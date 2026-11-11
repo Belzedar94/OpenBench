@@ -920,19 +920,26 @@ class RootsPageTests(TestCase):
             ('Rhaxier Gambit', True, '+1.50', '+1.50', ''))
         self.assertEqual(row['url'], f'/atomicdb/explore/{pos.key}/')
         self.assertEqual(len(rows), len(openings.load_catalog()) + 1)
-        self.assertIn('community name', response.content.decode())
+        # Proposed without an account: credited as anonymous.
+        self.assertEqual(row['named_by'], 'anonymous')
+        self.assertIn('community name · named by anonymous',
+                      response.content.decode())
+        # A catalogue row carries no credit.
+        self.assertTrue(all(other['named_by'] is None for other in rows
+                            if not other['community']))
 
     def test_an_approved_correction_renames_a_catalogue_row(self):
         (pos, watched), = _catalogue_positions()
         _suggest(pos, 'Corrected Name', kind=OpeningNameSuggestion.SKind.EDIT,
-                 previous_name=watched.label,
+                 previous_name=watched.label, suggested_by='lesha',
                  status=OpeningNameSuggestion.SState.APPROVED)
 
         rows = roots.page_context(now=T0)['openings']
 
         row = next(row for row in rows if row['key'] == pos.key)
-        self.assertEqual((row['label'], row['community'], row['line_san']),
-                         ('Corrected Name', True, watched.line_san))
+        self.assertEqual((row['label'], row['community'], row['line_san'],
+                          row['named_by']),
+                         ('Corrected Name', True, watched.line_san, 'lesha'))
         self.assertEqual(len(rows), len(openings.load_catalog()))
 
     def test_the_main_line_and_its_history_by_day(self):

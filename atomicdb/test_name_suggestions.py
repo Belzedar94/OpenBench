@@ -1027,3 +1027,129 @@ class SuggesterIdentityTests(TestCase):
         body = self.client.get('/atomicdb/suggestions/').content.decode()
 
         self.assertIn('<strong>lesha</strong>', body)
+
+
+class NameCreditTests(TestCase):
+    """A community name is shown with who proposed it (owner, 11-Nov-2026):
+    the account of the approved suggestion in force, or "anonymous"."""
+
+    def setUp(self):
+        community_names.invalidate()
+        self.client = Client()
+
+    def tearDown(self):
+        community_names.invalidate()
+
+    def _approve(self, pos, name, suggested_by='', minutes=0, **fields):
+        row = OpeningNameSuggestion.objects.create(
+            position=pos, proposed_name=name, ip='10.0.0.9',
+            comment='private note', suggested_by=suggested_by,
+            status=OpeningNameSuggestion.SState.APPROVED,
+            resolved_by='boss',
+            resolved_at=timezone.now() + timedelta(minutes=minutes),
+            **fields)
+        community_names.invalidate()
+        return row
+
+    def _page(self, pos):
+        return self.client.get(f'/atomicdb/explore/{pos.key}/')
+
+    def _api(self, pos):
+        return self.client.get('/atomicdb/api/query',
+                               {'fen': pos.fen}).json()
+
+    def test_the_proposer_is_credited_on_the_page(self):
+        pos = _unnamed_position()
+        self._approve(pos, 'Belfast Gambit', suggested_by='lesha')
+
+        response = self._page(pos)
+
+        self.assertEqual(response.context['opening']['named_by'], 'lesha')
+        body = response.content.decode()
+        self.assertIn('Belfast Gambit</h2>', body)
+        self.assertIn('· named by lesha</span>', body)
+        self.assertIn('title="A community name, proposed by lesha"', body)
+        # Only the account is public: the rest of the row stays private.
+        self.assertNotIn('private note', body)
+        self.assertNotIn('10.0.0.9', body)
+
+    def test_the_proposer_is_credited_in_the_query_api(self):
+        pos = _unnamed_position()
+        self._approve(pos, 'Belfast Gambit', suggested_by='lesha')
+
+        data = self._api(pos)
+
+        self.assertEqual((data['opening'], data['opening_named_by']),
+                         ('Belfast Gambit', 'lesha'))
+        self.assertNotIn('private note', str(data))
+
+    def test_an_anonymous_proposal_reads_as_anonymous(self):
+        pos = _unnamed_position()
+        self._approve(pos, 'Ghost Gambit')
+
+        body = self._page(pos).content.decode()
+
+        self.assertIn('· named by anonymous</span>', body)
+        self.assertEqual(self._api(pos)['opening_named_by'], 'anonymous')
+
+    def test_the_latest_approval_is_credited_after_an_edit(self):
+        pos = _unnamed_position()
+        self._approve(pos, 'First Name', suggested_by='alice')
+        self._approve(pos, 'Second Name', suggested_by='bob', minutes=1,
+                      kind=OpeningNameSuggestion.SKind.EDIT,
+                      previous_name='First Name')
+
+        body = self._page(pos).content.decode()
+
+        self.assertIn('Second Name</h2>', body)
+        self.assertIn('named by bob', body)
+        self.assertNotIn('alice', body)
+        self.assertEqual(self._api(pos)['opening_named_by'], 'bob')
+
+    def test_an_approved_correction_credits_its_proposer(self):
+        named = _named_position()
+        self._approve(named, CORRECTED_NAME, suggested_by='lesha',
+                      kind=OpeningNameSuggestion.SKind.EDIT,
+                      previous_name=CATALOGUED_NAME)
+
+        body = self._page(named).content.decode()
+
+        self.assertIn('named by lesha', body)
+
+    def test_an_inherited_community_name_keeps_its_credit(self):
+        pos = _unnamed_position()
+        self._approve(pos, 'Belfast Gambit', suggested_by='lesha')
+        child = ingest.get_or_create_position(
+            logic.apply_move(pos.fen, 'a6a5'))
+        Edge.objects.get_or_create(parent=pos, move_uci='a6a5',
+                                   defaults={'child': child})
+
+        response = self._page(child)
+
+        self.assertEqual(response.context['opening']['name'],
+                         'Belfast Gambit')
+        self.assertIn('named by lesha', response.content.decode())
+        self.assertEqual(self._api(child)['opening_named_by'], 'lesha')
+
+    def test_a_catalogue_name_carries_no_credit(self):
+        named = _named_position()
+
+        body = self._page(named).content.decode()
+
+        self.assertIn(f'{CATALOGUED_NAME}</h2>', body)
+        self.assertNotIn('named by', body)
+        data = self._api(named)
+        self.assertEqual(data['opening'], CATALOGUED_NAME)
+        self.assertIsNone(data['opening_named_by'])
+
+    def test_the_credit_rides_on_the_one_map_read(self):
+        """No query per credit: the map read that names a line credits it."""
+        pos = _unnamed_position()
+        self._approve(pos, 'Belfast Gambit', suggested_by='lesha')
+
+        entry = community_names.approved_map()[pos.key]
+
+        self.assertEqual(entry['suggested_by'], 'lesha')
+        self.assertEqual(community_names.credit(entry), 'lesha')
+        self.assertEqual(community_names.credit({'suggested_by': ''}),
+                         'anonymous')
