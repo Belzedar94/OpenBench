@@ -6494,6 +6494,10 @@ def _approver_gate(request):
     return None
 
 
+# Seconds of propagation delay the queue page leaves unsaid.
+PROPAGATION_LAG_SHOWN = 120
+
+
 def queue_page(request):
     """The queue by account, so fairness can be checked and not believed.
 
@@ -6527,8 +6531,20 @@ def queue_page(request):
     # than a reassuring "stored as they arrive".
     waiting_writes = table.get('waiting_writes')
     oldest_write = table.get('oldest_write') if waiting_writes else None
+    # The climb through the ancestors rides in it too (§
+    # lanes._propagation_backlog): said only once the oldest waiting climb
+    # is older than PROPAGATION_LAG_SHOWN, so a normal second or two of
+    # drain shows nothing.
+    oldest_climb = table.get('oldest_propagation')
+    propagation_lag = ''
+    if (table.get('waiting_propagation') and oldest_climb is not None
+            and (timezone.now() - oldest_climb).total_seconds()
+            > PROPAGATION_LAG_SHOWN):
+        propagation_lag = _ago_text(oldest_climb)
     return render(request, 'atomicdb/queue.html', {
         'account_rows': rows,
+        'propagation_lag': propagation_lag,
+        'waiting_propagation': table.get('waiting_propagation') or 0,
         'served_minutes': table['served_minutes'],
         'has_served': bool(table['served_total']),
         'waiting_writes': waiting_writes,
