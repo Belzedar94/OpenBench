@@ -573,3 +573,131 @@ class ClampsStillWinTests(TestCase):
 
         self.assertEqual(tasks[0].position_id, tip.key)
         self.assertEqual(tasks[0].budget_nodes, proof.OR_CLAMP_NODES)
+
+
+class LongLineWeightTests(SimpleTestCase):
+    """The shape of the penalty: flat up to the threshold, then halving."""
+
+    def test_no_penalty_up_to_the_threshold(self):
+        for plies in (None, 0, 33, proof.LONG_LINE_PLIES):
+            self.assertEqual(proof.long_line_weight(plies), 1.0)
+
+    def test_the_weight_halves_every_half_life(self):
+        half = proof.LONG_LINE_PLIES + proof.LONG_LINE_HALF_LIFE_PLIES
+        self.assertAlmostEqual(proof.long_line_weight(half), 0.5)
+        self.assertAlmostEqual(
+            proof.long_line_weight(400),
+            0.5 ** ((400 - proof.LONG_LINE_PLIES)
+                    / proof.LONG_LINE_HALF_LIFE_PLIES))
+        self.assertLess(proof.long_line_weight(400), 0.05)
+
+    def test_it_never_reaches_zero(self):
+        """A ranking penalty: even an absurd length keeps a positive score."""
+        self.assertGreater(proof.long_line_weight(5_000), 0.0)
+
+
+def _long_spine(name, plies, line):
+    """A spine of ``plies`` edges cut out of a line ``line`` plies long.
+
+    Every node keeps pointing down (``backed_move``) and carries the plies of
+    the chain of pointers still below it, as the backed ascent writes them:
+    ``line - index``.  Walked with ``max_plies`` below ``plies``, the walk is
+    cut halfway down, which is how the global walk meets a 300-ply line with
+    ``DESCENT_MAX_PLIES`` at 96.
+    """
+    nodes = []
+    for index in range(plies + 1):
+        stm = 'w' if index % 2 == 0 else 'b'
+        nodes.append(_pos(f'{name}-{index}', stm, eval_cp=800,
+                          backed_eval=812, backed_move=f'm{index}',
+                          backed_plies=line - index, expanded=True))
+    for index in range(plies):
+        _edge(nodes[index], nodes[index + 1], f'm{index}')
+    return nodes[0], nodes
+
+
+@override_settings(**VALUE)
+class LongLinePenaltyTests(TestCase):
+    """Long lines rank lower in the walker; nothing else about them changes."""
+
+    def _with_alternative(self, name, line):
+        root, nodes = _long_spine(name, 4, line)
+        # A competitive reply at the root (100cp from the primary) whose own
+        # line is one ply: a short line the walker can buy instead.
+        alt = _pos(f'{name}-alt', 'b', eval_cp=712)
+        _edge(root, alt, 'alt')
+        return root, nodes, alt
+
+    def test_a_short_line_is_untouched(self):
+        root, nodes = _spine('LS', 4)
+        campaign = _campaign(root)
+
+        target = proof.descend_value(campaign, counter=0)
+
+        self.assertEqual(target.position.key, nodes[-1].key)
+        self.assertEqual(target.line_plies, 4)
+
+    def test_the_line_length_counts_what_the_cut_hides(self):
+        root, nodes = _long_spine('LC', 4, 400)
+        campaign = _campaign(root)
+
+        target = proof.descend_value(campaign, counter=0, max_plies=2)
+
+        self.assertEqual(target.position.key, nodes[2].key)
+        self.assertEqual(target.plies, 2)
+        self.assertEqual(target.line_plies, 400)
+
+    def test_a_very_long_line_yields_to_a_short_alternative(self):
+        root, nodes, alt = self._with_alternative('LV', 400)
+        campaign = _campaign(root)
+
+        target = proof.descend_value(campaign, counter=0, max_plies=2)
+
+        self.assertEqual(target.position.key, alt.key)
+        self.assertEqual(target.line_plies, 1)
+
+    def test_a_mildly_long_line_still_beats_the_next_plan(self):
+        """220 plies weighs about 0.71, more than the 0.5 of the next plan."""
+        root, nodes, alt = self._with_alternative('LM', 220)
+        campaign = _campaign(root)
+
+        target = proof.descend_value(campaign, counter=0, max_plies=2)
+
+        self.assertEqual(target.position.key, nodes[2].key)
+
+    def test_when_only_long_lines_are_left_the_walk_still_buys_one(self):
+        """Never idle: the penalty ranks, it does not filter."""
+        root, nodes = _long_spine('LO', 4, 400)
+        campaign = _campaign(root)
+
+        target = proof.descend_value(campaign, counter=0, max_plies=2)
+        tasks = ingest._next_tasks_by_proof(1)
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.position.key, nodes[2].key)
+        self.assertEqual(len(tasks), 1)
+
+    def test_the_queue_lands_on_the_short_line(self):
+        """Through the pool, with the real cut of ``DESCENT_MAX_PLIES``."""
+        depth = proof.DESCENT_MAX_PLIES + 1
+        root, nodes = _long_spine('LQ', depth, 400)
+        alt = _pos('LQ-alt', 'b', eval_cp=712)
+        _edge(root, alt, 'alt')
+        _campaign(root)
+
+        tasks = ingest._next_tasks_by_proof(1)
+
+        self.assertEqual(tasks[0].position_id, alt.key)
+
+    def test_values_are_not_touched(self):
+        """Only the choice moves: no value, pointer or distance is written."""
+        root, nodes, alt = self._with_alternative('LN', 400)
+        campaign = _campaign(root)
+        columns = ('key', 'backed_eval', 'backed_move', 'backed_plies',
+                   'eval_cp', 'status')
+        before = list(Position.objects.order_by('key').values_list(*columns))
+
+        proof.descend_value(campaign, counter=0, max_plies=2)
+
+        after = list(Position.objects.order_by('key').values_list(*columns))
+        self.assertEqual(before, after)
