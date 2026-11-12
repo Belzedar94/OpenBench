@@ -7,13 +7,15 @@ Report from the community (cz_eclipsia, 9-Nov-2026): the worker printed
 
 for every search.  Nobody knew what the dict meant, and nothing said which
 position was being analysed.  A search now prints one line when it starts,
-with the moves that lead to its position, and one when it ends, with the
-server's answer in words.  The raw reply only prints with ``--verbose``.
+with the FEN of its position, and one when it ends, with the server's answer
+in words.  The raw reply only prints with ``--verbose``.
 
-The line of moves is new in the lease response, with who the task is for
+The lease response also carries a line of moves and who the task is for
 (``source`` and ``requested_by``).  The three keys are additive: a worker
 that does not know them never reads them, and the lease never waits for the
-line nor fails because of it.
+line nor fails because of it.  Since build 2026111204 the worker no longer
+prints the line: it often arrives abbreviated, and it cannot be pasted into
+the website, while the FEN can (a contributor's request, 12-Nov-2026).
 """
 
 import importlib.util
@@ -105,9 +107,11 @@ class AsciiTests(SimpleTestCase):
 
 class PositionTests(SimpleTestCase):
 
-    def test_the_line_from_the_start_comes_first(self):
-        self.assertEqual(
-            worker.task_position({'fen': E4_FEN, 'line': '1. e4'}), '1. e4')
+    def test_the_fen_is_printed_even_with_a_line(self):
+        for line in ('1. e4', '1. e4 … Kf8 …', '…'):
+            self.assertEqual(
+                worker.task_position({'fen': E4_FEN, 'line': line}),
+                'FEN ' + E4_SHOWN)
 
     def test_without_a_line_the_fen_is_printed_to_paste(self):
         self.assertEqual(worker.task_position({'fen': E4_FEN}),
@@ -135,30 +139,36 @@ class PositionTests(SimpleTestCase):
         task = {'fen': fen, 'budget_nodes': 128_000_000,
                 'searchmoves': ['e1g1', 'd1c2'], 'source': 'USER',
                 'requested_by': 'SomeoneWithAVeryLongUserNameIndeed'}
-        shown = worker.format_task_start(task, 'me')
-        self.assertGreater(len(shown), worker.CONSOLE_LINE_CHARS)
-        self.assertTrue(shown.startswith('searching FEN ' + fen + ' |'), shown)
-        self.assertNotIn('...', shown)
+        for line in ('', '1. d4 Nf6 2. c4 e6 3. Nc3 d5 4. e3 c6 5. Nf3 Nbd7 '
+                         '6. Bd3 Bd6 7. Bd2 … 13. Qb3'):
+            shown = worker.format_task_start(dict(task, line=line), 'me')
+            self.assertGreater(len(shown), 100)
+            self.assertTrue(shown.startswith('searching FEN ' + fen + ' |'),
+                            shown)
+            self.assertNotIn('...', shown)
 
     def test_the_identity_of_a_position_is_still_board_and_side(self):
         self.assertEqual(worker.short_fen(E4_FEN),
                          'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b')
         self.assertEqual(worker.task_position(
             {'fen': 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 5 9'}),
-            'the start position')
+            'FEN rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - -'
+            ' (the start position)')
 
-    def test_the_start_position_has_an_empty_line(self):
-        self.assertEqual(worker.task_position({'fen': START_FEN, 'line': ''}),
-                         'the start position')
+    def test_the_start_position_prints_its_fen_and_says_so(self):
+        for line in ('', None):
+            self.assertEqual(
+                worker.task_position({'fen': START_FEN, 'line': line}),
+                'FEN rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
+                ' (the start position)')
 
-    def test_a_long_line_keeps_its_head_and_its_tail(self):
-        moves = ' '.join(f'{n}. Nf3 Nf6 {n + 1}. Ng1 Ng8'
-                         for n in range(1, 60, 2)) + ' 61. e4'
-        shown = worker.shorten_line(moves)
-        self.assertLessEqual(len(shown), worker.CONSOLE_LINE_CHARS + 5)
-        self.assertTrue(shown.startswith('1. Nf3 Nf6'), shown)
-        self.assertTrue(shown.endswith('61. e4'), shown)
-        self.assertIn(' ... ', shown)
+    def test_the_move_line_is_never_printed(self):
+        task = {'fen': E4_FEN, 'budget_nodes': 128_000_000,
+                'line': '1. Nf3 f6 2. Nc3 Nh6 3. g4 c6 4. d4 e6 … Kf8 '
+                        '10. b4 b6 …'}
+        shown = worker.format_task_start(task, 'me')
+        self.assertEqual(shown, 'searching FEN ' + E4_SHOWN + ' | 128M nodes')
+        self.assertFalse(hasattr(worker, 'shorten_line'))
 
 
 class RequesterTests(SimpleTestCase):
@@ -195,18 +205,20 @@ class StartLineTests(SimpleTestCase):
 
     def test_one_job_prints_no_slot(self):
         self.assertEqual(worker.format_task_start(self.TASK, 'me'),
-                         'searching 1. e4 | 128M nodes | your request')
+                         'searching FEN ' + E4_SHOWN
+                         + ' | 128M nodes | your request')
 
     def test_several_jobs_print_their_slot(self):
         self.assertEqual(
             worker.format_task_start(self.TASK, 'me', slot=2, jobs=4),
-            '[2] searching 1. e4 | 128M nodes | your request')
+            '[2] searching FEN ' + E4_SHOWN + ' | 128M nodes | your request')
 
     def test_a_restricted_search_says_so(self):
         task = dict(self.TASK, searchmoves=['e7e5', 'd7d5', 'g8f6'])
         self.assertEqual(
             worker.format_task_start(task, 'me'),
-            'searching 1. e4 | 128M nodes | 3 root moves | your request')
+            'searching FEN ' + E4_SHOWN
+            + ' | 128M nodes | 3 root moves | your request')
 
 
 class SubmitReplyTests(SimpleTestCase):
@@ -390,8 +402,8 @@ class SlotOutputTests(SimpleTestCase):
 
     def test_the_console_reads_without_the_dict(self):
         lines, recorded = self.run_slot(verbose=False)
-        self.assertEqual(lines[0], "searching 1. e4 | 128M nodes | "
-                                   "Torom's request")
+        self.assertEqual(lines[0], 'searching FEN ' + E4_SHOWN
+                         + " | 128M nodes | Torom's request")
         # The fake engine answers at once, so the speed may not print.
         self.assertRegex(lines[1], r'^done in \d+\.\ds \| 128\.0M nodes '
                                    r'(\| \S+ nodes/s )?\| best move e7e5 '
