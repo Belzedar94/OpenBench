@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111201
+ATOMICDB_WORKER_BUILD = 2026111202
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -1058,82 +1058,47 @@ _INFO_NODES = re.compile(r' nodes (\d+)')
 
 
 def last_complete_iteration(snapshots):
-    """The lines of the last complete, exact iteration in ``snapshots``.
+    """The exact lines of the last usable group in ``snapshots``.
 
     The engine prints its MultiPV lines in groups that each start again at
-    ``multipv 1``.  Only some groups are a finished iteration: a fail-high or
-    fail-low prints a single line marked ``lowerbound``/``upperbound``, a long
-    search prints partial groups in which the lines not yet searched at the
-    new depth repeat the previous one, and the search that a node limit cuts
-    short prints a last group that mixes both.  Storing any of those as an
-    exact line put scores in the tree that the engine never claimed (5 of 9
-    searches cut by nodes with MultiPV >= 2 had one, audit of 11-Nov-2026).
+    ``multipv 1``.  In a group, the lines already re-searched at the new depth
+    D come first; the lines below them are not stale guesses but the exact
+    scores of the previous iteration, printed at depth D-1 until their turn
+    comes (Torom, 12-Nov-2026).  What is not exact is a line marked
+    ``lowerbound``/``upperbound``: the fail-high or fail-low of the line being
+    searched when the group was printed.
 
-    A group counts when it has every line (1..width, the most the search ever
-    printed), all at one depth and none of them a bound.  Returns that group's
-    entries in MultiPV order, or [] when no group qualifies.
+    So the result is the last group whose MultiPV numbers run 1, 2, 3...,
+    from line 1 down to the first bound line, whatever the depths of the
+    lines kept.  A search cut by the node limit keeps its deeper lines (a
+    128M task stored its depth-34 lines while depth 35 was half done), and
+    a search stopped at a mate keeps the mate in line 1 with everything
+    exact below it.  When line 1 itself is a bound, the group before is
+    tried the same way.  [] when no group qualifies.
 
-    One exception, the stop at a mate (``mate_stop_lines``): when the last
-    group's line 1 is an exact mate, the result is that group's exact lines
-    at line 1's depth, even if the lines below them are still the previous
-    depth's.
+    The lines kept are always a prefix 1..k of one ranking: the search of
+    line i covers every move not in lines 1..i-1, so the worst line kept
+    still bounds every move left out (the server's showcase bound).  Line 1
+    is always at the deepest depth of its group, which is the depth the
+    server records for the position.
     """
-    stopped = mate_stop_lines(snapshots)
-    if stopped:
-        return stopped
-    width = max((entry['_multipv'] for group in snapshots for entry in group),
-                default=0)
     for group in reversed(snapshots):
-        if [entry['_multipv'] for entry in group] != list(range(1, width + 1)):
+        if [entry['_multipv'] for entry in group] != list(
+                range(1, len(group) + 1)):
             continue
-        if len({entry['_depth'] for entry in group}) != 1:
-            continue
-        if any(entry['_bound'] for entry in group):
-            continue
-        return _public_lines(group)
+        kept = []
+        for entry in group:
+            if entry['_bound']:
+                break
+            kept.append(entry)
+        if kept:
+            return _public_lines(kept)
     return []
 
 
 def _public_lines(group):
     return [{key: value for key, value in entry.items()
              if not key.startswith('_')} for entry in group]
-
-
-def mate_stop_lines(snapshots):
-    """The exact top-depth lines of a search the mate limit stopped, or [].
-
-    ``go ... mate 250`` ends the search after the first iteration whose best
-    line is a mate.  With several threads the engine stops before re-searching
-    every line: its last group has the mate in line 1 at depth D, perhaps a
-    few more lines at D, and the rest still the D-1 lines it had (Threads 6,
-    MultiPV 5: lines 1-3 at depth 22, lines 4-5 at depth 21).  That group is
-    not complete, and the complete group before it has no mate, so the
-    general rule threw the mate away and sent a +27xx line from a search
-    stopped early (about 19 of 3,900 tasks of a contributor running
-    multi-thread engines, 12-Nov-2026).
-
-    What is kept is still only what the engine claimed exact at that depth:
-    the lines from line 1 down, while they are at line 1's depth and not a
-    bound.  They are a prefix by construction -- the engine searches the lines
-    in order, and the search of line k covers every move not in lines 1..k-1
-    -- so the worst line kept still bounds every move left out.  [] when the
-    last group does not start with an exact mate at its top depth; the
-    caller then falls back to the last complete iteration.
-    """
-    if not snapshots or not snapshots[-1]:
-        return []
-    group = snapshots[-1]
-    first = group[0]
-    if (first['_multipv'] != 1 or first['_bound'] or first.get('mate') is None
-            or first['_depth'] != max(entry['_depth'] for entry in group)):
-        return []
-    kept = []
-    for number, entry in enumerate(group, start=1):
-        if (entry['_multipv'] != number or entry['_depth'] != first['_depth']
-                or entry['_bound']):
-            break
-        kept.append(entry)
-    return _public_lines(kept)
 
 
 def engine_identity_problem(output):
@@ -1239,8 +1204,8 @@ class Engine:
         and a result nobody can reproduce cannot be audited.
 
         The search stops at the first mate (``mate``; 0 or None searches the
-        whole budget) and only the lines of the last complete, exact
-        iteration are returned (``last_complete_iteration``).  The nodes the
+        whole budget) and only the exact lines of the last group the engine
+        printed are returned (``last_complete_iteration``).  The nodes the
         search really ran are left in ``self.last_nodes``.
 
         searchmoves restringe la raiz a las jugadas vivas (no pegajoso:
