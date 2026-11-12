@@ -107,3 +107,36 @@ class WriteBacklogLineTests(QueueLiveForMembersTests):
         body = ' '.join(Client().get('/atomicdb/queue/').content.decode().split())
         self.assertIn('<strong>2</strong> finished searches waiting to be stored', body)
         self.assertIn('the oldest for 12', body)
+
+
+class PropagationBacklogLineTests(QueueLiveForMembersTests):
+    """The climb through the ancestors can lag; the queue page says so."""
+
+    def _seeds(self, count, minutes):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .models import PropagationSeed
+        self._queue('miner', count)
+        for position in Position.objects.order_by('key')[:count]:
+            PropagationSeed.objects.create(position=position, payload={},
+                                           next_attempt_at=timezone.now())
+        PropagationSeed.objects.update(
+            created=timezone.now() - timedelta(minutes=minutes))
+
+    def _body(self):
+        return ' '.join(Client().get('/atomicdb/queue/').content.decode()
+                        .split())
+
+    def test_nothing_is_said_when_the_climb_keeps_up(self):
+        self.assertNotIn('propagating', self._body())
+
+    def test_a_short_delay_is_left_unsaid(self):
+        self._seeds(2, minutes=1)
+        self.assertNotIn('propagating', self._body())
+
+    def test_a_delay_over_two_minutes_is_shown(self):
+        self._seeds(3, minutes=14)
+        body = self._body()
+        self.assertIn('Results are propagating <strong>14', body)
+        self.assertIn('3 stored searches still to reach the positions above',
+                      body)
