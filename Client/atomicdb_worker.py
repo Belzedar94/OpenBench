@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111202
+ATOMICDB_WORKER_BUILD = 2026111203
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -2591,6 +2591,13 @@ def short_fen(fen):
     return ' '.join(str(fen).split()[:2])
 
 
+def pasteable_fen(fen):
+    """Board, side to move, castling and en passant: what the website's
+    position box takes when it is pasted there (it does not need the move
+    counters, which never tell two positions apart)."""
+    return ' '.join(str(fen).split()[:4])
+
+
 def shorten_line(line, limit=CONSOLE_LINE_CHARS):
     """A long line of moves keeps its opening and where it ends up."""
     line = ascii_text(line).strip()
@@ -2606,14 +2613,16 @@ def task_position(task):
 
     ``line`` comes from servers that know it (an older one never sends it,
     and a newer one leaves it empty when the line is not ready yet).  An
-    empty line on the start position is the start position.
+    empty line on the start position is the start position.  A FEN is
+    printed with its castling and en passant fields and is never shortened,
+    so it can be copied and pasted into the website.
     """
     line = str(task.get('line') or '').strip()
     if line:
         return shorten_line(line)
     if short_fen(task.get('fen', '')) == ATOMIC_START_BOARD:
         return 'the start position'
-    return 'FEN ' + ascii_text(short_fen(task.get('fen', '')))
+    return 'FEN ' + ascii_text(pasteable_fen(task.get('fen', '')))
 
 
 def task_requester(task, username):
