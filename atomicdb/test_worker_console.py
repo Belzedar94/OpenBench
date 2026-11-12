@@ -39,6 +39,7 @@ _SPEC.loader.exec_module(worker)
 
 START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 E4_FEN = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+E4_SHOWN = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -'
 
 CACHE_FOR_TESTS = {
     'default': {
@@ -108,13 +109,43 @@ class PositionTests(SimpleTestCase):
         self.assertEqual(
             worker.task_position({'fen': E4_FEN, 'line': '1. e4'}), '1. e4')
 
-    def test_without_a_line_the_fen_is_shortened(self):
-        self.assertEqual(
-            worker.task_position({'fen': E4_FEN}),
-            'FEN rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b')
-        self.assertEqual(
-            worker.task_position({'fen': E4_FEN, 'line': ''}),
-            'FEN rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b')
+    def test_without_a_line_the_fen_is_printed_to_paste(self):
+        self.assertEqual(worker.task_position({'fen': E4_FEN}),
+                         'FEN ' + E4_SHOWN)
+        self.assertEqual(worker.task_position({'fen': E4_FEN, 'line': ''}),
+                         'FEN ' + E4_SHOWN)
+
+    def test_the_fen_keeps_castling_and_en_passant_not_the_counters(self):
+        fen = 'rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w Kq d6 0 3'
+        self.assertEqual(worker.task_position({'fen': '  ' + fen + '\n'}),
+                         'FEN rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR'
+                         ' w Kq d6')
+
+    def test_the_printed_fen_is_one_the_website_takes(self):
+        fen = 'rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w Kq d6 0 3'
+        shown = worker.task_position({'fen': fen})[len('FEN '):]
+        self.assertEqual(views._parse_public_fen(shown),
+                         views._parse_public_fen(fen))
+        self.assertEqual(logic.key_of(views._parse_public_fen(shown)),
+                         logic.key_of(fen))
+
+    def test_a_long_fen_is_never_cut(self):
+        fen = ('r1bqk2r/pp1n1ppp/2pbpn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R '
+               'w KQkq -')
+        task = {'fen': fen, 'budget_nodes': 128_000_000,
+                'searchmoves': ['e1g1', 'd1c2'], 'source': 'USER',
+                'requested_by': 'SomeoneWithAVeryLongUserNameIndeed'}
+        shown = worker.format_task_start(task, 'me')
+        self.assertGreater(len(shown), worker.CONSOLE_LINE_CHARS)
+        self.assertTrue(shown.startswith('searching FEN ' + fen + ' |'), shown)
+        self.assertNotIn('...', shown)
+
+    def test_the_identity_of_a_position_is_still_board_and_side(self):
+        self.assertEqual(worker.short_fen(E4_FEN),
+                         'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b')
+        self.assertEqual(worker.task_position(
+            {'fen': 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 5 9'}),
+            'the start position')
 
     def test_the_start_position_has_an_empty_line(self):
         self.assertEqual(worker.task_position({'fen': START_FEN, 'line': ''}),
@@ -153,8 +184,7 @@ class RequesterTests(SimpleTestCase):
         self.assertEqual(worker.task_requester(task, 'me'), '')
         self.assertEqual(
             worker.format_task_start(task, 'me'),
-            'searching FEN rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b '
-            '| 128M nodes')
+            'searching FEN ' + E4_SHOWN + ' | 128M nodes')
 
 
 class StartLineTests(SimpleTestCase):
