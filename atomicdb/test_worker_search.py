@@ -110,7 +110,7 @@ class GoCommandTests(SimpleTestCase):
 
 
 class IterationFilterTests(SimpleTestCase):
-    """Only the last complete, exact iteration becomes the result."""
+    """The exact lines of the last group, from line 1 to the first bound."""
 
     def analyse(self, body, multipv=2):
         engine = _engine('readyok\n' + body + 'bestmove e2e4\n')
@@ -129,19 +129,74 @@ class IterationFilterTests(SimpleTestCase):
                          [('e2e4', 30), ('d2d4', 20)])
         self.assertTrue(all('bound' not in line['raw'] for line in lines))
 
-    def test_an_iteration_cut_by_the_node_limit_is_dropped(self):
+    def test_an_iteration_cut_by_the_node_limit_keeps_its_deeper_lines(self):
         # The last group: line 1 already at depth 12, line 2 still the
-        # depth-11 line it was.  A mix of two iterations, not a result.
+        # depth-11 line it was.  Both are exact: line 2 is the previous
+        # iteration's score, printed until its turn comes.
         lines, engine = self.analyse(
             _info(11, 1, ('cp', 30), 1000, 'e2e4')
             + _info(11, 2, ('cp', 20), 1000, 'd2d4')
             + _info(12, 1, ('cp', 45), 1800, 'c2c4')
             + _info(11, 2, ('cp', 20), 1800, 'd2d4'))
 
-        self.assertEqual([line['move'] for line in lines], ['e2e4', 'd2d4'])
-        self.assertIn('depth 11', lines[0]['raw'])
-        # The nodes are the search's, not the kept iteration's.
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('c2c4', 45), ('d2d4', 20)])
+        self.assertIn('depth 12', lines[0]['raw'])
+        self.assertIn('depth 11', lines[1]['raw'])
+        # The nodes are the search's, not the kept group's.
         self.assertEqual(engine.last_nodes, 1800)
+
+    def test_a_node_cut_group_with_mixed_depths_is_kept_whole(self):
+        # 128M, MultiPV 5: depth 35 had re-searched lines 1-2 when the node
+        # limit hit.  The depth-34 group before is no longer the result.
+        lines, engine = self.analyse(
+            _info(34, 1, ('cp', 120), 90_000_000, 'e2e4 e7e5')
+            + _info(34, 2, ('cp', 95), 90_000_000, 'd2d4 d7d5')
+            + _info(34, 3, ('cp', 80), 90_000_000, 'c2c4 e7e5')
+            + _info(34, 4, ('cp', 60), 90_000_000, 'g1f3 d7d5')
+            + _info(34, 5, ('cp', 40), 90_000_000, 'b2b3 e7e5')
+            + _info(35, 1, ('cp', 131), 128_000_000, 'e2e4 e7e5')
+            + _info(35, 2, ('cp', 101), 128_000_000, 'd2d4 d7d5')
+            + _info(34, 3, ('cp', 80), 128_000_000, 'c2c4 e7e5')
+            + _info(34, 4, ('cp', 60), 128_000_000, 'g1f3 d7d5')
+            + _info(34, 5, ('cp', 40), 128_000_000, 'b2b3 e7e5'),
+            multipv=5)
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 131), ('d2d4', 101), ('c2c4', 80),
+                          ('g1f3', 60), ('b2b3', 40)])
+        self.assertEqual([line['raw'].split()[2] for line in lines],
+                         ['35', '35', '34', '34', '34'])
+        self.assertEqual(engine.last_nodes, 128_000_000)
+
+    def test_a_bound_in_the_middle_truncates_there(self):
+        # Line 3 failed low when the node limit hit: lines 1-2 are kept, the
+        # bound and the lines after it are not.
+        lines, _ = self.analyse(
+            _info(20, 1, ('cp', 50), 1000, 'e2e4')
+            + _info(20, 2, ('cp', 40), 1000, 'd2d4')
+            + _info(20, 3, ('cp', 30), 1000, 'c2c4')
+            + _info(20, 4, ('cp', 20), 1000, 'g1f3')
+            + _info(21, 1, ('cp', 55), 1800, 'e2e4')
+            + _info(21, 2, ('cp', 42), 1800, 'd2d4')
+            + _info(21, 3, ('cp', 10), 1800, 'c2c4', bound='upperbound')
+            + _info(20, 4, ('cp', 20), 1800, 'g1f3'), multipv=4)
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 55), ('d2d4', 42)])
+        self.assertTrue(all('depth 21' in line['raw'] for line in lines))
+
+    def test_line_one_a_bound_falls_back_to_the_group_before(self):
+        lines, _ = self.analyse(
+            _info(20, 1, ('cp', 50), 1000, 'e2e4')
+            + _info(21, 1, ('cp', 52), 1500, 'e2e4')
+            + _info(20, 2, ('cp', 40), 1500, 'd2d4')
+            + _info(22, 1, ('cp', 90), 1800, 'g1f3', bound='lowerbound')
+            + _info(21, 2, ('cp', 52), 1800, 'e2e4'))
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 52), ('d2d4', 40)])
+        self.assertIn('depth 21', lines[0]['raw'])
 
     def test_the_last_complete_iteration_wins(self):
         lines, _ = self.analyse(
@@ -153,11 +208,11 @@ class IterationFilterTests(SimpleTestCase):
         self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
                          [('c2c4', 45), ('e2e4', 40)])
 
-    def test_a_mate_stop_keeps_the_exact_top_depth_lines(self):
+    def test_a_mate_stop_keeps_every_exact_line(self):
         # Threads 6, MultiPV 5, 12-Nov-2026: the mate limit stopped the
-        # search with lines 4-5 still at depth 21.  The mate and the two
-        # lines searched with it are sent; the stale lines are not, and the
-        # mate-blind depth-21 group before them is not the result.
+        # search with lines 4-5 still at depth 21.  The mate, the two lines
+        # searched with it and the two exact depth-21 lines are all sent;
+        # the mate-blind depth-21 group before them is not the result.
         fen = '2r1kb2/1p4p1/p2p4/3Pp2p/2P1Pp2/8/PP3PPP/R1BQK2R w KQ - 0 1'
         engine = _engine(
             'readyok\n'
@@ -177,8 +232,10 @@ class IterationFilterTests(SimpleTestCase):
 
         self.assertEqual(
             [(line['move'], line['mate'], line['eval_cp']) for line in lines],
-            [('d1f3', 6, 9994), ('d1h5', None, 3206), ('d1a4', None, 3058)])
-        self.assertTrue(all('depth 22' in line['raw'] for line in lines))
+            [('d1f3', 6, 9994), ('d1h5', None, 3206), ('d1a4', None, 3058),
+             ('c1d2', None, 2722), ('b2b4', None, 2694)])
+        self.assertEqual([line['raw'].split()[2] for line in lines],
+                         ['22', '22', '22', '21', '21'])
         self.assertEqual(engine.last_nodes, 4_100_000)
 
     def test_a_mate_stop_with_only_the_mate_re_searched(self):
@@ -188,8 +245,9 @@ class IterationFilterTests(SimpleTestCase):
             + _info(15, 1, ('mate', 4), 1800, 'e2e4')
             + _info(14, 2, ('cp', 700), 1800, 'd2d4'))
 
-        self.assertEqual([(line['move'], line['mate']) for line in lines],
-                         [('e2e4', 4)])
+        self.assertEqual([(line['move'], line['mate'], line['eval_cp'])
+                          for line in lines],
+                         [('e2e4', 4, 9996), ('d2d4', None, 700)])
 
     def test_a_mated_side_stops_the_same_way(self):
         lines, _ = self.analyse(
@@ -198,8 +256,9 @@ class IterationFilterTests(SimpleTestCase):
             + _info(15, 1, ('mate', -5), 1800, 'e2e4')
             + _info(14, 2, ('cp', -950), 1800, 'd2d4'))
 
-        self.assertEqual([(line['move'], line['mate']) for line in lines],
-                         [('e2e4', -5)])
+        self.assertEqual([(line['move'], line['mate'], line['eval_cp'])
+                          for line in lines],
+                         [('e2e4', -5, -9995), ('d2d4', None, -950)])
 
     def test_a_mate_stop_drops_a_bound_and_everything_after_it(self):
         lines, _ = self.analyse(
@@ -212,7 +271,7 @@ class IterationFilterTests(SimpleTestCase):
 
         self.assertEqual([line['move'] for line in lines], ['e2e4'])
 
-    def test_a_bound_mate_is_not_a_mate_stop(self):
+    def test_a_bound_mate_falls_back_to_the_group_before(self):
         lines, _ = self.analyse(
             _info(14, 1, ('cp', 900), 1000, 'e2e4')
             + _info(14, 2, ('cp', 700), 1000, 'd2d4')
@@ -222,15 +281,18 @@ class IterationFilterTests(SimpleTestCase):
         self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
                          [('e2e4', 900), ('d2d4', 700)])
 
-    def test_a_mate_in_a_lower_line_is_not_a_mate_stop(self):
+    def test_a_mate_in_a_lower_line_is_kept_as_it_was_printed(self):
+        # Line 2's mate is the previous iteration's exact score: kept, below
+        # the deeper line 1, in the order the engine ranked them.
         lines, _ = self.analyse(
             _info(14, 1, ('cp', 900), 1000, 'e2e4')
-            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(14, 2, ('mate', 7), 1000, 'd2d4')
             + _info(15, 1, ('cp', 950), 1800, 'e2e4')
             + _info(14, 2, ('mate', 7), 1800, 'd2d4'))
 
-        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
-                         [('e2e4', 900), ('d2d4', 700)])
+        self.assertEqual([(line['move'], line['mate'], line['eval_cp'])
+                          for line in lines],
+                         [('e2e4', None, 950), ('d2d4', 7, 9993)])
 
     def test_a_complete_mate_iteration_is_sent_whole(self):
         lines, _ = self.analyse(
@@ -241,6 +303,16 @@ class IterationFilterTests(SimpleTestCase):
 
         self.assertEqual([(line['move'], line['mate']) for line in lines],
                          [('e2e4', 4), ('d2d4', None)])
+
+    def test_a_group_out_of_order_is_skipped(self):
+        # A group that does not run 1, 2, 3... is no ranking of its own.
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(15, 2, ('cp', 720), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 900), ('d2d4', 700)])
 
     def test_fewer_legal_moves_than_lines_asked_for(self):
         lines, _ = self.analyse(
