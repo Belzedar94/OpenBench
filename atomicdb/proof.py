@@ -1263,12 +1263,66 @@ VALUE_BACKTRACK_MAX = 64
 # ``(posicion, plies, brazo, suelo de nodos)``.  ``floor_nodes`` solo viaja
 # cuando el brazo lo necesita para elegir peldano: los nodos que la punta ya
 # tiene (revisita) o los del hijo que cierra el ciclo (desambiguacion).
-ValueTarget = namedtuple('ValueTarget', 'position plies arm floor_nodes')
+# ``line_plies`` is the length of the line the target extends, measured from
+# where this walk started (see LONG LINES below).  It only ranks plans; the
+# budget never reads it.
+ValueTarget = namedtuple('ValueTarget',
+                         'position plies arm floor_nodes line_plies',
+                         defaults=(None,))
 
 _VALUE_CHILD_COLUMNS = ('move_uci', 'child_id', 'child__status', 'child__fen',
                         'child__eval_cp', 'child__backed_eval',
                         'child__backed_move', 'child__backed_nodes',
-                        'child__nodes_invested')
+                        'child__nodes_invested', 'child__backed_plies')
+
+# ---------------- LONG LINES: a ranking penalty, never a filter -------------
+#
+# THE CASE (community, Nov-2026).  AtomicDB stores positions without move
+# counters, so there is no 50-move rule.  A backed value can be carried up a
+# line of 240 to 400+ plies with no repetition in it: the engine shuffles in a
+# won ending (a QQPP vs BPP held around +12.7) without making progress, every
+# search there extends the same line by a few plies, and the walker kept
+# choosing exactly those tips, because the spine is where it buys.
+#
+# THE RULE (owner, "option 2").  Long lines are penalised ONLY when the walker
+# chooses what to buy.  Values, closures, backed values, propagation, what the
+# pages show and the API are untouched: the penalty decides where the fleet
+# looks, never what any number is worth.
+#
+# HOW LONG A LINE IS, from what the walk already reads: the plies walked from
+# where this walk started (the global root or a campaign root) down to the
+# target, plus the target's own ``backed_plies`` (the plies of the chain of
+# backed pointers from it down to the analysis its value comes from).  For the
+# real leaf of a spine the second term is 0 and the length is its depth; for
+# a tip cut by ``DESCENT_MAX_PLIES`` halfway down a long spine it adds the
+# rest of that spine, which is what the cut hides.  No extra query: the
+# column rides the edge query each step of the walk already makes.
+#
+# HOW IT RANKS.  Up to ``LONG_LINE_PLIES`` nothing changes.  Above it a plan's
+# weight halves every ``LONG_LINE_HALF_LIFE_PLIES`` (0.5 at 240, about 0.18 at
+# 300, 1/32 at 400).  The walker's own order of preference keeps its meaning:
+# each usable plan further down that order scores ``LONG_LINE_PLAN_DECAY``
+# times the one before.  The best score wins and the earlier plan wins a tie.
+# A first usable plan that is not long is returned at once, exactly as before,
+# so a tree without long lines gets the same queue as yesterday.
+#
+# NEVER IDLE.  A long plan is never dropped: if nothing better turns up it is
+# what the walk returns, so a tree where only long lines are left is still
+# served.  ``LONG_LINE_SCAN_PLANS`` bounds the extra plans looked at after a
+# long one (each may be a detour walk), so the price of the penalty is
+# bounded too.
+LONG_LINE_PLIES = 200
+LONG_LINE_HALF_LIFE_PLIES = 40
+LONG_LINE_PLAN_DECAY = 0.5
+LONG_LINE_SCAN_PLANS = 8
+
+
+def long_line_weight(line_plies):
+    """Weight of a plan by the length of its line: 1, then halving."""
+    excess = (line_plies or 0) - LONG_LINE_PLIES
+    if excess <= 0:
+        return 1.0
+    return 0.5 ** (excess / LONG_LINE_HALF_LIFE_PLIES)
 
 
 def descent_mode():
@@ -1311,10 +1365,10 @@ class _ValueChild:
 
     __slots__ = ('index', 'move_uci', 'key', 'status', 'fen', 'eval_cp',
                  'backed_eval', 'backed_move', 'backed_nodes',
-                 'nodes_invested', 'value')
+                 'nodes_invested', 'backed_plies', 'value')
 
     def __init__(self, index, move_uci, key, status, fen, eval_cp, backed_eval,
-                 backed_move, backed_nodes, nodes_invested):
+                 backed_move, backed_nodes, nodes_invested, backed_plies=0):
         self.index = index
         self.move_uci = move_uci
         self.key = key
@@ -1325,18 +1379,22 @@ class _ValueChild:
         self.backed_move = backed_move
         self.backed_nodes = backed_nodes
         self.nodes_invested = nodes_invested
+        self.backed_plies = backed_plies or 0
         self.value = None       # best_known en POV blanca, lo pone el orden
 
 
 class _ValueStep:
     """Un nodo del camino recorrido, con lo que se miro en el."""
 
-    __slots__ = ('key', 'fen', 'nodes', 'children', 'ranked', 'primary')
+    __slots__ = ('key', 'fen', 'nodes', 'children', 'ranked', 'primary',
+                 'backed_plies')
 
-    def __init__(self, key, fen, nodes, children, ranked):
+    def __init__(self, key, fen, nodes, children, ranked, backed_plies=0):
         self.key = key
         self.fen = fen
         self.nodes = nodes or 0
+        # Plies of this node's own chain of backed pointers (LONG LINES).
+        self.backed_plies = backed_plies or 0
         self.children = children
         self.ranked = ranked
         self.primary = None     # el hijo por el que siguio la espina
@@ -1425,7 +1483,8 @@ def _spine_step(backed_move, ranked, node):
     return _value_primary(ranked, node)
 
 
-def _walk_spine(campaign, key, fen, backed_move, nodes, visited, max_plies):
+def _walk_spine(campaign, key, fen, backed_move, nodes, visited, max_plies,
+                backed_plies=0):
     """Baja la espina desde un nodo y devuelve ``(camino, hijo que cicla)``.
 
     ``visited`` se comparte y se MUTA: es el guardarrail de ciclos del paseo
@@ -1439,7 +1498,7 @@ def _walk_spine(campaign, key, fen, backed_move, nodes, visited, max_plies):
         children = _value_children(key)
         rows = _node_rows(campaign, [key] + [child.key for child in children])
         ranked = _value_ranked(campaign.goal, fen, children, rows)
-        step = _ValueStep(key, fen, nodes, children, ranked)
+        step = _ValueStep(key, fen, nodes, children, ranked, backed_plies)
         path.append(step)
         if plies >= max_plies:
             return path, None
@@ -1452,6 +1511,7 @@ def _walk_spine(campaign, key, fen, backed_move, nodes, visited, max_plies):
         visited.add(chosen.key)
         key, fen = chosen.key, chosen.fen
         backed_move, nodes = chosen.backed_move, chosen.nodes_invested
+        backed_plies = chosen.backed_plies
         plies += 1
 
 
@@ -1473,12 +1533,14 @@ def _tip_plan(path, arm, plies):
     punta cobra el peldano siguiente al que ya tiene.
     """
     tip = path[-1]
+    # Every plan of this path extends the same line: the one through its tip.
+    line = plies + tip.backed_plies
     if tip.nodes < _saturated_nodes():
-        return tip.key, arm, None, plies
+        return tip.key, arm, None, plies, line
     for step in reversed(path):
         if _has_unjudged(step):
-            return step.key, VALUE_ARM_BOTTLENECK, None, plies
-    return tip.key, VALUE_ARM_RUNG, tip.nodes, plies
+            return step.key, VALUE_ARM_BOTTLENECK, None, plies, line
+    return tip.key, VALUE_ARM_RUNG, tip.nodes, plies, line
 
 
 def _competitive(step):
@@ -1536,7 +1598,7 @@ def _value_detours(campaign, path, max_plies):
             branch, _cycled = _walk_spine(
                 campaign, child.key, child.fen, child.backed_move,
                 child.nodes_invested, visited,
-                max(0, max_plies - depth - 1))
+                max(0, max_plies - depth - 1), child.backed_plies)
             yield path[:depth + 1] + branch, depth + len(branch)
 
 
@@ -1582,7 +1644,7 @@ def _value_plans(campaign, path, cycled, bucket, max_plies):
         # de verdad.  Mismo espiritu que ``ingest._queue_cycle_disambiguation``
         # y misma cuenta: por encima de lo que ese hijo ya tiene.
         yield (path[-1].key, VALUE_ARM_CYCLE, cycled.nodes_invested + 1,
-               len(path) - 1)
+               len(path) - 1, len(path) - 1 + path[-1].backed_plies)
     detours = _value_detours(campaign, path, max_plies)
     if bucket == 'backup':
         branch = next(detours, None)
@@ -1591,7 +1653,8 @@ def _value_plans(campaign, path, cycled, bucket, max_plies):
     elif bucket == 'explore':
         virgin = _best_unexplored(path)
         if virgin is not None:
-            yield virgin[0].key, VALUE_ARM_EXPLORE, None, virgin[1]
+            yield (virgin[0].key, VALUE_ARM_EXPLORE, None, virgin[1],
+                   virgin[1] + virgin[0].backed_plies)
     yield _tip_plan(path, VALUE_ARM_SPINE, len(path) - 1)
     for branch, plies in detours:
         yield _tip_plan(branch, VALUE_ARM_SPINE, plies)
@@ -1623,6 +1686,13 @@ def descend_value(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
     ``descend``: la reserva del lote, la raiz de la campana de la comunidad
     donde arranca este descenso y el tope de plies del paseo.
 
+    LONG LINES SCORE LESS (see LONG LINES, ``long_line_weight``).  The first
+    usable plan that is not long is returned at once, as always.  If it is
+    long, at most ``LONG_LINE_SCAN_PLANS`` more usable plans are looked at and
+    the best score wins; if none beats it, the long plan is still the answer.
+    It ranks, it never filters, so the walk is never left without a target
+    because of it.
+
     EL REPARTO 80/15/5 SE SORTEA UNA VEZ POR PASEO, no una por ply.  En el
     descenso df-pn el bucket elegia una jugada en CADA nodo, asi que tenia
     sentido re-sortearlo con la profundidad; aqui describe el paseo entero —
@@ -1637,16 +1707,28 @@ def descend_value(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
     reserved = set(avoid)
     bucket = _bucket(counter, normalized_policy(campaign))
     path, cycled = _walk_spine(campaign, node.key, node.fen, node.backed_move,
-                               node.nodes_invested, {node.key}, max_plies)
-    for key, arm, floor, plies in _value_plans(campaign, path, cycled, bucket,
-                                               max_plies):
+                               node.nodes_invested, {node.key}, max_plies,
+                               node.backed_plies)
+    best, best_score, usable = None, 0.0, 0
+    for key, arm, floor, plies, line in _value_plans(campaign, path, cycled,
+                                                     bucket, max_plies):
+        if best is not None and (
+                LONG_LINE_PLAN_DECAY ** usable <= best_score
+                or usable > LONG_LINE_SCAN_PLANS):
+            break             # nothing further down the order can beat it
         if key in reserved or _has_live_task(key):
             continue
         position = Position.objects.filter(key=key).first()
         if position is None or position.status != 'UNKNOWN':
             continue
-        return ValueTarget(position, plies, arm, floor)
-    return None
+        score = LONG_LINE_PLAN_DECAY ** usable * long_line_weight(line)
+        usable += 1
+        if best is None or score > best_score:
+            best = ValueTarget(position, plies, arm, floor, line)
+            best_score = score
+        if best_score >= 1.0:
+            break             # the first usable plan, and not long: as before
+    return best
 
 
 def open_and_obligations(campaign, limit=10):
