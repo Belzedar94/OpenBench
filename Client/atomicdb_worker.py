@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111204
+ATOMICDB_WORKER_BUILD = 2026111205
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -786,6 +786,9 @@ class HeldLeases:
     def __init__(self):
         self._lock = threading.Lock()
         self._leases = {}
+        # Set while an update hands everything back to restart the worker
+        # (``_hand_over_for_restart``): no job asks for a new lease then.
+        self.handing_over = threading.Event()
 
     def hold(self, kind, machine, tasks):
         entries = [(task['id'], task.get('lease_token') or '')
@@ -2753,6 +2756,44 @@ def _reply_body(response):
         return None
 
 
+def _hand_over_for_restart(server, auth, held, slot=0, release=None):
+    """Before an update restarts the worker, give back every lease it holds.
+
+    A restart ends every job at once, as a stop does, but it handed nothing
+    back.  Each job's lease stayed LEASED under a heartbeat less than a
+    minute old, and the restarted job, which asks under the same machine
+    identity with a new session, was answered "no tasks" until that
+    heartbeat was three minutes old (``RESTART_RECYCLE_MINUTES`` on the
+    server).  Every job of every machine sat idle for three minutes after
+    every update: Torom's 32 from 16:18 to 16:21 UTC on 12-Nov-2026, and 468
+    of the 471 empty lease answers that day.  Handed back, the tasks go to
+    the queue at once and the restarted jobs lease on their first request.
+
+    From here on no job takes a new lease (``held.handing_over``): one taken
+    now would be left behind by the restart in the same way.  A search
+    still running on another job finishes into a lease the server no longer
+    has, and its submit is refused; the restart was about to end it anyway.
+    If the restart fails, the caller clears ``handing_over`` and the worker
+    goes on.  Returns how many leases the server took back.
+    """
+    if held is None:
+        return 0
+    held.handing_over.set()
+    leases = held.snapshot()
+    if not leases:
+        return 0
+    release = release or _release_leases
+    released, problem = release(server, auth, leases)
+    if released is None:
+        print(f'[{slot}] restart: {len(leases)} task(s) not handed back '
+              f'({problem}); they return to the queue when their leases '
+              'expire', flush=True)
+        return 0
+    print(f'[{slot}] restart: handed {released} task(s) back to the server',
+          flush=True)
+    return released
+
+
 def _hand_back(server, auth, machine, task, held=None, slot=0,
                release=None):
     """Give one analysis lease back to the server now; True if it took it.
@@ -2847,7 +2888,10 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
             if _install_worker_update(a.S):
                 eng.close()
+                _hand_over_for_restart(a.S, auth, held, slot)
                 if not _restart_updated_worker():
+                    if held is not None:
+                        held.handing_over.clear()
                     eng = Engine(engine_path, threads=engine_threads,
                                  hash_mb=a.hash, syzygy=a.syzygy)
         # A newly published engine is taken here, between batches: never in
@@ -2872,6 +2916,12 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                         ENGINE_FAILURE_BACKOFF_MAX_SECONDS)
             if stop.wait(delay):
                 break
+        if held is not None and held.handing_over.is_set():
+            # An update is restarting the worker: a lease taken now would be
+            # left behind (§ _hand_over_for_restart).
+            if stop.wait(1):
+                break
+            continue
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
         except LeaseRequestError as e:

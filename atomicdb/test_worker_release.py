@@ -656,6 +656,135 @@ class SlotStopTests(SimpleTestCase):
         self.assertEqual(held.snapshot(), [])
 
 
+class RestartHandOverTests(SimpleTestCase):
+    """An update hands every lease back before it restarts the worker.
+
+    Without it each job's lease outlived the restart under a fresh
+    heartbeat, and the restarted job, asking under the same machine identity,
+    was told "no tasks" for three minutes (12-Nov-2026, every update).
+    """
+
+    LEASES = [{'kind': 'analysis', 'machine': 'box-atomicdb#1',
+               'task_id': 7, 'lease_token': 'tok-7'},
+              {'kind': 'solve', 'machine': 'box-atomicdb#0',
+               'task_id': 8, 'lease_token': 'tok-8'}]
+
+    def held_with_two(self):
+        held = worker.HeldLeases()
+        held.hold('analysis', 'box-atomicdb#1',
+                  [{'id': 7, 'lease_token': 'tok-7'}])
+        held.hold('solve', 'box-atomicdb#0',
+                  [{'id': 8, 'lease_token': 'tok-8'}])
+        return held
+
+    def test_everything_held_goes_back_in_one_call(self):
+        held = self.held_with_two()
+        calls = []
+
+        def release(server, auth, leases):
+            calls.append((server, auth, leases))
+            return len(leases), ''
+
+        with redirect_stdout(io.StringIO()) as out:
+            released = worker._hand_over_for_restart(
+                'https://server', AUTH, held, 0, release=release)
+
+        self.assertEqual(released, 2)
+        self.assertEqual(calls, [('https://server', AUTH, self.LEASES)])
+        self.assertTrue(held.handing_over.is_set())
+        self.assertIn('handed 2 task(s) back', out.getvalue())
+
+    def test_nothing_held_means_no_call(self):
+        held = worker.HeldLeases()
+        released = worker._hand_over_for_restart(
+            'https://server', AUTH, held,
+            release=lambda *args: self.fail('called with nothing held'))
+        self.assertEqual(released, 0)
+        self.assertTrue(held.handing_over.is_set())
+
+    def test_a_server_that_refuses_is_reported_not_raised(self):
+        held = self.held_with_two()
+        with redirect_stdout(io.StringIO()) as out:
+            released = worker._hand_over_for_restart(
+                'https://server', AUTH, held,
+                release=lambda *args: (None, 'HTTP 404'))
+        self.assertEqual(released, 0)
+        self.assertIn('not handed back (HTTP 404)', out.getvalue())
+
+    def run_updating_slot(self, restart):
+        """Slot 0 finds an update; another job holds a lease meanwhile."""
+        stop = threading.Event()
+        held = worker.HeldLeases()
+        held.hold('analysis', 'box-atomicdb#1',
+                  [{'id': 7, 'lease_token': 'tok-7'}])
+        log = []
+
+        def release(server, auth, leases):
+            log.append(('release', [lease['task_id'] for lease in leases]))
+            return len(leases), ''
+
+        def request_tasks(server, auth, lease_session):
+            log.append(('lease', held.handing_over.is_set()))
+            stop.set()
+            return []
+
+        def restarted():
+            log.append(('restart', held.handing_over.is_set()))
+            return restart(stop)
+
+        a = SimpleNamespace(engine='engine', hash=16, syzygy='',
+                            S='https://server', no_auto_update=False,
+                            once=False)
+        with mock.patch.object(worker, 'Engine', _SlotEngine), \
+                mock.patch.object(worker, 'WORKER_UPDATE_INTERVAL_SECONDS', 0), \
+                mock.patch.object(worker, '_install_worker_update',
+                                  lambda server: True), \
+                mock.patch.object(worker, '_release_leases', release), \
+                mock.patch.object(worker, '_restart_updated_worker',
+                                  restarted), \
+                mock.patch.object(worker, '_request_tasks', request_tasks), \
+                mock.patch.object(worker, '_heartbeat_loop',
+                                  lambda *args: None), \
+                redirect_stdout(io.StringIO()):
+            worker._analysis_slot(0, a, None, {'machine': 'box-atomicdb#0'},
+                                  {}, 1, stop, True, held=held)
+        return log, held
+
+    def test_the_leases_go_back_before_the_restart(self):
+        def restart(stop):
+            stop.set()          # exec replaced the process
+            return True
+
+        log, held = self.run_updating_slot(restart)
+
+        self.assertEqual(log, [('release', [7]), ('restart', True)])
+
+    def test_a_failed_restart_lets_the_jobs_lease_again(self):
+        log, held = self.run_updating_slot(lambda stop: False)
+
+        self.assertEqual(log, [('release', [7]), ('restart', True),
+                               ('lease', False)])
+        self.assertFalse(held.handing_over.is_set())
+
+    def test_no_job_takes_a_lease_while_the_worker_hands_over(self):
+        stop = threading.Event()
+        held = worker.HeldLeases()
+        held.handing_over.set()
+        threading.Timer(0.3, stop.set).start()
+        a = SimpleNamespace(engine='engine', hash=16, syzygy='',
+                            S='https://server', no_auto_update=True,
+                            once=False)
+        with mock.patch.object(worker, 'Engine', _SlotEngine), \
+                mock.patch.object(worker, '_request_tasks',
+                                  lambda *args: self.fail('leased')), \
+                mock.patch.object(worker, '_heartbeat_loop',
+                                  lambda *args: None), \
+                redirect_stdout(io.StringIO()):
+            worker._analysis_slot(1, a, None, {'machine': 'box-atomicdb#1'},
+                                  {}, 1, stop, False, held=held)
+        self.assertTrue(stop.is_set())
+
+
 # ---------------------------------------------------------------------------
 # The published file, as a process
 # ---------------------------------------------------------------------------
