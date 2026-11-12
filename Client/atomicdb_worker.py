@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111203
+ATOMICDB_WORKER_BUILD = 2026111204
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -2524,9 +2524,6 @@ def probe_tb(tb, fen):
 # How often the one-line session status prints, at most.  It rides on the
 # analysis heartbeat, which wakes once a minute.
 STATUS_INTERVAL_SECONDS = 5 * 60
-# Longest line of moves printed when a search starts; a longer one keeps its
-# head and its tail.
-CONSOLE_LINE_CHARS = 100
 ATOMIC_START_BOARD = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w'
 _ASCII_SUBSTITUTES = {
     '\u2026': '...', '\u2265': '>=', '\u2264': '<=', '\u00b7': '-',
@@ -2598,31 +2595,18 @@ def pasteable_fen(fen):
     return ' '.join(str(fen).split()[:4])
 
 
-def shorten_line(line, limit=CONSOLE_LINE_CHARS):
-    """A long line of moves keeps its opening and where it ends up."""
-    line = ascii_text(line).strip()
-    if len(line) <= limit:
-        return line
-    head = line[:limit * 2 // 5].rsplit(' ', 1)[0]
-    tail = line[-(limit * 3 // 5):].split(' ', 1)[-1]
-    return f'{head} ... {tail}'
-
-
 def task_position(task):
-    """The moves from the start position, or else the FEN.
+    """The FEN of the position, always, and never shortened.
 
-    ``line`` comes from servers that know it (an older one never sends it,
-    and a newer one leaves it empty when the line is not ready yet).  An
-    empty line on the start position is the start position.  A FEN is
-    printed with its castling and en passant fields and is never shortened,
-    so it can be copied and pasted into the website.
+    It is printed with its castling and en passant fields so it can be
+    copied and pasted into the website.  The server's ``line`` of moves is
+    not printed: it often arrives abbreviated or not at all, and it cannot
+    be pasted into the website.  The start position says so after its FEN.
     """
-    line = str(task.get('line') or '').strip()
-    if line:
-        return shorten_line(line)
+    fen = 'FEN ' + ascii_text(pasteable_fen(task.get('fen', '')))
     if short_fen(task.get('fen', '')) == ATOMIC_START_BOARD:
-        return 'the start position'
-    return 'FEN ' + ascii_text(pasteable_fen(task.get('fen', '')))
+        return fen + ' (the start position)'
+    return fen
 
 
 def task_requester(task, username):
