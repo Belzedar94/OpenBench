@@ -153,6 +153,95 @@ class IterationFilterTests(SimpleTestCase):
         self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
                          [('c2c4', 45), ('e2e4', 40)])
 
+    def test_a_mate_stop_keeps_the_exact_top_depth_lines(self):
+        # Threads 6, MultiPV 5, 12-Nov-2026: the mate limit stopped the
+        # search with lines 4-5 still at depth 21.  The mate and the two
+        # lines searched with it are sent; the stale lines are not, and the
+        # mate-blind depth-21 group before them is not the result.
+        fen = '2r1kb2/1p4p1/p2p4/3Pp2p/2P1Pp2/8/PP3PPP/R1BQK2R w KQ - 0 1'
+        engine = _engine(
+            'readyok\n'
+            + _info(21, 1, ('cp', 2741), 3_000_000, 'd1f3 e8d8')
+            + _info(21, 2, ('cp', 3010), 3_000_000, 'd1h5 e8d8')
+            + _info(21, 3, ('cp', 2950), 3_000_000, 'd1a4 b7b5')
+            + _info(21, 4, ('cp', 2722), 3_000_000, 'c1d2 c8c5')
+            + _info(21, 5, ('cp', 2694), 3_000_000, 'b2b4 g7g5')
+            + _info(22, 1, ('mate', 6), 4_100_000, 'd1f3 e8d8')
+            + _info(22, 2, ('cp', 3206), 4_100_000, 'd1h5 e8d8')
+            + _info(22, 3, ('cp', 3058), 4_100_000, 'd1a4 b7b5')
+            + _info(21, 4, ('cp', 2722), 4_100_000, 'c1d2 c8c5')
+            + _info(21, 5, ('cp', 2694), 4_100_000, 'b2b4 g7g5')
+            + 'bestmove d1f3\n')
+
+        lines = engine.analyse(fen, 128_000_000, 5)
+
+        self.assertEqual(
+            [(line['move'], line['mate'], line['eval_cp']) for line in lines],
+            [('d1f3', 6, 9994), ('d1h5', None, 3206), ('d1a4', None, 3058)])
+        self.assertTrue(all('depth 22' in line['raw'] for line in lines))
+        self.assertEqual(engine.last_nodes, 4_100_000)
+
+    def test_a_mate_stop_with_only_the_mate_re_searched(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(15, 1, ('mate', 4), 1800, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['mate']) for line in lines],
+                         [('e2e4', 4)])
+
+    def test_a_mated_side_stops_the_same_way(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', -900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', -950), 1000, 'd2d4')
+            + _info(15, 1, ('mate', -5), 1800, 'e2e4')
+            + _info(14, 2, ('cp', -950), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['mate']) for line in lines],
+                         [('e2e4', -5)])
+
+    def test_a_mate_stop_drops_a_bound_and_everything_after_it(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(14, 3, ('cp', 600), 1000, 'c2c4')
+            + _info(15, 1, ('mate', 4), 1800, 'e2e4')
+            + _info(15, 2, ('cp', 720), 1800, 'd2d4', bound='upperbound')
+            + _info(15, 3, ('cp', 610), 1800, 'c2c4'), multipv=3)
+
+        self.assertEqual([line['move'] for line in lines], ['e2e4'])
+
+    def test_a_bound_mate_is_not_a_mate_stop(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(15, 1, ('mate', 4), 1800, 'e2e4', bound='lowerbound')
+            + _info(14, 2, ('cp', 700), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 900), ('d2d4', 700)])
+
+    def test_a_mate_in_a_lower_line_is_not_a_mate_stop(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(15, 1, ('cp', 950), 1800, 'e2e4')
+            + _info(14, 2, ('mate', 7), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 900), ('d2d4', 700)])
+
+    def test_a_complete_mate_iteration_is_sent_whole(self):
+        lines, _ = self.analyse(
+            _info(14, 1, ('cp', 900), 1000, 'e2e4')
+            + _info(14, 2, ('cp', 700), 1000, 'd2d4')
+            + _info(15, 1, ('mate', 4), 1800, 'e2e4')
+            + _info(15, 2, ('cp', 720), 1800, 'd2d4'))
+
+        self.assertEqual([(line['move'], line['mate']) for line in lines],
+                         [('e2e4', 4), ('d2d4', None)])
+
     def test_fewer_legal_moves_than_lines_asked_for(self):
         lines, _ = self.analyse(
             _info(5, 1, ('cp', 30), 1000, 'e2e4')

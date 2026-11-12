@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111103
+ATOMICDB_WORKER_BUILD = 2026111201
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -1072,7 +1072,15 @@ def last_complete_iteration(snapshots):
     A group counts when it has every line (1..width, the most the search ever
     printed), all at one depth and none of them a bound.  Returns that group's
     entries in MultiPV order, or [] when no group qualifies.
+
+    One exception, the stop at a mate (``mate_stop_lines``): when the last
+    group's line 1 is an exact mate, the result is that group's exact lines
+    at line 1's depth, even if the lines below them are still the previous
+    depth's.
     """
+    stopped = mate_stop_lines(snapshots)
+    if stopped:
+        return stopped
     width = max((entry['_multipv'] for group in snapshots for entry in group),
                 default=0)
     for group in reversed(snapshots):
@@ -1082,9 +1090,50 @@ def last_complete_iteration(snapshots):
             continue
         if any(entry['_bound'] for entry in group):
             continue
-        return [{key: value for key, value in entry.items()
-                 if not key.startswith('_')} for entry in group]
+        return _public_lines(group)
     return []
+
+
+def _public_lines(group):
+    return [{key: value for key, value in entry.items()
+             if not key.startswith('_')} for entry in group]
+
+
+def mate_stop_lines(snapshots):
+    """The exact top-depth lines of a search the mate limit stopped, or [].
+
+    ``go ... mate 250`` ends the search after the first iteration whose best
+    line is a mate.  With several threads the engine stops before re-searching
+    every line: its last group has the mate in line 1 at depth D, perhaps a
+    few more lines at D, and the rest still the D-1 lines it had (Threads 6,
+    MultiPV 5: lines 1-3 at depth 22, lines 4-5 at depth 21).  That group is
+    not complete, and the complete group before it has no mate, so the
+    general rule threw the mate away and sent a +27xx line from a search
+    stopped early (about 19 of 3,900 tasks of a contributor running
+    multi-thread engines, 12-Nov-2026).
+
+    What is kept is still only what the engine claimed exact at that depth:
+    the lines from line 1 down, while they are at line 1's depth and not a
+    bound.  They are a prefix by construction -- the engine searches the lines
+    in order, and the search of line k covers every move not in lines 1..k-1
+    -- so the worst line kept still bounds every move left out.  [] when the
+    last group does not start with an exact mate at its top depth; the
+    caller then falls back to the last complete iteration.
+    """
+    if not snapshots or not snapshots[-1]:
+        return []
+    group = snapshots[-1]
+    first = group[0]
+    if (first['_multipv'] != 1 or first['_bound'] or first.get('mate') is None
+            or first['_depth'] != max(entry['_depth'] for entry in group)):
+        return []
+    kept = []
+    for number, entry in enumerate(group, start=1):
+        if (entry['_multipv'] != number or entry['_depth'] != first['_depth']
+                or entry['_bound']):
+            break
+        kept.append(entry)
+    return _public_lines(kept)
 
 
 def engine_identity_problem(output):
