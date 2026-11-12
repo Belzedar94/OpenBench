@@ -578,7 +578,9 @@ class HashGuardTests(SimpleTestCase):
         slot, out = self.run_main('-T', '8', '--hash', '4096')
         self.assertEqual(slot.call_count, 8)
         self.assertEqual(slot.call_args.args[1].hash, 512)
-        self.assertIn('--hash is per engine since build 2026111101', out)
+        self.assertIn('-T 8 without --jobs runs 8 engines since build '
+                      '2026111101, so --hash 4096 applies 8 times', out)
+        self.assertNotIn('per engine since', out)
         self.assertIn('8 engines x 4096 MB would need 34.3 GB', out)
         self.assertIn('using 512 MB each', out)
         self.assertIn('--jobs 1', out)
@@ -591,6 +593,13 @@ class HashGuardTests(SimpleTestCase):
         self.assertEqual(sum(call.args[5] for call in slot.call_args_list),
                          32)
         self.assertIn('using 25 jobs of 16 MB each', out)
+
+    def test_explicit_jobs_are_named_as_such(self):
+        slot, out = self.run_main('-T', '8', '--jobs', '4', '--hash', '4096')
+        self.assertEqual(slot.call_args.args[1].hash, 1024)
+        self.assertIn('--jobs 4 runs 4 engines, so --hash 4096 applies 4 '
+                      'times', out)
+        self.assertNotIn('since build', out)
 
     def test_one_big_engine_that_fits_is_left_alone(self):
         slot, out = self.run_main('-T', '8', '--jobs', '1', '--hash', '4096')

@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111102
+ATOMICDB_WORKER_BUILD = 2026111103
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3174,9 +3174,10 @@ def usable_memory_mb(memory=None):
 def fit_hash(engines, hash_mb, memory=None):
     """(engines, hash_mb) that fit in the free memory, for an explicit --hash.
 
-    Since build 2026111101 -T without --jobs runs one engine per thread, and
-    --hash is per engine: an old ``-T 8 --hash 4096`` (one engine, 4 GB)
-    became eight engines asking for 32 GB, on a laptop.  When ``engines``
+    --hash has always been per engine.  What build 2026111101 changed is
+    that -T without --jobs runs one engine per thread instead of one engine of
+    -T threads, so an old ``-T 8 --hash 4096`` (one engine, 4 GB) became eight
+    engines asking for 32 GB, on a laptop.  When ``engines``
     tables of ``hash_mb`` plus ``GUARD_ENGINE_OVERHEAD_MB`` each do not fit,
     the hash comes down to the largest power of two that does (never below
     ``AUTO_HASH_MIN_MB``); when not even that fits, the engines come down too.
@@ -3352,6 +3353,7 @@ def main():
         solver_engines = 1 if a.solve else 0
         engines = jobs + solver_engines
         asked = a.hash
+        asked_jobs = jobs
         fit_engines, fit_mb = ((engines, asked) if a.allow_hash_overcommit
                                else fit_hash(engines, asked))
         if (fit_engines, fit_mb) != (engines, asked):
@@ -3364,8 +3366,13 @@ def main():
                           'that fit')
             else:
                 change = f'using {fit_mb} MB each'
-            print(f'warning: --hash is per engine since build 2026111101; '
-                  f'{engines} engines x {asked} MB would need '
+            why = (f'-T {a.T} without --jobs runs {asked_jobs} engines '
+                   'since build 2026111101' if auto_jobs
+                   else f'--jobs {a.jobs} runs {asked_jobs} engines')
+            if solver_engines:
+                why += ' plus the solver'
+            print(f'warning: {why}, so --hash {asked} applies {engines} '
+                  f'times; {engines} engines x {asked} MB would need '
                   f'{need_gb:.1f} GB and this machine does not have it free; '
                   f'{change}. Pass --jobs 1 for one big engine, or '
                   '--allow-hash-overcommit to keep --hash as given.',
