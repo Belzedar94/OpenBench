@@ -13,6 +13,7 @@ Lo que se defiende aqui:
 """
 
 import json
+from datetime import timedelta
 from unittest import mock
 
 from django.core.management import call_command
@@ -488,16 +489,18 @@ class ShadowBackfillTests(TestCase):
         ingest.expand(self.root)
         self.target = (Edge.objects.filter(parent=self.root)
                        .order_by('move_uci').first().child)
-        AnalysisTask.objects.create(
-            position=self.target, generation=0, budget_nodes=512_000_000,
-            state=AnalysisTask.TState.COMPLETED, machine='m1',
-            nodes_searched=512_000_000, completed=timezone.now())
         self.shadowed = AnalysisTask.objects.create(
             position=self.target, generation=1, budget_nodes=128_000_000,
             source=AnalysisTask.Source.USER, requested_by='w')
         self.deeper = AnalysisTask.objects.create(
             position=self.target, generation=2, budget_nodes=10_000_000_000,
             source=AnalysisTask.Source.USER, requested_by='w')
+        # La busqueda de 512M termina con las dos ya en cola: eso es lo que
+        # hace de la de 128M un duplicado.
+        AnalysisTask.objects.create(
+            position=self.target, generation=0, budget_nodes=512_000_000,
+            state=AnalysisTask.TState.COMPLETED, machine='m1',
+            nodes_searched=512_000_000, completed=timezone.now())
 
     def _other_child(self, index=1):
         return (Edge.objects.filter(parent=self.root)
@@ -571,6 +574,29 @@ class ShadowBackfillTests(TestCase):
         running.refresh_from_db()
         self.assertEqual(running.state, 'LEASED')
         self.assertEqual(running.machine, 'm1')
+
+    def test_a_task_made_after_the_search_is_not_a_duplicate(self):
+        """Quien la creo ya tenia la busqueda delante: pidio repetirla.
+
+        Es la forma de cada tarea del barrido +16 y de las del selector sobre
+        posiciones interiores: 128M sobre una posicion ya buscada a 128M."""
+        again = self._other_child(2)
+        AnalysisTask.objects.create(
+            position=again, generation=0, budget_nodes=128_000_000,
+            state=AnalysisTask.TState.COMPLETED, machine='m1',
+            nodes_searched=128_000_000,
+            completed=timezone.now() - timedelta(days=30))
+        repeat = AnalysisTask.objects.create(
+            position=again, generation=1, budget_nodes=128_000_000,
+            source=AnalysisTask.Source.FILL)
+
+        output = self._run()
+
+        self.assertEqual(output, 'absorb_shadowed_tasks: 1 sombreadas + 0 '
+                                 'sobre posicion cerrada absorbidas')
+        repeat.refresh_from_db()
+        self.assertEqual(repeat.state, 'PENDING')
+        self.assertIsNone(repeat.completed)
 
     def test_a_second_pass_finds_nothing_left(self):
         self._on_closed_position()

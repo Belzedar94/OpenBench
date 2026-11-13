@@ -381,6 +381,21 @@ def _save_cursor(build_id, cursor):
             pass
 
 
+def rewind():
+    """Send the walk back to the head of the current list.  Returns its id.
+
+    For a list whose head was passed over without being searched: the walk
+    meets every key again, and ``drip`` checks each one again as always.  A
+    selector that is already running keeps its own place in memory and takes
+    the new one when it starts.
+    """
+    plan = load_plan()
+    if not plan:
+        return None
+    _save_cursor(plan.get('build_id', ''), 0)
+    return plan.get('build_id', '')
+
+
 def forget_plan():
     """Drop the list and the cursor, on disk too: the sweep stops."""
     _memory.update(plan=None, cursor=None, plan_mtime=None)
@@ -505,6 +520,25 @@ def pending_count():
     return AnalysisTask.objects.filter(state='PENDING', arm=SWEEP_ARM).count()
 
 
+def _revive(task):
+    """Put the sweep's own absorbed task back in the queue.  True if it did.
+
+    An absorbed row is COMPLETED with no nodes and no machine: nobody searched
+    it (§ ``ingest.absorb_tasks``).  It holds the one slot its position has
+    for this visit, so without this the position could never be queued again.
+    Its position still qualifies (the caller just checked), so the search it
+    was made for is still owed.  ``created`` moves to now: the task waits from
+    now on, and it counts against this hour's ceiling like a new one.
+    """
+    if task.arm != SWEEP_ARM or not ingest.is_absorbed(task):
+        return False
+    return bool(AnalysisTask.objects.filter(
+        pk=task.pk, arm=SWEEP_ARM, state=AnalysisTask.TState.COMPLETED,
+        nodes_searched=0, machine='',
+    ).update(state=AnalysisTask.TState.PENDING, completed=None,
+             created=timezone.now()))
+
+
 def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
          scan=SWEEP_SCAN):
     """One step down the list.  Returns how many tasks it queued.
@@ -516,6 +550,7 @@ def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
     ``scan``
     keys, each checked again against the database: a position that closed,
     was searched again, or already has a live task is passed over for good.
+    A task of the sweep that was absorbed without a search is queued again.
     """
     if cap <= 0 or ingest.arm_rate(SWEEP_ARM) <= 0:
         return 0
@@ -556,13 +591,13 @@ def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
                 if (pos is None or key in live or not qualifies(pos)
                         or not ingest._still_reachable(pos)):
                     continue
-                _task, created = AnalysisTask.objects.get_or_create(
+                task, created = AnalysisTask.objects.get_or_create(
                     position=pos, generation=pos.visits,
                     defaults={'budget_nodes': SWEEP_NODES,
                               'multipv': SWEEP_MULTIPV,
                               'source': AnalysisTask.Source.FILL,
                               'arm': SWEEP_ARM})
-                if created:
+                if created or _revive(task):
                     made += 1
         cursor += used
     _save_cursor(build_id, cursor)

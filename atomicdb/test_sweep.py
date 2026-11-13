@@ -18,6 +18,10 @@ What these tests pin, and why each one:
   pile up, checks every key again, resumes where it stopped (on disk when
   there is a state directory) and queues nothing without a list or with the
   arm at 0;
+* the hourly pass that absorbs shadowed duplicates leaves the sweep's tasks
+  alone (each one repeats a search its position already had), and a task
+  that was absorbed without a search is queued again when the walk comes
+  back to it (``--rewind``), within the same cap;
 * a request still goes first and the sweep goes before the selector's pool,
   which does not count it;
 * it shows as "server: re-search" on the workers page, and its receipt stays
@@ -27,11 +31,13 @@ What these tests pin, and why each one:
 import json
 import os
 import tempfile
+from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
+from django.utils import timezone
 
 from . import active_workers, idle_repair, ingest, logic, sweep, views
 from .models import AnalysisTask, DBEvent, Edge, Position
@@ -435,6 +441,105 @@ class SweepDripTests(TestCase):
             sweep.forget_plan()
             self.assertFalse(os.path.exists(os.path.join(root,
                                                          sweep.PLAN_FILE)))
+
+    def _searched_before(self):
+        """The search of 128M each candidate already had, a month ago."""
+        for key in self.keys:
+            AnalysisTask.objects.create(
+                position_id=key, generation=0, budget_nodes=M128,
+                source=USER, state=COMPLETED, machine='m1',
+                nodes_searched=ONCE,
+                completed=timezone.now() - timedelta(days=30))
+
+    def test_the_hourly_absorb_pass_leaves_its_tasks_alone(self):
+        # A sweep task repeats a search its position already had, which is
+        # the shape of a shadowed duplicate.  The pass took the whole queue
+        # every hour (8,860 tasks, 11 to 13 Nov 2026).
+        self._searched_before()
+        self._plan()
+        sweep.drip()
+
+        call_command('absorb_shadowed_tasks', stdout=StringIO())
+
+        self.assertEqual(self._swept().filter(state=PENDING).count(), 5)
+
+    def test_a_search_that_lands_while_it_waits_still_absorbs_it(self):
+        self._plan()
+        sweep.drip()
+        AnalysisTask.objects.create(
+            position_id=self.keys[0], generation=0, budget_nodes=M512,
+            source=USER, state=COMPLETED, machine='m1',
+            nodes_searched=M512, completed=timezone.now())
+
+        call_command('absorb_shadowed_tasks', stdout=StringIO())
+
+        self.assertEqual(self._swept().get(position_id=self.keys[0]).state,
+                         COMPLETED)
+        self.assertEqual(self._swept().filter(state=PENDING).count(), 4)
+
+    def test_an_absorbed_task_is_queued_again_from_the_head(self):
+        self._plan()
+        sweep.drip()
+        first = dict(self._swept().values_list('id', 'created'))
+        ingest.absorb_tasks(self._swept())
+        self.assertEqual(sweep.drip(), 0)          # the walk is past them
+
+        self.assertEqual(sweep.rewind(), 'b1')
+        self.assertEqual(sweep.drip(), 5)
+
+        for task in self._swept():
+            self.assertEqual(task.state, PENDING)
+            self.assertIsNone(task.completed)
+            self.assertGreaterEqual(task.created, first[task.id])
+        self.assertEqual(self._swept().count(), 5)
+
+    def test_a_revived_task_counts_against_the_cap(self):
+        self._plan()
+        sweep.drip()
+        ingest.absorb_tasks(self._swept())
+        sweep.rewind()
+
+        self.assertEqual(sweep.drip(cap=2), 2)
+
+        self.assertEqual(self._swept().filter(state=PENDING).count(), 2)
+
+    def test_a_task_somebody_searched_is_not_queued_again(self):
+        self._plan()
+        sweep.drip()
+        self._swept().update(state=COMPLETED, machine='m1',
+                             nodes_searched=ONCE, completed=timezone.now())
+        sweep.rewind()
+
+        self.assertEqual(sweep.drip(), 0)
+
+        self.assertFalse(self._swept().filter(state=PENDING).exists())
+
+    def test_another_arms_absorbed_task_is_left_alone(self):
+        self._plan()
+        other = AnalysisTask.objects.create(
+            position_id=self.keys[0], generation=1, budget_nodes=M128,
+            source=AUTO, arm=ingest.VALUE_DESCEND_ARM)
+        ingest.absorb_tasks(AnalysisTask.objects.filter(pk=other.pk))
+
+        self.assertEqual(sweep.drip(), 4)
+
+        other.refresh_from_db()
+        self.assertEqual(other.state, COMPLETED)
+
+    def test_rewinding_without_a_list_does_nothing(self):
+        self.assertIsNone(sweep.rewind())
+
+    def test_the_command_rewinds(self):
+        self._plan()
+        sweep.drip()
+        ingest.absorb_tasks(self._swept())
+        out = StringIO()
+
+        call_command('sweep_plus16', '--rewind', '--drip', stdout=out)
+
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['rewound'], 'b1')
+        self.assertEqual(report['queued'], 5)
 
     def test_the_command_stops_and_withdraws(self):
         self._plan()

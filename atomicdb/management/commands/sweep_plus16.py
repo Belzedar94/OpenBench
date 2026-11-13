@@ -5,6 +5,9 @@
     manage.py sweep_plus16 --rebuild --dry-run   the same without storing it
     manage.py sweep_plus16 --drip          one step now (the selector service
                                            does this every pass by itself)
+    manage.py sweep_plus16 --rewind        walk the current list again from
+                                           its head (a running selector takes
+                                           the new place when it starts)
     manage.py sweep_plus16 --stop          delete the list: nothing more queued
     manage.py sweep_plus16 --withdraw      also remove the PENDING sweep tasks
 
@@ -84,6 +87,7 @@ class Command(BaseCommand):
         parser.add_argument('--drip', action='store_true')
         parser.add_argument('--cap', type=int,
                             default=sweep.SWEEP_PENDING_CAP)
+        parser.add_argument('--rewind', action='store_true')
         parser.add_argument('--stop', action='store_true')
         parser.add_argument('--withdraw', action='store_true')
 
@@ -105,6 +109,8 @@ class Command(BaseCommand):
                 'build_id', 'built_at', 'tree_count', 'rest_count',
                 'tree_stats', 'scan_stats', 'seconds')}
             out['rebuilt']['stored'] = not options['dry_run']
+        if options['rewind']:
+            out['rewound'] = sweep.rewind()
         if options['drip']:
             out['queued'] = sweep.drip(cap=options['cap'])
         if options['status'] or not out:
