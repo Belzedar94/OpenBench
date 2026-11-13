@@ -11,7 +11,7 @@
   <span title="{{ served_total_h }} served in total"><strong>{{ served_hour_h }}</strong> served in the last hour</span></p>
 
 <section class="contrib-section">
-  <h3 class="contrib-sub">Running now</h3>
+  <h3 class="contrib-sub">Running now &middot; {{ running_total_h }}</h3>
   {% if queue_leased %}
   <ul class="feed">
     {% for q in queue_leased %}
@@ -25,7 +25,7 @@
   {% comment %}Waiting and served side by side, split by a line
   (seaside_cliff, 5-Nov-2026); one column on a phone.{% endcomment %}
   <div class="queue-cols"><div>
-  <h3 class="contrib-sub">Waiting</h3>
+  <h3 class="contrib-sub">Waiting &middot; {{ waiting_total_h }}</h3>
   {% if queue_pending %}
   <ul class="feed">
     {% for q in queue_pending %}
@@ -38,7 +38,7 @@
   {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
 
   </div><div>
-  <h3 class="contrib-sub">Served</h3>
+  <h3 class="contrib-sub">Served &middot; {{ served_total_h }}</h3>
   {% if queue_done %}
   <ul class="feed">
     {% for q in queue_done %}

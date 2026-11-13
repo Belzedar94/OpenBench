@@ -822,6 +822,117 @@ class AccountQueueTests(TestCase):
         # of these is the ``served_rank`` aggregate of the queue order.
         self.assertLessEqual(len(queries), 11)
 
+class SectionCountTests(TestCase):
+    """The queue's hourly node line and the counts on the section headers."""
+
+    def setUp(self):
+        cache.clear()
+        contributors.reset_cache()
+
+    def _leased(self, count, account='alice'):
+        position = _child('e2e3')
+        now = timezone.now()
+        for _ in range(count):
+            _task(position, source=AnalysisTask.Source.USER,
+                  requested_by=account, state=AnalysisTask.TState.LEASED,
+                  machine='box-atomicdb', leased_at=now,
+                  lease_heartbeat_at=now)
+
+    def _served(self, count, account='alice'):
+        position = _child('f2f3')
+        for _ in range(count):
+            _completed(position, 'box', 1_000, 1.0, ago_hours=3,
+                       source=AnalysisTask.Source.USER, requested_by=account)
+
+    def test_the_queue_page_sums_every_search_of_the_last_hour(self):
+        _completed(_child('a2a3'), 'box', 1_000_000_000, 1.0, ago_hours=0.5,
+                   source=AnalysisTask.Source.USER, requested_by='alice')
+        _completed(_child('b2b3'), 'box', 200_000_000, 1.0, ago_hours=0.5)
+        # Older than the hour: left out.
+        _completed(_child('c2c3'), 'box', 5_000_000_000, 1.0, ago_hours=2)
+
+        response = Client().get('/atomicdb/queue/')
+
+        self.assertEqual(response.context['fleet_hour_nodes_h'], '1.20B')
+        self.assertIn('1.20B nodes searched in the last hour',
+                      _reading(response.content.decode()))
+
+    def test_a_quiet_hour_says_zero(self):
+        response = Client().get('/atomicdb/queue/')
+
+        self.assertIn('0 nodes searched in the last hour',
+                      _reading(response.content.decode()))
+
+    def test_the_hourly_sum_is_cached_for_signed_in_visitors_too(self):
+        worker_account('alice')
+        client = Client()
+        client.login(username='alice', password='pw')
+        client.get('/atomicdb/queue/')
+        _completed(_child('a2a3'), 'box', 1_000_000_000, 1.0, ago_hours=0.5)
+
+        response = client.get('/atomicdb/queue/')
+
+        self.assertEqual(response.context['fleet_hour_nodes_h'], '0')
+
+    def test_the_account_queue_headers_count_every_row(self):
+        self._leased(contributors.QUEUE_ROWS + 2)
+        position = _child('g2g3')
+        for _ in range(contributors.QUEUE_ROWS + 5):
+            _task(position, source=AnalysisTask.Source.USER,
+                  requested_by='alice')
+        self._served(contributors.QUEUE_ROWS + 7)
+
+        response = Client().get('/atomicdb/queue/alice/')
+
+        body = _reading(response.content.decode())
+        self.assertEqual(len(response.context['queue_leased']),
+                         contributors.QUEUE_ROWS)
+        self.assertIn('Running now · 22', body)
+        self.assertIn('Waiting · 25', body)
+        self.assertIn('Served · 27', body)
+
+    def test_the_profile_headers_count_every_row(self):
+        self._leased(contributors.QUEUE_ROWS + 1)
+        _task(_child('g2g3'), source=AnalysisTask.Source.USER,
+              requested_by='alice')
+        self._served(3)
+
+        response = Client().get('/atomicdb/user/alice/')
+
+        self.assertEqual((response.context['running_total_h'],
+                          response.context['waiting_total_h'],
+                          response.context['served_total_h']),
+                         ('21', '1', '3'))
+        body = _reading(response.content.decode())
+        self.assertIn('Running now · 21', body)
+        self.assertIn('Waiting · 1', body)
+        self.assertIn('Served · 3', body)
+
+    def test_a_short_running_list_costs_no_count(self):
+        self._leased(2)
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            response = Client().get('/atomicdb/queue/alice/')
+
+        self.assertEqual(response.context['running_total_h'], '2')
+        self.assertFalse([query['sql'] for query in queries
+                          if 'COUNT(' in query['sql'].upper()
+                          and "'LEASED'" in query['sql']])
+
+    def test_the_served_total_is_shared_with_signed_in_visitors(self):
+        self._served(contributors.QUEUE_ROWS + 1)
+        worker_account('bob')
+        client = Client()
+        client.login(username='bob', password='pw')
+        client.get('/atomicdb/queue/alice/')
+        self._served(4)
+
+        response = client.get('/atomicdb/queue/alice/')
+
+        self.assertEqual(response.context['served_total_h'],
+                         str(contributors.QUEUE_ROWS + 1))
+
+
 class ClubPageTests(TestCase):
     """The node clubs: the profile badge links to a page with every member."""
 

@@ -6547,6 +6547,7 @@ def queue_page(request):
         'waiting_propagation': table.get('waiting_propagation') or 0,
         'served_minutes': table['served_minutes'],
         'has_served': bool(table['served_total']),
+        'fleet_hour_nodes_h': _human(lanes.fleet_nodes_last_hour()),
         'waiting_writes': waiting_writes,
         'oldest_write': (_ago_text(oldest_write) if oldest_write else '').replace('just now', ''),
     })
