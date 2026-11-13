@@ -1196,6 +1196,9 @@ def propagate_landings(landings):
     from . import autosolve, idle_repair
     landed = {landing.key for landing in landings}
     closed_all = {key for landing in landings for key in landing.closed}
+    # The rechecks of a batch share their reads until one of them writes
+    # (see _RecheckMemo).
+    memo = _RecheckMemo() if len(landings) > 1 else None
     summaries = {}
     for landing in landings:
         pos, parent_keys = landing.pos, landing.parents
@@ -1227,7 +1230,8 @@ def propagate_landings(landings):
                 else landed | closed_all)
         _recheck_once_committed(
             pos.key, [pos.key, *parent_keys, *landing.others],
-            [key for key in cascade.get('changed', ()) if key not in skip])
+            [key for key in cascade.get('changed', ()) if key not in skip],
+            memo=memo)
         summary = {'backed_up': changed, 'backed_evals': backed,
                    'uncertainty_expanded': uncertainty,
                    'witness_refuted': refuted}
@@ -1455,8 +1459,62 @@ def backup_cascade(seed_keys, report=None):
     # Va DESPUES del punto fijo exacto a proposito — la prueba se apoya en el
     # status, no al reves — y nunca puede tumbar una ingesta: unos numeros de
     # prueba viejos ordenan peor, no mienten.
-    proof.refresh_proof_numbers(list(seed_keys) + changed_keys)
+    # Inside the drainer's batch the same call is made once the batch has
+    # committed instead (see the block above proof_refresh_after_commit).
+    seeds = list(seed_keys) + changed_keys
+    sink = _proof_refresh_sink.get()
+    if sink is not None:
+        sink.append(seeds)
+    else:
+        proof.refresh_proof_numbers(seeds)
     return changed_total
+
+
+# ---------------- the proof numbers of a drained batch ----------------
+#
+# THE COST (13-Nov-2026).  Profiled on the live drainer during a backlog,
+# the pn/dn refresh was 65% of its time: 46% in the hook above, inside the
+# batch transaction, and 19% in the refresh of the landed keys after the
+# commit (propagation_queue._after_commit), which climbed again from keys
+# the hook had already climbed from, with a cold carrier cache.
+#
+# THE RULE.  In a drained batch the hook leaves its call here and the batch
+# makes the same calls, with the same seeds and in the same order, right
+# after its commit and before anything else that follows it (the rechecks).
+# The pn/dn read only ``key``, ``fen``, ``status`` and ``eval_cp`` (plus the
+# solve gate's columns, which nothing here writes), and between the hook
+# and the commit the batch writes none of them: the backed ascent writes the
+# backed columns, the arms queue tasks.  So each call reads what it read in
+# the transaction, and writes what it wrote.  The landed keys are seeds of
+# every one of those calls, so their separate refresh after the commit, a
+# second climb over unchanged rows, is gone.  Outside the transaction a row
+# another transaction holds is no longer skipped (_refresh_campaign), so the
+# calls only ever reach further.  Values and closures never read pn/dn.
+_proof_refresh_sink = contextvars.ContextVar('atomicdb_proof_refresh_sink',
+                                             default=None)
+
+
+@contextlib.contextmanager
+def proof_refresh_after_commit():
+    """Collect the proof refreshes backup_cascade would make in here.
+
+    Yields the list of seed lists, one per cascade, in call order; the
+    caller passes them to refresh_collected_proof_numbers once it has
+    committed.  Leave the block before the commit: a cascade that runs in a
+    commit hook (a recheck) refreshes at once, as everywhere else.
+    """
+    calls = []
+    token = _proof_refresh_sink.set(calls)
+    try:
+        yield calls
+    finally:
+        _proof_refresh_sink.reset(token)
+
+
+def refresh_collected_proof_numbers(calls):
+    """The refreshes proof_refresh_after_commit collected, in order."""
+    for seeds in calls:
+        proof.refresh_proof_numbers(seeds)
 
 
 def closable_rows(keys):
@@ -4028,7 +4086,7 @@ def close_missed(keys, sleeps=RECHECK_RETRY_SLEEPS):
             time.sleep(pause)
 
 
-def _recheck_once_committed(landed, keys, climbed):
+def _recheck_once_committed(landed, keys, climbed, memo=None):
     """Register recheck_after_commit for when this transaction commits.
 
     On the AtomicDB alias, the one the landing's transaction is on: on any
@@ -4038,6 +4096,7 @@ def _recheck_once_committed(landed, keys, climbed):
     closure source is read now, while the landing's is still set.  A plain
     function and not a partial: ``robust`` names the callback by its
     ``__qualname__`` when it logs a failure, and a partial has none.
+    ``memo`` is the batch's _RecheckMemo, shared by its rechecks.
     """
     keys, climbed = list(keys), list(climbed)
     source = current_closure_source()
@@ -4045,13 +4104,13 @@ def _recheck_once_committed(landed, keys, climbed):
 
     def recheck():
         recheck_after_commit(landed, keys, climbed=climbed, source=source,
-                             provenance=provenance)
+                             provenance=provenance, memo=memo)
 
     transaction.on_commit(recheck, using=current_alias(), robust=True)
 
 
 def recheck_after_commit(landed, keys, climbed=(), source=None,
-                         provenance=None):
+                         provenance=None, memo=None):
     """Both rules again on what a landing read, once it has committed.
 
     Registered by ingest_analysis and by a TB landing (_apply_prepared_tb)
@@ -4067,28 +4126,88 @@ def recheck_after_commit(landed, keys, climbed=(), source=None,
     """
     try:
         with closure_attribution(source, provenance):
-            return _recheck(landed, keys, climbed)
+            return _recheck(landed, keys, climbed, memo)
     except Exception:       # noqa: BLE001 - the landing stands without it
         logger.exception('AtomicDB recheck after the landing on %s failed',
                          landed)
         return None
 
 
-def _recheck(landed, keys, climbed):
+class _RecheckMemo:
+    """What the rechecks of one drained batch have already read.
+
+    In a batch every landing's recheck reads the parents of the same
+    ``climbed`` list (what the batch's one cascade changed) and asks
+    closable_rows about them again: 128 times the same reads of the same
+    committed rows.  Two answers are kept here, and only these two:
+
+    * the parents of a ``climbed`` prefix, a read of the edges;
+    * closable_rows per key.  Its verdict on a key reads only that key's
+      row and edges, never the other keys of the call, so a verdict kept
+      from one call is the verdict of the next.
+
+    stale_backed_rows is NOT kept: _decide_level judges a row together with
+    the other rows of its call (the rows that wait, the loops of a level),
+    so its verdict on a key depends on the call it came in.  It is read
+    every time, as before.
+
+    The memo holds while the rechecks only read, and stops holding when one
+    of them writes: a recheck that finds anything clears it before it
+    closes or climbs, and every later recheck reads afresh, exactly as it
+    did without the memo.  The writes of other processes between two
+    rechecks are what any recheck may miss already (see the block above
+    RECHECK_MAX_KEYS); the queue climbs each of them in its own turn.
+    """
+
+    __slots__ = ('parents', 'closable')
+
+    def __init__(self):
+        self.parents = {}       # climbed prefix -> parent keys, in order
+        self.closable = {}      # key -> closable_rows decided it
+
+    def clear(self):
+        self.parents.clear()
+        self.closable.clear()
+
+
+def _climbed_parents(climbed, memo):
+    prefix = tuple(climbed[:RECHECK_MAX_KEYS])
+    if memo is not None and prefix in memo.parents:
+        return memo.parents[prefix]
+    parents = list(Edge.objects.filter(child_id__in=prefix).order_by(
+        'parent_id').values_list('parent_id', flat=True))
+    if memo is not None:
+        memo.parents[prefix] = parents
+    return parents
+
+
+def _closable_keys(keys, memo):
+    if memo is None:
+        return set(closable_rows(keys))
+    missing = [key for key in keys if key not in memo.closable]
+    if missing:
+        found = closable_rows(missing)
+        for key in missing:
+            memo.closable[key] = key in found
+    return {key for key in keys if memo.closable[key]}
+
+
+def _recheck(landed, keys, climbed, memo=None):
     keys = list(dict.fromkeys(key for key in keys if key))
     climbed = list(dict.fromkeys(key for key in climbed if key))
     if climbed and len(keys) < RECHECK_MAX_KEYS:
-        keys = list(dict.fromkeys([*keys, *Edge.objects.filter(
-            child_id__in=climbed[:RECHECK_MAX_KEYS]).order_by(
-                'parent_id').values_list('parent_id', flat=True)]))
+        keys = list(dict.fromkeys([*keys, *_climbed_parents(climbed, memo)]))
     keys = keys[:RECHECK_MAX_KEYS]
-    closing = sorted(closable_rows(keys))
+    closing = sorted(_closable_keys(keys, memo))
     stale = sorted(key for key in stale_backed_rows(keys)
                    if key not in closing)
     summary = {'checked': len(keys), 'closed': [], 'stale': stale,
                'changed': 0}
     if not (closing or stale):
         return summary
+    if memo is not None:
+        # This recheck writes: whatever the batch read before is old now.
+        memo.clear()
     with _brief_lock_waits():
         if closing:
             summary['closed'] = close_missed(closing)
