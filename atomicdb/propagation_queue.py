@@ -80,16 +80,17 @@ positions and the deferred PV verification after the commit, as in
 ``ingest_queue.apply_job``.
 """
 
+import contextlib
 import logging
 import time
 
 from django.conf import settings
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 from django.db.models import Count, Min
 from django.utils import timezone
 
 from . import ingest
-from .database import atomic
+from .database import atomic, connection, current_alias
 from .models import IngestJob, Position, PropagationSeed
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,28 @@ class _Job:
         self.position_id = position_id
 
 
+def proof_after_commit_enabled():
+    """A batch refreshes its proof numbers once it has committed.
+
+    On by default (see ingest.proof_refresh_after_commit); the setting
+    ``ATOMICDB_PROOF_AFTER_COMMIT = False`` puts back the refresh inside the
+    batch transaction plus the one of the landed keys after it.  A batch
+    drained inside somebody else's transaction (a test, a shell) has no
+    commit of its own to wait for, and refreshes inside as before.
+    """
+    return (bool(getattr(settings, 'ATOMICDB_PROOF_AFTER_COMMIT', True))
+            and not connection.in_atomic_block)
+
+
+def _refresh_proof_after_commit(calls):
+    """The batch's proof refreshes, the first thing after its commit."""
+    try:
+        ingest.refresh_collected_proof_numbers(calls)
+    except DatabaseError:
+        logger.exception('AtomicDB propagation: proof numbers of a batch '
+                         '(%d cascades) failed', len(calls))
+
+
 def _claim_size(limit):
     """A row that failed before climbs alone, so one bad row never holds a
     whole batch back again."""
@@ -233,6 +256,7 @@ def drain_batch(limit=BATCH_SIZE):
         return 0
     ids = []
     summaries, landings, jobs = {}, [], {}
+    proof_later = proof_after_commit_enabled()
     try:
         with ingest.carried_cuts() as cut:
             with atomic():
@@ -241,18 +265,33 @@ def drain_batch(limit=BATCH_SIZE):
                 if not rows:
                     return 0
                 ids = [row.pk for row in rows]
-                # One closure source per climb: the cascade reads it for
-                # every closure it writes (§ ingest.closure_attribution).
-                groups = {}
-                for row in rows:
-                    groups.setdefault(row.source or '', []).append(row)
-                for source, group in groups.items():
-                    with ingest.closure_attribution(source or None):
-                        merged, merged_jobs = _merge(group)
-                        summaries.update(ingest.propagate_landings(merged))
-                        landings.extend(merged)
-                        for key, payloads in merged_jobs.items():
-                            jobs.setdefault(key, []).extend(payloads)
+                with contextlib.ExitStack() as stack:
+                    if proof_later:
+                        # Registered before any recheck, so it runs first
+                        # after the commit, where the refresh used to end
+                        # the transaction (§ ingest.proof_refresh_after_commit).
+                        calls = stack.enter_context(
+                            ingest.proof_refresh_after_commit())
+
+                        def refresh_proof():
+                            _refresh_proof_after_commit(calls)
+
+                        transaction.on_commit(refresh_proof,
+                                              using=current_alias(),
+                                              robust=True)
+                    # One closure source per climb: the cascade reads it for
+                    # every closure it writes (§ ingest.closure_attribution).
+                    groups = {}
+                    for row in rows:
+                        groups.setdefault(row.source or '', []).append(row)
+                    for source, group in groups.items():
+                        with ingest.closure_attribution(source or None):
+                            merged, merged_jobs = _merge(group)
+                            summaries.update(
+                                ingest.propagate_landings(merged))
+                            landings.extend(merged)
+                            for key, payloads in merged_jobs.items():
+                                jobs.setdefault(key, []).extend(payloads)
                 _record(landings, jobs, summaries, len(rows))
                 PropagationSeed.objects.filter(pk__in=ids).delete()
     except Exception as error:      # noqa: BLE001 - the rows keep the work
@@ -266,20 +305,26 @@ def drain_batch(limit=BATCH_SIZE):
             logger.exception('AtomicDB propagation: claiming a batch failed')
         return -1
     # The batch has committed: what follows never puts its rows back.
-    _after_commit(landings, jobs, cut)
+    _after_commit(landings, jobs, cut, proof_later)
     return len(ids)
 
 
-def _after_commit(landings, jobs, cut):
+def _after_commit(landings, jobs, cut, proof_refreshed=False):
     """What ``ingest_queue.apply_job`` did after its commit, for these
     landings: the proof numbers of the landed positions, the ascents a
-    guard cut short, and the deferred PV verifications."""
-    keys = [landing.key for landing in landings]
-    try:
-        ingest.proof.refresh_proof_numbers(keys)
-    except DatabaseError:
-        logger.exception('AtomicDB propagation: proof numbers of %d landed '
-                         'positions failed', len(keys))
+    guard cut short, and the deferred PV verifications.
+
+    With ``proof_refreshed`` the batch's own refresh after the commit has
+    already climbed from every landed key (each is a seed of its cascade),
+    over rows nothing has changed since, so the landed keys are not climbed
+    a second time."""
+    if not proof_refreshed:
+        keys = [landing.key for landing in landings]
+        try:
+            ingest.proof.refresh_proof_numbers(keys)
+        except DatabaseError:
+            logger.exception('AtomicDB propagation: proof numbers of %d '
+                             'landed positions failed', len(keys))
     if cut:
         try:
             ingest.carry_cut_ascents(cut)
