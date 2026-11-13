@@ -398,6 +398,19 @@ def _overflow(rows, limit, queryset):
     return rows[:limit], queryset.count() - limit
 
 
+def _running_total(leased, mine):
+    """Every request of the account on a worker, not just the rows shown.
+
+    ``_queue_rows`` reads at most ``QUEUE_ROWS`` leased rows, so the count
+    only runs when that list came back full: one count over the
+    ``(requested_by, state)`` index, under a millisecond for 42 leases on
+    13-Nov-2026.
+    """
+    if len(leased) < QUEUE_ROWS:
+        return len(leased)
+    return mine.filter(state=LEASED).count()
+
+
 def _spark(machines, now):
     """Nodos por dia (UTC) de las ultimas dos semanas, ya en barras SVG.
 
@@ -757,14 +770,16 @@ def present(username, now=None, every_worker=False):
     # lo mismo en la pagina que menos se puede permitir consultas de sobra.
     pending_total = len(pending) + pending_more
     if len(done) > QUEUE_ROWS:
-        # Only the "and N more served" line needs this count, and it is a
-        # count over everything the account was ever served: cached.
+        # The "and N more served" line and the Served header need this
+        # count, and it is a count over everything the account was ever
+        # served: cached.
         done_total = _account_cached(
             'served', username, mine.filter(state=COMPLETED).count,
             seconds=ACCOUNT_COUNT_SECONDS)
         done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
     else:
         done_more = 0
+    running_total = _running_total(leased, mine)
 
     suggestions = list(OpeningNameSuggestion.objects
                        .filter(suggested_by=username)
@@ -875,6 +890,10 @@ def present(username, now=None, every_worker=False):
         'queue_pending_total': pending_total,
         'queue_leased': leased_rows,
         'queue_done': done_rows, 'queue_done_more': done_more,
+        # The section headers' counts: the full totals, not the rows shown.
+        'running_total_h': human(running_total),
+        'waiting_total_h': human(pending_total),
+        'served_total_h': human(len(done_rows) + done_more),
         'has_queue': bool(pending_rows or leased_rows or done_rows),
         'workers': workers, 'has_workers': bool(workers),
         'workers_more': workers_more, 'workers_total': len(pings),
@@ -906,9 +925,13 @@ def present_queue(username, now=None, live=False):
     The profile's three lists without the rest of the profile (workers,
     counters, chart, names), so it costs the queue reads and nothing else.
 
-    ``live`` counts the served total now instead of reading the one-minute
-    copy: a signed-in visitor gets every number fresh (seaside_cliff,
-    6-Nov-2026), and that count is 0.2 s on the largest account.
+    ``live`` counts the last hour now instead of reading the one-minute
+    copy: a signed-in visitor gets that number fresh (seaside_cliff,
+    6-Nov-2026), and it is one range over the ``(state, completed)`` index,
+    15-33 ms on the largest accounts on 13-Nov-2026.  The lifetime served
+    total is NOT live for anybody: it is 0.9 s for gannet, 2 s for Torom and
+    2.5 s for MoKy1978 even warm (13-Nov-2026), and it only grows, so it
+    always comes from the one-minute copy the profile shares.
     """
     now = now or timezone.now()
     pending, leased, done = _queue_rows(username)
@@ -916,12 +939,13 @@ def present_queue(username, now=None, live=False):
     pending, pending_more = _overflow(pending, QUEUE_ROWS,
                                       mine.filter(state=PENDING))
     if len(done) > QUEUE_ROWS:
-        served = mine.filter(state=COMPLETED).count
-        done_total = (served() if live else _account_cached(
-            'served', username, served, seconds=ACCOUNT_COUNT_SECONDS))
+        done_total = _account_cached(
+            'served', username, mine.filter(state=COMPLETED).count,
+            seconds=ACCOUNT_COUNT_SECONDS)
         done, done_more = done[:QUEUE_ROWS], max(0, done_total - QUEUE_ROWS)
     else:
         done_more = 0
+    running_total = _running_total(leased, mine)
     # The rate is what a queue owner watches; the lifetime total only
     # grows (seaside_cliff, 6-Nov-2026).  Same freshness rule as the total.
     hour = mine.filter(state=COMPLETED,
@@ -955,9 +979,10 @@ def present_queue(username, now=None, live=False):
         'queue_pending': pending_rows, 'queue_pending_more': pending_more,
         'queue_leased': leased_rows, 'queue_done': done_rows,
         'queue_done_more': done_more,
-        # The totals the lists already counted: no query of their own.
+        # The full totals: the lists already counted waiting and served,
+        # and running costs a count only when its list came back full.
         'waiting_total_h': human(len(pending_rows) + pending_more),
-        'running_total_h': human(len(leased_rows)),
+        'running_total_h': human(running_total),
         'served_total_h': human(len(done_rows) + done_more),
         'served_hour_h': human(served_hour),
     }

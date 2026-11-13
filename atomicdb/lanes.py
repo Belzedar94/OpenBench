@@ -167,6 +167,29 @@ def charged_loads(names):
 SERVED_WINDOW = timedelta(hours=1)
 QUEUE_CACHE_KEY = 'atomicdb.queue.table.v1'
 QUEUE_CACHE_SECONDS = 60
+FLEET_HOUR_CACHE_KEY = 'atomicdb.queue.fleet_hour_nodes.v1'
+
+
+def fleet_nodes_last_hour(now=None):
+    """Engine nodes of every search completed in the last hour, all sources.
+
+    The line above the queue table (cz_eclipsia, 13-Nov-2026).  One SUM over
+    the ``(state, completed)`` index: about 6,000 rows and 23 ms on
+    13-Nov-2026 under load, kept for the queue's own 60 seconds so a
+    signed-in visitor, who reads the table live, does not pay it on every
+    load.  The value is wrapped so that a quiet hour's 0 is cached too.
+    """
+    from django.core.cache import cache
+    hit = cache.get(FLEET_HOUR_CACHE_KEY)
+    if hit is None:
+        now = now or timezone.now()
+        total = (AnalysisTask.objects
+                 .filter(state=AnalysisTask.TState.COMPLETED,
+                         completed__gte=now - SERVED_WINDOW)
+                 .aggregate(nodes=Sum('nodes_searched'))['nodes'])
+        hit = (total or 0,)
+        cache.set(FLEET_HOUR_CACHE_KEY, hit, QUEUE_CACHE_SECONDS)
+    return hit[0]
 
 
 def _charged_by_requester(now):

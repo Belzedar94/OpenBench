@@ -65,7 +65,7 @@ profile link went: for an AtomicDB contributor it led to an empty page.{% endcom
   {% if has_queue %}
   {% comment %}A link in the link colour, saying where it goes (cz_eclipsia,
   3-Nov-2026): grey, "queue only" read as a label.{% endcomment %}
-  <h3 class="contrib-sub">Running now <a style="font-weight:normal;font-size:.85em"
+  <h3 class="contrib-sub">Running now &middot; {{ running_total_h }} <a style="font-weight:normal;font-size:.85em"
     href="/atomicdb/queue/{{ profile_user|urlencode }}/">view queue only</a></h3>
   {% if queue_leased %}
   <ul class="feed">
@@ -78,7 +78,7 @@ profile link went: for an AtomicDB contributor it led to an empty page.{% endcom
   {% else %}<p class="dim">Nothing of {% if is_self %}yours{% else %}theirs{% endif %} is on a worker right now.</p>{% endif %}
 
   <div class="queue-cols"><div>
-  <h3 class="contrib-sub">Waiting</h3>
+  <h3 class="contrib-sub">Waiting &middot; {{ waiting_total_h }}</h3>
   {% if queue_pending %}
   <ul class="feed">
     {% for q in queue_pending %}
@@ -133,7 +133,7 @@ profile link went: for an AtomicDB contributor it led to an empty page.{% endcom
   {% else %}<p class="dim">Nothing waiting.</p>{% endif %}
 
   </div><div>
-  <h3 class="contrib-sub">Served</h3>
+  <h3 class="contrib-sub">Served &middot; {{ served_total_h }}</h3>
   {% if queue_done %}
   <ul class="feed">
     {% for q in queue_done %}

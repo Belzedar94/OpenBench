@@ -8,6 +8,8 @@
   <a href="/atomicdb/workers/" style="font-size:.8rem;font-weight:400"
     title="Every active worker, what it is searching and who asked for it">workers</a></h2>
 
+<p class="queue-counts"><span title="Engine nodes in every search finished in the last hour, requested or automatic"><strong>{{ fleet_hour_nodes_h }}</strong> nodes searched in the last hour</span></p>
+
 {% if waiting_writes is not None %}<p class="dim queue-writes">{% if waiting_writes %}<strong>{{ waiting_writes }}</strong> finished
   search{{ waiting_writes|pluralize:"es" }} waiting to be stored{% if oldest_write %}, the oldest for {{ oldest_write }}{% endif %}: results appear on the site after this delay.{% else %}Finished searches are stored as they arrive.{% endif %}</p>{% endif %}
 {% if propagation_lag %}<p class="dim queue-writes">Results are propagating <strong>{{ propagation_lag }}</strong> behind:
