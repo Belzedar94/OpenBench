@@ -1,0 +1,22 @@
+{% extends "atomicdb/base.html" %}
+{% load static %}
+{% block title %}Fun side quests · AtomicDB{% endblock %}
+{% block description %}Fun side quests on AtomicDB: atomic chess variants to play in the browser, against the computer or a friend.{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'atomicdb/funquests/funquests.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">{% endblock %}
+{% block content %}
+<h2 style="margin-top:0">Fun side quests</h2>
+<p class="dim fq-intro">A break from solving: atomic chess with a twist, to play right here in the browser.</p>
+<ul class="fq-list">
+  {% for q in quests %}
+  <li class="fq-card">
+    <a class="fq-card-link" href="{{ q.url }}">
+      <span class="fq-card-art" aria-hidden="true"><span class="fq-mini fq-mini-a"></span><span class="fq-mini fq-mini-b"></span></span>
+      <span class="fq-card-body">
+        <strong>{{ q.title }}</strong>
+        <span class="dim">{{ q.blurb }}</span>
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

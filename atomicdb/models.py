@@ -1637,3 +1637,54 @@ class OpeningNameFlag(models.Model):
 
     def __str__(self):
         return f'{self.name} under review ({self.position_key[:12]})'
+
+
+class AliceGame(models.Model):
+    """A game of Alice Atomic between two people (Fun side quests).
+
+    Nothing here touches the analysis tree: the game lives on its own rows
+    and its rules in ``funquests.alice_atomic``.  Each side has a private
+    random token, and the link carrying it is the only key to that side, so
+    no account is needed.  ``white_name``/``black_name`` hold the account
+    name of a signed-in player, as plain text (accounts live in the other
+    database).
+
+    ``moves`` is the whole game, space separated; ``afen`` the position now,
+    so a move is checked without replaying the game.  ``seen`` holds the
+    position digests since the last capture or pawn move, which is all that
+    threefold repetition needs.  ``version`` goes up on every change, moves
+    and offers alike, and is what the players' pages poll against.
+    """
+
+    class State(models.TextChoices):
+        WAITING = 'waiting'
+        LIVE = 'live'
+        FINISHED = 'finished'
+        ABANDONED = 'abandoned'
+
+    white_token = models.CharField(max_length=32, unique=True)
+    black_token = models.CharField(max_length=32, unique=True)
+    white_name = models.CharField(max_length=150, blank=True, default='')
+    black_name = models.CharField(max_length=150, blank=True, default='')
+    white_joined = models.BooleanField(default=False)
+    black_joined = models.BooleanField(default=False)
+    state = models.CharField(max_length=10, choices=State.choices,
+                             default=State.WAITING)
+    afen = models.CharField(max_length=200)
+    moves = models.TextField(blank=True, default='')
+    ply = models.IntegerField(default=0)
+    seen = models.TextField(blank=True, default='')
+    result = models.CharField(max_length=8, blank=True, default='')
+    reason = models.CharField(max_length=16, blank=True, default='')
+    draw_offer = models.CharField(max_length=1, blank=True, default='')
+    version = models.IntegerField(default=0)
+    creator_ip = models.GenericIPAddressField(null=True, blank=True)
+    created = models.DateTimeField(default=timezone.now)
+    updated = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [models.Index(fields=['creator_ip', 'created'],
+                                name='atomic_alicegame_ip')]
+
+    def __str__(self):
+        return f'Alice Atomic game {self.pk} ({self.state})'

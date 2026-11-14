@@ -6,6 +6,7 @@ from django.views.decorators.vary import vary_on_cookie
 from . import (active_workers, name_vote_views, page_cache, preferences,
                roots, views)
 from .conquest_map import map_api
+from .funquests import views as fun_views
 
 # Cache corta sobre las vistas de LECTURA calientes, con el mismo patron que
 # el index de OpenBench ("perf: 15s cookie-varied cache"): absorbe tormentas
@@ -72,6 +73,10 @@ _map_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.conquest_map)))
 _docs_cached = cache_page(30)(vary_on_cookie(csrf_protect(views.docs)))
 _docs_page_cached = cache_page(30)(vary_on_cookie(csrf_protect(
     views.docs_page)))
+_fun_cached = cache_page(30)(vary_on_cookie(csrf_protect(
+    fun_views.fun_index)))
+_alice_cached = cache_page(30)(vary_on_cookie(csrf_protect(
+    fun_views.alice_page)))
 def _live_for_members(view, seconds=15):
     """``view`` behind the short page cache for visitors without a session,
     and straight through for signed-in ones.
@@ -264,4 +269,17 @@ urlpatterns = [
     path('api/solve/acquire', views.api_solve_acquire),
     path('api/solve/heartbeat', views.api_solve_heartbeat),
     path('api/solve/submit', views.api_solve_submit),
+    # Fun side quests.  The two pages are static and go behind the same short
+    # cache as the docs; a game's page and its API are per player and live,
+    # so no cache on those.
+    path('fun/', _fun_cached, name='atomicdb-fun'),
+    path('fun/alice-atomic/', _alice_cached, name='atomicdb-fun-alice'),
+    path('fun/alice-atomic/play/<str:token>/', fun_views.alice_game_page,
+         name='atomicdb-fun-alice-game'),
+    path('fun/alice-atomic/api/create', fun_views.api_create),
+    path('fun/alice-atomic/api/<str:token>/join', fun_views.api_join),
+    path('fun/alice-atomic/api/<str:token>/state', fun_views.api_state),
+    path('fun/alice-atomic/api/<str:token>/move', fun_views.api_move),
+    path('fun/alice-atomic/api/<str:token>/resign', fun_views.api_resign),
+    path('fun/alice-atomic/api/<str:token>/draw', fun_views.api_draw),
 ]

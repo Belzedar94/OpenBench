@@ -1,0 +1,111 @@
+{% extends "atomicdb/base.html" %}
+{% load static %}
+{% block title %}Alice Atomic · AtomicDB{% endblock %}
+{% block description %}Alice Atomic: atomic chess on two boards. Quiet moves pass through to the other board, captures explode. Play the computer or a friend in the browser.{% endblock %}
+{% block extra_head %}{% if token %}<meta name="robots" content="noindex, nofollow">{% endif %}
+<link rel="stylesheet" href="{% static 'atomicdb/funquests/funquests.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
+<script src="{% static 'atomicdb/funquests/alice_atomic.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
+<script src="{% static 'atomicdb/funquests/alice_atomic_ui.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
+{% endblock %}
+{% block content %}
+<p class="fq-crumbs"><a href="/atomicdb/fun/">Fun side quests</a> /</p>
+<h2 style="margin-top:0">Alice Atomic</h2>
+
+<div id="alice-app"
+  data-token="{{ token }}"
+  data-api="/atomicdb/fun/alice-atomic/api/"
+  data-home="/atomicdb/fun/alice-atomic/"
+  data-csrf="{{ csrf_token }}"
+  data-pieces="{% static 'atomicdb/pieces/' %}"
+  data-rules-url="{% static 'atomicdb/funquests/alice_atomic.js' %}{% if static_version %}?v={{ static_version }}{% endif %}"
+  data-ai-url="{% static 'atomicdb/funquests/alice_atomic_ai.js' %}{% if static_version %}?v={{ static_version }}{% endif %}">
+
+  <p class="aa-error" id="aa-error" role="alert" hidden></p>
+
+  <section class="aa-setup" id="aa-setup"{% if token %} hidden{% endif %}>
+    <div class="aa-setup-card">
+      <h3>Play the computer</h3>
+      <p class="dim">It thinks for about a second a move, in your browser.</p>
+      <label>Your colour
+        <select id="aa-ai-color">
+          <option value="white">White</option>
+          <option value="black">Black</option>
+          <option value="random">Random</option>
+        </select>
+      </label>
+      <button type="button" class="aa-btn aa-btn-primary" id="aa-ai-start">Start</button>
+    </div>
+    <div class="aa-setup-card">
+      <h3>Play a friend</h3>
+      <p class="dim">You get your own private link and one to send to your friend. No account needed.</p>
+      <label>Your colour
+        <select id="aa-friend-color">
+          <option value="white">White</option>
+          <option value="black">Black</option>
+          <option value="random">Random</option>
+        </select>
+      </label>
+      <button type="button" class="aa-btn aa-btn-primary" id="aa-friend-create">Create game</button>
+      <div id="aa-friend-result" hidden></div>
+    </div>
+  </section>
+
+  <section class="aa-game" id="aa-game" hidden>
+    <div class="aa-invite" id="aa-invite" hidden>
+      <p><strong>Send this link to your opponent.</strong> The game starts when they open it.
+        Keep the address of this page: it is your own way back into the game.</p>
+      <div class="aa-invite-row">
+        <input type="text" id="aa-invite-url" readonly aria-label="Link for your opponent">
+        <button type="button" class="aa-btn" id="aa-invite-copy">Copy</button>
+      </div>
+    </div>
+    <div class="aa-banner" id="aa-banner" role="status" hidden></div>
+    <div class="aa-layout">
+      <div class="aa-boards">
+        <div class="aa-player" id="aa-player-top"></div>
+        <div class="aa-board-pair">
+          <figure class="aa-board-wrap">
+            <figcaption>Board A</figcaption>
+            <div class="aa-board" id="aa-board-a" role="grid" aria-label="Board A"></div>
+          </figure>
+          <figure class="aa-board-wrap">
+            <figcaption>Board B</figcaption>
+            <div class="aa-board" id="aa-board-b" role="grid" aria-label="Board B"></div>
+          </figure>
+        </div>
+        <div class="aa-player" id="aa-player-bottom"></div>
+        <div class="aa-promo" id="aa-promo" hidden></div>
+      </div>
+      <aside class="aa-side">
+        <p class="aa-status" id="aa-status" aria-live="polite"></p>
+        <ol class="aa-moves" id="aa-moves" aria-label="Moves"></ol>
+        <div class="aa-actions">
+          <button type="button" class="aa-btn" id="aa-flip">Flip boards</button>
+          <button type="button" class="aa-btn" id="aa-draw" hidden>Offer draw</button>
+          <button type="button" class="aa-btn aa-btn-primary" id="aa-draw-accept" hidden>Accept draw</button>
+          <button type="button" class="aa-btn" id="aa-draw-decline" hidden>Decline draw</button>
+          <button type="button" class="aa-btn aa-btn-danger" id="aa-resign">Resign</button>
+          <button type="button" class="aa-btn" id="aa-new">New game</button>
+        </div>
+        <p class="dim aa-legend">Moves are written as the board letter and the move: <code>Ae2e4</code> is the pawn on e2 of board A going to e4.
+          Dots show where the selected piece can go; a faint ring on the other board shows where it will land.</p>
+      </aside>
+    </div>
+  </section>
+</div>
+
+<section class="aa-rules" id="rules">
+  <h3>The rules</h3>
+  <ul>
+    <li><strong>Two boards.</strong> Board A starts with the usual chess position; board B starts empty. White moves first.</li>
+    <li><strong>Through the looking glass.</strong> A piece moves on the board it stands on, following the normal chess moves of that board; only pieces on that same board get in its way. A move that does not capture also needs the same square on the other board to be empty, and after the move the piece passes through to that square of the other board.</li>
+    <li><strong>Captures explode.</strong> A capture happens on the board where the move is made and explodes there: the captured piece, the capturing piece and every piece except pawns on the eight squares around it are removed from that board. The capturing piece is destroyed, so nothing passes through on a capture, and the other board does not need to be empty there. The blast never reaches the other board. Kings cannot capture.</li>
+    <li><strong>En passant.</strong> After a pawn's double step it stands on the other board. On the very next move, an enemy pawn on that same board, beside it, may take it en passant, moving to the square it passed over (that square must be empty on that board). The blast is centred on that square.</li>
+    <li><strong>Promotion</strong> works as usual. A promotion without a capture passes through to the other board like any quiet move; a capturing promotion explodes.</li>
+    <li><strong>Castling.</strong> King and rook must not have moved, the squares between them must be empty, and the king must not be in check, pass through or land on an attacked square, all on their board. The squares where the king and the rook land must also be empty on the other board, and both pass through to it.</li>
+    <li><strong>Check.</strong> A king is in check when an enemy piece on the same board attacks it, except when the two kings stand next to each other on that board: then neither checks the other. You may not leave your king in check, and you may not make a capture that blows up your own king.</li>
+    <li><strong>Winning.</strong> Blowing up the enemy king wins at once, even if your own king is left attacked. Checkmate also wins.</li>
+    <li><strong>Draws.</strong> Stalemate, the same position three times with the same player to move, fifty moves by each side without a capture or a pawn move, or a draw agreed between the players.</li>
+  </ul>
+</section>
+{% endblock %}
