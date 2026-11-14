@@ -215,3 +215,62 @@ class SharedVectorTests(SimpleTestCase):
         run = subprocess.run([node, script], capture_output=True, text=True,
                              timeout=120)
         self.assertEqual(run.returncode, 0, run.stderr or run.stdout)
+
+
+class ExperimentalVariantTests(SimpleTestCase):
+    """The experimental rule sets ('v1'..'v5'); 'v0' is everything above."""
+
+    def test_perft_from_each_start(self):
+        expected = {'v0': (20, 400, 9388), 'v1': (20, 400, 9384),
+                    'v2': (20, 400, 9388), 'v3': (36, 1296, 45370),
+                    'v4': (36, 1296, 45370), 'v5': (36, 1296, 45178)}
+        for variant, counts in expected.items():
+            start = rules.start_state(variant)
+            self.assertEqual(
+                tuple(rules.perft(start, d) for d in (1, 2, 3)), counts,
+                variant)
+
+    def test_the_quick_v0_win_is_gone_with_kings_on_b(self):
+        state = rules.start_state('v1')
+        self.assertEqual(state.castling, '')
+        for text in ('Ad2d4', 'Ag8f6'):
+            state = rules.play(state, text)
+        after = rules.play(state, 'Ad1d7')
+        self.assertIsNotNone(rules.king_location(after, 'b'))
+
+    def test_v2_capture_explodes_on_the_other_board(self):
+        state = rules.parse(
+            '4k3/8/8/2n5/2b1p3/8/3N4/4K3|8/8/8/2r5/8/1p1q4/8/8 w - - 0 1',
+            'v2')
+        after = rules.play(state, 'Ad2c4')
+        a, b = after.boards
+        sq = rules.parse_square
+        self.assertEqual(a[sq('c4')], '')    # the victim
+        self.assertEqual(a[sq('c5')], 'n')   # no blast on A
+        self.assertEqual(b[sq('c4')], '')    # the capturer exploded on B
+        self.assertEqual(b[sq('c5')], '')    # blown up on B
+        self.assertEqual(b[sq('d3')], '')
+        self.assertEqual(b[sq('b3')], 'p')   # pawns survive
+
+    def test_v2_capture_needs_the_other_square_empty(self):
+        afen = '4k3/8/8/8/2b5/8/3N4/4K3|8/8/8/8/2r5/8/8/8 w - - 0 1'
+        self.assertIn('Ad2c4', set(rules.legal_moves(rules.parse(afen))))
+        self.assertNotIn('Ad2c4',
+                         set(rules.legal_moves(rules.parse(afen, 'v2'))))
+
+    def test_v2_check_needs_a_possible_capture(self):
+        # A rook on A attacks the king on A: check, unless the king's square
+        # is taken on B, or the black king stands next to it on B.
+        base = '8/8/8/8/8/8/8/r3K3|{} w - - 0 1'
+        self.assertTrue(rules.in_check(
+            rules.parse(base.format('7k/8/8/8/8/8/8/8'), 'v2'), 'w'))
+        self.assertFalse(rules.in_check(
+            rules.parse(base.format('7k/8/8/8/8/8/8/4N3'), 'v2'), 'w'))
+        self.assertFalse(rules.in_check(
+            rules.parse(base.format('8/8/8/8/8/8/5k2/8'), 'v2'), 'w'))
+
+    def test_v3_black_can_block_the_d_file_from_b(self):
+        state = rules.play(rules.start_state('v3'), 'Ad2d4')
+        self.assertIn('Bd7d6', rules.legal_moves(state))
+        state = rules.play(state, 'Bd7d6')
+        self.assertEqual(state.boards[0][rules.parse_square('d6')], 'p')

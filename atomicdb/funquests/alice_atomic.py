@@ -50,6 +50,41 @@ import hashlib
 
 START_AFEN = ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR|8/8/8/8/8/8/8/8 '
               'w KQkq - 0 1')
+
+# EXPERIMENTAL rule sets, picked with ``variant=`` (the default 'v0' is the
+# rules above, unchanged).  Only the Python copy knows them so far.
+#
+# * 'v1', kings on B: both kings start alone on B (e1, e8), everything else
+#   on A as usual.  No castling: the rights start empty.
+# * 'v2', capture here, explode there: a capture removes the victim from the
+#   board where it is made; the capturer then passes to the same square of
+#   the OTHER board and explodes there, removing itself and every piece
+#   other than a pawn on the eight squares around it on that board.  Like
+#   every other move, a capture needs that square empty on the other board.
+#   Nothing explodes on the board where the capture was made.  A king is in
+#   check when an enemy piece on its board attacks it and that capture could
+#   be made (its square empty on the other board, and the attacker's own
+#   king not next to that square on the other board); kings side by side on
+#   the same board do check each other.
+# * 'v3', pawns on both boards: the usual start on A, and both sides' pawns
+#   also on B (ranks 2 and 7).
+# * 'v4', 'v1' plus 'v3' pawns on B in front of the kings (the kings keep a
+#   pawn shield on their own board).
+# * 'v5', 'v2' captures with the 'v3' start.
+VARIANT_STARTS = {
+    'v0': START_AFEN,
+    'v1': ('rnbq1bnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1BNR|4k3/8/8/8/8/8/8/4K3 '
+           'w - - 0 1'),
+    'v2': START_AFEN,
+    'v3': ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR|'
+           '8/pppppppp/8/8/8/8/PPPPPPPP/8 w KQkq - 0 1'),
+    'v4': ('rnbq1bnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1BNR|'
+           '4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1'),
+    'v5': ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR|'
+           '8/pppppppp/8/8/8/8/PPPPPPPP/8 w KQkq - 0 1'),
+}
+# Rule sets whose captures explode on the other board.
+CROSS_BLAST = frozenset(('v2', 'v5'))
 BOARD_LETTERS = 'AB'
 FILES = 'abcdefgh'
 
@@ -89,19 +124,23 @@ def opponent(color):
 
 
 class State:
-    __slots__ = ('boards', 'turn', 'castling', 'ep', 'halfmove', 'fullmove')
+    __slots__ = ('boards', 'turn', 'castling', 'ep', 'halfmove', 'fullmove',
+                 'variant')
 
-    def __init__(self, boards, turn, castling, ep, halfmove, fullmove):
+    def __init__(self, boards, turn, castling, ep, halfmove, fullmove,
+                 variant='v0'):
         self.boards = boards        # [list of 64, list of 64]
         self.turn = turn            # 'w' or 'b'
         self.castling = castling    # subset of 'KQkq', in that order
         self.ep = ep                # None or (board, square)
         self.halfmove = halfmove
         self.fullmove = fullmove
+        self.variant = variant
 
     def copy(self):
         return State([self.boards[0][:], self.boards[1][:]], self.turn,
-                     self.castling, self.ep, self.halfmove, self.fullmove)
+                     self.castling, self.ep, self.halfmove, self.fullmove,
+                     self.variant)
 
 
 # -- reading and writing positions -------------------------------------------
@@ -148,7 +187,9 @@ def _placement(board):
     return '/'.join(rows)
 
 
-def parse(afen):
+def parse(afen, variant='v0'):
+    if variant not in VARIANT_STARTS:
+        raise ValueError(f'unknown variant {variant!r}')
     parts = afen.split()
     if len(parts) != 6:
         raise ValueError('a position has six fields')
@@ -169,7 +210,8 @@ def parse(afen):
         ep_value = (BOARD_LETTERS.index(ep[0]), parse_square(ep[1:]))
     rights = ''.join(c for c in 'KQkq' if c in castling)
     return State([_parse_placement(halves[0]), _parse_placement(halves[1])],
-                 turn, rights, ep_value, int(halfmove), int(fullmove))
+                 turn, rights, ep_value, int(halfmove), int(fullmove),
+                 variant)
 
 
 def _ep_text(state):
@@ -194,8 +236,8 @@ def position_hash(state):
     return hashlib.sha1(position_key(state).encode()).hexdigest()[:16]
 
 
-def start_state():
-    return parse(START_AFEN)
+def start_state(variant='v0'):
+    return parse(VARIANT_STARTS[variant], variant)
 
 
 # -- attacks and check -------------------------------------------------------
@@ -256,9 +298,16 @@ def _kings_adjacent(board, sq, color):
     return False
 
 
-def _square_in_check(board, sq, color):
+def _square_in_check(board, sq, color, other=None, variant='v0'):
     """Whether a king of ``color`` standing on ``sq`` of ``board`` would be in
-    check there."""
+    check there (``other`` is the other board, needed by 'v2'/'v5')."""
+    if variant in CROSS_BLAST:
+        # The capture lands and explodes on the other board: impossible if
+        # that square is taken there, or if it would blow up the capturer's
+        # own king.
+        if other[sq] or _kings_adjacent(other, sq, color):
+            return False
+        return attacked(board, sq, opponent(color))
     if _kings_adjacent(board, sq, color):
         return False
     return attacked(board, sq, opponent(color))
@@ -269,7 +318,8 @@ def in_check(state, color):
     if loc is None:
         return False
     b, sq = loc
-    return _square_in_check(state.boards[b], sq, color)
+    return _square_in_check(state.boards[b], sq, color, state.boards[1 - b],
+                            state.variant)
 
 
 # -- move generation ---------------------------------------------------------
@@ -282,6 +332,7 @@ def move_text(move):
 def _pseudo_moves(state):
     turn = state.turn
     white = turn == 'w'
+    cross = state.variant in CROSS_BLAST
     moves = []
     for b in (0, 1):
         board = state.boards[b]
@@ -313,6 +364,8 @@ def _pseudo_moves(state):
                         continue
                     target = rr * 8 + f + df
                     victim = board[target]
+                    if cross and other[target]:
+                        continue
                     if victim and color_of(victim) != turn:
                         if rr == last_rank:
                             for p in PROMOTIONS:
@@ -333,7 +386,8 @@ def _pseudo_moves(state):
                     if not victim:
                         if not other[target]:
                             moves.append((b, sq, target, None, QUIET))
-                    elif color_of(victim) != turn and kind != 'K':
+                    elif (color_of(victim) != turn and kind != 'K'
+                          and not (cross and other[target])):
                         moves.append((b, sq, target, None, CAPTURE))
                 if kind == 'K':
                     moves.extend(_castling_moves(state, b, sq))
@@ -349,7 +403,8 @@ def _pseudo_moves(state):
                         if not other[target]:
                             moves.append((b, sq, target, None, QUIET))
                     else:
-                        if color_of(victim) != turn:
+                        if color_of(victim) != turn and not (
+                                cross and other[target]):
                             moves.append((b, sq, target, None, CAPTURE))
                         break
                     ff += df
@@ -379,7 +434,8 @@ def _castling_moves(state, b, sq):
             continue
         if other[home + king_to] or other[home + rook_to]:
             continue
-        if any(_square_in_check(board, home + f, color) for f in safe):
+        if any(_square_in_check(board, home + f, color, other, state.variant)
+               for f in safe):
             continue
         out.append((0, home + 4, home + king_to, None, CASTLE))
     return out
@@ -406,12 +462,15 @@ def apply_move(state, move):
         if kind == EN_PASSANT:
             board[to - 8 if white else to + 8] = ''
         board[to] = ''
+        # 'v2'/'v5': the capturer passes through and explodes over there
+        # (the square itself is empty there: the generator checked).
+        blasted = other if state.variant in CROSS_BLAST else board
         f, r = to % 8, to // 8
         for df, dr in KING_STEPS:
             if _on_board(f + df, r + dr):
                 n = (r + dr) * 8 + f + df
-                if board[n] and board[n] not in 'Pp':
-                    board[n] = ''
+                if blasted[n] and blasted[n] not in 'Pp':
+                    blasted[n] = ''
     else:
         if promo:
             piece = promo.upper() if white else promo
@@ -495,10 +554,11 @@ def outcome(state, repetitions=1):
     return None
 
 
-def replay(moves, afen=START_AFEN):
-    """Play ``moves`` from ``afen``.  Returns ``(state, outcome)``; raises
-    ``IllegalMove`` on the first illegal one or on a move after the end."""
-    state = parse(afen)
+def replay(moves, afen=None, variant='v0'):
+    """Play ``moves`` from ``afen`` (the variant's start by default).
+    Returns ``(state, outcome)``; raises ``IllegalMove`` on the first
+    illegal one or on a move after the end."""
+    state = parse(afen or VARIANT_STARTS[variant], variant)
     seen = {position_hash(state): 1}
     for text in moves:
         if outcome(state, seen.get(position_hash(state), 1)):
