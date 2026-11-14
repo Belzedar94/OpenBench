@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111205
+ATOMICDB_WORKER_BUILD = 2026111401
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -1071,13 +1071,23 @@ def last_complete_iteration(snapshots):
     ``lowerbound``/``upperbound``: the fail-high or fail-low of the line being
     searched when the group was printed.
 
-    So the result is the last group whose MultiPV numbers run 1, 2, 3...,
-    from line 1 down to the first bound line, whatever the depths of the
-    lines kept.  A search cut by the node limit keeps its deeper lines (a
-    128M task stored its depth-34 lines while depth 35 was half done), and
-    a search stopped at a mate keeps the mate in line 1 with everything
-    exact below it.  When line 1 itself is a bound, the group before is
-    tried the same way.  [] when no group qualifies.
+    So the result is the last WHOLE group with no bound line in it, whatever
+    the depths of its lines (Torom, 14-Nov-2026).  A search cut by the node
+    limit keeps its deeper lines (a 128M task stored its depth-34 lines
+    while depth 35 was half done).  Until 14-Nov the rule kept the last
+    group only down to its first bound line, and a node limit that hit
+    while line 2 was failing high or low left a single line: about one
+    multi-line search in five came back short, on every engine.  The group
+    before the bound is one consistent ranking with all its lines, so it is
+    the better buy even though its line 1 may be one ply shallower.
+
+    Two exceptions keep the old prefix of the last group.  A mate in line 1
+    is never thrown away for a mate-blind group before it (the mate stop
+    ends the search right there).  And when no group is free of bounds,
+    the prefix is still better than nothing.  A group shorter than the
+    longest one printed (fewer lines than asked, before the engine filled
+    them) only counts when no full-length clean group exists.  [] when no
+    group qualifies.
 
     The lines kept are always a prefix 1..k of one ranking: the search of
     line i covers every move not in lines 1..i-1, so the worst line kept
@@ -1085,18 +1095,28 @@ def last_complete_iteration(snapshots):
     is always at the deepest depth of its group, which is the depth the
     server records for the position.
     """
-    for group in reversed(snapshots):
-        if [entry['_multipv'] for entry in group] != list(
-                range(1, len(group) + 1)):
-            continue
-        kept = []
+    ordered = [group for group in snapshots
+               if [entry['_multipv'] for entry in group]
+               == list(range(1, len(group) + 1))]
+
+    prefix = []
+    for group in reversed(ordered):
         for entry in group:
             if entry['_bound']:
                 break
-            kept.append(entry)
-        if kept:
-            return _public_lines(kept)
-    return []
+            prefix.append(entry)
+        if prefix:
+            break
+    if prefix and prefix[0]['mate'] is not None:
+        return _public_lines(prefix)
+
+    clean = [group for group in ordered
+             if not any(entry['_bound'] for entry in group)]
+    if clean:
+        full = max(len(group) for group in ordered)
+        whole = [group for group in clean if len(group) == full]
+        return _public_lines((whole or clean)[-1])
+    return _public_lines(prefix)
 
 
 def _public_lines(group):
@@ -1516,6 +1536,22 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
         'tablebases (analysis stays correct, only slower in endgames)',
         flush=True)
     return None
+
+
+def split_syzygy_dirs(value, pathsep=None):
+    """The directories of a --syzygy value, in order.
+
+    The guide says ';', and that is what Windows users type.  The engine
+    wants its platform's separator: ':' on Linux and macOS, where a ';' list
+    reached it as one directory that does not exist.  So both are accepted;
+    ':' is only a separator where the platform uses it, because on Windows
+    it is part of every drive letter.
+    """
+    pathsep = os.pathsep if pathsep is None else pathsep
+    parts = value.split(';')
+    if pathsep != ';':
+        parts = [piece for part in parts for piece in part.split(pathsep)]
+    return [part for part in (p.strip() for p in parts) if part]
 
 
 def resolve_syzygy(args, server, log=print, script_path=None, get=None):
@@ -2729,10 +2765,18 @@ class SessionStats:
     def status_line(self):
         with self._lock:
             tasks, nodes, seconds = self.tasks, self.nodes, self.seconds
-        parts = [f'status: up {human_duration(self._clock() - self.started)}',
+        up = self._clock() - self.started
+        parts = [f'status: up {human_duration(up)}',
                  f"{tasks} task{'' if tasks == 1 else 's'} done"]
         if seconds > 0:
-            parts.append(f'average {human_count(nodes / seconds, 2)} nodes/s')
+            # Per engine: the speed of one search.  With several jobs the
+            # machine does that many at once, which is what the website's
+            # worker page shows, so the total over the uptime goes next to it.
+            parts.append(f'average {human_count(nodes / seconds, 2)} nodes/s '
+                         'per engine')
+            if up > 0:
+                parts.append(f'machine total {human_count(nodes / up, 2)} '
+                             'nodes/s')
         return ' | '.join(parts)
 
     def due(self):
@@ -3293,9 +3337,12 @@ def main():
                f'{AUTO_JOBS_MAX}, each with a hash sized to the free memory. '
                'Give --jobs to run fewer, wider engines and --hash to fix '
                'the table size.')
-    ap.add_argument('-U', required=True)
-    ap.add_argument('-P', required=True)
-    ap.add_argument('-S', required=True)
+    ap.add_argument('-U', required=True, metavar='USER',
+                    help='your username on the server')
+    ap.add_argument('-P', required=True, metavar='PASSWORD',
+                    help='your password on the server')
+    ap.add_argument('-S', required=True, metavar='SERVER',
+                    help='server URL, e.g. https://belzedar.duckdns.org')
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
                          'reference build is downloaded)')
@@ -3313,12 +3360,13 @@ def main():
                          f'memory, between {AUTO_HASH_MIN_MB} and '
                          f'{AUTO_HASH_MAX_MB}')
     ap.add_argument('--syzygy', default='',
-                    help='atomic TB dirs separated by ; (when given, it is '
-                         'used as-is and nothing is downloaded)')
+                    help='atomic TB dirs separated by ; (or : on Linux and '
+                         'macOS); when given, nothing is downloaded')
     ap.add_argument('--no-fetch-syzygy', action='store_true',
                     help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
                          'when --syzygy was not given')
-    ap.add_argument('--once', action='store_true')
+    ap.add_argument('--once', action='store_true',
+                    help='run a single task on one engine and exit (for testing)')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help="also print the server's raw replies and timings, "
                          'for debugging')
@@ -3362,7 +3410,9 @@ def main():
     # position to some other worker for no reason.
     tb = None
     if a.syzygy:
-        dirs = [d for d in a.syzygy.split(';') if d]
+        dirs = split_syzygy_dirs(a.syzygy)
+        # The engine gets the list in its own platform's form.
+        a.syzygy = os.pathsep.join(dirs)
         try:
             import chess.syzygy
             import chess.variant

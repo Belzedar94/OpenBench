@@ -169,9 +169,10 @@ class IterationFilterTests(SimpleTestCase):
                          ['35', '35', '34', '34', '34'])
         self.assertEqual(engine.last_nodes, 128_000_000)
 
-    def test_a_bound_in_the_middle_truncates_there(self):
-        # Line 3 failed low when the node limit hit: lines 1-2 are kept, the
-        # bound and the lines after it are not.
+    def test_a_bound_in_the_middle_takes_the_whole_group_before(self):
+        # Line 3 failed low when the node limit hit.  Until 14-Nov this kept
+        # lines 1-2 of the last group; now the last group free of bounds is
+        # sent whole, so no line asked for is lost.
         lines, _ = self.analyse(
             _info(20, 1, ('cp', 50), 1000, 'e2e4')
             + _info(20, 2, ('cp', 40), 1000, 'd2d4')
@@ -183,8 +184,50 @@ class IterationFilterTests(SimpleTestCase):
             + _info(20, 4, ('cp', 20), 1800, 'g1f3'), multipv=4)
 
         self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
-                         [('e2e4', 55), ('d2d4', 42)])
-        self.assertTrue(all('depth 21' in line['raw'] for line in lines))
+                         [('e2e4', 50), ('d2d4', 40), ('c2c4', 30),
+                          ('g1f3', 20)])
+        self.assertTrue(all('depth 20' in line['raw'] for line in lines))
+
+    def test_a_bound_in_line_two_no_longer_leaves_one_line(self):
+        # The 128M case from 14-Nov-2026: MultiPV 5, the node limit hit
+        # while line 2 was failing high.  The mixed-depth group before it
+        # (line 1 re-searched, lines 2-5 from the previous iteration) has no
+        # bound, so all five lines are kept.
+        lines, _ = self.analyse(
+            _info(30, 1, ('cp', -1290), 100_000_000, 'b7b5')
+            + _info(30, 2, ('cp', -1500), 100_000_000, 'a7a6')
+            + _info(30, 3, ('cp', -1700), 100_000_000, 'a5b4')
+            + _info(30, 4, ('cp', -1800), 100_000_000, 'h8g8')
+            + _info(30, 5, ('cp', -1900), 100_000_000, 'f8f7')
+            + _info(31, 1, ('cp', -1283), 120_000_000, 'b7b5')
+            + _info(30, 2, ('cp', -1500), 120_000_000, 'a7a6')
+            + _info(30, 3, ('cp', -1700), 120_000_000, 'a5b4')
+            + _info(30, 4, ('cp', -1800), 120_000_000, 'h8g8')
+            + _info(30, 5, ('cp', -1900), 120_000_000, 'f8f7')
+            + _info(31, 1, ('cp', -1283), 128_000_000, 'b7b5')
+            + _info(31, 2, ('cp', -1450), 128_000_000, 'a7a6',
+                    bound='lowerbound')
+            + _info(30, 3, ('cp', -1700), 128_000_000, 'a5b4')
+            + _info(30, 4, ('cp', -1800), 128_000_000, 'h8g8')
+            + _info(30, 5, ('cp', -1900), 128_000_000, 'f8f7'),
+            multipv=5)
+
+        self.assertEqual([line['move'] for line in lines],
+                         ['b7b5', 'a7a6', 'a5b4', 'h8g8', 'f8f7'])
+        self.assertEqual([line['raw'].split()[2] for line in lines],
+                         ['31', '30', '30', '30', '30'])
+        self.assertTrue(all('bound' not in line['raw'] for line in lines))
+
+    def test_without_a_clean_group_the_exact_prefix_is_kept(self):
+        # Every group has a bound somewhere: the old prefix rule still
+        # applies, rather than sending nothing.
+        lines, _ = self.analyse(
+            _info(9, 1, ('cp', 40), 1000, 'e2e4')
+            + _info(9, 2, ('cp', 35), 1000, 'd2d4', bound='upperbound')
+            + _info(9, 3, ('cp', 30), 1000, 'c2c4'), multipv=3)
+
+        self.assertEqual([(line['move'], line['eval_cp']) for line in lines],
+                         [('e2e4', 40)])
 
     def test_line_one_a_bound_falls_back_to_the_group_before(self):
         lines, _ = self.analyse(
