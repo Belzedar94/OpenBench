@@ -2436,10 +2436,13 @@ def _api_moves_route(raw, target_key):
     for ply, uci in enumerate(ucis, start=1):
         if not PLAY_UCI_RE.fullmatch(uci):
             return '', f'ply {ply} ({uci}) is not a UCI move'
+        # ``apply_move`` refuses an illegal move itself (the movegen raises,
+        # pinned pieces included) and is cached, so a walker replaying the
+        # same opening pays nothing for it; generating every legal move per
+        # ply first cost more than the whole replay (MoKy, 14-Nov-2026).
         try:
-            legal = uci in logic.legal_moves(fen)
-            if legal:
-                fen = logic.apply_move(fen, uci)
+            fen = logic.apply_move(fen, uci)
+            legal = True
         except Exception:               # noqa: BLE001
             legal = False
         if not legal:
