@@ -1071,13 +1071,23 @@ def last_complete_iteration(snapshots):
     ``lowerbound``/``upperbound``: the fail-high or fail-low of the line being
     searched when the group was printed.
 
-    So the result is the last group whose MultiPV numbers run 1, 2, 3...,
-    from line 1 down to the first bound line, whatever the depths of the
-    lines kept.  A search cut by the node limit keeps its deeper lines (a
-    128M task stored its depth-34 lines while depth 35 was half done), and
-    a search stopped at a mate keeps the mate in line 1 with everything
-    exact below it.  When line 1 itself is a bound, the group before is
-    tried the same way.  [] when no group qualifies.
+    So the result is the last WHOLE group with no bound line in it, whatever
+    the depths of its lines (Torom, 14-Nov-2026).  A search cut by the node
+    limit keeps its deeper lines (a 128M task stored its depth-34 lines
+    while depth 35 was half done).  Until 14-Nov the rule kept the last
+    group only down to its first bound line, and a node limit that hit
+    while line 2 was failing high or low left a single line: about one
+    multi-line search in five came back short, on every engine.  The group
+    before the bound is one consistent ranking with all its lines, so it is
+    the better buy even though its line 1 may be one ply shallower.
+
+    Two exceptions keep the old prefix of the last group.  A mate in line 1
+    is never thrown away for a mate-blind group before it (the mate stop
+    ends the search right there).  And when no group is free of bounds,
+    the prefix is still better than nothing.  A group shorter than the
+    longest one printed (fewer lines than asked, before the engine filled
+    them) only counts when no full-length clean group exists.  [] when no
+    group qualifies.
 
     The lines kept are always a prefix 1..k of one ranking: the search of
     line i covers every move not in lines 1..i-1, so the worst line kept
@@ -1085,18 +1095,28 @@ def last_complete_iteration(snapshots):
     is always at the deepest depth of its group, which is the depth the
     server records for the position.
     """
-    for group in reversed(snapshots):
-        if [entry['_multipv'] for entry in group] != list(
-                range(1, len(group) + 1)):
-            continue
-        kept = []
+    ordered = [group for group in snapshots
+               if [entry['_multipv'] for entry in group]
+               == list(range(1, len(group) + 1))]
+
+    prefix = []
+    for group in reversed(ordered):
         for entry in group:
             if entry['_bound']:
                 break
-            kept.append(entry)
-        if kept:
-            return _public_lines(kept)
-    return []
+            prefix.append(entry)
+        if prefix:
+            break
+    if prefix and prefix[0]['mate'] is not None:
+        return _public_lines(prefix)
+
+    clean = [group for group in ordered
+             if not any(entry['_bound'] for entry in group)]
+    if clean:
+        full = max(len(group) for group in ordered)
+        whole = [group for group in clean if len(group) == full]
+        return _public_lines((whole or clean)[-1])
+    return _public_lines(prefix)
 
 
 def _public_lines(group):
