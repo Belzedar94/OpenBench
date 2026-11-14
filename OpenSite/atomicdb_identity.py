@@ -68,6 +68,7 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_plannershadowpick',       # 0063_planner_shadow
     'atomicdb_openingnameflag',         # 0064_opening_name_votes
     'atomicdb_openingnamevote',         # 0064_opening_name_votes
+    'atomicdb_alicegame',               # 0066_alice_game
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
