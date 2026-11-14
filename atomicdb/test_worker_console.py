@@ -319,7 +319,37 @@ class SessionStatusTests(SimpleTestCase):
         now[0] += 3725
         self.assertEqual(
             stats.status_line(),
-            'status: up 1h02m | 2 tasks done | average 2.00M nodes/s')
+            'status: up 1h02m | 2 tasks done | average 2.00M nodes/s per '
+            'engine | machine total 26.85k nodes/s')
+
+    def test_the_machine_total_adds_up_the_jobs(self):
+        # Four jobs searching at once for the whole hour, 2M nodes/s each.
+        now = [0.0]
+        stats = worker.SessionStats(clock=lambda: now[0], interval=300)
+        for _ in range(4):
+            stats.record(7_200_000_000, 3600.0)
+        now[0] = 3600.0
+        self.assertIn('average 2.00M nodes/s per engine', stats.status_line())
+        self.assertIn('machine total 8.00M nodes/s', stats.status_line())
+
+
+class SyzygyDirsTests(SimpleTestCase):
+
+    def test_semicolons_work_everywhere(self):
+        self.assertEqual(worker.split_syzygy_dirs('/a;/b', pathsep=':'),
+                         ['/a', '/b'])
+        self.assertEqual(worker.split_syzygy_dirs(r'C:\a;D:\b', pathsep=';'),
+                         [r'C:\a', r'D:\b'])
+
+    def test_colons_split_only_where_they_are_the_separator(self):
+        self.assertEqual(worker.split_syzygy_dirs('/a:/b', pathsep=':'),
+                         ['/a', '/b'])
+        self.assertEqual(worker.split_syzygy_dirs(r'C:\tb', pathsep=';'),
+                         [r'C:\tb'])
+
+    def test_empty_pieces_are_dropped(self):
+        self.assertEqual(worker.split_syzygy_dirs(';/a;;/b:', pathsep=':'),
+                         ['/a', '/b'])
 
     def test_it_is_due_at_most_once_per_interval(self):
         now = [0.0]

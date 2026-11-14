@@ -1538,6 +1538,22 @@ def fetch_syzygy_set(server, directory=None, attempts=SYZYGY_FETCH_ATTEMPTS,
     return None
 
 
+def split_syzygy_dirs(value, pathsep=None):
+    """The directories of a --syzygy value, in order.
+
+    The guide says ';', and that is what Windows users type.  The engine
+    wants its platform's separator: ':' on Linux and macOS, where a ';' list
+    reached it as one directory that does not exist.  So both are accepted;
+    ':' is only a separator where the platform uses it, because on Windows
+    it is part of every drive letter.
+    """
+    pathsep = os.pathsep if pathsep is None else pathsep
+    parts = value.split(';')
+    if pathsep != ';':
+        parts = [piece for part in parts for piece in part.split(pathsep)]
+    return [part for part in (p.strip() for p in parts) if part]
+
+
 def resolve_syzygy(args, server, log=print, script_path=None, get=None):
     """The SyzygyPath the engines should use, or '' for none.
 
@@ -2749,10 +2765,18 @@ class SessionStats:
     def status_line(self):
         with self._lock:
             tasks, nodes, seconds = self.tasks, self.nodes, self.seconds
-        parts = [f'status: up {human_duration(self._clock() - self.started)}',
+        up = self._clock() - self.started
+        parts = [f'status: up {human_duration(up)}',
                  f"{tasks} task{'' if tasks == 1 else 's'} done"]
         if seconds > 0:
-            parts.append(f'average {human_count(nodes / seconds, 2)} nodes/s')
+            # Per engine: the speed of one search.  With several jobs the
+            # machine does that many at once, which is what the website's
+            # worker page shows, so the total over the uptime goes next to it.
+            parts.append(f'average {human_count(nodes / seconds, 2)} nodes/s '
+                         'per engine')
+            if up > 0:
+                parts.append(f'machine total {human_count(nodes / up, 2)} '
+                             'nodes/s')
         return ' | '.join(parts)
 
     def due(self):
@@ -3313,9 +3337,12 @@ def main():
                f'{AUTO_JOBS_MAX}, each with a hash sized to the free memory. '
                'Give --jobs to run fewer, wider engines and --hash to fix '
                'the table size.')
-    ap.add_argument('-U', required=True)
-    ap.add_argument('-P', required=True)
-    ap.add_argument('-S', required=True)
+    ap.add_argument('-U', required=True, metavar='USER',
+                    help='your username on the server')
+    ap.add_argument('-P', required=True, metavar='PASSWORD',
+                    help='your password on the server')
+    ap.add_argument('-S', required=True, metavar='SERVER',
+                    help='server URL, e.g. https://belzedar.duckdns.org')
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
                          'reference build is downloaded)')
@@ -3333,12 +3360,13 @@ def main():
                          f'memory, between {AUTO_HASH_MIN_MB} and '
                          f'{AUTO_HASH_MAX_MB}')
     ap.add_argument('--syzygy', default='',
-                    help='atomic TB dirs separated by ; (when given, it is '
-                         'used as-is and nothing is downloaded)')
+                    help='atomic TB dirs separated by ; (or : on Linux and '
+                         'macOS); when given, nothing is downloaded')
     ap.add_argument('--no-fetch-syzygy', action='store_true',
                     help=f'do not download the {SYZYGY_SET} set (1.3 GB) '
                          'when --syzygy was not given')
-    ap.add_argument('--once', action='store_true')
+    ap.add_argument('--once', action='store_true',
+                    help='run a single task on one engine and exit (for testing)')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help="also print the server's raw replies and timings, "
                          'for debugging')
@@ -3382,7 +3410,9 @@ def main():
     # position to some other worker for no reason.
     tb = None
     if a.syzygy:
-        dirs = [d for d in a.syzygy.split(';') if d]
+        dirs = split_syzygy_dirs(a.syzygy)
+        # The engine gets the list in its own platform's form.
+        a.syzygy = os.pathsep.join(dirs)
         try:
             import chess.syzygy
             import chess.variant
