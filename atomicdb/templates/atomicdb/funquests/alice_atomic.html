@@ -1,7 +1,7 @@
 {% extends "atomicdb/base.html" %}
 {% load static %}
 {% block title %}Alice Atomic · AtomicDB{% endblock %}
-{% block description %}Alice Atomic: atomic chess on two boards. Quiet moves pass through to the other board, captures explode. Play the computer or a friend in the browser.{% endblock %}
+{% block description %}Alice Atomic: atomic chess on two boards. Every move passes through to the other board, and a capturing piece explodes over there. Play the computer or a friend in the browser.{% endblock %}
 {% block extra_head %}{% if token %}<meta name="robots" content="noindex, nofollow">{% endif %}
 <link rel="stylesheet" href="{% static 'atomicdb/funquests/funquests.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
 <script src="{% static 'atomicdb/funquests/alice_atomic.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
@@ -98,12 +98,12 @@
   <h3>The rules</h3>
   <ul>
     <li><strong>Two boards.</strong> Board A starts with the usual chess position; board B starts empty. White moves first.</li>
-    <li><strong>Through the looking glass.</strong> A piece moves on the board it stands on, following the normal chess moves of that board; only pieces on that same board get in its way. A move that does not capture also needs the same square on the other board to be empty, and after the move the piece passes through to that square of the other board.</li>
-    <li><strong>Captures explode.</strong> A capture happens on the board where the move is made and explodes there: the captured piece, the capturing piece and every piece except pawns on the eight squares around it are removed from that board. The capturing piece is destroyed, so nothing passes through on a capture, and the other board does not need to be empty there. The blast never reaches the other board. Kings cannot capture.</li>
-    <li><strong>En passant.</strong> After a pawn's double step it stands on the other board. On the very next move, an enemy pawn on that same board, beside it, may take it en passant, moving to the square it passed over (that square must be empty on that board). The blast is centred on that square.</li>
-    <li><strong>Promotion</strong> works as usual. A promotion without a capture passes through to the other board like any quiet move; a capturing promotion explodes.</li>
-    <li><strong>Castling.</strong> King and rook must not have moved, the squares between them must be empty, and the king must not be in check, pass through or land on an attacked square, all on their board. The squares where the king and the rook land must also be empty on the other board, and both pass through to it.</li>
-    <li><strong>Check.</strong> A king is in check when an enemy piece on the same board attacks it, except when the two kings stand next to each other on that board: then neither checks the other. You may not leave your king in check, and you may not make a capture that blows up your own king.</li>
+    <li><strong>Through the looking glass.</strong> A piece moves on the board it stands on, following the normal chess moves of that board; only pieces on that same board get in its way. Every move, captures included, also needs the same square on the other board to be empty, and after the move the piece passes through to that square of the other board.</li>
+    <li><strong>Capture here, explode there.</strong> A capture removes the captured piece from the board where the move is made. The capturing piece then passes through to the same square of the other board, which must be empty, and explodes there: the capturing piece and every piece except pawns on the eight squares around it are removed from that other board. Nothing explodes on the board where the capture was made. Kings cannot capture.</li>
+    <li><strong>En passant.</strong> After a pawn's double step it stands on the other board. On the very next move, an enemy pawn on that same board, beside it, may take it en passant, moving to the square it passed over (that square must be empty on both boards). The capturing pawn passes through and explodes on that square of the other board.</li>
+    <li><strong>Promotion</strong> works as usual. A promotion passes through to the other board like any move; a capturing promotion explodes there.</li>
+    <li><strong>Castling.</strong> King and rook must not have moved, the squares between them must be empty, and the king must not be in check on its square, on the square it crosses or on the square it lands on, all on their board (see Check). The squares where the king and the rook land must also be empty on the other board, and both pass through to it.</li>
+    <li><strong>Check.</strong> A king is in check when an enemy piece on the same board attacks it and could really take it: the king's square must be empty on the other board, and the attacker's own king must not stand next to that square on the other board, where the explosion would take it too. Standing next to the enemy king on the same board gives no protection. You may not leave your king in check, and you may not make a capture that blows up your own king.</li>
     <li><strong>Winning.</strong> Blowing up the enemy king wins at once, even if your own king is left attacked. Checkmate also wins.</li>
     <li><strong>Draws.</strong> Stalemate, the same position three times with the same player to move, fifty moves by each side without a capture or a pawn move, or a draw agreed between the players.</li>
   </ul>

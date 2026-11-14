@@ -11,26 +11,31 @@ THE RULES, as the page explains them:
   and White moves first.
 * A move is made on the board the moving piece stands on, with ordinary chess
   movement on that board: only pieces on that board block it.
-* A move that does not capture also needs the same square on the OTHER board
-  to be empty, and the piece then passes through to that square of the other
-  board.
-* A capture explodes on the board where it is made: the captured piece, the
-  capturing piece and every piece other than a pawn on the eight squares
-  around the destination of that board are removed.  Nothing passes through
-  on a capture, so the other board does not matter for it, and the blast
-  never reaches the other board.  A king cannot capture.
+* Every move, captures included, also needs the same square on the OTHER
+  board to be empty, and the piece then passes through to that square of the
+  other board.
+* A capture removes the captured piece from the board where the capture is
+  made.  The capturing piece then passes through to the same square of the
+  OTHER board, which, as for every move, has to be empty, and explodes
+  there: it and every piece other than a pawn on the eight squares around
+  that square of the other board are removed.  Nothing explodes on the board
+  where the capture was made.  A king cannot capture.
 * En passant: after a pawn's double step the pawn stands on the other board,
   and only a pawn on THAT board may take it en passant, on the next move,
-  landing on the square the pawn passed over (which has to be empty on that
-  board).  The blast is centred on that landing square.
-* Promotion is the usual one; a promotion without capture passes through to
-  the other board like any quiet move, and a capturing promotion explodes.
+  aiming at the square the pawn passed over (which has to be empty on both
+  boards).  The capturing pawn passes through and explodes on that square of
+  the other board.
+* Promotion is the usual one; the promoted piece passes through to the other
+  board like any move, and a capturing promotion explodes there.
 * Castling: king and rook unmoved, the squares between them empty and the
-  king's start, crossing and landing squares not attacked, all on their
-  board; the king's and the rook's landing squares must be empty on the
+  king not in check (see below) on its start, crossing or landing square,
+  all on their board; the king's and the rook's landing squares must be empty on the
   other board too, and both pass through.
-* A king is in check when an enemy piece on the same board attacks it, except
-  when both kings stand next to each other on that board.  A move that leaves
+* A king is in check when an enemy piece on the same board attacks it and
+  that capture could be made: the king's square is empty on the other board,
+  and the attacker's own king does not stand next to that square on the
+  other board (the explosion would take it too).  Standing next to the
+  enemy king on the same board gives no protection.  A move that leaves
   the mover's king in check, or that blows up the mover's own king, is
   illegal.  A move that blows up the enemy king wins at once, even if the
   mover's king is left attacked.
@@ -256,10 +261,12 @@ def _kings_adjacent(board, sq, color):
     return False
 
 
-def _square_in_check(board, sq, color):
+def _square_in_check(board, other, sq, color):
     """Whether a king of ``color`` standing on ``sq`` of ``board`` would be in
-    check there."""
-    if _kings_adjacent(board, sq, color):
+    check there; ``other`` is the other board.  The capture would land and
+    explode on the other board: impossible if that square is taken there,
+    or if the blast would take the capturer's own king."""
+    if other[sq] or _kings_adjacent(other, sq, color):
         return False
     return attacked(board, sq, opponent(color))
 
@@ -269,7 +276,7 @@ def in_check(state, color):
     if loc is None:
         return False
     b, sq = loc
-    return _square_in_check(state.boards[b], sq, color)
+    return _square_in_check(state.boards[b], state.boards[1 - b], sq, color)
 
 
 # -- move generation ---------------------------------------------------------
@@ -312,6 +319,8 @@ def _pseudo_moves(state):
                     if not _on_board(f + df, rr):
                         continue
                     target = rr * 8 + f + df
+                    if other[target]:
+                        continue    # a capture passes through too
                     victim = board[target]
                     if victim and color_of(victim) != turn:
                         if rr == last_rank:
@@ -333,7 +342,8 @@ def _pseudo_moves(state):
                     if not victim:
                         if not other[target]:
                             moves.append((b, sq, target, None, QUIET))
-                    elif color_of(victim) != turn and kind != 'K':
+                    elif (color_of(victim) != turn and kind != 'K'
+                          and not other[target]):
                         moves.append((b, sq, target, None, CAPTURE))
                 if kind == 'K':
                     moves.extend(_castling_moves(state, b, sq))
@@ -349,7 +359,7 @@ def _pseudo_moves(state):
                         if not other[target]:
                             moves.append((b, sq, target, None, QUIET))
                     else:
-                        if color_of(victim) != turn:
+                        if color_of(victim) != turn and not other[target]:
                             moves.append((b, sq, target, None, CAPTURE))
                         break
                     ff += df
@@ -379,7 +389,8 @@ def _castling_moves(state, b, sq):
             continue
         if other[home + king_to] or other[home + rook_to]:
             continue
-        if any(_square_in_check(board, home + f, color) for f in safe):
+        if any(_square_in_check(board, other, home + f, color)
+               for f in safe):
             continue
         out.append((0, home + 4, home + king_to, None, CASTLE))
     return out
@@ -406,12 +417,14 @@ def apply_move(state, move):
         if kind == EN_PASSANT:
             board[to - 8 if white else to + 8] = ''
         board[to] = ''
+        # The capturer passes through to ``to`` of the other board (empty
+        # there: the generator checked) and explodes on that board.
         f, r = to % 8, to // 8
         for df, dr in KING_STEPS:
             if _on_board(f + df, r + dr):
                 n = (r + dr) * 8 + f + df
-                if board[n] and board[n] not in 'Pp':
-                    board[n] = ''
+                if other[n] and other[n] not in 'Pp':
+                    other[n] = ''
     else:
         if promo:
             piece = promo.upper() if white else promo

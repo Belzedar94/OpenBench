@@ -41,9 +41,9 @@ QUESTS = (
         'slug': 'alice-atomic',
         'title': 'Alice Atomic',
         'url': BASE_URL,
-        'blurb': ('Atomic chess on two boards. Every quiet move sends the '
-                  'piece through the looking glass to the other board; '
-                  'every capture explodes where it happens. Play the '
+        'blurb': ('Atomic chess on two boards. Every move sends the '
+                  'piece through the looking glass to the other board, '
+                  'and a capturing piece explodes over there. Play the '
                   'computer or send a link to a friend.'),
     },
 )

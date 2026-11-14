@@ -128,7 +128,8 @@
       if (legal[i].text === text) {
         var m = legal[i].move;
         var blast = m.kind === R.CAPTURE || m.kind === R.EN_PASSANT;
-        var info = { fromB: m.b, from: m.from, toB: blast ? m.b : 1 - m.b, to: m.to, blast: blast };
+        // Every move ends on the other board; a capture explodes there.
+        var info = { fromB: m.b, from: m.from, toB: 1 - m.b, to: m.to, blast: blast };
         if (m.kind === R.CASTLE) info.rook = m.to > m.from ? m.to - 1 : m.to + 1;
         return info;
       }
@@ -193,7 +194,9 @@
         if (i % 8 === 0) cell.dataset.rank = String((sq >> 3) + 1);
         if (i >= 56) cell.dataset.file = 'abcdefgh'[sq & 7];
         if (last) {
-          if (last.fromB === b && last.from === sq) cell.classList.add('aa-last');
+          if (last.fromB === b && (last.from === sq || (last.blast && last.to === sq))) {
+            cell.classList.add('aa-last');
+          }
           if (last.toB === b && last.to === sq) cell.classList.add(last.blast ? 'aa-blast' : 'aa-last');
           if (last.rook !== undefined && last.toB === b && last.rook === sq) cell.classList.add('aa-last');
         }
@@ -203,8 +206,7 @@
           var m = dests[d].move;
           if (m.b === b && m.to === sq) {
             cell.classList.add(piece ? 'aa-dest-capture' : 'aa-dest');
-          } else if (m.b !== b && m.to === sq &&
-                     m.kind !== R.CAPTURE && m.kind !== R.EN_PASSANT) {
+          } else if (m.b !== b && m.to === sq) {
             cell.classList.add('aa-landing');
           }
         }

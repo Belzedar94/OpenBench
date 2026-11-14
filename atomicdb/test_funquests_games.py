@@ -37,7 +37,8 @@ class PagesTests(TestCase):
     def test_the_game_page_explains_the_rules(self):
         response = self.client.get('/atomicdb/fun/alice-atomic/')
         self.assertContains(response, 'The rules')
-        self.assertContains(response, 'Captures explode')
+        self.assertContains(response, 'Capture here, explode there')
+        self.assertContains(response, '<strong>Check.</strong>')
         self.assertContains(response, 'En passant')
         self.assertContains(response, 'alice_atomic.js')
 
@@ -180,7 +181,7 @@ class GameFlowTests(TestCase):
     def test_blowing_up_the_king_ends_the_game(self):
         self.start()
         game = AliceGame.objects.get(white_token=self.wt)
-        game.afen = '4k3/5p2/8/7Q/8/8/8/4K3|8/8/8/8/8/8/8/8 w - - 0 1'
+        game.afen = '8/5p2/8/7Q/8/8/8/4K3|4k3/8/8/8/8/8/8/8 w - - 0 1'
         game.save()
         body = self.move(self.white, self.wt, 'Ah5f7').json()
         self.assertEqual((body['state'], body['result'], body['reason']),

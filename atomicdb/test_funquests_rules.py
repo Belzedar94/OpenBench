@@ -30,6 +30,11 @@ class PerftTests(SimpleTestCase):
         self.assertEqual(rules.perft(start, 2), 400)
         self.assertEqual(rules.perft(start, 3), 9388)
 
+    def test_count_at_depth_four(self):
+        # Depths 1 to 3 do not tell the capture rules apart (no capture can
+        # be answered yet); depth 4 does.
+        self.assertEqual(rules.perft(rules.start_state(), 4), 219784)
+
     def test_the_start_position_round_trips(self):
         self.assertEqual(rules.to_afen(rules.start_state()), rules.START_AFEN)
 
@@ -63,37 +68,50 @@ class AliceMovementTests(SimpleTestCase):
 
 class AtomicCaptureTests(SimpleTestCase):
 
-    def test_a_capture_explodes_on_its_board_only(self):
+    def test_a_capture_explodes_on_the_other_board(self):
         state = rules.parse(
-            '4k3/8/8/2n5/2b1p3/8/3N4/4K3|8/8/8/2r5/2p5/8/8/8 w - - 0 1')
+            '4k3/8/8/2n5/2b1p3/8/3N4/4K3|8/8/8/2r5/8/1p1q4/8/8 w - - 0 1')
         after = rules.play(state, 'Ad2c4')
         a, b = after.boards
-        self.assertEqual(a[rules.parse_square('c4')], '')   # the victim
-        self.assertEqual(a[rules.parse_square('d2')], '')   # the capturer
-        self.assertEqual(a[rules.parse_square('c5')], '')   # blown up
-        self.assertEqual(a[rules.parse_square('e4')], 'p')  # two files away
-        # The other board is untouched, pawn and rook alike.
-        self.assertEqual(b[rules.parse_square('c5')], 'r')
-        self.assertEqual(b[rules.parse_square('c4')], 'p')
+        sq = rules.parse_square
+        self.assertEqual(a[sq('c4')], '')    # the victim
+        self.assertEqual(a[sq('d2')], '')    # the capturer left
+        # Nothing explodes on A.
+        self.assertEqual(a[sq('c5')], 'n')
+        self.assertEqual(a[sq('e4')], 'p')
+        # The capturer passed through to B c4 and exploded there.
+        self.assertEqual(b[sq('c4')], '')
+        self.assertEqual(b[sq('c5')], '')    # blown up
+        self.assertEqual(b[sq('d3')], '')    # blown up
+        self.assertEqual(b[sq('b3')], 'p')   # pawns survive
 
-    def test_pawns_survive_the_blast(self):
-        state = rules.parse('4k3/8/8/1p6/2b5/8/3N4/4K3|8/8/8/8/8/8/8/8 w - - 0 1')
-        after = rules.play(state, 'Ad2c4')
-        self.assertEqual(after.boards[0][rules.parse_square('b5')], 'p')
-
-    def test_a_capture_does_not_need_the_other_board_empty(self):
+    def test_a_capture_needs_the_square_empty_on_the_other_board(self):
         moves = legal('4k3/8/8/8/2b5/8/3N4/4K3|8/8/8/8/2r5/8/8/8 w - - 0 1')
+        self.assertNotIn('Ad2c4', moves)
+        moves = legal('4k3/8/8/8/2b5/8/3N4/4K3|8/8/8/8/8/8/8/8 w - - 0 1')
         self.assertIn('Ad2c4', moves)
 
+    def test_pawn_captures_need_it_too(self):
+        # The pawn on A d4 may take on c5 (B c5 empty) but not on e5.
+        moves = legal(
+            '4k3/8/8/2p1p3/3P4/8/8/4K3|8/8/8/4n3/8/8/8/8 w - - 0 1')
+        self.assertIn('Ad4c5', moves)
+        self.assertNotIn('Ad4e5', moves)
+
     def test_blowing_up_the_enemy_king_wins(self):
-        state = rules.parse('4k3/5p2/8/7Q/8/8/8/4K3|8/8/8/8/8/8/8/8 w - - 0 1')
+        state = rules.parse(
+            '8/5p2/8/7Q/8/8/8/4K3|4k3/8/8/8/8/8/8/8 w - - 0 1')
         after = rules.play(state, 'Ah5f7')
         self.assertIsNone(rules.king_location(after, 'b'))
         self.assertEqual(rules.outcome(after), ('1-0', 'explosion'))
 
     def test_blowing_up_your_own_king_is_illegal(self):
-        moves = legal('k7/8/8/8/8/8/2pK4/2R5|8/8/8/8/8/8/8/8 w - - 0 1')
+        # The white king stands on B next to c2, where the rook would explode.
+        moves = legal('k7/8/8/8/8/8/2p5/2R5|8/8/8/8/8/8/3K4/8 w - - 0 1')
         self.assertNotIn('Ac1c2', moves)
+        # Next to the capture square on A, the king is safe.
+        moves = legal('k7/8/8/8/8/8/2pK4/2R5|8/8/8/8/8/8/8/8 w - - 0 1')
+        self.assertIn('Ac1c2', moves)
 
     def test_kings_cannot_capture(self):
         moves = legal('4k3/8/8/8/8/8/3p4/4K3|8/8/8/8/8/8/8/8 w - - 0 1')
@@ -101,8 +119,9 @@ class AtomicCaptureTests(SimpleTestCase):
 
     def test_an_explosion_win_beats_a_check_on_your_own_king(self):
         # White is in check on B, yet blowing up the black king is legal.
-        moves = legal('4k3/5p2/8/7Q/8/8/8/8|8/8/8/8/8/8/8/r3K3 w - - 0 1')
-        self.assertIn('Ah5f7', moves)
+        afen = '8/5p2/8/7Q/8/8/8/8|4k3/8/8/8/8/8/8/r3K3 w - - 0 1'
+        self.assertTrue(rules.in_check(rules.parse(afen), 'w'))
+        self.assertIn('Ah5f7', legal(afen))
 
 
 class CheckTests(SimpleTestCase):
@@ -111,9 +130,21 @@ class CheckTests(SimpleTestCase):
         state = rules.parse('4k3/8/8/8/8/8/8/4K3|4r3/8/8/8/8/8/8/8 w - - 0 1')
         self.assertFalse(rules.in_check(state, 'w'))
 
-    def test_kings_side_by_side_give_no_check(self):
+    def test_kings_side_by_side_still_check(self):
         state = rules.parse('8/8/8/8/3kK3/8/8/4r3|8/8/8/8/8/8/8/8 w - - 0 1')
-        self.assertFalse(rules.in_check(state, 'w'))
+        self.assertTrue(rules.in_check(state, 'w'))
+
+    def test_no_check_when_the_capture_could_not_be_made(self):
+        base = '8/8/8/8/8/8/8/r3K3|{} w - - 0 1'
+        # Check: the rook could take on e1 and explode on B e1.
+        self.assertTrue(rules.in_check(
+            rules.parse(base.format('7k/8/8/8/8/8/8/8')), 'w'))
+        # B e1 is taken: the rook cannot pass through.
+        self.assertFalse(rules.in_check(
+            rules.parse(base.format('7k/8/8/8/8/8/8/4N3')), 'w'))
+        # The black king on B f2 would be blown up.
+        self.assertFalse(rules.in_check(
+            rules.parse(base.format('8/8/8/8/8/8/5k2/8')), 'w'))
 
     def test_checkmate_and_stalemate(self):
         mate = rules.parse('k7/1Q6/2K5/8/8/8/8/8|1N6/N7/8/8/8/8/8/8 b - - 0 1')
@@ -137,6 +168,10 @@ class EnPassantTests(SimpleTestCase):
         taken = rules.play(after, 'Bd4e3')
         self.assertEqual(taken.boards[1][rules.parse_square('e4')], '')
         self.assertEqual(taken.boards[1][rules.parse_square('d4')], '')
+        # The capturing pawn exploded on A e3, without touching the kings.
+        self.assertEqual(taken.boards[0][rules.parse_square('e3')], '')
+        self.assertEqual(rules.king_location(taken, 'w'),
+                         (0, rules.parse_square('e1')))
 
     def test_no_en_passant_when_the_square_passed_over_is_taken(self):
         state = rules.parse(
@@ -171,6 +206,15 @@ class CastlingTests(SimpleTestCase):
             'r3k2r/5r2/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/8 w KQkq - 0 1')
         self.assertNotIn('Ae1g1', moves)
         self.assertIn('Ae1c1', moves)
+
+    def test_castling_past_a_rook_that_cannot_really_take(self):
+        # The rook on A e7 attacks e1, but B e1 is taken: no check there.
+        moves = legal(
+            'r3k2r/4r3/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/4N3 w KQkq - 0 1')
+        self.assertIn('Ae1g1', moves)
+        # The rook on A f7 attacks f1, but its own king stands on B f2.
+        moves = legal('r6r/5r2/8/8/8/8/8/R3K2R|8/8/8/8/8/8/5k2/8 w KQ - 0 1')
+        self.assertIn('Ae1g1', moves)
 
     def test_a_rook_that_left_loses_the_right(self):
         state = rules.parse(

@@ -29,12 +29,24 @@ HANDMADE = (
     'r3k2r/8/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/8 b KQkq - 0 1',
     # Castling through an attacked square on A.
     'r3k2r/5r2/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/8 w KQkq - 0 1',
-    # Explosion wins: Qh5xf7 blows up the king on e8.
-    '4k3/5p2/8/7Q/8/8/8/4K3|8/8/8/8/8/8/8/8 w - - 0 1',
-    # Own king next to the capture square: that capture is illegal.
-    'k7/8/8/8/8/8/2pK4/2R5|8/8/8/8/8/8/8/8 w - - 0 1',
-    # Kings side by side on A: the rook on A gives no check.
+    # Castling past a rook on A that cannot really take: B e1 is taken (no
+    # check on e1), or the black king stands on B next to e1, f1 and g1.
+    'r3k2r/4r3/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/4N3 w KQkq - 0 1',
+    'r6r/5r2/8/8/8/8/8/R3K2R|8/8/8/8/8/8/5k2/8 w KQ - 0 1',
+    # Explosion wins: Qh5xf7 on A explodes on B f7 next to the king on B e8.
+    '8/5p2/8/7Q/8/8/8/4K3|4k3/8/8/8/8/8/8/8 w - - 0 1',
+    # A capture needs its square empty on the other board: B c4 is taken.
+    '4k3/8/8/8/2b5/8/3N4/4K3|8/8/8/8/2r5/8/8/8 w - - 0 1',
+    # The blast on B takes pieces but not pawns; nothing explodes on A.
+    '4k3/8/8/2n5/2b1p3/8/3N4/4K3|8/8/8/2r5/8/1p1q4/8/8 w - - 0 1',
+    # Own king on B next to the capture square: that capture is illegal.
+    'k7/8/8/8/8/8/2p5/2R5|8/8/8/8/8/8/3K4/8 w - - 0 1',
+    # Kings side by side on A: the rook on A still checks.
     '8/8/8/8/3kK3/8/8/4r3|8/8/8/8/8/8/8/8 w - - 0 1',
+    # No check: the king's square is taken on B, or the rook's own king
+    # stands next to it on B.
+    '8/8/8/8/8/8/8/r3K3|7k/8/8/8/8/8/8/4N3 w - - 0 1',
+    '8/8/8/8/8/8/8/r3K3|8/8/8/8/8/8/5k2/8 w - - 0 1',
     # A rook on B does not check a king on A.
     '4k3/8/8/8/8/8/8/4K3|4r3/8/8/8/8/8/8/8 w - - 0 1',
     # Check on B, answered by moving or by passing through.

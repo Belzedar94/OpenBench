@@ -21,6 +21,9 @@ function kingNeighbourhood(s, color) {
   var loc = rules.kingLocation(s, color);
   if (!loc) return 0;
   var board = s.boards[loc[0]];
+  // A capture made on the other board explodes on the king's board, so
+  // enemy pieces around the king's square over there are a danger too.
+  var other = s.boards[1 - loc[0]];
   var f = loc[1] % 8, r = Math.floor(loc[1] / 8);
   var pressure = 0;
   for (var df = -2; df <= 2; df++) {
@@ -29,6 +32,10 @@ function kingNeighbourhood(s, color) {
       if (ff < 0 || ff > 7 || rr < 0 || rr > 7 || (!df && !dr)) continue;
       var p = board[rr * 8 + ff];
       if (p && p.toUpperCase() !== 'K' && rules.colorOf(p) !== color) {
+        pressure += 1;
+      }
+      var q = other[rr * 8 + ff];
+      if (q && q.toUpperCase() !== 'K' && rules.colorOf(q) !== color) {
         pressure += 1;
       }
     }

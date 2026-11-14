@@ -215,15 +215,19 @@
     return false;
   }
 
-  function squareInCheck(board, sq, color) {
-    if (kingsAdjacent(board, sq, color)) return false;
+  // Whether a king of `color` on `sq` of `board` would be in check there;
+  // `other` is the other board.  The capture would land and explode on the
+  // other board: impossible if that square is taken there, or if the blast
+  // would take the capturer's own king.
+  function squareInCheck(board, other, sq, color) {
+    if (other[sq] || kingsAdjacent(other, sq, color)) return false;
     return attacked(board, sq, opponent(color));
   }
 
   function inCheck(s, color) {
     var loc = kingLocation(s, color);
     if (!loc) return false;
-    return squareInCheck(s.boards[loc[0]], loc[1], color);
+    return squareInCheck(s.boards[loc[0]], s.boards[1 - loc[0]], loc[1], color);
   }
 
   // -- move generation -----------------------------------------------------
@@ -259,7 +263,7 @@
       if (other[home + side[3]] || other[home + side[4]]) continue;
       var unsafe = false;
       for (j = 0; j < 3; j++) {
-        if (squareInCheck(board, home + side[5][j], s.turn)) unsafe = true;
+        if (squareInCheck(board, other, home + side[5][j], s.turn)) unsafe = true;
       }
       if (unsafe) continue;
       out.push(mv(0, home + 4, home + side[3], null, CASTLE));
@@ -299,6 +303,7 @@
           for (df = -1; df <= 1; df += 2) {
             if (!onBoard(f + df, rr)) continue;
             target = rr * 8 + f + df;
+            if (other[target]) continue;  // a capture passes through too
             victim = board[target];
             if (victim && colorOf(victim) !== turn) {
               if (rr === lastRank) {
@@ -322,7 +327,7 @@
             victim = board[target];
             if (!victim) {
               if (!other[target]) moves.push(mv(b, sq, target, null, QUIET));
-            } else if (colorOf(victim) !== turn && kind !== 'K') {
+            } else if (colorOf(victim) !== turn && kind !== 'K' && !other[target]) {
               moves.push(mv(b, sq, target, null, CAPTURE));
             }
           }
@@ -339,7 +344,9 @@
             if (!victim) {
               if (!other[target]) moves.push(mv(b, sq, target, null, QUIET));
             } else {
-              if (colorOf(victim) !== turn) moves.push(mv(b, sq, target, null, CAPTURE));
+              if (colorOf(victim) !== turn && !other[target]) {
+                moves.push(mv(b, sq, target, null, CAPTURE));
+              }
               break;
             }
             ff += df; r2 += dr;
@@ -368,12 +375,14 @@
     } else if (m.kind === CAPTURE || m.kind === EN_PASSANT) {
       if (m.kind === EN_PASSANT) board[white ? to - 8 : to + 8] = '';
       board[to] = '';
+      // The capturer passes through to `to` of the other board (empty there:
+      // the generator checked) and explodes on that board.
       var f = to % 8, r = Math.floor(to / 8);
       for (var i = 0; i < 8; i++) {
         var df = KING_STEPS[i][0], dr = KING_STEPS[i][1];
         if (onBoard(f + df, r + dr)) {
           var n = (r + dr) * 8 + f + df;
-          if (board[n] && board[n] !== 'P' && board[n] !== 'p') board[n] = '';
+          if (other[n] && other[n] !== 'P' && other[n] !== 'p') other[n] = '';
         }
       }
     } else {
