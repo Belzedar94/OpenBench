@@ -10,10 +10,19 @@ demas cuando una entregaba su resultado.
 Son DOS clases de zombi, con dos guardianes distintos en el codigo vivo, y
 esta pasada es la unica para lo que se quedo colgado antes de que existieran:
 
-* SOMBREADA: su posicion ya tiene una tarea COMPLETED con presupuesto igual o
-  mayor.  El criterio es el de la fila y no el de un pase concreto.  Lo que
-  pide mas hondo que todo lo completado sigue en cola, que es lo que su autor
-  encargo.  En vivo lo cubre ``ingest_queue._absorb_shadowed``.
+* SOMBREADA: su posicion tiene una tarea COMPLETED con presupuesto igual o
+  mayor QUE TERMINO MIENTRAS ELLA ESPERABA (``completed >= created``).  El
+  criterio es el de la fila y no el de un pase concreto.  Lo que pide mas
+  hondo que todo lo completado sigue en cola, que es lo que su autor encargo.
+  En vivo lo cubre ``ingest_queue._absorb_shadowed``.
+
+  Una tarea creada DESPUES de esa busqueda no es un duplicado: es una decision
+  de volver a buscar, y quien la creo ya tenia la busqueda delante.  Sin ese
+  corte esta pasada se llevaba cada hora la cola entera del barrido +16
+  (§ atomicdb.sweep), que por definicion repite a 128M una posicion ya buscada
+  a 128M: 8.860 tareas entre el 11 y el 13-nov-2026.  Lo mismo les pasaba a
+  las del selector sobre posiciones interiores, que desde el 11-nov tambien
+  se quedan en 128M.
 * SOBRE POSICION CERRADA: su posicion ya no esta en 'UNKNOWN'.  El selector
   salta lo que no esta abierto (``views.choose_pending``), asi que no la sirve
   nadie nunca; y la absorcion por analisis solo dispara cuando un analisis
@@ -59,14 +68,16 @@ class Command(BaseCommand):
         # condiciones, y un total que la sume dos veces no es un total.  La
         # frontera es el estado de la posicion, asi que se corta ahi.
         closed = pending.exclude(position__status='UNKNOWN')
-        # La subconsulta correlacionada pregunta por fila "hay algo COMPLETED
-        # aqui que ya cubra mi presupuesto?", que es justo la pregunta que
-        # nadie hacia.
+        # La subconsulta correlacionada pregunta por fila "ha terminado aqui,
+        # mientras yo esperaba, algo que ya cubra mi presupuesto?".  El corte
+        # de tiempo es lo que separa un duplicado de una repeticion pedida a
+        # proposito (ver arriba).
         shadowed = pending.filter(position__status='UNKNOWN').filter(
             Exists(AnalysisTask.objects.filter(
                 position_id=OuterRef('position_id'),
                 state=AnalysisTask.TState.COMPLETED,
-                budget_nodes__gte=OuterRef('budget_nodes'))))
+                budget_nodes__gte=OuterRef('budget_nodes'),
+                completed__gte=OuterRef('created'))))
         if options['dry_run']:
             self.stdout.write(
                 'absorb_shadowed_tasks: %d sombreadas + %d sobre posicion '
