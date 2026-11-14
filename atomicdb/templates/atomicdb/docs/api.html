@@ -164,6 +164,10 @@ does not have is seeded (added) rather than refused.</p>
   {{ subtree_cap }} searches of 128M below the position.</td></tr>
 <tr><td><code>only_if_missing=1</code></td><td>Optional. Only make sure a
   search exists; see below.</td></tr>
+<tr><td><code>moves</code></td><td>Optional. The line that reached the
+  position, as UCI moves from the start position separated by commas or
+  spaces (<code>moves=g1f3,f7f6,b1c3</code>). The queue pages and their
+  explorer links then show your request in that move order; see below.</td></tr>
 </table></div>
 <p>Session cookies are deliberately ignored here, so a page open in your
 browser cannot spend your queue behind your back.</p>
@@ -195,6 +199,22 @@ a target (the rung you picked, or the first one):</p>
   <code>budget=10000000000</code>.</li>
 </ul>
 
+<p><strong>Your move order.</strong> The tree reaches most positions by
+several move orders, and a request sent with only a FEN is listed under the
+one the tree uses for that position, which may not be the one you played.
+Send <code>moves</code> to have it listed under yours:</p>
+<ul>
+<li>It only changes how the request is shown. What is searched, how deep,
+  and where it sits in the queue are exactly the same with or without it.</li>
+<li>Every move must be legal, the line must end at <code>fen</code>, must not
+  repeat a position, must be at most 64 plies long, and every position on it
+  must already be in the tree. Otherwise the line is left out, the request
+  goes ahead as if it had not been sent, and the reply says why in
+  <code>moves_ignored</code>.</li>
+<li>A request keeps the first line it was given. Asking again with another
+  line does not change it.</li>
+</ul>
+
 <h4>The reply</h4>
 <div class="docs-table-wrap"><table>
 <tr><th>Field</th><th>Meaning</th></tr>
@@ -212,6 +232,10 @@ a target (the rung you picked, or the first one):</p>
   request somebody else had already made.</td></tr>
 <tr><td><code>seeded</code></td><td>The FEN was not in the tree and was
   added by this call.</td></tr>
+<tr><td><code>moves</code></td><td>Only when you sent <code>moves</code>:
+  the line the request is shown with, comma separated.</td></tr>
+<tr><td><code>moves_ignored</code></td><td>Only when you sent
+  <code>moves</code> and it was not used: why.</td></tr>
 </table></div>
 <div class="docs-table-wrap"><table>
 <tr><th><code>status</code></th><th>Meaning</th></tr>
@@ -250,7 +274,8 @@ a target (the rung you picked, or the first one):</p>
 <li><code>POST /atomicdb/api/my-queue/</code> with <code>username</code> and
   <code>password</code> (your OpenBench credentials, same as a worker) returns
   your PENDING and LEASED requests: task ids, position keys, budgets, state,
-  and the <code>bump</code> / <code>cancel</code> paths each row accepts. A
+  <code>moves</code> (the line the request is shown with, empty when it has
+  none), and the <code>bump</code> / <code>cancel</code> paths each row accepts. A
   logged-in browser can simply <code>GET</code> it.</li>
 <li>The ids plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
   and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code>, with the same

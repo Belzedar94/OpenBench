@@ -1831,6 +1831,10 @@ def api_my_queue(request):
               'state': t.state,
               'queue_seq': t.queue_seq,
               'backed': False,
+              # The line the request shows on the queue pages (comma
+              # separated UCI from the start position), '' when none was
+              # declared and the canonical path is shown.  Additive.
+              'moves': t.route,
               'bump': '/atomicdb/api/queue-bump/%d/' % t.id,
               'cancel': '/atomicdb/api/queue-cancel/%d/' % t.id}
              for t in rows[:200]]
@@ -1846,6 +1850,7 @@ def api_my_queue(request):
          'state': t.state,
          'queue_seq': t.queue_seq,
          'backed': True,
+         'moves': t.route,
          'bump': None,
          'cancel': None}
         for t in _backed_by(account, live)[:max(0, 200 - len(tasks))])
@@ -2388,8 +2393,76 @@ def _validated_route_for(raw_route, key):
         return ''
 
 
+# THE LINE A SCRIPT PLAYED, for the queue and the explorer link only.
+#
+# Community request (MoKy, 14-Nov-2026, approved by the owner): a bot that
+# sends only a FEN sees its request on the queue pages under the canonical
+# path of the tree, another move order, and cannot recognise its own opening.
+# ``moves`` on ``api/request`` carries the line from the start position and
+# ends up in ``AnalysisTask.route``, the same field the explorer button fills
+# from its ``?play=``.  It is a LABEL: nothing in the ladder, the dedup, the
+# queue order, the budgets or the propagation reads it.  It does not create
+# positions either: every position of the line must already be in the tree,
+# because the queue and the explorer can only show a line whose positions
+# exist (§ ``_validated_play_route``), and materialising them would add edges
+# to the tree from a request.
+#
+# The cap is the explorer's own (``PLAY_ROUTE_MAX_PLIES``): a longer line
+# could be stored but never shown, since the ``?play=`` link refuses it.
+API_MOVES_MAX_PLIES = PLAY_ROUTE_MAX_PLIES
+API_MOVES_MAX_CHARS = API_MOVES_MAX_PLIES * 8
+
+
+def _api_moves_route(raw, target_key):
+    """``(route, '')`` for a usable ``moves`` line, or ``('', reason)``.
+
+    ``raw`` is a list of UCI moves from the start position, separated by
+    commas or spaces.  The route comes back in the stored form (comma
+    separated, lower case).  A line that cannot be used never fails the
+    request: the caller says why it was left out (``moves_ignored``) and the
+    request goes on exactly as it would have without it.
+    """
+    raw = (raw or '').strip()
+    if len(raw) > API_MOVES_MAX_CHARS:
+        return '', f'the line is longer than {API_MOVES_MAX_PLIES} plies'
+    ucis = [token.lower() for token in re.split(r'[\s,]+', raw) if token]
+    if not ucis:
+        return '', ''
+    if len(ucis) > API_MOVES_MAX_PLIES:
+        return '', f'the line is longer than {API_MOVES_MAX_PLIES} plies'
+    fen = logic.start_fen()
+    keys = [logic.key_of(fen)]
+    seen = {keys[0]}
+    for ply, uci in enumerate(ucis, start=1):
+        if not PLAY_UCI_RE.fullmatch(uci):
+            return '', f'ply {ply} ({uci}) is not a UCI move'
+        try:
+            legal = uci in logic.legal_moves(fen)
+            if legal:
+                fen = logic.apply_move(fen, uci)
+        except Exception:               # noqa: BLE001
+            legal = False
+        if not legal:
+            return '', (f'ply {ply} ({uci}) is not a legal move in that '
+                        'position')
+        key = logic.key_of(fen)
+        if key in seen:
+            return '', f'the line repeats a position at ply {ply}'
+        seen.add(key)
+        keys.append(key)
+    if keys[-1] != target_key:
+        return '', 'the line does not end at the requested position'
+    known = set(Position.objects.filter(key__in=keys)
+                .values_list('key', flat=True))
+    if any(key not in known for key in keys):
+        return '', ('the line goes through positions AtomicDB does not '
+                    'have yet')
+    return ','.join(ucis), ''
+
+
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
-                   only_if_missing=False, with_place=True, one_search=False):
+                   only_if_missing=False, with_place=True, one_search=False,
+                   checked_route=None):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2471,7 +2544,10 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     # entrar hacia que cada click repetido — que es la salida comun de un
     # explorador — pagase un rejuego entero para acabar diciendo
     # 'already-requested'.
-    route = _validated_route_for(raw_route, pos.key)
+    # ``checked_route`` is a route its door validated already
+    # (§ ``_api_moves_route``), so it is not replayed a second time.
+    route = (checked_route if checked_route is not None
+             else _validated_route_for(raw_route, pos.key))
     # Task creation/promotion and its rate-limit receipt are one commit.  A
     # lock while writing RequestLog must roll the task mutation back as well;
     # otherwise a browser retry could accidentally request the next rung.
@@ -2895,9 +2971,20 @@ def api_public_request(request):
             # y el bucle que hay que acotar es justamente el que pregunta lo
             # mismo mil veces.
             ApiRequestLog.objects.create(account=username, ip=ip)
+        # The line the caller played to get here, a label for the queue and
+        # the explorer link and nothing more (§ ``_api_moves_route``).  Read
+        # after the seeding, so a FEN this call added is already a position
+        # the line can end on.
+        moves_sent = bool((request.POST.get('moves') or '').strip())
+        route, moves_reason = ('', '')
+        if moves_sent:
+            route, moves_reason = _api_moves_route(
+                request.POST.get('moves'), pos.key)
+            moves_sent = bool(route or moves_reason)
         payload, status = _queue_request(
             pos, ip, requested_by=username, chosen=chosen,
-            only_if_missing=only_if_missing)
+            only_if_missing=only_if_missing,
+            checked_route=route if moves_sent else None)
     except OperationalError as error:
         # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
         # grande puede rechazar la subida a escritura, y ningun efecto quedo
@@ -2931,9 +3018,45 @@ def api_public_request(request):
         # para adelantarla.
         'backed': backed,
     })
+    if moves_sent:
+        payload.update(_api_moves_outcome(payload, task, route, moves_reason))
     if payload['status'] in _REQUEST_REFUSALS:
         payload['reason'] = _REQUEST_REFUSALS[payload['status']]
     return JsonResponse(payload, status=status)
+
+
+def _api_moves_outcome(payload, task, route, reason):
+    """What the reply says about ``moves``: ``{'moves': ...}`` or
+    ``{'moves_ignored': reason}``.  Only when the caller sent a line, so a
+    reply to a call without one keeps exactly the fields it always had.
+
+    THE FIRST LINE STAYS.  A live request that already shows a line keeps
+    it, whoever asks again and with whatever line: the label belongs to the
+    request, and a queue row that changed its move order on every repeated
+    call would be as unrecognisable as the canonical one.  A live request
+    with no line yet takes this one, also when the call was answered
+    ``already-requested`` (the caller's own request, asked again with the
+    line this time) or joined a request already on an engine, which the
+    purchase path leaves untouched.  Only the empty label is written, and
+    nothing else on the row.
+    """
+    if reason:
+        return {'moves_ignored': reason}
+    if task is None:
+        if payload.get('subtree'):
+            # The searches below carry the line, one move longer each
+            # (§ ``ingest._expand_frontier``).
+            return {'moves': route}
+        return {'moves_ignored': 'no request is waiting on this position, '
+                                 'so there is nothing to label'}
+    if payload.get('status') in ('queued', 'already-queued',
+                                 'already-requested') and not task.route:
+        if AnalysisTask.objects.filter(pk=task.pk, route='').update(
+                route=route):
+            task.route = route
+    if task.route == route:
+        return {'moves': route}
+    return {'moves_ignored': 'this request already shows another line'}
 
 
 # La frase que acompana a cada negativa que el camino comun puede devolver.
