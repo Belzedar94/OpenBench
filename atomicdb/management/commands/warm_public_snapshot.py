@@ -21,13 +21,22 @@ lo unico que se pierde es que la cifra sea un poco mas reciente.  Por eso el
 timer no lleva ``Requires=`` de nadie y por eso esto sale con codigo 0
 incluso cuando una medida revienta: un calentador que tumba lo que calienta
 seria peor que no tenerlo.
+
+TAMBIEN RELLENA LAS SUSCRIPCIONES A LOS BACKLOGS (§ backlog.top_up), despues
+de republicar y por separado: un paso acotado (40 suscripciones, ningun
+arranque pasados 30 s) que adopta la siguiente tanda para quien se esta
+quedando sin posiciones adoptadas esperando.  Vive aqui y no en el selector
+porque este servicio arranca en limpio cada cinco minutos (un deploy no
+necesita reiniciar nada) y porque el selector tarda mas de una hora por
+pasada.  Si falla, lo dice en stderr y sale con codigo 0, como la
+republicacion; ``--no-backlog-top-up`` lo salta.
 """
 
 import time
 
 from django.core.management.base import BaseCommand
 
-from atomicdb import metrics
+from atomicdb import backlog, metrics
 
 
 class Command(BaseCommand):
@@ -38,8 +47,16 @@ class Command(BaseCommand):
         parser.add_argument(
             '--quiet', action='store_true',
             help='No imprimir nada salvo que falle algo.')
+        parser.add_argument(
+            '--no-backlog-top-up', action='store_true',
+            help='No rellenar las suscripciones a los backlogs.')
 
     def handle(self, *args, **options):
+        self._republish(options)
+        if not options['no_backlog_top_up']:
+            self._top_up(options)
+
+    def _republish(self, options):
         started = time.monotonic()
         try:
             keys = metrics.refresh_public_snapshot()
@@ -53,3 +70,20 @@ class Command(BaseCommand):
         if not options['quiet']:
             self.stdout.write('warm_public_snapshot: %d entradas en %.1fs'
                               % (len(keys), time.monotonic() - started))
+
+    def _top_up(self, options):
+        started = time.monotonic()
+        try:
+            summary = backlog.top_up()
+        except Exception as exc:            # noqa: BLE001
+            self.stderr.write('backlog top-up: failed (%s: %s)'
+                              % (type(exc).__name__, exc))
+            return
+        if summary['errors']:
+            self.stderr.write('backlog top-up: %d error(s), see the log'
+                              % summary['errors'])
+        if summary['checked'] and not options['quiet']:
+            self.stdout.write(
+                'backlog top-up: checked=%(checked)d topped_up=%(topped_up)d '
+                'adopted=%(adopted)d ended=%(ended)d deferred=%(deferred)d'
+                % summary + ' in %.1fs' % (time.monotonic() - started))

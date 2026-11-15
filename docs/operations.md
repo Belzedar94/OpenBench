@@ -326,6 +326,15 @@ de la petición podía publicar en ellas.
   (§ `metrics.shared_snapshot`); lo único que se pierde al apagarlo es que la
   cifra sea reciente. Para volver:
   `systemctl enable --now atomicdb-snapshot.timer`.
+- **Suscripciones a los backlogs** (desde #256): el mismo
+  `warm_public_snapshot`, después de republicar, pasa por las suscripciones
+  activas (`BacklogSubscription`) y adopta la siguiente tanda para quien
+  tenga menos de media tanda de ese backlog esperando, con `backlog.adopt`
+  (mismos topes y el mismo recibo `LANE_CAP_HIT`). Acotado: 40 suscripciones
+  y ningún arranque pasados 30 s por pasada; un fallo sale en stderr y el
+  comando sigue saliendo con 0. Si apagas el timer, las suscripciones se
+  quedan quietas. Para saltarlo sin apagar el timer: `--no-backlog-top-up` en
+  el `ExecStart`. Pasada a mano: `manage.py atomicdb_backlog top-up`.
 - **Palanca de emergencia**: `redis-cli -n 1 FLUSHDB`. Un `systemctl restart
   openbench` ya **no** vacía estas cachés — antes sí, porque vivían dentro
   de los workers.
