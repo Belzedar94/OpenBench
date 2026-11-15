@@ -246,13 +246,12 @@
 }
 
 /* Blast area of the selected piece's captures, on the board where it lands. */
-.aa-zone {
-  background-image: repeating-linear-gradient(45deg,
-    rgba(232, 120, 40, .32) 0 5px, rgba(232, 120, 40, 0) 5px 10px);
-}
-.aa-zone-hot { box-shadow: inset 0 0 0 100vmax rgba(232, 120, 40, .5); }
-.aa-doomed { outline: 2px dashed rgba(215, 55, 0, .95); outline-offset: -3px; }
-.aa-doomed img { filter: drop-shadow(0 0 3px #ff6a00) drop-shadow(0 0 2px #ff6a00); }
+/* Only pieces a capture would really remove turn red; the one pointed at
+   turns deep red. */
+.aa-doomed { box-shadow: inset 0 0 0 100vmax rgba(220, 30, 30, .38); }
+.aa-doomed img { filter: drop-shadow(0 0 3px #ff1f1f) drop-shadow(0 0 2px #ff1f1f); }
+.aa-doomed.aa-zone-hot,
+.aa-zone-hot { box-shadow: inset 0 0 0 100vmax rgba(200, 0, 0, .7); }
 
 /* One-board view: both boards on one grid. */
 .aa-board-pair.aa-combined {
@@ -263,7 +262,7 @@
 .aa-on-b img { opacity: .5; filter: saturate(.7); }
 .aa-on-b.aa-doomed img {
   opacity: .7;
-  filter: saturate(.7) drop-shadow(0 0 3px #ff6a00) drop-shadow(0 0 2px #ff6a00);
+  filter: saturate(.7) drop-shadow(0 0 3px #ff1f1f) drop-shadow(0 0 2px #ff1f1f);
 }
 
 .aa-badge,

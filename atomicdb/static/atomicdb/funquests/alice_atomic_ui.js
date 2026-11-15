@@ -187,9 +187,9 @@
 
   // What the selected piece's moves do, per board and square: where it may
   // go (dest) and on which board it lands (land), the landing square on the
-  // other board, and for captures the blast area there (zone; blastArea on
-  // the capture square lists it for the hover preview) with the
-  // pieces it would remove (doomed: everything but pawns, not the centre).
+  // other board, and for captures the pieces the blast there would remove
+  // (doomed: everything but pawns around the landing square; blastArea on
+  // the capture square lists them for the hover preview).
   function selectionMarks(s, dests) {
     var marks = [{}, {}];
     function at(b, sq) { return marks[b][sq] || (marks[b][sq] = {}); }
@@ -201,14 +201,15 @@
       here.land = land;
       at(land, m.to).landing = true;
       if (!capture) return;
-      here.blastArea = [m.to].concat(neighbours(m.to));
-      at(land, m.to).zone = true;
-      neighbours(m.to).forEach(function (n) {
-        var mark = at(land, n);
-        mark.zone = true;
+      // Only what really disappears is marked: the non-pawn pieces around
+      // the landing square on the board where the blast happens.
+      var doomed = neighbours(m.to).filter(function (n) {
         var p = s.boards[land][n];
-        if (p && p !== 'P' && p !== 'p') mark.doomed = true;
+        return p && p !== 'P' && p !== 'p';
       });
+      here.blastArea = doomed;
+      here.blastBoard = land;
+      doomed.forEach(function (n) { at(land, n).doomed = true; });
     });
     return marks;
   }
@@ -298,11 +299,11 @@
             if (mark.blastArea) {
               cell.dataset.zone = mark.blastArea.join(',');
               cell.dataset.zoneGrid = String(combined ? 0 : mark.land);
+              cell.dataset.zoneBoard = String(mark.blastBoard);
             }
           } else if (mark.landing && !combined) {
             cell.classList.add('aa-landing');
           }
-          if (mark.zone) cell.classList.add('aa-zone');
           if (mark.doomed && pb === b) cell.classList.add('aa-doomed');
         }
         cell.setAttribute('aria-label', label);
@@ -316,8 +317,12 @@
     clearZone();
     if (!cell || !cell.dataset.zone) return;
     var grid = els.boards[Number(cell.dataset.zoneGrid)];
+    var board = cell.dataset.zoneBoard;
     cell.dataset.zone.split(',').forEach(function (sq) {
-      var target = grid.querySelector('.aa-sq[data-sq="' + sq + '"]');
+      // In the one-board view a square shows whichever board holds a piece
+      // there; only the piece on the blast's board is the one removed.
+      var target = grid.querySelector('.aa-sq[data-sq="' + sq + '"][data-b="' + board + '"]')
+        || (combined ? null : grid.querySelector('.aa-sq[data-sq="' + sq + '"]'));
       if (target) target.classList.add('aa-zone-hot');
     });
   }
