@@ -3,6 +3,7 @@ from django.views.decorators.cache import cache_page
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
+from . import backlog
 from . import (active_workers, name_vote_views, page_cache, preferences,
                roots, views)
 from .conquest_map import map_api
@@ -224,6 +225,9 @@ urlpatterns = [
     # vaciarle la cola a otro.
     path('queue/clear/', views.api_queue_clear,
          name='atomicdb-queue-clear'),
+    # Adopt a batch of a community backlog as your own requests.  Writes and
+    # belongs to the session, like the two above: no cache.
+    path('queue/adopt/', backlog.api_adopt, name='atomicdb-queue-adopt'),
     # One account's requests only, without the rest of its profile.  After
     # every fixed ``queue/<word>/`` route above, so none of them is shadowed;
     # same short cache as the anonymous page.

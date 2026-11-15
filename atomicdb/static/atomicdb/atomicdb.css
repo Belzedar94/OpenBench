@@ -3699,3 +3699,21 @@ html[data-board="custom"] cg-board {
 @media (max-width: 640px) {
   .namevote-btn { padding: .15rem .4rem; }
 }
+
+/* The community backlog box of the queue page: one row per backlog and its
+   Adopt buttons side by side, wrapping on a phone. */
+.backlog-box { margin-top: 1.6rem; }
+.backlog-intro, .backlog-note { max-width: 46rem; font-size: .9rem; }
+.backlog-table td { vertical-align: top; }
+.backlog-about { max-width: 32rem; font-size: .8rem; }
+.backlog-adopt { white-space: nowrap; }
+.backlog-adopt form { display: inline; margin: 0 .3rem .3rem 0; }
+.backlog-adopt button {
+  padding: .2rem .6rem; border: 1px solid var(--accent); border-radius: 4px;
+  background: none; color: var(--accent); font: inherit; font-size: .85rem;
+  cursor: pointer;
+}
+.backlog-adopt button:hover { background: var(--accent); color: var(--bg); }
+@media (max-width: 640px) {
+  .backlog-adopt { white-space: normal; }
+}
