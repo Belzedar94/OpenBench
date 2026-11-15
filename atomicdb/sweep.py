@@ -72,7 +72,7 @@ from django.db.models import Q
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from . import ingest
+from . import idle_repair, ingest
 from .database import atomic
 from .models import AnalysisTask, DBEvent, Edge, Position
 
@@ -80,7 +80,15 @@ logger = logging.getLogger(__name__)
 
 SWEEP_ARM = ingest.SWEEP16_ARM
 SWEEP_EVENT = 'SWEEP16_ENQUEUED'
-SWEEP_NODES = ingest.REQUEST_BUDGET_LADDER[0]          # 128M
+# 128M plus the repair arm's overbid (§ idle_repair.REPAIR_OVERBID_PER_MILLE):
+# 128,640,000.  A new search only replaces the one a position shows if it ran
+# at least as many nodes, and engines stop a little past their budget, so at
+# exactly 128M a sweep search lost to the August 128M search it re-does about
+# as often as not (15-Nov-2026: of the last 3,000 sweep searches, ~1,800
+# neither closed their position nor replaced the shown search; MoKy's report).
+# Still the 128M rung for every reader of the ladder.
+SWEEP_NODES = (ingest.REQUEST_BUDGET_LADDER[0]
+               * (1000 + idle_repair.REPAIR_OVERBID_PER_MILLE) // 1000)
 SWEEP_MULTIPV = 1
 SWEEP_LOW_CP = 1600
 SWEEP_HIGH_CP = ingest.MATE_BAND                       # 9000, excluded
