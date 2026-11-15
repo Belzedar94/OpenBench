@@ -182,7 +182,7 @@ def _multipv(backlog, visits):
 def counts(fresh=False):
     """``{backlog: {'open': n, 'adopted': n, 'adopters': n}}``.
 
-    Two GROUP BY over the list, behind a short cache: the queue page is
+    One GROUP BY over the list, behind a short cache: the queue page is
     public and the numbers only move when someone adopts or a loader runs.
     """
     if not fresh:
@@ -191,7 +191,8 @@ def counts(fresh=False):
             return cached
     out = {name: {'open': 0, 'adopted': 0, 'adopters': 0} for name in ORDER}
     for row in (BacklogItem.objects.values('backlog', 'state')
-                .annotate(n=Count('id'))):
+                .annotate(n=Count('id'),
+                          people=Count('adopted_by', distinct=True))):
         entry = out.get(row['backlog'])
         if entry is None:
             continue
@@ -199,11 +200,7 @@ def counts(fresh=False):
             entry['open'] = row['n']
         elif row['state'] == BacklogItem.State.ADOPTED:
             entry['adopted'] = row['n']
-    for row in (BacklogItem.objects.filter(state=BacklogItem.State.ADOPTED)
-                .values('backlog')
-                .annotate(n=Count('adopted_by', distinct=True))):
-        if row['backlog'] in out:
-            out[row['backlog']]['adopters'] = row['n']
+            entry['adopters'] = row['people']
     cache.set(COUNTS_CACHE_KEY, out, COUNTS_CACHE_SECONDS)
     return out
 
