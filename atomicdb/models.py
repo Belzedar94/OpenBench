@@ -1688,3 +1688,43 @@ class AliceGame(models.Model):
 
     def __str__(self):
         return f'Alice Atomic game {self.pk} ({self.state})'
+
+
+class BacklogItem(models.Model):
+    """One position of a community backlog, waiting for someone to adopt it.
+
+    A backlog is a list of re-searches the tree needs but the server only
+    buys when nobody is requesting anything, which is rarely.  Anyone signed
+    in can adopt a batch from the queue page: each adopted position becomes
+    that account's own request (§ ``atomicdb.backlog``), so its workers serve
+    it first and it shows in its queue.
+
+    Filled by ``manage.py atomicdb_backlog``.  A row only records the offer
+    and who took it; the search itself is an ordinary ``AnalysisTask``, and
+    nothing here decides a value.
+    """
+
+    class State(models.TextChoices):
+        OPEN = 'open'          # waiting for someone to adopt it
+        ADOPTED = 'adopted'    # a request was queued for it (``task_id``)
+        DROPPED = 'dropped'    # no longer needed when someone came for it
+
+    backlog = models.CharField(max_length=16)
+    position_key = models.CharField(max_length=64)
+    state = models.CharField(max_length=8, choices=State.choices,
+                             default=State.OPEN)
+    # Why a dropped row went (§ ``backlog`` for the words).
+    reason = models.CharField(max_length=16, blank=True, default='')
+    adopted_by = models.CharField(max_length=64, blank=True, default='')
+    adopted_at = models.DateTimeField(null=True, blank=True)
+    task_id = models.BigIntegerField(null=True, blank=True)
+    added = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['backlog', 'position_key'], name='uniq_backlog_item')]
+        indexes = [models.Index(fields=['backlog', 'state', 'id'],
+                                name='atomic_backlog_state')]
+
+    def __str__(self):
+        return f'{self.backlog} {self.position_key[:12]} ({self.state})'
