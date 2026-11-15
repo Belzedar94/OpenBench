@@ -7,8 +7,10 @@
  * (require).
  *
  * Position text: "<board A>|<board B> <side> <castling> <en passant>
- * <halfmove> <fullmove>", each board a FEN piece placement, en passant "-" or
- * board letter plus square ("Be3").  Move text: board letter plus UCI
+ * <halfmove> <fullmove>", each board a FEN piece placement.  There is no en
+ * passant: the field is always written "-", and a board letter plus square
+ * there ("Be3", as positions were written before it was dropped) is read and
+ * ignored.  Move text: board letter plus UCI
  * ("Ae2e4", "Bd7d8q", "Ae1g1").  Squares are 0..63, a1 = 0, a8 = 56; an
  * empty square is "".
  */
@@ -32,8 +34,7 @@
   var BISHOP_DIRS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
   var QUEEN_DIRS = ROOK_DIRS.concat(BISHOP_DIRS);
   var PROMOTIONS = 'qrbn';
-  var QUIET = 'q', DOUBLE = 'd', CAPTURE = 'c', EN_PASSANT = 'e',
-    CASTLE = 'k';
+  var QUIET = 'q', DOUBLE = 'd', CAPTURE = 'c', CASTLE = 'k';
 
   function squareName(sq) {
     return FILES[sq % 8] + String(Math.floor(sq / 8) + 1);
@@ -54,7 +55,6 @@
       boards: [s.boards[0].slice(), s.boards[1].slice()],
       turn: s.turn,
       castling: s.castling,
-      ep: s.ep ? [s.ep[0], s.ep[1]] : null,
       halfmove: s.halfmove,
       fullmove: s.fullmove,
     };
@@ -115,12 +115,12 @@
     if (parts[2] !== '-' && !/^[KQkq]+$/.test(parts[2])) {
       throw new Error('bad castling field');
     }
-    var ep = null;
     if (parts[3] !== '-') {
+      // No en passant: a well-formed square is read and ignored.
       if (parts[3].length !== 3 || BOARD_LETTERS.indexOf(parts[3][0]) < 0) {
         throw new Error('bad en passant field');
       }
-      ep = [BOARD_LETTERS.indexOf(parts[3][0]), parseSquare(parts[3].slice(1))];
+      parseSquare(parts[3].slice(1));
     }
     var rights = '';
     for (var i = 0; i < 4; i++) {
@@ -130,19 +130,14 @@
       boards: [parsePlacement(halves[0]), parsePlacement(halves[1])],
       turn: parts[1],
       castling: rights,
-      ep: ep,
       halfmove: Number(parts[4]),
       fullmove: Number(parts[5]),
     };
   }
 
-  function epText(s) {
-    return s.ep ? BOARD_LETTERS[s.ep[0]] + squareName(s.ep[1]) : '-';
-  }
-
   function toAfen(s) {
     return [placement(s.boards[0]) + '|' + placement(s.boards[1]),
-      s.turn, s.castling || '-', epText(s),
+      s.turn, s.castling || '-', '-',
       String(s.halfmove), String(s.fullmove)].join(' ');
   }
 
@@ -311,9 +306,6 @@
               } else {
                 moves.push(mv(b, sq, target, null, CAPTURE));
               }
-            } else if (!victim && s.ep && s.ep[0] === b && s.ep[1] === target &&
-                       board[target - step] === (white ? 'p' : 'P')) {
-              moves.push(mv(b, sq, target, null, EN_PASSANT));
             }
           }
           continue;
@@ -372,8 +364,7 @@
       board[rookFrom] = '';
       other[to] = piece;
       other[rookTo] = rook;
-    } else if (m.kind === CAPTURE || m.kind === EN_PASSANT) {
-      if (m.kind === EN_PASSANT) board[white ? to - 8 : to + 8] = '';
+    } else if (m.kind === CAPTURE) {
       board[to] = '';
       // The capturer passes through to `to` of the other board (empty there:
       // the generator checked) and explodes on that board.
@@ -389,11 +380,6 @@
       if (m.promo) piece = white ? m.promo.toUpperCase() : m.promo;
       other[to] = piece;
     }
-    s.ep = null;
-    if (m.kind === DOUBLE) {
-      var middle = (m.from + to) / 2;
-      if (!other[middle]) s.ep = [1 - m.b, middle];
-    }
     var a = s.boards[0];
     var rights = '';
     var table = [['K', 0, 'K', 'R'], ['Q', 0, 'K', 'R'],
@@ -407,7 +393,7 @@
       }
     }
     s.castling = rights;
-    if (piece === 'P' || piece === 'p' || m.kind === CAPTURE || m.kind === EN_PASSANT) {
+    if (piece === 'P' || piece === 'p' || m.kind === CAPTURE) {
       s.halfmove = 0;
     } else {
       s.halfmove = state.halfmove + 1;
@@ -497,8 +483,7 @@
   return {
     START_AFEN: START_AFEN,
     BOARD_LETTERS: BOARD_LETTERS,
-    QUIET: QUIET, DOUBLE: DOUBLE, CAPTURE: CAPTURE,
-    EN_PASSANT: EN_PASSANT, CASTLE: CASTLE,
+    QUIET: QUIET, DOUBLE: DOUBLE, CAPTURE: CAPTURE, CASTLE: CASTLE,
     squareName: squareName,
     parseSquare: parseSquare,
     colorOf: colorOf,

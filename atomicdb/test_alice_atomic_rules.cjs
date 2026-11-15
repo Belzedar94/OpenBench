@@ -36,5 +36,16 @@ for (const p of vectors.perft) {
   assert.equal(rules.perft(rules.parse(p.afen), p.depth), p.nodes,
     `perft ${p.depth}`);
 }
+// No en passant: an old position with a square in the field reads as if
+// it were "-", and the field is always written "-".
+{
+  const old = rules.parse('4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - Be3 0 1');
+  assert.equal(rules.toAfen(old),
+    '4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - - 0 1');
+  assert.ok(!rules.legalMoves(old).includes('Bd4e3'));
+  assert.throws(() => rules.parse(
+    '4k3/8/8/8/8/8/8/4K3|8/8/8/8/8/8/8/8 w - Ce3 0 1'));
+  assert.equal(rules.EN_PASSANT, undefined);
+}
 assert.ok(checked > 50);
 console.log(`ok ${checked} positions, ${vectors.perft.length} perft counts`);

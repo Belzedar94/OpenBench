@@ -19,10 +19,11 @@ VECTORS_PATH = os.path.join(os.path.dirname(__file__),
 
 # Hand-made positions for the rules that random games rarely reach.
 HANDMADE = (
-    # En passant: Ae2e4 lands on B e4 next to the black pawn on B d4.
+    # No en passant: Ae2e4 lands on B e4 next to the black pawn on B d4,
+    # and the pawn on B d4 cannot take it.
     '4k3/8/8/8/8/8/4P3/4K3|8/8/8/8/3p4/8/8/8 w - - 0 1',
-    '4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - Be3 0 1',
-    # Same, but the square passed over is taken on B: no en passant.
+    '4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - - 0 1',
+    # The square passed over is taken on B: no double step at all.
     '4k3/8/8/8/8/8/4P3/4K3|8/8/8/8/3p4/4n3/8/8 w - - 0 1',
     # Castling: B g1 taken, so only the long castle.
     'r3k2r/8/8/8/8/8/8/R3K2R|8/8/8/8/8/8/8/6n1 w KQkq - 0 1',
@@ -95,11 +96,12 @@ def _random_positions(seed, games, max_plies, every):
             if not legal or rules.outcome(state):
                 break
             # Prefer captures half the time, so blasts show up early.
-            captures = [x for x in legal
-                        if x[0][4] in (rules.CAPTURE, rules.EN_PASSANT)]
+            captures = [x for x in legal if x[0][4] == rules.CAPTURE]
             pool = captures if captures and rng.random() < 0.5 else legal
-            state = rng.choice(pool)[1]
-            if ply % every == every - 1 or state.ep:
+            move, state = rng.choice(pool)
+            # Every position after a double step too: where en passant
+            # would have been, before it was dropped.
+            if ply % every == every - 1 or move[4] == rules.DOUBLE:
                 out.append(state)
     return out
 

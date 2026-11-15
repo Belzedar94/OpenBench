@@ -22,11 +22,9 @@ THE RULES, as the page explains them:
   checks it) and explodes there: it and every piece other than a pawn on the eight squares around
   that square of the other board are removed.  Nothing explodes on the board
   where the capture was made.  A king cannot capture.
-* En passant: after a pawn's double step the pawn stands on the other board,
-  and only a pawn on THAT board may take it en passant, on the next move,
-  aiming at the square the pawn passed over (which has to be empty on both
-  boards).  The capturing pawn passes through and explodes on that square of
-  the other board.
+* There is no en passant (as usual in Alice chess; dropped on 15-Nov-2026).
+  A pawn's double step needs both squares empty on both boards, and the
+  pawn then passes through like any move.
 * Promotion is the usual one; the promoted piece passes through to the other
   board like any move, and a capturing promotion explodes there.
 * Castling: king and rook unmoved, the squares between them empty and the
@@ -47,7 +45,11 @@ THE RULES, as the page explains them:
 
 NOTATION.  A position is written as ``<board A>|<board B> <side> <castling>
 <en passant> <halfmove> <fullmove>``: each board is a FEN piece placement,
-and en passant is ``-`` or the board letter and square, as in ``Be3``.  A
+and the en passant field is kept for the shape of the format only: it is
+always written ``-``.  A position read with a square there (``Be3``, the
+board letter and square, as positions were written before en passant was
+dropped) is accepted and the square ignored, so old positions still load and
+compare equal to the same position written now.  A
 move is the board letter it is played on followed by its UCI, as in
 ``Ae2e4``, ``Bd7d8q`` or ``Ae1g1`` (castling).
 
@@ -69,8 +71,8 @@ ROOK_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 BISHOP_DIRS = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 PROMOTIONS = 'qrbn'
 
-# Move kinds (internal): quiet, double pawn step, capture, en passant, castle.
-QUIET, DOUBLE, CAPTURE, EN_PASSANT, CASTLE = 'q', 'd', 'c', 'e', 'k'
+# Move kinds (internal): quiet, double pawn step, capture, castle.
+QUIET, DOUBLE, CAPTURE, CASTLE = 'q', 'd', 'c', 'k'
 
 
 class IllegalMove(ValueError):
@@ -97,19 +99,18 @@ def opponent(color):
 
 
 class State:
-    __slots__ = ('boards', 'turn', 'castling', 'ep', 'halfmove', 'fullmove')
+    __slots__ = ('boards', 'turn', 'castling', 'halfmove', 'fullmove')
 
-    def __init__(self, boards, turn, castling, ep, halfmove, fullmove):
+    def __init__(self, boards, turn, castling, halfmove, fullmove):
         self.boards = boards        # [list of 64, list of 64]
         self.turn = turn            # 'w' or 'b'
         self.castling = castling    # subset of 'KQkq', in that order
-        self.ep = ep                # None or (board, square)
         self.halfmove = halfmove
         self.fullmove = fullmove
 
     def copy(self):
         return State([self.boards[0][:], self.boards[1][:]], self.turn,
-                     self.castling, self.ep, self.halfmove, self.fullmove)
+                     self.castling, self.halfmove, self.fullmove)
 
 
 # -- reading and writing positions -------------------------------------------
@@ -169,27 +170,20 @@ def parse(afen):
     if castling != '-' and (not castling
                             or any(c not in 'KQkq' for c in castling)):
         raise ValueError('bad castling field')
-    if ep == '-':
-        ep_value = None
-    else:
+    if ep != '-':
+        # No en passant: a well-formed square is read and ignored.
         if len(ep) != 3 or ep[0] not in BOARD_LETTERS:
             raise ValueError('bad en passant field')
-        ep_value = (BOARD_LETTERS.index(ep[0]), parse_square(ep[1:]))
+        parse_square(ep[1:])
     rights = ''.join(c for c in 'KQkq' if c in castling)
     return State([_parse_placement(halves[0]), _parse_placement(halves[1])],
-                 turn, rights, ep_value, int(halfmove), int(fullmove))
-
-
-def _ep_text(state):
-    if state.ep is None:
-        return '-'
-    return BOARD_LETTERS[state.ep[0]] + square_name(state.ep[1])
+                 turn, rights, int(halfmove), int(fullmove))
 
 
 def to_afen(state):
     return ' '.join((
         _placement(state.boards[0]) + '|' + _placement(state.boards[1]),
-        state.turn, state.castling or '-', _ep_text(state),
+        state.turn, state.castling or '-', '-',
         str(state.halfmove), str(state.fullmove)))
 
 
@@ -331,10 +325,6 @@ def _pseudo_moves(state):
                                 moves.append((b, sq, target, p, CAPTURE))
                         else:
                             moves.append((b, sq, target, None, CAPTURE))
-                    elif (state.ep == (b, target) and not victim
-                          and board[target - step] == ('p' if white
-                                                       else 'P')):
-                        moves.append((b, sq, target, None, EN_PASSANT))
                 continue
             if kind in ('N', 'K'):
                 for df, dr in (KNIGHT_STEPS if kind == 'N' else KING_STEPS):
@@ -416,9 +406,7 @@ def apply_move(state, move):
         board[rook_from] = ''
         other[to] = piece
         other[rook_to] = rook
-    elif kind in (CAPTURE, EN_PASSANT):
-        if kind == EN_PASSANT:
-            board[to - 8 if white else to + 8] = ''
+    elif kind == CAPTURE:
         board[to] = ''
         # The capturer passes through to ``to`` of the other board (empty
         # there: the generator checked) and explodes on that board.
@@ -432,11 +420,6 @@ def apply_move(state, move):
         if promo:
             piece = promo.upper() if white else promo
         other[to] = piece
-    s.ep = None
-    if kind == DOUBLE:
-        middle = (frm + to) // 2
-        if not other[middle]:
-            s.ep = (1 - b, middle)
     a = s.boards[0]
     rights = ''
     for right, home, king in (('K', 0, 'K'), ('Q', 0, 'K'),
@@ -447,7 +430,7 @@ def apply_move(state, move):
         if a[home + 4] == king and a[rook_sq] == ('R' if king == 'K' else 'r'):
             rights += right
     s.castling = rights
-    if piece in 'Pp' or kind in (CAPTURE, EN_PASSANT):
+    if piece in 'Pp' or kind == CAPTURE:
         s.halfmove = 0
     else:
         s.halfmove = state.halfmove + 1

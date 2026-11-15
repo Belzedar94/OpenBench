@@ -39,7 +39,7 @@ class PagesTests(TestCase):
         self.assertContains(response, 'The rules')
         self.assertContains(response, 'Capture here, explode there')
         self.assertContains(response, '<strong>Check.</strong>')
-        self.assertContains(response, 'En passant')
+        self.assertContains(response, 'No en passant')
         self.assertContains(response, 'alice_atomic.js')
 
     def test_the_rules_say_no_square_is_taken_on_both_boards(self):
