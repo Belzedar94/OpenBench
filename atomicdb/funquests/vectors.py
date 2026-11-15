@@ -36,6 +36,8 @@ HANDMADE = (
     # Explosion wins: Qh5xf7 on A explodes on B f7 next to the king on B e8.
     '8/5p2/8/7Q/8/8/8/4K3|4k3/8/8/8/8/8/8/8 w - - 0 1',
     # A capture needs its square empty on the other board: B c4 is taken.
+    # Unreachable in a game (c4 is occupied on both boards), kept to pin
+    # the guard that both copies of the rules still carry.
     '4k3/8/8/8/2b5/8/3N4/4K3|8/8/8/8/2r5/8/8/8 w - - 0 1',
     # The blast on B takes pieces but not pawns; nothing explodes on A.
     '4k3/8/8/2n5/2b1p3/8/3N4/4K3|8/8/8/2r5/8/1p1q4/8/8 w - - 0 1',

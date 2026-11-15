@@ -8,6 +8,7 @@ stale and, with Node installed, when the browser's copy disagrees.
 """
 
 import os
+import random
 import shutil
 import subprocess
 import unittest
@@ -259,3 +260,63 @@ class SharedVectorTests(SimpleTestCase):
         run = subprocess.run([node, script], capture_output=True, text=True,
                              timeout=120)
         self.assertEqual(run.returncode, 0, run.stderr or run.stdout)
+
+
+def squares_on_both_boards(state):
+    a, b = state.boards
+    return [rules.square_name(sq) for sq in range(64) if a[sq] and b[sq]]
+
+
+class NoSquareOnBothBoardsTests(SimpleTestCase):
+    """A square is never occupied on both boards at once.
+
+    Every piece arrives on a square that is empty on both boards (a quiet
+    move checks the other board; a capture empties the square where it is
+    made and the capturer explodes on the other board), and the start has
+    board B empty.  The rules text of the page and its one-board view rely
+    on it, so it is checked after every move these tests can reach.
+    """
+
+    def assert_every_move_keeps_it(self, state):
+        for move, after in rules.legal_moves_detailed(state):
+            self.assertEqual(
+                squares_on_both_boards(after), [],
+                f'{rules.to_afen(state)} {rules.move_text(move)}')
+
+    def test_the_perft_tree(self):
+        frontier = [rules.start_state()]
+        for _depth in range(3):
+            following = []
+            for state in frontier:
+                self.assert_every_move_keeps_it(state)
+                following.extend(after for _move, after
+                                 in rules.legal_moves_detailed(state))
+            frontier = following
+
+    def test_every_move_of_the_shared_vectors(self):
+        unreachable = []
+        for vector in vectors.build()['positions']:
+            state = rules.parse(vector['afen'])
+            if squares_on_both_boards(state):
+                unreachable.append(vector['afen'])
+                continue
+            self.assert_every_move_keeps_it(state)
+        # Only hand-made positions may break it (set up to pin a guard).
+        self.assertTrue(set(unreachable) <= set(vectors.HANDMADE))
+
+    def test_capture_heavy_random_games(self):
+        rng = random.Random(20261115)
+        for _game in range(30):
+            state = rules.start_state()
+            for _ply in range(160):
+                if rules.outcome(state):
+                    break
+                legal = rules.legal_moves_detailed(state)
+                for move, after in legal:
+                    self.assertEqual(
+                        squares_on_both_boards(after), [],
+                        f'{rules.to_afen(state)} {rules.move_text(move)}')
+                captures = [x for x in legal
+                            if x[0][4] in (rules.CAPTURE, rules.EN_PASSANT)]
+                pool = captures if captures and rng.random() < 0.6 else legal
+                state = rng.choice(pool)[1]

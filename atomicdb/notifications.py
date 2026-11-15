@@ -38,15 +38,21 @@ from .models import RequestNotification
 # campana, pila vertical) exactamente por una hoja cacheada de antes del
 # deploy.  Antes era el mtime de atomicdb.css a secas, asi que un cambio que
 # solo tocara un .js salia con la URL de siempre; ahora es un digest del
-# CONTENIDO de todos los ficheros de primer nivel (hoja y scripts propios, sin
-# vendor), que tampoco depende de que el deploy conserve o no los mtimes.
+# CONTENIDO de todo el arbol, subcarpetas incluidas (funquests/, docs/,
+# pieces/...): nginx sirve /static/ con "expires 30d", y un digest solo del
+# primer nivel dejaba los scripts de Alice Atomic con la URL vieja tras un
+# deploy.  Son unos cientos de KB, leidos una vez por proceso, y no depende
+# de que el deploy conserve o no los mtimes.
 def _static_version(folder=os.path.join(
         os.path.dirname(__file__), 'static', 'atomicdb')):
     digest = hashlib.sha256()
-    for name in sorted(os.listdir(folder)):
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            digest.update(name.encode('utf-8'))
+    for parent, dirs, files in os.walk(folder):
+        dirs.sort()
+        for name in sorted(files):
+            path = os.path.join(parent, name)
+            relative = os.path.relpath(path, folder).replace(os.sep, '/')
+            digest.update(relative.encode('utf-8'))
+            digest.update(b'\0')
             with open(path, 'rb') as handle:
                 digest.update(handle.read())
     return digest.hexdigest()[:10]

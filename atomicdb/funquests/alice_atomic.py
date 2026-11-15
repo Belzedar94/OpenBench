@@ -11,13 +11,15 @@ THE RULES, as the page explains them:
   and White moves first.
 * A move is made on the board the moving piece stands on, with ordinary chess
   movement on that board: only pieces on that board block it.
-* Every move, captures included, also needs the same square on the OTHER
-  board to be empty, and the piece then passes through to that square of the
-  other board.
+* A move to an empty square also needs that square to be empty on the
+  OTHER board, and the piece then passes through to that square of the
+  other board.  Every piece arrives on a square empty on both boards, so a
+  square is never occupied on both boards at once (the tests check it after
+  every move).
 * A capture removes the captured piece from the board where the capture is
   made.  The capturing piece then passes through to the same square of the
-  OTHER board, which, as for every move, has to be empty, and explodes
-  there: it and every piece other than a pawn on the eight squares around
+  OTHER board (always empty there, by the invariant above; the code still
+  checks it) and explodes there: it and every piece other than a pawn on the eight squares around
   that square of the other board are removed.  Nothing explodes on the board
   where the capture was made.  A king cannot capture.
 * En passant: after a pawn's double step the pawn stands on the other board,
@@ -31,10 +33,11 @@ THE RULES, as the page explains them:
   king not in check (see below) on its start, crossing or landing square,
   all on their board; the king's and the rook's landing squares must be empty on the
   other board too, and both pass through.
-* A king is in check when an enemy piece on the same board attacks it and
-  that capture could be made: the king's square is empty on the other board,
-  and the attacker's own king does not stand next to that square on the
-  other board (the explosion would take it too).  Standing next to the
+* A king is in check when an enemy piece on the same board attacks it,
+  unless the attacker's own king stands next to that square on the other
+  board (the explosion would take it too, so the capture cannot be made).
+  The code also requires the king's square to be empty on the other board,
+  which the invariant above makes always true in a real game.  Standing next to the
   enemy king on the same board gives no protection.  A move that leaves
   the mover's king in check, or that blows up the mover's own king, is
   illegal.  A move that blows up the enemy king wins at once, even if the

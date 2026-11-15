@@ -63,12 +63,12 @@
     <div class="aa-layout">
       <div class="aa-boards">
         <div class="aa-player" id="aa-player-top"></div>
-        <div class="aa-board-pair">
+        <div class="aa-board-pair" id="aa-board-pair">
           <figure class="aa-board-wrap">
-            <figcaption>Board A</figcaption>
+            <figcaption id="aa-caption-a">Board A</figcaption>
             <div class="aa-board" id="aa-board-a" role="grid" aria-label="Board A"></div>
           </figure>
-          <figure class="aa-board-wrap">
+          <figure class="aa-board-wrap" id="aa-board-wrap-b">
             <figcaption>Board B</figcaption>
             <div class="aa-board" id="aa-board-b" role="grid" aria-label="Board B"></div>
           </figure>
@@ -81,14 +81,16 @@
         <ol class="aa-moves" id="aa-moves" aria-label="Moves"></ol>
         <div class="aa-actions">
           <button type="button" class="aa-btn" id="aa-flip">Flip boards</button>
+          <button type="button" class="aa-btn" id="aa-view" aria-pressed="false" title="Show both boards on one board, or side by side">One board</button>
           <button type="button" class="aa-btn" id="aa-draw" hidden>Offer draw</button>
           <button type="button" class="aa-btn aa-btn-primary" id="aa-draw-accept" hidden>Accept draw</button>
           <button type="button" class="aa-btn" id="aa-draw-decline" hidden>Decline draw</button>
           <button type="button" class="aa-btn aa-btn-danger" id="aa-resign">Resign</button>
           <button type="button" class="aa-btn" id="aa-new">New game</button>
         </div>
-        <p class="dim aa-legend">Moves are written as the board letter and the move: <code>Ae2e4</code> is the pawn on e2 of board A going to e4.
-          Dots show where the selected piece can go; a faint ring on the other board shows where it will land.</p>
+        <p class="dim aa-legend">Moves are written as the board letter and the move: <code>Ae2e4</code> is the pawn on e2 of board A going to e4.</p>
+        <p class="dim aa-legend" id="aa-legend-two">Dots show where the selected piece can go; a faint ring on the other board shows where it will land, orange shows where a capture explodes, and a dashed red frame marks each piece it would blow up.</p>
+        <p class="dim aa-legend" id="aa-legend-one" hidden>One board: no square is ever taken on both boards, so both fit on one. Pieces on board B are see-through with a small <span class="aa-legend-badge">B</span>. The letter on a move dot is the board the piece lands on; orange is the blast area of a capture, and a dashed red frame marks each piece it would blow up.</p>
       </aside>
     </div>
   </section>
@@ -98,12 +100,12 @@
   <h3>The rules</h3>
   <ul>
     <li><strong>Two boards.</strong> Board A starts with the usual chess position; board B starts empty. White moves first.</li>
-    <li><strong>Through the looking glass.</strong> A piece moves on the board it stands on, following the normal chess moves of that board; only pieces on that same board get in its way. Every move, captures included, also needs the same square on the other board to be empty, and after the move the piece passes through to that square of the other board.</li>
-    <li><strong>Capture here, explode there.</strong> A capture removes the captured piece from the board where the move is made. The capturing piece then passes through to the same square of the other board, which must be empty, and explodes there: the capturing piece and every piece except pawns on the eight squares around it are removed from that other board. Nothing explodes on the board where the capture was made. Kings cannot capture.</li>
+    <li><strong>Through the looking glass.</strong> A piece moves on the board it stands on, following the normal chess moves of that board; only pieces on that same board get in its way. A move to an empty square also needs that square to be empty on the other board. After the move the piece passes through to that square of the other board. Because every piece arrives on a square that is empty on both boards, a square is never occupied on both boards at once.</li>
+    <li><strong>Capture here, explode there.</strong> A capture removes the captured piece from the board where the move is made. The capturing piece then passes through to the same square of the other board (always empty: no square is occupied on both boards) and explodes there: the capturing piece and every piece except pawns on the eight squares around it are removed from that other board. Nothing explodes on the board where the capture was made. Kings cannot capture.</li>
     <li><strong>En passant.</strong> After a pawn's double step it stands on the other board. On the very next move, an enemy pawn on that same board, beside it, may take it en passant, moving to the square it passed over (that square must be empty on both boards). The capturing pawn passes through and explodes on that square of the other board.</li>
     <li><strong>Promotion</strong> works as usual. A promotion passes through to the other board like any move; a capturing promotion explodes there.</li>
     <li><strong>Castling.</strong> King and rook must not have moved, the squares between them must be empty, and the king must not be in check on its square, on the square it crosses or on the square it lands on, all on their board (see Check). The squares where the king and the rook land must also be empty on the other board, and both pass through to it.</li>
-    <li><strong>Check.</strong> A king is in check when an enemy piece on the same board attacks it and could really take it: the king's square must be empty on the other board, and the attacker's own king must not stand next to that square on the other board, where the explosion would take it too. Standing next to the enemy king on the same board gives no protection. You may not leave your king in check, and you may not make a capture that blows up your own king.</li>
+    <li><strong>Check.</strong> A king is in check when an enemy piece on the same board attacks it, unless the attacker's own king stands next to that square on the other board: the capture would explode there and take that king too, so it cannot be made. Standing next to the enemy king on the same board gives no protection. You may not leave your king in check, and you may not make a capture that blows up your own king.</li>
     <li><strong>Winning.</strong> Blowing up the enemy king wins at once, even if your own king is left attacked. Checkmate also wins.</li>
     <li><strong>Draws.</strong> Stalemate, the same position three times with the same player to move, fifty moves by each side without a capture or a pawn move, or a draw agreed between the players.</li>
   </ul>
