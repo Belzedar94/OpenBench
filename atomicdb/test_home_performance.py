@@ -326,6 +326,22 @@ class PublicCounterTests(TestCase):
         self.assertEqual(totals['measured_at'], snapshot.bucket_start)
         self.assertTrue(totals['from_snapshot'])
 
+    def test_the_previous_capture_covers_the_gap_until_the_next_lands(self):
+        """At :20 the last bucket is the previous hour's (80 min old): still used.
+
+        The :05 capture takes a while to land; until it does, the previous
+        bucket must keep standing in, or every refresh sweeps the table.
+        """
+        snapshot = ProgressSnapshot.objects.order_by('-bucket_start').first()
+        later = snapshot.bucket_start + timedelta(minutes=80)
+
+        with mock.patch.object(Position.objects, 'aggregate',
+                               side_effect=AssertionError('swept')):
+            totals = metrics._measure_tree_totals(later)
+
+        self.assertTrue(totals['from_snapshot'])
+        self.assertEqual(totals['total'], snapshot.positions_total)
+
     def test_with_no_capture_at_all_it_counts_rather_than_print_zero(self):
         """Sin cache, sin cerrojo libre y sin captura horaria: se mide.
 
