@@ -55,8 +55,8 @@ SUBSCRIPTIONS (Torom, Discord, 15-Nov-2026: "a new adoption of 100 positions
 when the last one is done").  A signed-in account can subscribe to a backlog
 with a batch size of 25, 50 or 100.  Every five minutes the top-up
 (``top_up``, run by ``manage.py warm_public_snapshot``) looks at each active
-subscription and, when fewer than half a batch of the account's adopted
-positions from that backlog are waiting, adopts the next batch for it with
+subscription and, when fewer than one batch of the account's adopted
+positions from that backlog are waiting, adopts up to two batches for it with
 ``adopt`` itself: the same re-checks, the same allowance of waiting requests
 and its receipt, the same ceiling of adopted positions.  A subscription turns
 itself off when its backlog has nothing left to adopt, and the account can
@@ -423,8 +423,12 @@ def receipt(params):
 
 SUBSCRIBE_DEFAULT_SIZE = 50
 # Topped up when fewer than batch // TOPUP_DIVISOR adopted positions of that
-# backlog are waiting: half a batch.
-TOPUP_DIVISOR = 2
+# backlog are waiting: one batch.  A pass then adopts batches until about
+# TOPUP_BATCHES_PER_PASS batches are waiting.  Half a batch every five minutes
+# ran dry: Torom's workers finish ~20 positions a minute (15-Nov-2026), so
+# the queue emptied between passes.
+TOPUP_DIVISOR = 1
+TOPUP_BATCHES_PER_PASS = 2
 # One pass, every five minutes: at most this many subscriptions, and no new
 # one started after this many seconds.  The least recently checked go first,
 # so a pass cut short leaves the rest for the next one.
@@ -504,16 +508,28 @@ def _top_up_one(sub, enabled, has_open):
         return SUB_ACCOUNT, 0, False
     if not has_open(sub.backlog):
         return SUB_EMPTY, 0, False
-    if (backlog_waiting(sub.username, sub.backlog)
-            >= topup_below(sub.batch_size)):
+    waiting = backlog_waiting(sub.username, sub.backlog)
+    if waiting >= topup_below(sub.batch_size):
         return SUB_ENOUGH, 0, True
-    outcome = adopt(sub.username, sub.backlog, sub.batch_size)
-    if outcome.status == 'empty':
-        # Every row it read had left the list; off only if none is left.
-        if not has_open(sub.backlog, fresh=True):
-            return SUB_EMPTY, 0, False
-        return SUB_ENOUGH, 0, True
-    return outcome.status, outcome.adopted, True
+    adopted, status = 0, SUB_ENOUGH
+    for _ in range(TOPUP_BATCHES_PER_PASS):
+        if waiting + adopted >= TOPUP_BATCHES_PER_PASS * sub.batch_size:
+            break
+        outcome = adopt(sub.username, sub.backlog, sub.batch_size)
+        if outcome.status == 'empty':
+            # Every row it read had left the list; off only if none is left.
+            if not adopted and not has_open(sub.backlog, fresh=True):
+                return SUB_EMPTY, 0, False
+            break
+        if not outcome.adopted:
+            # A refusal ('queue-full', 'adopted-full') is the status only
+            # when nothing was adopted in this pass.
+            if not adopted:
+                status = outcome.status
+            break
+        status = outcome.status
+        adopted += outcome.adopted
+    return status, adopted, True
 
 
 def top_up(max_subscriptions=None, seconds=None):

@@ -1734,8 +1734,9 @@ class BacklogSubscription(models.Model):
     """An account's standing order on a community backlog.
 
     While ``active``, the backlog top-up (§ ``atomicdb.backlog.top_up``)
-    adopts the next ``batch_size`` positions for the account whenever fewer
-    than half a batch of its adopted positions from that backlog are waiting,
+    adopts up to two batches of ``batch_size`` positions for the account
+    whenever fewer than one batch of its adopted positions from that backlog
+    are waiting,
     through the same adoption as the queue page's buttons.  It turns itself
     off when the backlog runs out; the account can turn it off any time.
 

@@ -545,42 +545,50 @@ class Subscribing(BacklogTestCase):
 
 class TopUp(BacklogTestCase):
 
-    def test_it_adopts_a_batch_when_below_half_and_not_otherwise(self):
-        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(80)])
+    def test_below_one_batch_it_fills_up_to_two_and_not_otherwise(self):
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(120)])
         backlog.subscribe('moky', backlog.LOST_LINES, 25)
         summary = backlog.top_up()
-        self.assertEqual((summary['topped_up'], summary['adopted']), (1, 25))
+        self.assertEqual((summary['topped_up'], summary['adopted']), (1, 50))
         mine = _adopted_of('moky')
-        self.assertEqual(mine.count(), 25)
+        self.assertEqual(mine.count(), 50)
         for task in mine:
             self.assertEqual((task.budget_nodes, task.multipv, task.state),
                              (128_640_000, 5, PENDING))
-        # 25 waiting: not below 12, nothing more.
+        # 50 waiting: not below 25, nothing more.
         self.assertEqual(backlog.top_up()['adopted'], 0)
-        # 13 served, 12 waiting: still not below 12.
-        served = list(mine.values_list('id', flat=True)[:13])
+        # 25 served, 25 waiting: still not below 25.
+        served = list(mine.values_list('id', flat=True)[:25])
         AnalysisTask.objects.filter(id__in=served).update(state=COMPLETED)
         self.assertEqual(backlog.top_up()['adopted'], 0)
         self.assertEqual(BacklogSubscription.objects.get().last_status,
                          backlog.SUB_ENOUGH)
-        # One more served, 11 waiting: the next batch.
+        # One more served, 24 waiting: two batches, back above 50.
         AnalysisTask.objects.filter(id=mine.filter(state=PENDING)
                                     .first().id).update(state=COMPLETED)
-        self.assertEqual(backlog.top_up()['adopted'], 25)
+        self.assertEqual(backlog.top_up()['adopted'], 50)
         sub = BacklogSubscription.objects.get()
         self.assertEqual((sub.adopted_total, sub.last_status, sub.active),
-                         (50, backlog.SUB_ADOPTED, True))
+                         (100, backlog.SUB_ADOPTED, True))
         self.assertIsNotNone(sub.checked_at)
         self.assertEqual(BacklogItem.objects.filter(
-            state='adopted', adopted_by='moky').count(), 50)
+            state='adopted', adopted_by='moky').count(), 100)
+
+    def test_a_refusal_after_a_batch_keeps_the_adopted_status(self):
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(60)])
+        backlog.subscribe('moky', backlog.LOST_LINES, 25)
+        with patch.object(backlog, 'ADOPT_WAITING_MAX', 30):
+            self.assertEqual(backlog.top_up()['adopted'], 30)
+        self.assertEqual(BacklogSubscription.objects.get().last_status,
+                         backlog.SUB_ADOPTED)
 
     def test_only_that_backlogs_waiting_positions_count(self):
         _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(30)])
-        _offer(backlog.SHALLOW, [_shallow(f's{i}') for i in range(30)])
+        _offer(backlog.SHALLOW, [_shallow(f's{i}') for i in range(60)])
         backlog.adopt('moky', backlog.LOST_LINES, 25)
         backlog.subscribe('moky', backlog.SHALLOW, 25)
-        self.assertEqual(backlog.top_up()['adopted'], 25)
-        self.assertEqual(_adopted_of('moky', 'shallow').count(), 25)
+        self.assertEqual(backlog.top_up()['adopted'], 50)
+        self.assertEqual(_adopted_of('moky', 'shallow').count(), 50)
 
     def test_it_respects_the_adopted_ceiling(self):
         _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(60)])
@@ -617,9 +625,7 @@ class TopUp(BacklogTestCase):
     def test_it_stops_when_the_backlog_is_empty(self):
         _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(30)])
         backlog.subscribe('moky', backlog.LOST_LINES, 25)
-        backlog.top_up()
-        AnalysisTask.objects.update(state=COMPLETED)
-        self.assertEqual(backlog.top_up()['adopted'], 5)
+        self.assertEqual(backlog.top_up()['adopted'], 30)
         AnalysisTask.objects.update(state=COMPLETED)
         summary = backlog.top_up()
         self.assertEqual((summary['adopted'], summary['ended']), (0, 1))
@@ -669,7 +675,7 @@ class TopUp(BacklogTestCase):
         self.assertFalse(AnalysisTask.objects.exists())
 
     def test_a_pass_is_bounded_and_the_rest_wait_their_turn(self):
-        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(100)])
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(200)])
         names = [f'acct{i}' for i in range(4)]
         for name in names:
             worker_account(name)
@@ -687,7 +693,7 @@ class TopUp(BacklogTestCase):
         self.assertEqual((late['checked'], late['deferred']), (0, 4))
 
     def test_one_failing_subscription_does_not_stop_the_others(self):
-        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(50)])
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(100)])
         worker_account('torom')
         backlog.subscribe('moky', backlog.LOST_LINES, 25)
         backlog.subscribe('torom', backlog.LOST_LINES, 25)
@@ -701,21 +707,21 @@ class TopUp(BacklogTestCase):
         with patch.object(backlog, 'adopt', flaky), \
                 self.assertLogs('atomicdb.backlog', 'ERROR'):
             summary = backlog.top_up()
-        self.assertEqual((summary['errors'], summary['adopted']), (1, 25))
+        self.assertEqual((summary['errors'], summary['adopted']), (1, 50))
         subs = {sub.username: sub
                 for sub in BacklogSubscription.objects.all()}
         self.assertEqual((subs['moky'].last_status, subs['moky'].active),
                          (backlog.SUB_ERROR, True))
-        self.assertEqual(_adopted_of('torom').count(), 25)
+        self.assertEqual(_adopted_of('torom').count(), 50)
 
     def test_the_host_command_runs_the_top_up(self):
         _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(30)])
         backlog.subscribe('moky', backlog.LOST_LINES, 25)
         out = StringIO()
         call_command('warm_public_snapshot', stdout=out, stderr=StringIO())
-        self.assertIn('backlog top-up: checked=1 topped_up=1 adopted=25',
+        self.assertIn('backlog top-up: checked=1 topped_up=1 adopted=30',
                       out.getvalue())
-        self.assertEqual(_adopted_of('moky').count(), 25)
+        self.assertEqual(_adopted_of('moky').count(), 30)
 
     def test_the_host_command_can_skip_it(self):
         _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(30)])
@@ -747,4 +753,4 @@ class TopUp(BacklogTestCase):
                       out.getvalue())
         out = StringIO()
         call_command('atomicdb_backlog', 'top-up', stdout=out)
-        self.assertIn('adopted=25', out.getvalue())
+        self.assertIn('adopted=30', out.getvalue())
