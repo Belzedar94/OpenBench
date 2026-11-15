@@ -496,6 +496,18 @@ class SweepDripTests(TestCase):
             self.assertGreaterEqual(task.created, first[task.id])
         self.assertEqual(self._swept().count(), 5)
 
+    def test_a_revived_task_is_bought_at_todays_budget(self):
+        self._plan()
+        sweep.drip()
+        ingest.absorb_tasks(self._swept())
+        self._swept().update(budget_nodes=128_000_000)   # made before #255
+        sweep.rewind()
+
+        self.assertEqual(sweep.drip(), 5)
+
+        for task in self._swept():
+            self.assertEqual(task.budget_nodes, sweep.SWEEP_NODES)
+
     def test_a_revived_task_counts_against_the_cap(self):
         self._plan()
         sweep.drip()

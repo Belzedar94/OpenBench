@@ -68,8 +68,8 @@ import time
 import uuid
 
 from django.conf import settings
-from django.db.models import Q
-from django.db.models.functions import Coalesce
+from django.db.models import F, Q
+from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 
 from . import idle_repair, ingest
@@ -536,7 +536,10 @@ def _revive(task):
     for this visit, so without this the position could never be queued again.
     Its position still qualifies (the caller just checked), so the search it
     was made for is still owed.  ``created`` moves to now: the task waits from
-    now on, and it counts against this hour's ceiling like a new one.
+    now on, and it counts against this hour's ceiling like a new one.  It
+    is bought at today's ``SWEEP_NODES``, not at the budget it was made with:
+    rows absorbed before 15-Nov-2026 hold the old 128M, which loses to the
+    search it re-does (OpenBench#255 only covered new rows).
     """
     if task.arm != SWEEP_ARM or not ingest.is_absorbed(task):
         return False
@@ -544,7 +547,8 @@ def _revive(task):
         pk=task.pk, arm=SWEEP_ARM, state=AnalysisTask.TState.COMPLETED,
         nodes_searched=0, machine='',
     ).update(state=AnalysisTask.TState.PENDING, completed=None,
-             created=timezone.now()))
+             created=timezone.now(),
+             budget_nodes=Greatest(F('budget_nodes'), SWEEP_NODES)))
 
 
 def drip(cap=SWEEP_PENDING_CAP, user_backlog_max=SWEEP_USER_BACKLOG_MAX,
