@@ -82,6 +82,7 @@
         <div class="aa-actions">
           <button type="button" class="aa-btn" id="aa-flip">Flip boards</button>
           <button type="button" class="aa-btn" id="aa-view" aria-pressed="false" title="Show both boards on one board, or side by side">One board</button>
+          <button type="button" class="aa-btn" id="aa-focus" hidden title="Choose which board is drawn solid in the one-board view">Focus board B</button>
           <button type="button" class="aa-btn" id="aa-draw" hidden>Offer draw</button>
           <button type="button" class="aa-btn aa-btn-primary" id="aa-draw-accept" hidden>Accept draw</button>
           <button type="button" class="aa-btn" id="aa-draw-decline" hidden>Decline draw</button>
@@ -90,7 +91,7 @@
         </div>
         <p class="dim aa-legend">Moves are written as the board letter and the move: <code>Ae2e4</code> is the pawn on e2 of board A going to e4.</p>
         <p class="dim aa-legend" id="aa-legend-two">Dots show where the selected piece can go; a faint ring on the other board shows where it will land, and pieces a capture would blow up turn red (deep red for the capture you point at).</p>
-        <p class="dim aa-legend" id="aa-legend-one" hidden>One board: no square is ever taken on both boards, so both fit on one. Pieces on board B are see-through with a small <span class="aa-legend-badge">B</span>. The letter on a move dot is the board the piece lands on, and pieces a capture would blow up turn red (deep red for the capture you point at).</p>
+        <p class="dim aa-legend" id="aa-legend-one" hidden>One board: no square is ever taken on both boards, so both fit on one. Pieces on the board out of focus are faint, with its letter (<span class="aa-legend-badge">B</span>); the focus button swaps which board is drawn solid. The letter on a move dot is the board the piece lands on, and pieces a capture would blow up turn red (deep red for the capture you point at).</p>
       </aside>
     </div>
   </section>

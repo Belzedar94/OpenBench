@@ -259,7 +259,7 @@
   max-width: 36rem;
 }
 
-.aa-on-b img { opacity: .5; filter: saturate(.7); }
+.aa-on-b img { opacity: .32; filter: grayscale(.6); }
 .aa-on-b.aa-doomed img {
   opacity: .7;
   filter: saturate(.7) drop-shadow(0 0 3px #ff1f1f) drop-shadow(0 0 2px #ff1f1f);
