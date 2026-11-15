@@ -335,7 +335,10 @@ class SweepDripTests(TestCase):
 
         for task in self._swept():
             self.assertEqual(task.source, FILL)
-            self.assertEqual(task.budget_nodes, M128)
+            # 128M plus the repair overbid, so the new search can replace
+            # the 128M one it re-does (§ sweep.SWEEP_NODES).
+            self.assertEqual(task.budget_nodes, 128_640_000)
+            self.assertGreater(task.budget_nodes, M128)
             self.assertEqual(task.multipv, 1)
             self.assertEqual(task.generation, 1)
             self.assertEqual(task.state, PENDING)
