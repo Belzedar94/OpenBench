@@ -293,6 +293,20 @@ class WorkerAggregationTests(TestCase):
         self.assertEqual(page['nodes_all_h'], '9.0M')
         self.assertEqual(page['tasks_all_h'], '3')
 
+    def test_both_windows_end_at_the_same_instant(self):
+        # A search that lands while the snapshot is being measured counts in
+        # neither window, so the last 24h never exceeds all time.
+        now = timezone.now()
+        late = _completed(self.pos, 'alice-box-atomicdb', 50_000_000, 2.0)
+        AnalysisTask.objects.filter(pk=late.pk).update(
+            completed=now + timedelta(seconds=30))
+        snap = contributors.measure_fleet(now)
+
+        day = snap['machines_24h']['alice-box-atomicdb']['nodes']
+        life = snap['machines_all']['alice-box-atomicdb']['nodes']
+        self.assertEqual((day, life), (3_000_000, 9_000_000))
+        self.assertLessEqual(snap['nodes_24h'], snap['nodes_all'])
+
     def test_the_speed_is_the_last_hour_of_searches(self):
         # Las tres del fixture tienen una hora o mas: la velocidad es la de
         # estas dos, 9.0M nodos en 3 segundos de motor, y no la de su vida.
