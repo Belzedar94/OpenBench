@@ -228,6 +228,11 @@ CAMPAIGN_PROGRESS_KEY = 'atomicdb.campaign-progress.v1'
 # espera a nadie — vieja se sirve y se renueva por detras — pero el numero
 # se queda en 90 porque sigue siendo lo que decide cuando SE MIDE otra vez.
 PUBLIC_FRESH_SECONDS = 90
+# How old the hourly capture may be and still stand in for a full count of
+# the position table.  Its bucket is stamped on the hour but lands when the
+# :05 capture finishes (~15 min at 133M rows), so this must cover one whole
+# hour plus that lag with room to spare (§ _measure_tree_totals).
+SEED_MAX_AGE_SECONDS = 135 * 60
 # Vida DURA de la entrada.  Muy por encima de la frescura: entre las dos hay
 # una ventana en la que se sirve un valor viejo mientras alguien lo renueva,
 # que es justo lo que impide que una portada sin trafico deje a la siguiente
@@ -362,11 +367,18 @@ def _measure_tree_totals(now):
     # ensena la hora del bucket ('counters_at'), asi que la vejez acotada va
     # dicha en voz alta, que es el trato de siempre: exacto de hace un rato,
     # nunca estimado.  El barrido queda de RED DE SEGURIDAD para cuando la
-    # captura falte o envejezca (su servicio caido mas de 75 minutos).
+    # captura falte o envejezca (su servicio caido mas de SEED_MAX_AGE).
+    #
+    # 15-nov-2026: a 133M filas la captura de las :05 tarda unos 15 minutos
+    # y su bucket lleva la hora en punto, asi que con 75 minutos el bucket
+    # anterior caducaba a las :15 y hasta que aterrizaba el nuevo el
+    # selector y la web barrian los 40 GB de la tabla, cada hora (vistos
+    # tres barridos a la vez, dos de ellos huerfanos de peticiones web ya
+    # cortadas).  El margen tiene que cubrir una captura entera de retraso.
     reciente = _seed_tree_totals(now)
     if reciente is not None:
         edad = (now - reciente['measured_at']).total_seconds()
-        if edad < 75 * 60:
+        if edad < SEED_MAX_AGE_SECONDS:
             reciente['bucket_start'] = reciente['measured_at']
             return reciente
     row = Position.objects.aggregate(
