@@ -103,6 +103,28 @@ class SettingsCogTests(TestCase):
 
             self.assertNotEqual(before, notifications._static_version(folder))
 
+    def test_the_cache_buster_covers_subfolders(self):
+        # nginx caches /static/ for 30 days: a change to a script in a
+        # subfolder (the Alice Atomic page's funquests/) must move the URL.
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, 'atomicdb.css').write_text('a {}')
+            Path(folder, 'funquests').mkdir()
+            Path(folder, 'funquests', 'alice_atomic_ui.js').write_text('1')
+            before = notifications._static_version(folder)
+            self.assertEqual(before, notifications._static_version(folder))
+            Path(folder, 'funquests', 'alice_atomic_ui.js').write_text('2')
+
+            self.assertNotEqual(before, notifications._static_version(folder))
+
+    def test_moving_a_file_between_folders_moves_the_version(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, 'sub').mkdir()
+            Path(folder, 'a.js').write_text('1')
+            before = notifications._static_version(folder)
+            Path(folder, 'a.js').rename(Path(folder, 'sub', 'a.js'))
+
+            self.assertNotEqual(before, notifications._static_version(folder))
+
 
 class QueueOptionFromThePanelTests(TestCase):
 
