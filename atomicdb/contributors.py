@@ -123,7 +123,7 @@ def _ago(moment, now):
     return f'{text} ago'
 
 
-def _totals(owner, since=None):
+def _totals(owner, since=None, until=None):
     """Totales por MAQUINA y por CUENTA de una ventana, en UN solo GROUP BY.
 
     Agrupar por ``(machine, delivered_by)`` cuesta lo mismo que agrupar por
@@ -138,6 +138,12 @@ def _totals(owner, since=None):
     rows = AnalysisTask.objects.filter(state=COMPLETED)
     if since is not None:
         rows = rows.filter(completed__gte=since)
+    # Both windows end at the same instant.  The all-time pass is slow, and
+    # the 24h pass after it used to count what landed in between: a newcomer
+    # whose whole history fits in a day showed more nodes in the last 24h
+    # than all time (cz_eclipsia, 15-Nov-2026: 12.04B vs 11.78B).
+    if until is not None:
+        rows = rows.filter(completed__lte=until)
     rows = (rows.values('machine', 'delivered_by')
             .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'),
                       seconds=Sum('elapsed_seconds')).order_by())
@@ -196,8 +202,9 @@ def measure_fleet(now):
     al GROUP BY.
     """
     owner = _owner_of_machine()
-    machines_all, users_all = _totals(owner)
-    machines_24h, users_24h = _totals(owner, since=now - timedelta(hours=24))
+    machines_all, users_all = _totals(owner, until=now)
+    machines_24h, users_24h = _totals(owner, since=now - timedelta(hours=24),
+                                      until=now)
     return {
         'machines_all': machines_all,
         'machines_24h': machines_24h,
