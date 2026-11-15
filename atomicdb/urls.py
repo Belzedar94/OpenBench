@@ -252,6 +252,7 @@ urlpatterns = [
     path('sitemap.xml', cache_page(3600)(views.sitemap)),
     path('api/query', views.api_query),
     path('api/principal-variations', views.api_principal_variations),
+    path('api/backed-source', views.api_backed_source),
     # La API oficial de peticion, hermana de ``api/query``: la de lectura vive
     # ahi arriba desde el principio y esta es la de escritura, con la misma
     # forma de direccion (una FEN en el cuerpo, no una clave interna en la

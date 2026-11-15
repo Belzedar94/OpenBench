@@ -13,6 +13,9 @@ reading and requesting work without an account.</p>
   database knows about one position.</td></tr>
 <tr><td><code>GET /atomicdb/api/principal-variations?fen=...</code></td><td>One
   position and its best lines, a few plies deep, in one call.</td></tr>
+<tr><td><code>GET /atomicdb/api/backed-source?fen=...</code></td><td>Where a
+  position's value comes from: the position whose analysis it is, and the
+  moves leading there.</td></tr>
 <tr><td><code>POST /atomicdb/api/request</code></td><td>Ask for analysis of a
   position, exactly like the explorer button.</td></tr>
 <tr><td><code>POST /atomicdb/api/my-queue/</code></td><td>List your own
@@ -30,7 +33,7 @@ reading and requesting work without an account.</p>
 <h3 id="pace">Rate limit</h3>
 <ul>
 <li>The endpoints a script can call (<code>query</code>,
-  <code>principal-variations</code>, <code>request</code>, <code>live-request</code>, <code>frontier</code>,
+  <code>principal-variations</code>, <code>backed-source</code>, <code>request</code>, <code>live-request</code>, <code>frontier</code>,
   <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code> and
   <code>map</code>) take 5 requests a second from one address, with bursts of
   up to 50.</li>
@@ -58,6 +61,28 @@ A line the tree cannot continue comes back as far as it got.</p>
 <tr><td><code>positions</code></td><td>By FEN, every position the lines
   reach: <code>key</code>, <code>status</code>, <code>closure</code>,
   <code>score</code> from the side to move and <code>best_move</code>.</td></tr>
+</table></div>
+
+<h3 id="backed-source">Where a value comes from</h3>
+<p><code>GET /atomicdb/api/backed-source?fen=...</code> follows the chain of
+moves a position's value is borrowed from, the same walk as the explorer's
+backed-value button, down to the position whose own search or proof it is.</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>position</code></td><td>The asked position: <code>fen</code>,
+  <code>key</code>, <code>status</code>, <code>closure</code>,
+  <code>score</code> and <code>point</code> from the side to move,
+  <code>visits</code>, <code>nodes</code>.</td></tr>
+<tr><td><code>origin</code></td><td>The same fields for the position the
+  value comes from, plus its <code>analysis</code> block as
+  <code>/api/query</code> returns it.</td></tr>
+<tr><td><code>moves</code>, <code>plies</code></td><td>The UCI moves from
+  <code>position</code> to <code>origin</code>, and how many. Empty when the
+  position's own analysis is the source.</td></tr>
+<tr><td><code>end</code></td><td><code>origin</code> when the chain ended
+  normally; <code>repetition</code> when it closed on itself and
+  <code>incomplete</code> when it broke off, and then <code>origin</code> is
+  the last position reached.</td></tr>
 </table></div>
 
 <h3 id="query">Query a position</h3>
