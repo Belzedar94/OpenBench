@@ -159,32 +159,45 @@ class CheckTests(SimpleTestCase):
         self.assertIsNone(rules.outcome(state))
 
 
-class EnPassantTests(SimpleTestCase):
+class NoEnPassantTests(SimpleTestCase):
+    """There is no en passant (community decision, 15-Nov-2026)."""
 
-    def test_en_passant_on_the_board_the_pawn_passed_to(self):
+    def test_a_double_step_beside_an_enemy_pawn_cannot_be_taken(self):
         state = rules.parse('4k3/8/8/8/8/8/4P3/4K3|8/8/8/8/3p4/8/8/8 w - - 0 1')
         after = rules.play(state, 'Ae2e4')
-        self.assertEqual(rules.to_afen(after).split()[3], 'Be3')
-        self.assertIn('Bd4e3', rules.legal_moves(after))
-        taken = rules.play(after, 'Bd4e3')
-        self.assertEqual(taken.boards[1][rules.parse_square('e4')], '')
-        self.assertEqual(taken.boards[1][rules.parse_square('d4')], '')
-        # The capturing pawn exploded on A e3, without touching the kings.
-        self.assertEqual(taken.boards[0][rules.parse_square('e3')], '')
-        self.assertEqual(rules.king_location(taken, 'w'),
-                         (0, rules.parse_square('e1')))
+        self.assertEqual(rules.to_afen(after).split()[3], '-')
+        self.assertEqual(after.boards[1][rules.parse_square('e4')], 'P')
+        self.assertNotIn('Bd4e3', rules.legal_moves(after))
+        with self.assertRaises(rules.IllegalMove):
+            rules.play(after, 'Bd4e3')
 
-    def test_no_en_passant_when_the_square_passed_over_is_taken(self):
-        state = rules.parse(
-            '4k3/8/8/8/8/8/4P3/4K3|8/8/8/8/3p4/4n3/8/8 w - - 0 1')
-        after = rules.play(state, 'Ae2e4')
-        self.assertIsNone(after.ep)
+    def test_an_old_position_with_a_square_reads_without_en_passant(self):
+        old = '4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - Be3 0 1'
+        new = '4k3/8/8/8/8/8/8/4K3|8/8/8/8/3pP3/8/8/8 b - - 0 1'
+        state = rules.parse(old)
+        self.assertEqual(rules.to_afen(state), new)
+        self.assertEqual(rules.position_key(state),
+                         rules.position_key(rules.parse(new)))
+        self.assertEqual(rules.legal_moves(state),
+                         rules.legal_moves(rules.parse(new)))
+        self.assertNotIn('Bd4e3', rules.legal_moves(state))
 
-    def test_no_en_passant_from_the_other_board(self):
-        state = rules.parse('4k3/8/8/8/3p4/8/4P3/4K3|8/8/8/8/8/8/8/8 w - - 0 1')
-        after = rules.play(state, 'Ae2e4')
-        self.assertFalse([m for m in rules.legal_moves(after)
-                          if m.startswith('Ad4e3')])
+    def test_a_malformed_field_is_still_refused(self):
+        for field in ('e3', 'Ce3', 'Bz9', 'Be33'):
+            with self.assertRaises(ValueError, msg=field):
+                rules.parse(f'4k3/8/8/8/8/8/8/4K3|8/8/8/8/8/8/8/8 w - {field} 0 1')
+
+    def test_the_field_stays_empty_through_random_games(self):
+        rng = random.Random(20261115)
+        for _game in range(12):
+            state = rules.start_state()
+            for _ply in range(120):
+                if rules.outcome(state):
+                    break
+                for move, after in rules.legal_moves_detailed(state):
+                    self.assertEqual(rules.to_afen(after).split()[3], '-')
+                    self.assertNotEqual(move[4], 'e')
+                state = rng.choice(rules.legal_moves_detailed(state))[1]
 
 
 class CastlingTests(SimpleTestCase):
@@ -316,7 +329,6 @@ class NoSquareOnBothBoardsTests(SimpleTestCase):
                     self.assertEqual(
                         squares_on_both_boards(after), [],
                         f'{rules.to_afen(state)} {rules.move_text(move)}')
-                captures = [x for x in legal
-                            if x[0][4] in (rules.CAPTURE, rules.EN_PASSANT)]
+                captures = [x for x in legal if x[0][4] == rules.CAPTURE]
                 pool = captures if captures and rng.random() < 0.6 else legal
                 state = rng.choice(pool)[1]

@@ -144,7 +144,7 @@
     for (var i = 0; i < legal.length; i++) {
       if (legal[i].text === text) {
         var m = legal[i].move;
-        var blast = m.kind === R.CAPTURE || m.kind === R.EN_PASSANT;
+        var blast = m.kind === R.CAPTURE;
         // Every move ends on the other board; a capture explodes there.
         var info = { fromB: m.b, from: m.from, toB: 1 - m.b, to: m.to, blast: blast };
         if (m.kind === R.CASTLE) info.rook = m.to > m.from ? m.to - 1 : m.to + 1;
@@ -200,7 +200,7 @@
     function at(b, sq) { return marks[b][sq] || (marks[b][sq] = {}); }
     dests.forEach(function (x) {
       var m = x.move, land = 1 - m.b;
-      var capture = m.kind === R.CAPTURE || m.kind === R.EN_PASSANT;
+      var capture = m.kind === R.CAPTURE;
       var here = at(m.b, m.to);
       here.dest = capture ? 'capture' : 'quiet';
       here.land = land;

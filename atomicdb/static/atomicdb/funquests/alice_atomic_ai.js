@@ -68,7 +68,7 @@ function tick() {
 }
 
 function isCapture(entry) {
-  return entry.move.kind === rules.CAPTURE || entry.move.kind === rules.EN_PASSANT;
+  return entry.move.kind === rules.CAPTURE;
 }
 
 function ordered(s, legal) {
