@@ -245,6 +245,78 @@
   border: 2px dashed rgba(20, 90, 30, .6);
 }
 
+/* Blast area of the selected piece's captures, on the board where it lands. */
+.aa-zone {
+  background-image: repeating-linear-gradient(45deg,
+    rgba(232, 120, 40, .32) 0 5px, rgba(232, 120, 40, 0) 5px 10px);
+}
+.aa-zone-hot { box-shadow: inset 0 0 0 100vmax rgba(232, 120, 40, .5); }
+.aa-doomed { outline: 2px dashed rgba(215, 55, 0, .95); outline-offset: -3px; }
+.aa-doomed img { filter: drop-shadow(0 0 3px #ff6a00) drop-shadow(0 0 2px #ff6a00); }
+
+/* One-board view: both boards on one grid. */
+.aa-board-pair.aa-combined {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 36rem;
+}
+
+.aa-on-b img { opacity: .5; filter: saturate(.7); }
+.aa-on-b.aa-doomed img {
+  opacity: .7;
+  filter: saturate(.7) drop-shadow(0 0 3px #ff6a00) drop-shadow(0 0 2px #ff6a00);
+}
+
+.aa-badge,
+.aa-legend-badge {
+  font-size: .6rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: #3a63b8;
+  color: #fff;
+}
+
+.aa-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.aa-legend-badge { display: inline-block; vertical-align: 1px; }
+
+/* The board a move lands on, written on its destination. */
+.aa-lettered.aa-dest::after { display: none; }
+
+.aa-land {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36%;
+  height: 36%;
+  border-radius: 50%;
+  background: var(--move-destination);
+  color: #fff;
+  font-size: .62rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.aa-land-blast {
+  width: auto;
+  height: auto;
+  left: 2px;
+  bottom: 2px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(200, 40, 20, .85);
+}
+
 .aa-player {
   display: flex;
   align-items: center;

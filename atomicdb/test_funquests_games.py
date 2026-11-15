@@ -42,6 +42,27 @@ class PagesTests(TestCase):
         self.assertContains(response, 'En passant')
         self.assertContains(response, 'alice_atomic.js')
 
+    def test_the_rules_say_no_square_is_taken_on_both_boards(self):
+        response = self.client.get('/atomicdb/fun/alice-atomic/')
+        self.assertContains(response, 'a square is never occupied on both boards')
+        # Conditions that this makes always true are not listed as rules.
+        self.assertNotContains(response, 'which must be empty')
+        self.assertNotContains(response, "the king's square must be empty")
+        self.assertNotContains(response, 'Every move, captures included')
+
+    def test_the_page_offers_the_one_board_view(self):
+        response = self.client.get('/atomicdb/fun/alice-atomic/')
+        self.assertContains(response, 'id="aa-view"')
+        self.assertContains(response, 'id="aa-legend-one"')
+        self.assertContains(response, 'id="aa-board-wrap-b"')
+
+    def test_the_scripts_carry_the_cache_buster(self):
+        from . import notifications
+        response = self.client.get('/atomicdb/fun/alice-atomic/')
+        for name in ('alice_atomic.js', 'alice_atomic_ui.js', 'funquests.css'):
+            self.assertContains(
+                response, f'funquests/{name}?v={notifications.STATIC_VERSION}')
+
     def test_an_unknown_game_link_is_a_404(self):
         response = self.client.get('/atomicdb/fun/alice-atomic/play/nope/')
         self.assertEqual(response.status_code, 404)
