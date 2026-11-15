@@ -8,6 +8,7 @@
   <strong>{{ receipt.adopted }}</strong> position{{ receipt.adopted|pluralize }} from {{ receipt.title }}: they are in
   <a href="/atomicdb/queue/{{ username|urlencode }}/">your queue</a>.{% if receipt.dropped %}
   {{ receipt.dropped }} more had closed, been searched again or been requested already, and left the list.{% endif %}{% elif receipt.status == 'empty' %}Nothing left to adopt in {{ receipt.title }}{% if receipt.dropped %}: the {{ receipt.dropped }} position{{ receipt.dropped|pluralize }} checked had closed, been searched again or been requested already, and left the list{% endif %}.{% elif receipt.status == 'adopted-full' %}You already have {{ receipt.waiting_max }} adopted positions waiting. Adopt more once some of them are searched.{% elif receipt.status == 'queue-full' %}Your queue is full. Adopt more once some of your requests are searched.{% else %}That batch could not be adopted.{% endif %}</p>{% endif %}
+{% if sub_receipt %}<p class="queue-receipt" role="status">{% if sub_receipt.status == 'subscribed' %}Subscribed to {{ sub_receipt.title }}: whenever fewer than half a batch of your adopted positions from it are waiting, the next batch is adopted for you. This is checked every five minutes.{% elif sub_receipt.status == 'unsubscribed' %}Unsubscribed from {{ sub_receipt.title }}. Positions already adopted stay in your queue.{% else %}That subscription could not be changed.{% endif %}</p>{% endif %}
 
 <div class="contrib-scroll">
 <table class="backlog-table">
@@ -21,11 +22,21 @@
         <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
         <input type="hidden" name="backlog" value="{{ b.name }}">
         <input type="hidden" name="size" value="{{ size }}">
-        <button type="submit" title="Queue {{ size }} of these searches as your own requests">Adopt {{ size }}</button></form>{% endfor %}{% elif b.adopted %}<span class="dim">all adopted</span>{% else %}<span class="dim">nothing to adopt</span>{% endif %}{% endif %}</td>
+        <button type="submit" title="Queue {{ size }} of these searches as your own requests">Adopt {{ size }}</button></form>{% endfor %}{% elif b.adopted %}<span class="dim">all adopted</span>{% else %}<span class="dim">nothing to adopt</span>{% endif %}<div class="backlog-sub">{% if b.sub and b.sub.active %}<form method="post" action="/atomicdb/queue/subscribe/">
+        <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+        <input type="hidden" name="backlog" value="{{ b.name }}">
+        <input type="hidden" name="action" value="unsubscribe">
+        <span title="The next batch is adopted for you whenever fewer than half a batch of your adopted positions from this backlog are waiting">Subscribed, {{ b.sub.batch_size }} at a time</span>
+        <button type="submit">Unsubscribe</button></form>{% elif b.open %}<form method="post" action="/atomicdb/queue/subscribe/">
+        <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+        <input type="hidden" name="backlog" value="{{ b.name }}">
+        <select name="size" aria-label="Batch size">{% for size in sizes %}<option value="{{ size }}"{% if size == default_size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select>
+        <button type="submit" title="Adopt a new batch for me whenever fewer than half a batch of my adopted positions from this backlog are waiting">Subscribe</button></form>{% if b.sub.last_status == 'empty' %} <span class="dim">Your last subscription ended when this list ran out.</span>{% endif %}{% elif b.sub.last_status == 'empty' %}<span class="dim">Your subscription ended when this list ran out.</span>{% endif %}</div>{% endif %}</td>
   </tr>
   {% endfor %}
 </table>
 </div>
-{% if signed_in %}<p class="dim backlog-note">{% if waiting_adopted %}You have {{ waiting_adopted }} adopted position{{ waiting_adopted|pluralize }} waiting; up to {{ waiting_max }} can wait at once.{% else %}Up to {{ waiting_max }} adopted positions can wait at once in each account's queue.{% endif %}</p>
+{% if signed_in %}<p class="dim backlog-note">{% if waiting_adopted %}You have {{ waiting_adopted }} adopted position{{ waiting_adopted|pluralize }} waiting; up to {{ waiting_max }} can wait at once.{% else %}Up to {{ waiting_max }} adopted positions can wait at once in each account's queue.{% endif %}
+  Subscribe to a backlog and the next batch is adopted for you whenever fewer than half a batch from it are waiting; it stops by itself when the list runs out.</p>
 {% else %}<p class="dim backlog-note"><a href="/login/?next=/atomicdb/queue/%23backlog">Sign in</a> to adopt a batch.</p>{% endif %}
 </section>

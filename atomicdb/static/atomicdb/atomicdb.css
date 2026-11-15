@@ -3714,6 +3714,9 @@ html[data-board="custom"] cg-board {
   cursor: pointer;
 }
 .backlog-adopt button:hover { background: var(--accent); color: var(--bg); }
+.backlog-sub { margin-top: .2rem; font-size: .85rem; }
+.backlog-sub select, .backlog-sub span { font: inherit; margin-right: .3rem; }
+.backlog-subs li { margin-bottom: .3rem; }
 @media (max-width: 640px) {
   .backlog-adopt { white-space: normal; }
 }

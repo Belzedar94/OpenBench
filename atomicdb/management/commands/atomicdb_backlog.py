@@ -1,6 +1,7 @@
 """Fill and inspect the community backlogs (see ``atomicdb.backlog``).
 
     manage.py atomicdb_backlog status
+    manage.py atomicdb_backlog top-up
     manage.py atomicdb_backlog load-lost-lines --file KEYS [--skip N]
     manage.py atomicdb_backlog scan-shallow --state-file PATH
                                            [--batch 2000] [--pause 0.5]
@@ -9,6 +10,9 @@
 ``load-lost-lines`` reads one position key per line and adds the ones not on
 the list yet; ``--skip N`` leaves out the first N lines (the ones a drip
 already queued).  Running it twice adds nothing the second time.
+
+``top-up`` runs one pass of the subscriptions' top-up by hand, the same
+pass ``warm_public_snapshot`` runs every five minutes.
 
 ``scan-shallow`` walks the completed searches of 128M or more by id, newest
 first, ``--batch`` ids per step with ``--pause`` seconds between steps, and
@@ -30,8 +34,10 @@ import os
 import time
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import Count
 
 from atomicdb import backlog
+from atomicdb.models import BacklogSubscription
 
 
 def _read_state(path):
@@ -55,7 +61,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('action', choices=['status', 'load-lost-lines',
-                                               'scan-shallow'])
+                                               'scan-shallow', 'top-up'])
         parser.add_argument('--file', help='keys to load, one per line')
         parser.add_argument('--skip', type=int, default=0,
                             help='leave out the first N lines of --file')
@@ -73,14 +79,23 @@ class Command(BaseCommand):
             return self._status()
         if action == 'load-lost-lines':
             return self._load(options)
+        if action == 'top-up':
+            summary = backlog.top_up()
+            self.stdout.write(' '.join(f'{key}={value}' for key, value
+                                       in summary.items()))
+            return
         return self._scan(options)
 
     def _status(self):
+        subscribed = dict(BacklogSubscription.objects.filter(active=True)
+                          .values_list('backlog')
+                          .annotate(n=Count('id')))
         for name, numbers in backlog.counts(fresh=True).items():
             self.stdout.write(
                 f"{name}: open={numbers['open']} "
                 f"adopted={numbers['adopted']} "
-                f"adopters={numbers['adopters']}")
+                f"adopters={numbers['adopters']} "
+                f"subscribed={subscribed.get(name, 0)}")
 
     def _load(self, options):
         path = options['file']

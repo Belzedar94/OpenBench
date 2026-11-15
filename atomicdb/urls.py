@@ -228,6 +228,10 @@ urlpatterns = [
     # Adopt a batch of a community backlog as your own requests.  Writes and
     # belongs to the session, like the two above: no cache.
     path('queue/adopt/', backlog.api_adopt, name='atomicdb-queue-adopt'),
+    # Subscribe to a backlog (or stop): the next batch is adopted for you
+    # whenever your adopted positions from it run low.  Same rules.
+    path('queue/subscribe/', backlog.api_subscribe,
+         name='atomicdb-queue-subscribe'),
     # One account's requests only, without the rest of its profile.  After
     # every fixed ``queue/<word>/`` route above, so none of them is shadowed;
     # same short cache as the anonymous page.

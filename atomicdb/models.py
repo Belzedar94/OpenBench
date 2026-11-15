@@ -1728,3 +1728,38 @@ class BacklogItem(models.Model):
 
     def __str__(self):
         return f'{self.backlog} {self.position_key[:12]} ({self.state})'
+
+
+class BacklogSubscription(models.Model):
+    """An account's standing order on a community backlog.
+
+    While ``active``, the backlog top-up (§ ``atomicdb.backlog.top_up``)
+    adopts the next ``batch_size`` positions for the account whenever fewer
+    than half a batch of its adopted positions from that backlog are waiting,
+    through the same adoption as the queue page's buttons.  It turns itself
+    off when the backlog runs out; the account can turn it off any time.
+
+    Nothing here decides a value: a row only says who wants more and how
+    many at a time.
+    """
+
+    username = models.CharField(max_length=64)
+    backlog = models.CharField(max_length=16)
+    batch_size = models.PositiveSmallIntegerField(default=50)
+    active = models.BooleanField(default=True)
+    created = models.DateTimeField(default=timezone.now)
+    # The last top-up that looked at this row, what it found, and how many
+    # positions the top-ups together adopted for it.
+    checked_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=16, blank=True, default='')
+    adopted_total = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['username', 'backlog'], name='uniq_backlog_subscription')]
+        indexes = [models.Index(fields=['active', 'checked_at'],
+                                name='atomic_backlog_sub_due')]
+
+    def __str__(self):
+        state = 'on' if self.active else 'off'
+        return f'{self.username} {self.backlog} x{self.batch_size} ({state})'

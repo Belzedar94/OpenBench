@@ -51,24 +51,39 @@ more is possible as soon as some are served.  An adopted request is a
 request like any other in the fair share, so it never takes another
 account's turn.
 
+SUBSCRIPTIONS (Torom, Discord, 15-Nov-2026: "a new adoption of 100 positions
+when the last one is done").  A signed-in account can subscribe to a backlog
+with a batch size of 25, 50 or 100.  Every five minutes the top-up
+(``top_up``, run by ``manage.py warm_public_snapshot``) looks at each active
+subscription and, when fewer than half a batch of the account's adopted
+positions from that backlog are waiting, adopts the next batch for it with
+``adopt`` itself: the same re-checks, the same allowance of waiting requests
+and its receipt, the same ceiling of adopted positions.  A subscription turns
+itself off when its backlog has nothing left to adopt, and the account can
+turn it off any time.  One pass is bounded in subscriptions and in seconds,
+and a failure stays inside it: the host command still exits cleanly.
+
 WHAT IT NEVER DOES: decide a value, or change what any other producer buys.
 The lists are filled by ``manage.py atomicdb_backlog``.
 """
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from urllib.parse import quote, urlencode
 
 from django.core.cache import cache
-from django.db.models import Count
+from django.db.models import Count, F
 from django.http import JsonResponse
 from django.shortcuts import redirect
 from django.utils import timezone
 
 from . import idle_repair, ingest, logic
 from .database import atomic
-from .models import AnalysisTask, BacklogItem, Position
+from .models import AnalysisTask, BacklogItem, BacklogSubscription, Position
+
+log = logging.getLogger(__name__)
 
 LOST_LINES = 'lost-lines'
 SHALLOW = 'shallow'
@@ -402,6 +417,229 @@ def receipt(params):
     title = BACKLOGS.get(params.get('backlog', ''), {}).get('title', '')
     return {'status': status, 'adopted': adopted, 'dropped': dropped,
             'title': title, 'waiting_max': ADOPT_WAITING_MAX}
+
+
+# ---------------- subscriptions ----------------
+
+SUBSCRIBE_DEFAULT_SIZE = 50
+# Topped up when fewer than batch // TOPUP_DIVISOR adopted positions of that
+# backlog are waiting: half a batch.
+TOPUP_DIVISOR = 2
+# One pass, every five minutes: at most this many subscriptions, and no new
+# one started after this many seconds.  The least recently checked go first,
+# so a pass cut short leaves the rest for the next one.
+TOPUP_MAX_SUBSCRIPTIONS = 40
+TOPUP_SECONDS = 30.0
+
+# What the last top-up found (``BacklogSubscription.last_status``).
+SUB_ADOPTED = 'adopted'        # it adopted a batch
+SUB_ENOUGH = 'enough'          # enough adopted positions were still waiting
+SUB_EMPTY = 'empty'            # the backlog ran out: turned off
+SUB_STOPPED = 'stopped'        # the account turned it off
+SUB_ACCOUNT = 'account-off'    # the account is disabled: turned off
+SUB_ERROR = 'error'            # this one failed; the next pass tries again
+# ``adopt`` refusals ('queue-full', 'adopted-full') are stored as they are:
+# the subscription stays on and the next pass tries again.
+
+
+def backlog_waiting(username, backlog):
+    """This account's adopted requests from ``backlog`` still waiting."""
+    return (AnalysisTask.objects
+            .filter(state=AnalysisTask.TState.PENDING,
+                    source=AnalysisTask.Source.USER,
+                    requested_by=username, arm=BACKLOGS[backlog]['arm'],
+                    position__status='UNKNOWN')
+            .count())
+
+
+def topup_below(batch_size):
+    return batch_size // TOPUP_DIVISOR
+
+
+def subscriptions_of(username):
+    """``{backlog: BacklogSubscription}`` of this account, on or off."""
+    if not username:
+        return {}
+    return {sub.backlog: sub for sub in
+            BacklogSubscription.objects.filter(username=username,
+                                               backlog__in=ORDER)}
+
+
+def subscribe(username, backlog, size):
+    """Turn on (or resize) ``username``'s subscription to ``backlog``."""
+    if not username:
+        return 'sign-in'
+    if backlog not in BACKLOGS or size not in ADOPT_SIZES:
+        return 'bad-request'
+    BacklogSubscription.objects.update_or_create(
+        username=username, backlog=backlog,
+        defaults={'batch_size': size, 'active': True, 'last_status': ''})
+    return 'subscribed'
+
+
+def unsubscribe(username, backlog):
+    """Turn ``username``'s subscription to ``backlog`` off."""
+    if not username:
+        return 'sign-in'
+    if backlog not in BACKLOGS:
+        return 'bad-request'
+    BacklogSubscription.objects.filter(
+        username=username, backlog=backlog, active=True).update(
+            active=False, last_status=SUB_STOPPED)
+    return 'unsubscribed'
+
+
+def _enabled_accounts(usernames):
+    from django.contrib.auth.models import User
+
+    return set(User.objects.filter(username__in=usernames, is_active=True)
+               .values_list('username', flat=True))
+
+
+def _top_up_one(sub, enabled, has_open):
+    """``(status, adopted, still active)`` for one subscription."""
+    if sub.backlog not in BACKLOGS or sub.batch_size not in ADOPT_SIZES:
+        return 'bad-request', 0, False
+    if sub.username not in enabled:
+        return SUB_ACCOUNT, 0, False
+    if not has_open(sub.backlog):
+        return SUB_EMPTY, 0, False
+    if (backlog_waiting(sub.username, sub.backlog)
+            >= topup_below(sub.batch_size)):
+        return SUB_ENOUGH, 0, True
+    outcome = adopt(sub.username, sub.backlog, sub.batch_size)
+    if outcome.status == 'empty':
+        # Every row it read had left the list; off only if none is left.
+        if not has_open(sub.backlog, fresh=True):
+            return SUB_EMPTY, 0, False
+        return SUB_ENOUGH, 0, True
+    return outcome.status, outcome.adopted, True
+
+
+def top_up(max_subscriptions=None, seconds=None):
+    """Adopt the next batch for every subscription that is running low.
+
+    Bounded: at most ``max_subscriptions`` rows, the least recently checked
+    first, and none started after ``seconds``.  A subscription that fails is
+    marked and skipped; nothing raised here escapes.  Returns a summary.
+    """
+    limit = TOPUP_MAX_SUBSCRIPTIONS if max_subscriptions is None \
+        else max_subscriptions
+    budget = TOPUP_SECONDS if seconds is None else seconds
+    started = time.monotonic()
+    summary = {'checked': 0, 'topped_up': 0, 'adopted': 0, 'ended': 0,
+               'errors': 0, 'deferred': 0}
+    try:
+        subs = list(BacklogSubscription.objects.filter(active=True)
+                    .order_by(F('checked_at').asc(nulls_first=True), 'id')
+                    [:limit])
+        enabled = _enabled_accounts({sub.username for sub in subs}) \
+            if subs else set()
+    except Exception:                       # noqa: BLE001
+        log.exception('backlog top-up: could not read the subscriptions')
+        summary['errors'] += 1
+        return summary
+    open_now = {}
+
+    def has_open(name, fresh=False):
+        if fresh or name not in open_now:
+            open_now[name] = BacklogItem.objects.filter(
+                backlog=name, state=BacklogItem.State.OPEN).exists()
+        return open_now[name]
+
+    for index, sub in enumerate(subs):
+        if time.monotonic() - started > budget:
+            summary['deferred'] = len(subs) - index
+            break
+        summary['checked'] += 1
+        try:
+            status, adopted, active = _top_up_one(sub, enabled, has_open)
+        except Exception:                   # noqa: BLE001
+            log.exception('backlog top-up: %s on %s failed',
+                          sub.username, sub.backlog)
+            status, adopted, active = SUB_ERROR, 0, True
+            summary['errors'] += 1
+        if adopted:
+            summary['topped_up'] += 1
+            summary['adopted'] += adopted
+        if not active:
+            summary['ended'] += 1
+        try:
+            # Only if it is still on: an untick during the pass wins.
+            BacklogSubscription.objects.filter(pk=sub.pk, active=True).update(
+                checked_at=timezone.now(), last_status=status, active=active,
+                adopted_total=F('adopted_total') + adopted)
+        except Exception:                   # noqa: BLE001
+            log.exception('backlog top-up: could not record %s on %s',
+                          sub.username, sub.backlog)
+            summary['errors'] += 1
+    return summary
+
+
+def api_subscribe(request):
+    """The box's Subscribe and Unsubscribe buttons: a form POST.
+
+    Scripts may send ``format=json`` for the outcome as JSON instead.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    wants_json = request.POST.get('format') == 'json'
+    if not request.user.is_authenticated:
+        if wants_json:
+            return JsonResponse({'status': 'sign-in'}, status=401)
+        return redirect(f'/login/?next={quote(QUEUE_PAGE + "#backlog")}')
+    backlog = request.POST.get('backlog', '')
+    username = request.user.username
+    if request.POST.get('action') == 'unsubscribe':
+        status = unsubscribe(username, backlog)
+    else:
+        try:
+            size = int(request.POST.get('size', SUBSCRIBE_DEFAULT_SIZE))
+        except ValueError:
+            size = 0
+        status = subscribe(username, backlog, size)
+    if wants_json:
+        return JsonResponse({'status': status},
+                            status=400 if status == 'bad-request' else 200)
+    query = urlencode({'sub': status, 'backlog': backlog})
+    return redirect(f'{QUEUE_PAGE}?{query}#backlog')
+
+
+def subscription_receipt(params):
+    """The sentence the box shows after a subscription click."""
+    status = params.get('sub')
+    if status not in ('subscribed', 'unsubscribed', 'bad-request'):
+        return None
+    title = BACKLOGS.get(params.get('backlog', ''), {}).get('title', '')
+    return {'status': status, 'title': title}
+
+
+def _ago(moment):
+    """"3 minutes ago", in one unit, or "just now"; '' for never."""
+    if moment is None:
+        return ''
+    from django.utils.timesince import timesince
+    text = timesince(moment, now=timezone.now(), depth=1)
+    return 'just now' if text.split()[:1] == ['0'] else f'{text} ago'
+
+
+def subscription_rows(username):
+    """What a subscriber sees of their subscriptions, one per backlog."""
+    subs = subscriptions_of(username)
+    rows = []
+    for name in ORDER:
+        sub = subs.get(name)
+        if sub is None:
+            continue
+        rows.append({'name': name, 'title': BACKLOGS[name]['title'],
+                     'active': sub.active, 'batch_size': sub.batch_size,
+                     'below': topup_below(sub.batch_size),
+                     'status': sub.last_status,
+                     'checked': _ago(sub.checked_at),
+                     'adopted_total': sub.adopted_total,
+                     'waiting': (backlog_waiting(username, name)
+                                 if sub.active else None)})
+    return rows
 
 
 # ---------------- filling the lists ----------------
