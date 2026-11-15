@@ -34,9 +34,9 @@ reading and requesting work without an account.</p>
 <ul>
 <li>The endpoints a script can call (<code>query</code>,
   <code>principal-variations</code>, <code>backed-source</code>, <code>request</code>, <code>live-request</code>, <code>frontier</code>,
-  <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code> and
-  <code>map</code>) take 5 requests a second from one address, with bursts of
-  up to 50.</li>
+  <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code>,
+  <code>map</code> and <code>roots</code>) take 10 requests a second from one
+  address, with bursts of up to 100.</li>
 <li>Past that the reply is <code>429</code> with a JSON body and a
   <code>Retry-After</code> header. Nothing is lost: wait and send it
   again.</li>
