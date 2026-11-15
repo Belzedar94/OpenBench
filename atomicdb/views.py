@@ -6145,6 +6145,49 @@ def api_principal_variations(request):
                          'line_count': line_count, 'ply_count': ply_count})
 
 
+def _compact_record(pos):
+    """Key, FEN, status and scores of ``pos``, from its side to move."""
+    stm_white = pos.fen.split()[1] == 'w'
+    known = ingest.best_known_eval(pos)
+    return {'fen': pos.fen, 'key': pos.key, 'status': pos.status,
+            'closure': pos.closure,
+            'score': None if known is None else (known if stm_white else -known),
+            'point': None if pos.eval_cp is None else (
+                pos.eval_cp if stm_white else -pos.eval_cp),
+            'visits': pos.visits, 'nodes': pos.nodes_invested}
+
+
+def api_backed_source(request):
+    """Where a position's value comes from, in one call.
+
+    The JSON twin of the explorer's "backed value" button (§ backed_source):
+    a script that wants the analysis behind a number used to walk the tree
+    down ``backed_move`` itself (BManBJ, 15-Nov-2026).  ``position`` is the
+    asked position, ``origin`` the position whose own search or proof the
+    value comes from, with its ``analysis`` block as ``/api/query`` returns
+    it, and ``moves`` the UCI moves from one to the other.  ``end`` is
+    ``origin`` when the chain ended normally, ``repetition`` when it closed
+    on itself and ``incomplete`` when it broke off; then ``origin`` is the
+    last position reached.
+    """
+    try:
+        fen = _parse_public_fen(request.GET.get('fen', ''))
+    except Exception:
+        return JsonResponse({'error': 'invalid fen'}, status=400)
+    try:
+        pos = Position.objects.get(key=logic.key_of(fen))
+    except Position.DoesNotExist:
+        return JsonResponse({'error': 'unknown position'}, status=404)
+    origin, walked, outcome = _walk_backed_spine(pos)
+    origin_record = _compact_record(origin)
+    origin_record['analysis'] = _analysis_block(
+        origin, origin.fen.split()[1] == 'w')
+    return JsonResponse({'position': _compact_record(pos),
+                         'origin': origin_record,
+                         'moves': list(walked), 'plies': len(walked),
+                         'end': outcome or 'origin'})
+
+
 def api_frontier(request, key):
     """What a click bought BELOW this position, for the explorer's poller.
 
