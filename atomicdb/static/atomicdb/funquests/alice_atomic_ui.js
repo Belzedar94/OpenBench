@@ -19,6 +19,7 @@
   };
   var STORE_KEY = 'atomicdb-alice-ai';
   var VIEW_KEY = 'atomicdb-alice-view';
+  var FOCUS_KEY = 'atomicdb-alice-focus';
   var POLL_MS = 2000;
   var REASONS = {
     explosion: 'the king exploded',
@@ -41,6 +42,7 @@
     wrapB: $('aa-board-wrap-b'),
     captionA: $('aa-caption-a'),
     view: $('aa-view'),
+    focus: $('aa-focus'),
     legendTwo: $('aa-legend-two'),
     legendOne: $('aa-legend-one'),
     status: $('aa-status'),
@@ -76,6 +78,9 @@
   // empty on both; the server tests check it after every move).
   var combined = false;
   try { combined = window.localStorage.getItem(VIEW_KEY) === 'one'; } catch (_error) {}
+  // The board drawn solid in the one-board view; the other one is faint.
+  var focusBoard = 0;
+  try { focusBoard = window.localStorage.getItem(FOCUS_KEY) === 'B' ? 1 : 0; } catch (_error) {}
   var selected = null;   // {b, sq}
   var pending = null;    // promotion choice: list of legal entries
   var worker = null;
@@ -239,6 +244,8 @@
     els.legendTwo.hidden = combined;
     els.view.textContent = combined ? 'Two boards' : 'One board';
     els.view.setAttribute('aria-pressed', combined ? 'true' : 'false');
+    els.focus.hidden = !combined;
+    els.focus.textContent = 'Focus board ' + R.BOARD_LETTERS[1 - focusBoard];
     if (combined) els.boards[1].textContent = '';
     for (var e = 0; e < (combined ? 1 : 2); e++) {
       var el = els.boards[e];
@@ -266,9 +273,10 @@
           cell.appendChild(img);
           label += ', ' + pieceName(piece);
           if (combined) label += ' on board ' + R.BOARD_LETTERS[pb];
-          if (combined && pb === 1) {
+          // The board out of focus is drawn faint, with its letter.
+          if (combined && pb !== focusBoard) {
             cell.classList.add('aa-on-b');
-            badge(cell, 'B', 'aa-badge');
+            badge(cell, R.BOARD_LETTERS[pb], 'aa-badge');
           }
         }
         if (i % 8 === 0) cell.dataset.rank = String((sq >> 3) + 1);
@@ -531,6 +539,12 @@
   els.view.addEventListener('click', function () {
     combined = !combined;
     try { window.localStorage.setItem(VIEW_KEY, combined ? 'one' : 'two'); } catch (_error) {}
+    if (game) drawBoards();
+  });
+
+  els.focus.addEventListener('click', function () {
+    focusBoard = 1 - focusBoard;
+    try { window.localStorage.setItem(FOCUS_KEY, R.BOARD_LETTERS[focusBoard]); } catch (_error) {}
     if (game) drawBoards();
   });
 
