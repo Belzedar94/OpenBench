@@ -145,31 +145,27 @@ class PendingMarkTests(TestCase):
 
 class TableHelpTests(TestCase):
 
-    def test_the_info_toggles_sit_above_the_moves_table(self):
+    def test_the_column_headers_link_to_their_part_of_the_guide(self):
         parent = _pos('HELP-P', 'w', expanded=True)
         _edge(parent, _pos('HELP-C', 'b', eval_cp=9997), 'e1d1')
 
         body = self.client.get(
             f'/atomicdb/explore/{parent.key}/').content.decode()
 
-        self.assertIn('class="table-help"', body)
-        self.assertLess(body.index('class="table-help"'),
-                        body.index('<table aria-labelledby="moves-heading">'))
-        for topic in ('state', 'eval', 'colours', 'pn / dn', 'depth',
-                      'pending'):
-            # The page goes out minified, with the entity as its character.
-            self.assertIn(f'ⓘ {topic}</summary>', body)
+        for anchor in ('state', 'eval', 'pndn', 'depth'):
+            self.assertIn(
+                f'class="col-info" href="/atomicdb/docs/reading/#col-{anchor}"',
+                body)
+        # The first two headers stay bare (test_multi_request reads them).
+        self.assertIn('<th></th><th>move</th>', body)
+
+    def test_the_guide_has_every_column(self):
+        body = self.client.get('/atomicdb/docs/reading/').content.decode()
+
+        for anchor in ('col-state', 'col-marks', 'col-eval', 'col-colours',
+                       'col-pndn', 'col-depth'):
+            self.assertIn(f'id="{anchor}"', body)
         # The values the eval note explains are the ones the code prints.
-        self.assertIn('9997 is mate in 3 more moves', body)
-        self.assertIn('capped at 9500', body)
-
-    def test_no_toggles_without_a_table(self):
-        pos = _pos('HELP-NONE', 'w')
-        pos.closure = 'TERMINAL'
-        pos.status = 'WHITE_WIN'
-        pos.save()
-
-        body = self.client.get(
-            f'/atomicdb/explore/{pos.key}/').content.decode()
-
-        self.assertNotIn('class="table-help"', body)
+        self.assertIn('9997 is\nmate in 3 more moves'.replace('\n', ' '),
+                      ' '.join(body.split()))
+        self.assertIn('capped at 9500', ' '.join(body.split()))

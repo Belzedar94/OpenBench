@@ -97,4 +97,72 @@ show too), or a dash where no search has reached it yet.</p>
   one, because other work got there first, does not.</li>
 <li>Hover the cell for the number of visits.</li>
 </ul>
+
+<h3 id="columns">Each column</h3>
+
+<h4 id="col-state">state</h4>
+<ul>
+<li><strong>unsolved</strong>: the move's position is open, nothing is proven
+  yet.</li>
+<li><strong>unexplored</strong>: open, and no engine has searched that position
+  itself; any number it shows came from a line running through it.</li>
+<li><strong>WHITE_WIN</strong>, <strong>BLACK_WIN</strong> or
+  <strong>DRAW</strong>: a proven result, followed by how it was proven:
+  TERMINAL (the game is over on the board), MATE_PV (a mate line checked move by
+  move), MINIMAX (from proven moves below it), TB (tablebase) or SOLVE (a full
+  proof replayed on the server).</li>
+<li><strong>not in tree</strong>: a legal move nobody has stepped into yet.
+  Following it adds it.</li>
+</ul>
+<p id="col-marks">A small mark after the state says something is already on
+its way for that move, so there is no need to request it again:</p>
+<ul>
+<li><strong>queued</strong> (dashed): analysis is requested and waiting for a
+  worker.</li>
+<li><strong>running</strong>: a worker is searching it right now.</li>
+<li><strong>writing</strong>: the search has finished and its result is waiting
+  to be written into the tree; the value updates once it is.</li>
+<li><strong>unconfirmed mate</strong> or <strong>unconfirmed win</strong>: a
+  worker reported a forced mate, or a line to a tablebase win, that the server
+  could not prove, from an account whose unproven lines are not used. The move
+  stays open until it is closed another way or the line is refuted.</li>
+</ul>
+<p>The marks are as of when the page loaded: reload to refresh them.</p>
+
+<h4 id="col-eval">eval</h4>
+<p>The value of each move for the side to move here, in centipawns (100 is
+about one pawn). Switch the eval to Pawns in the settings to see it in pawns
+from White's side instead (9500 becomes 95.00).</p>
+<ul>
+<li><strong>M3</strong>: a proven win for the side to move, mate in at most 3
+  moves, counting this move. <strong>-M3</strong>: a proven loss.</li>
+<li><strong>10000</strong>: won, with no mate distance attached (-10000: lost).
+  On an open move it is a value carried up from a move below that is already
+  proven, before this position has closed.</li>
+<li><strong>9501 to 9999</strong>: an engine announced a mate it has not
+  proven: 10000 minus the number of moves to mate after this move, so 9997 is
+  mate in 3 more moves. Negative numbers are the same for the other side.</li>
+<li><strong>9500</strong>: an engine reported a winning score that is not a
+  mate count, such as a tablebase win. Those scores are capped at 9500, so 9500
+  never means a long mate.</li>
+<li><strong>not analysed</strong>: no value yet. These rows sort just above
+  proven losses, so a run of them can sit between the open moves and the proven
+  losses at the bottom.</li>
+</ul>
+<p id="col-colours">The coloured square at the start of each row is from the
+side to move here: green for a proven win, red for a proven loss, blue for a
+proven draw. Open moves are coloured by the size of their value, for either
+side: orange for 500 or more, brown for 200 to 499, grey for less than 200 (or
+no value).</p>
+
+<h4 id="col-pndn">pn / dn</h4>
+<p>Proof and disproof numbers of the active proof campaign: an estimate of how
+much work is left to prove the campaign's goal from that move (pn) or to refute
+it (dn). Smaller means closer, &infin; means it can no longer be done. They are
+not probabilities. Empty when the campaign has no estimate for that move.</p>
+
+<h4 id="col-depth">depth</h4>
+<p>The node budget of the deepest search the move's position has had, or a dash
+if none has reached it yet; see <a href="#table">the moves table</a>
+above.</p>
 {% endblock %}
