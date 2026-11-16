@@ -428,6 +428,22 @@ def reported_threads(request):
         return 0
 
 
+MAX_WORKER_BUILD = 2_147_483_647  # the column is a 32-bit integer
+
+
+def reported_worker_build(request):
+    """The worker build the request announces, or 0 when it gives none.
+
+    Anything unusable (missing, not a number, not positive, wider than the
+    column) reads as 0, which the callers treat as "no build reported".
+    """
+    try:
+        build = int(request.POST.get('worker_build', 0) or 0)
+    except ValueError:
+        return 0
+    return build if 0 < build <= MAX_WORKER_BUILD else 0
+
+
 def _touch_worker(request, user):
     """Refresh capacity without changing, extending or reclaiming any lease."""
     machine = request.POST.get('machine', user.username)[:64]
@@ -443,6 +459,12 @@ def _touch_worker(request, user):
         'os': request.POST.get('os', '')[:64],
         'last_seen': now,
     }
+    # The build rides on the same write.  Only a request that carries a
+    # usable build changes it: the calls that omit it (or an old worker that
+    # never sent one) keep the last value seen instead of wiping it.
+    build = reported_worker_build(request)
+    if build:
+        capacity['worker_build'] = build
     ping, created = WorkerPing.objects.get_or_create(
         machine=machine, user=user.username, defaults=capacity)
     if not created:

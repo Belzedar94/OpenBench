@@ -1048,6 +1048,55 @@ class LeaseReclaimTests(TestCase):
                           task.lease_token),
                          ('LEASED', 'm1', 1, 'healthy-token'))
 
+    def test_lease_stores_the_worker_build(self):
+        from .models import WorkerPing
+        worker_account('u', 'p')
+        payload = {'username': 'u', 'password': 'p', 'machine': 'm1',
+                   'tb': '1', 'worker_build': '2026111401'}
+
+        self.client.post('/atomicdb/api/lease', payload)
+        self.assertEqual(
+            WorkerPing.objects.get(machine='m1', user='u').worker_build,
+            2026111401)
+
+        # A newer build replaces it on the next lease.
+        self.client.post('/atomicdb/api/lease',
+                         {**payload, 'worker_build': '2026111502'})
+        self.assertEqual(
+            WorkerPing.objects.get(machine='m1', user='u').worker_build,
+            2026111502)
+
+    def test_request_without_build_keeps_the_stored_build(self):
+        from .models import WorkerPing
+        worker_account('u', 'p')
+        auth = {'username': 'u', 'password': 'p', 'machine': 'm1', 'tb': '1'}
+        self.client.post('/atomicdb/api/lease',
+                         {**auth, 'worker_build': '2026111401'})
+
+        self.client.post('/atomicdb/api/lease', auth)
+        self.client.post('/atomicdb/api/lease', {**auth, 'worker_build': ''})
+        self.client.post('/atomicdb/api/lease', {**auth, 'worker_build': '0'})
+        self.client.post('/atomicdb/api/lease',
+                         {**auth, 'worker_build': 'garbage'})
+        self.client.post('/atomicdb/api/lease',
+                         {**auth, 'worker_build': str(2 ** 40)})
+        self.client.post('/atomicdb/api/heartbeat',
+                         {**auth, 'task_id': '0', 'nps': '1'})
+
+        self.assertEqual(
+            WorkerPing.objects.get(machine='m1', user='u').worker_build,
+            2026111401)
+
+    def test_worker_that_never_sent_a_build_has_none(self):
+        from .models import WorkerPing
+        worker_account('u', 'p')
+
+        self.client.post('/atomicdb/api/lease', {
+            'username': 'u', 'password': 'p', 'machine': 'legacy', 'tb': '1'})
+
+        self.assertIsNone(
+            WorkerPing.objects.get(machine='legacy', user='u').worker_build)
+
     def test_same_machine_recycles_only_stale_lease(self):
         worker_account('u', 'p')
         p = ingest.get_or_create_position(logic.start_fen())

@@ -721,6 +721,7 @@ def _worker_rows(pings, snapshot, now):
             'threads': ping.threads,
             'hash_mb': ping.hash_mb,
             'os': ping.os,
+            'build': ping.worker_build,
             'online': ping.last_seen >= online_cutoff,
             'seen': _ago(ping.last_seen, now),
             # El contador propio del ping (``tasks_done``) NO se pinta: cuenta

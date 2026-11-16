@@ -546,11 +546,33 @@ class PrivacyTests(TestCase):
         row = _rows()[0]
 
         self.assertEqual(set(row), {'machine', 'owner', 'threads', 'hash_mb',
-                                    'os', 'task', 'nps_h', 'searches',
-                                    'searches_h'})
+                                    'os', 'build', 'task', 'nps_h',
+                                    'searches', 'searches_h'})
         self.assertEqual(set(row['task']),
                          {'key', 'san', 'full', 'play', 'budget', 'source',
                           'since', 'requester', 'requested_by', 'more'})
+
+
+class WorkerBuildTests(TestCase):
+    """The build a worker announced shows on its row, and only when known."""
+
+    def test_the_build_shows_on_the_worker_row(self):
+        _ping('new-box', 'alice', worker_build=2026111401)
+        _ping('old-box', 'alice')
+
+        body = _reading(_page())
+
+        self.assertIn('Linux · build 2026111401', body)
+        self.assertEqual(body.count('build 2026111401'), 1)
+        self.assertNotIn('build None', body)
+
+    def test_the_contributor_page_shows_the_build_too(self):
+        _ping('new-box', 'alice', worker_build=2026111401)
+
+        body = _reading(
+            Client().get('/atomicdb/user/alice/').content.decode())
+
+        self.assertIn('Linux · build 2026111401', body)
 
 
 class CostTests(TestCase):
