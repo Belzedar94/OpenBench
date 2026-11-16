@@ -117,12 +117,15 @@ show too), or a dash where no search has reached it yet.</p>
 <p id="col-marks">A small mark after the state says something is already on
 its way for that move, so there is no need to request it again:</p>
 <ul>
-<li><strong>queued</strong> (dashed): analysis is requested and waiting for a
-  worker.</li>
-<li><strong>running</strong>: a worker is searching it right now.</li>
-<li><strong>writing</strong>: the search has finished and its result is waiting
-  to be written into the tree; the value updates once it is.</li>
-<li><strong>unconfirmed mate</strong> or <strong>unconfirmed win</strong>: a
+<li><span class="backed-mark" style="border-style:dashed">queued</span>
+  analysis is requested and waiting for a worker.</li>
+<li><span class="backed-mark">running</span> a worker is searching it right
+  now.</li>
+<li><span class="backed-mark">writing</span> the search has finished and its
+  result is waiting to be written into the tree; the value updates once it
+  is.</li>
+<li><span class="backed-mark light">unconfirmed mate</span> or
+  <span class="backed-mark light">unconfirmed win</span> a
   worker reported a forced mate, or a line to a tablebase win, that the server
   could not prove, from an account whose unproven lines are not used. The move
   stays open until it is closed another way or the line is refuted.</li>
@@ -150,10 +153,11 @@ from White's side instead (9500 becomes 95.00).</p>
   losses at the bottom.</li>
 </ul>
 <p id="col-colours">The coloured square at the start of each row is from the
-side to move here: green for a proven win, red for a proven loss, blue for a
+side to move here: <span class="chip won"></span> proven win,
+<span class="chip lost"></span> proven loss, <span class="chip draw"></span>
 proven draw. Open moves are coloured by the size of their value, for either
-side: orange for 500 or more, brown for 200 to 499, grey for less than 200 (or
-no value).</p>
+side: <span class="chip hot"></span> 500 or more, <span class="chip warm"></span>
+200 to 499, <span class="chip cold"></span> less than 200 or no value.</p>
 
 <h4 id="col-pndn">pn / dn</h4>
 <p>Proof and disproof numbers of the active proof campaign: an estimate of how
