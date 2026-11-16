@@ -1134,7 +1134,8 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       line up (cz_eclipsia, 5-Nov-2026).{% endcomment %}<span class="ms-picks">
       <button type="button" class="reqbtn" id="msall" title="Ticks every move shown in the table">Select all</button>
       <button type="button" class="reqbtn" id="msnew" style="display:none" title="Ticks every move no engine has searched yet and every reply not in the tree, folded rows included, up to {{ multi_request_cap }} per click">Select unanalysed</button>
-      <button type="button" class="reqbtn" id="msclear" disabled>Clear</button></span>
+      <button type="button" class="reqbtn" id="msunconf" style="display:none" title="Ticks every move marked unconfirmed mate or unconfirmed win, so one request searches them all again">Select unconfirmed</button>
+<button type="button" class="reqbtn" id="msclear" disabled>Clear</button></span>
       <span class="dim" id="msnote" style="font-size:.8rem"></span>
       <span class="reqnote" id="msdone" hidden></span>
     </div>
@@ -1149,6 +1150,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       const button = document.getElementById('msreq');
       const all = document.getElementById('msall');
       const unanalysed = document.getElementById('msnew');
+      const unconfirmed = document.getElementById('msunconf');
       const clear = document.getElementById('msclear');
       const note = document.getElementById('msnote');
       const done = document.getElementById('msdone');
@@ -1367,6 +1369,25 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
         leftOut = Math.max(0, waiting.length - room);
         refresh();
       });
+      // The moves with an unconfirmed mate or win (cz_eclipsia, 16-Nov-2026):
+      // a new search of each, on any worker, is what can confirm the line.
+      // Same cap and count as the button above; hidden when there are none.
+      function unconfirmedBoxes() {
+        return boxes().filter(box => {
+          const row = box.closest('tr');
+          return row && row.querySelector('.claim-mark');
+        });
+      }
+      if (unconfirmed && unconfirmedBoxes().length) {
+        unconfirmed.style.display = '';
+        unconfirmed.addEventListener('click', function () {
+          const waiting = unconfirmedBoxes().filter(box => !box.checked);
+          const room = Math.max(0, CAP - ticked().length);
+          waiting.slice(0, room).forEach(box => { box.checked = true; });
+          leftOut = Math.max(0, waiting.length - room);
+          refresh();
+        });
+      }
       clear.addEventListener('click', function () {
         boxes().forEach(box => { box.checked = false; });
         leftOut = 0;
