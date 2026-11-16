@@ -16,7 +16,11 @@ What these tests pin, and why each one:
   against its own ceiling of adopted ones, and is refused or cut short there;
 * the loader is idempotent, and the shallow scan finds what the repair arm's
   definition finds, skips what it already repaired, resumes from its state
-  file and reads only with ``--dry-run``.
+  file and reads only with ``--dry-run``;
+* clear wins buy what the +16 sweep buys (one line, 128.64M, arm sweep16),
+  are checked again with the sweep's own rule, take over a sweep task nobody
+  leased, are never bought twice by the drip, and load from the sweep's list
+  in its order, idempotently.
 """
 
 import hashlib
@@ -26,12 +30,12 @@ import tempfile
 from io import StringIO
 from unittest.mock import patch
 
-from django.core.management import call_command
-from django.test import Client
+from django.core.management import CommandError, call_command
+from django.test import Client, override_settings
 
-from . import backlog, idle_repair, ingest, logic
+from . import backlog, idle_repair, ingest, logic, sweep
 from .models import (AnalysisTask, BacklogItem, BacklogSubscription, DBEvent,
-                     Position)
+                     Edge, Position)
 from .testing import TestCase, worker_account
 
 USER = AnalysisTask.Source.USER
@@ -479,6 +483,173 @@ class ShallowScan(TestCase):
             call_command(*args, stdout=out)
             self.assertIn('already finished', out.getvalue())
         self.assertEqual(BacklogItem.objects.count(), 1)
+
+
+# ---------------- clear wins (the +16 sweep) ----------------
+
+ONCE = 128_001_500
+
+
+def _win(name, lines=None, **fields):
+    """A clear win: searched once at 128M, White to move at +20."""
+    base = {'nodes_invested': ONCE, 'eval_cp': 2000}
+    base.update(fields)
+    visits = base.pop('visits', 1)
+    return _pos(name, _lines(1) if lines is None else lines, visits=visits,
+                **base)
+
+
+@override_settings(ATOMICDB_ARM_RATE_SWEEP16='1000')
+class ClearWins(BacklogTestCase):
+
+    def setUp(self):
+        super().setUp()
+        sweep.forget_plan()
+        self.addCleanup(sweep.forget_plan)
+
+    def test_the_box_offers_it(self):
+        _offer(backlog.CLEAR_WINS, [_win('a')])
+        body = self.client.get('/atomicdb/queue/').content.decode()
+        self.assertIn('Clear wins', body)
+        self.assertIn('value="clear-wins"', body)
+        self.assertEqual([box['name'] for box in backlog.boxes()],
+                         ['lost-lines', 'shallow', 'clear-wins'])
+
+    def test_a_batch_buys_what_the_sweep_buys(self):
+        positions = [_win(f'w{i}') for i in range(3)]
+        _offer(backlog.CLEAR_WINS, positions)
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (3, 0))
+        for task in AnalysisTask.objects.all():
+            self.assertEqual((task.source, task.requested_by, task.arm),
+                             (USER, 'moky', 'sweep16'))
+            self.assertEqual(task.budget_nodes, sweep.SWEEP_NODES)
+            self.assertEqual(task.budget_nodes, 128_640_000)
+            self.assertEqual(task.multipv, 1)
+            self.assertEqual(task.generation, 1)
+
+    def test_closed_done_deep_and_queued_positions_leave_the_list(self):
+        closed = _win('closed', status='WHITE_WIN')
+        dead = _win('dead', priority=ingest.DEAD)
+        again = _win('again', visits=2)
+        small = _win('small', eval_cp=1500)
+        mated = _win('mated', eval_cp=9500)
+        deep = _win('deep', lines=_lines(1, nodes=512_004_000))
+        cut_off = _win('cut-off')
+        proven_parent = _pos('proven-parent', _lines(5), status='WHITE_WIN')
+        Edge.objects.create(parent=proven_parent, child=cut_off,
+                            move_uci='e1e2')
+        running = _win('running')
+        AnalysisTask.objects.create(position=running, generation=1,
+                                    budget_nodes=sweep.SWEEP_NODES,
+                                    source=FILL, arm='sweep16', state=LEASED)
+        good = _win('good')
+        _offer(backlog.CLEAR_WINS, [closed, dead, again, small, mated, deep,
+                                    cut_off, running, good])
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (1, 8))
+        reasons = dict(BacklogItem.objects.filter(state='dropped')
+                       .values_list('position_key', 'reason'))
+        self.assertEqual(reasons, {
+            closed.key: 'closed', dead.key: 'closed', cut_off.key: 'closed',
+            again.key: 'done', small.key: 'done', mated.key: 'done',
+            deep.key: 'deep', running.key: 'queued'})
+        self.assertEqual(AnalysisTask.objects.get(requested_by='moky')
+                         .position_id, good.key)
+
+    def test_it_bids_over_a_search_already_at_the_adoption_budget(self):
+        shown = backlog.ADOPT_BUDGET + 68
+        pos = _win('again', lines=_lines(1, nodes=shown))
+        _offer(backlog.CLEAR_WINS, [pos])
+        self.assertEqual(backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+                         .adopted, 1)
+        task = AnalysisTask.objects.get(requested_by='moky')
+        self.assertGreater(task.budget_nodes, shown)
+        self.assertEqual(ingest._rung_matching(task.budget_nodes),
+                         128_000_000)
+        self.assertEqual(backlog.adopt_budget(backlog.CLEAR_WINS,
+                                              _lines(1, nodes=SEARCHED)),
+                         sweep.SWEEP_NODES)
+
+    def test_a_sweep_task_waiting_on_the_slot_becomes_the_request(self):
+        pos = _win('drip')
+        sweep.save_plan({'build_id': 'b1', 'keys': [pos.key]})
+        self.assertEqual(sweep.drip(), 1)
+        _offer(backlog.CLEAR_WINS, [pos])
+        self.assertEqual(backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+                         .adopted, 1)
+        task = AnalysisTask.objects.get()
+        self.assertEqual((task.source, task.requested_by, task.arm,
+                          task.budget_nodes, task.multipv),
+                         (USER, 'moky', 'sweep16', 128_640_000, 1))
+        # The drip does not buy it again, and it is no longer the drip's.
+        sweep.rewind()
+        self.assertEqual(sweep.drip(), 0)
+        self.assertEqual(sweep.pending_count(), 0)
+        self.assertEqual(sweep.status()['adopted_pending'], 1)
+        self.assertEqual(sweep.withdraw_pending(), 0)
+        self.assertEqual(AnalysisTask.objects.count(), 1)
+
+    def test_the_drip_passes_over_an_adopted_position(self):
+        adopted, other = _win('adopted'), _win('other')
+        _offer(backlog.CLEAR_WINS, [adopted])
+        backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        sweep.save_plan({'build_id': 'b1', 'keys': [adopted.key, other.key]})
+        self.assertEqual(sweep.drip(), 1)
+        self.assertEqual(AnalysisTask.objects.get(source=FILL).position_id,
+                         other.key)
+        # Absorbed without a search, the adopted request is not revived as
+        # a sweep task by the drip.
+        ingest.absorb_tasks(AnalysisTask.objects.filter(source=USER))
+        sweep.rewind()
+        self.assertEqual(sweep.drip(), 0)
+
+    def test_the_loader_keeps_the_sweeps_order_and_is_idempotent(self):
+        keys = [_win(f'w{i}').key for i in range(4)]
+        stale = _win('stale', visits=2).key
+        plan = [keys[2], stale, keys[0], keys[3], keys[1]]
+        sweep.save_plan({'build_id': 'b1', 'keys': plan})
+        out = StringIO()
+        call_command('atomicdb_backlog', 'load-clear-wins', '--limit', '3',
+                     stdout=out)
+        self.assertIn('added=2 already=0 left_out=1', out.getvalue())
+        out = StringIO()
+        call_command('atomicdb_backlog', 'load-clear-wins', stdout=out)
+        self.assertIn('added=2 already=2 left_out=1', out.getvalue())
+        call_command('atomicdb_backlog', 'load-clear-wins', stdout=StringIO())
+        self.assertEqual(
+            list(BacklogItem.objects.filter(backlog='clear-wins')
+                 .order_by('id').values_list('position_key', flat=True)),
+            [keys[2], keys[0], keys[3], keys[1]])
+        # A batch takes them in that order.
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        self.assertEqual(outcome.task_ids, sorted(outcome.task_ids))
+        self.assertEqual(
+            [AnalysisTask.objects.get(pk=pk).position_id
+             for pk in outcome.task_ids], [keys[2], keys[0], keys[3], keys[1]])
+
+    def test_the_loader_reads_a_file_too(self):
+        keys = [_win(f'w{i}').key for i in range(3)]
+        with tempfile.TemporaryDirectory() as folder:
+            as_json = os.path.join(folder, 'sweep16.json')
+            with open(as_json, 'w') as handle:
+                json.dump({'build_id': 'x', 'keys': keys}, handle)
+            as_lines = os.path.join(folder, 'keys.txt')
+            with open(as_lines, 'w') as handle:
+                handle.write('\n'.join(keys + ['not-a-key']) + '\n')
+            out = StringIO()
+            call_command('atomicdb_backlog', 'load-clear-wins', '--file',
+                         as_json, '--skip', '1', stdout=out)
+            self.assertIn('added=2', out.getvalue())
+            out = StringIO()
+            call_command('atomicdb_backlog', 'load-clear-wins', '--file',
+                         as_lines, stdout=out)
+            self.assertIn('added=1 already=2 left_out=1', out.getvalue())
+
+    def test_without_a_list_the_loader_says_so(self):
+        with self.assertRaises(CommandError):
+            call_command('atomicdb_backlog', 'load-clear-wins',
+                         stdout=StringIO())
 
 
 # ---------------- subscriptions ----------------

@@ -14,6 +14,12 @@ requests always waiting, two such lists sat untouched (Discord, 15-Nov-2026):
   under 18 and no mate: the same definition as the idle fleet's repair arm
   (§ ``idle_repair.shallow_showcase``), which only gets the AUTO band and
   narrow engines and has not kept up.
+* CLEAR WINS (16-Nov-2026).  The +16 sweep's positions (§ ``sweep``): open,
+  searched once at about 128M, the side to move ahead by +16 to +90.  The
+  sweep bought them on a fixed share of the leases, requests or not; the
+  community asked for them here instead, as a list it adopts like the other
+  two.  Filled from the sweep's own ordered list (``sweep16.json``: White's
+  strategy tree first), so the order of service is the sweep's.
 
 MoKy's proposal: cut the lists into chunks anyone can adopt.  A batch adopted
 from the queue page becomes the adopter's own requests (source USER,
@@ -38,10 +44,15 @@ meant to replace most of the time and land in the pass history only, which
 helps neither list.  So it is bought at the repair arm's overbid, 128.64M
 (§ ``idle_repair.REPAIR_OVERBID_PER_MILLE``), which every reader of the
 ladder still sees as 128M.  A position whose shown search already ran that
-much is dropped: a 128M search could not replace it.
+much is dropped: a 128M search could not replace it.  Lost lines and clear
+wins bid over the nodes the shown search ran when that is more, as long as
+the bid stays on the 128M rung: a short search or a single search may itself
+have been bought at 128.64M.
 
 WIDTH.  Lost lines: five, the point of the re-search.  Shallow showcases: the
-house policy for a revisit at this budget (§ ``ingest.multipv_for``).
+house policy for a revisit at this budget (§ ``ingest.multipv_for``).  Clear
+wins: one, what the sweep buys (§ ``sweep.SWEEP_MULTIPV``): the search only
+has to find the mate.
 
 HOW MUCH ONE ACCOUNT MAY TAKE.  A batch counts against the same allowance of
 waiting requests as every other request (``views.REQUEST_QUEUE_MAX``) and
@@ -71,6 +82,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from django.core.cache import cache
@@ -79,7 +91,7 @@ from django.http import JsonResponse
 from django.shortcuts import redirect
 from django.utils import timezone
 
-from . import idle_repair, ingest, logic
+from . import idle_repair, ingest, logic, sweep
 from .database import atomic
 from .models import AnalysisTask, BacklogItem, BacklogSubscription, Position
 
@@ -87,6 +99,7 @@ log = logging.getLogger(__name__)
 
 LOST_LINES = 'lost-lines'
 SHALLOW = 'shallow'
+CLEAR_WINS = 'clear-wins'
 
 # What a list is called on the page, what it is, and the arm its requests
 # carry.  ``relines`` is the arm the lost-lines drip used, so every search
@@ -107,8 +120,18 @@ BACKLOGS = {
                   '128M nodes; an engine of 8 threads or fewer goes deepest '
                   'on them.'),
     },
+    # ``sweep16``: the arm of the sweep's own tasks, so the adopted ones and
+    # the ones the sweep queued itself answer to one name.
+    CLEAR_WINS: {
+        'arm': sweep.SWEEP_ARM,
+        'title': 'Clear wins',
+        'about': ('Open positions searched only once, at 128M nodes, where '
+                  'the side to move is ahead by 16 to 90 pawns. Each one is '
+                  'searched again at 128M nodes with one line; the current '
+                  'engine often finds the mate.'),
+    },
 }
-ORDER = (LOST_LINES, SHALLOW)
+ORDER = (LOST_LINES, SHALLOW, CLEAR_WINS)
 ARMS = tuple(spec['arm'] for spec in BACKLOGS.values())
 
 ADOPT_BUDGET = (idle_repair.REPAIR_MIN_NODES
@@ -190,24 +213,55 @@ def shallow_now(last_analysis):
     return searched is not None and searched < ADOPT_BUDGET
 
 
+def clear_win_now(row):
+    """Does the position still qualify for the +16 sweep?
+
+    The sweep's own rule (§ ``sweep.qualifies``), on a row of ``adopt``.
+    """
+    return sweep.qualifies(SimpleNamespace(
+        status=row['status'], visits=row['visits'],
+        nodes_invested=row['nodes_invested'], fen=row['fen'],
+        backed_eval=row['backed_eval'], eval_cp=row['eval_cp']))
+
+
+# The backlogs whose re-search bids over the nodes the shown search ran.
+REBID = (LOST_LINES, CLEAR_WINS)
+
+
 def adopt_budget(backlog, last_analysis):
     """The nodes the adopted search of a position is bought at."""
-    if backlog != LOST_LINES:
+    if backlog not in REBID:
         return ADOPT_BUDGET
     shown = showcase_budget(last_analysis)
     return max(ADOPT_BUDGET,
                shown * (1000 + LOST_LINES_REBID_PER_MILLE) // 1000)
 
 
+def _off_rung(backlog, last_analysis):
+    """Would the bid leave the 128M rung?  Then 128M cannot replace it."""
+    return (ingest._rung_matching(adopt_budget(backlog, last_analysis))
+            > ingest._rung_matching(ADOPT_BUDGET))
+
+
 def _verdict(backlog, row, repaired):
     """``None`` if the position still qualifies, else why it is dropped."""
     if row is None:
         return CLOSED
+    if backlog == CLEAR_WINS:
+        # The drip's checks (§ ``sweep.drip``): a second visit means it was
+        # searched again; every parent proven means the search no longer
+        # reaches the tree (§ ``ingest._still_reachable``).
+        if not clear_win_now(row):
+            return DONE
+        if _off_rung(backlog, row['last_analysis']):
+            return DEEP
+        if not ingest._still_reachable(row['key']):
+            return CLOSED
+        return None
     if backlog == LOST_LINES:
         # Its re-search only has to beat the nodes the shown one ran; it is
         # deep when that would leave the 128M rung.
-        if (ingest._rung_matching(adopt_budget(backlog, row['last_analysis']))
-                > ingest._rung_matching(ADOPT_BUDGET)):
+        if _off_rung(backlog, row['last_analysis']):
             return DEEP
     elif showcase_budget(row['last_analysis']) >= ADOPT_BUDGET:
         return DEEP
@@ -223,6 +277,8 @@ def _verdict(backlog, row, repaired):
 def _multipv(backlog, visits):
     if backlog == LOST_LINES:
         return LOST_LINES_MULTIPV
+    if backlog == CLEAR_WINS:
+        return sweep.SWEEP_MULTIPV
     return ingest.multipv_for(visits, ADOPT_BUDGET)
 
 
@@ -371,7 +427,8 @@ def adopt(username, backlog, size):
             keys = [item.position_key for item in items]
             rows = {row['key']: row for row in Position.objects.filter(
                 key__in=keys, **_OPEN).values(
-                    'key', 'fen', 'visits', 'last_analysis',
+                    'key', 'fen', 'status', 'visits', 'nodes_invested',
+                    'eval_cp', 'backed_eval', 'last_analysis',
                     'analysis_passes')}
             repaired = (idle_repair._already_repaired(list(rows))
                         if backlog == SHALLOW else set())
@@ -728,6 +785,35 @@ def load_keys(backlog, keys, chunk=2_000):
     if added:
         cache.delete(COUNTS_CACHE_KEY)
     return added, len(valid) - added, invalid
+
+
+def load_clear_wins(keys, chunk=2_000):
+    """Add the sweep's keys that still qualify, in their order.
+
+    ``keys`` is the sweep's list (§ ``sweep.build_plan``: White's strategy
+    tree first), and the rows keep that order, which is the order a batch
+    takes them in.  Each key is read again and left out if its position no
+    longer qualifies (§ ``sweep.qualifies``); adopting checks it once more.
+    Idempotent, so a run cut short is resumed by running it again.  Returns
+    ``(added, already there, left out)``.
+    """
+    added = known = left_out = 0
+    keys = list(dict.fromkeys(key.strip().lower() for key in keys
+                              if isinstance(key, str)))
+    for start in range(0, len(keys), chunk):
+        part = keys[start:start + chunk]
+        rows = {pos.key: pos for pos in Position.objects.filter(
+            key__in=part).only('key', 'fen', 'status', 'visits',
+                               'nodes_invested', 'eval_cp', 'backed_eval')}
+        keep = [key for key in part
+                if key in rows and sweep.qualifies(rows[key])]
+        left_out += len(part) - len(keep)
+        if keep:
+            fresh, there, invalid = load_keys(CLEAR_WINS, keep, chunk)
+            added += fresh
+            known += there
+            left_out += invalid
+    return added, known, left_out
 
 
 def scan_shallow_step(cursor, batch, stop_below=0, dry_run=False):

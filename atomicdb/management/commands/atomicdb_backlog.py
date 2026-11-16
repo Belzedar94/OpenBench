@@ -3,6 +3,8 @@
     manage.py atomicdb_backlog status
     manage.py atomicdb_backlog top-up
     manage.py atomicdb_backlog load-lost-lines --file KEYS [--skip N]
+    manage.py atomicdb_backlog load-clear-wins [--file PLAN] [--skip N]
+                                              [--limit N]
     manage.py atomicdb_backlog scan-shallow --state-file PATH
                                            [--batch 2000] [--pause 0.5]
                                            [--max-steps N] [--dry-run]
@@ -10,6 +12,14 @@
 ``load-lost-lines`` reads one position key per line and adds the ones not on
 the list yet; ``--skip N`` leaves out the first N lines (the ones a drip
 already queued).  Running it twice adds nothing the second time.
+
+``load-clear-wins`` adds the +16 sweep's list (``sweep16.json`` in
+``ATOMICDB_STATE_DIR``, written by ``sweep_plus16 --rebuild``; or ``--file``,
+that JSON or one key per line) to the clear-wins backlog, in its order:
+White's strategy tree first.  Keys whose position no longer qualifies are
+left out.  ``--skip N`` and ``--limit N`` take a slice of the list.  Running
+it again adds only what is new, so a run cut short is resumed that way, and
+the list of a later rebuild is added behind what is already there.
 
 ``top-up`` runs one pass of the subscriptions' top-up by hand, the same
 pass ``warm_public_snapshot`` runs every five minutes.
@@ -36,7 +46,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count
 
-from atomicdb import backlog
+from atomicdb import backlog, sweep
 from atomicdb.models import BacklogSubscription
 
 
@@ -61,10 +71,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('action', choices=['status', 'load-lost-lines',
+                                               'load-clear-wins',
                                                'scan-shallow', 'top-up'])
-        parser.add_argument('--file', help='keys to load, one per line')
+        parser.add_argument('--file', help='keys to load, one per line '
+                            '(load-clear-wins: also the sweep\'s JSON list)')
         parser.add_argument('--skip', type=int, default=0,
-                            help='leave out the first N lines of --file')
+                            help='leave out the first N keys')
+        parser.add_argument('--limit', type=int, default=None,
+                            help='load-clear-wins: at most N keys after '
+                                 '--skip')
         parser.add_argument('--state-file',
                             help='where scan-shallow saves where it stands')
         parser.add_argument('--batch', type=int, default=2_000)
@@ -79,6 +94,8 @@ class Command(BaseCommand):
             return self._status()
         if action == 'load-lost-lines':
             return self._load(options)
+        if action == 'load-clear-wins':
+            return self._load_clear_wins(options)
         if action == 'top-up':
             summary = backlog.top_up()
             self.stdout.write(' '.join(f'{key}={value}' for key, value
@@ -107,6 +124,34 @@ class Command(BaseCommand):
         added, known, invalid = backlog.load_keys(backlog.LOST_LINES, keys)
         self.stdout.write(f'lost-lines: added={added} already={known} '
                           f'invalid={invalid} skipped_lines={skip}')
+
+    def _load_clear_wins(self, options):
+        path = options['file']
+        if path:
+            with open(path, encoding='utf-8') as handle:
+                text = handle.read()
+            try:
+                keys = json.loads(text)['keys']
+            except (ValueError, TypeError, KeyError):
+                keys = text.splitlines()
+            source = path
+        else:
+            plan = sweep.load_plan()
+            if not plan:
+                raise CommandError('no sweep list: run sweep_plus16 --rebuild '
+                                   'or give --file')
+            keys = plan['keys']
+            source = f"sweep list {plan.get('build_id', '')}"
+        if not isinstance(keys, list):
+            raise CommandError(f'{source}: no list of keys')
+        skip = max(0, options['skip'])
+        keys = keys[skip:]
+        if options['limit'] is not None:
+            keys = keys[:max(0, options['limit'])]
+        added, known, left_out = backlog.load_clear_wins(keys)
+        self.stdout.write(f'{backlog.CLEAR_WINS}: added={added} '
+                          f'already={known} left_out={left_out} '
+                          f'read={len(keys)} skipped={skip} from {source}')
 
     def _scan(self, options):
         path = options['state_file']
