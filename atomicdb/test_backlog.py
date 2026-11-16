@@ -261,6 +261,17 @@ class RecheckAtAdoption(BacklogTestCase):
                          128_000_000)
         self.assertEqual(task.multipv, backlog.LOST_LINES_MULTIPV)
 
+    def test_a_restricted_search_is_not_short(self):
+        # The server searched only the replies still open (searchmoves), so
+        # fewer lines is the right answer, not a lost one.
+        narrow = _pos('narrow', _lines(1),
+                      analysis_passes=[{'showcase': True, 'restricted': True,
+                                        'lines': 1}])
+        _offer(backlog.LOST_LINES, [narrow])
+        outcome = backlog.adopt('moky', backlog.LOST_LINES, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (0, 1))
+        self.assertEqual(BacklogItem.objects.get().reason, 'done')
+
     def test_a_shallow_adoption_keeps_the_fixed_price(self):
         self.assertEqual(
             backlog.adopt_budget(backlog.SHALLOW, _lines(2, nodes=SEARCHED)),

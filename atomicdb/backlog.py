@@ -171,6 +171,19 @@ def lines_short(fen, last_analysis):
     return len(last_analysis) < min(LOST_LINES_WANTED, legal)
 
 
+def showcase_restricted(analysis_passes):
+    """Was the shown search restricted to the moves still open?
+
+    The server asks for ``searchmoves`` without the replies already proven,
+    so such a search shows fewer lines on purpose: it is not short.  The
+    newest pass that took the showcase says (``ingest.pass_summary``).
+    """
+    for entry in analysis_passes or []:
+        if isinstance(entry, dict) and entry.get('showcase'):
+            return bool(entry.get('restricted'))
+    return False
+
+
 def shallow_now(last_analysis):
     """Is the shown search a shallow 128M one that 128.64M can replace?"""
     searched = idle_repair.shallow_showcase(last_analysis)
@@ -199,7 +212,8 @@ def _verdict(backlog, row, repaired):
     elif showcase_budget(row['last_analysis']) >= ADOPT_BUDGET:
         return DEEP
     if backlog == LOST_LINES:
-        if not lines_short(row['fen'], row['last_analysis']):
+        if (not lines_short(row['fen'], row['last_analysis'])
+                or showcase_restricted(row.get('analysis_passes'))):
             return DONE
     elif row['key'] in repaired or not shallow_now(row['last_analysis']):
         return DONE
@@ -357,7 +371,8 @@ def adopt(username, backlog, size):
             keys = [item.position_key for item in items]
             rows = {row['key']: row for row in Position.objects.filter(
                 key__in=keys, **_OPEN).values(
-                    'key', 'fen', 'visits', 'last_analysis')}
+                    'key', 'fen', 'visits', 'last_analysis',
+                    'analysis_passes')}
             repaired = (idle_repair._already_repaired(list(rows))
                         if backlog == SHALLOW else set())
             for item in items:
