@@ -568,8 +568,9 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
               'confirm-10b': 'That option needs the confirmation dialog',
               {% endif %}
               // Searched that deep since the page loaded: nothing was sent.
+              // The short form was asked for (cz_eclipsia, 16-Nov-2026).
               'already-analyzed': 'Already searched to '
-                + humanNodes(d.completed_budget) + ', nothing sent',
+                + humanNodes(d.completed_budget),
               'already-solved': 'Already solved',
               // The request bought below this position: the searches below
               // it once the ladder here is spent, or the slider's last stop.
