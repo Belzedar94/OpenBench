@@ -171,15 +171,53 @@
     boardLight.addEventListener('input', saveBoard);
     boardDark.addEventListener('input', saveBoard);
   }
+
+  // The best-move arrow's colour (cz_eclipsia, 16-Nov-2026), kept in this
+  // browser.  board.js reads the same key when it draws the board and
+  // listens for 'atomicdb-arrow' to repaint the arrow while the picker moves.
+  const arrowKey = 'atomicdb-arrow';
+  const arrowPicker = document.getElementById('settings-board-arrow');
+  const ARROW_DEFAULT = '#15781b';
+
+  function storedArrow() {
+    try {
+      const value = window.localStorage.getItem(arrowKey) || '';
+      if (/^#[0-9a-f]{6}$/i.test(value)) return value;
+    } catch (_error) {
+      // Unreadable or no storage: the default arrow.
+    }
+    return null;
+  }
+
+  function announceArrow(colour) {
+    window.dispatchEvent(new CustomEvent('atomicdb-arrow',
+      {detail: colour || ARROW_DEFAULT}));
+  }
+
+  if (arrowPicker) {
+    arrowPicker.value = storedArrow() || ARROW_DEFAULT;
+    arrowPicker.addEventListener('input', function () {
+      try {
+        window.localStorage.setItem(arrowKey, arrowPicker.value);
+      } catch (_error) {
+        // Without storage the colour holds for this page only.
+      }
+      announceArrow(arrowPicker.value);
+    });
+  }
+
   if (boardReset) {
     boardReset.addEventListener('click', function () {
       applyBoard(null);
       try {
         window.localStorage.removeItem(boardKey);
+        window.localStorage.removeItem(arrowKey);
       } catch (_error) {
         // Nothing stored to forget.
       }
       syncBoard();
+      if (arrowPicker) arrowPicker.value = ARROW_DEFAULT;
+      announceArrow(null);
     });
   }
 
@@ -187,6 +225,12 @@
     if (event.key === boardKey) {
       applyBoard(storedBoard());
       syncBoard();
+      return;
+    }
+    if (event.key === arrowKey) {
+      const colour = storedArrow();
+      if (arrowPicker) arrowPicker.value = colour || ARROW_DEFAULT;
+      announceArrow(colour);
       return;
     }
     if (event.key === evalKey) {

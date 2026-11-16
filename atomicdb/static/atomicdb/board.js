@@ -31,11 +31,38 @@ if (board && movesNode) {
   const bestMove = board.dataset.bestMove || '';
   const play = board.dataset.play || '';
   const playQuery = play ? `?play=${encodeURIComponent(play)}` : '';
-  const autoShapes = bestMove.length >= 4 ? [{
-    orig: bestMove.slice(0, 2),
-    dest: bestMove.slice(2, 4),
-    brush: 'green',
-  }] : [];
+  // The arrow's colour can be changed in the settings (settings.js owns the
+  // key and announces changes with 'atomicdb-arrow'); its own brush keeps
+  // Chessground's green as the default.
+  const ARROW_DEFAULT = '#15781b';
+  function arrowColour() {
+    try {
+      const value = window.localStorage.getItem('atomicdb-arrow') || '';
+      if (/^#[0-9a-f]{6}$/i.test(value)) return value;
+    } catch (_error) {
+      // No storage: the default arrow.
+    }
+    return ARROW_DEFAULT;
+  }
+  // A fresh brush name for every change: Chessground keys a drawn arrow (and
+  // its arrowhead) by the brush's name and keeps what it drew before, so
+  // reusing a name, even one from an earlier colour, may not repaint.
+  let arrowSerial = 0;
+  let arrowName = '';
+  function arrowBrushes(colour) {
+    arrowSerial += 1;
+    arrowName = `arrow${arrowSerial}`;
+    return { [arrowName]: { key: arrowName, color: colour, opacity: 1, lineWidth: 10 } };
+  }
+  function arrowShapes() {
+    return bestMove.length >= 4 ? [{
+      orig: bestMove.slice(0, 2),
+      dest: bestMove.slice(2, 4),
+      brush: arrowName,
+    }] : [];
+  }
+  const initialArrow = arrowColour();
+  const initialBrushes = arrowBrushes(initialArrow);
   ground = Chessground(board, {
     fen: board.dataset.fen,
     orientation: 'white',
@@ -55,7 +82,8 @@ if (board && movesNode) {
     drawable: {
       enabled: false,
       visible: true,
-      autoShapes,
+      brushes: initialBrushes,
+      autoShapes: arrowShapes(),
     },
     movable: {
       free: false,
@@ -77,6 +105,13 @@ if (board && movesNode) {
         },
       },
     },
+  });
+
+  window.addEventListener('atomicdb-arrow', (event) => {
+    const colour = /^#[0-9a-f]{6}$/i.test(event.detail || '')
+      ? event.detail : ARROW_DEFAULT;
+    Object.assign(ground.state.drawable.brushes, arrowBrushes(colour));
+    ground.setAutoShapes(arrowShapes());
   });
 
   // Back from the position a move led to, the browser may restore this page
