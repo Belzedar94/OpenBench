@@ -32,9 +32,9 @@ from . import (community_names, contributors, depth, engine_policy, ingest,
 from .database import atomic
 from .metrics import worker_metrics
 from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
-                     DBEvent, Edge, OpeningNameSuggestion, Position,
-                     ProgressSnapshot, ProofCampaign, ProofNode, RequestLog,
-                     SolveTask, WorkerPing)
+                     DBEvent, Edge, IngestJob, OpeningNameSuggestion,
+                     PendingClaim, Position, ProgressSnapshot, ProofCampaign,
+                     ProofNode, RequestLog, SolveTask, WorkerPing)
 from .models import ContributorPref
 from . import idle_repair
 from . import sweep
@@ -7822,14 +7822,113 @@ def _queued_children(moves):
     (§ live_request): esperando en la cola o ya arrendado a un worker.  Dos
     definiciones de vivo en la misma pagina son dos numeros que se contradicen.
     """
-    keys = [move['key'] for move in moves if move['key']]
+    return sum(1 for states in _pending_children(moves).values()
+               if states & {'queued', 'running'})
+
+
+# What each pending state of a row means, in the words of its marker's
+# tooltip.  The info panel above the table says the same thing.
+PENDING_MARKS = {
+    'writing': ('writing', 'a search of this move has finished and its result '
+                'is waiting to be written into the tree; the value updates '
+                'once it is'),
+    'running': ('running', 'a worker is searching this move right now'),
+    'queued': ('queued', 'analysis of this move is requested and waiting for '
+               'a worker'),
+}
+# One marker per row, the one closest to changing the number first.
+PENDING_ORDER = ('writing', 'running', 'queued')
+
+
+def _pending_children(moves):
+    """``{child key: set of states}`` for the rows with work in flight, in ONE
+    statement.
+
+    ``queued`` and ``running`` are the task states ``_queued_children``
+    always counted (PENDING and LEASED, § live_request).  ``writing`` is a
+    task a worker already delivered whose ``IngestJob`` the writers have not
+    applied yet (PENDING or PROCESSING): the submit marks the task COMPLETED
+    and leaves the result in that queue (§ api_submit, ingest_queue), so
+    between the two the row would otherwise say nothing.  A FAILED job is
+    left out: nothing is about to land.  Keys only, through the same indexed
+    ``IN`` as before, plus the one-to-one join to the job.
+    """
+    keys = [move['key'] for move in moves if move.get('key')]
     if not keys:
-        return 0
-    return (AnalysisTask.objects
-            .filter(position_id__in=keys,
-                    state__in=(AnalysisTask.TState.PENDING,
-                               AnalysisTask.TState.LEASED))
-            .values('position_id').distinct().count())
+        return {}
+    states = {}
+    rows = (AnalysisTask.objects
+            .filter(position_id__in=keys)
+            .filter(Q(state__in=(AnalysisTask.TState.PENDING,
+                                 AnalysisTask.TState.LEASED))
+                    | Q(state=AnalysisTask.TState.COMPLETED,
+                        ingest_job__state__in=(
+                            IngestJob.JState.PENDING,
+                            IngestJob.JState.PROCESSING)))
+            .values_list('position_id', 'state'))
+    for key, state in rows:
+        states.setdefault(key, set()).add(
+            'queued' if state == AnalysisTask.TState.PENDING
+            else 'running' if state == AnalysisTask.TState.LEASED
+            else 'writing')
+    return states
+
+
+def _open_claims(moves):
+    """``{child key: kind}`` of the open rows with an unconfirmed closing
+    line, in ONE statement.
+
+    A line that ends in mate (or a tablebase win) the server could not prove,
+    delivered by an account that is not trusted, is kept as an open
+    ``PendingClaim`` and changes nothing in the tree (§ ingest, the trust
+    gate).  It is resolved when the position closes or an exhaustive search
+    refutes the line.  Only open rows ask: a closed one has its claims
+    resolved by the closure itself.
+    """
+    keys = [move['key'] for move in moves
+            if move.get('key') and move.get('status') == 'UNKNOWN']
+    if not keys:
+        return {}
+    claims = {}
+    for key, kind in (PendingClaim.objects
+                      .filter(position_key__in=keys, resolved__isnull=True)
+                      .values_list('position_key', 'kind')):
+        # A mate claim says more than a tablebase one; one mark per row.
+        if claims.get(key) != PendingClaim.Kind.MATE:
+            claims[key] = kind
+    return claims
+
+
+def _with_pending_marks(moves):
+    """Each row's marker for work in flight, and an unconfirmed claim.
+
+    Two statements for the whole table (§ _pending_children,
+    § _open_claims), never one per row.  Rows come back with ``pending``
+    (a ``(label, tooltip)`` pair or None), ``pending_state``, ``claim_mark``
+    (the same pair or None) and ``in_flight`` (queued or running, what the
+    header's summary counts).
+    """
+    pending = _pending_children(moves)
+    claims = _open_claims(moves)
+    for move in moves:
+        states = pending.get(move.get('key'), set())
+        state = next((s for s in PENDING_ORDER if s in states), None)
+        move['pending_state'] = state
+        move['pending'] = PENDING_MARKS[state] if state else None
+        move['in_flight'] = bool(states & {'queued', 'running'})
+        kind = claims.get(move.get('key'))
+        move['claim_mark'] = None if kind is None else (
+            ('unconfirmed mate', 'a worker reported a forced mate from this '
+             'position that the server could not prove, from an account '
+             'whose unproven lines are not used. The position stays open '
+             'until it is closed another way or the line is refuted')
+            if kind == PendingClaim.Kind.MATE else
+            ('unconfirmed win', 'a worker reported a line from this position '
+             'that ends in a tablebase win the server could not prove, from '
+             'an account whose unproven lines are not used. The position '
+             'stays open until it is closed another way or the line is '
+             'refuted'))
+    return moves
 
 
 def _header_move(pos):
@@ -7991,7 +8090,12 @@ def _moves_summary(moves):
         return ''
     searched = sum(1 for move in moves if move['searched'])
     walked = sum(1 for move in moves if move['walked'])
-    queued = _queued_children(moves)
+    # Rows that already carry their marks (§ _with_pending_marks) are counted
+    # from them: the same statement, read once for the table and the summary.
+    if all('in_flight' in move for move in moves):
+        queued = sum(1 for move in moves if move['in_flight'])
+    else:
+        queued = _queued_children(moves)
     # El primero se dice SIEMPRE, cero incluido: "0 searched" es justo la
     # historia del nodo del reporte, y callarlo la deja sin contar.
     parts = [f'{searched} searched']
@@ -8217,8 +8321,9 @@ def explore(request, key):
         # desde el propio aviso o por su pie — no abrir el panel.
         notifications.mark_position_seen(viewer, pos.key)
     # The depth column of the table, one aggregate for every row
-    # (§ _with_search_depth).
-    moves = _with_search_depth(_child_moves(pos))
+    # (§ _with_search_depth), and the marks of work in flight on each row,
+    # two more statements for the whole table (§ _with_pending_marks).
+    moves = _with_pending_marks(_with_search_depth(_child_moves(pos)))
     # The parent's FEN rides on the same query, so the page names each move in
     # SAN without a read per parent (§ san).  Only shown with two or more.
     parents = [{'key': parent_key, 'uci': uci, 'fen': parent_fen}
