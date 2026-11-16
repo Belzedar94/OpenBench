@@ -57,6 +57,16 @@ selector service, and a restart of it, stops the drip.  Without a restart:
 ``sweep_plus16 --withdraw`` also removes the sweep's PENDING tasks that no
 worker took yet.
 
+THE COMMUNITY BACKLOG (16-Nov-2026).  The same list can be handed to the
+queue page's community backlog (``atomicdb_backlog load-clear-wins``), where
+anyone signed in adopts it in batches as their own requests, arm ``sweep16``,
+source USER (§ ``backlog.CLEAR_WINS``).  Both buy on the one slot a position
+has for its next visit, so they never buy the same search twice: the drip
+passes over a position with a live task or a second visit, and an adoption
+takes over a sweep task nobody has leased yet.  The drip's cap, revival and
+``--withdraw`` touch only its own FILL tasks; the hourly ceiling of the arm
+counts both.
+
 WHAT IT NEVER DOES: decide a value or close anything.  It only buys searches;
 what they find lands through ``ingest_analysis`` like any other result.
 """
@@ -525,7 +535,19 @@ def user_backlog():
 
 
 def pending_count():
-    return AnalysisTask.objects.filter(state='PENDING', arm=SWEEP_ARM).count()
+    """The sweep's own waiting tasks.  A position adopted from the community
+    backlog (§ ``backlog.CLEAR_WINS``) carries the same arm but is somebody's
+    request: it is not the drip's to count, revive or withdraw."""
+    return AnalysisTask.objects.filter(
+        state='PENDING', arm=SWEEP_ARM,
+        source=AnalysisTask.Source.FILL).count()
+
+
+def adopted_pending_count():
+    """Positions adopted from the community backlog still waiting."""
+    return AnalysisTask.objects.filter(
+        state='PENDING', arm=SWEEP_ARM,
+        source=AnalysisTask.Source.USER).count()
 
 
 def _revive(task):
@@ -541,10 +563,12 @@ def _revive(task):
     rows absorbed before 15-Nov-2026 hold the old 128M, which loses to the
     search it re-does (OpenBench#255 only covered new rows).
     """
-    if task.arm != SWEEP_ARM or not ingest.is_absorbed(task):
+    if (task.arm != SWEEP_ARM or task.source != AnalysisTask.Source.FILL
+            or not ingest.is_absorbed(task)):
         return False
     return bool(AnalysisTask.objects.filter(
-        pk=task.pk, arm=SWEEP_ARM, state=AnalysisTask.TState.COMPLETED,
+        pk=task.pk, arm=SWEEP_ARM, source=AnalysisTask.Source.FILL,
+        state=AnalysisTask.TState.COMPLETED,
         nodes_searched=0, machine='',
     ).update(state=AnalysisTask.TState.PENDING, completed=None,
              created=timezone.now(),
@@ -626,6 +650,7 @@ def status():
     plan = load_plan()
     out = {'rate_per_hour': ingest.arm_rate(SWEEP_ARM),
            'pending': pending_count(),
+           'adopted_pending': adopted_pending_count(),
            'leased': AnalysisTask.objects.filter(
                state='LEASED', arm=SWEEP_ARM).count(),
            'completed': AnalysisTask.objects.filter(
@@ -647,8 +672,10 @@ def withdraw_pending():
 
     They are the server's own rows, never a person's request, and a PENDING
     row holds nothing but its slot: the next producer that wants the same
-    position and visit simply creates it again.
+    position and visit simply creates it again.  Positions adopted from the
+    community backlog are requests and stay.
     """
     deleted, _ = AnalysisTask.objects.filter(
-        state='PENDING', arm=SWEEP_ARM).delete()
+        state='PENDING', arm=SWEEP_ARM,
+        source=AnalysisTask.Source.FILL).delete()
     return deleted
