@@ -7830,8 +7830,7 @@ def _queued_children(moves):
 # tooltip.  The info panel above the table says the same thing.
 PENDING_MARKS = {
     'writing': ('writing', 'a search of this move has finished and its result '
-                'is waiting to be written into the tree; the value updates '
-                'once it is'),
+                'is waiting to be written into the tree'),
     'running': ('running', 'a worker is searching this move right now'),
     'queued': ('queued', 'analysis of this move is requested and waiting for '
                'a worker'),
