@@ -295,6 +295,21 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
     <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0"
        hidden></p>
     <script>
+    // A click refused because the page is out of date (the position was
+    // searched, solved or changed since it loaded) reloads the page by
+    // itself (cz_eclipsia, 16-Nov-2026).  At most once a minute per page, so
+    // a refusal that a reload does not cure cannot loop.
+    window.atomicdbReloadStale = function (say) {
+      try {
+        const k = 'atomicdb-stale-reload:' + location.pathname;
+        const last = Number(sessionStorage.getItem(k)) || 0;
+        if (Date.now() - last < 60000) { return false; }
+        sessionStorage.setItem(k, String(Date.now()));
+      } catch (e) { return false; }
+      if (say) { say('Page out of date, reloading...'); }
+      setTimeout(function () { location.reload(); }, 900);
+      return true;
+    };
     document.addEventListener('DOMContentLoaded', function () {
       const row = document.querySelector('.fenbox-here');
       const line = document.getElementById('cascade');
@@ -581,6 +596,12 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
               // the button goes back to offering the click it did not spend
               'saturated': idleLabel,
             }[d.status] || 'Something went wrong';
+            if (['already-analyzed', 'already-solved', 'bad-budget']
+                  .includes(d.status)
+                && window.atomicdbReloadStale(
+                     t => { btn.textContent = t; })) {
+              return;
+            }
             showNote(descent ? descentNote(d) : '',
                      d.status === 'saturated');
             if (d.descent_key) { below = d.descent_key; }
@@ -721,6 +742,11 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
                   // nuevo aterrizo mientras esto estaba abierto.
                   'unknown-line': 'That line is gone, reload',
                 }[data.status] || 'Something went wrong';
+                if (['already-solved', 'unknown-line'].includes(data.status)
+                    && window.atomicdbReloadStale(
+                         t => { pvbtn.textContent = t; })) {
+                  return;
+                }
               }
               // Con selector siempre queda otra linea que pedir, asi que el
               // boton no se muere con el veredicto de UNA: lo que acaba de
@@ -1258,6 +1284,10 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
           if (waiting.length) { watch(waiting); }
         } else if (d) {
           say(REFUSED[d.status] || 'Something went wrong');
+          if (['already-solved', 'unknown-position', 'bad-budget']
+                .includes(d.status) && window.atomicdbReloadStale(say)) {
+            return;
+          }
         } else {
           say(offline ? 'Network error, try again'
                       : 'Server error, try again');
