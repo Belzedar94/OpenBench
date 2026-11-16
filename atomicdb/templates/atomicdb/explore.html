@@ -923,80 +923,15 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
     floor goes on the header cell because the cells of the rows take no
     attributes (see the rows below), and it is content-box because browsers
     disagree on whether a cell's min-width counts its padding.{% endcomment %}
-    {% comment %}The (i) toggles over the table (cz_eclipsia, 16-Nov-2026):
-    one short note per column, plain <details>, no script.  Inline styles
-    only, like the marks in the rows (atomicdb.css does not reach a cached
-    browser).  ``table-help`` is a hook for the tests.  Every value
-    quoted here comes from the code that prints it: the 9500 cap and the
-    10000 - N mate scores from the worker (Client/atomicdb_worker.py), 10000
-    and M-numbers from views._child_moves, the colours from views._move_css,
-    the order from the rank in views._child_moves, the pending marks from
-    views._with_pending_marks.{% endcomment %}
-    {% if moves or offtree %}
-    <div class="table-help" style="display:flex;flex-wrap:wrap;gap:.15rem .7rem;margin:0 0 .35rem;font-size:.8rem;line-height:1.45">
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What the state column says" aria-label="About the state column">&#9432; state</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0"><strong>unsolved:</strong> the move's position is open, nothing is proven yet.
-          <strong>unexplored:</strong> open, and no engine has searched that position itself; any number it shows came from a line running through it.</p>
-          <p style="margin:.2rem 0"><strong>WHITE_WIN</strong>, <strong>BLACK_WIN</strong> or <strong>DRAW</strong>: a proven result, followed by how it was proven:
-          TERMINAL (the game is over on the board), MATE_PV (a mate line checked move by move), MINIMAX (from proven moves below it),
-          TB (tablebase) or SOLVE (a full proof replayed on the server). Results are practical, see the docs.</p>
-          <p style="margin:.2rem 0"><strong>not in tree:</strong> a legal move nobody has stepped into yet. Following it adds it.</p>
-        </div>
-      </details>
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What the numbers in the eval column mean" aria-label="About the eval column">&#9432; eval</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0">The value of each move for the side to move here, in centipawns (100 is about one pawn).
-          Switch the eval to Pawns in the settings to see it in pawns from White's side instead (9500 becomes 95.00, signed from White's side).</p>
-          <ul style="margin:.2rem 0;padding-left:1.1rem">
-            <li><strong>M3:</strong> a proven win for the side to move, mate in at most 3 moves, counting this move. <strong>-M3:</strong> a proven loss.</li>
-            <li><strong>10000:</strong> won, with no mate distance attached (-10000: lost). On an open move it is a value carried up from a move below that is already proven, before this position has closed.</li>
-            <li><strong>9501 to 9999:</strong> an engine announced a mate it has not proven: 10000 minus the number of moves to mate after this move, so 9997 is mate in 3 more moves. Negative numbers are the same for the other side.</li>
-            <li><strong>9500:</strong> an engine reported a winning score that is not a mate count, such as a tablebase win. Those scores are capped at 9500, so 9500 never means a long mate.</li>
-            <li><strong>not analysed:</strong> no value yet. These rows sort just above proven losses, so a run of them can sit between the open moves and the proven losses at the bottom.</li>
-          </ul>
-          <p style="margin:.2rem 0">Moves sort by value only: proven wins first, proven losses last. A muted italic number, or a chip such as backed, walked or borrowed beside it, says where the number came from: hover it, or read <a href="/atomicdb/docs/reading/">the position page docs</a>.</p>
-        </div>
-      </details>
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What the coloured squares mean" aria-label="About the colours">&#9432; colours</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0">Colours are from the side to move here:
-          <span class="chip won"></span> proven win, <span class="chip lost"></span> proven loss, <span class="chip draw"></span> proven draw.
-          Open moves are coloured by the size of their value, for either side:
-          <span class="chip hot"></span> 500 or more, <span class="chip warm"></span> 200 to 499, <span class="chip cold"></span> less than 200 or no value.</p>
-        </div>
-      </details>
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What pn / dn means" aria-label="About pn / dn">&#9432; pn / dn</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0">Proof and disproof numbers of the active proof campaign: an estimate of how much work is left to prove the campaign's goal from that move (pn) or to refute it (dn).
-          Smaller means closer, &infin; means it can no longer be done. They are not probabilities. Empty when the campaign has no estimate for that move.</p>
-        </div>
-      </details>
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What the depth column means" aria-label="About the depth column">&#9432; depth</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0">The node budget of the deepest search the move's position has had (128M, 512M, 2B), or a dash if none has reached it yet.
-          Only searches that really ran count. Hover a cell for its visits.</p>
-        </div>
-      </details>
-      <details style="max-width:100%"><summary style="margin:0;list-style:none" title="What the queued, running and writing marks mean" aria-label="About the pending marks">&#9432; pending</summary>
-        <div style="margin:.3rem 0 .4rem;max-width:36rem">
-          <p style="margin:.2rem 0">Small marks in the state column. The first three mean work is already on its way for that move, so there is no need to request it again:</p>
-          <ul style="margin:.2rem 0;padding-left:1.1rem">
-            <li><span style="padding:.05rem .32rem;border:1px dashed var(--border-strong);border-radius:3px;font-size:.7rem;white-space:nowrap">queued</span> analysis is requested and waiting for a worker.</li>
-            <li><span style="padding:.05rem .32rem;border:1px solid var(--border-strong);border-radius:3px;font-size:.7rem;white-space:nowrap">running</span> a worker is searching it right now.</li>
-            <li><span style="padding:.05rem .32rem;border:1px solid var(--border-strong);border-radius:3px;font-size:.7rem;white-space:nowrap">writing</span> the search has finished and its result is waiting to be written into the tree; the value updates once it is.</li>
-            <li><span style="padding:.05rem .32rem;border:1px dashed var(--warn, #b4762a);border-radius:3px;color:var(--warn, #b4762a);font-size:.7rem;white-space:nowrap">unconfirmed mate</span> or <span style="padding:.05rem .32rem;border:1px dashed var(--warn, #b4762a);border-radius:3px;color:var(--warn, #b4762a);font-size:.7rem;white-space:nowrap">unconfirmed win</span> a worker reported a forced mate, or a line to a tablebase win, from there that the server could not prove, from an account whose unproven lines are not used. The move stays open until it is closed another way or the line is refuted.</li>
-          </ul>
-          <p style="margin:.2rem 0">The marks are as of when the page loaded: reload to refresh them.</p>
-        </div>
-      </details>
-    </div>
-    {% endif %}
+    {% comment %}The (i) links in the column headers (cz_eclipsia, 16-Nov-2026):
+    each one opens the part of the position page guide that explains that
+    column (docs/reading.html, #col-*).  ``col-info`` is a hook for the
+    tests; the first two headers stay bare, the tests read them.{% endcomment %}
     <div class="table-scroll movecols">
     <table aria-labelledby="moves-heading">
-      <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state</th><th>eval</th>
-        <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn</th>
-        <th title="The node budget of the deepest search each move's position has had, a dash where none has yet. Hover a cell for its visits.">depth</th></tr>
+      <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state <a class="col-info" href="/atomicdb/docs/reading/#col-state" title="What the state column means" aria-label="About the state column" style="text-decoration:none;font-weight:normal">&#9432;</a></th><th>eval <a class="col-info" href="/atomicdb/docs/reading/#col-eval" title="What the eval column means" aria-label="About the eval column" style="text-decoration:none;font-weight:normal">&#9432;</a></th>
+        <th title="Estimated proof / disproof effort for the active campaign. Not a probability.">pn / dn <a class="col-info" href="/atomicdb/docs/reading/#col-pndn" title="What the pn / dn column means" aria-label="About the pn / dn column" style="text-decoration:none;font-weight:normal">&#9432;</a></th>
+        <th title="The node budget of the deepest search each move's position has had, a dash where none has yet. Hover a cell for its visits.">depth <a class="col-info" href="/atomicdb/docs/reading/#col-depth" title="What the depth column means" aria-label="About the depth column" style="text-decoration:none;font-weight:normal">&#9432;</a></th></tr>
       {% comment %}The box of the multi-select (the bar under the table says
       what it is for) lives INSIDE the chip cell, after the chip: the tests
       read the rows of the tree as <tr><td><span class="chip, so neither a new
