@@ -1273,6 +1273,10 @@ class WorkerPing(models.Model):
     # since this column existed", which is what every pre-existing row means
     # and why the column has to be nullable rather than defaulted to now.
     last_result_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # The worker build (``ATOMICDB_WORKER_BUILD``) this machine last announced
+    # in a request that carried one, written in ``views._touch_worker``.
+    # NULL is "never announced one since this column existed".
+    worker_build = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['machine', 'user'],

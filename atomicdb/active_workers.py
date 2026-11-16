@@ -8,8 +8,8 @@ have to be the machines behind it, one row per ping, busy or not.
 WHAT A ROW SAYS, AND WHERE IT WAS ALREADY PUBLIC.  The page only groups what
 other pages publish one at a time:
 
-* the machine, its owner, threads, hash and OS: the workers table of each
-  contributor page (§ contributors.present);
+* the machine, its owner, threads, hash, OS and worker build: the workers
+  table of each contributor page (§ contributors.present);
 * the line, the budget and the source of the task it is searching: the "Now
   analyzing" column of the home page, which shows five of them;
 * who asked for it: the contributor page lists the account's running
@@ -78,7 +78,8 @@ def live_pings(now):
     """
     since = now - timedelta(seconds=metrics.LIVE_SECONDS)
     pings = list(WorkerPing.objects.filter(last_seen__gte=since).only(
-        'machine', 'user', 'threads', 'hash_mb', 'os', 'current_task_id'))
+        'machine', 'user', 'threads', 'hash_mb', 'os', 'current_task_id',
+        'worker_build'))
     pings.sort(key=lambda ping: (ping.user.lower(), ping.user,
                                  _natural(ping.machine), ping.machine))
     return pings
@@ -209,6 +210,7 @@ def present(now=None):
                            max(0, ping.threads or 0)),
             'hash_mb': ping.hash_mb,
             'os': ping.os,
+            'build': ping.worker_build,
             'task': tasks.get(ping.pk),
             'nps_h': views._human(round(nps)) if nps else '',
             'searches': searches,
