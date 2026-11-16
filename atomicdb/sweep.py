@@ -172,10 +172,18 @@ def _known(status, backed_eval, eval_cp):
     return ingest.known_eval_of(status, backed_eval, eval_cp)
 
 
+def _sweep_match(visits, nodes_invested, value):
+    return (searched_once(visits, nodes_invested)
+            and favoured_value(True, value))
+
+
 def walk_strategy_tree(max_nodes=TREE_MAX_NODES, max_plies=TREE_MAX_PLIES,
-                       deadline=None, root=None):
+                       deadline=None, root=None, match=None):
     """Candidates inside White's strategy tree, the shallowest first.
 
+    A candidate is an open White-to-move position for which ``match(visits,
+    nodes_invested, value)`` holds, the sweep's rule unless told otherwise
+    (the deep-wins loader passes its own, § ``backlog.deep_tree_match``).
     Returns ``(keys, stats)``.  Breadth first from the start position: at a
     White node the move its value stands on (``backed_move``, else the best
     known child), at a Black node every open reply.  Only open positions are
@@ -185,6 +193,7 @@ def walk_strategy_tree(max_nodes=TREE_MAX_NODES, max_plies=TREE_MAX_PLIES,
     comes first, and says which in ``stats['stopped']``.
     """
     root = root or ingest.root_key()
+    match = match or _sweep_match
     head = (Position.objects.filter(key=root)
             .values_list('status', 'backed_move').first())
     stats = {'nodes': 0, 'plies': 0, 'stopped': 'exhausted'}
@@ -254,8 +263,8 @@ def walk_strategy_tree(max_nodes=TREE_MAX_NODES, max_plies=TREE_MAX_PLIES,
                         continue
                     child = c[1]
                     value = c[4] if c[4] is not None else c[3]
-                    if (child not in found_set and searched_once(c[6], c[7])
-                            and favoured_value(True, value)):
+                    if (child not in found_set
+                            and match(c[6], c[7], value)):
                         found.append(child)
                         found_set.add(child)
                     if child not in visited:

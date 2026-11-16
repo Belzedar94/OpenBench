@@ -20,7 +20,12 @@ What these tests pin, and why each one:
 * clear wins buy what the +16 sweep buys (one line, 128.64M, arm sweep16),
   are checked again with the sweep's own rule, take over a sweep task nobody
   leased, are never bought twice by the drip, and load from the sweep's list
-  in its order, idempotently.
+  in its order, idempotently;
+* deep wins buy one line at 514.56M (arm deep25), outbid a shown search
+  already on the 512M rung without leaving it, are checked again with their
+  own rule (visits 2, +25 for the side to move), come in batches of 5, 10
+  or 20, take four places each under the ceiling of adopted positions, and
+  load from a resumable scan of the searches, the highest value first.
 """
 
 import hashlib
@@ -513,7 +518,7 @@ class ClearWins(BacklogTestCase):
         self.assertIn('Clear wins', body)
         self.assertIn('value="clear-wins"', body)
         self.assertEqual([box['name'] for box in backlog.boxes()],
-                         ['lost-lines', 'shallow', 'clear-wins'])
+                         ['lost-lines', 'shallow', 'clear-wins', 'deep-wins'])
 
     def test_a_batch_buys_what_the_sweep_buys(self):
         positions = [_win(f'w{i}') for i in range(3)]
@@ -650,6 +655,304 @@ class ClearWins(BacklogTestCase):
         with self.assertRaises(CommandError):
             call_command('atomicdb_backlog', 'load-clear-wins',
                          stdout=StringIO())
+
+
+# ---------------- deep wins ----------------
+
+BLACK_FEN = '4k3/8/8/8/8/8/8/4K3 b - - 0 1'
+TWICE = 2 * ONCE
+
+
+def _deep(name, lines=None, fen=FEN, **fields):
+    """A deep win: searched twice at 128M, White to move at +30."""
+    base = {'nodes_invested': TWICE, 'eval_cp': 3000, 'visits': 2}
+    base.update(fields)
+    return Position.objects.create(
+        key=_key(name), fen=fen,
+        last_analysis=_lines(1) if lines is None else lines, **base)
+
+
+def _row(pos):
+    return Position.objects.filter(key=pos.key).values(
+        'key', 'fen', 'status', 'visits', 'nodes_invested', 'eval_cp',
+        'backed_eval', 'last_analysis', 'analysis_passes').get()
+
+
+class DeepWins(BacklogTestCase):
+
+    def test_the_box_offers_it_with_its_own_sizes(self):
+        _offer(backlog.DEEP_WINS, [_deep('a')])
+        body = self.client.get('/atomicdb/queue/').content.decode()
+        self.assertIn('Deep wins', body)
+        self.assertIn('value="deep-wins"', body)
+        for size in (5, 10, 20):
+            self.assertIn(f'Adopt {size}<', body)
+        # The other lists are empty: none of their sizes is offered.
+        self.assertNotIn('Adopt 25', body)
+        self.assertIn('<option selected="" value="10">', body)
+        self.assertIn('A position from Deep wins takes 4 places', body)
+
+    def test_a_batch_buys_one_line_at_512m(self):
+        positions = [_deep(f'd{i}') for i in range(3)]
+        _offer(backlog.DEEP_WINS, positions)
+        outcome = backlog.adopt('moky', backlog.DEEP_WINS, 5)
+        self.assertEqual((outcome.adopted, outcome.dropped), (3, 0))
+        for task in AnalysisTask.objects.all():
+            self.assertEqual((task.source, task.requested_by, task.arm),
+                             (USER, 'moky', 'deep25'))
+            self.assertEqual(task.budget_nodes, 514_560_000)
+            self.assertEqual(ingest._rung_matching(task.budget_nodes),
+                             512_000_000)
+            self.assertEqual((task.multipv, task.generation), (1, 2))
+
+    def test_the_rule_reads_the_value_as_the_sweep_does(self):
+        cases = {
+            'white-25': (_deep('w25', eval_cp=2500), True),
+            'white-24': (_deep('w24', eval_cp=2499), False),
+            'black-25': (_deep('b25', fen=BLACK_FEN, eval_cp=-2500), True),
+            'black-behind': (_deep('bb', fen=BLACK_FEN, eval_cp=3000), False),
+            'backed-lower': (_deep('bl', eval_cp=3000, backed_eval=1000),
+                             False),
+            'backed-higher': (_deep('bh', eval_cp=0, backed_eval=2600), True),
+            'mate-band': (_deep('mb', eval_cp=9500), True),
+            'no-value': (_deep('nv', eval_cp=None), False),
+            'once': (_deep('once', visits=1), False),
+            'thrice': (_deep('thrice', visits=3), False),
+        }
+        for label, (pos, expected) in cases.items():
+            self.assertEqual(backlog.deep_win_now(_row(pos)), expected, label)
+        # The SQL form agrees with the Python one.
+        from django.db.models.functions import Coalesce
+        found = set(Position.objects.annotate(
+            deep_value=Coalesce('backed_eval', 'eval_cp'))
+            .filter(backlog.deep_wins_q()).values_list('key', flat=True))
+        self.assertEqual(found, {pos.key for pos, expected in cases.values()
+                                 if expected})
+
+    def test_closed_done_deep_and_queued_positions_leave_the_list(self):
+        closed = _deep('closed', status='WHITE_WIN')
+        dead = _deep('dead', priority=ingest.DEAD)
+        once = _deep('once', visits=1)
+        again = _deep('again', visits=3)
+        small = _deep('small', eval_cp=2000)
+        searched = _deep('searched')
+        AnalysisTask.objects.create(
+            position=searched, generation=1, budget_nodes=514_560_000,
+            arm='deep25', state=COMPLETED, nodes_searched=514_561_000)
+        deep = _deep('deep', lines=_lines(1, nodes=2_000_100_000))
+        cut_off = _deep('cut-off')
+        proven_parent = _pos('proven-parent', _lines(5), status='WHITE_WIN')
+        Edge.objects.create(parent=proven_parent, child=cut_off,
+                            move_uci='e1e2')
+        running = _deep('running')
+        AnalysisTask.objects.create(position=running, generation=2,
+                                    budget_nodes=8_000_000, state=LEASED)
+        good = _deep('good')
+        _offer(backlog.DEEP_WINS, [closed, dead, once, again, small,
+                                   searched, deep, cut_off, running, good])
+        outcome = backlog.adopt('moky', backlog.DEEP_WINS, 20)
+        self.assertEqual((outcome.adopted, outcome.dropped), (1, 9))
+        reasons = dict(BacklogItem.objects.filter(state='dropped')
+                       .values_list('position_key', 'reason'))
+        self.assertEqual(reasons, {
+            closed.key: 'closed', dead.key: 'closed', cut_off.key: 'closed',
+            once.key: 'done', again.key: 'done', small.key: 'done',
+            searched.key: 'done', deep.key: 'deep', running.key: 'queued'})
+        self.assertEqual(AnalysisTask.objects.get(requested_by='moky')
+                         .position_id, good.key)
+
+    def test_the_bid_stays_on_the_512m_rung(self):
+        self.assertEqual(backlog.DEEP_BUDGET, 514_560_000)
+        budget = backlog.adopt_budget
+        name = backlog.DEEP_WINS
+        # A 128M search shown: the plain price.
+        self.assertEqual(budget(name, _lines(1, nodes=SEARCHED)),
+                         backlog.DEEP_BUDGET)
+        self.assertFalse(backlog._off_rung(name, _lines(1, nodes=SEARCHED)))
+        # A 512M search already shown, a hair past its budget: bid over it.
+        for shown in (512_000_099, backlog.DEEP_BUDGET + 68, 516_000_000):
+            bid = budget(name, _lines(1, nodes=shown))
+            self.assertGreater(bid, shown)
+            self.assertEqual(ingest._rung_matching(bid), 512_000_000)
+            self.assertFalse(backlog._off_rung(name, _lines(1, nodes=shown)))
+        # A bid that would leave the rung is "deep".
+        self.assertTrue(backlog._off_rung(name, _lines(1, nodes=517_000_000)))
+        self.assertTrue(backlog._off_rung(name,
+                                          _lines(1, nodes=2_000_100_000)))
+        pos = _deep('again', lines=_lines(1, nodes=backlog.DEEP_BUDGET + 68))
+        _offer(name, [pos])
+        backlog.adopt('moky', name, 5)
+        self.assertGreater(AnalysisTask.objects.get().budget_nodes,
+                           backlog.DEEP_BUDGET + 68)
+
+    def test_a_server_search_waiting_on_the_slot_becomes_the_request(self):
+        pos = _deep('drip')
+        server = AnalysisTask.objects.create(
+            position=pos, generation=2, budget_nodes=128_000_000, multipv=2,
+            source=FILL, arm='coverage')
+        _offer(backlog.DEEP_WINS, [pos])
+        self.assertEqual(backlog.adopt('moky', backlog.DEEP_WINS, 5).adopted,
+                         1)
+        server.refresh_from_db()
+        self.assertEqual((server.source, server.requested_by,
+                          server.budget_nodes),
+                         (USER, 'moky', 514_560_000))
+
+    def test_only_its_own_sizes(self):
+        _offer(backlog.DEEP_WINS, [_deep('a')])
+        _offer(backlog.LOST_LINES, [_short('b')])
+        self.assertEqual(backlog.adopt('moky', backlog.DEEP_WINS, 25).status,
+                         'bad-request')
+        self.assertEqual(backlog.adopt('moky', backlog.LOST_LINES, 5).status,
+                         'bad-request')
+        response = self.client.post('/atomicdb/queue/adopt/',
+                                    {'backlog': 'deep-wins', 'size': '25',
+                                     'format': 'json'})
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post('/atomicdb/queue/adopt/',
+                                    {'backlog': 'deep-wins', 'size': '20',
+                                     'format': 'json'})
+        self.assertEqual(response.json(),
+                         {'status': 'adopted', 'adopted': 1, 'dropped': 0})
+
+    def test_each_waiting_position_takes_four_places(self):
+        _offer(backlog.DEEP_WINS, [_deep(f'd{i}') for i in range(20)])
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(10)])
+        with patch.object(backlog, 'ADOPT_WAITING_MAX', 30):
+            first = backlog.adopt('moky', backlog.DEEP_WINS, 20)
+            self.assertEqual(first.adopted, 7)          # 7 x 4 = 28 places
+            self.assertEqual(backlog.adopted_waiting('moky'), 28)
+            self.assertEqual(backlog.adopt('moky', backlog.DEEP_WINS, 5)
+                             .status, 'adopted-full')
+            self.assertEqual(backlog.adopt('moky', backlog.LOST_LINES, 25)
+                             .adopted, 2)
+            self.assertEqual(backlog.adopted_waiting('moky'), 30)
+        body = self.client.get(
+            '/atomicdb/queue/?adopt=adopted-full&backlog=deep-wins&n=0'
+            '&dropped=0').content.decode()
+        self.assertIn('take the 500 places an account has', body)
+
+
+class DeepWinsSubscriptions(BacklogTestCase):
+
+    def test_the_default_batch_is_ten_and_only_its_sizes(self):
+        _offer(backlog.DEEP_WINS, [_deep(f'd{i}') for i in range(50)])
+        self.client.post('/atomicdb/queue/subscribe/',
+                         {'backlog': 'deep-wins'})
+        self.assertEqual(BacklogSubscription.objects.get().batch_size, 10)
+        response = self.client.post('/atomicdb/queue/subscribe/',
+                                    {'backlog': 'deep-wins', 'size': '50',
+                                     'format': 'json'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(backlog.subscribe('moky', backlog.LOST_LINES, 10),
+                         'bad-request')
+        self.assertEqual(backlog.subscribe('moky', backlog.DEEP_WINS, 20),
+                         'subscribed')
+        summary = backlog.top_up()
+        self.assertEqual(summary['adopted'], 40)
+        self.assertEqual(_adopted_of('moky', 'deep25').count(), 40)
+        # 40 waiting, not below 20: nothing more.
+        self.assertEqual(backlog.top_up()['adopted'], 0)
+
+    def test_a_stored_size_of_another_list_is_refused_by_the_top_up(self):
+        _offer(backlog.DEEP_WINS, [_deep('a')])
+        BacklogSubscription.objects.create(username='moky',
+                                           backlog='deep-wins', batch_size=50)
+        backlog.top_up()
+        sub = BacklogSubscription.objects.get()
+        self.assertEqual((sub.active, sub.last_status),
+                         (False, 'bad-request'))
+        self.assertFalse(AnalysisTask.objects.exists())
+
+
+class DeepWinsLoader(TestCase):
+
+    def _searched(self, pos):
+        for generation in range(pos.visits):
+            AnalysisTask.objects.create(
+                position=pos, generation=generation,
+                budget_nodes=128_000_000, nodes_searched=ONCE,
+                state=COMPLETED)
+
+    def setUp(self):
+        self.white = _deep('white', eval_cp=3000)
+        self.black = _deep('black', fen=BLACK_FEN, eval_cp=-5000)
+        self.mate = _deep('mate', eval_cp=9800)
+        self.small = _deep('small', eval_cp=1000)
+        self.once = _deep('once', visits=1)
+        self.closed = _deep('closed', status='WHITE_WIN')
+        for pos in (self.white, self.black, self.mate, self.small,
+                    self.once, self.closed):
+            self._searched(pos)
+        self.folder = tempfile.mkdtemp()
+        self.path = os.path.join(self.folder, 'deep.json')
+
+    def tearDown(self):
+        for name in os.listdir(self.folder):
+            os.remove(os.path.join(self.folder, name))
+        os.rmdir(self.folder)
+
+    def _run(self, *extra):
+        out = StringIO()
+        call_command('atomicdb_backlog', 'load-deep-wins', '--state-file',
+                     self.path, '--pause', '0', *extra, stdout=out)
+        return out.getvalue()
+
+    def _listed(self):
+        return list(BacklogItem.objects.filter(backlog='deep-wins')
+                    .order_by('id').values_list('position_key', flat=True))
+
+    def test_it_resumes_then_loads_the_highest_value_first(self):
+        first = self._run('--batch', '1', '--max-steps', '3')
+        self.assertIn('stopped at cursor=', first)
+        with open(self.path) as handle:
+            state = json.load(handle)
+        self.assertFalse(state['done'])
+        self.assertEqual(self._listed(), [])
+        out = self._run('--batch', '2')
+        self.assertIn('found=3 added=3', out)
+        self.assertEqual(self._listed(),
+                         [self.mate.key, self.black.key, self.white.key])
+        with open(self.path) as handle:
+            self.assertTrue(json.load(handle)['loaded'])
+        self.assertIn('already finished', self._run())
+        # A fresh scan adds nothing already there.
+        os.remove(self.path)
+        os.remove(self.path + '.found.jsonl')
+        self.assertIn('added=0 already=3', self._run())
+        self.assertEqual(len(self._listed()), 3)
+
+    def test_dry_run_adds_nothing(self):
+        out = self._run('--dry-run')
+        self.assertIn('found=3 would add=3', out)
+        self.assertFalse(BacklogItem.objects.exists())
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_below_mate_leaves_the_mate_band_out(self):
+        out = self._run('--below-mate')
+        self.assertIn('added=2', out)
+        self.assertEqual(self._listed(), [self.black.key, self.white.key])
+
+    def test_the_tree_comes_first(self):
+        root = _pos('root', _lines(5), backed_move='e1e2')
+        reply = _pos('reply', _lines(5))
+        Edge.objects.create(parent=root, child=reply, move_uci='e1e2')
+        Edge.objects.create(parent=reply, child=self.white, move_uci='e8e7')
+        with patch.object(ingest, 'root_key', return_value=root.key):
+            out = self._run('--tree')
+        self.assertIn('tree_first=1', out)
+        self.assertEqual(self._listed(),
+                         [self.white.key, self.mate.key, self.black.key])
+
+    def test_the_order_itself(self):
+        found = {'a': (3000, 1.0), 'b': (-4000, 0.0), 'c': (3000, 5.0),
+                 'd': (9500, 0.0)}
+        self.assertEqual(backlog.order_deep_wins(found),
+                         ['d', 'b', 'c', 'a'])
+        self.assertEqual(backlog.order_deep_wins(found, tree=['a', 'x']),
+                         ['a', 'd', 'b', 'c'])
+        self.assertEqual(backlog.order_deep_wins(found, below_mate=True),
+                         ['b', 'c', 'a'])
 
 
 # ---------------- subscriptions ----------------

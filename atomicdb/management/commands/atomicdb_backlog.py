@@ -8,6 +8,11 @@
     manage.py atomicdb_backlog scan-shallow --state-file PATH
                                            [--batch 2000] [--pause 0.5]
                                            [--max-steps N] [--dry-run]
+    manage.py atomicdb_backlog load-deep-wins --state-file PATH
+                                             [--batch 2000] [--pause 0.5]
+                                             [--max-steps N] [--dry-run]
+                                             [--tree] [--tree-seconds 1800]
+                                             [--below-mate]
 
 ``load-lost-lines`` reads one position key per line and adds the ones not on
 the list yet; ``--skip N`` leaves out the first N lines (the ones a drip
@@ -37,6 +42,20 @@ completed search of 128M or more; a step of 2,000 ids takes 0.5 to 1.5 s
 with a cold cache, so the whole walk is about 2,050 steps, 30 to 70 minutes
 of queries plus the pauses (17 minutes at 0.5 s): one to one and a half
 hours.  Run it niced, under ``flock -n``, so only one copy runs.
+
+``load-deep-wins`` fills the deep-wins backlog in two halves.  The scan walks
+the completed searches by id exactly like ``scan-shallow`` (same steps, same
+cost) and keeps the positions that qualify now: open, ``visits == 2``, the
+side to move at +25 or more.  What it finds goes to ``PATH.found.jsonl``,
+appended after each step, and where it stands to ``PATH``, so a scan cut
+short resumes there.  Only when the walk reaches the oldest search is the
+list loaded, all at once, in its order: with ``--tree``, first the ones a
+walk of White's strategy tree meets (the sweep's walk, minutes of reads,
+capped by ``--tree-seconds``), then the rest, the highest value first.
+``--below-mate`` leaves out the values in the mate band.  The state file
+then says it finished, and running again does nothing; delete both files to
+scan again (a later load adds only what is new, behind what is there).
+``--dry-run`` reads only and says what it would add.
 """
 
 import json
@@ -47,7 +66,27 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count
 
 from atomicdb import backlog, sweep
-from atomicdb.models import BacklogSubscription
+from atomicdb.models import AnalysisTask, BacklogItem, BacklogSubscription
+
+# Where load-deep-wins keeps what its scan found, next to its state file.
+FOUND_SUFFIX = '.found.jsonl'
+
+
+def _read_found(path):
+    """``{key: (value, priority)}`` from the scan's file; later lines win."""
+    found = {}
+    try:
+        with open(path, encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    key, value, priority = json.loads(line)
+                except (ValueError, TypeError):
+                    continue        # a line cut short by a stop
+                if isinstance(key, str) and isinstance(value, int):
+                    found[key] = (value, priority)
+    except OSError:
+        pass
+    return found
 
 
 def _read_state(path):
@@ -72,6 +111,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('action', choices=['status', 'load-lost-lines',
                                                'load-clear-wins',
+                                               'load-deep-wins',
                                                'scan-shallow', 'top-up'])
         parser.add_argument('--file', help='keys to load, one per line '
                             '(load-clear-wins: also the sweep\'s JSON list)')
@@ -86,7 +126,17 @@ class Command(BaseCommand):
         parser.add_argument('--pause', type=float, default=0.5)
         parser.add_argument('--max-steps', type=int, default=None)
         parser.add_argument('--dry-run', action='store_true',
-                            help='scan-shallow: read only, add nothing')
+                            help='scan-shallow, load-deep-wins: read only, '
+                                 'add nothing')
+        parser.add_argument('--tree', action='store_true',
+                            help='load-deep-wins: White\'s strategy tree '
+                                 'first')
+        parser.add_argument('--tree-seconds', type=float, default=1800.0,
+                            help='load-deep-wins: at most this long walking '
+                                 'the tree')
+        parser.add_argument('--below-mate', action='store_true',
+                            help='load-deep-wins: leave out the values in '
+                                 'the mate band')
 
     def handle(self, *args, **options):
         action = options['action']
@@ -96,6 +146,8 @@ class Command(BaseCommand):
             return self._load(options)
         if action == 'load-clear-wins':
             return self._load_clear_wins(options)
+        if action == 'load-deep-wins':
+            return self._load_deep_wins(options)
         if action == 'top-up':
             summary = backlog.top_up()
             self.stdout.write(' '.join(f'{key}={value}' for key, value
@@ -152,6 +204,84 @@ class Command(BaseCommand):
         self.stdout.write(f'{backlog.CLEAR_WINS}: added={added} '
                           f'already={known} left_out={left_out} '
                           f'read={len(keys)} skipped={skip} from {source}')
+
+    def _load_deep_wins(self, options):
+        path = options['state_file']
+        dry_run = options['dry_run']
+        name = backlog.DEEP_WINS
+        state = _read_state(path) if path else {}
+        if state.get('loaded') and not dry_run:
+            self.stdout.write(f'{name}: already finished ({path}); delete it '
+                              f'and {path}{FOUND_SUFFIX} to scan again')
+            return
+        found_path = path + FOUND_SUFFIX if path else None
+        found = _read_found(found_path) if found_path else {}
+        started = time.time()
+        totals = {'read': state.get('read', 0)}
+        cursor = state.get('cursor')
+        if not isinstance(cursor, int) or cursor <= 0:
+            cursor = None
+        if cursor is None and not state.get('done'):
+            cursor = 1 + (AnalysisTask.objects.order_by('-id')
+                          .values_list('id', flat=True).first() or 0)
+        steps = 0
+        while cursor is not None and cursor > 0:
+            if (options['max_steps'] is not None
+                    and steps >= options['max_steps']):
+                break
+            cursor, read, rows = backlog.scan_deep_step(
+                cursor, max(1, options['batch']))
+            steps += 1
+            totals['read'] += read
+            for key, value, priority in rows:
+                found[key] = (value, priority)
+            if path and not dry_run:
+                if rows:
+                    with open(found_path, 'a', encoding='utf-8') as handle:
+                        for row in rows:
+                            handle.write(json.dumps(list(row)) + '\n')
+                _write_state(path, {'cursor': cursor, 'done': cursor <= 0,
+                                    'found': len(found), **totals})
+            self.stdout.write(f'cursor={cursor} read={read} '
+                              f'qualifying={len(rows)} found={len(found)} '
+                              f'elapsed={time.time() - started:.0f}s')
+            if cursor > 0 and options['pause']:
+                time.sleep(max(0.0, options['pause']))
+        if cursor is not None and cursor > 0:
+            self.stdout.write(f'{name}: stopped at cursor={cursor} after '
+                              f'{steps} steps, found={len(found)}; run it '
+                              'again to go on')
+            return
+        tree = []
+        if options['tree']:
+            deadline = time.monotonic() + max(0.0, options['tree_seconds'])
+            tree, stats = sweep.walk_strategy_tree(
+                deadline=deadline, match=backlog.deep_tree_match)
+            self.stdout.write(f"tree walk: {len(tree)} found, "
+                              f"{stats['nodes']} positions, "
+                              f"stopped={stats['stopped']}")
+        keys = backlog.order_deep_wins(found, tree,
+                                       below_mate=options['below_mate'])
+        head = len(set(tree) & set(keys))
+        if dry_run:
+            known = set()
+            for start in range(0, len(keys), 2_000):
+                known.update(BacklogItem.objects.filter(
+                    backlog=name, position_key__in=keys[start:start + 2_000])
+                    .values_list('position_key', flat=True))
+            self.stdout.write(f'{name}: found={len(found)} '
+                              f'would add={len(set(keys) - known)} '
+                              f'tree_first={head} (dry run)')
+            return
+        added, known, invalid = backlog.load_keys(name, keys)
+        if path:
+            _write_state(path, {'cursor': 0, 'done': True, 'loaded': True,
+                                'found': len(found), 'added': added,
+                                **totals})
+        self.stdout.write(f'{name}: found={len(found)} added={added} '
+                          f'already={known} left_out={len(found) - len(keys)}'
+                          f' tree_first={head} in '
+                          f'{time.time() - started:.0f}s')
 
     def _scan(self, options):
         path = options['state_file']

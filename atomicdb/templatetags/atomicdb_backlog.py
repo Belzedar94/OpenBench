@@ -23,12 +23,11 @@ def backlog_box(context):
         row['sub'] = subs.get(row['name'])
     return {
         'backlogs': rows,
-        'sizes': backlog.ADOPT_SIZES,
-        'default_size': backlog.SUBSCRIBE_DEFAULT_SIZE,
         'signed_in': signed_in,
         'username': username,
         'waiting_adopted': backlog.adopted_waiting(username),
         'waiting_max': backlog.ADOPT_WAITING_MAX,
+        'heavy': backlog.heavy_backlogs(),
         'receipt': (backlog.receipt(request.GET)
                     if signed_in and request is not None else None),
         'sub_receipt': (backlog.subscription_receipt(request.GET)
