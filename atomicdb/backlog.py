@@ -114,6 +114,11 @@ ARMS = tuple(spec['arm'] for spec in BACKLOGS.values())
 ADOPT_BUDGET = (idle_repair.REPAIR_MIN_NODES
                 * (1000 + idle_repair.REPAIR_OVERBID_PER_MILLE) // 1000)
 LOST_LINES_MULTIPV = 5
+# A lost-lines position whose short search already ran the adoption budget
+# (the engine stops a little past it: 128,640,068 nodes) is bought this much
+# over the nodes it shows, so the new search reliably wins the showcase.
+# Small enough to stay on the 128M rung (ingest.RUNG_OVERSHOOT_TOLERANCE).
+LOST_LINES_REBID_PER_MILLE = 2
 # The widest line count a lost-lines position is held to: fewer legal moves
 # than this and every one of them is enough.
 LOST_LINES_WANTED = 5
@@ -172,11 +177,26 @@ def shallow_now(last_analysis):
     return searched is not None and searched < ADOPT_BUDGET
 
 
+def adopt_budget(backlog, last_analysis):
+    """The nodes the adopted search of a position is bought at."""
+    if backlog != LOST_LINES:
+        return ADOPT_BUDGET
+    shown = showcase_budget(last_analysis)
+    return max(ADOPT_BUDGET,
+               shown * (1000 + LOST_LINES_REBID_PER_MILLE) // 1000)
+
+
 def _verdict(backlog, row, repaired):
     """``None`` if the position still qualifies, else why it is dropped."""
     if row is None:
         return CLOSED
-    if showcase_budget(row['last_analysis']) >= ADOPT_BUDGET:
+    if backlog == LOST_LINES:
+        # Its re-search only has to beat the nodes the shown one ran; it is
+        # deep when that would leave the 128M rung.
+        if (ingest._rung_matching(adopt_budget(backlog, row['last_analysis']))
+                > ingest._rung_matching(ADOPT_BUDGET)):
+            return DEEP
+    elif showcase_budget(row['last_analysis']) >= ADOPT_BUDGET:
         return DEEP
     if backlog == LOST_LINES:
         if not lines_short(row['fen'], row['last_analysis']):
@@ -249,7 +269,7 @@ class Adoption:
     task_ids: list = field(default_factory=list)
 
 
-def _mint(key, visits, multipv, arm, username, now):
+def _mint(key, visits, multipv, arm, username, now, budget=ADOPT_BUDGET):
     """Queue the adopted search of ``key``.  The task, or ``None``.
 
     The slot is the next visit, like every producer's.  What already sits
@@ -260,7 +280,7 @@ def _mint(key, visits, multipv, arm, username, now):
     """
     task, created = AnalysisTask.objects.get_or_create(
         position_id=key, generation=visits,
-        defaults={'budget_nodes': ADOPT_BUDGET, 'multipv': multipv,
+        defaults={'budget_nodes': budget, 'multipv': multipv,
                   'source': AnalysisTask.Source.USER,
                   'requested_by': username, 'requested_at': now,
                   'arm': arm})
@@ -268,7 +288,7 @@ def _mint(key, visits, multipv, arm, username, now):
         return task
     if (task.state == AnalysisTask.TState.CANCELLED
             or ingest.is_absorbed(task)):
-        ingest._revive_withdrawn(task, ADOPT_BUDGET, multipv, username)
+        ingest._revive_withdrawn(task, budget, multipv, username)
         task.arm = arm
         task.save(update_fields=['arm'])
         return task
@@ -277,7 +297,7 @@ def _mint(key, visits, multipv, arm, username, now):
             and task.requested_by in ('', username)):
         task.source = AnalysisTask.Source.USER
         task.requested_by = username
-        task.budget_nodes = max(task.budget_nodes, ADOPT_BUDGET)
+        task.budget_nodes = max(task.budget_nodes, budget)
         task.requested_at = now
         fields = ['source', 'requested_by', 'budget_nodes', 'requested_at']
         if not task.arm:
@@ -349,7 +369,8 @@ def adopt(username, backlog, size):
                 if reason is None:
                     task = _mint(item.position_key, row['visits'],
                                  _multipv(backlog, row['visits']), arm,
-                                 username, now)
+                                 username, now,
+                                 adopt_budget(backlog, row['last_analysis']))
                     if task is None:
                         reason = QUEUED
                 if task is not None:
