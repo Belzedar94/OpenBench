@@ -176,7 +176,10 @@ def _verdict(backlog, row, repaired):
     """``None`` if the position still qualifies, else why it is dropped."""
     if row is None:
         return CLOSED
-    if showcase_budget(row['last_analysis']) >= ADOPT_BUDGET:
+    # Strictly deeper only: a search at the same budget still takes the
+    # showcase when it brings at least as many lines (ingest_analysis), which
+    # is what a lost-lines re-search of a short 128.64M one is for.
+    if showcase_budget(row['last_analysis']) > ADOPT_BUDGET:
         return DEEP
     if backlog == LOST_LINES:
         if not lines_short(row['fen'], row['last_analysis']):

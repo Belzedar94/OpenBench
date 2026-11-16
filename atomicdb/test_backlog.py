@@ -243,6 +243,15 @@ class RecheckAtAdoption(BacklogTestCase):
         self.assertEqual(AnalysisTask.objects.filter(
             requested_by='moky').get().position_id, good.key)
 
+    def test_a_short_search_at_the_adoption_budget_is_still_offered(self):
+        # A re-search that came back short at 128.64M (an old worker's
+        # MultiPV rule) is redone at the same budget: with more lines it
+        # takes the showcase, so it is not "deep".
+        again = _pos('again', _lines(2, nodes=backlog.ADOPT_BUDGET))
+        _offer(backlog.LOST_LINES, [again])
+        outcome = backlog.adopt('moky', backlog.LOST_LINES, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (1, 0))
+
     def test_a_batch_takes_the_next_rows_past_the_dropped_ones(self):
         rows = [_short(f'c{i}', status='WIN') for i in range(10)]
         rows += [_short(f'g{i}') for i in range(30)]
