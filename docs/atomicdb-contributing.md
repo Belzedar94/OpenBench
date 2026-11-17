@@ -144,10 +144,11 @@ in `Documentation/` show the commands:
 
 The worker's own usage line is
 `python atomicdb_worker.py -U user -P pass -S https://server -T 8`. `-S`
-defaults to `https://belzedar.duckdns.org`. `--dotenv [PATH]` replaces `-U`
-and `-P` (they cannot be combined): `ATOMICDB_USER` and `ATOMICDB_PASSWORD`
-come from a `.env` file, by default the one in the current directory, else
-the one next to the script. `--engine`
+defaults to `https://belzedar.duckdns.org`. At startup the worker reads
+`.env` from the current directory, else next to the script; its
+`ATOMICDB_USER` and `ATOMICDB_PASSWORD` make `-U` and `-P` optional, and `-U`
+/ `-P` on the command line still win. `--dotenv PATH` reads one specific file
+instead and cannot be combined with `-U`/`-P`. `--engine`
 points it at a local engine build. Without `--engine` it downloads the
 reference engine and moves to a newly published one while it runs;
 `--no-engine-update` turns that off. Each search prints one line when it

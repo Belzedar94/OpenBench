@@ -1,8 +1,10 @@
-"""--dotenv [PATH] for the account, -S with a default (worker build 2026111702).
+"""The account from a .env file, -S with a default (worker build 2026111703).
 
---dotenv and -U/-P are exclusive; without --dotenv, -U and -P stay required
-and nothing is read from the environment.  The file gives ATOMICDB_USER and
-ATOMICDB_PASSWORD only.  The password is never printed.
+At startup the worker reads .env from the current directory, else next to
+the script; its ATOMICDB_USER / ATOMICDB_PASSWORD make -U / -P optional, and
+-U / -P on the command line win over it.  --dotenv PATH reads one specific
+file and is exclusive with -U / -P.  The server and process environment are
+never read.  The password is never printed.
 """
 
 import importlib.util
@@ -83,10 +85,11 @@ class DotenvFileTests(SimpleTestCase):
         path = self.write('.env', 'ATOMICDB_USER=alice\n'
                                   'ATOMICDB_PASSWORD=x\n'
                                   'ATOMICDB_SERVER=https://elsewhere\n')
-        a = _args(dotenv=str(path))
-        a.S = worker.DEFAULT_SERVER
-        self.assertIsNone(worker.resolve_account(a))
-        self.assertEqual(a.S, 'https://belzedar.duckdns.org')
+        for a in (_args(dotenv=str(path)), _args()):
+            a.S = worker.DEFAULT_SERVER
+            problem, _ = worker.resolve_account(a, [path])
+            self.assertIsNone(problem)
+            self.assertEqual(a.S, 'https://belzedar.duckdns.org')
 
     def test_a_missing_key_names_the_key_and_the_file_not_values(self):
         path = self.write('.env', f'ATOMICDB_PASSWORD="{SECRET}"\n')
@@ -131,27 +134,100 @@ class DotenvFileTests(SimpleTestCase):
     def test_the_default_paths_are_cwd_then_the_script(self):
         paths = worker.default_dotenv_paths()
         self.assertEqual(paths[0], pathlib.Path.cwd() / '.env')
-        self.assertEqual(paths[1].parent,
+        self.assertEqual(paths[-1].parent,
                          pathlib.Path(worker.__file__).resolve().parent)
 
 
 class ResolveAccountTests(SimpleTestCase):
 
-    def test_without_dotenv_both_flags_stay_required(self):
-        problem = worker.resolve_account(_args(U='alice'))
-        self.assertIn('required: -P', problem)
-        self.assertIn('--dotenv', problem)
-        self.assertIsNone(worker.resolve_account(_args('alice', 'pw')))
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+        self.cwd_env = root / 'cwd' / '.env'
+        self.script_env = root / 'script' / '.env'
+        self.cwd_env.parent.mkdir()
+        self.script_env.parent.mkdir()
+        self.candidates = [self.cwd_env, self.script_env]
 
-    def test_dotenv_and_the_flags_are_exclusive(self):
+    def test_no_cli_and_no_file_names_both_ways(self):
+        problem, note = worker.resolve_account(_args(), self.candidates)
+        self.assertIn('missing -U, -P', problem)
+        self.assertIn('command line', problem)
+        self.assertIn('ATOMICDB_USER and ATOMICDB_PASSWORD in a .env file',
+                      problem)
+        self.assertIn('--dotenv PATH', problem)
+        self.assertIn(str(self.cwd_env), problem)
+        self.assertIsNone(note)
+
+    def test_the_command_line_alone_still_works(self):
+        a = _args('alice', 'pw')
+        self.assertEqual(worker.resolve_account(a, self.candidates),
+                         (None, None))
+        self.assertEqual((a.U, a.P), ('alice', 'pw'))
+
+    def test_the_automatic_file_makes_the_flags_optional(self):
+        self.script_env.write_text('ATOMICDB_USER=alice\n'
+                                   f'ATOMICDB_PASSWORD="{SECRET}"\n')
+        a = _args()
+        problem, note = worker.resolve_account(a, self.candidates)
+        self.assertIsNone(problem)
+        self.assertEqual((a.U, a.P), ('alice', SECRET))
+        self.assertEqual(note,
+                         f'note: account alice read from {self.script_env}')
+
+    def test_the_current_directory_file_wins(self):
+        self.script_env.write_text('ATOMICDB_USER=script\n'
+                                   'ATOMICDB_PASSWORD=s\n')
+        self.cwd_env.write_text('ATOMICDB_USER=cwd\nATOMICDB_PASSWORD=c\n')
+        a = _args()
+        worker.resolve_account(a, self.candidates)
+        self.assertEqual((a.U, a.P), ('cwd', 'c'))
+
+    def test_the_command_line_overrides_the_file_and_says_so(self):
+        self.cwd_env.write_text('ATOMICDB_USER=file-user\n'
+                                f'ATOMICDB_PASSWORD="{SECRET}"\n')
+        a = _args('cli', 'cli-pass')
+        problem, note = worker.resolve_account(a, self.candidates)
+        self.assertIsNone(problem)
+        self.assertEqual((a.U, a.P), ('cli', 'cli-pass'))
+        self.assertEqual(note, f'note: -U, -P on the command line override '
+                               f'{self.cwd_env}')
+        self.assertNotIn(SECRET, note)
+
+    def test_a_partial_file_and_a_flag_complete_each_other(self):
+        self.cwd_env.write_text(f'ATOMICDB_PASSWORD="{SECRET}"\n')
+        a = _args(U='alice')
+        problem, note = worker.resolve_account(a, self.candidates)
+        self.assertIsNone(problem)
+        self.assertEqual((a.U, a.P), ('alice', SECRET))
+        self.assertIn('ATOMICDB_PASSWORD read from', note)
+        self.assertNotIn(SECRET, note)
+
+    def test_a_partial_file_alone_names_the_missing_key_and_file(self):
+        self.cwd_env.write_text(f'ATOMICDB_PASSWORD="{SECRET}"\n')
+        problem, _ = worker.resolve_account(_args(), self.candidates)
+        self.assertIn('missing -U', problem)
+        self.assertIn(f'{self.cwd_env} has no ATOMICDB_USER', problem)
+        self.assertNotIn(SECRET, problem)
+
+    def test_explicit_dotenv_and_the_flags_are_exclusive(self):
         for a in (_args(U='alice', dotenv=''), _args(P='pw', dotenv='x')):
-            self.assertIn('cannot be combined', worker.resolve_account(a))
+            problem, _ = worker.resolve_account(a, self.candidates)
+            self.assertIn('cannot be combined', problem)
+
+    def test_explicit_dotenv_needs_both_keys(self):
+        other = self.cwd_env.parent / 'other.env'
+        other.write_text('ATOMICDB_USER=alice\n')
+        problem, _ = worker.resolve_account(_args(dotenv=str(other)),
+                                            self.candidates)
+        self.assertIn(f'{other} has no ATOMICDB_PASSWORD', problem)
 
     def test_the_environment_is_never_read(self):
         with mock.patch.dict(os.environ, {'ATOMICDB_USER': 'env',
                                           'ATOMICDB_PASSWORD': 'env'}):
-            problem = worker.resolve_account(_args())
-        self.assertIn('required: -U, -P', problem)
+            problem, _ = worker.resolve_account(_args(), self.candidates)
+        self.assertIn('missing -U, -P', problem)
 
 
 class MainCredentialTests(SimpleTestCase):
@@ -215,11 +291,38 @@ class MainCredentialTests(SimpleTestCase):
         self.assertEqual(slot.call_count, 0)
         self.assertIn('--dotenv cannot be combined with -U or -P', err)
 
-    def test_no_account_at_all_is_refused_as_before(self):
+    def test_no_account_at_all_is_refused(self):
         code, slot, _, err = self.run_main()
         self.assertEqual(code, 2)
         self.assertEqual(slot.call_count, 0)
-        self.assertIn('required: -U, -P', err)
+        self.assertIn('missing -U, -P', err)
+        self.assertIn('--dotenv PATH', err)
+
+    def test_the_automatic_env_file_needs_no_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = pathlib.Path(tmp) / '.env'
+            env.write_text('ATOMICDB_USER=alice\n'
+                           f'ATOMICDB_PASSWORD="{SECRET}"\n')
+            code, slot, out, err = self.run_main(candidates=[env])
+        self.assertEqual(code, 0)
+        auth = self.auth_of(slot)
+        self.assertEqual((auth['username'], auth['password']),
+                         ('alice', SECRET))
+        self.assertIn(f'note: account alice read from {env}', out)
+        self.assertNotIn(SECRET, out + err)
+
+    def test_the_command_line_wins_over_the_automatic_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = pathlib.Path(tmp) / '.env'
+            env.write_text('ATOMICDB_USER=alice\n'
+                           f'ATOMICDB_PASSWORD="{SECRET}"\n')
+            code, slot, out, err = self.run_main('-U', 'cli', '-P', 'cp',
+                                                 candidates=[env])
+        self.assertEqual(code, 0)
+        auth = self.auth_of(slot)
+        self.assertEqual((auth['username'], auth['password']), ('cli', 'cp'))
+        self.assertIn(f'-U, -P on the command line override {env}', out)
+        self.assertNotIn(SECRET, out + err)
 
     def test_a_missing_key_stops_before_anything_runs(self):
         with tempfile.TemporaryDirectory() as tmp:

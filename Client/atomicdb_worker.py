@@ -5,12 +5,13 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
   python atomicdb_worker.py -U user -P pass -S https://servidor -T 8
 
---dotenv [PATH] replaces -U/-P: ATOMICDB_USER and ATOMICDB_PASSWORD come
-from a .env file (KEY=VALUE lines; without PATH, .env in the current
-directory, else next to this script).  -S defaults to
+-U/-P are optional when a .env file (KEY=VALUE lines) in the current
+directory, else next to this script, has ATOMICDB_USER / ATOMICDB_PASSWORD;
+-U/-P on the command line still win over it.  --dotenv PATH reads one
+specific file instead (and then -U/-P are refused).  -S defaults to
 https://belzedar.duckdns.org.
 
-  python atomicdb_worker.py --dotenv -T 4
+  python atomicdb_worker.py -T 4
 
 By default every thread of -T runs its own engine (-T 8 = 8 analyses of one
 thread each), each with a hash sized to the free memory; --jobs K runs K
@@ -65,7 +66,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111702
+ATOMICDB_WORKER_BUILD = 2026111703
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3395,12 +3396,15 @@ def plan_threads(total, jobs, solve):
                   for slot in range(jobs)], solver_cores
 
 
-# --dotenv keeps the account off the command line (and out of screenshots of
-# it): -U and -P come from a ``.env`` file instead.  It is explicit on
-# purpose -- without --dotenv, -U and -P are required as always and nothing
-# is read from the environment behind the contributor's back.  The file gives
-# the user name and the password only; the server is -S, which defaults to
-# the public server.  No python-dotenv: the format is plain KEY=VALUE lines.
+# The account can stay off the command line (and out of screenshots of it):
+# at startup the worker reads ``.env`` from the current directory, else from
+# the folder this script lives in, and ATOMICDB_USER / ATOMICDB_PASSWORD there
+# make -U / -P optional.  -U / -P given on the command line still win over the
+# file.  --dotenv PATH points at one specific file instead, and then -U / -P
+# are refused (the account comes from that file only).  The file gives the
+# user name and the password only; the server is -S, which defaults to the
+# public server.  Process environment variables are never read.  No
+# python-dotenv: the format is plain KEY=VALUE lines.
 DEFAULT_SERVER = 'https://belzedar.duckdns.org'
 DOTENV_KEYS = (('U', 'ATOMICDB_USER'), ('P', 'ATOMICDB_PASSWORD'))
 ENV_FILE_NAME = '.env'
@@ -3445,10 +3449,14 @@ def parse_env_file(text):
 
 
 def default_dotenv_paths():
-    """Where a bare --dotenv looks: the current directory, then the folder
-    this script lives in."""
-    return [Path.cwd() / ENV_FILE_NAME,
-            Path(__file__).resolve().parent / ENV_FILE_NAME]
+    """Where the worker looks for ``.env`` (and a bare --dotenv too): the
+    current directory, then the folder this script lives in."""
+    paths = []
+    for path in (Path.cwd() / ENV_FILE_NAME,
+                 Path(__file__).resolve().parent / ENV_FILE_NAME):
+        if path not in paths:
+            paths.append(path)
+    return paths
 
 
 def find_dotenv(path='', candidates=None):
@@ -3488,29 +3496,75 @@ def read_dotenv_account(path):
     return tuple(values[name] for _, name in DOTENV_KEYS)
 
 
-def resolve_account(a, candidates=None):
-    """Fill a.U / a.P, or return the error to print (None when all is well).
-
-    --dotenv and -U/-P are exclusive; without --dotenv both flags are
-    required, exactly as before.
-    """
-    if a.dotenv is None:
-        missing = [f'-{flag}' for flag, _ in DOTENV_KEYS
-                   if not getattr(a, flag, None)]
-        if missing:
-            return (f'the following arguments are required: '
-                    f'{", ".join(missing)} (or use --dotenv to read '
-                    'ATOMICDB_USER and ATOMICDB_PASSWORD from a .env file)')
-        return None
-    if a.U or a.P:
-        return ('--dotenv cannot be combined with -U or -P: the account comes '
-                'from one place or the other')
+def read_dotenv_values(path):
+    """The account keys present (and not empty) in ``path``, or {} when the
+    file cannot be read.  Used for the automatic ``.env``, where a partial
+    file is fine as long as the command line supplies the rest."""
     try:
-        a.dotenv_path = find_dotenv(a.dotenv, candidates)
-        a.U, a.P = read_dotenv_account(a.dotenv_path)
-    except DotenvError as exc:
-        return str(exc)
-    return None
+        text = Path(path).read_text(encoding='utf-8-sig')
+    except (OSError, UnicodeError):
+        return {}
+    values = parse_env_file(text)
+    return {name: values[name] for _, name in DOTENV_KEYS if values.get(name)}
+
+
+def resolve_account(a, candidates=None):
+    """Fill a.U / a.P; return (error, note), each None or one line.
+
+    ``note`` names the file used (never a value).  With ``--dotenv`` (a.dotenv
+    not None) the account comes from that file only and -U / -P are refused;
+    a bare --dotenv uses the automatic lookup.  Without it, the first
+    existing ``.env`` of ``candidates`` fills whatever -U / -P left empty.
+    """
+    candidates = default_dotenv_paths() if candidates is None else candidates
+    a.dotenv_path = None
+    if a.dotenv is not None:
+        if a.U or a.P:
+            return ('--dotenv cannot be combined with -U or -P: the account '
+                    'comes from one place or the other'), None
+        try:
+            a.dotenv_path = find_dotenv(a.dotenv, candidates)
+            a.U, a.P = read_dotenv_account(a.dotenv_path)
+        except DotenvError as exc:
+            return str(exc), None
+        return None, f'note: account {a.U} read from {a.dotenv_path}'
+    found = next((Path(c) for c in candidates if Path(c).is_file()), None)
+    values = read_dotenv_values(found) if found else {}
+    used, overridden, from_cli = [], [], []
+    for flag, name in DOTENV_KEYS:
+        if getattr(a, flag, None):
+            from_cli.append(f'-{flag}')
+            if name in values:
+                overridden.append(f'-{flag}')
+        elif name in values:
+            setattr(a, flag, values[name])
+            used.append(name)
+    missing = [flag for flag, _ in DOTENV_KEYS if not getattr(a, flag, None)]
+    if missing:
+        flags = ', '.join(f'-{flag}' for flag in missing)
+        keys = ' and '.join(dict(DOTENV_KEYS)[flag] for flag in missing)
+        if found:
+            where = f'{found} has no {keys}'
+        else:
+            where = ('no .env found at '
+                     + ' or '.join(str(c) for c in candidates))
+        them = 'them' if len(missing) > 1 else 'it'
+        return (f'missing {flags}: pass {them} on the command line, or put '
+                f'{keys} in a .env file in the current directory or next to '
+                f'atomicdb_worker.py (or give --dotenv PATH); {where}'), None
+    if used and from_cli:
+        note = (f'note: {" and ".join(used)} read from {found}; '
+                f'{", ".join(from_cli)} from the command line')
+    elif used:
+        note = f'note: account {a.U} read from {found}'
+    elif overridden:
+        note = (f'note: {", ".join(overridden)} on the command line '
+                f'override {found}')
+    else:
+        note = None
+    if found:
+        a.dotenv_path = found
+    return None, note
 
 
 def main():
@@ -3523,18 +3577,19 @@ def main():
                'Give --jobs to run fewer, wider engines and --hash to fix '
                'the table size.')
     ap.add_argument('-U', default=None, metavar='USER',
-                    help='your username on the server (required unless '
-                         '--dotenv is given)')
+                    help='your username on the server.  Optional when a '
+                         '.env file (current directory, else next to this '
+                         'script) has ATOMICDB_USER; given here, it wins')
     ap.add_argument('-P', default=None, metavar='PASSWORD',
-                    help='your password on the server (required unless '
-                         '--dotenv is given)')
+                    help='your password on the server.  Optional when that '
+                         '.env file has ATOMICDB_PASSWORD; given here, it '
+                         'wins')
     ap.add_argument('--dotenv', nargs='?', const='', default=None,
                     metavar='PATH',
-                    help='read ATOMICDB_USER and ATOMICDB_PASSWORD from a '
-                         '.env file instead of -U/-P, which keeps the '
-                         'password off the command line.  Without PATH: '
-                         '.env in the current directory, else next to this '
-                         'script')
+                    help='read ATOMICDB_USER and ATOMICDB_PASSWORD from this '
+                         'file only (cannot be combined with -U/-P).  '
+                         'Without PATH: the same .env the worker looks for '
+                         'by itself')
     ap.add_argument('-S', default=DEFAULT_SERVER, metavar='SERVER',
                     help='server URL (default %(default)s)')
     ap.add_argument('--engine', default='',
@@ -3586,11 +3641,11 @@ def main():
                     help='start even if the engine does not identify itself '
                          'as an Atomic-Stockfish build')
     a = ap.parse_args()
-    problem = resolve_account(a)
+    problem, note = resolve_account(a)
     if problem:
         ap.error(problem)
-    if a.dotenv is not None:
-        print(f'note: account {a.U} read from {a.dotenv_path}', flush=True)
+    if note:
+        print(note, flush=True)
 
     if not a.no_auto_update and _install_worker_update(a.S):
         _restart_updated_worker(once=a.once)
