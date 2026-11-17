@@ -680,6 +680,24 @@ class AutoHashTests(SimpleTestCase):
         # 16 GB with 8 GB free, 16 engines: (8000 - 2048 - 16*128) / 16.
         self.assertEqual(worker.auto_hash_mb(16, (16384, 8000)), 128)
 
+    def test_the_margin_is_a_quarter_of_the_ram_up_to_two_gigabytes(self):
+        self.assertEqual(worker.memory_margin_mb(4096), 1024)
+        self.assertEqual(worker.memory_margin_mb(8192), 2048)
+        self.assertEqual(worker.memory_margin_mb(65536), 2048)
+
+    def test_the_automatic_hash_and_the_guard_share_the_margin(self):
+        for memory in ((4096, 2560), (8192, 5000), (65536, 40000)):
+            total, available = memory
+            self.assertEqual(worker.usable_memory_mb(memory),
+                             available - worker.memory_margin_mb(total))
+        # 4 GB with 2.5 GB free: 2560 - 1024 - 128 = 1408 -> 1024 -> cap 512.
+        self.assertEqual(worker.auto_hash_mb(1, (4096, 2560)), 512)
+        # 8 GB with 3 GB free, 4 engines: (3072 - 2048 - 4*128) / 4 = 128.
+        self.assertEqual(worker.auto_hash_mb(4, (8192, 3072)), 128)
+        # 64 GB with 6 GB free, 8 engines: the margin stays at 2 GB, not 8:
+        # (6144 - 2048 - 8*128) / 8 = 384 -> 256.
+        self.assertEqual(worker.auto_hash_mb(8, (65536, 6144)), 256)
+
     def test_a_full_machine_still_gets_a_minimal_table(self):
         self.assertEqual(worker.auto_hash_mb(32, (8192, 1000)),
                          worker.AUTO_HASH_MIN_MB)
@@ -741,11 +759,11 @@ class StartupTests(SimpleTestCase):
 class HashGuardTests(SimpleTestCase):
     """An explicit --hash that the free memory cannot hold (build 2026111102).
 
-    The memory in these tests: 32 GB installed, 12 GB free, so the margin is
-    4 GB and 8192 MB are usable.
+    The memory in these tests: 32 GB installed, 10 GB free, so the margin is
+    2 GB and 8192 MB are usable.
     """
 
-    MEMORY = (32768, 12288)
+    MEMORY = (32768, 10240)
 
     def test_a_hash_that_fits_is_kept(self):
         self.assertEqual(worker.fit_hash(8, 512, self.MEMORY), (8, 512))
@@ -783,10 +801,13 @@ class HashGuardTests(SimpleTestCase):
         self.assertEqual(slot.call_count, 8)
         self.assertEqual(slot.call_args.args[1].hash, 512)
         self.assertIn('-T 8 without --jobs runs 8 engines since build '
-                      '2026111101, so --hash 4096 applies 8 times', out)
+                      '2026111101, and --hash is per engine.', out)
         self.assertNotIn('per engine since', out)
-        self.assertIn('8 engines x 4096 MB would need 34.3 GB', out)
-        self.assertIn('using 512 MB each', out)
+        self.assertIn('Each engine needs 4096 MB of hash plus 300 MB for the '
+                      'net, binary and stacks: 34.3 GB for 8 engines.', out)
+        self.assertIn('Free memory now: 10.0 GB; 2.0 GB stays free for the '
+                      'rest of the machine, so 8.0 GB is usable.', out)
+        self.assertIn('Using --hash 512 MB per engine instead.', out)
         self.assertIn('--jobs 1', out)
         self.assertEqual(out.count('warning:'), 1)
 
@@ -796,14 +817,59 @@ class HashGuardTests(SimpleTestCase):
         self.assertEqual(slot.call_args.args[1].hash, 16)
         self.assertEqual(sum(call.args[5] for call in slot.call_args_list),
                          32)
-        self.assertIn('using 25 jobs of 16 MB each', out)
+        self.assertIn('Using 25 jobs of 16 MB each, the most that fit.', out)
 
     def test_explicit_jobs_are_named_as_such(self):
         slot, out = self.run_main('-T', '8', '--jobs', '4', '--hash', '4096')
         self.assertEqual(slot.call_args.args[1].hash, 1024)
-        self.assertIn('--jobs 4 runs 4 engines, so --hash 4096 applies 4 '
-                      'times', out)
+        self.assertIn('--jobs 4 runs 4 engines, and --hash is per engine.',
+                      out)
         self.assertNotIn('since build', out)
+
+    def test_one_engine_is_counted_as_one_and_the_margin_is_named(self):
+        # 16 GB installed and 2.3 GB free: the 2 GB margin leaves 307 MB,
+        # less than one engine's 300 MB plus 256 MB of hash.
+        slot, out = self.run_main('-T', '4', '--jobs', '1', '--hash', '256',
+                                  memory=(16384, 2355))
+        self.assertEqual(slot.call_count, 1)
+        self.assertEqual(slot.call_args.args[1].hash, 16)
+        warning = [line for line in out.splitlines()
+                   if line.startswith('warning:')]
+        self.assertEqual(warning, [
+            'warning: --jobs 1 runs 1 engine. Each engine needs 256 MB of '
+            'hash plus 300 MB for the net, binary and stacks: 556 MB for 1 '
+            'engine. Free memory now: 2.3 GB; 2.0 GB stays free for the rest '
+            'of the machine, so 307 MB is usable. Using --hash 16 MB per '
+            'engine instead. Pass --allow-hash-overcommit to keep --hash as '
+            'given.'])
+        self.assertNotIn('1 engines', out)
+        self.assertNotIn('one big engine', out)
+
+    def test_a_small_machine_keeps_a_quarter_not_two_gigabytes(self):
+        # 4 GB installed, 2.5 GB free: the margin is 1 GB, so 1.5 GB is
+        # usable and one engine of 256 MB (+300) fits as given.
+        self.assertEqual(worker.fit_hash(1, 256, (4096, 2560)), (1, 256))
+        slot, out = self.run_main('-T', '2', '--jobs', '1', '--hash', '256',
+                                  memory=(4096, 2560))
+        self.assertEqual(slot.call_args.args[1].hash, 256)
+        self.assertNotIn('warning:', out)
+
+    def test_the_warning_prints_the_margin_it_used(self):
+        line = worker.hash_guard_warning(
+            '--jobs 4 runs 4 engines', 1024, 4, 4, 64, 4, (4096, 2560),
+            True)
+        self.assertIn('Free memory now: 2.5 GB; 1.0 GB stays free for the '
+                      'rest of the machine, so 1.5 GB is usable.', line)
+
+    def test_the_warning_says_when_nothing_is_left_over(self):
+        line = worker.hash_guard_warning(
+            '--jobs 2 runs 2 engines', 1024, 2, 1, 16, 1, (16384, 1400),
+            True)
+        self.assertIn('Free memory now: 1.4 GB; 2.0 GB stays free for the '
+                      'rest of the machine, so nothing is left over.', line)
+        self.assertIn('2.6 GB for 2 engines', line)
+        self.assertIn('Using 1 job of 16 MB each, the most that fit.', line)
+        self.assertIn('Pass --jobs 1 for one big engine', line)
 
     def test_one_big_engine_that_fits_is_left_alone(self):
         slot, out = self.run_main('-T', '8', '--jobs', '1', '--hash', '4096')

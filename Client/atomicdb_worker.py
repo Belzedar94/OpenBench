@@ -58,7 +58,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111401
+ATOMICDB_WORKER_BUILD = 2026111701
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3162,10 +3162,22 @@ AUTO_HASH_MIN_MB = 16
 # What one engine process holds besides its hash: the net (48 MB today), the
 # binary and its stacks.
 ENGINE_BASE_MB = 128
-# What is left free for the rest of the machine, as the OpenBench client does
-# (``memory_margin_mb`` in Client/worker.py): 2 GB, or an eighth of the RAM.
-MEMORY_MARGIN_MIN_MB = 2048
-MEMORY_MARGIN_RAM_DIV = 8
+# What is left free for the rest of the machine: a quarter of the RAM, never
+# more than 2 GB (``memory_margin_mb``).  Until build 2026111701 it was the
+# OpenBench client's rule, 2 GB or an eighth of the RAM, whichever is LARGER:
+# a floor that ate most of what a 4 GB machine had free, and 8 GB on a 64 GB
+# box that the hash could have used.
+MEMORY_MARGIN_MAX_MB = 2048
+MEMORY_MARGIN_RAM_DIV = 4
+
+
+def memory_margin_mb(total):
+    """The memory left to the rest of the machine, for ``total`` MB of RAM.
+
+    One helper for the automatic hash and for the guard on an explicit
+    --hash, so the two never disagree about what is usable.
+    """
+    return min(MEMORY_MARGIN_MAX_MB, int(total) // MEMORY_MARGIN_RAM_DIV)
 
 
 def default_jobs(total, solve):
@@ -3245,8 +3257,7 @@ def auto_hash_mb(engines, memory=None):
     if not total or available is None:
         budget = 4096
     else:
-        margin = max(MEMORY_MARGIN_MIN_MB, total // MEMORY_MARGIN_RAM_DIV)
-        budget = available - margin
+        budget = available - memory_margin_mb(total)
     share = (budget - engines * ENGINE_BASE_MB) // engines
     if share < AUTO_HASH_MIN_MB:
         return AUTO_HASH_MIN_MB
@@ -3269,7 +3280,7 @@ def usable_memory_mb(memory=None):
     total, available = memory if memory is not None else memory_mb()
     if not total or available is None:
         return None
-    return available - max(MEMORY_MARGIN_MIN_MB, total // MEMORY_MARGIN_RAM_DIV)
+    return available - memory_margin_mb(total)
 
 
 def fit_hash(engines, hash_mb, memory=None):
@@ -3297,6 +3308,55 @@ def fit_hash(engines, hash_mb, memory=None):
         return engines, max(AUTO_HASH_MIN_MB, size)
     room = max(1, usable // (AUTO_HASH_MIN_MB + GUARD_ENGINE_OVERHEAD_MB))
     return min(engines, room), min(hash_mb, AUTO_HASH_MIN_MB)
+
+
+def _count(n, word):
+    """1 -> '1 engine'; 8 -> '8 engines'."""
+    return f'{n} {word}' if n == 1 else f'{n} {word}s'
+
+
+def _size_text(mb):
+    """1800 -> '1.8 GB'; 556 -> '556 MB'.  Below a gigabyte '0.5 GB' hides
+    the difference that matters, so small sizes stay in megabytes."""
+    mb = int(mb)
+    return f'{mb / 1024:.1f} GB' if mb >= 1024 else f'{mb} MB'
+
+
+def hash_guard_warning(why, asked_mb, engines, fit_engines, fit_mb, jobs,
+                       memory, suggest_one_job):
+    """The line the memory guard prints when it lowers an explicit --hash.
+
+    It spells out the whole sum ``fit_hash`` did, so nobody has to guess it:
+    what one engine needs (the hash plus ``GUARD_ENGINE_OVERHEAD_MB``), what
+    all of them need, the memory free now, the margin left to the rest of the
+    machine, what is usable after that, and what the worker does instead.
+    The old line printed only the total, and with one engine "1 engines x
+    256 MB would need 0.5 GB" read as if it had counted two: the 300 MB per
+    engine and the 2 GB margin were nowhere in it.
+    """
+    total, available = memory
+    margin = memory_margin_mb(total)
+    usable = available - margin
+    per_engine = asked_mb + GUARD_ENGINE_OVERHEAD_MB
+    if fit_engines < engines:
+        change = (f'Using {_count(jobs, "job")} of {fit_mb} MB each, the '
+                  'most that fit.')
+    else:
+        change = f'Using --hash {fit_mb} MB per engine instead.'
+    if usable > 0:
+        left = f'so {_size_text(usable)} is usable'
+    else:
+        left = 'so nothing is left over'
+    per_engine_note = ', and --hash is per engine' if engines > 1 else ''
+    hint = ('Pass --jobs 1 for one big engine, or --allow-hash-overcommit to '
+            'keep --hash as given.' if suggest_one_job
+            else 'Pass --allow-hash-overcommit to keep --hash as given.')
+    return (f'warning: {why}{per_engine_note}. Each engine needs {asked_mb} '
+            f'MB of hash plus {GUARD_ENGINE_OVERHEAD_MB} MB for the net, '
+            f'binary and stacks: {_size_text(engines * per_engine)} for '
+            f'{_count(engines, "engine")}. Free memory now: '
+            f'{_size_text(available)}; {_size_text(margin)} stays free for '
+            f'the rest of the machine, {left}. {change} {hint}')
 
 
 def plan_threads(total, jobs, solve):
@@ -3461,28 +3521,25 @@ def main():
         engines = jobs + solver_engines
         asked = a.hash
         asked_jobs = jobs
+        # One reading of the memory for both the guard and its message, so
+        # the numbers printed are the ones the guard decided on.
+        memory = (None, None) if a.allow_hash_overcommit else memory_mb()
         fit_engines, fit_mb = ((engines, asked) if a.allow_hash_overcommit
-                               else fit_hash(engines, asked))
+                               else fit_hash(engines, asked, memory))
         if (fit_engines, fit_mb) != (engines, asked):
-            need_gb = engines * (asked + GUARD_ENGINE_OVERHEAD_MB) / 1024
             if fit_engines < engines:
                 fewer = max(1, fit_engines - solver_engines)
                 jobs, slot_threads, solver_cores = plan_threads(
                     a.T, fewer, a.solve)
-                change = (f'using {jobs} jobs of {fit_mb} MB each, the most '
-                          'that fit')
-            else:
-                change = f'using {fit_mb} MB each'
-            why = (f'-T {a.T} without --jobs runs {asked_jobs} engines '
-                   'since build 2026111101' if auto_jobs
-                   else f'--jobs {a.jobs} runs {asked_jobs} engines')
+            why = (f'-T {a.T} without --jobs runs '
+                   f'{_count(asked_jobs, "engine")} since build 2026111101'
+                   if auto_jobs
+                   else f'--jobs {a.jobs} runs '
+                        f'{_count(asked_jobs, "engine")}')
             if solver_engines:
                 why += ' plus the solver'
-            print(f'warning: {why}, so --hash {asked} applies {engines} '
-                  f'times; {engines} engines x {asked} MB would need '
-                  f'{need_gb:.1f} GB and this machine does not have it free; '
-                  f'{change}. Pass --jobs 1 for one big engine, or '
-                  '--allow-hash-overcommit to keep --hash as given.',
+            print(hash_guard_warning(why, asked, engines, fit_engines, fit_mb,
+                                     jobs, memory, asked_jobs > 1),
                   flush=True)
             a.hash = fit_mb
         hash_note = f'hash {a.hash} MB each'
