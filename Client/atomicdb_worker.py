@@ -5,6 +5,13 @@ cero riesgo sobre SPRT/DATAGEN). Uso minimo (el motor se descarga solo):
 
   python atomicdb_worker.py -U user -P pass -S https://servidor -T 8
 
+--dotenv [PATH] replaces -U/-P: ATOMICDB_USER and ATOMICDB_PASSWORD come
+from a .env file (KEY=VALUE lines; without PATH, .env in the current
+directory, else next to this script).  -S defaults to
+https://belzedar.duckdns.org.
+
+  python atomicdb_worker.py --dotenv -T 4
+
 By default every thread of -T runs its own engine (-T 8 = 8 analyses of one
 thread each), each with a hash sized to the free memory; --jobs K runs K
 analyses instead, splitting -T between them, and --hash fixes the hash.
@@ -58,7 +65,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111701
+ATOMICDB_WORKER_BUILD = 2026111702
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3388,6 +3395,124 @@ def plan_threads(total, jobs, solve):
                   for slot in range(jobs)], solver_cores
 
 
+# --dotenv keeps the account off the command line (and out of screenshots of
+# it): -U and -P come from a ``.env`` file instead.  It is explicit on
+# purpose -- without --dotenv, -U and -P are required as always and nothing
+# is read from the environment behind the contributor's back.  The file gives
+# the user name and the password only; the server is -S, which defaults to
+# the public server.  No python-dotenv: the format is plain KEY=VALUE lines.
+DEFAULT_SERVER = 'https://belzedar.duckdns.org'
+DOTENV_KEYS = (('U', 'ATOMICDB_USER'), ('P', 'ATOMICDB_PASSWORD'))
+ENV_FILE_NAME = '.env'
+_ENV_KEY = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+
+
+class DotenvError(Exception):
+    """A --dotenv file that cannot give the account.  The message names the
+    file and the key, never a value."""
+
+
+def parse_env_file(text):
+    """KEY=VALUE lines -> dict.
+
+    Blank lines and lines starting with ``#`` are skipped, a leading
+    ``export`` is allowed, the value may be wrapped in single or double
+    quotes (kept verbatim inside, so a password may hold ``#`` or spaces),
+    and an unquoted value ends at `` #`` (an inline comment).  Lines that are
+    not KEY=VALUE are ignored rather than fatal: the file may be shared with
+    other tools.
+    """
+    values = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+        key, sep, value = line.partition('=')
+        key = key.strip()
+        if not sep or not _ENV_KEY.match(key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] in '"\'' and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            hash_at = value.find(' #')
+            if hash_at >= 0:
+                value = value[:hash_at].rstrip()
+        values[key] = value
+    return values
+
+
+def default_dotenv_paths():
+    """Where a bare --dotenv looks: the current directory, then the folder
+    this script lives in."""
+    return [Path.cwd() / ENV_FILE_NAME,
+            Path(__file__).resolve().parent / ENV_FILE_NAME]
+
+
+def find_dotenv(path='', candidates=None):
+    """The file --dotenv reads: ``path`` when given, else the first existing
+    default.  Raises DotenvError naming what was looked for."""
+    if path:
+        found = Path(path).expanduser()
+        if not found.is_file():
+            raise DotenvError(f'--dotenv: no file at {found}')
+        return found
+    candidates = default_dotenv_paths() if candidates is None else candidates
+    for candidate in candidates:
+        if Path(candidate).is_file():
+            return Path(candidate)
+    looked = ' or '.join(str(candidate) for candidate in candidates)
+    raise DotenvError(f'--dotenv: no {ENV_FILE_NAME} file at {looked}')
+
+
+def read_dotenv_account(path):
+    """(user, password) from the file at ``path``.
+
+    Only ATOMICDB_USER and ATOMICDB_PASSWORD are read; anything else in the
+    file is ignored.  A missing or empty key raises DotenvError naming the
+    key and the file.
+    """
+    try:
+        text = Path(path).read_text(encoding='utf-8-sig')
+    except (OSError, UnicodeError) as exc:
+        raise DotenvError(f'--dotenv: cannot read {path} '
+                          f'({type(exc).__name__})') from None
+    values = parse_env_file(text)
+    missing = [name for _, name in DOTENV_KEYS if not values.get(name)]
+    if missing:
+        raise DotenvError(f'--dotenv: {path} has no '
+                          f'{" and no ".join(missing)} (one KEY=VALUE per '
+                          'line, e.g. ATOMICDB_USER=your_user)')
+    return tuple(values[name] for _, name in DOTENV_KEYS)
+
+
+def resolve_account(a, candidates=None):
+    """Fill a.U / a.P, or return the error to print (None when all is well).
+
+    --dotenv and -U/-P are exclusive; without --dotenv both flags are
+    required, exactly as before.
+    """
+    if a.dotenv is None:
+        missing = [f'-{flag}' for flag, _ in DOTENV_KEYS
+                   if not getattr(a, flag, None)]
+        if missing:
+            return (f'the following arguments are required: '
+                    f'{", ".join(missing)} (or use --dotenv to read '
+                    'ATOMICDB_USER and ATOMICDB_PASSWORD from a .env file)')
+        return None
+    if a.U or a.P:
+        return ('--dotenv cannot be combined with -U or -P: the account comes '
+                'from one place or the other')
+    try:
+        a.dotenv_path = find_dotenv(a.dotenv, candidates)
+        a.U, a.P = read_dotenv_account(a.dotenv_path)
+    except DotenvError as exc:
+        return str(exc)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='AtomicDB worker: leases positions, analyses them with '
@@ -3397,12 +3522,21 @@ def main():
                f'{AUTO_JOBS_MAX}, each with a hash sized to the free memory. '
                'Give --jobs to run fewer, wider engines and --hash to fix '
                'the table size.')
-    ap.add_argument('-U', required=True, metavar='USER',
-                    help='your username on the server')
-    ap.add_argument('-P', required=True, metavar='PASSWORD',
-                    help='your password on the server')
-    ap.add_argument('-S', required=True, metavar='SERVER',
-                    help='server URL, e.g. https://belzedar.duckdns.org')
+    ap.add_argument('-U', default=None, metavar='USER',
+                    help='your username on the server (required unless '
+                         '--dotenv is given)')
+    ap.add_argument('-P', default=None, metavar='PASSWORD',
+                    help='your password on the server (required unless '
+                         '--dotenv is given)')
+    ap.add_argument('--dotenv', nargs='?', const='', default=None,
+                    metavar='PATH',
+                    help='read ATOMICDB_USER and ATOMICDB_PASSWORD from a '
+                         '.env file instead of -U/-P, which keeps the '
+                         'password off the command line.  Without PATH: '
+                         '.env in the current directory, else next to this '
+                         'script')
+    ap.add_argument('-S', default=DEFAULT_SERVER, metavar='SERVER',
+                    help='server URL (default %(default)s)')
     ap.add_argument('--engine', default='',
                     help='your own binary (optional; without it the '
                          'reference build is downloaded)')
@@ -3452,6 +3586,11 @@ def main():
                     help='start even if the engine does not identify itself '
                          'as an Atomic-Stockfish build')
     a = ap.parse_args()
+    problem = resolve_account(a)
+    if problem:
+        ap.error(problem)
+    if a.dotenv is not None:
+        print(f'note: account {a.U} read from {a.dotenv_path}', flush=True)
 
     if not a.no_auto_update and _install_worker_update(a.S):
         _restart_updated_worker(once=a.once)
