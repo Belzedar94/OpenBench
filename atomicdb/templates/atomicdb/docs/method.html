@@ -130,6 +130,17 @@ credited to your username.</p>
 <li>Run these three commands, with your own user name and password:</li>
 </ol>
 <div class="raw"><div class="rawline">curl -O https://belzedar.duckdns.org/atomicdb/engines/atomicdb_worker.py</div><div class="rawline">pip install requests chess</div><div class="rawline">python atomicdb_worker.py -U your_user -P your_pass -S https://belzedar.duckdns.org -T 8 --hash 1024</div></div>
+<p id="worker-env">To keep your password off the command line (and out of
+screenshots), put your account in a file called <code>.env</code> in the
+folder you run the worker from, or next to <code>atomicdb_worker.py</code>:</p>
+<div class="raw"><div class="rawline">ATOMICDB_USER=your_user</div><div class="rawline">ATOMICDB_PASSWORD=your_pass</div></div>
+<p>and start it with <code>--dotenv</code> instead of <code>-U</code> and
+<code>-P</code>:</p>
+<div class="raw"><div class="rawline">python atomicdb_worker.py --dotenv -T 4</div></div>
+<p><code>--dotenv path/to/file</code> reads another file. Quote a password
+that contains <code>#</code> or spaces: <code>ATOMICDB_PASSWORD="my
+#pass"</code>. The server defaults to <code>https://belzedar.duckdns.org</code>,
+so <code>-S</code> can be left out.</p>
 <p>The worker is a single self-contained file. It also lives in the
 <a href="https://github.com/Belzedar94/OpenBench">OpenBench repo</a> under
 <code>Client/</code> if you prefer git.</p>

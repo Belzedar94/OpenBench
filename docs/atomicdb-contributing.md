@@ -143,7 +143,11 @@ in `Documentation/` show the commands:
   timers.
 
 The worker's own usage line is
-`python atomicdb_worker.py -U user -P pass -S https://server -T 8`; `--engine`
+`python atomicdb_worker.py -U user -P pass -S https://server -T 8`. `-S`
+defaults to `https://belzedar.duckdns.org`. `--dotenv [PATH]` replaces `-U`
+and `-P` (they cannot be combined): `ATOMICDB_USER` and `ATOMICDB_PASSWORD`
+come from a `.env` file, by default the one in the current directory, else
+the one next to the script. `--engine`
 points it at a local engine build. Without `--engine` it downloads the
 reference engine and moves to a newly published one while it runs;
 `--no-engine-update` turns that off. Each search prints one line when it
