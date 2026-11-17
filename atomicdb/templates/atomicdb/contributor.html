@@ -29,12 +29,16 @@ profile link went: for an AtomicDB contributor it led to an empty page.{% endcom
 {% if has_spark %}
 <section class="contrib-section">
   <h2>Engine nodes per day <span class="dim">last {{ spark_days }} days</span></h2>
+  <div class="spark-plot">
+  <div class="spark-axis" aria-hidden="true">{% for t in spark_ticks %}<span style="top:{{ t.pct }}%">{{ t.label }}</span>{% endfor %}</div>
   <svg class="spark" viewBox="0 0 {{ spark_width }} {{ spark_height }}"
     role="img" preserveAspectRatio="none"
     aria-label="Engine nodes per day from {{ spark_from }} to {{ spark_to }}, {{ spark_total_h }} in total, peaking at {{ spark_peak_h }} in a day">
+    {% for t in spark_ticks %}{% if t.grid %}<line class="grid" x1="0" y1="{{ t.y }}" x2="{{ spark_width }}" y2="{{ t.y }}" vector-effect="non-scaling-stroke"></line>{% endif %}{% endfor %}
     {% for b in spark_bars %}<rect{% if b.quiet %} class="quiet"{% endif %} x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}"><title>{{ b.day }}: {{ b.nodes }} nodes</title></rect>{% endfor %}
     <line x1="0" y1="{{ spark_baseline }}" x2="{{ spark_width }}" y2="{{ spark_baseline }}"></line>
   </svg>
+  </div>
   <p class="dim contrib-sparknote">{{ spark_from }} to {{ spark_to }} ·
     {{ spark_total_h }} nodes · busiest day {{ spark_peak_h }}</p>
 </section>

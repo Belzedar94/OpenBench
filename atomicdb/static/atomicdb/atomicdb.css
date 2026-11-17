@@ -2440,6 +2440,45 @@ a.contrib-badge:focus-visible {
   stroke-width: 1;
 }
 
+/* Las guias del pico y de la mitad, por detras de las barras: finas y
+   discontinuas para que no compitan con la linea de base. */
+.spark line.grid {
+  stroke: var(--border);
+  stroke-dasharray: 3 3;
+}
+
+/* El eje vertical va en HTML al lado del SVG y no dentro: el SVG se estira
+   con preserveAspectRatio="none" y un <text> saldria deformado.  Cada
+   etiqueta se coloca a la altura de su guia con el mismo porcentaje del
+   alto (contributors._spark_ticks). */
+.spark-plot {
+  display: flex;
+  gap: .4rem;
+  max-width: calc(420px + 3.4rem);
+}
+
+.spark-plot .spark {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.spark-axis {
+  position: relative;
+  flex: 0 0 3rem;
+  height: 72px;
+  font-size: .7rem;
+  line-height: 1;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.spark-axis span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
 .contrib-sparknote {
   margin-top: .35rem;
   font-size: .82rem;

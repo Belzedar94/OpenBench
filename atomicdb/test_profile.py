@@ -394,6 +394,25 @@ class WorkerAggregationTests(TestCase):
         self.assertEqual(page['spark_peak_h'], '6.0M')
         self.assertEqual(page['spark_total_h'], '9.0M')
 
+    def test_the_chart_has_a_vertical_axis_from_zero_to_the_peak(self):
+        page = contributors.present('alice')
+
+        ticks = page['spark_ticks']
+        self.assertEqual([t['label'] for t in ticks], ['6.0M', '3.0M', '0'])
+        # The peak tick sits on top of the tallest bar, zero on the baseline.
+        tallest = min(bar['y'] for bar in page['spark_bars'])
+        self.assertEqual(ticks[0]['y'], tallest)
+        self.assertEqual(ticks[-1]['y'], contributors.SPARK_BASELINE)
+        self.assertEqual([t['grid'] for t in ticks], [True, True, False])
+
+        body = self.client.get('/atomicdb/user/alice/').content.decode()
+        self.assertIn('class="spark-axis"', body)
+        self.assertIn('>6.0M</span>', body)
+        self.assertIn('>3.0M</span>', body)
+        self.assertIn('<line class="grid"', body)
+        # Every bar keeps its own date and count on hover.
+        self.assertIn(': 6.0M nodes</title>', body)
+
     def test_a_worker_that_never_searched_still_gets_its_row(self):
         _ping('idle-box-atomicdb', 'carol')
 

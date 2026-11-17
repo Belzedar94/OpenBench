@@ -467,6 +467,7 @@ def _spark(machines, now):
     return {
         'has_spark': True,
         'spark_bars': bars,
+        'spark_ticks': _spark_ticks(peak),
         'spark_width': SPARK_WIDTH,
         'spark_height': SPARK_HEIGHT,
         'spark_baseline': SPARK_BASELINE,
@@ -476,6 +477,28 @@ def _spark(machines, now):
         'spark_from': days[0].strftime('%b %d'),
         'spark_to': days[-1].strftime('%b %d'),
     }
+
+
+def _spark_ticks(peak):
+    """El eje vertical de la grafica: el pico, la mitad y el cero.
+
+    La escala de las barras es lineal desde la base hasta el pico (la barra
+    mas alta mide ``SPARK_MAX_BAR``), asi que tres marcas bastan para leer
+    cualquier barra a ojo.  ``y`` es la coordenada dentro del SVG, para la
+    linea guia; ``pct`` la misma altura en porcentaje del alto, para colocar
+    la etiqueta HTML al lado: el SVG se estira con
+    ``preserveAspectRatio="none"`` y un texto dentro saldria deformado.
+    """
+    ticks = []
+    for share in (1, 0.5, 0):
+        y = SPARK_BASELINE - SPARK_MAX_BAR * share
+        ticks.append({
+            'label': human(round(peak * share)) if share else '0',
+            'y': y,
+            'pct': round(100 * y / SPARK_HEIGHT, 2),
+            'grid': bool(share),
+        })
+    return ticks
 
 
 def human(n):
