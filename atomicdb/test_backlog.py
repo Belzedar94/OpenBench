@@ -25,7 +25,11 @@ What these tests pin, and why each one:
   already on the 512M rung without leaving it, are checked again with their
   own rule (visits 2, +25 for the side to move), come in batches of 5, 10
   or 20, take four places each under the ceiling of adopted positions, and
-  load from a resumable scan of the searches, the highest value first.
+  load from a resumable scan of the searches, the highest value first;
+* White's best line buys 128.64M at the house width (arm bestline) for open
+  positions whose shown search ran under 128M and reached a depth under 14
+  with no mate, drops them once searched again, and loads from a walk of
+  White's strategy tree (both colours, in the walk's order), resumably.
 """
 
 import hashlib
@@ -518,7 +522,8 @@ class ClearWins(BacklogTestCase):
         self.assertIn('Clear wins', body)
         self.assertIn('value="clear-wins"', body)
         self.assertEqual([box['name'] for box in backlog.boxes()],
-                         ['lost-lines', 'shallow', 'clear-wins', 'deep-wins'])
+                         ['lost-lines', 'shallow', 'clear-wins', 'deep-wins',
+                          'best-line'])
 
     def test_a_batch_buys_what_the_sweep_buys(self):
         positions = [_win(f'w{i}') for i in range(3)]
@@ -953,6 +958,197 @@ class DeepWinsLoader(TestCase):
                          ['a', 'd', 'b', 'c'])
         self.assertEqual(backlog.order_deep_wins(found, below_mate=True),
                          ['b', 'c', 'a'])
+
+
+# ---------------- white's best line ----------------
+
+QUICK = 32_000_100          # an old 32M pass, a hair past its budget
+
+
+def _quick(name, depth=12, nodes=QUICK, **fields):
+    """A best-line position: shown search of 32M that reached depth 12."""
+    return _pos(name, _lines(5, depth=depth, nodes=nodes), **fields)
+
+
+class BestLine(BacklogTestCase):
+
+    def test_the_box_offers_it(self):
+        _offer(backlog.BEST_LINE, [_quick('a')])
+        body = self.client.get('/atomicdb/queue/').content.decode()
+        self.assertIn("White's best line", body)
+        self.assertIn('value="best-line"', body)
+        self.assertIn('Adopt 25', body)
+        self.assertIn('stopped before depth 14', body)
+
+    def test_a_batch_buys_128m_at_the_house_width(self):
+        positions = [_quick(f'q{i}', visits=1 + i % 2) for i in range(4)]
+        _offer(backlog.BEST_LINE, positions)
+        outcome = backlog.adopt('moky', backlog.BEST_LINE, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (4, 0))
+        for task in AnalysisTask.objects.select_related('position'):
+            self.assertEqual((task.source, task.requested_by, task.arm),
+                             (USER, 'moky', 'bestline'))
+            self.assertEqual(task.budget_nodes, backlog.ADOPT_BUDGET)
+            self.assertEqual(task.budget_nodes, 128_640_000)
+            self.assertEqual(task.generation, task.position.visits)
+            self.assertEqual(task.multipv, ingest.multipv_for(
+                task.position.visits, backlog.ADOPT_BUDGET))
+
+    def test_the_rule(self):
+        mate = _lines(5, depth=10, nodes=QUICK)
+        mate[0]['mate'] = 7
+        band = _lines(5, depth=10, nodes=QUICK)
+        band[0]['eval_cp'] = 9500
+        no_depth = _lines(5, depth=10, nodes=QUICK)
+        no_depth[0]['raw'] = ''
+        no_budget = _lines(5, depth=10, nodes=QUICK)
+        del no_budget[0]['_budget']
+        behind_old = ([{**_lines(1, depth=30, nodes=SEARCHED)[0],
+                        'prior_pass': True}]
+                      + _lines(5, depth=10, nodes=8_000_050))
+        cases = {
+            '32M depth 12': (_lines(5, depth=12, nodes=QUICK), True),
+            '8M depth 13': (_lines(5, depth=13, nodes=8_000_050), True),
+            '32M depth 14': (_lines(5, depth=14, nodes=QUICK), False),
+            '128M depth 10': (_lines(5, depth=10, nodes=SEARCHED), False),
+            'mate': (mate, False),
+            'mate band': (band, False),
+            'no depth': (no_depth, False),
+            'no nodes': (no_budget, False),
+            'never searched': ([], False),
+            'old pass behind the shown one': (behind_old, True),
+        }
+        for label, (lines, expected) in cases.items():
+            self.assertEqual(backlog.best_line_shallow(lines) is not None,
+                             expected, label)
+
+    def test_closed_done_and_queued_positions_leave_the_list(self):
+        closed = _quick('closed', status='WHITE_WIN')
+        dead = _quick('dead', priority=ingest.DEAD)
+        again = _quick('again', nodes=SEARCHED)
+        deeper = _quick('deeper', depth=20)
+        cut_off = _quick('cut-off')
+        proven_parent = _pos('proven-parent', _lines(5), status='WHITE_WIN')
+        Edge.objects.create(parent=proven_parent, child=cut_off,
+                            move_uci='e1e2')
+        running = _quick('running')
+        AnalysisTask.objects.create(position=running, generation=1,
+                                    budget_nodes=8_000_000, state=LEASED)
+        good = _quick('good')
+        _offer(backlog.BEST_LINE, [closed, dead, again, deeper, cut_off,
+                                   running, good])
+        outcome = backlog.adopt('moky', backlog.BEST_LINE, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped), (1, 6))
+        reasons = dict(BacklogItem.objects.filter(state='dropped')
+                       .values_list('position_key', 'reason'))
+        self.assertEqual(reasons, {
+            closed.key: 'closed', dead.key: 'closed', cut_off.key: 'closed',
+            again.key: 'done', deeper.key: 'done', running.key: 'queued'})
+        self.assertEqual(AnalysisTask.objects.get(requested_by='moky')
+                         .position_id, good.key)
+
+    def test_the_new_search_replaces_the_shown_one(self):
+        # 128.64M against a shown search under 128M: the replacement rule
+        # (the new search ran at least as many nodes) always holds.
+        self.assertGreaterEqual(backlog.ADOPT_BUDGET,
+                                idle_repair.REPAIR_MIN_NODES)
+        self.assertFalse(backlog._off_rung(backlog.BEST_LINE,
+                                           _lines(5, depth=12, nodes=QUICK)))
+
+    def test_subscribing_takes_the_usual_sizes(self):
+        _offer(backlog.BEST_LINE, [_quick(f'q{i}') for i in range(60)])
+        self.client.post('/atomicdb/queue/subscribe/',
+                         {'backlog': 'best-line'})
+        self.assertEqual(BacklogSubscription.objects.get().batch_size, 50)
+        self.assertEqual(backlog.top_up()['adopted'], 60)
+        self.assertEqual(_adopted_of('moky', 'bestline').count(), 60)
+
+
+class BestLineLoader(TestCase):
+    """root (White) -best-> reply (Black) -> a, b; root -other-> off."""
+
+    def setUp(self):
+        self.root = _quick('root', nodes=SEARCHED, backed_move='e1e2')
+        self.reply = _quick('reply')
+        self.off = _quick('off')
+        self.a = _quick('a')
+        self.b = _quick('b', nodes=SEARCHED)
+        self.c = _quick('c', depth=8)
+        Edge.objects.create(parent=self.root, child=self.reply,
+                            move_uci='e1e2')
+        Edge.objects.create(parent=self.root, child=self.off,
+                            move_uci='e1d1')
+        for move, child in (('e8e7', self.a), ('e8d8', self.b),
+                            ('e8f8', self.c)):
+            Edge.objects.create(parent=self.reply, child=child,
+                                move_uci=move)
+        self.folder = tempfile.mkdtemp()
+        self.path = os.path.join(self.folder, 'best.json')
+        self.patcher = patch.object(ingest, 'root_key',
+                                    return_value=self.root.key)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        for name in os.listdir(self.folder):
+            os.remove(os.path.join(self.folder, name))
+        os.rmdir(self.folder)
+
+    def _run(self, *extra):
+        out = StringIO()
+        call_command('atomicdb_backlog', 'load-best-line', '--state-file',
+                     self.path, '--pause', '0', *extra, stdout=out)
+        return out.getvalue()
+
+    def _listed(self):
+        return list(BacklogItem.objects.filter(backlog='best-line')
+                    .order_by('id').values_list('position_key', flat=True))
+
+    def test_it_walks_white_s_best_line_and_loads_in_its_order(self):
+        out = self._run()
+        self.assertIn('tree walk: 5 positions', out)
+        self.assertIn('found=3 added=3', out)
+        # Both colours; the shallowest first; the move White does not play
+        # and the 128M searches stay out.
+        listed = self._listed()
+        self.assertEqual(listed[0], self.reply.key)
+        self.assertEqual(set(listed), {self.reply.key, self.a.key,
+                                       self.c.key})
+        self.assertNotIn(self.off.key, listed)
+
+    def test_it_resumes_and_finishes_once(self):
+        first = self._run('--batch', '2', '--max-steps', '1')
+        self.assertIn('stopped at 2/5', first)
+        with open(self.path) as handle:
+            state = json.load(handle)
+        self.assertEqual((state['walked'], state['checked']), (True, 2))
+        # The walk is not repeated: a position added to the line now is not
+        # seen until the files are deleted.
+        later = _quick('later')
+        Edge.objects.create(parent=self.reply, child=later, move_uci='e8d7')
+        out = self._run('--batch', '2')
+        self.assertNotIn('tree walk', out)
+        self.assertIn('found=3 added=3', out)
+        self.assertNotIn(later.key, self._listed())
+        self.assertIn('already finished', self._run())
+        os.remove(self.path)
+        os.remove(self.path + '.walk')
+        self.assertIn('found=4 added=1 already=3', self._run())
+
+    def test_dry_run_adds_nothing(self):
+        out = self._run('--dry-run')
+        self.assertIn('found=3 would add=3', out)
+        self.assertFalse(BacklogItem.objects.exists())
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_the_sweep_walk_is_unchanged(self):
+        levels = []
+        found, stats = sweep.walk_strategy_tree(on_level=levels.append)
+        self.assertEqual(found, sweep.walk_strategy_tree()[0])
+        self.assertEqual(levels[0], [self.root.key])
+        self.assertEqual(levels[1], [self.reply.key])
+        self.assertEqual(set(levels[2]), {self.a.key, self.b.key,
+                                          self.c.key})
 
 
 # ---------------- subscriptions ----------------
