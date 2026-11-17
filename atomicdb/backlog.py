@@ -227,6 +227,10 @@ LOST_LINES_MULTIPV = 5
 # White's best line: a shown search under the 128M rung that reached a depth
 # under this, Eclipsia's cut (17-Nov-2026).
 BEST_LINE_DEPTH = 14
+# The walk of White's strategy tree, every open position of both colours:
+# 2.86M positions over 97 plies, 15 minutes of reads (17-Nov-2026), more than
+# the sweep's cap, which counts the same positions but keeps only some.
+BEST_LINE_MAX_NODES = 5_000_000
 # A lost-lines position whose short search already ran the adoption budget
 # (the engine stops a little past it: 128,640,068 nodes) is bought this much
 # over the nodes it shows, so the new search reliably wins the showcase.
@@ -1135,7 +1139,7 @@ def walk_best_line(on_level, deadline=None, max_plies=None, max_nodes=None):
     ``on_level``.  The sweep's walk (§ ``sweep.walk_strategy_tree``), which
     keeps nothing of its own here.  Returns its stats."""
     _found, stats = sweep.walk_strategy_tree(
-        max_nodes=sweep.TREE_MAX_NODES if max_nodes is None else max_nodes,
+        max_nodes=BEST_LINE_MAX_NODES if max_nodes is None else max_nodes,
         max_plies=sweep.TREE_MAX_PLIES if max_plies is None else max_plies,
         deadline=deadline, match=_never, on_level=on_level)
     return stats
