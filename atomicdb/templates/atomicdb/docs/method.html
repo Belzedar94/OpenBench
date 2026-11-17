@@ -155,6 +155,14 @@ so <code>-S</code> can be left out.</p>
 <tr><td><code>--hash</code></td><td>Engine hash (transposition table) in MB,
   per engine. Without it, each engine's hash is sized to the free memory
   (16 to 512&nbsp;MB). See memory below.</td></tr>
+<tr><td><code>--max-budget N</code></td><td>Take only tasks of at most
+  <code>N</code> nodes, for example <code>128M</code>, <code>512M</code>,
+  <code>2B</code> or a plain number. Larger tasks are left for other workers.
+  For a slow machine that would spend a long time on a big search; run your
+  other machines without it so they take anything. Most tasks are 128M or
+  more, so a lower cap can leave the worker waiting. With
+  <code>--solve</code> it limits proofs as well. Needs worker build
+  <code>2026111704</code> or newer.</td></tr>
 <tr><td><code>--syzygy dirs</code></td><td>Use your own atomic Syzygy
   tablebases: absolute paths, separated by <code>;</code> on Windows and
   <code>:</code> on Linux and macOS. Optional.</td></tr>

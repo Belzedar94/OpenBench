@@ -17,6 +17,10 @@ By default every thread of -T runs its own engine (-T 8 = 8 analyses of one
 thread each), each with a hash sized to the free memory; --jobs K runs K
 analyses instead, splitting -T between them, and --hash fixes the hash.
 
+--max-budget N (128M, 512M, 2B or a plain number of nodes) takes only tasks
+of at most N nodes; larger ones are left for other workers.  For a slow
+machine, so that it does not hold a long search for a long time.
+
 --engine ruta/binario permite usar una build propia en su lugar.
 
 El motor descargado se renueva sin parar el worker: cada 15 min se relee el
@@ -66,7 +70,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111703
+ATOMICDB_WORKER_BUILD = 2026111704
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -2616,6 +2620,57 @@ def human_count(n, decimals=None):
     return f'{value:.{decimals}f}{unit}'
 
 
+# --max-budget: the suffixes a node count may carry.  B and G are the same
+# thousand million (human_count prints G, people write B).
+_NODE_SUFFIXES = {'': 1, 'K': 10 ** 3, 'M': 10 ** 6, 'B': 10 ** 9,
+                  'G': 10 ** 9, 'T': 10 ** 12}
+_NODE_COUNT = re.compile(r'(\d+(?:\.\d+)?)([KMBGT]?)')
+# No task is smaller than a million nodes.  Most of the queue is 128M or more
+# (the server's SERVER_PICKED_MIN_NODES and its request ladder), so a cap
+# below that gets a startup note that the worker may often be idle.
+MAX_BUDGET_MIN_NODES = 1_000_000
+MAX_BUDGET_COMMON_NODES = 128_000_000
+
+
+def parse_node_count(text):
+    """'128M' -> 128000000, '2B' -> 2000000000, '1.5B', '512000000'.
+
+    The argparse ``type`` of --max-budget.  Case-insensitive, with ``_`` or
+    ``,`` allowed between digits; anything else, or less than
+    ``MAX_BUDGET_MIN_NODES``, is refused with a message that says why.
+    """
+    cleaned = str(text).strip().upper().replace('_', '').replace(',', '')
+    match = _NODE_COUNT.fullmatch(cleaned)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f'{text!r} is not a node count (examples: 128M, 512M, 2B, '
+            '500000000)')
+    number, suffix = match.groups()
+    if suffix == '' and '.' in number:
+        raise argparse.ArgumentTypeError(
+            f'{text!r}: a plain node count is a whole number')
+    whole, _, fraction = number.partition('.')
+    scale = _NODE_SUFFIXES[suffix]
+    nodes = int(whole) * scale
+    if fraction:
+        nodes += int(fraction) * scale // 10 ** len(fraction)
+    if nodes < MAX_BUDGET_MIN_NODES:
+        raise argparse.ArgumentTypeError(
+            f'{text!r} is below {human_count(MAX_BUDGET_MIN_NODES)} nodes; '
+            'no task is that small')
+    return nodes
+
+
+def max_budget_note(nodes):
+    """The startup line that says what --max-budget does on this machine."""
+    note = (f'max budget: only tasks of up to {human_count(nodes)} nodes; '
+            'larger ones are left for other workers')
+    if nodes < MAX_BUDGET_COMMON_NODES:
+        note += (f' (most tasks are {human_count(MAX_BUDGET_COMMON_NODES)} '
+                 'or more, so this worker may often wait with nothing to do)')
+    return note
+
+
 def human_duration(seconds):
     """58.5 -> '58.5s', 3725 -> '1h02m', 90061 -> '1d01h'."""
     seconds = max(0.0, float(seconds))
@@ -3629,6 +3684,12 @@ def main():
                     help='minutes between checks for a newly published '
                          'engine (default %(default)g, minimum '
                          f'{ENGINE_UPDATE_MIN_SECONDS // 60})')
+    ap.add_argument('--max-budget', type=parse_node_count, default=None,
+                    metavar='N',
+                    help='take only tasks of at most N nodes, e.g. 128M, '
+                         '512M, 2B or a plain number; larger tasks are left '
+                         'for other workers.  For a slow machine (with '
+                         '--solve, proofs too).  Default: any size')
     ap.add_argument('--solve', action='store_true',
                     help='also serve SOLVE tasks (exhaustive proofs) besides '
                          'analysis; without this flag the worker behaves '
@@ -3757,6 +3818,11 @@ def main():
                  'tb': '1' if a.syzygy else '0',
                  'os': f'{platform.system()} {platform.release()}',
                  'worker_build': ATOMICDB_WORKER_BUILD}
+    # Only with --max-budget: without it every request is the same as before.
+    # The server reads it on api/lease and api/solve/acquire; the other
+    # calls carry it and ignore it.
+    if a.max_budget is not None:
+        auth_base['max_budget'] = str(a.max_budget)
     # Additive provenance: an older server simply ignores these POST fields.
     # A downloaded engine that loads its net from disk names exactly the net
     # the manifest gave it; the directory scan is the fallback for the rest.
@@ -3791,6 +3857,8 @@ def main():
           f'{spread} threads ({sum(slot_threads) + solver_cores} in total)'
           + (f' + {solver_cores} solver' if solver_cores else '')
           + f', {hash_note} -> {a.S}', flush=True)
+    if a.max_budget is not None:
+        print(max_budget_note(a.max_budget), flush=True)
     if auto_jobs and jobs > 1:
         print(f'jobs: one engine per thread by default; --jobs 1 runs a '
               f'single engine of {a.T} threads instead', flush=True)

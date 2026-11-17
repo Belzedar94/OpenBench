@@ -444,6 +444,32 @@ def reported_worker_build(request):
     return build if 0 < build <= MAX_WORKER_BUILD else 0
 
 
+class BadMaxBudget(ValueError):
+    """A ``max_budget`` field that is present but is not a positive integer."""
+
+
+def reported_max_budget(request):
+    """The largest task, in nodes, this worker takes (``--max-budget``).
+
+    None when the request carries no ``max_budget``, which is every worker
+    before build 2026111704 and every newer one started without the flag: the
+    lease then runs exactly as before.  A field that is present but is not a
+    positive integer raises ``BadMaxBudget``, and the lease answers 400 rather
+    than guess: read as "no cap", it would hand a 2B search to the slow
+    machine the contributor meant to keep away from them.
+    """
+    raw = request.POST.get('max_budget', '')
+    if raw == '':
+        return None
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        raise BadMaxBudget(raw) from None
+    if cap <= 0:
+        raise BadMaxBudget(raw)
+    return cap
+
+
 def _touch_worker(request, user):
     """Refresh capacity without changing, extending or reclaiming any lease."""
     machine = request.POST.get('machine', user.username)[:64]
@@ -616,7 +642,17 @@ def _deep_capped_requesters():
                      if row['held'] >= cap)
 
 
-def _locked_in_order(ordered):
+def _lease_order(ordered, max_budget=None):
+    """Step one of ``_locked_in_order``: the ids of ``ordered``, in order,
+    without the tasks above ``max_budget``.  No locks are taken here."""
+    if max_budget is None:
+        return list(ordered.values_list('id', flat=True))
+    return [task_id for task_id, budget
+            in ordered.values_list('id', 'budget_nodes')
+            if budget <= max_budget]
+
+
+def _locked_in_order(ordered, max_budget=None):
     """Recorre ``ordered`` devolviendo las filas YA bloqueadas, en ese orden.
 
     El paso uno (``ordered``) calcula el sitio de cada tarea con una funcion
@@ -637,8 +673,18 @@ def _locked_in_order(ordered):
     1.912 s siendo la siguiente mientras se servian 60 tareas de detras.  La
     posicion aqui solo se lee (estado, visitas, FEN) y basta la foto de la
     sentencia; bloquearla ademas hacia esperar a la ingesta por todo el lote.
+
+    ``max_budget`` (the worker's ``--max-budget``) drops the larger tasks
+    from the id list of step one, before anything is locked.  Not in SQL:
+    the fair-share window has to see every row (a WHERE runs before the
+    window and would change the sums this worker orders by), and a skip in
+    the loop below would lock every larger task on the way, hiding it from
+    the other workers until this transaction ends.  Read here, those tasks
+    are never locked and stay in the queue, in their place, for everyone
+    else.  Step one costs the same query with one more column.  None keeps
+    the historic query, column list included.
     """
-    order = list(ordered.values_list('id', flat=True))
+    order = _lease_order(ordered, max_budget)
     for start in range(0, len(order), LEASE_SCAN_CHUNK):
         chunk = order[start:start + LEASE_SCAN_CHUNK]
         rows = {task.id: task for task in AnalysisTask.objects
@@ -647,7 +693,10 @@ def _locked_in_order(ordered):
                 .filter(id__in=chunk, state='PENDING')}
         for task_id in chunk:
             task = rows.get(task_id)
-            if task is not None:
+            # The budget is read again under the lock: a pending task can be
+            # raised to a larger budget between the two steps.
+            if task is not None and (max_budget is None
+                                     or task.budget_nodes <= max_budget):
                 yield task
 
 
@@ -698,6 +747,13 @@ def api_lease(request):
     user = _auth(request)
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
+    # Read before anything is touched, so a bad value changes nothing.
+    try:
+        max_budget = reported_max_budget(request)
+    except BadMaxBudget:
+        return JsonResponse(
+            {'error': 'max_budget must be a positive whole number of nodes'},
+            status=400)
     ping = _touch_worker(request, user)
     machine = ping.machine
     slot_threads = reported_threads(request)
@@ -965,7 +1021,7 @@ def api_lease(request):
                            .order_by(*band_keys, '-source', '-own_first',
                                      *live_request.SERVICE_KEYS,
                                      '-queue_rank', 'id'))
-            for candidate in _locked_in_order(ordered):
+            for candidate in _locked_in_order(ordered, max_budget):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
                 # generation commits, and never runs if that visit solved the
@@ -1069,7 +1125,11 @@ def api_lease(request):
                 # A personal worker with nothing to take does not refill the
                 # selector's pool: it would not take those tasks either, and
                 # every idle poll of it would add another handful.
-                if chosen is None and worker_mode != 'personal':
+                # Nor does a worker capped below what the server picks
+                # (§ ``ingest.SERVER_PICKED_MIN_NODES``), for the same reason.
+                if (chosen is None and worker_mode != 'personal'
+                        and (max_budget is None
+                             or max_budget >= ingest.SERVER_PICKED_MIN_NODES)):
                     ingest.next_tasks(TASK_REFILL_COUNT)
                     chosen = choose_pending()
                 if chosen is None:
@@ -1577,6 +1637,15 @@ def api_solve_acquire(request):
     user = _auth(request)
     if user is None:
         return JsonResponse({'error': 'bad credentials'}, status=403)
+    # The same cap as an analysis lease (§ ``reported_max_budget``): a proof
+    # budget is a node count too, so a capped solver takes the proofs that
+    # fit and leaves the rest for the others.
+    try:
+        max_budget = reported_max_budget(request)
+    except BadMaxBudget:
+        return JsonResponse(
+            {'error': 'max_budget must be a positive whole number of nodes'},
+            status=400)
     ping = _touch_worker(request, user)
     machine = ping.machine
     lease_session = request.POST.get('lease_session', '')[:64]
@@ -1621,9 +1690,12 @@ def api_solve_acquire(request):
         # dentro de cada grupo el presupuesto mayor primero.  La deuda de
         # certificacion es importante pero nunca urgente: si se sirviera por
         # tamano de presupuesto se colaria delante por ser barata.
-        task = (SolveTask.objects
+        pending = SolveTask.objects.filter(state='PENDING')
+        if max_budget is not None:
+            pending = pending.filter(budget_nodes__lte=max_budget)
+        task = (pending
                 .select_for_update(skip_locked=True, of=('self',))
-                .select_related('position').filter(state='PENDING')
+                .select_related('position')
                 .annotate(is_debt=Case(
                     When(arm=ingest.DEBT_ARM, then=Value(1)),
                     default=Value(0), output_field=IntegerField()))

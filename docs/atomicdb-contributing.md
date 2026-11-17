@@ -163,7 +163,11 @@ memory; `--jobs K` runs K engines and splits `-T` between them (`--jobs 1` is
 the old single engine) and `--hash` fixes the table size per engine. An
 explicit `--hash` that the free memory cannot hold is reduced (and, if need
 be, so is the number of jobs), with a warning; `--allow-hash-overcommit` keeps
-it as given. Every task starts
+it as given. `--max-budget N` (`128M`, `512M`, `2B` or a plain node count)
+makes a slow machine take only tasks of at most N nodes: the worker sends
+`max_budget` with each `api/lease` and `api/solve/acquire`, and the server
+leaves larger tasks in the queue for the other workers (a request without
+the field leases as before). Every task starts
 from a cleared engine (`ucinewgame`), the search stops at the first mate
 (`go nodes N mate 250`), and only the lines of the last complete iteration are
 sent, never a `lowerbound`/`upperbound` line. An engine that dies hands its
