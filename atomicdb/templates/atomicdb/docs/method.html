@@ -134,10 +134,12 @@ credited to your username.</p>
 screenshots), put your account in a file called <code>.env</code> in the
 folder you run the worker from, or next to <code>atomicdb_worker.py</code>:</p>
 <div class="raw"><div class="rawline">ATOMICDB_USER=your_user</div><div class="rawline">ATOMICDB_PASSWORD=your_pass</div></div>
-<p>and start it with <code>--dotenv</code> instead of <code>-U</code> and
-<code>-P</code>:</p>
-<div class="raw"><div class="rawline">python atomicdb_worker.py --dotenv -T 4</div></div>
-<p><code>--dotenv path/to/file</code> reads another file. Quote a password
+<p>The worker reads it by itself when it starts, so <code>-U</code> and
+<code>-P</code> can be left out:</p>
+<div class="raw"><div class="rawline">python atomicdb_worker.py -T 4</div></div>
+<p><code>-U</code> or <code>-P</code> given on the command line still win over
+the file. <code>--dotenv path/to/file</code> reads one specific file instead
+(and then <code>-U</code>/<code>-P</code> are not accepted). Quote a password
 that contains <code>#</code> or spaces: <code>ATOMICDB_PASSWORD="my
 #pass"</code>. The server defaults to <code>https://belzedar.duckdns.org</code>,
 so <code>-S</code> can be left out.</p>
