@@ -169,6 +169,10 @@ credited to your username.</p>
   instance.</li>
 <li>Without <code>--hash</code>, each engine's hash is sized to the free
   memory, between 16 and 512&nbsp;MB.</li>
+<li>The worker leaves a quarter of the RAM, at most 2&nbsp;GB, free for the
+  rest of the machine. When an explicit <code>--hash</code> does not fit in
+  what is left, it lowers it and prints the sum it did;
+  <code>--allow-hash-overcommit</code> keeps <code>--hash</code> as given.</li>
 <li>A bigger table buys search <em>quality</em> on long runs (less overwriting
   of entries). We recommend <code>--hash 1024</code> per engine, or
   <code>--hash 512</code> on a 16&nbsp;GB machine.</li>
