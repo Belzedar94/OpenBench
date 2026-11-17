@@ -863,7 +863,7 @@ class HashGuardTests(SimpleTestCase):
 
     def test_the_warning_says_when_nothing_is_left_over(self):
         line = worker.hash_guard_warning(
-            '--jobs 2 runs 2 engines', 1024, 2, 1, 16, 1, (16384, 1500),
+            '--jobs 2 runs 2 engines', 1024, 2, 1, 16, 1, (16384, 1400),
             True)
         self.assertIn('Free memory now: 1.4 GB; 2.0 GB stays free for the '
                       'rest of the machine, so nothing is left over.', line)
