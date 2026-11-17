@@ -178,12 +178,14 @@ def _sweep_match(visits, nodes_invested, value):
 
 
 def walk_strategy_tree(max_nodes=TREE_MAX_NODES, max_plies=TREE_MAX_PLIES,
-                       deadline=None, root=None, match=None):
+                       deadline=None, root=None, match=None, on_level=None):
     """Candidates inside White's strategy tree, the shallowest first.
 
     A candidate is an open White-to-move position for which ``match(visits,
     nodes_invested, value)`` holds, the sweep's rule unless told otherwise
     (the deep-wins loader passes its own, § ``backlog.deep_tree_match``).
+    ``on_level(keys)``, if given, is called with every ply's open positions
+    as the walk reaches them, both colours (the best-line loader keeps them).
     Returns ``(keys, stats)``.  Breadth first from the start position: at a
     White node the move its value stands on (``backed_move``, else the best
     known child), at a Black node every open reply.  Only open positions are
@@ -213,6 +215,8 @@ def walk_strategy_tree(max_nodes=TREE_MAX_NODES, max_plies=TREE_MAX_PLIES,
             break
         stats['nodes'] += len(level)
         stats['plies'] = ply
+        if on_level is not None:
+            on_level([key for key, _ in level])
         white = ply % 2 == 0
         nxt = []
         for i in range(0, len(level), TREE_CHUNK):

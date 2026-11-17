@@ -26,6 +26,16 @@ requests always waiting, two such lists sat untouched (Discord, 15-Nov-2026):
   White's side), searched again at 512M with one line.  Found by a walk of
   the completed searches by id, like the shallow scan, and loaded the highest
   value first (``atomicdb_backlog load-deep-wins``).
+* WHITE'S BEST LINE (17-Nov-2026, asked for by MoKy, narrowed by Eclipsia).
+  Open positions reachable from the start position with White always
+  playing the move its value stands on and Black playing anything (the
+  sweep's walk of White's strategy tree, § ``sweep.walk_strategy_tree``),
+  whose shown search ran under 128M nodes (an 8M or 32M pass) and reached a
+  depth under 14, with no mate.  Searched again at 128.64M, like a shallow
+  showcase, and loaded in the order the walk meets them, the shallowest
+  first (``atomicdb_backlog load-best-line``).  White's choice moves as the
+  tree learns, so a position is checked again for its search when adopted,
+  not for its place on the line.
 
 MoKy's proposal: cut the lists into chunks anyone can adopt.  A batch adopted
 from the queue page becomes the adopter's own requests (source USER,
@@ -60,8 +70,9 @@ two per mille over the shown search when that already ran as much, as long
 as the bid stays on the 512M rung; a position shown by a 2B search is
 dropped as ``deep``.  A shown search of 128M is simply replaced.
 
-WIDTH.  Lost lines: five, the point of the re-search.  Shallow showcases: the
-house policy for a revisit at this budget (§ ``ingest.multipv_for``).  Clear
+WIDTH.  Lost lines: five, the point of the re-search.  Shallow showcases and
+White's best line: the house policy for a revisit at this budget
+(§ ``ingest.multipv_for``).  Clear
 wins: one, what the sweep buys (§ ``sweep.SWEEP_MULTIPV``): the search only
 has to find the mate.  Deep wins: one, for the same reason.
 
@@ -119,6 +130,8 @@ SHALLOW = 'shallow'
 CLEAR_WINS = 'clear-wins'
 DEEP_WINS = 'deep-wins'
 DEEP_ARM = 'deep25'
+BEST_LINE = 'best-line'
+BEST_LINE_ARM = 'bestline'
 
 # How many positions one click or one subscription batch adopts, unless a
 # backlog says otherwise.
@@ -165,8 +178,16 @@ BACKLOGS = {
         'sizes': (5, 10, 20),
         'weight': 4,
     },
+    BEST_LINE: {
+        'arm': BEST_LINE_ARM,
+        'title': "White's best line",
+        'about': ('Open positions White reaches by always playing the move '
+                  'the tree rates best, whatever Black replies, whose shown '
+                  'search ran fewer than 128M nodes and stopped before depth '
+                  '14. Each one is searched again at 128M nodes.'),
+    },
 }
-ORDER = (LOST_LINES, SHALLOW, CLEAR_WINS, DEEP_WINS)
+ORDER = (LOST_LINES, SHALLOW, CLEAR_WINS, DEEP_WINS, BEST_LINE)
 ARMS = tuple(spec['arm'] for spec in BACKLOGS.values())
 # The places one waiting adopted position takes, by the arm it carries.
 ARM_WEIGHTS = {spec['arm']: spec.get('weight', 1)
@@ -203,6 +224,9 @@ DEEP_MULTIPV = 1
 DEEP_LOW_CP = 2500
 DEEP_VISITS = 2
 LOST_LINES_MULTIPV = 5
+# White's best line: a shown search under the 128M rung that reached a depth
+# under this, Eclipsia's cut (17-Nov-2026).
+BEST_LINE_DEPTH = 14
 # A lost-lines position whose short search already ran the adoption budget
 # (the engine stops a little past it: 128,640,068 nodes) is bought this much
 # over the nodes it shows, so the new search reliably wins the showcase.
@@ -320,6 +344,33 @@ def deep_wins_q():
                | (Q(fen__contains=' b ') & Q(deep_value__lte=-DEEP_LOW_CP))))
 
 
+def best_line_shallow(last_analysis):
+    """The nodes the shown search ran if it qualifies for the best line.
+
+    ``None`` unless the shown search (the first current line, read as
+    ``idle_repair.shallow_showcase`` reads it) ran fewer than 128M nodes,
+    reached a depth under ``BEST_LINE_DEPTH`` and found no mate.  A line with
+    no nodes or no depth on record does not qualify: not knowing is not the
+    same as knowing it was shallow.
+    """
+    current = _current_lines(last_analysis)
+    if not current:
+        return None
+    top = current[0]
+    searched = top.get('_budget')
+    if (not isinstance(searched, int) or searched <= 0
+            or searched >= idle_repair.REPAIR_MIN_NODES):
+        return None
+    depth = ingest.info_fields(top.get('raw')).get('depth')
+    if depth is None or depth >= BEST_LINE_DEPTH:
+        return None
+    score = top.get('eval_cp')
+    if (top.get('mate') is not None or not isinstance(score, int)
+            or abs(score) >= ingest.MATE_BAND):
+        return None
+    return searched
+
+
 def _already_deep(keys):
     """The keys of ``keys`` a search of this backlog's arm already ran on."""
     if not keys:
@@ -357,6 +408,15 @@ def _verdict(backlog, row, repaired):
     """``None`` if the position still qualifies, else why it is dropped."""
     if row is None:
         return CLOSED
+    if backlog == BEST_LINE:
+        # Searched again at 128M or deeper, or closed: done.  A search of
+        # 128.64M always replaces one under 128M, so no repair record is
+        # needed to keep a position from coming back.
+        if best_line_shallow(row['last_analysis']) is None:
+            return DONE
+        if not ingest._still_reachable(row['key']):
+            return CLOSED
+        return None
     if backlog == DEEP_WINS:
         # ``repaired``: the positions a search of this arm already ran on.
         if not deep_win_now(row) or row['key'] in repaired:
@@ -1064,3 +1124,31 @@ def order_deep_wins(found, tree=(), below_mate=False):
                   key=lambda key: (-abs(found[key][0]),
                                    -(found[key][1] or 0.0), key))
     return head + rest
+
+
+def _never(visits, nodes_invested, value):
+    return False
+
+
+def walk_best_line(on_level, deadline=None, max_plies=None, max_nodes=None):
+    """Walk White's strategy tree, handing every ply's open positions to
+    ``on_level``.  The sweep's walk (§ ``sweep.walk_strategy_tree``), which
+    keeps nothing of its own here.  Returns its stats."""
+    _found, stats = sweep.walk_strategy_tree(
+        max_nodes=sweep.TREE_MAX_NODES if max_nodes is None else max_nodes,
+        max_plies=sweep.TREE_MAX_PLIES if max_plies is None else max_plies,
+        deadline=deadline, match=_never, on_level=on_level)
+    return stats
+
+
+def best_line_check(keys):
+    """The keys of ``keys`` that qualify for the best line now, in order.
+
+    One lookup by key; open positions only, as ``adopt`` reads them.
+    """
+    if not keys:
+        return []
+    shown = dict(Position.objects.filter(key__in=keys, **_OPEN)
+                 .values_list('key', 'last_analysis'))
+    return [key for key in keys
+            if key in shown and best_line_shallow(shown[key]) is not None]

@@ -13,6 +13,11 @@
                                              [--max-steps N] [--dry-run]
                                              [--tree] [--tree-seconds 1800]
                                              [--below-mate]
+    manage.py atomicdb_backlog load-best-line --state-file PATH
+                                             [--batch 2000] [--pause 0.5]
+                                             [--max-steps N] [--dry-run]
+                                             [--tree-seconds 1800]
+                                             [--max-plies 200]
 
 ``load-lost-lines`` reads one position key per line and adds the ones not on
 the list yet; ``--skip N`` leaves out the first N lines (the ones a drip
@@ -56,6 +61,20 @@ capped by ``--tree-seconds``), then the rest, the highest value first.
 then says it finished, and running again does nothing; delete both files to
 scan again (a later load adds only what is new, behind what is there).
 ``--dry-run`` reads only and says what it would add.
+
+``load-best-line`` fills White's best line in two halves.  First the sweep's
+walk of White's strategy tree (White the move its value stands on, Black
+every open reply; capped by ``--tree-seconds`` and ``--max-plies``) writes
+every open position it meets, both colours, the shallowest first, to
+``PATH.walk``.  Then the positions are read back by key, ``--batch`` per
+step with ``--pause`` seconds between steps, and the ones whose shown search
+ran under 128M nodes, reached a depth under 14 and found no mate are added,
+in the walk's order.  ``PATH`` says where it stands after every step: a run
+cut short during the checks resumes there, one cut short during the walk
+walks again.  The state file then says it finished, and running again does
+nothing; delete both files to walk again (a later load adds only what is
+new, behind what is there).  ``--dry-run`` reads only and says what it
+would add.
 """
 
 import json
@@ -70,6 +89,8 @@ from atomicdb.models import AnalysisTask, BacklogItem, BacklogSubscription
 
 # Where load-deep-wins keeps what its scan found, next to its state file.
 FOUND_SUFFIX = '.found.jsonl'
+# Where load-best-line keeps the positions its walk met, one key per line.
+WALK_SUFFIX = '.walk'
 
 
 def _read_found(path):
@@ -112,6 +133,7 @@ class Command(BaseCommand):
         parser.add_argument('action', choices=['status', 'load-lost-lines',
                                                'load-clear-wins',
                                                'load-deep-wins',
+                                               'load-best-line',
                                                'scan-shallow', 'top-up'])
         parser.add_argument('--file', help='keys to load, one per line '
                             '(load-clear-wins: also the sweep\'s JSON list)')
@@ -132,8 +154,11 @@ class Command(BaseCommand):
                             help='load-deep-wins: White\'s strategy tree '
                                  'first')
         parser.add_argument('--tree-seconds', type=float, default=1800.0,
-                            help='load-deep-wins: at most this long walking '
-                                 'the tree')
+                            help='load-deep-wins, load-best-line: at most '
+                                 'this long walking the tree')
+        parser.add_argument('--max-plies', type=int, default=None,
+                            help='load-best-line: walk at most this many '
+                                 'plies from the start position')
         parser.add_argument('--below-mate', action='store_true',
                             help='load-deep-wins: leave out the values in '
                                  'the mate band')
@@ -148,6 +173,8 @@ class Command(BaseCommand):
             return self._load_clear_wins(options)
         if action == 'load-deep-wins':
             return self._load_deep_wins(options)
+        if action == 'load-best-line':
+            return self._load_best_line(options)
         if action == 'top-up':
             summary = backlog.top_up()
             self.stdout.write(' '.join(f'{key}={value}' for key, value
@@ -281,6 +308,90 @@ class Command(BaseCommand):
         self.stdout.write(f'{name}: found={len(found)} added={added} '
                           f'already={known} left_out={len(found) - len(keys)}'
                           f' tree_first={head} in '
+                          f'{time.time() - started:.0f}s')
+
+    def _load_best_line(self, options):
+        path = options['state_file']
+        if not path:
+            raise CommandError('load-best-line needs --state-file')
+        dry_run = options['dry_run']
+        name = backlog.BEST_LINE
+        state = _read_state(path)
+        if state.get('loaded') and not dry_run:
+            self.stdout.write(f'{name}: already finished ({path}); delete it '
+                              f'and {path}{WALK_SUFFIX} to walk again')
+            return
+        walk_path = path + WALK_SUFFIX
+        started = time.time()
+        if dry_run or not state.get('walked'):
+            keys = []
+            deadline = time.monotonic() + max(0.0, options['tree_seconds'])
+            stats = backlog.walk_best_line(keys.extend, deadline=deadline,
+                                           max_plies=options['max_plies'])
+            self.stdout.write(f"tree walk: {len(keys)} positions, "
+                              f"{stats['plies']} plies, "
+                              f"stopped={stats['stopped']} in "
+                              f'{time.time() - started:.0f}s')
+            if not dry_run:
+                partial = walk_path + '.tmp'
+                with open(partial, 'w', encoding='utf-8') as handle:
+                    for key in keys:
+                        handle.write(key + '\n')
+                os.replace(partial, walk_path)
+                state = {'walked': True, 'walk_positions': len(keys),
+                         'walk_stopped': stats['stopped'], 'checked': 0,
+                         'found': 0, 'added': 0}
+                _write_state(path, state)
+        else:
+            with open(walk_path, encoding='utf-8') as handle:
+                keys = [line.strip() for line in handle if line.strip()]
+        checked = 0 if dry_run else max(0, state.get('checked', 0))
+        totals = {'found': 0 if dry_run else state.get('found', 0),
+                  'added': 0 if dry_run else state.get('added', 0)}
+        batch = max(1, options['batch'])
+        steps = 0
+        while checked < len(keys):
+            if (options['max_steps'] is not None
+                    and steps >= options['max_steps']):
+                break
+            part = keys[checked:checked + batch]
+            found = backlog.best_line_check(part)
+            if dry_run:
+                known = set(BacklogItem.objects.filter(
+                    backlog=name, position_key__in=found)
+                    .values_list('position_key', flat=True)) if found else ()
+                added = len(set(found) - set(known))
+            else:
+                added = backlog.load_keys(name, found)[0] if found else 0
+            checked += len(part)
+            steps += 1
+            totals['found'] += len(found)
+            totals['added'] += added
+            if not dry_run:
+                state.update(checked=checked, **totals)
+                _write_state(path, state)
+            self.stdout.write(f'checked={checked}/{len(keys)} '
+                              f'qualifying={len(found)} '
+                              f"found={totals['found']} "
+                              f"added={totals['added']} "
+                              f'elapsed={time.time() - started:.0f}s')
+            if checked < len(keys) and options['pause']:
+                time.sleep(max(0.0, options['pause']))
+        if checked < len(keys):
+            self.stdout.write(f'{name}: stopped at {checked}/{len(keys)} '
+                              f"after {steps} steps, found={totals['found']}; "
+                              'run it again to go on')
+            return
+        if dry_run:
+            self.stdout.write(f"{name}: walked={len(keys)} "
+                              f"found={totals['found']} "
+                              f"would add={totals['added']} (dry run)")
+            return
+        state.update(loaded=True)
+        _write_state(path, state)
+        self.stdout.write(f"{name}: walked={len(keys)} "
+                          f"found={totals['found']} added={totals['added']} "
+                          f'already={totals["found"] - totals["added"]} in '
                           f'{time.time() - started:.0f}s')
 
     def _scan(self, options):
