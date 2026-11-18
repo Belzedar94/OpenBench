@@ -1215,6 +1215,14 @@ class OpeningNameSuggestion(models.Model):
         # taken off; ``proposed_name`` stays empty.  The latest approval on a
         # position still wins, so a later NEW or EDIT names it again.
         REMOVE = 'DEL'
+        # Hides the name the position shows, catalogue or community
+        # (math_god, 18-Nov-2026).  Born from a visitor's empty-name
+        # suggestion (the reason in ``comment``) or from an approver's hide
+        # on the moderation page; approved through the same code as any
+        # other.  ``previous_name`` holds the name hidden; ``proposed_name``
+        # stays empty.  The position then reads as unnamed
+        # (§ community_names), until a later approval names it again.
+        HIDE = 'HIDE'
 
     position      = models.ForeignKey(Position, on_delete=models.CASCADE,
                                       related_name='name_suggestions')
@@ -1244,6 +1252,8 @@ class OpeningNameSuggestion(models.Model):
     def __str__(self):
         if self.kind == self.SKind.REMOVE:
             return f'{self.previous_name} -> (removed) ({self.status})'
+        if self.kind == self.SKind.HIDE:
+            return f'{self.previous_name} -> (hidden) ({self.status})'
         if self.kind == self.SKind.EDIT:
             return (f'{self.previous_name} -> {self.proposed_name} '
                     f'({self.status})')
@@ -1613,6 +1623,7 @@ class OpeningNameFlag(models.Model):
         RESTORE = 'RESTORE'
         REMOVE = 'REMOVE'
         RENAME = 'RENAME'
+        HIDE = 'HIDE'
         STALE = 'STALE'
 
     position_key = models.CharField(max_length=64)

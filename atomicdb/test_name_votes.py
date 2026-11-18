@@ -275,6 +275,7 @@ class DiscordTests(_Base):
         self.assertEqual(body['allowed_mentions'], {'parse': []})
         answers = [a['poll_media']['text'] for a in body['poll']['answers']]
         self.assertEqual(answers, ['Keep', 'Remove',
+                                   'No name for this position',
                                    'Rename (propose in the thread)'])
         self.assertIn('Belfast Gambit', body['content'])
         self.assertIn('named by lesha', body['content'])
@@ -306,13 +307,14 @@ class DiscordTests(_Base):
                    name_flags_discord.payload(flag)['poll']['answers']]
         self.assertEqual(answers, [
             'Keep', f'Restore catalogue name: {CATALOGUED}', 'Remove',
-            'Rename (propose in the thread)'])
+            'No name for this position', 'Rename (propose in the thread)'])
 
-    def test_a_catalogue_name_offers_keep_and_rename_only(self):
+    def test_a_catalogue_name_offers_keep_hide_and_rename_only(self):
         flag, _ = name_votes.flag(self.nf3.key, CATALOGUED, None, 0, 4)
         body = name_flags_discord.payload(flag)
         answers = [a['poll_media']['text'] for a in body['poll']['answers']]
-        self.assertEqual(answers, ['Keep', 'Rename (propose in the thread)'])
+        self.assertEqual(answers, ['Keep', 'No name for this position',
+                                   'Rename (propose in the thread)'])
         self.assertIn('Catalogue name.', body['content'])
 
     def test_a_failed_post_is_recorded_and_retried_a_few_times(self):

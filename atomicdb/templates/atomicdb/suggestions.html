@@ -5,8 +5,10 @@
 <h2 style="margin-top:0">Opening name suggestions</h2>
 <p class="dim">Visitors propose a name where a position has none
   (<strong>NEW</strong>), or a correction to the name a position already shows
-  (<strong>EDIT</strong>, written as <em>current &rarr; proposed</em>).
-  Approving one publishes it on that position as a community name.</p>
+  (<strong>EDIT</strong>, written as <em>current &rarr; proposed</em>), or ask
+  for a position to have no name (<strong>HIDE NAME</strong>, with their
+  reason). Approving one publishes it on that position as a community name,
+  or hides the name it shows.</p>
 
 <h2 id="review">Names under review <span class="dim">({{ flags_total }})</span></h2>
 <p class="dim">Names with at least {{ flag_min_votes }} votes on the
@@ -14,7 +16,7 @@
   quarters of them thumbs down, widest margin first. Each one is posted once
   as a poll in #opening-names. The votes and the poll only advise: each button
   below is an ordinary approval, recorded under your name.</p>
-{% if review_outcome %}<p class="campaign-status" role="status">{% if review_outcome == 'kept' %}Kept: the name stays and the review is closed.{% elif review_outcome == 'restored' %}Restored: the catalogue name is shown again.{% elif review_outcome == 'removed' %}Removed: the community name is off the position.{% elif review_outcome == 'renamed' %}Renamed.{% elif review_outcome == 'moved' %}The name changed since it was flagged, so nothing was done.{% elif review_outcome == 'done' %}That review was already closed.{% else %}That action could not be applied.{% endif %}</p>{% endif %}
+{% if review_outcome %}<p class="campaign-status" role="status">{% if review_outcome == 'kept' %}Kept: the name stays and the review is closed.{% elif review_outcome == 'restored' %}Restored: the catalogue name is shown again.{% elif review_outcome == 'removed' %}Removed: the community name is off the position.{% elif review_outcome == 'renamed' %}Renamed.{% elif review_outcome == 'hidden' %}Hidden: the position shows no name of its own now.{% elif review_outcome == 'moved' %}The name changed since it was flagged, so nothing was done.{% elif review_outcome == 'done' %}That review was already closed.{% else %}That action could not be applied.{% endif %}</p>{% endif %}
 {% if flags %}
 <div class="contrib-scroll">
 <table class="review-flags">
@@ -34,6 +36,7 @@
         <button class="reqbtn ghost" name="action" value="keep">Keep</button>
         {% if item.can_restore %}<button class="reqbtn" name="action" value="restore" title="Show '{{ item.catalogue }}' again">Restore catalogue name</button>{% endif %}
         {% if item.can_remove %}<button class="reqbtn" name="action" value="remove">Remove</button>{% endif %}
+        {% if item.can_hide %}<button class="reqbtn" name="action" value="hide" title="Show no name on this position, catalogue or community">Hide name</button>{% endif %}
       </form>
       <form method="post" action="/atomicdb/suggestions/flags/" class="review-actions">{% csrf_token %}
         <input type="hidden" name="flag" value="{{ item.flag.id }}">
@@ -47,6 +50,38 @@
 </div>
 {% else %}<p class="dim">No name is under review.</p>{% endif %}
 
+<h2 id="hidden">Hidden names <span class="dim">({{ hidden_total }})</span></h2>
+<p class="dim">A hidden position shows no name of its own, catalogue or
+  community, and the positions after it take the name of the one before it.
+  A later approved name shows again.</p>
+{% if hide_outcome %}<p class="campaign-status" role="status">{% if hide_outcome == 'hidden' %}Hidden: the position shows no name of its own now.{% elif hide_outcome == 'shown' %}Shown again.{% elif hide_outcome == 'unnamed' %}That position has no name of its own to hide.{% elif hide_outcome == 'not-hidden' %}That name is not hidden.{% else %}No position found there.{% endif %}</p>{% endif %}
+<form method="post" action="/atomicdb/suggestions/hide/" class="review-actions">{% csrf_token %}
+  <input type="text" name="position" placeholder="Position key or explorer link" aria-label="Position key or explorer link" required>
+  <input type="text" name="comment" maxlength="280" placeholder="Reason (optional)" aria-label="Reason">
+  <button class="reqbtn" name="action" value="hide">Hide name</button>
+</form>
+{% if hidden_names %}
+<div class="contrib-scroll">
+<table>
+  <tr><th>Hidden name</th><th>Position</th><th>By</th><th></th></tr>
+  {% for item in hidden_names %}
+  <tr>
+    <td><strong>{{ item.name|default:"(no name)" }}</strong></td>
+    <td><a class="qline" href="/atomicdb/explore/{{ item.key }}/"
+        title="{{ item.full }}">{{ item.san }}</a></td>
+    <td class="dim">{{ item.by }}{% if item.at %} · {{ item.at|date:"M d H:i" }}{% endif %}</td>
+    <td>
+      <form method="post" action="/atomicdb/suggestions/hide/" class="review-actions">{% csrf_token %}
+        <input type="hidden" name="position" value="{{ item.key }}">
+        <button class="reqbtn ghost" name="action" value="show">Show again</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+
 <h2>Pending <span class="dim">({{ pending_total }})</span></h2>
 {% if pending %}
 <table>
@@ -54,7 +89,7 @@
     <th>From</th><th></th></tr>
   {% for item in pending %}
   <tr>
-    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; <strong>'{{ item.row.proposed_name }}'</strong>{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% else %}<span class="dim">NEW:</span> <strong>{{ item.row.proposed_name }}</strong>{% endif %}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; <strong>'{{ item.row.proposed_name }}'</strong>{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> <strong>'{{ item.row.previous_name }}'</strong> &rarr; no name{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% else %}<span class="dim">NEW:</span> <strong>{{ item.row.proposed_name }}</strong>{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td class="dim">{{ item.row.comment }}</td>
@@ -79,7 +114,7 @@
   <tr><th>Name</th><th>Position</th><th>State</th><th>By</th></tr>
   {% for item in history %}
   <tr>
-    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; '{{ item.row.proposed_name }}'{% elif item.row.kind == 'DEL' %}<span class="dim">REMOVE:</span> '{{ item.row.previous_name }}'{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name|default:"(no name)" }}' &rarr; '{{ item.row.proposed_name }}'{% elif item.row.kind == 'DEL' %}{% if item.row.previous_name %}<span class="dim">REMOVE:</span> '{{ item.row.previous_name }}'{% else %}<span class="dim">SHOW NAME AGAIN</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> '{{ item.row.previous_name }}'{% if item.row.comment %}<div class="dim contrib-spec">{{ item.row.comment }}</div>{% endif %}{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td>{% if item.row.status == 'APPROVED' %}<span class="chip won"></span>approved

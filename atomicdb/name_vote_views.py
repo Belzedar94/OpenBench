@@ -9,6 +9,9 @@
 * ``POST /atomicdb/suggestions/flags/`` -- an approver's decision on a name
   under review, from the moderation page.  Goes through the ordinary
   approval of ``OpeningNameSuggestion`` (``name_votes.apply_flag``).
+* ``POST /atomicdb/suggestions/hide/`` -- an approver hides the name of any
+  position, or shows a hidden one again (``name_votes.hide_position``,
+  ``show_position``).  The same approval path.
 """
 
 from urllib.parse import urlencode
@@ -124,6 +127,7 @@ def flags_context():
             'can_restore': (entry is not None and bool(catalogue)
                             and catalogue != name),
             'can_remove': entry is not None,
+            'can_hide': name is not None,
             'poll_url': name_votes.poll_url(row),
         })
     # Most decided first: the widest margin of thumbs down.
@@ -151,3 +155,54 @@ def flag_action(request):
             flag_id, action, approver=request.user.username,
             ip=views._client_ip(request), new_name=new_name)
     return redirect(f'/atomicdb/suggestions/?review={outcome}#review')
+
+
+HIDDEN_SHOWN = 100
+
+
+def hidden_context():
+    """The "Hidden names" section of the moderation page: every position
+    whose name is hidden, newest first."""
+    hidden = community_names.hidden_map()
+    keys = sorted(hidden, key=lambda key: (
+        hidden[key]['approved_at'] is not None,
+        hidden[key]['approved_at'].isoformat()
+        if hidden[key]['approved_at'] is not None else '', key),
+        reverse=True)[:HIDDEN_SHOWN]
+    labels = views._line_labels_many(keys) if keys else {}
+    items = []
+    for key in keys:
+        preview, full = labels.get(key, ('', ''))
+        info = hidden[key]
+        items.append({'key': key, 'name': info['previous'],
+                      'by': info['approved_by'], 'at': info['approved_at'],
+                      'san': preview or key[:12], 'full': full})
+    return {'hidden_names': items, 'hidden_total': len(hidden)}
+
+
+HIDE_OUTCOMES = frozenset(('hidden', 'shown', 'unnamed', 'not-hidden',
+                           'invalid'))
+
+
+def hide_action(request):
+    """An approver hides a name, or shows a hidden one again, from the
+    moderation page (§ ``name_votes.hide_position``)."""
+    denied = views._approver_gate(request)
+    if denied is not None:
+        return denied
+    if request.method != 'POST':
+        return redirect('/atomicdb/suggestions/#hidden')
+    key = name_votes.position_key_in(request.POST.get('position'))
+    comment = ' '.join((request.POST.get('comment') or '').split())
+    action = request.POST.get('action', '')
+    outcome = 'invalid'
+    if key and action == 'hide':
+        outcome = name_votes.hide_position(
+            key, approver=request.user.username,
+            ip=views._client_ip(request),
+            comment=comment[:views.SUGGESTION_COMMENT_MAX_CHARS])
+    elif key and action == 'show':
+        outcome = name_votes.show_position(
+            key, approver=request.user.username,
+            ip=views._client_ip(request))
+    return redirect(f'/atomicdb/suggestions/?hide={outcome}#hidden')

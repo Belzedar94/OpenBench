@@ -120,11 +120,16 @@ class SuggestionFormTests(TestCase):
                          f'/atomicdb/explore/{self.pos.key}/?suggested=ok')
 
     def test_names_are_validated(self):
-        for bad in ('', 'x', 'y' * 61, '<script>alert(1)</script>',
-                    '   ', '"quoted"'):
+        for bad in ('x', 'y' * 61, '<script>alert(1)</script>',
+                    '"quoted"'):
             with self.subTest(name=bad):
                 response = self._post(name=bad)
                 self.assertIn('suggested=invalid', response['Location'])
+        # An empty name asks for no name, and there is none to hide here.
+        for empty in ('', '   '):
+            with self.subTest(name=empty):
+                response = self._post(name=empty)
+                self.assertIn('suggested=hide-unnamed', response['Location'])
         self.assertEqual(OpeningNameSuggestion.objects.count(), 0)
 
     def test_an_overlong_comment_is_rejected(self):
@@ -266,10 +271,15 @@ class EditSuggestionFormTests(TestCase):
         self.assertEqual(row.previous_name, 'Belfast Gambit')
 
     def test_the_same_validation_applies_to_a_correction(self):
-        for bad in ('', 'x', 'y' * 61, '<script>alert(1)</script>', '   '):
+        for bad in ('x', 'y' * 61, '<script>alert(1)</script>'):
             with self.subTest(name=bad):
                 response = self._post(name=bad)
                 self.assertIn('suggested=invalid', response['Location'])
+        # An empty name without a reason is not filed either.
+        for empty in ('', '   '):
+            with self.subTest(name=empty):
+                response = self._post(name=empty)
+                self.assertIn('suggested=hide-why', response['Location'])
         self.assertEqual(OpeningNameSuggestion.objects.count(), 0)
 
     def test_one_pending_correction_per_ip_and_position(self):

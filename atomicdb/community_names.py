@@ -52,9 +52,31 @@ camino sigue cerrado.
 El mapa completo de nombres aprobados cabe de sobra en memoria (son decenas),
 se lee de una sola consulta y se cachea unos segundos, con invalidacion
 explicita en cuanto un moderador aprueba o rechaza algo.
+
+HIDDEN NAMES (math_god, 18-Nov-2026, with the owner's standing endorsement).
+An approver can hide the name a position shows, whichever layer it comes
+from, and a visitor can ask for it by proposing an empty name with a reason.
+Both end as an approved ``kind=HIDE`` row, and the rules are:
+
+* the catalogue JSON is untouched.  A hide is one more community-layer
+  override, read from the database like every other approval;
+* the latest approval on a position still wins.  A HIDE takes the position's
+  community name off AND keeps the catalogue from naming it.  A later EDIT
+  names it again; a later NEW does too, because approving a NEW on a
+  position whose catalogue name is hidden turns it into an EDIT
+  (``name_votes.resolve_suggestion``: it does replace the catalogue there);
+  a later REMOVE ("show again") lifts the hide;
+* a hidden position behaves exactly as an unnamed one.  It shows no name of
+  its own, and a lookup along a line goes on to the next named position
+  further up, the same as for any unnamed node: its descendants inherit from
+  that shallower name, not from the hidden one.  The catalogue readers that
+  name positions take ``hidden=hidden_keys()`` for that
+  (§ ``openings.match_line_keys_object``).
 """
 
 import logging
+import threading
+import time
 
 from django.core.cache import cache
 
@@ -65,6 +87,9 @@ logger = logging.getLogger(__name__)
 # v2: each entry gained ``suggested_by``.  A new key, so no process reads a
 # v1 map without it from a shared cache during a deploy.
 CACHE_KEY = 'atomicdb.community-opening-names.v2'
+# {position_key: {'previous', 'approved_by', 'approved_at'}} of the positions
+# whose latest approval is a HIDE.  Written by the same read as the map.
+HIDDEN_CACHE_KEY = 'atomicdb.community-hidden-names.v1'
 # El backend por defecto es LocMem: UNA cache POR PROCESO.  Con varios workers
 # de gunicorn, ``invalidate()`` solo borra la entrada del proceso que atendio
 # la moderacion — los demas ni se enteran.  El limite real de obsolescencia
@@ -90,6 +115,13 @@ def approved_map():
     cached = cache.get(CACHE_KEY)
     if cached is not None:
         return cached
+    loaded = _load()
+    return {} if loaded is None else loaded[0]
+
+
+def _load():
+    """``(names, hidden)`` from one read of the approvals, both cached; or
+    ``None`` when the table cannot be read."""
     from .models import OpeningNameSuggestion
     try:
         rows = (OpeningNameSuggestion.objects
@@ -98,9 +130,20 @@ def approved_map():
                 .values_list('position_id', 'proposed_name', 'resolved_by',
                              'resolved_at', 'kind', 'previous_name',
                              'suggested_by'))
-        names = {}
+        names, hidden = {}, {}
         for (key, name, approved_by, approved_at, kind, previous,
              suggested_by) in rows:
+            # A hide wins like any later approval, and leaves no community
+            # name: the position goes into ``hidden`` instead, which also
+            # keeps the catalogue from naming it.  Any later approval lifts
+            # it again.
+            if kind == OpeningNameSuggestion.SKind.HIDE:
+                names.pop(key, None)
+                hidden[key] = {'previous': previous,
+                               'approved_by': approved_by,
+                               'approved_at': approved_at}
+                continue
+            hidden.pop(key, None)
             # Una aprobacion posterior sobre la misma posicion manda.  Y eso
             # ya era, por si solo, el camino de escritura de una edicion de
             # nombre COMUNITARIO: aprobar la siguiente sustituye a la anterior.
@@ -122,9 +165,63 @@ def approved_map():
                 del names[key]
     except Exception:
         logger.exception('community opening names unavailable')
-        return {}
+        return None
     cache.set(CACHE_KEY, names, CACHE_SECONDS)
-    return names
+    cache.set(HIDDEN_CACHE_KEY, hidden, CACHE_SECONDS)
+    return names, hidden
+
+
+def hidden_map():
+    """``{position_key: {'previous', 'approved_by', 'approved_at'}}`` of the
+    positions whose name is hidden — fail-open (``{}``)."""
+    cached = cache.get(HIDDEN_CACHE_KEY)
+    if cached is not None:
+        return cached
+    loaded = _load()
+    return {} if loaded is None else loaded[1]
+
+
+# The hidden keys, memoised IN THE PROCESS for ``CACHE_SECONDS``.  The
+# catalogue readers ask per position (each child of an explorer table, each
+# step of a line), and a trip to the shared cache per question is exactly what
+# ``approved_map`` warns against.  Same staleness bound as the map: the
+# process that approved a hide forgets at once (``invalidate``), the others
+# within ``CACHE_SECONDS``.
+_hidden_memo = {'keys': None, 'until': 0.0}
+_hidden_lock = threading.Lock()
+
+
+def hidden_keys():
+    """The keys of every position whose name is hidden, as a frozenset."""
+    now = time.monotonic()
+    keys = _hidden_memo['keys']
+    if keys is not None and now < _hidden_memo['until']:
+        return keys
+    keys = frozenset(hidden_map())
+    with _hidden_lock:
+        _hidden_memo['keys'] = keys
+        _hidden_memo['until'] = now + CACHE_SECONDS
+    return keys
+
+
+def reset_hidden_memo():
+    """Forget the process memo of ``hidden_keys`` (tests, ``invalidate``)."""
+    with _hidden_lock:
+        _hidden_memo['keys'] = None
+        _hidden_memo['until'] = 0.0
+
+
+def is_hidden(position_key):
+    """True when the latest approval on the position is a HIDE, read from
+    the database and not from any cache: the approval path decides on it."""
+    from django.db.models import F
+    from .models import OpeningNameSuggestion
+    latest = (OpeningNameSuggestion.objects
+              .filter(position_id=position_key,
+                      status=OpeningNameSuggestion.SState.APPROVED)
+              .order_by(F('resolved_at').desc(nulls_last=True), '-id')
+              .values_list('kind', flat=True).first())
+    return latest == OpeningNameSuggestion.SKind.HIDE
 
 
 ANONYMOUS_CREDIT = 'anonymous'
@@ -148,6 +245,8 @@ def invalidate():
     memcached), esta misma llamada se vuelve global sin tocar nada mas.
     """
     cache.delete(CACHE_KEY)
+    cache.delete(HIDDEN_CACHE_KEY)
+    reset_hidden_memo()
 
 
 def in_force(position_key, names=None):

@@ -186,8 +186,9 @@ def compute(lines=None):
     # Every name shown on its own position, catalogue and community, by
     # normalised name.
     shown = {}
+    hidden = community_names.hidden_keys()
     for key, opening in catalogue.items():
-        if key not in in_force:
+        if key not in in_force and key not in hidden:
             shown.setdefault(normalised(opening.name), set()).add(key)
     for key, entry in in_force.items():
         shown.setdefault(normalised(entry['name']), set()).add(key)

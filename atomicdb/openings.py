@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping, Sequence
+from typing import AbstractSet, Iterable, Mapping, Sequence
 
 from atomicdb import logic
 
@@ -948,17 +948,27 @@ def clear_catalog_cache() -> None:
     _load_catalog_document.cache_clear()
 
 
-def match_key(position_key: str) -> Opening | None:
-    """Return an exact opening match for an AtomicDB position key."""
+def match_key(position_key: str,
+              hidden: AbstractSet[str] = frozenset()) -> Opening | None:
+    """Return an exact opening match for an AtomicDB position key.
+
+    ``hidden`` is a set of keys whose name an approver hid
+    (§ ``community_names.hidden_keys``): they answer as unnamed.  The
+    catalogue itself is never changed; the default reads it as published.
+    """
     if not isinstance(position_key, str) \
             or not _SHA256_RE.fullmatch(position_key):
+        return None
+    if position_key in hidden:
         return None
     return load_catalog().get(position_key)
 
 
-def lookup_key(position_key: str) -> dict[str, object] | None:
+def lookup_key(position_key: str,
+               hidden: AbstractSet[str] = frozenset()
+               ) -> dict[str, object] | None:
     """Serializable exact-key lookup for views and JSON payload builders."""
-    opening = match_key(position_key)
+    opening = match_key(position_key, hidden)
     if opening is None:
         return None
     result = opening.as_dict()
@@ -978,18 +988,21 @@ def match_fen(fen: str) -> Opening | None:
         return None
 
 
-def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
+def match_line_object(ucis: Iterable[str],
+                      hidden: AbstractSet[str] = frozenset()
+                      ) -> OpeningLineMatch | None:
     """Return the last named position reached by a legal UCI line.
 
     The match is position-based.  A transposed route therefore recognizes the
     same opening.  An unnamed continuation retains the closest named ancestor,
     and a later exact match replaces it.  Illegal moves raise
     :class:`InvalidOpeningLine` rather than producing a misleading partial
-    result.
+    result.  A key in ``hidden`` is read as unnamed (§ :func:`match_key`),
+    so the line keeps the name of the named position before it.
     """
     fen = logic.start_fen()
     current_key = logic.key_of(fen)
-    opening = match_key(current_key)
+    opening = match_key(current_key, hidden)
     matched_ply = 0
     for ply, move in enumerate(ucis, start=1):
         if not isinstance(move, str) or not move:
@@ -1000,7 +1013,7 @@ def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
                 f'illegal Atomic move at ply {ply}: {move} in {fen}')
         fen = logic.apply_move(fen, move)
         current_key = logic.key_of(fen)
-        exact = match_key(current_key)
+        exact = match_key(current_key, hidden)
         if exact is not None:
             opening = exact
             matched_ply = ply
@@ -1013,14 +1026,17 @@ def match_line_object(ucis: Iterable[str]) -> OpeningLineMatch | None:
     )
 
 
-def match_line(ucis: Iterable[str]) -> dict[str, object] | None:
+def match_line(ucis: Iterable[str],
+               hidden: AbstractSet[str] = frozenset()
+               ) -> dict[str, object] | None:
     """Serializable last-known-opening lookup for a legal played line."""
-    match = match_line_object(ucis)
+    match = match_line_object(ucis, hidden)
     return match.as_dict() if match is not None else None
 
 
 def match_line_keys_object(
-        position_keys: Sequence[str]) -> OpeningLineMatch | None:
+        position_keys: Sequence[str],
+        hidden: AbstractSet[str] = frozenset()) -> OpeningLineMatch | None:
     """:func:`match_line_object` for a line that was ALREADY replayed.
 
     The catalogue is keyed by position, so replaying a line only ever serves
@@ -1046,10 +1062,10 @@ def match_line_keys_object(
     if not keys or any(not isinstance(key, str)
                        or not _SHA256_RE.fullmatch(key) for key in keys):
         raise InvalidOpeningLine('line is not a sequence of position keys')
-    opening = match_key(keys[0])
+    opening = match_key(keys[0], hidden)
     matched_ply = 0
     for ply, key in enumerate(keys[1:], start=1):
-        exact = match_key(key)
+        exact = match_key(key, hidden)
         if exact is not None:
             opening = exact
             matched_ply = ply
@@ -1063,7 +1079,8 @@ def match_line_keys_object(
 
 
 def match_line_keys(
-        position_keys: Sequence[str]) -> dict[str, object] | None:
+        position_keys: Sequence[str],
+        hidden: AbstractSet[str] = frozenset()) -> dict[str, object] | None:
     """Serializable :func:`match_line` for an already-replayed line."""
-    match = match_line_keys_object(position_keys)
+    match = match_line_keys_object(position_keys, hidden)
     return match.as_dict() if match is not None else None

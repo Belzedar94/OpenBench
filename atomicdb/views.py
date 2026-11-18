@@ -3369,7 +3369,7 @@ def _signed_opening_anchor(target_key, match, route_ply):
         or route_ply < matched_ply
     ):
         return None
-    exact = openings.lookup_key(opening_key)
+    exact = openings.lookup_key(opening_key, community_names.hidden_keys())
     if exact is None or exact.get('position_key') != opening_key:
         return None
     return signing.dumps(
@@ -3419,7 +3419,8 @@ def _validated_opening_anchor(raw, target_key):
         or route_ply < matched_ply
     ):
         return None, None
-    exact = openings.lookup_key(opening_key)
+    # A name hidden since the anchor was signed no longer anchors anything.
+    exact = openings.lookup_key(opening_key, community_names.hidden_keys())
     if exact is None or exact.get('position_key') != opening_key:
         return None, None
     match = dict(exact)
@@ -3466,15 +3467,19 @@ def _navigation_opening(active_ucis, raw_anchor, target_key, *,
     ``active_ucis`` (§ :func:`_route_prefix_keys`).  With it the catalogue is
     read by key; without it the line is replayed, which is the same answer for
     one move generation and one position setup per ply.
+
+    A hidden name reads as no name (§ ``community_names.hidden_keys``).
     """
+    hidden = community_names.hidden_keys()
+
     def matched(ucis):
         if route_keys is not None:
             try:
-                return openings.match_line_keys(route_keys)
+                return openings.match_line_keys(route_keys, hidden)
             except openings.InvalidOpeningLine:
                 pass
         try:
-            return openings.match_line(ucis)
+            return openings.match_line(ucis, hidden)
         except openings.InvalidOpeningLine:
             return None
 
@@ -3485,7 +3490,7 @@ def _navigation_opening(active_ucis, raw_anchor, target_key, *,
         return anchored, route_ply, None
     if active_ucis is not None:
         return matched(active_ucis), len(active_ucis), active_ucis
-    exact = openings.lookup_key(target_key)
+    exact = openings.lookup_key(target_key, hidden)
     if exact is None:
         return None, None, None
     return exact, exact['matched_ply'], None
@@ -3493,7 +3498,7 @@ def _navigation_opening(active_ucis, raw_anchor, target_key, *,
 
 def _opening_after_move(current, child_key, child_ply):
     """Advance a trusted opening anchor by one already-validated legal move."""
-    exact = openings.lookup_key(child_key)
+    exact = openings.lookup_key(child_key, community_names.hidden_keys())
     if exact is not None:
         result = dict(exact)
         if child_ply is not None:
@@ -4552,7 +4557,7 @@ def _opening_and_credit_for_keys(keys, names=None):
     ``_opening_name_for_keys`` gives, and who proposed it when it is a
     community name (§ ``community_names.credit``), else ``None``."""
     try:
-        match = openings.match_line_keys(keys)
+        match = openings.match_line_keys(keys, community_names.hidden_keys())
     except (openings.InvalidOpeningLine, openings.OpeningCatalogError):
         return '', None
     floor = 0 if match is None else match['matched_ply']
@@ -6454,7 +6459,10 @@ def _opening_matches(query):
     if not wanted:
         return []
     entries = {}
+    hidden = community_names.hidden_keys()
     for key, opening in openings.load_catalog().items():
+        if key in hidden:
+            continue
         entries[key] = [opening.fen, opening.name,
                         [opening.name, *opening.names, *opening.aliases],
                         opening.reference_line_san]
@@ -6662,7 +6670,7 @@ def _named_right_here(position_key, names=None):
     name = community_names.name_for(position_key, names=names)
     if name is not None:
         return name
-    match = openings.lookup_key(position_key)
+    match = openings.lookup_key(position_key, community_names.hidden_keys())
     return None if match is None else match['name']
 
 
@@ -6718,6 +6726,10 @@ SUGGESTION_MESSAGES = {
     'rate-limited': 'Daily suggestion limit reached, try again tomorrow.',
     'invalid': 'A name is 2 to 60 characters of ordinary text.',
     'unchanged': 'That is already the name this position shows.',
+    'hide-ok': 'Thanks: your request to leave this position unnamed is '
+               'queued for review.',
+    'hide-why': 'To leave this position unnamed, say why in the comment.',
+    'hide-unnamed': 'This position has no name of its own to hide.',
 }
 
 
@@ -6772,17 +6784,30 @@ def suggest_opening_name(request, key):
 
     name = ' '.join((request.POST.get('name') or '').split())
     comment = ' '.join((request.POST.get('comment') or '').split())
-    if (len(name) < SUGGESTION_NAME_MIN_CHARS
-            or len(name) > SUGGESTION_NAME_MAX_CHARS
-            or not SUGGESTION_NAME_RE.fullmatch(name)
-            or len(comment) > SUGGESTION_COMMENT_MAX_CHARS):
+    if len(comment) > SUGGESTION_COMMENT_MAX_CHARS:
         return back('invalid')
-
     current = _named_right_here(pos.key)
-    if current == name:
-        return back('unchanged')
-    kind = (OpeningNameSuggestion.SKind.NEW if current is None
-            else OpeningNameSuggestion.SKind.EDIT)
+    if not name:
+        # An EMPTY name asks for the position to have none (math_god,
+        # 18-Nov-2026): a HIDE, and only with a reason, which is what the
+        # approver reads in the queue.  It hides whatever the position shows,
+        # catalogue or community (§ community_names).
+        if current is None:
+            return back('hide-unnamed')
+        if not comment:
+            return back('hide-why')
+        kind = OpeningNameSuggestion.SKind.HIDE
+        ok = 'hide-ok'
+    else:
+        if (len(name) < SUGGESTION_NAME_MIN_CHARS
+                or len(name) > SUGGESTION_NAME_MAX_CHARS
+                or not SUGGESTION_NAME_RE.fullmatch(name)):
+            return back('invalid')
+        if current == name:
+            return back('unchanged')
+        kind = (OpeningNameSuggestion.SKind.NEW if current is None
+                else OpeningNameSuggestion.SKind.EDIT)
+        ok = 'ok'
 
     ip = _client_ip(request)
     if OpeningNameSuggestion.objects.filter(
@@ -6798,7 +6823,7 @@ def suggest_opening_name(request, key):
         kind=kind, previous_name=current or '',
         suggested_by=(request.user.username
                       if request.user.is_authenticated else ''))
-    return back('ok')
+    return back(ok)
 
 
 def _suggestions_badge(request):
@@ -6979,7 +7004,8 @@ def suggestions(request):
         # El "actual" de la fila es el de CUANDO se propuso.  Si el nombre se
         # movio mientras esperaba, el moderador tiene que verlo: aprobar esto
         # sustituye lo que hay HOY, no lo que habia entonces.
-        if live and row.kind == OpeningNameSuggestion.SKind.EDIT:
+        if live and row.kind in (OpeningNameSuggestion.SKind.EDIT,
+                                 OpeningNameSuggestion.SKind.HIDE):
             current = _named_right_here(row.position_id)
             if (current or '') != row.previous_name:
                 item['drifted'] = current or '(no name)'
@@ -6993,7 +7019,9 @@ def suggestions(request):
         'pending_total': OpeningNameSuggestion.objects.filter(
             status=OpeningNameSuggestion.SState.PENDING).count(),
         'review_outcome': request.GET.get('review', ''),
+        'hide_outcome': request.GET.get('hide', ''),
         **name_vote_views.flags_context(),
+        **name_vote_views.hidden_context(),
     })
 
 
@@ -8858,7 +8886,7 @@ def explore(request, key):
         'suggest_comment_max': SUGGESTION_COMMENT_MAX_CHARS,
         'suggest_message': SUGGESTION_MESSAGES.get(
             request.GET.get('suggested', '')),
-        'suggest_ok': request.GET.get('suggested') == 'ok',
+        'suggest_ok': request.GET.get('suggested') in ('ok', 'hide-ok'),
         # Proponer una campana se hace desde la posicion que se esta mirando:
         # la raiz de la campana ES esta posicion, y pedirle a alguien que
         # copie una clave de 64 hex en otra pagina es pedirle que no lo haga.
@@ -8992,6 +9020,7 @@ def sitemap(request):
     keys = set(openings.load_catalog())
     try:
         keys |= set(community_names.approved_map())
+        keys -= community_names.hidden_keys()
     except Exception:
         pass
     # Solo las que el arbol tiene: una URL que contesta "not in the tree" no

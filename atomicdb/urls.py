@@ -150,6 +150,9 @@ urlpatterns = [
     # half of a cached page: no cache on any of them.
     path('suggestions/flags/', name_vote_views.flag_action,
          name='atomicdb-name-flags'),
+    # An approver hides a name or shows it again (§ community_names).
+    path('suggestions/hide/', name_vote_views.hide_action,
+         name='atomicdb-name-hide'),
     path('names/vote/<str:key>/', name_vote_views.vote,
          name='atomicdb-name-vote'),
     path('names/votes/', name_vote_views.votes, name='atomicdb-name-votes'),

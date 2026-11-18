@@ -74,19 +74,20 @@ most eight (§ views.explore).{% endcomment %}
   {% if suggest_current_name %}
   <p class="suggest-current dim">Current name:
     <strong>{{ suggest_current_name }}</strong>. An approver sees your
-    correction next to it before deciding.</p>
+    correction next to it before deciding. To propose that this position
+    have no name, empty the name and say why.</p>
   {% endif %}
   <form method="post" action="/atomicdb/suggest/{{ pos.key }}/">{% csrf_token %}
     <input type="hidden" name="play" value="{{ suggest_play }}">
     <input type="hidden" name="opening" value="{{ suggest_anchor }}">
     <label>Name
-      <input name="name" maxlength="{{ suggest_name_max }}" required
+      <input name="name" maxlength="{{ suggest_name_max }}"{% if not suggest_current_name %} required{% endif %}
         value="{{ suggest_current_name }}"
-        placeholder="e.g. Belfast Gambit" spellcheck="false"
+        placeholder="{% if suggest_current_name %}empty: this position should have no name{% else %}e.g. Belfast Gambit{% endif %}" spellcheck="false"
         autocomplete="off"></label>
-    <label>Reference or comment <span class="dim">(optional)</span>
+    <label>Reference or comment <span class="dim">({% if suggest_current_name %}required for an empty name{% else %}optional{% endif %})</span>
       <input name="comment" maxlength="{{ suggest_comment_max }}"
-        placeholder="where the name comes from" autocomplete="off"></label>
+        placeholder="{% if suggest_current_name %}where the name comes from, or why it should go{% else %}where the name comes from{% endif %}" autocomplete="off"></label>
     <button class="reqbtn">Send for review</button>
     <span class="dim">Public, no account. An approver reviews it before it
       shows up.</span>
