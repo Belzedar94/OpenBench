@@ -65,6 +65,20 @@ wins bid over the nodes the shown search ran when that is more, as long as
 the bid stays on the 128M rung: a short search or a single search may itself
 have been bought at 128.64M.
 
+CLEAR WINS ARE PRICED BY THEIR VALUE (18-Nov-2026, asked for by MoKy and
+Torom).  The closing bench (500 open positions of production, engine 1114,
+one line) closes half of them with 8M nodes from +52, with 32M from +39 and
+with 128M from +33; under +33 a 128M search closes about 15 %.  So the value
+of the side to move, read as the sweep reads it, picks the search
+(``CLEAR_WINS_TIERS``): +52 or more, 8M; +39 to +52, 32M; +33 to +39, the
+128.64M above.  Under +33 a position is HELD: it stays on the list, out of
+the box, and ``atomicdb_backlog tier-clear-wins`` moves rows between open and
+held as their values move.  An 8M or 32M search cannot replace the shown
+128M one and does not try to: it is there to find the mate, which closes the
+position through its own channel whatever the showcase.  A position it does
+not close has had its second visit and leaves the list; a later round may
+buy it a bigger search.
+
 DEEP WINS PAY THE SAME RULE ON THE 512M RUNG: 514.56M (``DEEP_BUDGET``), or
 two per mille over the shown search when that already ran as much, as long
 as the bid stays on the 512M rung; a position shown by a 2B search is
@@ -85,6 +99,11 @@ is refused the same way when it is full.  On top of that an account has
 ``ADOPT_WAITING_MAX`` places for adopted positions waiting at once; a
 position takes one place, or four for a 512M search (``weight_of``), so the
 ceiling holds the compute waiting about steady whichever list it comes from.
+A place is one 128M search: a position takes the places of the rung it is
+bought at (``places_of``), a sixteenth for 8M, a quarter for 32M, four for
+512M.  Clear wins, whose rungs vary, count their batch in places too: a batch
+of 100 is 100 searches' worth of 128M, up to 1,600 positions at 8M, so a
+subscriber's workers do not run dry between two top-ups on the cheap tier.
 Adopting more is possible as soon as some are served.  An adopted request is a
 request like any other in the fair share, so it never takes another
 account's turn.
@@ -162,9 +181,12 @@ BACKLOGS = {
         'arm': sweep.SWEEP_ARM,
         'title': 'Clear wins',
         'about': ('Open positions searched only once, at 128M nodes, where '
-                  'the side to move is ahead by 16 to 90 pawns. Each one is '
-                  'searched again at 128M nodes with one line; the current '
-                  'engine often finds the mate.'),
+                  'the side to move is ahead by 33 to 90 pawns. Each one is '
+                  'searched again with one line, as deep as its value needs '
+                  'for the current engine to find the mate: 8M nodes from '
+                  '+52, 32M from +39, 128M from +33. A batch counts 128M '
+                  'searches, so it holds 16 positions at 8M for each one at '
+                  '128M.'),
     },
     # A 512M search costs four 128M ones: smaller batches, and each waiting
     # position takes four of the account's places (``ADOPT_WAITING_MAX``).
@@ -189,9 +211,6 @@ BACKLOGS = {
 }
 ORDER = (LOST_LINES, SHALLOW, CLEAR_WINS, DEEP_WINS, BEST_LINE)
 ARMS = tuple(spec['arm'] for spec in BACKLOGS.values())
-# The places one waiting adopted position takes, by the arm it carries.
-ARM_WEIGHTS = {spec['arm']: spec.get('weight', 1)
-               for spec in BACKLOGS.values()}
 
 
 def sizes_of(backlog):
@@ -206,8 +225,26 @@ def default_size_of(backlog):
 
 
 def weight_of(backlog):
-    """The places one waiting position of ``backlog`` takes."""
+    """The places one waiting position of ``backlog`` takes, nominally: the
+    unit its batch sizes count in (clear wins: one 128M search, though a
+    position on a smaller tier takes less, § ``places_of``)."""
     return BACKLOGS[backlog].get('weight', 1)
+
+
+def places_of(budget):
+    """The places a search of ``budget`` nodes takes: its rung over 128M.
+
+    8M a sixteenth, 32M a quarter, 128M (128.64M too) one, 512M four.  Exact
+    binary fractions, so sums of them stay exact.
+    """
+    return ingest._rung_matching(budget) / idle_repair.REPAIR_MIN_NODES
+
+
+def min_places_of(backlog):
+    """The fewest places one position of ``backlog`` can take."""
+    if backlog == CLEAR_WINS:
+        return places_of(CLEAR_WINS_TIERS[0][1])
+    return weight_of(backlog)
 
 
 ADOPT_BUDGET = (idle_repair.REPAIR_MIN_NODES
@@ -248,12 +285,25 @@ ADOPT_WAITING_MAX = 500
 # do not leave a batch short; and a ceiling on all the rows one click reads.
 ADOPT_SLACK = 25
 ADOPT_SCAN_MAX = 600
+# Clear wins: the search a position gets, by the value of the side to move
+# (White's side as the sweep reads it, so +52 is 5200), the highest first.
+# From the closing bench, engine 1114: half of the positions close at 8M from
+# +52, at 32M from +39, at 128M from +33 (14/15-Nov-2026).  Always one line
+# (§ ``sweep.SWEEP_MULTIPV``): at 8M five lines close a fifth fewer.
+CLEAR_WINS_TIERS = ((5200, ingest.BUDGET_LADDER[0]),
+                    (3900, ingest.BUDGET_LADDER[1]),
+                    (3300, ADOPT_BUDGET))
+# Under this a position is held off the box: a 128M search closes ~15 %.
+CLEAR_WINS_FLOOR_CP = CLEAR_WINS_TIERS[-1][0]
+# A batch of 100 places can be 1,600 positions at 8M.
+CLEAR_WINS_SCAN_MAX = 2_000
 
 # Why a row left the list without a request.
 CLOSED = 'closed'      # the position closed, or its branch is dead
 DONE = 'done'          # it no longer qualifies: already searched again
 QUEUED = 'queued'      # its next search is already queued or running
 DEEP = 'deep'          # its shown search ran more than the rung could beat
+HELD = 'held'          # clear wins under the floor: kept, out of the box
 
 COUNTS_CACHE_KEY = 'atomicdb:backlog:counts'
 COUNTS_CACHE_SECONDS = 30
@@ -319,6 +369,27 @@ def clear_win_now(row):
         status=row['status'], visits=row['visits'],
         nodes_invested=row['nodes_invested'], fen=row['fen'],
         backed_eval=row['backed_eval'], eval_cp=row['eval_cp']))
+
+
+def clear_win_tier(fen, backed_eval, eval_cp):
+    """The base budget of a clear win's search, or ``None`` under the floor.
+
+    The value is the side to move's, read as the sweep reads it
+    (``backed_eval``, else ``eval_cp``, White's side); § ``CLEAR_WINS_TIERS``.
+    """
+    value = backed_eval if backed_eval is not None else eval_cp
+    if value is None:
+        return None
+    if fen.split()[1] != 'w':
+        value = -value
+    for low, budget in CLEAR_WINS_TIERS:
+        if value >= low:
+            return budget
+    return None
+
+
+def _clear_win_base(row):
+    return clear_win_tier(row['fen'], row['backed_eval'], row['eval_cp'])
 
 
 def deep_value(backed_eval, eval_cp):
@@ -393,19 +464,25 @@ def _base_budget(backlog):
     return DEEP_BUDGET if backlog == DEEP_WINS else ADOPT_BUDGET
 
 
-def adopt_budget(backlog, last_analysis):
-    """The nodes the adopted search of a position is bought at."""
-    base = _base_budget(backlog)
-    if backlog not in REBID:
+def adopt_budget(backlog, last_analysis, base=None):
+    """The nodes the adopted search of a position is bought at.
+
+    ``base``: the rung's price when it is not the backlog's own (a clear
+    win's tier, § ``clear_win_tier``).  A search under 128M never bids over
+    the shown one: it cannot replace it, and is not meant to.
+    """
+    base = _base_budget(backlog) if base is None else base
+    if backlog not in REBID or base < ADOPT_BUDGET:
         return base
     shown = showcase_budget(last_analysis)
     return max(base, shown * (1000 + LOST_LINES_REBID_PER_MILLE) // 1000)
 
 
-def _off_rung(backlog, last_analysis):
+def _off_rung(backlog, last_analysis, base=None):
     """Would the bid leave its rung?  Then a search there cannot replace it."""
-    return (ingest._rung_matching(adopt_budget(backlog, last_analysis))
-            > ingest._rung_matching(_base_budget(backlog)))
+    base = _base_budget(backlog) if base is None else base
+    return (ingest._rung_matching(adopt_budget(backlog, last_analysis, base))
+            > ingest._rung_matching(base))
 
 
 def _verdict(backlog, row, repaired):
@@ -436,7 +513,10 @@ def _verdict(backlog, row, repaired):
         # reaches the tree (§ ``ingest._still_reachable``).
         if not clear_win_now(row):
             return DONE
-        if _off_rung(backlog, row['last_analysis']):
+        base = _clear_win_base(row)
+        if base is None:
+            return HELD
+        if _off_rung(backlog, row['last_analysis'], base):
             return DEEP
         if not ingest._still_reachable(row['key']):
             return CLOSED
@@ -479,7 +559,8 @@ def counts(fresh=False):
         cached = cache.get(COUNTS_CACHE_KEY)
         if cached is not None:
             return cached
-    out = {name: {'open': 0, 'adopted': 0, 'adopters': 0} for name in ORDER}
+    out = {name: {'open': 0, 'adopted': 0, 'adopters': 0, 'held': 0}
+           for name in ORDER}
     for row in (BacklogItem.objects.values('backlog', 'state')
                 .annotate(n=Count('id'),
                           people=Count('adopted_by', distinct=True))):
@@ -488,6 +569,8 @@ def counts(fresh=False):
             continue
         if row['state'] == BacklogItem.State.OPEN:
             entry['open'] = row['n']
+        elif row['state'] == BacklogItem.State.HELD:
+            entry['held'] = row['n']
         elif row['state'] == BacklogItem.State.ADOPTED:
             entry['adopted'] = row['n']
             entry['adopters'] = row['people']
@@ -498,18 +581,24 @@ def counts(fresh=False):
 def adopted_waiting(username):
     """The places this account's waiting adopted requests take.
 
-    One per position, or its backlog's weight (§ ``weight_of``): a 512M
-    search takes four.  Counted against ``ADOPT_WAITING_MAX``.
+    The places of the rung each one is bought at (§ ``places_of``): one for
+    128M, four for 512M, a sixteenth for 8M.  Counted against
+    ``ADOPT_WAITING_MAX``.  A whole number whenever it is one.
     """
     if not username:
         return 0
+    return _places_waiting(username=username, arms=ARMS)
+
+
+def _places_waiting(username, arms):
     rows = (AnalysisTask.objects
             .filter(state=AnalysisTask.TState.PENDING,
                     source=AnalysisTask.Source.USER,
-                    requested_by=username, arm__in=ARMS,
+                    requested_by=username, arm__in=arms,
                     position__status='UNKNOWN')
-            .order_by().values('arm').annotate(n=Count('id')))
-    return sum(ARM_WEIGHTS.get(row['arm'], 1) * row['n'] for row in rows)
+            .order_by().values('budget_nodes').annotate(n=Count('id')))
+    total = sum(places_of(row['budget_nodes']) * row['n'] for row in rows)
+    return int(total) if total == int(total) else total
 
 
 def heavy_backlogs():
@@ -535,6 +624,10 @@ class Adoption:
     adopted: int = 0
     dropped: int = 0
     task_ids: list = field(default_factory=list)
+    # Rows set aside instead (clear wins under the floor), and the places
+    # the adopted positions take (§ ``places_of``).
+    held: int = 0
+    places: float = 0
 
 
 def _mint(key, visits, multipv, arm, username, now, budget=ADOPT_BUDGET):
@@ -601,19 +694,28 @@ def adopt(username, backlog, size):
     room, refused = _queue_room(username)
     if refused:
         return Adoption(refused)
-    adopt_room = ((ADOPT_WAITING_MAX - adopted_waiting(username))
-                  // weight_of(backlog))
-    if adopt_room <= 0:
+    # Everything below counts places (§ ``places_of``): the batch is ``size``
+    # positions of the backlog's nominal weight, and no position may take
+    # the account past ``ADOPT_WAITING_MAX``.
+    free = ADOPT_WAITING_MAX - adopted_waiting(username)
+    smallest = min_places_of(backlog)
+    if free < smallest:
         return Adoption('adopted-full')
-    want = min(size, room, adopt_room)
+    want = min(size * weight_of(backlog), free)
+    scan_max = CLEAR_WINS_SCAN_MAX if backlog == CLEAR_WINS \
+        else ADOPT_SCAN_MAX
     arm = BACKLOGS[backlog]['arm']
     outcome = Adoption('adopted')
     now = timezone.now()
     scanned = 0
+    places = 0
+    capped = False
     with atomic():
-        while outcome.adopted < want and scanned < ADOPT_SCAN_MAX:
-            take = min(want - outcome.adopted + ADOPT_SLACK,
-                       ADOPT_SCAN_MAX - scanned)
+        while (places < want and outcome.adopted < room and not capped
+               and scanned < scan_max):
+            take = min(int(-(-(want - places) // smallest)) + ADOPT_SLACK,
+                       room - outcome.adopted + ADOPT_SLACK,
+                       scan_max - scanned)
             # SKIP LOCKED: two people adopting at once take different rows
             # instead of queueing behind each other.  (No-op on SQLite.)
             items = list(BacklogItem.objects.select_for_update(
@@ -636,19 +738,33 @@ def adopt(username, backlog, size):
             else:
                 repaired = set()
             for item in items:
-                if outcome.adopted >= want:
+                if places >= want or outcome.adopted >= room:
                     break
                 row = rows.get(item.position_key)
                 reason = _verdict(backlog, row, repaired)
                 task = None
                 if reason is None:
+                    base = (_clear_win_base(row) if backlog == CLEAR_WINS
+                            else None)
+                    budget = adopt_budget(backlog, row['last_analysis'], base)
+                    weight = places_of(budget)
+                    if places + weight > free:
+                        # The account's places are full: this row stays
+                        # open for a later batch.
+                        capped = True
+                        break
                     task = _mint(item.position_key, row['visits'],
                                  _multipv(backlog, row['visits']), arm,
-                                 username, now,
-                                 adopt_budget(backlog, row['last_analysis']))
+                                 username, now, budget)
                     if task is None:
                         reason = QUEUED
-                if task is not None:
+                    else:
+                        places += places_of(task.budget_nodes)
+                if reason == HELD:
+                    item.state = BacklogItem.State.HELD
+                    item.save(update_fields=['state'])
+                    outcome.held += 1
+                elif task is not None:
                     item.state = BacklogItem.State.ADOPTED
                     item.adopted_by = username
                     item.adopted_at = now
@@ -662,8 +778,9 @@ def adopt(username, backlog, size):
                     item.reason = reason
                     item.save(update_fields=['state', 'reason'])
                     outcome.dropped += 1
+    outcome.places = places
     if not outcome.adopted:
-        outcome.status = 'empty'
+        outcome.status = 'adopted-full' if capped else 'empty'
     cache.delete(COUNTS_CACHE_KEY)
     return outcome
 
@@ -744,13 +861,12 @@ SUB_ERROR = 'error'            # this one failed; the next pass tries again
 
 
 def backlog_waiting(username, backlog):
-    """This account's adopted requests from ``backlog`` still waiting."""
-    return (AnalysisTask.objects
-            .filter(state=AnalysisTask.TState.PENDING,
-                    source=AnalysisTask.Source.USER,
-                    requested_by=username, arm=BACKLOGS[backlog]['arm'],
-                    position__status='UNKNOWN')
-            .count())
+    """This account's adopted requests from ``backlog`` still waiting, in
+    the unit its batches count: positions, or for clear wins 128M searches
+    (§ ``places_of``), so an 8M position is a sixteenth."""
+    places = _places_waiting(username, (BACKLOGS[backlog]['arm'],))
+    units = places / weight_of(backlog)
+    return int(units) if units == int(units) else round(units, 2)
 
 
 def topup_below(batch_size):
@@ -809,9 +925,11 @@ def _top_up_one(sub, enabled, has_open):
     waiting = backlog_waiting(sub.username, sub.backlog)
     if waiting >= topup_below(sub.batch_size):
         return SUB_ENOUGH, 0, True
-    adopted, status = 0, SUB_ENOUGH
+    # ``adopted`` counts positions, ``units`` what the batch counts in
+    # (§ ``backlog_waiting``): they differ for clear wins under 128M.
+    adopted, units, status = 0, 0, SUB_ENOUGH
     for _ in range(TOPUP_BATCHES_PER_PASS):
-        if waiting + adopted >= TOPUP_BATCHES_PER_PASS * sub.batch_size:
+        if waiting + units >= TOPUP_BATCHES_PER_PASS * sub.batch_size:
             break
         outcome = adopt(sub.username, sub.backlog, sub.batch_size)
         if outcome.status == 'empty':
@@ -827,6 +945,7 @@ def _top_up_one(sub, enabled, has_open):
             break
         status = outcome.status
         adopted += outcome.adopted
+        units += outcome.places / weight_of(sub.backlog)
     return status, adopted, True
 
 
@@ -954,7 +1073,11 @@ def subscription_rows(username):
                      'checked': _ago(sub.checked_at),
                      'adopted_total': sub.adopted_total,
                      'waiting': (backlog_waiting(username, name)
-                                 if sub.active else None)})
+                                 if sub.active else None),
+                     # What ``waiting`` and the batch count, if not
+                     # positions.
+                     'unit': ('adopted, counted in searches of 128M,'
+                              if name == CLEAR_WINS else '')})
     return rows
 
 
@@ -1001,6 +1124,7 @@ def load_clear_wins(keys, chunk=2_000):
     tree first), and the rows keep that order, which is the order a batch
     takes them in.  Each key is read again and left out if its position no
     longer qualifies (§ ``sweep.qualifies``); adopting checks it once more.
+    A new row under the floor (§ ``CLEAR_WINS_FLOOR_CP``) is added held.
     Idempotent, so a run cut short is resumed by running it again.  Returns
     ``(added, already there, left out)``.
     """
@@ -1016,11 +1140,81 @@ def load_clear_wins(keys, chunk=2_000):
                 if key in rows and sweep.qualifies(rows[key])]
         left_out += len(part) - len(keep)
         if keep:
+            there_keys = set(BacklogItem.objects.filter(
+                backlog=CLEAR_WINS, position_key__in=keep)
+                .values_list('position_key', flat=True))
             fresh, there, invalid = load_keys(CLEAR_WINS, keep, chunk)
             added += fresh
             known += there
             left_out += invalid
+            below = [key for key in keep if key not in there_keys
+                     and _tier_of(rows[key]) is None]
+            if below:
+                BacklogItem.objects.filter(
+                    backlog=CLEAR_WINS, position_key__in=below,
+                    state=BacklogItem.State.OPEN).update(
+                        state=BacklogItem.State.HELD)
     return added, known, left_out
+
+
+def _tier_of(pos):
+    return clear_win_tier(pos.fen, pos.backed_eval, pos.eval_cp)
+
+
+def tier_clear_wins(chunk=2_000, dry_run=False):
+    """Move the clear wins between open and held by their value now.
+
+    An open row whose position still qualifies but sits under the floor is
+    held; a held row whose position climbed to the floor is opened again,
+    and one that no longer qualifies (closed, or searched again) is dropped
+    as ``done``.  Open rows that no longer qualify are left to the next
+    adoption, which drops them with the reason it finds.  Reads the list in
+    ``chunk`` rows by id; every write is guarded by the state it read, so a
+    concurrent adoption wins.  Returns the counts.
+    """
+    out = {'read': 0, 'held': 0, 'opened': 0, 'dropped': 0}
+    OPEN, HELD_STATE = BacklogItem.State.OPEN, BacklogItem.State.HELD
+    last = 0
+    while True:
+        items = list(BacklogItem.objects.filter(
+            backlog=CLEAR_WINS, state__in=(OPEN, HELD_STATE), id__gt=last)
+            .order_by('id').values_list('id', 'position_key', 'state')
+            [:chunk])
+        if not items:
+            break
+        last = items[-1][0]
+        out['read'] += len(items)
+        rows = {pos.key: pos for pos in Position.objects.filter(
+            key__in=[key for _pk, key, _state in items]).only(
+                'key', 'fen', 'status', 'visits', 'nodes_invested',
+                'eval_cp', 'backed_eval')}
+        hold, reopen, drop = [], [], []
+        for pk, key, state in items:
+            pos = rows.get(key)
+            ok = pos is not None and sweep.qualifies(pos)
+            tier = _tier_of(pos) if ok else None
+            if state == OPEN and ok and tier is None:
+                hold.append(pk)
+            elif state == HELD_STATE and not ok:
+                drop.append(pk)
+            elif state == HELD_STATE and tier is not None:
+                reopen.append(pk)
+        if not dry_run:
+            hold_n = BacklogItem.objects.filter(
+                pk__in=hold, state=OPEN).update(state=HELD_STATE)
+            reopen_n = BacklogItem.objects.filter(
+                pk__in=reopen, state=HELD_STATE).update(state=OPEN)
+            drop_n = BacklogItem.objects.filter(
+                pk__in=drop, state=HELD_STATE).update(
+                    state=BacklogItem.State.DROPPED, reason=DONE)
+        else:
+            hold_n, reopen_n, drop_n = len(hold), len(reopen), len(drop)
+        out['held'] += hold_n
+        out['opened'] += reopen_n
+        out['dropped'] += drop_n
+    if not dry_run and (out['held'] or out['opened'] or out['dropped']):
+        cache.delete(COUNTS_CACHE_KEY)
+    return out
 
 
 def scan_shallow_step(cursor, batch, stop_below=0, dry_run=False):

@@ -5,6 +5,7 @@
     manage.py atomicdb_backlog load-lost-lines --file KEYS [--skip N]
     manage.py atomicdb_backlog load-clear-wins [--file PLAN] [--skip N]
                                               [--limit N]
+    manage.py atomicdb_backlog tier-clear-wins [--dry-run]
     manage.py atomicdb_backlog scan-shallow --state-file PATH
                                            [--batch 2000] [--pause 0.5]
                                            [--max-steps N] [--dry-run]
@@ -29,7 +30,14 @@ that JSON or one key per line) to the clear-wins backlog, in its order:
 White's strategy tree first.  Keys whose position no longer qualifies are
 left out.  ``--skip N`` and ``--limit N`` take a slice of the list.  Running
 it again adds only what is new, so a run cut short is resumed that way, and
-the list of a later rebuild is added behind what is already there.
+the list of a later rebuild is added behind what is already there.  A new
+key under +33 for the side to move is added held: kept, out of the box.
+
+``tier-clear-wins`` moves the clear wins between open and held by their
+value now (``backlog.tier_clear_wins``): open rows under the floor are held,
+held rows that climbed to it are opened again, and held rows that no longer
+qualify are dropped.  Reads the list by id in steps of ``--batch``; with
+``--dry-run`` it only counts.
 
 ``top-up`` runs one pass of the subscriptions' top-up by hand, the same
 pass ``warm_public_snapshot`` runs every five minutes.
@@ -132,6 +140,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('action', choices=['status', 'load-lost-lines',
                                                'load-clear-wins',
+                                               'tier-clear-wins',
                                                'load-deep-wins',
                                                'load-best-line',
                                                'scan-shallow', 'top-up'])
@@ -148,8 +157,8 @@ class Command(BaseCommand):
         parser.add_argument('--pause', type=float, default=0.5)
         parser.add_argument('--max-steps', type=int, default=None)
         parser.add_argument('--dry-run', action='store_true',
-                            help='scan-shallow, load-deep-wins: read only, '
-                                 'add nothing')
+                            help='scan-shallow, load-deep-wins, '
+                                 'tier-clear-wins: read only, add nothing')
         parser.add_argument('--tree', action='store_true',
                             help='load-deep-wins: White\'s strategy tree '
                                  'first')
@@ -171,6 +180,13 @@ class Command(BaseCommand):
             return self._load(options)
         if action == 'load-clear-wins':
             return self._load_clear_wins(options)
+        if action == 'tier-clear-wins':
+            counts = backlog.tier_clear_wins(chunk=max(1, options['batch']),
+                                             dry_run=options['dry_run'])
+            self.stdout.write(f'{backlog.CLEAR_WINS}: ' + ' '.join(
+                f'{key}={value}' for key, value in counts.items())
+                + (' (dry run)' if options['dry_run'] else ''))
+            return
         if action == 'load-deep-wins':
             return self._load_deep_wins(options)
         if action == 'load-best-line':
@@ -191,7 +207,8 @@ class Command(BaseCommand):
                 f"{name}: open={numbers['open']} "
                 f"adopted={numbers['adopted']} "
                 f"adopters={numbers['adopters']} "
-                f"subscribed={subscribed.get(name, 0)}")
+                f"subscribed={subscribed.get(name, 0)} "
+                f"held={numbers['held']}")
 
     def _load(self, options):
         path = options['file']
