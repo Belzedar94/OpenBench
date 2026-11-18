@@ -149,7 +149,17 @@ PRIORITY_REFRESH_SECONDS = 30.0
 # en estas pruebas online y la cola se comia la latencia; la flota F0
 # re-certifica en diferido todo lo que aqui se degrade a ENGINE, asi que el
 # tiempo online solo compra lo barato.
-ONLINE_MATE_PROOF_SECONDS = 5.0
+#
+# 2.5s (18-nov), not 5: the movegen memo in ``logic`` makes a proof node
+# ~1.5x cheaper, and with the fleet doubled 95% of the jobs that carry a mate
+# were spending the whole 5s on proofs that never finish.  Replayed on 677
+# real jobs from that night, each pyffish call charged the server's 3.45 ms,
+# the memo at 2.5s gives byte-identical ``prepare_mate_proofs`` output to the
+# old code at 5s in all 677 (91 PROVEN, 903 INCONCLUSIVE lines, none moved),
+# at half the CPU per job.  Every proof that finished at all finished well
+# under 1s; at 1s it was still 0 PROVEN lost, but 27 jobs ran out of time
+# before verifying a mate PV, so 1s is too short.
+ONLINE_MATE_PROOF_SECONDS = 2.5
 _priority_refresh_cache = {'at': 0.0}
 
 
