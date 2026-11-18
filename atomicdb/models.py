@@ -1712,6 +1712,7 @@ class BacklogItem(models.Model):
         OPEN = 'open'          # waiting for someone to adopt it
         ADOPTED = 'adopted'    # a request was queued for it (``task_id``)
         DROPPED = 'dropped'    # no longer needed when someone came for it
+        HELD = 'held'          # kept on the list, out of the box for now
 
     backlog = models.CharField(max_length=16)
     position_key = models.CharField(max_length=64)

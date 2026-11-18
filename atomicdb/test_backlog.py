@@ -21,6 +21,9 @@ What these tests pin, and why each one:
   are checked again with the sweep's own rule, take over a sweep task nobody
   leased, are never bought twice by the drip, and load from the sweep's list
   in its order, idempotently;
+* clear wins are priced by their value (8M from +52, 32M from +39, 128.64M
+  from +33, held under +33 without leaving the list), count a batch in 128M
+  searches, and move between open and held with tier-clear-wins;
 * deep wins buy one line at 514.56M (arm deep25), outbid a shown search
   already on the 512M rung without leaving it, are checked again with their
   own rule (visits 2, +25 for the side to move), come in batches of 5, 10
@@ -112,9 +115,11 @@ class CountsAndBox(BacklogTestCase):
         backlog.adopt('torom', backlog.LOST_LINES, 25)
         numbers = backlog.counts(fresh=True)
         self.assertEqual(numbers[backlog.LOST_LINES],
-                         {'open': 0, 'adopted': 30, 'adopters': 2})
+                         {'open': 0, 'adopted': 30, 'adopters': 2,
+                          'held': 0})
         self.assertEqual(numbers[backlog.SHALLOW],
-                         {'open': 3, 'adopted': 0, 'adopters': 0})
+                         {'open': 3, 'adopted': 0, 'adopters': 0,
+                          'held': 0})
 
     def test_the_queue_page_shows_the_box_with_buttons(self):
         _offer(backlog.LOST_LINES, [_short('a'), _short('b')])
@@ -500,8 +505,9 @@ ONCE = 128_001_500
 
 
 def _win(name, lines=None, **fields):
-    """A clear win: searched once at 128M, White to move at +20."""
-    base = {'nodes_invested': ONCE, 'eval_cp': 2000}
+    """A clear win: searched once at 128M, White to move at +35 (the 128M
+    tier, § ``backlog.CLEAR_WINS_TIERS``)."""
+    base = {'nodes_invested': ONCE, 'eval_cp': 3500}
     base.update(fields)
     visits = base.pop('visits', 1)
     return _pos(name, _lines(1) if lines is None else lines, visits=visits,
@@ -660,6 +666,166 @@ class ClearWins(BacklogTestCase):
         with self.assertRaises(CommandError):
             call_command('atomicdb_backlog', 'load-clear-wins',
                          stdout=StringIO())
+
+
+@override_settings(ATOMICDB_ARM_RATE_SWEEP16='1000')
+class ClearWinsTiers(BacklogTestCase):
+    """18-Nov-2026: the search a clear win gets follows its value."""
+
+    def _budget_of(self, pos):
+        return AnalysisTask.objects.get(position=pos).budget_nodes
+
+    def test_the_value_of_the_side_to_move_picks_the_search(self):
+        cheap = _win('cheap', eval_cp=6000)
+        edge8 = _win('edge8', eval_cp=5200)
+        mid = _win('mid', eval_cp=4500)
+        edge32 = _win('edge32', eval_cp=3900)
+        dear = _win('dear', eval_cp=3500)
+        edge128 = _win('edge128', eval_cp=3300)
+        black = Position.objects.create(
+            key=_key('black'), fen=BLACK_FEN, visits=1, eval_cp=-6000,
+            nodes_invested=ONCE, last_analysis=_lines(1))
+        # The value the tree shows wins over the engine's own.
+        backed = _win('backed', eval_cp=3500, backed_eval=6000)
+        low = _win('low', eval_cp=3299)
+        _offer(backlog.CLEAR_WINS, [cheap, edge8, mid, edge32, dear, edge128,
+                                    black, backed, low])
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        self.assertEqual((outcome.adopted, outcome.dropped, outcome.held),
+                         (8, 0, 1))
+        for pos in (cheap, edge8, black, backed):
+            self.assertEqual(self._budget_of(pos), 8_000_000)
+        for pos in (mid, edge32):
+            self.assertEqual(self._budget_of(pos), 32_000_000)
+        for pos in (dear, edge128):
+            self.assertEqual(self._budget_of(pos), 128_640_000)
+        for task in AnalysisTask.objects.all():
+            self.assertEqual((task.multipv, task.arm, task.source),
+                             (1, 'sweep16', USER))
+        # Under +33: kept on the list, held, and no search bought.
+        item = BacklogItem.objects.get(position_key=low.key)
+        self.assertEqual((item.state, item.reason), ('held', ''))
+        self.assertFalse(AnalysisTask.objects.filter(position=low).exists())
+        self.assertEqual(outcome.places, 4 / 16 + 2 / 4 + 2)
+
+    def test_a_small_search_never_bids_over_the_shown_one(self):
+        shown = backlog.ADOPT_BUDGET + 68
+        pos = _win('again', eval_cp=6000, lines=_lines(1, nodes=shown))
+        _offer(backlog.CLEAR_WINS, [pos])
+        self.assertEqual(backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+                         .adopted, 1)
+        self.assertEqual(self._budget_of(pos), 8_000_000)
+
+    def test_a_batch_counts_searches_of_128m(self):
+        positions = [_win(f'c{i}', eval_cp=6000) for i in range(50)]
+        _offer(backlog.CLEAR_WINS, positions)
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        # 25 places would be 400 positions at 8M: all 50 go, 3.125 places.
+        self.assertEqual(outcome.adopted, 50)
+        self.assertEqual(backlog.adopted_waiting('moky'), 3.125)
+        self.assertEqual(backlog.backlog_waiting('moky', backlog.CLEAR_WINS),
+                         3.12)
+        body = self.client.get('/atomicdb/queue/').content.decode()
+        self.assertIn('take 3.1 of the 500 places', body)
+
+    def test_a_batch_stops_at_its_places(self):
+        positions = [_win(f'c{i}', eval_cp=6000) for i in range(20)]
+        positions += [_win(f'd{i}') for i in range(30)]
+        _offer(backlog.CLEAR_WINS, positions)
+        outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        # 20 at 8M (1.25 places), then 24 at 128M: 25.25 places.
+        self.assertEqual(outcome.adopted, 44)
+        self.assertEqual(outcome.places, 25.25)
+        self.assertEqual(BacklogItem.objects.filter(state='open').count(), 6)
+
+    def test_the_accounts_places_cap_the_batch(self):
+        cheap = [_win(f'c{i}', eval_cp=6000) for i in range(40)]
+        _offer(backlog.CLEAR_WINS, cheap)
+        with patch.object(backlog, 'ADOPT_WAITING_MAX', 2):
+            outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+            self.assertEqual((outcome.status, outcome.adopted),
+                             ('adopted', 32))
+            self.assertEqual(backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+                             .status, 'adopted-full')
+        self.assertEqual(BacklogItem.objects.filter(state='open').count(), 8)
+
+    def test_a_dear_position_that_does_not_fit_stays_open(self):
+        _offer(backlog.CLEAR_WINS, [_win('dear')])
+        with patch.object(backlog, 'ADOPT_WAITING_MAX', 0.5):
+            outcome = backlog.adopt('moky', backlog.CLEAR_WINS, 25)
+        self.assertEqual((outcome.status, outcome.adopted),
+                         ('adopted-full', 0))
+        self.assertEqual(BacklogItem.objects.get().state, 'open')
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    def test_the_top_up_fills_two_batches_of_places(self):
+        _offer(backlog.CLEAR_WINS,
+               [_win(f'c{i}', eval_cp=6000) for i in range(900)])
+        backlog.subscribe('moky', backlog.CLEAR_WINS, 25)
+        summary = backlog.top_up()
+        # Two batches of 25 places at 8M: 800 positions, not 50.
+        self.assertEqual(summary['adopted'], 800)
+        self.assertEqual(backlog.backlog_waiting('moky', backlog.CLEAR_WINS),
+                         50)
+        self.assertEqual(backlog.top_up()['adopted'], 0)
+        rows = backlog.subscription_rows('moky')
+        self.assertEqual(rows[0]['waiting'], 50)
+        self.assertIn('searches of 128M', rows[0]['unit'])
+
+    def test_the_loader_holds_what_is_under_the_floor(self):
+        high, low = _win('high'), _win('low', eval_cp=2500)
+        sweep.save_plan({'build_id': 'b1', 'keys': [high.key, low.key]})
+        try:
+            out = StringIO()
+            call_command('atomicdb_backlog', 'load-clear-wins', stdout=out)
+        finally:
+            sweep.forget_plan()
+        self.assertIn('added=2', out.getvalue())
+        states = dict(BacklogItem.objects.values_list('position_key',
+                                                      'state'))
+        self.assertEqual(states, {high.key: 'open', low.key: 'held'})
+        numbers = backlog.counts(fresh=True)[backlog.CLEAR_WINS]
+        self.assertEqual((numbers['open'], numbers['held']), (1, 1))
+        body = self.client.get('/atomicdb/queue/').content.decode()
+        self.assertIn('1 held', body)
+
+    def test_tier_clear_wins_moves_rows_by_their_value_now(self):
+        fell = _win('fell')
+        rose = _win('rose', eval_cp=2500)
+        gone = _win('gone', eval_cp=2500)
+        stays = _win('stays', eval_cp=2500)
+        _offer(backlog.CLEAR_WINS, [fell, rose, gone, stays])
+        BacklogItem.objects.filter(position_key__in=[
+            rose.key, gone.key, stays.key]).update(state='held')
+        Position.objects.filter(key=fell.key).update(eval_cp=2000)
+        Position.objects.filter(key=rose.key).update(eval_cp=4000)
+        Position.objects.filter(key=gone.key).update(visits=2)
+        out = StringIO()
+        call_command('atomicdb_backlog', 'tier-clear-wins', '--dry-run',
+                     stdout=out)
+        self.assertIn('read=4 held=1 opened=1 dropped=1 (dry run)',
+                      out.getvalue())
+        self.assertEqual(BacklogItem.objects.filter(state='held').count(), 3)
+        out = StringIO()
+        call_command('atomicdb_backlog', 'tier-clear-wins', stdout=out)
+        self.assertIn('read=4 held=1 opened=1 dropped=1', out.getvalue())
+        states = dict(BacklogItem.objects.values_list('position_key',
+                                                      'state'))
+        self.assertEqual(states, {fell.key: 'held', rose.key: 'open',
+                                  gone.key: 'dropped', stays.key: 'held'})
+        self.assertEqual(BacklogItem.objects.get(position_key=gone.key)
+                         .reason, 'done')
+        # Run again: nothing moves.
+        self.assertEqual(backlog.tier_clear_wins(),
+                         {'read': 3, 'held': 0, 'opened': 0, 'dropped': 0})
+
+    def test_other_backlogs_count_places_as_before(self):
+        _offer(backlog.LOST_LINES, [_short(f'l{i}') for i in range(10)])
+        backlog.adopt('moky', backlog.LOST_LINES, 25)
+        self.assertEqual(backlog.adopted_waiting('moky'), 10)
+        self.assertIsInstance(backlog.adopted_waiting('moky'), int)
+        self.assertEqual(backlog.backlog_waiting('moky', backlog.LOST_LINES),
+                         10)
 
 
 # ---------------- deep wins ----------------
