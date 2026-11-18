@@ -102,7 +102,8 @@ it with the request endpoint below, the FEN box or the explorer.</p>
 <tr><td><code>opening</code>, <code>opening_named_by</code></td><td>Only
   with <code>&amp;opening=1</code>: the last named opening on the line to
   this position (<code>null</code> if none), and who proposed it when it is
-  a community name (<code>anonymous</code> without an account). Naming walks
+  a community name (<code>anonymous</code> without an account). A position
+  whose name an approver hid counts as unnamed. Naming walks
   the line back to the start, so it is slower on deep positions; leave it out
   when polling.</td></tr>
 <tr><td><code>backed_plies</code></td><td>How deep the backing chain
