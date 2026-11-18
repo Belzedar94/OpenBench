@@ -376,7 +376,7 @@ class ExplorerWorkBudgetTests(TestCase):
     def test_a_restarted_worker_pays_one_position_per_route_ply(self):
         """Y el peor caso: un proceso recien arrancado que no recuerda nada."""
         Client().get(self.url)
-        logic.apply_move.cache_clear()
+        logic.clear_caches()
 
         with mock.patch('atomicdb.logic.pf.get_fen',
                         wraps=logic.pf.get_fen) as built:
@@ -479,11 +479,15 @@ class ExplorerWorkBudgetTests(TestCase):
         pos = Position.objects.get(key=self.leaf)
         uci = self.offtree[0]
         url = f'/atomicdb/goto/{pos.key}/{uci}/?play={self.route}'
+        # Counted at the movegen itself, from a process that remembers
+        # nothing: terminal_status() no longer goes through the public
+        # wrapper.
+        logic.clear_caches()
 
         with mock.patch('atomicdb.openings.match_line',
                         wraps=openings.match_line) as replayed, \
-                mock.patch('atomicdb.logic.legal_moves',
-                           wraps=logic.legal_moves) as generated:
+                mock.patch('atomicdb.logic.pf.legal_moves',
+                           wraps=logic.pf.legal_moves) as generated:
             response = Client().get(url)
 
         self.assertEqual(response.status_code, 302)
