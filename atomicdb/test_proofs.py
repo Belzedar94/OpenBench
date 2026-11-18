@@ -149,6 +149,32 @@ class MovegenMemoTests(SimpleTestCase):
                 FORCED_MATE_FEN, True, 3, budget_positions=3,
                 hint_pv=FORCED_MATE_PV), 'INCONCLUSIVE')
 
+    # Real mate lines from the production ingest (18-nov), with the result
+    # and the EXACT node budget the code before the memo needed: PROVEN at
+    # that budget and INCONCLUSIVE one node below.  The fixed budget pins the
+    # node count, so a memo that skipped, reordered or double-counted a node
+    # would move the boundary.
+    REAL_LINES = (
+        # (fen, winner_is_white, max_plies, hint, budget, result)
+        ('5rk1/3b4/p4n2/1p3Ppp/1PN1p1PP/3P4/PBr5/R3KB1R b KQ - 0 1', False,
+         7, ['c2e2', 'e1d1', 'e2e1', 'd1c2', 'e4d3'], 84, ('PROVEN', 4)),
+        ('1r2k3/1P6/3p4/p2P2Nq/P1p1p3/B1P1PP2/8/1R4K1 b - - 0 1', False,
+         5, ['h5h1', 'g1f2', 'e4f3'], 4, ('PROVEN', 2)),
+        ('r1bqr2k/pp1pB3/n3p3/4Pp1p/3P4/2P2P2/P2Q4/R3KB1R w KQ - 0 1', True,
+         5, ['d2h6', 'h8g8', 'h6g7'], 4, ('PROVEN', 3)),
+    )
+
+    def test_real_lines_keep_their_verdict_run_and_node_count(self):
+        for fen, white, plies, hint, budget, result in self.REAL_LINES:
+            with self.subTest(fen=fen):
+                logic.clear_caches()
+                self.assertEqual(logic.prove_forced_mate(
+                    fen, white, plies, budget_positions=budget,
+                    hint_pv=hint, return_run=True), result)
+                self.assertEqual(logic.prove_forced_mate(
+                    fen, white, plies, budget_positions=budget - 1,
+                    hint_pv=hint, return_run=True), ('INCONCLUSIVE', None))
+
     def test_is_zeroing_reuses_the_position_apply_move_built(self):
         logic.clear_caches()
         fen = logic.canonical_fen(FORCED_MATE_FEN)
