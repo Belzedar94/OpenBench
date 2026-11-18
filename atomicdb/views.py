@@ -1,6 +1,7 @@
 """API de AtomicDB (worker) + paginas publicas del Explorer."""
 
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -400,12 +401,87 @@ def _auth_pair(username, password):
     # Import local, como en ``_approver_gate``: mantiene a AtomicDB importable
     # sin arrastrar OpenBench.
     from OpenBench.models import Profile
+    key = _auth_cache_key(username, password)
+    user = _auth_cache_hit(key, username)
+    if user is not None:
+        return user
     user = authenticate(username=username, password=password)
     if user is None:
         return None
     if not Profile.objects.filter(user=user, enabled=True).exists():
         return None
+    _auth_cache_store(key, user)
     return user
+
+
+# Every worker call (lease, heartbeat, submit, request) carries the password,
+# and ``authenticate`` runs the full PBKDF2 hash each time: on 18-nov-2026 at
+# ~1400 requests a minute that was 83 % of the web workers' CPU and a load of
+# 30 on 12 threads.  A success is remembered for a few minutes, keyed by a MAC
+# of the pair (the password itself is never stored), and every hit is
+# re-checked against the database in one cheap query: the account must still
+# be active with an enabled profile, and the stored password hash must be the
+# one that was verified.  So a password change or a disabled account takes
+# effect on the very next request, not after the TTL.  Failures are never
+# remembered: they always take the full path.
+AUTH_CACHE_SECONDS = 300
+AUTH_CACHE_PREFIX = 'atomicdb:auth:'
+
+
+def _auth_cache_key(username, password):
+    if not username or not password:
+        return None
+    mac = hmac.new(settings.SECRET_KEY.encode('utf-8'),
+                   (username + '\0' + password).encode('utf-8'),
+                   hashlib.sha256).hexdigest()
+    return AUTH_CACHE_PREFIX + mac
+
+
+def _password_fingerprint(user):
+    # A digest of the stored hash, not the hash: the shared cache never holds
+    # anything a password could be brute-forced from.
+    return hashlib.sha256((user.password or '').encode('utf-8')).hexdigest()
+
+
+def _auth_cache_hit(key, username):
+    if key is None:
+        return None
+    from OpenBench.models import Profile
+    try:
+        entry = cache.get(key)
+    except Exception:                   # noqa: BLE001 - a cache is optional
+        return None
+    if not entry:
+        return None
+    try:
+        user_id, fingerprint = entry
+    except (TypeError, ValueError):
+        user_id, fingerprint = None, None
+    profile = None
+    if user_id is not None:
+        profile = (Profile.objects.select_related('user')
+                   .filter(user_id=user_id, enabled=True,
+                           user__is_active=True)
+                   .first())
+    user = profile.user if profile is not None else None
+    if (user is None or user.username != username
+            or _password_fingerprint(user) != fingerprint):
+        try:
+            cache.delete(key)
+        except Exception:               # noqa: BLE001
+            pass
+        return None
+    return user
+
+
+def _auth_cache_store(key, user):
+    if key is None:
+        return
+    try:
+        cache.set(key, (user.pk, _password_fingerprint(user)),
+                  AUTH_CACHE_SECONDS)
+    except Exception:                   # noqa: BLE001
+        pass
 
 
 # What a worker says about its own threads cannot be checked.  It is shown (the
