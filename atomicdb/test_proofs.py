@@ -79,6 +79,123 @@ class ForcedMateProofTests(SimpleTestCase):
         )
 
 
+class MovegenMemoTests(SimpleTestCase):
+    """The proof asks pyffish each question once (18-nov ingest profile).
+
+    Every pyffish call pays for building the variant's attack tables, so the
+    number of calls IS the cost of a proof.  The memo must change that number
+    and nothing else: same verdict, same reversible run, same nodes counted
+    against the budget.
+    """
+
+    WRAPPED = ('get_fen', 'legal_moves', 'is_immediate_game_end',
+               'game_result')
+
+    def _recorded(self, run):
+        calls = []
+        patches = []
+        for name in self.WRAPPED:
+            real = getattr(logic.pf, name)
+
+            def spy(*args, _name=name, _real=real):
+                calls.append((_name, repr(args)))
+                return _real(*args)
+            patches.append(patch.object(logic.pf, name, side_effect=spy))
+        for p in patches:
+            p.start()
+        try:
+            result = run()
+        finally:
+            for p in patches:
+                p.stop()
+        return result, calls
+
+    def test_no_question_is_asked_twice_in_a_proof(self):
+        logic.clear_caches()
+        # No hint and a spare ply: the search wanders through move orders
+        # that transpose, and still asks every question only once.  The
+        # expected value is what the code before the memo answered.
+        result, calls = self._recorded(lambda: logic.prove_forced_mate(
+            FORCED_MATE_FEN, True, 4, budget_positions=3_000,
+            return_run=True))
+
+        self.assertEqual(result, ('PROVEN', 3))
+        self.assertGreater(len(calls), 0)
+        self.assertEqual(len(calls), len(set(calls)))
+
+    def test_a_warm_proof_asks_nothing_and_answers_the_same(self):
+        logic.clear_caches()
+        cold = logic.prove_forced_mate(
+            FORCED_MATE_FEN, True, 3, budget_positions=3_000,
+            return_run=True)
+
+        warm, calls = self._recorded(lambda: logic.prove_forced_mate(
+            FORCED_MATE_FEN, True, 3, budget_positions=3_000,
+            return_run=True))
+
+        self.assertEqual(warm, cold)
+        self.assertEqual(calls, [])
+
+    def test_the_budget_still_counts_every_visited_node(self):
+        # Warm caches must not make a node free: the exact budget at which
+        # the hinted proof stops fitting is the same cold and warm.
+        for warm in (False, True):
+            if not warm:
+                logic.clear_caches()
+            self.assertEqual(logic.prove_forced_mate(
+                FORCED_MATE_FEN, True, 3, budget_positions=4,
+                hint_pv=FORCED_MATE_PV), 'PROVEN')
+            self.assertEqual(logic.prove_forced_mate(
+                FORCED_MATE_FEN, True, 3, budget_positions=3,
+                hint_pv=FORCED_MATE_PV), 'INCONCLUSIVE')
+
+    # Real mate lines from the production ingest (18-nov), with the result
+    # and the EXACT node budget the code before the memo needed: PROVEN at
+    # that budget and INCONCLUSIVE one node below.  The fixed budget pins the
+    # node count, so a memo that skipped, reordered or double-counted a node
+    # would move the boundary.
+    REAL_LINES = (
+        # (fen, winner_is_white, max_plies, hint, budget, result)
+        ('5rk1/3b4/p4n2/1p3Ppp/1PN1p1PP/3P4/PBr5/R3KB1R b KQ - 0 1', False,
+         7, ['c2e2', 'e1d1', 'e2e1', 'd1c2', 'e4d3'], 84, ('PROVEN', 4)),
+        ('1r2k3/1P6/3p4/p2P2Nq/P1p1p3/B1P1PP2/8/1R4K1 b - - 0 1', False,
+         5, ['h5h1', 'g1f2', 'e4f3'], 4, ('PROVEN', 2)),
+        ('r1bqr2k/pp1pB3/n3p3/4Pp1p/3P4/2P2P2/P2Q4/R3KB1R w KQ - 0 1', True,
+         5, ['d2h6', 'h8g8', 'h6g7'], 4, ('PROVEN', 3)),
+    )
+
+    def test_real_lines_keep_their_verdict_run_and_node_count(self):
+        for fen, white, plies, hint, budget, result in self.REAL_LINES:
+            with self.subTest(fen=fen):
+                logic.clear_caches()
+                self.assertEqual(logic.prove_forced_mate(
+                    fen, white, plies, budget_positions=budget,
+                    hint_pv=hint, return_run=True), result)
+                self.assertEqual(logic.prove_forced_mate(
+                    fen, white, plies, budget_positions=budget - 1,
+                    hint_pv=hint, return_run=True), ('INCONCLUSIVE', None))
+
+    def test_is_zeroing_reuses_the_position_apply_move_built(self):
+        logic.clear_caches()
+        fen = logic.canonical_fen(FORCED_MATE_FEN)
+        logic.apply_move(fen, 'b1g6')
+
+        zeroing, calls = self._recorded(
+            lambda: logic.is_zeroing(fen, 'b1g6'))
+
+        self.assertFalse(zeroing)
+        self.assertEqual(calls, [])
+
+    def test_legal_moves_hands_out_a_fresh_list(self):
+        fen = logic.canonical_fen(FORCED_MATE_FEN)
+        moves = logic.legal_moves(fen)
+        moves.reverse()
+        moves.append('junk')
+
+        self.assertEqual(logic.legal_moves(fen),
+                         list(logic.pf.legal_moves(logic.VARIANT, fen, [])))
+
+
 class VerifyMatesCommandTests(TestCase):
 
     def _mate_position(self, fen=FORCED_MATE_FEN,

@@ -74,6 +74,19 @@ VARIANT = 'atomic'
 # llamada de milisegundos, asi que el ingestor y el solver, que ven posiciones
 # nuevas casi siempre, no pagan nada medible por esto.
 MOVE_CACHE_ENTRIES = 16384
+# The same argument, measured on the ingest (18-nov): with the fleet doubled,
+# 85% of an ingest process was ``prove_forced_mate``, and inside it every
+# second went to asking pyffish the same few questions again — the legal
+# moves and the immediate-end flag of a node reached by another move order,
+# the terminal verdict of a leaf already scored, and ``is_zeroing`` replaying
+# the very ``get_fen`` that ``apply_move`` had just paid for.  All of them are
+# pure functions of their string arguments (same reasoning as above), so they
+# are remembered too.  This is NOT a transposition table: no search RESULT is
+# ever reused, the proof visits exactly the same nodes in exactly the same
+# order and counts them against the budget exactly as before — only the
+# movegen stops being asked twice.  A position entry (a tuple of ~30 short
+# strings) is a couple of KB, so 32768 of them are ~60 MB per process.
+POSITION_CACHE_ENTRIES = 32768
 
 # Identidad congelada del enunciado que se prueba.  Cambiarla es cambiar el
 # teorema, no un detalle de implementacion: todo cierre decisivo que exista
@@ -172,13 +185,41 @@ def start_fen():
 
 # ---------- reglas (movegen del ingestor) ----------
 
+@lru_cache(maxsize=POSITION_CACHE_ENTRIES)
+def _legal_moves(fen):
+    return tuple(pf.legal_moves(VARIANT, fen, []))
+
+
+@lru_cache(maxsize=POSITION_CACHE_ENTRIES)
+def _immediate_end(fen):
+    immediate, _ = pf.is_immediate_game_end(VARIANT, fen, [])
+    return bool(immediate)
+
+
+@lru_cache(maxsize=POSITION_CACHE_ENTRIES)
+def _game_result(fen):
+    return pf.game_result(VARIANT, fen, [])
+
+
 def legal_moves(fen):
-    return pf.legal_moves(VARIANT, fen, [])
+    # A fresh list every time: callers reorder it (the hint in
+    # ``prove_forced_mate``), and the remembered answer must not move.
+    return list(_legal_moves(fen))
+
+
+@lru_cache(maxsize=4 * MOVE_CACHE_ENTRIES)
+def _fen_after(fen, uci):
+    """The movegen's FEN after one move, counters included.
+
+    ``apply_move`` keeps the position and ``is_zeroing`` keeps the counter;
+    both used to ask this same question separately.
+    """
+    return pf.get_fen(VARIANT, fen, [uci])
 
 
 @lru_cache(maxsize=MOVE_CACHE_ENTRIES)
 def apply_move(fen, uci):
-    return canonical_fen(pf.get_fen(VARIANT, fen, [uci]))
+    return canonical_fen(_fen_after(fen, uci))
 
 
 def is_zeroing(fen, uci):
@@ -190,19 +231,26 @@ def is_zeroing(fen, uci):
     contar piezas seria una segunda implementacion de la regla con sus propios
     bordes; esto no lo es.
     """
-    parts = pf.get_fen(VARIANT, canonical_fen(fen), [uci]).split()
+    parts = _fen_after(canonical_fen(fen), uci).split()
     return len(parts) > 4 and parts[4] == '0'
+
+
+def clear_caches():
+    """Forget every remembered movegen answer, as a restarted process would."""
+    for remembered in (_legal_moves, _immediate_end, _game_result,
+                       _fen_after, apply_move, _en_passant_right_exists):
+        remembered.cache_clear()
 
 
 def terminal_status(fen):
     """Si la posicion es terminal, devuelve (status, razon); si no, None.
     status en {'WHITE_WIN','BLACK_WIN','DRAW'}."""
-    immediate, _ = pf.is_immediate_game_end(VARIANT, fen, [])
-    moves = legal_moves(fen)
-    if not immediate and moves:
+    # A position with no legal move is terminal whatever the immediate-end
+    # flag says, so the flag is only asked when there are moves.
+    if _legal_moves(fen) and not _immediate_end(fen):
         return None
     # game_result: valor desde la perspectiva del que mueve
-    res = pf.game_result(VARIANT, fen, [])
+    res = _game_result(fen)
     stm_white = fen.split()[1] == 'w'
     if res > 0:
         return ('WHITE_WIN' if stm_white else 'BLACK_WIN', 'terminal')
@@ -425,12 +473,13 @@ def prove_forced_mate(fen, winner_is_white, max_plies,
             raise _BudgetExhausted
         visited += 1
 
-        # Generate the legal set once on non-terminal nodes.  Calling
-        # terminal_status() unconditionally would make pyffish generate it a
-        # second time, which is material at the 200k-position ceiling.
-        immediate, _ = pf.is_immediate_game_end(VARIANT, node_fen, [])
-        moves = list(legal_moves(node_fen))
-        if immediate or not moves:
+        # The same questions terminal_status() asks, in the same order, so
+        # on a terminal node it answers them from memory and pays only for
+        # game_result.  With no legal move the node is terminal whatever the
+        # immediate-end flag says, so the flag is only asked when there are
+        # moves.
+        moves = legal_moves(node_fen)
+        if not moves or _immediate_end(node_fen):
             terminal = terminal_status(node_fen)
             won = terminal is not None and terminal[0] == winner_status
             return won, run
