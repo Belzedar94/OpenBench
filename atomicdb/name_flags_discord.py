@@ -93,13 +93,14 @@ def line_of(key):
 
 def answers_for(flag_row, catalogue, community):
     """The poll's options: Keep, then Restore and Remove where they mean
-    something, then Rename."""
+    something, then Hide and Rename."""
     options = ['Keep']
     if community and catalogue and catalogue != flag_row.name:
         options.append(_clip(f'Restore catalogue name: {catalogue}',
                              ANSWER_MAX))
     if community:
         options.append('Remove')
+    options.append('No name for this position')
     options.append('Rename (propose in the thread)')
     return options
 

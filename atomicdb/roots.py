@@ -680,10 +680,15 @@ def _opening_rows(records, sort):
     """Every named position on the watch list, by the name the explorer
     shows: the catalogue's, or the community's where one is in force."""
     names = community_names.approved_map()
+    # A hidden name is no name, and its position leaves the list
+    # (§ community_names).
+    hidden = community_names.hidden_keys()
     rows = []
     catalogued = set()
     for watched in named_openings():
         catalogued.add(watched.key)
+        if watched.key in hidden:
+            continue
         entry = community_names.in_force(watched.key, names=names)
         rows.append(_row(watched, records.get(watched.key),
                          label=entry['name'] if entry else None,
@@ -692,7 +697,7 @@ def _opening_rows(records, sort):
     # community name keeps its row even if that name is withdrawn later: its
     # history stays where it is, under a plain label.
     for key, record in records.items():
-        if key in catalogued:
+        if key in catalogued or key in hidden:
             continue
         entry = community_names.in_force(key, names=names)
         if entry is None and record['source'] != WatchedKey.Source.COMMUNITY:

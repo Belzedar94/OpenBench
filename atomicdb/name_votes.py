@@ -19,11 +19,12 @@ without sending a cookie back (the only ones nothing else groups).
 """
 
 import logging
+import re
 from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError
-from django.db.models import Count
+from django.db.models import Count, F
 from django.utils import timezone
 
 from . import community_names, openings
@@ -85,7 +86,7 @@ def current_name(key, names=None):
     if entry is not None:
         return entry['name'], entry
     try:
-        match = openings.lookup_key(key)
+        match = openings.lookup_key(key, community_names.hidden_keys())
     except openings.OpeningCatalogError:
         logger.exception('opening catalogue unavailable')
         return None, None
@@ -295,10 +296,12 @@ def current_names():
     """``{key: name}`` of every position that shows a name of its own: the
     catalogue's, or the community's where one is in force."""
     names = community_names.approved_map()
+    hidden = community_names.hidden_keys()
     current = {}
     try:
         for key, opening in openings.load_catalog().items():
-            current[key] = opening.name
+            if key not in hidden:
+                current[key] = opening.name
     except openings.OpeningCatalogError:
         logger.exception('opening catalogue unavailable')
     for key in names:
@@ -328,18 +331,26 @@ def resolve_suggestion(row, decision, username):
 
     The catalogue may have named the position while a NEW name waited, and a
     NEW name never covers it: the approval becomes a rejection, as always.
-    An EDIT or a REMOVE was born against the name shown, so it is not
+    Except where the catalogue name is HIDDEN (§ community_names): there the
+    position shows no name, the NEW was proposed for exactly that, and its
+    approval becomes an EDIT, the kind that does replace the catalogue.  An
+    EDIT, a REMOVE or a HIDE was born against the name shown, so it is not
     affected.
     """
     from .models import OpeningNameSuggestion
+    fields = ['status', 'resolved_by', 'resolved_at']
     if (decision == OpeningNameSuggestion.SState.APPROVED
             and row.kind == OpeningNameSuggestion.SKind.NEW
             and openings.lookup_key(row.position_id) is not None):
-        decision = OpeningNameSuggestion.SState.REJECTED
+        if community_names.is_hidden(row.position_id):
+            row.kind = OpeningNameSuggestion.SKind.EDIT
+            fields.append('kind')
+        else:
+            decision = OpeningNameSuggestion.SState.REJECTED
     row.status = decision
     row.resolved_by = (username or '')[:64]
     row.resolved_at = timezone.now()
-    row.save(update_fields=['status', 'resolved_by', 'resolved_at'])
+    row.save(update_fields=fields)
     return decision
 
 
@@ -352,7 +363,7 @@ def invalidate_names():
 
 REVIEW_COMMENT = 'Opening-name review'
 OUTCOMES = {'keep': 'kept', 'restore': 'restored', 'remove': 'removed',
-            'rename': 'renamed'}
+            'rename': 'renamed', 'hide': 'hidden'}
 
 
 def apply_flag(flag_id, action, *, approver, ip, new_name=''):
@@ -362,7 +373,9 @@ def apply_flag(flag_id, action, *, approver, ip, new_name=''):
     (already resolved).
 
     ``restore`` and ``remove`` exist only where a community name is in force;
-    ``rename`` needs a valid name and a position in the tree.  Each change
+    ``rename`` needs a valid name and a position in the tree; ``hide``
+    applies to any name, catalogue or community, and leaves the position
+    unnamed (§ community_names).  Each change
     is a new ``OpeningNameSuggestion`` approved at once through
     ``resolve_suggestion``, the queue's own path, with the approver as
     ``resolved_by``.  A restored or removed name is credited to nobody (the
@@ -374,7 +387,8 @@ def apply_flag(flag_id, action, *, approver, ip, new_name=''):
     kinds = {'keep': OpeningNameFlag.Resolution.KEEP,
              'restore': OpeningNameFlag.Resolution.RESTORE,
              'remove': OpeningNameFlag.Resolution.REMOVE,
-             'rename': OpeningNameFlag.Resolution.RENAME}
+             'rename': OpeningNameFlag.Resolution.RENAME,
+             'hide': OpeningNameFlag.Resolution.HIDE}
     if action not in kinds:
         return 'invalid'
     with atomic():
@@ -399,6 +413,9 @@ def apply_flag(flag_id, action, *, approver, ip, new_name=''):
             if entry is None:
                 return 'invalid'
             change = dict(kind=OpeningNameSuggestion.SKind.REMOVE,
+                          proposed_name='', suggested_by='')
+        elif action == 'hide':
+            change = dict(kind=OpeningNameSuggestion.SKind.HIDE,
                           proposed_name='', suggested_by='')
         elif action == 'rename':
             if (len(new_name) < views.SUGGESTION_NAME_MIN_CHARS
@@ -425,3 +442,94 @@ def apply_flag(flag_id, action, *, approver, ip, new_name=''):
                                      'resolved_at'])
     invalidate_names()
     return OUTCOMES[action]
+
+
+# ---- hidden names -----------------------------------------------------------
+
+HIDE_COMMENT = 'Hidden by an approver'
+SHOW_COMMENT = 'Shown again by an approver'
+_KEY_RE = re.compile(r'(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])')
+
+
+def position_key_in(text):
+    """The position key in what an approver pasted: a bare key or an
+    explorer link.  ``''`` when there is none."""
+    match = _KEY_RE.search((text or '').strip().lower())
+    return match.group(0) if match else ''
+
+
+def hide_position(key, *, approver, ip, comment=''):
+    """An approver hides the name a position shows, from the moderation
+    page.  Returns ``hidden``, ``unnamed`` (it shows no name of its own) or
+    ``invalid`` (no such position).
+
+    A new HIDE suggestion approved at once through ``resolve_suggestion``,
+    the queue's own path, like the review actions.  Any open review flag of
+    the name hidden is closed with it.
+    """
+    from .models import OpeningNameSuggestion, Position
+    with atomic():
+        position = Position.objects.filter(key=key).first()
+        if position is None:
+            return 'invalid'
+        name, _entry = current_name(key)
+        if name is None:
+            return 'unnamed'
+        row = OpeningNameSuggestion.objects.create(
+            position=position, kind=OpeningNameSuggestion.SKind.HIDE,
+            proposed_name='', previous_name=name[:60], suggested_by='',
+            ip=ip or '0.0.0.0',
+            comment=(comment or HIDE_COMMENT)[:280])
+        resolve_suggestion(row, OpeningNameSuggestion.SState.APPROVED,
+                           approver)
+        _close_flags(key, OpeningNameFlag.Resolution.HIDE, approver)
+    invalidate_names()
+    return 'hidden'
+
+
+def show_position(key, *, approver, ip):
+    """Lift a hide.  Returns ``shown``, ``not-hidden`` or ``invalid``.
+
+    The position gets back the name it showed when it was hidden: a REMOVE
+    when that was the catalogue's name (or none), so the catalogue answers
+    again; else an EDIT with that name, credited to whoever proposed it.
+    """
+    from .models import OpeningNameSuggestion, Position
+    with atomic():
+        position = Position.objects.filter(key=key).first()
+        if position is None:
+            return 'invalid'
+        if not community_names.is_hidden(key):
+            return 'not-hidden'
+        approved = (OpeningNameSuggestion.objects
+                    .filter(position_id=key,
+                            status=OpeningNameSuggestion.SState.APPROVED)
+                    .order_by(F('resolved_at').desc(nulls_last=True), '-id'))
+        hide = approved.filter(kind=OpeningNameSuggestion.SKind.HIDE).first()
+        previous = hide.previous_name if hide is not None else ''
+        catalogue = community_names.catalog_name(key) or ''
+        if not previous or previous == catalogue:
+            change = dict(kind=OpeningNameSuggestion.SKind.REMOVE,
+                          proposed_name='', suggested_by='')
+        else:
+            origin = (approved.exclude(kind=OpeningNameSuggestion.SKind.HIDE)
+                      .filter(proposed_name=previous).first())
+            change = dict(kind=OpeningNameSuggestion.SKind.EDIT,
+                          proposed_name=previous,
+                          suggested_by=(origin.suggested_by
+                                        if origin is not None else ''))
+        row = OpeningNameSuggestion.objects.create(
+            position=position, previous_name='', ip=ip or '0.0.0.0',
+            comment=SHOW_COMMENT, **change)
+        resolve_suggestion(row, OpeningNameSuggestion.SState.APPROVED,
+                           approver)
+    invalidate_names()
+    return 'shown'
+
+
+def _close_flags(key, resolution, approver):
+    now = timezone.now()
+    OpeningNameFlag.objects.filter(
+        position_key=key, resolved_at__isnull=True).update(
+            resolution=resolution, resolved_by=(approver or '')[:64],
+            resolved_at=now)

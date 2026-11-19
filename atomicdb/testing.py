@@ -29,9 +29,12 @@ class _IsolatedViewCache:
     """
 
     def _pre_setup(self):
-        from . import autosolve, idle_repair, ingest
+        from . import autosolve, community_names, idle_repair, ingest
 
         cache.clear()
+        # The hidden opening names are memoised in the process on top of the
+        # cache (§ community_names.hidden_keys).
+        community_names.reset_hidden_memo()
         ingest.reset_selector_delta_state()
         # Where the idle fleet's backlog walk stands lives in the process
         # too (§ idle_repair), and the same rule holds for it, and for the

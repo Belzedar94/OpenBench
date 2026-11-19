@@ -1115,8 +1115,12 @@ def _select_visible(snapshot, root_key, weight, limit, relative_depth):
 
 
 def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
-               relative_depth=DEFAULT_DEPTH):
-    """Expand a bounded hierarchical API document from one flat snapshot."""
+               relative_depth=DEFAULT_DEPTH, hidden=frozenset()):
+    """Expand a bounded hierarchical API document from one flat snapshot.
+
+    ``hidden`` are positions whose name an approver hid
+    (§ ``community_names.hidden_keys``): they read as unnamed.
+    """
     nodes = snapshot['nodes']
     if root_key not in nodes:
         raise KeyError(root_key)
@@ -1131,6 +1135,9 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
     metadata = snapshot['snapshot']
     start_key = metadata['start_key']
     lineage_keys = [start_key] + root_lineage
+
+    def lookup(key):
+        return None if key in hidden else openings.lookup_key(key)
 
     def compact_opening(exact_match, *, exact=True, matched_ply=None):
         if exact_match is None:
@@ -1199,7 +1206,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
         current = None
         final_key = lineage[-1] if lineage else None
         for lineage_key in lineage:
-            exact_match = openings.lookup_key(lineage_key)
+            exact_match = lookup(lineage_key)
             if exact_match is not None:
                 current = compact_opening(
                     exact_match,
@@ -1221,7 +1228,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
         node = nodes[key]
         children = visible_children.get(key, ())
         all_children = node['k']
-        exact_match = openings.lookup_key(key)
+        exact_match = lookup(key)
         current_opening = (
             compact_opening(
                 exact_match, exact=True, matched_ply=node['d'])
@@ -1351,7 +1358,7 @@ def render_map(snapshot, root_key, weight='frontier', limit=DEFAULT_MARKS,
             compact_summary(
                 key,
                 compact_opening(
-                    openings.lookup_key(key),
+                    lookup(key),
                     exact=True,
                     matched_ply=nodes[key]['d'],
                 ),
@@ -1483,10 +1490,22 @@ def _unavailable():
     return response
 
 
+def _hidden_names():
+    """Hidden opening names, or none if they cannot be read: the map is
+    rendered off the request path too, and a name never takes it down."""
+    try:
+        from . import community_names
+        return community_names.hidden_keys()
+    except Exception:
+        logger.exception('hidden opening names unavailable')
+        return frozenset()
+
+
 def _render_raw(snapshot, root_key, weight, limit, depth):
     """Canonical JSON of one view, or ``None`` when it cannot be served."""
     try:
-        document = render_map(snapshot, root_key, weight, limit, depth)
+        document = render_map(snapshot, root_key, weight, limit, depth,
+                              hidden=_hidden_names())
         raw = _canonical_json(document)
     except (KeyError, SnapshotError, RecursionError, ValueError):
         logger.exception('Atomic move-tree snapshot cannot be rendered')
