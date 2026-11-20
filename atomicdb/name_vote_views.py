@@ -12,6 +12,8 @@
 * ``POST /atomicdb/suggestions/hide/`` -- an approver hides the name of any
   position, or shows a hidden one again (``name_votes.hide_position``,
   ``show_position``).  The same approval path.
+* ``POST /atomicdb/suggestions/line/`` -- an approver declares the move
+  order of a named position, or clears it (``name_votes.declare_line``).
 """
 
 from urllib.parse import urlencode
@@ -19,7 +21,7 @@ from urllib.parse import urlencode
 from django.http import JsonResponse
 from django.shortcuts import redirect
 
-from . import community_names, name_votes, views
+from . import community_names, name_votes, opening_routes, views
 
 ROOTS_URL = '/atomicdb/roots/'
 FLAGS_SHOWN = 100
@@ -111,6 +113,7 @@ def flags_context():
     counts = name_votes.tallies({key: name for key, (name, _entry)
                                  in current.items() if name})
     labels = views._line_labels_many([row.position_key for row in rows])
+    declared = opening_routes.routes()
     items = []
     for row in rows:
         name, entry = current[row.position_key]
@@ -129,6 +132,7 @@ def flags_context():
             'can_remove': entry is not None,
             'can_hide': name is not None,
             'poll_url': name_votes.poll_url(row),
+            'url': opening_routes.name_url(row.position_key, declared),
         })
     # Most decided first: the widest margin of thumbs down.
     items.sort(key=lambda item: (-(item['down'] - item['up']),
@@ -206,3 +210,38 @@ def hide_action(request):
             key, approver=request.user.username,
             ip=views._client_ip(request))
     return redirect(f'/atomicdb/suggestions/?hide={outcome}#hidden')
+
+
+ROUTES_SHOWN = 200
+
+
+def routes_context():
+    """The "Move orders" section of the moderation page: every declared
+    line, newest first, with the name it opens."""
+    from .models import OpeningRoute
+    rows = list(OpeningRoute.objects.order_by('-set_at')[:ROUTES_SHOWN])
+    names = community_names.approved_map()
+    items = []
+    for row in rows:
+        name, _entry = name_votes.current_name(row.position_key, names=names)
+        items.append({'key': row.position_key, 'name': name or '',
+                      'line_san': row.line_san or row.line,
+                      'url': opening_routes.explore_url(
+                          row.position_key, row.line.split(',')),
+                      'by': row.set_by, 'at': row.set_at})
+    return {'routes': items, 'routes_total': OpeningRoute.objects.count()}
+
+
+def line_action(request):
+    """An approver declares the move order of a named position, or clears
+    it, from the moderation page (§ ``opening_routes``)."""
+    denied = views._approver_gate(request)
+    if denied is not None:
+        return denied
+    if request.method != 'POST':
+        return redirect('/atomicdb/suggestions/#lines')
+    outcome = name_votes.declare_line(
+        request.POST.get('position'), request.POST.get('line'),
+        clear=request.POST.get('action') == 'clear',
+        approver=request.user.username)
+    return redirect(f'/atomicdb/suggestions/?line={outcome}#lines')

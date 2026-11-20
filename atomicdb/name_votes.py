@@ -351,7 +351,24 @@ def resolve_suggestion(row, decision, username):
     row.resolved_by = (username or '')[:64]
     row.resolved_at = timezone.now()
     row.save(update_fields=fields)
+    if (decision == OpeningNameSuggestion.SState.APPROVED and row.line
+            and row.kind in (OpeningNameSuggestion.SKind.NEW,
+                             OpeningNameSuggestion.SKind.EDIT)):
+        _declare_line(row, username)
     return decision
+
+
+def _declare_line(row, username):
+    """The line an approved name carried becomes the position's declared
+    line (§ ``opening_routes``).  It was replayed when it was proposed; if
+    it no longer replays, the name stands without it."""
+    from . import opening_routes
+    try:
+        opening_routes.set_route(row.position_id, row.line.split(','),
+                                 by=username)
+    except opening_routes.LineError:
+        logger.warning('suggestion %s: its line no longer reaches %s',
+                       row.id, row.position_id)
 
 
 def invalidate_names():
@@ -525,6 +542,42 @@ def show_position(key, *, approver, ip):
                            approver)
     invalidate_names()
     return 'shown'
+
+
+# ---- declared move orders ---------------------------------------------------
+
+def declare_line(position, raw_line, *, clear=False, approver):
+    """An approver sets or clears the declared line of a named position
+    (§ ``opening_routes``).  Returns ``set``, ``cleared``, ``unchanged``,
+    ``invalid`` (the line does not read or replay), ``elsewhere`` (it does
+    not end on the position given), ``unnamed`` (it ends on a position with
+    no name of its own) or ``missing`` (nothing to clear, or no position).
+
+    ``position`` is a key or an explorer link, and may be left empty when
+    setting: the line's last position is then the one named.  The line is
+    SAN or UCI from the start position (``opening_routes.parse``).
+    """
+    from . import opening_routes
+    key = position_key_in(position)
+    if clear:
+        if not key:
+            return 'missing'
+        result = opening_routes.set_route(key, [], by=approver)
+        return 'missing' if result == 'unchanged' else result
+    try:
+        ucis = opening_routes.parse(raw_line)
+        if not ucis:
+            return 'invalid'
+        _fens, keys = opening_routes.validate(ucis)
+    except opening_routes.LineError:
+        return 'invalid'
+    if key and keys[-1] != key:
+        return 'elsewhere'
+    key = keys[-1]
+    name, _entry = current_name(key)
+    if name is None:
+        return 'unnamed'
+    return opening_routes.set_route(key, ucis, by=approver)
 
 
 def _close_flags(key, resolution, approver):

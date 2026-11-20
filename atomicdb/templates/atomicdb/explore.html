@@ -88,6 +88,9 @@ most eight (§ views.explore).{% endcomment %}
     <label>Reference or comment <span class="dim">({% if suggest_current_name %}required for an empty name{% else %}optional{% endif %})</span>
       <input name="comment" maxlength="{{ suggest_comment_max }}"
         placeholder="{% if suggest_current_name %}where the name comes from, or why it should go{% else %}where the name comes from{% endif %}" autocomplete="off"></label>
+    <label>Move order <span class="dim">(optional: the moves from the start position, SAN or UCI)</span>
+      <input name="line" maxlength="2000" placeholder="e.g. 1. Nf3 f6 2. Nc3"
+        spellcheck="false" autocomplete="off"></label>
     <button class="reqbtn">Send for review</button>
     <span class="dim">Public, no account. An approver reviews it before it
       shows up.</span>

@@ -8,7 +8,8 @@
   (<strong>EDIT</strong>, written as <em>current &rarr; proposed</em>), or ask
   for a position to have no name (<strong>HIDE NAME</strong>, with their
   reason). Approving one publishes it on that position as a community name,
-  or hides the name it shows.</p>
+  or hides the name it shows. A NEW or an EDIT may carry a move order, and
+  approving it makes that the line links to the name take.</p>
 
 <h2 id="review">Names under review <span class="dim">({{ flags_total }})</span></h2>
 <p class="dim">Names with at least {{ flag_min_votes }} votes on the
@@ -25,7 +26,7 @@
   <tr>
     <td><strong>{{ item.flag.name }}</strong>
       <div class="dim contrib-spec">{% if item.community %}community name · named by {{ item.flag.named_by|default:"anonymous" }}{% else %}catalogue name{% endif %}{% if item.catalogue and item.catalogue != item.flag.name %} · catalogue: {{ item.catalogue }}{% endif %}</div></td>
-    <td><a class="qline" href="/atomicdb/explore/{{ item.flag.position_key }}/"
+    <td><a class="qline" href="{{ item.url }}"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td class="n">&#128077; {{ item.up }} / &#128078; {{ item.down }}
       <div class="dim contrib-spec">flagged {{ item.flag.flagged_at|date:"M d H:i" }}</div></td>
@@ -82,6 +83,39 @@
 </div>
 {% endif %}
 
+<h2 id="lines">Move orders <span class="dim">({{ routes_total }})</span></h2>
+<p class="dim">The line every link to a name opens the position by, instead
+  of whatever order the tree reached it first. Without one, a catalogue name
+  takes its catalogue line. Give the moves from the start position in SAN or
+  UCI; the position can be left empty, and the line's last position is the
+  one named. Every position along the line is added to the tree.</p>
+{% if line_outcome %}<p class="campaign-status" role="status">{% if line_outcome == 'set' %}Saved: links to that name now take this line.{% elif line_outcome == 'cleared' %}Cleared: links to that name take their default line again.{% elif line_outcome == 'unchanged' %}That is already the line of that name.{% elif line_outcome == 'elsewhere' %}That line does not end on that position.{% elif line_outcome == 'unnamed' %}That line ends on a position with no name of its own.{% elif line_outcome == 'missing' %}That position has no line to clear.{% else %}That line could not be read as legal moves from the start position, without repeating a position.{% endif %}</p>{% endif %}
+<form method="post" action="/atomicdb/suggestions/line/" class="review-actions">{% csrf_token %}
+  <input type="text" name="position" placeholder="Position key or explorer link (optional)" aria-label="Position key or explorer link">
+  <input type="text" name="line" maxlength="2000" placeholder="1. Nf3 f6 2. Nc3 c6 or g1f3,f7f6,..." aria-label="Move order" required>
+  <button class="reqbtn" name="action" value="set">Set line</button>
+</form>
+{% if routes %}
+<div class="contrib-scroll">
+<table>
+  <tr><th>Name</th><th>Line</th><th>By</th><th></th></tr>
+  {% for item in routes %}
+  <tr>
+    <td><strong>{{ item.name|default:"(no name)" }}</strong></td>
+    <td><a class="qline" href="{{ item.url }}">{{ item.line_san }}</a></td>
+    <td class="dim">{{ item.by }}{% if item.at %} · {{ item.at|date:"M d H:i" }}{% endif %}</td>
+    <td>
+      <form method="post" action="/atomicdb/suggestions/line/" class="review-actions">{% csrf_token %}
+        <input type="hidden" name="position" value="{{ item.key }}">
+        <button class="reqbtn ghost" name="action" value="clear">Clear</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+
 <h2>Pending <span class="dim">({{ pending_total }})</span></h2>
 {% if pending %}
 <table>
@@ -89,7 +123,7 @@
     <th>From</th><th></th></tr>
   {% for item in pending %}
   <tr>
-    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; <strong>'{{ item.row.proposed_name }}'</strong>{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> <strong>'{{ item.row.previous_name }}'</strong> &rarr; no name{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% else %}<span class="dim">NEW:</span> <strong>{{ item.row.proposed_name }}</strong>{% endif %}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name }}' &rarr; <strong>'{{ item.row.proposed_name }}'</strong>{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> <strong>'{{ item.row.previous_name }}'</strong> &rarr; no name{% if item.drifted %}<br><span class="dim">now reads '{{ item.drifted }}'</span>{% endif %}{% else %}<span class="dim">NEW:</span> <strong>{{ item.row.proposed_name }}</strong>{% endif %}{% if item.line_san %}<div class="dim contrib-spec">move order: {{ item.line_san }}</div>{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td class="dim">{{ item.row.comment }}</td>
@@ -114,7 +148,7 @@
   <tr><th>Name</th><th>Position</th><th>State</th><th>By</th></tr>
   {% for item in history %}
   <tr>
-    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name|default:"(no name)" }}' &rarr; '{{ item.row.proposed_name }}'{% elif item.row.kind == 'DEL' %}{% if item.row.previous_name %}<span class="dim">REMOVE:</span> '{{ item.row.previous_name }}'{% else %}<span class="dim">SHOW NAME AGAIN</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> '{{ item.row.previous_name }}'{% if item.row.comment %}<div class="dim contrib-spec">{{ item.row.comment }}</div>{% endif %}{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}</td>
+    <td>{% if item.row.kind == 'EDIT' %}<span class="dim">EDIT:</span> '{{ item.row.previous_name|default:"(no name)" }}' &rarr; '{{ item.row.proposed_name }}'{% elif item.row.kind == 'DEL' %}{% if item.row.previous_name %}<span class="dim">REMOVE:</span> '{{ item.row.previous_name }}'{% else %}<span class="dim">SHOW NAME AGAIN</span>{% endif %}{% elif item.row.kind == 'HIDE' %}<span class="dim">HIDE NAME:</span> '{{ item.row.previous_name }}'{% if item.row.comment %}<div class="dim contrib-spec">{{ item.row.comment }}</div>{% endif %}{% else %}<span class="dim">NEW:</span> {{ item.row.proposed_name }}{% endif %}{% if item.line_san %}<div class="dim contrib-spec">move order: {{ item.line_san }}</div>{% endif %}</td>
     <td><a class="qline" href="/atomicdb/explore/{{ item.row.position_id }}/"
         title="{{ item.full }}">{{ item.san }}</a></td>
     <td>{% if item.row.status == 'APPROVED' %}<span class="chip won"></span>approved

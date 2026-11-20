@@ -1244,6 +1244,12 @@ class OpeningNameSuggestion(models.Model):
                                      default=SState.PENDING, db_index=True)
     resolved_by   = models.CharField(max_length=64, blank=True, default='')
     resolved_at   = models.DateTimeField(null=True)
+    # The move order the proposer says the name is played by: UCI from the
+    # start position, comma-separated, replayed at submission to end exactly
+    # on ``position`` (§ opening_routes).  Optional, and only on a NEW or an
+    # EDIT.  Approving the suggestion makes it the position's
+    # ``OpeningRoute``, the line every link to the name takes.
+    line          = models.CharField(max_length=384, blank=True, default='')
 
     class Meta:
         indexes = [models.Index(fields=['status', 'created'],
@@ -1258,6 +1264,36 @@ class OpeningNameSuggestion(models.Model):
             return (f'{self.previous_name} -> {self.proposed_name} '
                     f'({self.status})')
         return f'{self.proposed_name} ({self.status})'
+
+
+class OpeningRoute(models.Model):
+    """The declared move order of a named position (cz_eclipsia and MoKy,
+    20-Nov-2026: "make them real instead of canonical").
+
+    Positions are a DAG, so a link to a named position without a route opens
+    it on its canonical lineage, often a move order nobody plays.  This row
+    is the line the links take instead (``?play=``), for a catalogue name or
+    a community one alike.  One row per position; no row means the default
+    (§ ``opening_routes.route_for``).
+
+    Written only by an approver: directly from the moderation page, or by
+    approving a suggestion that carried a line.  ``line`` is replayed from
+    the start position when it is written and must end exactly on
+    ``position_key``; every position along it is materialised then, as a
+    click through the line would, so the ``?play=`` link always opens.  A
+    key and not a FK, like ``OpeningNameFlag``: the row is a label on a
+    position, and a key that stops matching only stops being used.
+    """
+    position_key = models.CharField(max_length=64, primary_key=True)
+    line         = models.CharField(max_length=384)
+    # The same line in numbered SAN, written with it, so a page listing
+    # names does not replay every line to print it.
+    line_san     = models.CharField(max_length=1024, blank=True, default='')
+    set_by       = models.CharField(max_length=64, blank=True, default='')
+    set_at       = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f'{self.position_key[:12]}: {self.line_san or self.line}'
 
 
 class WorkerPing(models.Model):
