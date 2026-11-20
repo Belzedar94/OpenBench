@@ -25,7 +25,7 @@ import urllib.request
 from django.conf import settings
 from django.utils import timezone
 
-from . import community_names, name_votes, openings
+from . import community_names, name_votes, opening_routes, openings
 from .models import OpeningNameFlag
 
 logger = logging.getLogger(__name__)
@@ -78,8 +78,13 @@ def _clip(text, limit):
 
 
 def line_of(key):
-    """The SAN line of a position: the catalogue's reference line, else the
-    tree's breadcrumb."""
+    """The SAN line of a position: its declared line, else the catalogue's
+    reference line, else the tree's breadcrumb."""
+    declared = opening_routes.routes().get(key)
+    if declared:
+        text = opening_routes.san_text(declared)
+        if text:
+            return text
     try:
         opening = openings.load_catalog().get(key)
     except openings.OpeningCatalogError:
@@ -121,7 +126,7 @@ def payload(flag_row, line=None):
             origin += f' Catalogue name: {catalogue}.'
     else:
         origin = 'Catalogue name.'
-    url = f'{site()}/atomicdb/explore/{key}/'
+    url = site() + opening_routes.name_url(key)
     content = '\n'.join([
         f'**{flag_row.name}** is under review: '
         f'\U0001F44D {up} / \U0001F44E {down} on the Openings page.',

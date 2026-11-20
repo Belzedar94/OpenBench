@@ -28,7 +28,8 @@ from django.db.models.functions import Coalesce, RowNumber
 
 from . import (community_names, contributors, depth, engine_policy, ingest,
                ingest_queue, lanes, live_request, logic, metrics,
-               name_votes, notifications, openings, preferences, proof,
+               name_votes, notifications, opening_routes, openings,
+               preferences, proof,
                revalidate, solve, solve_estimate)
 from .database import atomic
 from .metrics import worker_metrics
@@ -6504,10 +6505,30 @@ def _opening_jump(request, raw):
         key, fen = found[0][:2]
         if fen and not Position.objects.filter(key=key).exists():
             ingest.get_or_create_position(fen)
-        return redirect(f'/atomicdb/explore/{key}/')
+        return redirect(_opening_result_urls([key])[key])
+    shown = found[:OPENING_RESULTS_MAX]
+    urls = _opening_result_urls([row[0] for row in shown])
+    declared = opening_routes.routes()
+    results = []
+    for key, fen, name, also, line in shown:
+        if not line and key in declared:
+            line = opening_routes.san_text(declared[key])
+        results.append((key, fen, name, also, line, urls[key]))
     return render(request, 'atomicdb/opening_search.html', {
-        'query': raw, 'results': found[:OPENING_RESULTS_MAX],
+        'query': raw, 'results': results,
         'more': max(0, len(found) - OPENING_RESULTS_MAX)})
+
+
+def _opening_result_urls(keys):
+    """``{key: url}`` of named positions: each through its declared line, or
+    its catalogue line (§ opening_routes), where the explorer can open that
+    line as it is; else the bare position, as before."""
+    declared = opening_routes.routes()
+    lines = {key: opening_routes.route_for(
+        key, opening_routes.catalogue_line(key), declared) for key in keys}
+    openable = opening_routes.openable(lines.items())
+    return {key: opening_routes.explore_url(key, openable.get(key))
+            for key in keys}
 
 
 def fen_jump(request):
@@ -6730,6 +6751,9 @@ SUGGESTION_MESSAGES = {
                'queued for review.',
     'hide-why': 'To leave this position unnamed, say why in the comment.',
     'hide-unnamed': 'This position has no name of its own to hide.',
+    'line-invalid': 'The line has to be the moves from the start position '
+                    'to this one, in SAN or UCI, without repeating a '
+                    'position.',
 }
 
 
@@ -6808,6 +6832,18 @@ def suggest_opening_name(request, key):
         kind = (OpeningNameSuggestion.SKind.NEW if current is None
                 else OpeningNameSuggestion.SKind.EDIT)
         ok = 'ok'
+    # The move order the name is played by, optional and only with a name:
+    # replayed here, so the queue only ever holds lines that end on this
+    # position (§ opening_routes).
+    line = ''
+    if kind != OpeningNameSuggestion.SKind.HIDE:
+        try:
+            ucis = opening_routes.parse(request.POST.get('line'))
+            if ucis:
+                opening_routes.validate(ucis, pos.key)
+                line = ','.join(ucis)
+        except opening_routes.LineError:
+            return back('line-invalid')
 
     ip = _client_ip(request)
     if OpeningNameSuggestion.objects.filter(
@@ -6820,7 +6856,7 @@ def suggest_opening_name(request, key):
         return back('rate-limited')
     OpeningNameSuggestion.objects.create(
         position=pos, proposed_name=name, comment=comment, ip=ip,
-        kind=kind, previous_name=current or '',
+        kind=kind, previous_name=current or '', line=line,
         suggested_by=(request.user.username
                       if request.user.is_authenticated else ''))
     return back(ok)
@@ -7000,7 +7036,10 @@ def suggestions(request):
     def presented(row, live=False):
         preview, full = labels.get(row.position_id, ('', ''))
         item = {'row': row, 'san': preview or 'start position',
-                'full': full or 'start position', 'drifted': ''}
+                'full': full or 'start position', 'drifted': '',
+                # The move order the suggestion carries, as it will read.
+                'line_san': (opening_routes.san_text(row.line.split(','))
+                             if row.line else '')}
         # El "actual" de la fila es el de CUANDO se propuso.  Si el nombre se
         # movio mientras esperaba, el moderador tiene que verlo: aprobar esto
         # sustituye lo que hay HOY, no lo que habia entonces.
@@ -7020,8 +7059,10 @@ def suggestions(request):
             status=OpeningNameSuggestion.SState.PENDING).count(),
         'review_outcome': request.GET.get('review', ''),
         'hide_outcome': request.GET.get('hide', ''),
+        'line_outcome': request.GET.get('line', ''),
         **name_vote_views.flags_context(),
         **name_vote_views.hidden_context(),
+        **name_vote_views.routes_context(),
     })
 
 
@@ -8460,8 +8501,9 @@ def _opening_name_url(opening, pos_key, active_ucis, route_keys):
 
     None on that position itself.  Reached along the page's route, the link
     keeps that route up to the named ply, so the move line above it reads as
-    it did; otherwise it takes the opening's reference line.  Strings only,
-    no query.
+    it did; otherwise it takes the name's declared line, else the opening's
+    reference line (§ opening_routes; the declared lines are one cached
+    read, made only when the link leaves the route).
     """
     named_key = (opening or {}).get('position_key')
     if not named_key or named_key == pos_key:
@@ -8471,8 +8513,9 @@ def _opening_name_url(opening, pos_key, active_ucis, route_keys):
             and isinstance(ply, int) and 0 <= ply < len(route_keys)
             and route_keys[ply] == named_key):
         return _explore_url(named_key, active_ucis[:ply])
-    reference = list(opening.get('reference_line_uci') or ())
-    return _explore_url(named_key, reference or None)
+    route = opening_routes.route_for(
+        named_key, opening.get('reference_line_uci') or ())
+    return _explore_url(named_key, list(route) if route else None)
 
 
 def explore(request, key):

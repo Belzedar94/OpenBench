@@ -337,6 +337,9 @@ Send <code>moves</code> to have it listed under yours:</p>
   approved community suggestion, and <code>named_by</code> is then the account
   that proposed it (<code>"anonymous"</code> when it was proposed without one;
   <code>null</code> on a catalogue name).</li>
+<li><code>route</code> is the move order the page links the position by, in
+  UCI from the start position: the line approvers declared for the name,
+  else <code>line</code>. Empty when the link has none.</li>
 <li><code>since</code> is when tracking began.</li>
 </ul>
 {% endblock %}

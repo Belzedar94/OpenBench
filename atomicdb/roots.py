@@ -33,7 +33,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
 
-from . import community_names, ingest, logic, openings
+from . import community_names, ingest, logic, opening_routes, openings
 from .database import atomic, connection
 from .models import (Edge, MainLineSnapshot, OpeningNameSuggestion, Position,
                      RootExtreme, RootRecord, WatchedKey)
@@ -559,16 +559,19 @@ def _records():
     return records
 
 
-def _explore_url(row):
+def _explore_url(row, route=None):
+    line = row.line if route is None else route
     url = f'/atomicdb/explore/{row.key}/'
-    if row.line and len(row.line) <= PLAY_LINK_MAX_PLIES:
-        url += '?play=' + ','.join(row.line)
+    if line and len(line) <= PLAY_LINK_MAX_PLIES:
+        url += '?play=' + ','.join(line)
     return url
 
 
-def _row(watched, record, label=None, community=None):
+def _row(watched, record, label=None, community=None, route=None):
     """One table row.  ``community`` is the community entry in force on the
-    position (§ ``community_names.in_force``), or ``None``."""
+    position (§ ``community_names.in_force``), or ``None``; ``route`` the
+    position's declared line (§ ``opening_routes``), which the link takes
+    instead of ``watched.line``."""
     record = record or {}
     tracked = record.get('best_value') is not None
     return {
@@ -577,7 +580,11 @@ def _row(watched, record, label=None, community=None):
         'kind': watched.kind,
         'line': list(watched.line),
         'line_san': watched.line_san,
-        'url': _explore_url(watched),
+        # The line the link opens the position by, and its SAN when it is
+        # not ``line`` itself.
+        'route': list(route) if route else list(watched.line),
+        'route_san': opening_routes.san_text(route) if route else '',
+        'url': _explore_url(watched, route),
         # The name shown comes from an approved community suggestion, and
         # who proposed it (``None`` on a catalogue name).
         'community': community is not None,
@@ -683,6 +690,9 @@ def _opening_rows(records, sort):
     # A hidden name is no name, and its position leaves the list
     # (§ community_names).
     hidden = community_names.hidden_keys()
+    # Each name links through its declared line where it has one, else the
+    # catalogue's own line (§ opening_routes).
+    declared = opening_routes.routes()
     rows = []
     catalogued = set()
     for watched in named_openings():
@@ -692,7 +702,7 @@ def _opening_rows(records, sort):
         entry = community_names.in_force(watched.key, names=names)
         rows.append(_row(watched, records.get(watched.key),
                          label=entry['name'] if entry else None,
-                         community=entry))
+                         community=entry, route=declared.get(watched.key)))
     # Then the positions only the community names.  A key watched for a
     # community name keeps its row even if that name is withdrawn later: its
     # history stays where it is, under a plain label.
@@ -704,7 +714,8 @@ def _opening_rows(records, sort):
             continue
         rows.append(_row(Watched(key, 'opening',
                                  entry['name'] if entry else _UNNAMED),
-                         record, community=entry))
+                         record, community=entry,
+                         route=declared.get(key) if entry else None))
     _attach_votes(rows)
     rows, column, descending = _sorted(rows, sort)
     # Each header sorts by its column; the column in force flips instead.
@@ -786,7 +797,7 @@ def page_context(now=None, sort=DEFAULT_SORT):
 API_FIELDS = ('key', 'label', 'kind', 'line', 'line_san', 'community',
               'named_by', 'present', 'value', 'status', 'best_value',
               'best_status', 'best_at', 'worst_value', 'worst_status',
-              'worst_at', 'changes')
+              'worst_at', 'changes', 'route')
 # The opening-name votes, on the rows of the openings table only.
 API_VOTE_FIELDS = ('votes_up', 'votes_down', 'under_review')
 
