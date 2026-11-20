@@ -25,12 +25,16 @@ value, then the point eval.
 """
 
 import functools
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import timedelta, timezone as datetime_timezone
 
-from django.http import JsonResponse
-from django.shortcuts import render
+from django.conf import settings
+from django.core.cache import cache
+from django.http import HttpResponse, JsonResponse
+from django.middleware.csrf import get_token
+from django.template.loader import render_to_string
 from django.utils import timezone
 
 from . import community_names, ingest, logic, opening_routes, openings
@@ -840,13 +844,76 @@ def roots_api(request):
     return JsonResponse(api_context())
 
 
-def roots_page(request):
-    """Public page: the start position, first moves and named openings with
-    their best and worst, and the main line.  Cached in ``urls`` like the
-    other read views; the sort order is part of the URL."""
+# ---------------------------------------------------------- serving it ---
+#
+# Where a request went (21-Nov-2026, measured on production, Torom: "the
+# openings page is slow"): building the context 0.03 s, the template 0.2 s,
+# and then about 1 s in the site's HTML minifier (``htmlmin``), which parses
+# the whole 820 KB page with html5lib on every response.  The ``cache_page``
+# in ``urls`` never saved that: a visitor without cookies gets a fresh CSRF
+# token, so Django does not store that response, and a stored one still goes
+# through the minifier, which sits outside the cache.  So the page minifies
+# itself here, and keeps the minified HTML in the shared cache with a fixed
+# stand-in where the CSRF token goes.  Each response gets the visitor's own
+# token put in its place, so no copy ever carries anybody's token, and the
+# bytes are the ones the minifier would have produced.
+PAGE_CACHE_SECONDS = 30          # the page cache of ``urls``, unchanged
+MINIFIED_CACHE_SECONDS = 120
+PAGE_CACHE_VERSION = 1
+# Same length and alphabet as a real masked token (64 letters and digits), so
+# the minifier treats both alike and swapping one for the other afterwards
+# gives exactly what minifying the real page would.
+CSRF_STAND_IN = ('atomicdbrootscsrf' * 4)[:64]
+
+
+def _page_key(request):
+    # The anonymous page depends on the path and its raw query string only
+    # (the sort, the vote message, and the sign-in link's ``next``).
+    where = request.path + '?' + request.META.get('QUERY_STRING', '')
+    digest = hashlib.sha256(where.encode('utf-8', 'surrogateescape'))
+    return f'atomicdb.roots.page.v{PAGE_CACHE_VERSION}.{digest.hexdigest()}'
+
+
+def _cache_get(key):
+    try:
+        return cache.get(key)
+    except Exception:                   # noqa: BLE001 - a cache is optional
+        logger.exception('roots page cache unavailable')
+        return None
+
+
+def _cache_set(key, value, seconds):
+    try:
+        cache.set(key, value, seconds)
+    except Exception:                   # noqa: BLE001 - a cache is optional
+        logger.exception('roots page cache unavailable')
+
+
+def _minify(content):
+    """``content`` (bytes) as ``htmlmin``'s middleware would serve it, with
+    the same settings; remembered by its digest, so an unchanged page is
+    minified once for everybody."""
+    if not getattr(settings, 'HTML_MINIFY', not settings.DEBUG):
+        return content
+    key = ('atomicdb.roots.minified.v'
+           f'{PAGE_CACHE_VERSION}.{hashlib.sha256(content).hexdigest()}')
+    minified = _cache_get(key)
+    if minified is None:
+        from htmlmin.minify import html_minify
+        minified = html_minify(
+            content,
+            ignore_comments=not getattr(settings,
+                                        'KEEP_COMMENTS_ON_MINIFYING', False),
+            parser=getattr(settings, 'HTML_MIN_PARSER', 'html5lib'),
+        ).encode('utf-8')
+        _cache_set(key, minified, MINIFIED_CACHE_SECONDS)
+    return minified
+
+
+def _render_page(request):
     # The eval chart lives here, not on the home page (Torom and rhaxier,
     # 9-Nov-2026).  Imported here: ``root_chart`` imports this module.
-    from . import root_chart
+    from . import name_votes, root_chart
     sort = request.GET.get('sort', DEFAULT_SORT)
     context = page_context(sort=sort)
     context['root_chart'] = root_chart.chart()
@@ -855,6 +922,30 @@ def roots_page(request):
     context['sort'] = sort if sort.lstrip('-') in SORTS else DEFAULT_SORT
     context['vote_message'] = VOTE_MESSAGES.get(request.GET.get('voted', ''),
                                                 '')
-    from . import name_votes
     context['name_min_votes'] = name_votes.min_votes()
-    return render(request, 'atomicdb/roots.html', context)
+    # Overrides the context processor's lazy token (§ CSRF_STAND_IN).
+    context['csrf_token'] = CSRF_STAND_IN
+    return render_to_string('atomicdb/roots.html', context,
+                            request=request).encode('utf-8')
+
+
+def roots_page(request):
+    """Public page: the start position, first moves and named openings with
+    their best and worst, and the main line.  Cached in ``urls`` like the
+    other read views, and here (§ above); the sort order is part of the
+    URL."""
+    user = getattr(request, 'user', None)
+    shared = user is None or not user.is_authenticated
+    page = _cache_get(_page_key(request)) if shared else None
+    if page is None:
+        page = _minify(_render_page(request))
+        if shared:
+            _cache_set(_page_key(request), page, PAGE_CACHE_SECONDS)
+    stand_in = CSRF_STAND_IN.encode('ascii')
+    if stand_in in page:
+        # Only when the page carries a form, as the lazy token did.
+        page = page.replace(stand_in, get_token(request).encode('ascii'))
+    response = HttpResponse(page)
+    # Already minified, with the minifier's own settings.
+    response.minify_response = False
+    return response
