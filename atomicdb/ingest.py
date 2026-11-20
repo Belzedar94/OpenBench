@@ -1631,7 +1631,10 @@ def mate_distance_refresh(pos, edges):
     * Nodo AND (pierde el que mueve): ``1 + max`` sobre TODOS los hijos, y solo
       con todos informados.  Eso es informacion completa, luego es exacto, y
       por eso si puede superar al testigo propio: el testigo sigue UNA defensa
-      y el defensor elige la peor.
+      y el defensor elige la peor.  Con informacion parcial y testigo propio,
+      ``max(testigo propio, 1 + hijos cerrados)``: los hijos ya cerrados son
+      un suelo del exacto, y un testigo mas corto que una defensa conocida es
+      horizonte.  Sin testigo propio, la distancia almacenada se queda.
     * Sin nada que nombrar, la distancia se queda en ``None``: un numero que
       ya no sostiene ningun hijo es peor que no tener numero.
     """
@@ -1640,7 +1643,20 @@ def mate_distance_refresh(pos, edges):
         dists = [e.child.mate_in for e in edges]
         if dists and all(d is not None for d in dists):
             return 1 + max(dists), pos.best_move
-        return pos.mate_in, pos.best_move
+        own = _own_witness_plies(pos)
+        if own is None:
+            return pos.mate_in, pos.best_move
+        # Partial information under a witness of its own (quasa, 20-Nov):
+        # the witness follows ONE defence, and the replies already closed
+        # are a FLOOR under the exact ``1 + max`` above, which can only add
+        # replies to the max.  A stored line shorter than a reply already
+        # known to last longer is a horizon of the search that wrote it.
+        # The floor is taken over the witness, never over the stored number,
+        # so a child that later shortens brings the parent back down.
+        known = [1 + e.child.mate_in for e in edges
+                 if e.child.status == pos.status
+                 and e.child.mate_in is not None]
+        return max([own] + known), pos.best_move
 
     winners = [e for e in edges if e.child.status == pos.status
                and e.child.mate_in is not None]

@@ -23,6 +23,8 @@ direcciones, el AND sigue exactamente como estaba, y un testigo propio
 (``MATE_PV``) sigue siendo un techo que ningun hijo puede rebasar.
 """
 
+import os
+import tempfile
 from io import StringIO
 from unittest.mock import patch
 
@@ -302,6 +304,98 @@ class AndMirrorTests(TestCase):
 
         parent.refresh_from_db()
         self.assertEqual(parent.mate_in, 3)          # 1 + max(1, 2)
+
+
+class LoserWitnessFloorTests(TestCase):
+    """quasa, 20-Nov: the side that is mated, with a witness of its own.
+
+    Live, a Black-to-move position closed ``WHITE_WIN MATE_PV`` on a
+    40-ply line (M20 on the site) while its reply d7f6 was already closed
+    at 43 plies (M22): its own search had found the longer defence, and
+    the parent kept the shorter line it was closed with because only the
+    complete ``1 + max`` could ever raise it.  The closed replies are a
+    floor under that exact value, so the parent shows at least the longest
+    of them; the witness, not the stored number, is what the floor is laid
+    over, so the number comes back down when the long reply shortens.
+    """
+
+    def _graph(self, reply_mate_in, own_line='g8f6 f3e5 f6e4'):
+        parent = _position(_after('g1f3'))           # Black to move
+        ingest.expand(parent)
+        parent.status = 'WHITE_WIN'
+        parent.closure = 'MATE_PV'
+        parent.proof = 'ENGINE'
+        parent.won_line = own_line
+        parent.mate_in = len(own_line.split())
+        parent.best_move = own_line.split()[0]
+        parent.clock_slack = 90
+        parent.save()
+        edge = Edge.objects.select_related('child').get(parent=parent,
+                                                       move_uci='d7d5')
+        child = edge.child
+        child.status = 'WHITE_WIN'
+        child.closure = 'MATE_PV'
+        child.proof = 'ENGINE'
+        child.mate_in = reply_mate_in
+        child.clock_slack = 90
+        child.save()
+        return parent, child
+
+    def test_a_longer_closed_reply_raises_the_witness(self):
+        parent, child = self._graph(reply_mate_in=7)
+
+        ingest.backup_cascade([child.key])
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 8)          # 1 + 7, not its own 3
+        self.assertEqual(parent.best_move, 'g8f6')   # the witness stays
+        self.assertEqual(parent.status, 'WHITE_WIN')
+        self.assertEqual(parent.closure, 'MATE_PV')
+
+    def test_a_shorter_closed_reply_leaves_the_witness(self):
+        parent, child = self._graph(reply_mate_in=1)
+
+        ingest.backup_cascade([child.key])
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 3)
+
+    def test_the_number_comes_back_down_when_the_reply_shortens(self):
+        parent, child = self._graph(reply_mate_in=7)
+        ingest.backup_cascade([child.key])
+        child.mate_in = 4
+        child.save(update_fields=['mate_in'])
+
+        ingest.backup_cascade([child.key])
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 5)          # not stuck at 8
+
+    def test_the_backfill_repairs_a_listed_row(self):
+        parent, child = self._graph(reply_mate_in=7)
+        Position.objects.filter(key=parent.key).update(mate_in=3)
+        out = StringIO()
+
+        call_command('backfill_mate_distance', stdout=out, stderr=out)
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 3)          # default: shorten only
+
+        handle, path = tempfile.mkstemp(suffix='.txt')
+        try:
+            with os.fdopen(handle, 'w', encoding='utf-8') as keys:
+                keys.write(parent.key + '\n')
+            out = StringIO()
+            call_command('backfill_mate_distance', '--keys-file', path,
+                         stdout=out, stderr=out)
+        finally:
+            os.remove(path)
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.mate_in, 8)
+        report = out.getvalue()
+        self.assertIn('raised=1', report)
+        self.assertIn('scope=keys-file', report)
+        self.assertIn('fixed_point=True', report)
 
 
 class OwnWitnessTests(TestCase):
