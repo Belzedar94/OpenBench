@@ -33,10 +33,10 @@
     <span>{% if s.nps_h %}{{ s.nps_h }} nodes/s{% else %}<span class="dim">no search finished</span>{% endif %}</span>
     <span>{{ s.searches_h }} search{{ s.searches|pluralize:"es" }}</span>
   </summary>
-{% include "atomicdb/workers_rows.html" with rows=s.workers quiet_rows=s.quiet_workers %}</details>
+{% include "atomicdb/_workers_rows.html" with rows=s.workers quiet_rows=s.quiet_workers %}</details>
 {% endfor %}
 </div>
-{% else %}{% include "atomicdb/workers_rows.html" with rows=g.workers quiet_rows=g.quiet_workers %}{% endif %}</details>
+{% else %}{% include "atomicdb/_workers_rows.html" with rows=g.workers quiet_rows=g.quiet_workers %}{% endif %}</details>
 {% endfor %}
 </div>
 {% else %}
