@@ -3132,11 +3132,12 @@ def api_public_request(request):
             status=400)
     key = logic.key_of(fen)
     seeded = False
+    closed_below = []
     try:
         with atomic():
             pos = Position.objects.filter(key=key).first()
             if pos is None:
-                pos = ingest.get_or_create_position(fen)
+                pos, closed_below = ingest.get_or_create_position_linked(fen)
                 seeded = True
                 DBEvent.objects.create(kind='SEEDED', payload={
                     'key': pos.key, 'fen': pos.fen, 'ip': ip, 'via': 'api'})
@@ -3145,6 +3146,11 @@ def api_public_request(request):
             # y el bucle que hay que acotar es justamente el que pregunta lo
             # mismo mil veces.
             ApiRequestLog.objects.create(account=username, ip=ip)
+        if closed_below:
+            # A seeded FEN has no parent yet; the climb from it is the one a
+            # click runs (§ ingest.settle_linked_children).  After the seed's
+            # own transaction, so the receipt does not wait on it.
+            ingest.settle_linked_children(pos)
         # The line the caller played to get here, a label for the queue and
         # the explorer link and nothing more (§ ``_api_moves_route``).  Read
         # after the seeding, so a FEN this call added is already a position
@@ -3695,11 +3701,17 @@ def _materialise_child(pos, uci):
     # Misma herencia que en ``ingest.expand``: un nodo que nace de un click
     # bajo una linea de campana es de esa campana.  Por ``campaign_id``, que
     # es lo unico que hace falta y no cuesta una consulta a ``Campaign``.
-    child = ingest.get_or_create_position(logic.apply_move(pos.fen, uci),
-                                          campaign_id=pos.campaign_id)
+    child, closed_below = ingest.get_or_create_position_linked(
+        logic.apply_move(pos.fen, uci), campaign_id=pos.campaign_id)
     Edge.objects.get_or_create(parent=pos, move_uci=uci,
                                defaults={'child': child})
-    if child.status != 'UNKNOWN':
+    if closed_below:
+        # The node was born now and some of the children it was linked to
+        # (§ ingest.link_existing_children) are closed.  The climb starts at
+        # the node and re-reads ``pos`` on the way, so it also does what the
+        # branch below would do if the node closes.
+        ingest.settle_linked_children(child, [pos.key])
+    elif child.status != 'UNKNOWN':
         # Navegar puede DESCUBRIR un terminal (Bxe7 que explota al rey es
         # mate en 1 nada mas crear la arista).  Sin esta cascada el padre
         # seguia diciendo UNSOLVED +302 con un hijo WHITE_WIN TERMINAL en la
@@ -6504,7 +6516,9 @@ def _opening_jump(request, raw):
     if len(found) == 1:
         key, fen = found[0][:2]
         if fen and not Position.objects.filter(key=key).exists():
-            ingest.get_or_create_position(fen)
+            pos, closed_below = ingest.get_or_create_position_linked(fen)
+            if closed_below:
+                ingest.settle_linked_children(pos)
         return redirect(_opening_result_urls([key])[key])
     shown = found[:OPENING_RESULTS_MAX]
     urls = _opening_result_urls([row[0] for row in shown])
@@ -6568,10 +6582,12 @@ def fen_jump(request):
         # campaign root: only the visitor ladder works it, until something
         # expands a parent that reaches it and the ordinary edges connect it.
         ip = _client_ip(request)
-        pos = ingest.get_or_create_position(fen)
+        pos, closed_below = ingest.get_or_create_position_linked(fen)
         RequestLog.objects.create(ip=ip, position=pos)
         DBEvent.objects.create(kind='SEEDED', payload={
             'key': pos.key, 'fen': pos.fen, 'ip': ip})
+        if closed_below:
+            ingest.settle_linked_children(pos)
     return redirect(f'/atomicdb/explore/{key}/')
 
 
