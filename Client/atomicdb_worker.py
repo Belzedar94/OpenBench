@@ -70,7 +70,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026111704
+ATOMICDB_WORKER_BUILD = 2026112101
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -110,7 +110,19 @@ LEASE_READ_TIMEOUT_SECONDS = 60
 LEASE_RETRY_INITIAL_SECONDS = 5
 LEASE_RETRY_MAX_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 60
+# The least time a search may go without a new UCI ``nodes`` counter before
+# the heartbeat stops renewing its lease.  The engine prints that counter only
+# at the end of an iteration (or per line with MultiPV), and each iteration of
+# iterative deepening costs about as much as all the ones before it together:
+# late in a 2B search on a slow slot one iteration takes longer than this.  So
+# the grace grows with the search (``CurrentTaskState.grace``): twice the age
+# the search had at its last counter, never less than this floor.
 HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
+HEARTBEAT_PROGRESS_GRACE_FACTOR = 2
+# The heartbeat answers this way when the lease is no longer this slot's: the
+# task went back to the queue (and maybe to another worker), so the search
+# could never be submitted.
+HEARTBEAT_LOST_LEASE_ERRORS = frozenset({'stale-lease', 'not-your-lease'})
 MAX_REPORTED_NPS = 10 ** 12
 # Fallos de motor SEGUIDOS tras los que el hilo SOLVE se apaga solo.  Se
 # reintenta un par de veces por si el fallo era transitorio (memoria, fichero
@@ -212,6 +224,15 @@ class CurrentTaskState:
     Heartbeats expose the assignment only while its UCI ``nodes`` counter has
     advanced recently; after the grace period the server is free to let the
     lease expire and fence a replacement assignment with a new lease token.
+
+    The grace period scales with the search (``grace``), because the engine
+    reports its node counter only once per iteration and iterations get
+    longer as the search goes deeper.
+
+    When the server says the lease is gone (``mark_lost``), the task is
+    flagged so that its search is never submitted, and the heartbeat stops
+    naming it.  The flag belongs to that one assignment: ``start`` and
+    ``clear`` reset it, and every slot has its own state.
     """
 
     def __init__(self, clock=time.monotonic):
@@ -221,7 +242,9 @@ class CurrentTaskState:
         self._lease_token = ''
         self._nps = 0
         self._last_nodes = -1
+        self._started_at = 0.0
         self._progress_at = 0.0
+        self._lost = False
 
     def start(self, task_id, lease_token=''):
         with self._lock:
@@ -229,9 +252,10 @@ class CurrentTaskState:
             self._lease_token = lease_token or ''
             self._nps = 0
             self._last_nodes = -1
+            self._lost = False
             # Give a newly started engine one grace window to report its first
             # UCI node counter.
-            self._progress_at = self._clock()
+            self._started_at = self._progress_at = self._clock()
 
     def progress(self, nodes, elapsed):
         try:
@@ -255,13 +279,60 @@ class CurrentTaskState:
             self._lease_token = ''
             self._nps = 0
             self._last_nodes = -1
+            self._started_at = 0.0
             self._progress_at = 0.0
+            self._lost = False
+
+    def _grace(self):
+        # Twice the age the search had when it last reported progress, not
+        # its age now: a grace that grew with the clock would grow as fast as
+        # the silence it measures, and a frozen engine would never be caught.
+        # The next iteration of iterative deepening costs about as much as all
+        # the earlier ones together, so it reports within one more such age;
+        # the factor 2 leaves room for one that costs twice that.
+        age = max(0.0, self._progress_at - self._started_at)
+        return max(HEARTBEAT_PROGRESS_GRACE_SECONDS,
+                   HEARTBEAT_PROGRESS_GRACE_FACTOR * age)
+
+    def grace(self):
+        """Seconds of silence the current search may have before the
+        heartbeat stops renewing its lease."""
+        with self._lock:
+            return self._grace()
+
+    def mark_lost(self, task_id, lease_token, on_lost=None):
+        """The server no longer holds ``task_id`` for this slot.
+
+        True only when that is still the assignment in progress, with the
+        same lease token, and it was not flagged already; ``on_lost`` (which
+        stops the engine's search) then runs under the state's lock, so the
+        slot cannot start the next task's search in between and have that one
+        stopped instead.  A beat answered after the slot moved on changes
+        nothing.
+        """
+        with self._lock:
+            if (self._task_id is None or self._task_id != task_id
+                    or self._lease_token != (lease_token or '')
+                    or self._lost):
+                return False
+            self._lost = True
+            if on_lost is not None:
+                try:
+                    on_lost()
+                except Exception as exc:             # noqa: BLE001
+                    print(f'task {task_id}: could not stop the search: '
+                          f'{ascii_text(exc)}', flush=True)
+            return True
+
+    def lost(self, task_id):
+        """True when the lease of ``task_id`` (the current task) is gone."""
+        with self._lock:
+            return self._lost and self._task_id == task_id
 
     def snapshot(self):
         with self._lock:
-            if (self._task_id is None
-                    or self._clock() - self._progress_at
-                    > HEARTBEAT_PROGRESS_GRACE_SECONDS):
+            if (self._task_id is None or self._lost
+                    or self._clock() - self._progress_at > self._grace()):
                 return None
             return {
                 'id': self._task_id,
@@ -641,8 +712,26 @@ def _submit_until_definitive(server, payload, task_id):
             time.sleep(delay)
 
 
-def _heartbeat_loop(server, auth, current_task, stop):
-    """Keep capacity visible during long blocking engine searches."""
+def _lost_lease_error(response):
+    """The heartbeat's ``error`` when it says the lease is gone, else None."""
+    if getattr(response, 'status_code', None) != 409:
+        return None
+    try:
+        body = response.json()
+    except Exception:                                # noqa: BLE001
+        return None
+    error = body.get('error') if isinstance(body, dict) else None
+    return error if error in HEARTBEAT_LOST_LEASE_ERRORS else None
+
+
+def _heartbeat_loop(server, auth, current_task, stop, on_lease_lost=None):
+    """Keep capacity visible during long blocking engine searches.
+
+    A 409 that says the lease of the task it named is gone flags that task
+    (``CurrentTaskState.mark_lost``) and calls ``on_lease_lost`` to stop its
+    search: whatever it found could only be refused at submit.  Each slot runs
+    its own loop with its own state and engine, so only that slot stops.
+    """
     while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
         try:
             current = current_task.snapshot()
@@ -651,10 +740,19 @@ def _heartbeat_loop(server, auth, current_task, stop):
             if current:
                 payload.update(task_id=current['id'],
                                lease_token=current['lease_token'])
-            _http_session().post(
+            response = _http_session().post(
                 server + '/atomicdb/api/heartbeat', data=payload,
-                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30)) \
-                    .raise_for_status()
+                timeout=(SUBMIT_CONNECT_TIMEOUT_SECONDS, 30))
+            error = _lost_lease_error(response) if current else None
+            if error is not None:
+                if current_task.mark_lost(current['id'],
+                                          current['lease_token'],
+                                          on_lease_lost):
+                    print(f"task {current['id']}: the server answered "
+                          f'{error}; stopping its search, which can no '
+                          'longer be submitted', flush=True)
+            else:
+                response.raise_for_status()
         except requests.RequestException as exc:
             print(f'heartbeat skipped: {exc}', flush=True)
         if SESSION.due():
@@ -1191,7 +1289,19 @@ def check_engine_identity(path, timeout=60):
 class Engine:
     """Driver UCI minimo, embebido para que este archivo sea autocontenido."""
 
+    # Defaults for an object built without __init__ (tests do); __init__
+    # gives every engine its own lock.
+    _io_lock = threading.RLock()
+    _stop_requested = False
+    _searching = False
+
     def __init__(self, path, threads=1, hash_mb=256, syzygy=''):
+        # Every write to the engine goes through this lock: the heartbeat
+        # thread may send ``stop`` (``stop_search``) while the slot's thread
+        # is setting up a search.
+        self._io_lock = threading.RLock()
+        self._stop_requested = False
+        self._searching = False
         self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
         _ENGINE_PROCESSES.add(self.p)
@@ -1208,8 +1318,9 @@ class Engine:
         self.ready = self._wait('readyok')
 
     def _send(self, line):
-        self.p.stdin.write(line + '\n')
-        self.p.stdin.flush()
+        with self._io_lock:
+            self.p.stdin.write(line + '\n')
+            self.p.stdin.flush()
 
     def _wait(self, token):
         """Read up to a line starting with ``token``: True, or False at EOF."""
@@ -1258,7 +1369,20 @@ class Engine:
             go += f' mate {int(mate)}'
         if searchmoves:
             go += ' searchmoves ' + ' '.join(searchmoves)
-        self._send(go)
+        with self._io_lock:
+            if self._stop_requested:
+                # The task's lease went while the search was being set up.
+                return []
+            self._send(go)
+            self._searching = True
+        try:
+            return self._read_search(fen, progress)
+        finally:
+            with self._io_lock:
+                self._searching = False
+
+    def _read_search(self, fen, progress):
+        """Read one ``go`` up to its ``bestmove`` (see ``analyse``)."""
         snapshots = []
         started = time.monotonic()
         stm_white = fen.split()[1] == 'w'
@@ -1302,6 +1426,24 @@ class Engine:
                     snapshots.append([])
                 snapshots[-1].append(entry)
         return last_complete_iteration(snapshots)
+
+    def reset_stop(self):
+        """Forget a ``stop_search`` meant for an earlier task.  The slot
+        calls it before it starts the next task, so a stop that lands after
+        that can only be for the new one."""
+        with self._io_lock:
+            self._stop_requested = False
+
+    def stop_search(self):
+        """End the current task's search from another thread (the
+        heartbeat's).  A running ``go`` gets ``stop`` and ``analyse`` returns
+        what it has; a search not started yet is never started (``analyse``
+        returns no lines).  Safe against the slot's own writes: both go
+        through ``_io_lock``."""
+        with self._io_lock:
+            self._stop_requested = True
+            if self._searching:
+                self._send('stop')
 
     def close(self):
         try:
@@ -2229,7 +2371,7 @@ class Solver:
         # queja suele ser lo unico que explica por que, y tirarla obliga a
         # diagnosticar a ciegas.  Se lee aparte, nunca se parsea como salida.
         # Popen rather than subprocess.run so that a stop can reach the
-        # process (§ _stop_engines): a proof runs for minutes.
+        # process (Â§ _stop_engines): a proof runs for minutes.
         running = subprocess.Popen(
             [self.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True)
@@ -2302,7 +2444,7 @@ class SolveLeaseState:
         self._lock = threading.Lock()
         self._task_id = None
         self._lease_token = ''
-        # With ``held`` (§ HeldLeases) the lease is also on the list a stop
+        # With ``held`` (Â§ HeldLeases) the lease is also on the list a stop
         # hands back: from ``start`` until the server answers its submit
         # (``settled``), not until ``clear``.  An engine failure ends the
         # heartbeat, but the lease is still this worker's until it expires.
@@ -2974,8 +3116,18 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         return offered
 
     current_task = CurrentTaskState()
+
+    def stop_lost_search():
+        # Runs on this slot's heartbeat thread, under current_task's lock
+        # (CurrentTaskState.mark_lost), and reads ``eng`` at that moment: the
+        # slot replaces its engine only while no task is in progress.
+        stop_search = getattr(eng, 'stop_search', None)
+        if stop_search is not None:
+            stop_search()
+
     threading.Thread(
-        target=_heartbeat_loop, args=(a.S, auth, current_task, stop),
+        target=_heartbeat_loop,
+        args=(a.S, auth, current_task, stop, stop_lost_search),
         name=f'atomicdb-heartbeat-{slot}', daemon=True).start()
 
     next_update_check = time.monotonic() + WORKER_UPDATE_INTERVAL_SECONDS
@@ -3025,7 +3177,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 break
         if held is not None and held.handing_over.is_set():
             # An update is restarting the worker: a lease taken now would be
-            # left behind (§ _hand_over_for_restart).
+            # left behind (Â§ _hand_over_for_restart).
             if stop.wait(1):
                 break
             continue
@@ -3059,6 +3211,10 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         for t in tasks:
             if stop.is_set():
                 break          # still held: the stop hands it back
+            # A stop meant for the previous task must not cut this one short.
+            reset_stop = getattr(eng, 'reset_stop', None)
+            if reset_stop is not None:
+                reset_stop()
             current_task.start(t['id'], t.get('lease_token', ''))
             t0 = time.time()
             print(format_task_start(t, username, slot, jobs), flush=True)
@@ -3152,6 +3308,19 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                     pass
                 eng = Engine(engine_path, threads=engine_threads,
                              hash_mb=a.hash, syzygy=a.syzygy)
+                continue
+            if current_task.lost(t['id']):
+                # The heartbeat learned the lease is gone and stopped the
+                # search: the server would refuse it (409), and the task may
+                # already be another worker's.  Nothing is sent and nothing
+                # is handed back -- the lease is not ours to return.
+                print(f"[{slot}] task {t['id']}: lease lost, search stopped "
+                      'and not sent', flush=True)
+                if held is not None:
+                    held.drop('analysis', machine, t['id'])
+                current_task.clear()
+                if stop.is_set():
+                    break
                 continue
             if stop.is_set():
                 # The stop told the engine to quit, and the ``bestmove`` it
@@ -3833,7 +4002,7 @@ def main():
 
     stop = threading.Event()
     # Every lease the jobs and the solver hold, for a stop to hand back: Ctrl+C,
-    # SIGTERM, Ctrl+Break or the console window closed (§ GracefulStop).
+    # SIGTERM, Ctrl+Break or the console window closed (Â§ GracefulStop).
     held = HeldLeases()
     graceful = GracefulStop(a.S, dict(auth_base, machine=machines[0]), held,
                             stop)
