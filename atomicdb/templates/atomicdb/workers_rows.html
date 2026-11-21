@@ -1,0 +1,31 @@
+{# The slots of one account or one server: the live ones, then the quiet ones. #}
+<div class="contrib-scroll">
+<table class="contrib-workers fleet-workers">
+  <tr><th>Worker</th><th title="Nodes per second over the searches the worker finished in the last hour">Speed</th><th title="The position it is searching right now">Searching</th><th title="Who asked for that search">Requester</th></tr>
+  {% for w in rows %}
+  <tr>
+    <td><strong>{{ w.machine }}</strong>
+      <div class="dim contrib-spec">{% if w.threads %}{{ w.threads }} thread{{ w.threads|pluralize }}{% else %}threads not reported{% endif %}{% if w.hash_mb %} · {{ w.hash_mb }} MB hash{% endif %}{% if w.os %} · {{ w.os }}{% endif %}{% if w.build %} · <span title="AtomicDB worker build">build {{ w.build }}</span>{% endif %}</div></td>
+    <td>{% if w.nps_h %}{{ w.nps_h }} nodes/s
+      <div class="dim contrib-spec">{{ w.searches_h }} search{{ w.searches|pluralize:"es" }} in the last hour</div>{% else %}<span class="dim">no search finished in the last hour</span>{% endif %}</td>
+    {% if w.task %}
+    <td><span class="chip hot"></span><a class="qline" href="/atomicdb/explore/{{ w.task.key }}/{% if w.task.play %}?play={{ w.task.play|urlencode }}{% endif %}" title="{{ w.task.full }}">{{ w.task.san }}</a>
+      <div class="dim contrib-spec">{{ w.task.budget }} nodes · {{ w.task.source|title }}{% if w.task.since %} · started {{ w.task.since }}{% endif %}</div></td>
+    <td>{% if w.task.requester == 'account' %}<a href="/atomicdb/user/{{ w.task.requested_by|urlencode }}/">{{ w.task.requested_by }}</a>{% if w.task.more %}
+      <span class="dim" title="Other accounts asked for the same position">and {{ w.task.more }} more</span>{% endif %}{% elif w.task.requester == 'anonymous' %}<span title="Asked for by a visitor who was not signed in">Anonymous</span>{% elif w.task.reason == 'sweep' %}<span class="dim" title="Nobody asked for this one: the server is searching again, with the current engine, a position searched once that looked clearly won but was not proven">server: re-search</span>{% elif w.task.reason == 'repair' %}<span class="dim" title="Nobody asked for this one: the server picked it to search again a position whose last search was shallow, or one with no search of its own between searched positions">server: repair</span>{% else %}<span class="dim" title="Nobody asked for this one: the server picked it itself">server</span>{% endif %}</td>
+    {% else %}
+    <td><span class="chip cold"></span><span class="dim">between tasks</span></td>
+    <td></td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+  {% for q in quiet_rows %}
+  <tr class="fleet-quiet-row">
+    <td><strong>{{ q.machine }}</strong></td>
+    <td></td>
+    <td><span class="chip warm"></span><span class="fleet-quiet" title="No heartbeat in the last {{ live_minutes }} minutes; last one {{ q.seen_iso }}">quiet, last heard {{ q.seen }}</span></td>
+    <td></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>

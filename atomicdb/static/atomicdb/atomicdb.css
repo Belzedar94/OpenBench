@@ -2623,6 +2623,57 @@ table.fleet-workers .qline {
   margin: 0 0 .7rem;
 }
 
+/* Inside an account, one collapsed row per server: the account row's grid
+   and arrow, stepped in once, opening to that server's slots. */
+.fleet-servers {
+  margin: 0 0 .7rem;
+}
+
+.fleet-server > summary {
+  position: relative;
+  margin: 0;
+  color: var(--ink);
+  font-size: inherit;
+  list-style: none;
+}
+
+.fleet-server > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fleet-server > summary::before {
+  position: absolute;
+  top: .85rem;
+  left: .9rem;
+  border-width: .28rem 0 .28rem .4rem;
+  border-style: solid;
+  border-color: transparent transparent transparent var(--ink-muted);
+  content: "";
+  transform-origin: 40% 50%;
+  transition: transform .12s ease;
+}
+
+.fleet-server[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.fleet-server-row > span:first-child {
+  padding-left: 1.6rem;
+}
+
+.fleet-server > .contrib-scroll {
+  margin: 0 0 .5rem 1rem;
+}
+
+/* Slots heard in the last day but not in the live window. */
+.fleet-quiet {
+  color: var(--warn, #b4762a);
+}
+
+tr.fleet-quiet-row td {
+  opacity: .85;
+}
+
 /* The phone sizes of the worker table, cell for cell. */
 @media (max-width: 560px) {
   .fleet-owner-row {
@@ -2636,6 +2687,18 @@ table.fleet-workers .qline {
 
   .fleet-owner-row > span:first-child {
     padding-left: .7rem;
+  }
+
+  .fleet-server-row > span:first-child {
+    padding-left: 1.4rem;
+  }
+
+  .fleet-server > summary::before {
+    left: .7rem;
+  }
+
+  .fleet-server > .contrib-scroll {
+    margin-left: .4rem;
   }
 
   .fleet-owner-head > span {
