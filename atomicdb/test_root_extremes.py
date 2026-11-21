@@ -17,6 +17,7 @@ with the trigger switched off for the test).
 
 import importlib
 import json
+import re
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from io import StringIO
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.test import SimpleTestCase
+from django.test import Client, SimpleTestCase
 
 from OpenBench.models import Profile
 
@@ -995,6 +996,120 @@ class RootsPageTests(TestCase):
     def test_the_front_page_links_here(self):
         body = self.client.get('/atomicdb/').content.decode()
         self.assertIn('href="/atomicdb/roots/">Openings</a>', body)
+
+
+class RootsPageServingTests(TestCase):
+    """The page minifies itself and shares one copy, with each visitor's own
+    CSRF token put in on the way out (Torom, 21-Nov-2026: 1.6-2 s a request,
+    about 1 s of it the minifier on 820 KB, run on every response)."""
+
+    TOKEN = re.compile(r'csrfmiddlewaretoken"[^>]*?value="([^"]+)"')
+    VOTE = re.compile(r'action="/atomicdb/names/vote/([^/"]+)/"')
+
+    def setUp(self):
+        ingest.get_or_create_position(logic.start_fen())
+
+    def _tokens(self, response):
+        return set(self.TOKEN.findall(response.content.decode()))
+
+    def _minify_calls(self):
+        """Counts every run of the minifier, the middleware's and ours."""
+        from htmlmin import middleware, minify
+        real = minify.html_minify
+        calls = mock.Mock(side_effect=real)
+        return calls, mock.patch.multiple(middleware, html_minify=calls), \
+            mock.patch.multiple(minify, html_minify=calls)
+
+    def test_the_body_is_what_the_minifier_makes_of_the_page(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+        from django.template.loader import render_to_string
+        from htmlmin.minify import html_minify
+
+        response = Client().get('/atomicdb/roots/?sort=-now')
+        token, = self._tokens(response)
+        self.assertEqual(len(token), len(roots.CSRF_STAND_IN))
+
+        # The old way: render with the visitor's token, then minify.
+        request = RequestFactory().get('/atomicdb/roots/?sort=-now')
+        request.user = AnonymousUser()
+        context = response.context[0].flatten()
+        context['csrf_token'] = token
+        expected = html_minify(render_to_string('atomicdb/roots.html',
+                                                context, request=request))
+        self.assertEqual(response.content.decode(), expected)
+        self.assertNotIn(roots.CSRF_STAND_IN, response.content.decode())
+
+    def test_one_render_and_one_minify_serve_every_anonymous_visitor(self):
+        calls, *patches = self._minify_calls()
+        with patches[0], patches[1]:
+            first = Client().get('/atomicdb/roots/')
+            with self.assertNumQueries(
+                    0, using=settings.ATOMICDB_DATABASE_ALIAS):
+                second = Client().get('/atomicdb/roots/')
+        self.assertEqual(calls.call_count, 1)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        # Same page, each with a token of its own and the cookie to match.
+        self.assertTrue(self._tokens(first) and self._tokens(second))
+        self.assertFalse(self._tokens(first) & self._tokens(second))
+        self.assertNotEqual(first.cookies['csrftoken'].value,
+                            second.cookies['csrftoken'].value)
+        self.assertEqual(self.TOKEN.sub('', first.content.decode()),
+                         self.TOKEN.sub('', second.content.decode()))
+
+    def test_the_shared_copy_carries_nobody_s_token(self):
+        from django.core.cache import cache
+
+        response = Client().get('/atomicdb/roots/')
+        request = SimpleNamespace(path='/atomicdb/roots/',
+                                  META={'QUERY_STRING': ''})
+        stored = cache.get(roots._page_key(request)).decode()
+
+        self.assertIn(roots.CSRF_STAND_IN, stored)
+        for token in self._tokens(response):
+            self.assertNotIn(token, stored)
+
+    def test_the_token_in_a_shared_copy_validates_a_vote(self):
+        Client().get('/atomicdb/roots/')               # warms the copy
+        client = Client(enforce_csrf_checks=True)
+        page = client.get('/atomicdb/roots/')
+        token = next(iter(self._tokens(page)))
+        key = self.VOTE.search(page.content.decode()).group(1)
+
+        voted = client.post(f'/atomicdb/names/vote/{key}/',
+                            {'vote': 'up', 'csrfmiddlewaretoken': token})
+
+        self.assertNotEqual(voted.status_code, 403)
+
+    def test_the_sort_and_the_vote_message_get_their_own_copy(self):
+        Client().get('/atomicdb/roots/')
+        body = Client().get('/atomicdb/roots/?sort=-now&voted=voted')
+        self.assertIn('href="?sort=now#openings"', body.content.decode())
+        self.assertIn(roots.VOTE_MESSAGES['voted'], body.content.decode())
+
+    def test_a_signed_in_visitor_never_gets_the_anonymous_copy(self):
+        from django.contrib.auth.models import User
+
+        Client().get('/atomicdb/roots/')
+        member = Client()
+        member.force_login(User.objects.create_user('roots_reader'))
+        body = member.get('/atomicdb/roots/').content.decode()
+
+        self.assertIn('roots_reader', body)
+        self.assertNotIn('Register</a>', body)
+        # And what a member saw is not handed to the next anonymous visitor.
+        self.assertNotIn('roots_reader',
+                         Client().get('/atomicdb/roots/').content.decode())
+
+    def test_without_the_cache_the_page_still_serves(self):
+        broken = mock.Mock(**{'get.side_effect': OSError,
+                              'set.side_effect': OSError})
+        with mock.patch.object(roots, 'cache', broken), \
+                self.assertLogs('atomicdb.roots', level='ERROR'):
+            response = Client().get('/atomicdb/roots/')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self._tokens(response))
 
 
 class RootsApiTests(TestCase):
