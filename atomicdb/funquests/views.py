@@ -46,6 +46,14 @@ QUESTS = (
                   'and a capturing piece explodes over there. Play the '
                   'computer or send a link to a friend.'),
     },
+    {
+        'slug': 'tictactoedb',
+        'title': 'TicTacToeDB',
+        'url': '/atomicdb/fun/tictactoedb/',
+        'art': 'ttt',
+        'blurb': ('Tic-tac-toe, solved. Every move shows whether it wins, '
+                  'draws or loses with best play, and how fast.'),
+    },
 )
 
 
@@ -74,6 +82,11 @@ def alice_page(request):
         'token': '',
         'start_afen': rules.START_AFEN,
     })
+
+
+def tictactoedb_page(request):
+    # All of it runs in the browser: the page only hands out the script.
+    return render(request, 'atomicdb/funquests/tictactoedb.html')
 
 
 def alice_game_page(request, token):

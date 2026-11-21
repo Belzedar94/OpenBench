@@ -1,4 +1,4 @@
-/* Fun side quests: the list of quests and the Alice Atomic page. */
+/* Fun side quests: the list of quests, the Alice Atomic page and TicTacToeDB. */
 
 .fq-intro { margin-top: -.25rem; }
 
@@ -421,3 +421,154 @@
 @media (max-width: 600px) {
   .aa-board-pair { grid-template-columns: 1fr; }
 }
+
+/* -- TicTacToeDB ------------------------------------------------------------ */
+
+.fq-ttt-mini {
+  display: grid;
+  grid-template-columns: repeat(3, 22px);
+  grid-template-rows: repeat(3, 22px);
+  gap: 2px;
+  background: var(--border-strong);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.fq-ttt-mini span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink-strong);
+}
+
+.ttt-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-start;
+  margin: 1rem 0 1.5rem;
+}
+
+.ttt-main { flex: none; width: min(100%, 20rem); }
+
+.ttt-board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 6px;
+  background: var(--border-strong);
+  border-radius: 8px;
+  aspect-ratio: 1;
+}
+
+.ttt-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-1);
+  color: var(--ink-strong);
+  font: inherit;
+  font-size: clamp(2rem, 12vw, 3.6rem);
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  min-width: 0;
+}
+
+.ttt-cell:disabled { cursor: default; }
+.ttt-cell.ttt-x { color: var(--ink-strong); }
+.ttt-cell.ttt-o { color: var(--draw); }
+.ttt-cell.ttt-winline { background: var(--won-surface); }
+
+.ttt-open { cursor: pointer; }
+.ttt-open:hover { background: var(--surface-hover); }
+.ttt-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.ttt-tag {
+  font-size: .95rem;
+  font-weight: 700;
+  padding: .15rem .45rem;
+  border-radius: 4px;
+  color: #fff;
+}
+
+.ttt-open.won .ttt-tag { background: var(--won); }
+.ttt-open.draw .ttt-tag { background: var(--draw); }
+.ttt-open.lost .ttt-tag { background: var(--lost); }
+.ttt-open.ttt-best { box-shadow: inset 0 0 0 3px var(--accent); }
+
+.ttt-actions { display: flex; gap: .5rem; margin-top: .75rem; }
+
+.ttt-side { flex: 1 1 16rem; min-width: 0; }
+
+.ttt-status { margin: 0 0 .75rem; font-weight: 600; color: var(--ink-strong); }
+.ttt-status.won { color: var(--won); }
+.ttt-status.lost { color: var(--lost); }
+.ttt-status.draw { color: var(--draw); }
+
+.ttt-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  max-width: 22rem;
+}
+
+.ttt-list li + li { border-top: 1px solid var(--border); }
+
+.ttt-row {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: .4rem .75rem;
+  border: 0;
+  background: var(--surface-1);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ttt-row:hover { background: var(--surface-hover); }
+.ttt-row.ttt-best { box-shadow: inset 3px 0 0 var(--accent); }
+.ttt-row-move { font-family: ui-monospace, monospace; font-weight: 700; color: var(--ink-strong); }
+
+.ttt-val { font-weight: 600; }
+.ttt-val.won { color: var(--won); }
+.ttt-val.draw { color: var(--draw); }
+.ttt-val.lost { color: var(--lost); }
+
+.ttt-history {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+
+.ttt-history:empty { display: none; }
+
+.ttt-hist {
+  padding: .15rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: .85rem;
+  font-family: ui-monospace, monospace;
+  cursor: pointer;
+}
+
+.ttt-hist[aria-current="step"] { border-color: var(--accent); color: var(--ink-strong); }
+
+.ttt-legend { font-size: .85rem; max-width: 34rem; }
