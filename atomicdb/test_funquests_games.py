@@ -63,6 +63,20 @@ class PagesTests(TestCase):
             self.assertContains(
                 response, f'funquests/{name}?v={notifications.STATIC_VERSION}')
 
+    def test_the_quest_list_links_tictactoedb(self):
+        response = self.client.get('/atomicdb/fun/')
+        self.assertContains(response, 'href="/atomicdb/fun/tictactoedb/"')
+        self.assertContains(response, 'TicTacToeDB')
+
+    def test_tictactoedb_page_loads_its_script(self):
+        from . import notifications
+        response = self.client.get('/atomicdb/fun/tictactoedb/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="ttt-board"')
+        self.assertContains(
+            response,
+            f'funquests/tictactoedb.js?v={notifications.STATIC_VERSION}')
+
     def test_an_unknown_game_link_is_a_404(self):
         response = self.client.get('/atomicdb/fun/alice-atomic/play/nope/')
         self.assertEqual(response.status_code, 404)

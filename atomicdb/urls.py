@@ -78,6 +78,8 @@ _fun_cached = cache_page(30)(vary_on_cookie(csrf_protect(
     fun_views.fun_index)))
 _alice_cached = cache_page(30)(vary_on_cookie(csrf_protect(
     fun_views.alice_page)))
+_ttt_cached = cache_page(30)(vary_on_cookie(csrf_protect(
+    fun_views.tictactoedb_page)))
 def _live_for_members(view, seconds=15):
     """``view`` behind the short page cache for visitors without a session,
     and straight through for signed-in ones.
@@ -290,6 +292,7 @@ urlpatterns = [
     # so no cache on those.
     path('fun/', _fun_cached, name='atomicdb-fun'),
     path('fun/alice-atomic/', _alice_cached, name='atomicdb-fun-alice'),
+    path('fun/tictactoedb/', _ttt_cached, name='atomicdb-fun-tictactoedb'),
     path('fun/alice-atomic/play/<str:token>/', fun_views.alice_game_page,
          name='atomicdb-fun-alice-game'),
     path('fun/alice-atomic/api/create', fun_views.api_create),

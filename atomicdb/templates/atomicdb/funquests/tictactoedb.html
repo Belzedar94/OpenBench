@@ -1,0 +1,31 @@
+{% extends "atomicdb/base.html" %}
+{% load static %}
+{% block title %}TicTacToeDB · AtomicDB{% endblock %}
+{% block description %}TicTacToeDB: tic-tac-toe, solved. Every move shows whether it wins, draws or loses with best play, and how many moves until the game ends.{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'atomicdb/funquests/funquests.css' %}{% if static_version %}?v={{ static_version }}{% endif %}">
+<script src="{% static 'atomicdb/funquests/tictactoedb.js' %}{% if static_version %}?v={{ static_version }}{% endif %}" defer></script>
+{% endblock %}
+{% block content %}
+<p class="fq-crumbs"><a href="/atomicdb/fun/">Fun side quests</a> /</p>
+<h2 style="margin-top:0">TicTacToeDB</h2>
+<p class="dim fq-intro">Tic-tac-toe, solved: all <span id="ttt-count">5,478</span> positions, worked out in your browser. Click a square to play it.</p>
+
+<div id="ttt-app" class="ttt-layout">
+  <div class="ttt-main">
+    <div class="ttt-board" id="ttt-board" role="grid" aria-label="Board"></div>
+    <div class="ttt-actions">
+      <button type="button" class="aa-btn" id="ttt-back" disabled>Back</button>
+      <button type="button" class="aa-btn" id="ttt-reset" disabled>Reset</button>
+    </div>
+  </div>
+  <aside class="ttt-side">
+    <p class="ttt-status" id="ttt-status" aria-live="polite"></p>
+    <ol class="ttt-list" id="ttt-list" aria-label="Moves, best first"></ol>
+    <ol class="ttt-history" id="ttt-history" aria-label="Moves played"></ol>
+    <p class="dim ttt-legend"><strong>W3</strong>: the player to move wins, and the game ends 3 moves from now.
+      <strong>D</strong>: draw. <strong>L4</strong>: a loss in 4 moves, holding out as long as possible.
+      The outlined squares are the best moves. Squares are named like a chessboard: a1 is bottom left.</p>
+  </aside>
+</div>
+<noscript><p>This page needs JavaScript.</p></noscript>
+{% endblock %}
