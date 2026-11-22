@@ -472,6 +472,11 @@ def get_or_create_position(fen, campaign_id=None):
     posicion nace SIN marcar y se la gana por herencia en ``expand`` — tener
     un FEN no demuestra un camino.
     """
+    return _get_or_create_position(fen, campaign_id)[0]
+
+
+def _get_or_create_position(fen, campaign_id=None):
+    """``get_or_create_position`` that also says whether the row was born."""
     fen = logic.canonical_fen(fen)
     key = logic.key_of(fen)
     is_root = key == root_key()
@@ -494,6 +499,109 @@ def get_or_create_position(fen, campaign_id=None):
         # que el BFS pueda arrancar aunque nadie lo haya sembrado.
         pos.reachable = True
         pos.save(update_fields=['reachable'])
+    return pos, created
+
+
+# ---------------- linking a new node to the children it already has ----------
+#
+# A node's edges are written by ``expand``, and ``expand`` runs when the
+# node's first search is ingested.  A node that is born any other way — a
+# click in the explorer, the Verify PV walk, a FEN pasted in the box or sent
+# to the API — gets its row and, at most, the one edge from its parent.  Until
+# its first search lands it does not see the positions its moves lead to,
+# even when they are already in the tree through a transposition, and even
+# when they are already solved.  A read-only sample of the live tree (21-Nov)
+# found at least one existing child on 39% of the unexpanded nodes, 2.1 on
+# average, and 7.6% of those links pointed at a solved child.
+#
+# So a node born on one of those paths is linked, right there, to the children
+# that ALREADY EXIST: one movegen, one indexed lookup of all the child keys,
+# one bulk insert.  Nothing is created that was not there: a missing child is
+# still made by ``expand``, by its rules, when the node is searched.  The node
+# stays ``expanded=False`` because its list of moves is still incomplete, and
+# that is exactly what the partial expansions of a click already were: the
+# status cascade only closes it on a winning child (§ logic.backup_status) and
+# the backed value treats the coverage as partial (§ the block above
+# BACKED_MAX_PLIES).  Nothing in either rule changes here.
+#
+# The edges are the edges ``expand`` writes — ``(parent, move_uci, child)``,
+# one per legal move, in movegen order — and the side effect ``expand`` has on
+# an existing child is kept too: a new route revives a child from the
+# tombstone.  Reachability is not inherited, as in ``expand``, because a node
+# born on these paths is born unmarked (§ ``Position.reachable``): it has
+# nothing to hand down, and ``backfill_reachable`` marks it like before.
+#
+# ``ATOMICDB_LINK_CHILDREN_AT_CREATION = False`` in settings turns it off
+# (the behaviour before it), as a valve that needs a restart and no deploy.
+
+def link_children_at_creation_enabled():
+    return bool(getattr(settings, 'ATOMICDB_LINK_CHILDREN_AT_CREATION', True))
+
+
+def link_existing_children(pos):
+    """Write the edges from ``pos`` to the children it already has.
+
+    Returns the keys of the linked children that are closed (status other
+    than UNKNOWN): an edge to one of them can change what ``pos`` is worth,
+    and the caller climbs from ``pos`` with ``settle_linked_children`` once
+    the edge from its own parent, if any, is written.  An empty list means
+    nothing to climb.  A position that is closed or already expanded is left
+    alone, as ``expand`` leaves it.
+    """
+    if (not link_children_at_creation_enabled() or pos.expanded
+            or pos.status != 'UNKNOWN'):
+        return []
+    # Two moves can lead to the same position (two pieces capturing on the
+    # same square both explode), and ``expand`` writes one edge per move.
+    moves = [(uci, logic.key_of(logic.apply_move(pos.fen, uci)))
+             for uci in logic.legal_moves(pos.fen)]
+    if not moves:
+        return []
+    found = {key: (status, priority) for key, status, priority in
+             Position.objects.filter(key__in={key for _uci, key in moves})
+             .values_list('key', 'status', 'priority')}
+    if not found:
+        return []
+    Edge.objects.bulk_create(
+        [Edge(parent_id=pos.key, move_uci=uci, child_id=key)
+         for uci, key in moves if key in found],
+        ignore_conflicts=True)
+    # Same revival as ``expand``: a new route brings a child back from the
+    # tombstone.  Only when there is one, so the usual cost stays at the
+    # lookup and the insert.
+    dead = [key for key, (_status, priority) in found.items()
+            if priority <= DEAD / 2]
+    if dead:
+        Position.objects.filter(key__in=dead, priority__lte=DEAD / 2).update(
+            priority=0.0)
+    return [key for key, (status, _priority) in found.items()
+            if status != 'UNKNOWN']
+
+
+def get_or_create_position_linked(fen, campaign_id=None):
+    """``get_or_create_position`` for the paths that make nodes outside
+    ``expand``: a position born here is linked to its existing children.
+
+    Returns ``(pos, closed_children)``, the second as
+    ``link_existing_children`` returns it (always empty for a position that
+    already existed).
+    """
+    pos, created = _get_or_create_position(fen, campaign_id)
+    return pos, (link_existing_children(pos) if created else [])
+
+
+def settle_linked_children(pos, parent_keys=()):
+    """Climb from a position that was just linked to a closed child.
+
+    The same two climbs every other discovery of a closed child runs (the
+    ``goto`` of the explorer, the PV walk, the landing of a search): the
+    status cascade from ``pos``, which also re-reads its parents, and the
+    backed values of ``pos`` and of its parents (§ ``Landing.backed_seeds``).
+    ``pos`` is read again afterwards, so the caller sees what it is now.
+    """
+    backup_cascade([pos.key])
+    backup_backed_evals([pos.key, *parent_keys])
+    pos.refresh_from_db()
     return pos
 
 
@@ -9087,11 +9195,17 @@ def _walk_pv_frontier(pos, pv, requested_by='', route=''):
         uci, spine = _verify_step(node, spine, trust_own)
         if uci is None:
             break
-        child = get_or_create_position(logic.apply_move(node.fen, uci),
-                                       campaign_id=node.campaign_id)
+        child, closed_below = get_or_create_position_linked(
+            logic.apply_move(node.fen, uci), campaign_id=node.campaign_id)
         Edge.objects.get_or_create(parent=node, move_uci=uci,
                                    defaults={'child': child})
-        if child.status != 'UNKNOWN' and node.status == 'UNKNOWN':
+        if closed_below:
+            # Born now and linked to closed children that already existed
+            # (§ link_existing_children): the climb starts at the new node and
+            # re-reads ``node`` on the way.  Read again, ``child`` says
+            # whether that closed it, and the walk goes on from what it is.
+            settle_linked_children(child, [node.key])
+        elif child.status != 'UNKNOWN' and node.status == 'UNKNOWN':
             # LA MISMA CASCADA QUE EL ``goto`` DEL EXPLORADOR, y por el mismo
             # motivo (§ ``views.explore_play``, 29-jul): caminar una linea
             # tambien DESCUBRE terminales — el ultimo ply de una PV de mate
