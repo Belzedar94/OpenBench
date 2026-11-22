@@ -58,10 +58,14 @@ class AtomicDBThemePageTests(SimpleTestCase):
         self.assertIn('id="theme-toggle"', base.read_text(encoding='utf-8'))
 
         # Partials (``_name.html``) are included, not pages; a page may reach
-        # the base through a layout of its own (the docs pages do).
+        # the base through a layout of its own (the docs pages do).  The lite
+        # explorer stands alone on purpose: it carries no script at all, so
+        # it has no theme switch to inherit (§ atomicdb.lite).
+        standalone = {'lite.html'}
         pages = [
             path for path in template_root.rglob('*.html')
             if path.name != 'base.html' and not path.name.startswith('_')
+            and path.name not in standalone
         ]
         self.assertGreaterEqual(len(pages), 5)
         extends = re.compile(r'{% extends "atomicdb/([^"]+)" %}')
