@@ -1631,7 +1631,10 @@ def mate_distance_refresh(pos, edges):
     * Nodo AND (pierde el que mueve): ``1 + max`` sobre TODOS los hijos, y solo
       con todos informados.  Eso es informacion completa, luego es exacto, y
       por eso si puede superar al testigo propio: el testigo sigue UNA defensa
-      y el defensor elige la peor.
+      y el defensor elige la peor.  Con informacion parcial y testigo propio,
+      ``max(testigo propio, 1 + hijos cerrados)``: los hijos ya cerrados son
+      un suelo del exacto, y un testigo mas corto que una defensa conocida es
+      horizonte.  Sin testigo propio, la distancia almacenada se queda.
     * Sin nada que nombrar, la distancia se queda en ``None``: un numero que
       ya no sostiene ningun hijo es peor que no tener numero.
     """
@@ -1640,7 +1643,20 @@ def mate_distance_refresh(pos, edges):
         dists = [e.child.mate_in for e in edges]
         if dists and all(d is not None for d in dists):
             return 1 + max(dists), pos.best_move
-        return pos.mate_in, pos.best_move
+        own = _own_witness_plies(pos)
+        if own is None:
+            return pos.mate_in, pos.best_move
+        # Partial information under a witness of its own (quasa, 20-Nov):
+        # the witness follows ONE defence, and the replies already closed
+        # are a FLOOR under the exact ``1 + max`` above, which can only add
+        # replies to the max.  A stored line shorter than a reply already
+        # known to last longer is a horizon of the search that wrote it.
+        # The floor is taken over the witness, never over the stored number,
+        # so a child that later shortens brings the parent back down.
+        known = [1 + e.child.mate_in for e in edges
+                 if e.child.status == pos.status
+                 and e.child.mate_in is not None]
+        return max([own] + known), pos.best_move
 
     winners = [e for e in edges if e.child.status == pos.status
                and e.child.mate_in is not None]
@@ -2558,6 +2574,19 @@ def _grounding(child):
 # grounding of a tie.  What moves is the move a position stands on, with its
 # distance and support, and through them the arrow, the API ``best_move``
 # and the chain the backed chip follows.
+#
+# WHEN EVERY MOVE IS MATED (20-Nov-2026).  A proven child enters as a flat
+# 10,000 and an engine's unproven mate as 10,000 minus its moves, two
+# scales.  So the side to move, choosing the least bad number, took an
+# engine's "mate in 5" (9,995) over a proven mate in 13 (10,000): 465afa99
+# stood on b4d6, #5, while f8e8 was proven to last 25 plies.  When every
+# informed move is a mate against the mover, the moves are compared on the
+# engine's scale instead (_defence_moves) and the longest defence is taken,
+# after grounding, with the order above for what is still tied.  The value
+# written is still the chosen child's own number, so a proven child keeps
+# writing its 10,000.  The rule for the distance of a closed position is
+# the same one (mate_distance_refresh: the side that is mated takes its
+# longest reply).
 _UNCOUNTED = float('-inf')
 
 
@@ -2577,6 +2606,33 @@ def _proof_rank(child, stm_white):
     return (1, -child.mate_in) if wins else (-1, child.mate_in)
 
 
+def _defence_moves(child, stm_white):
+    """How many moves the side to move survives through ``child``, when
+    the move is a mate against it, else ``None`` (see the block above
+    _best_child).
+
+    One scale, the engine's: moves to mate, ``10000 - |eval|``.  A proven
+    loss with its plies counted is ``ceil(plies / 2)``, the same number an
+    engine's ``score mate N`` gives for that line whoever moves first
+    (_mate_moves_to_plies).  A proven loss nobody counted ranks last, as
+    in _proof_rank.  An open move carrying a flat 10,000 is a reply already
+    proven below a position that has not closed: no distance, and a move
+    still open may hold a defence, so it ranks first, as it did on ties.
+    """
+    value = child.value
+    if value is None or (value < 0) != stm_white or not value:
+        return None
+    if child.exact:
+        if child.mate_in is None:
+            return _UNCOUNTED
+        return (child.mate_in + 1) // 2
+    if abs(value) >= 10_000:
+        return float('inf')
+    if abs(value) > TB_CLAMP_CEILING:
+        return 10_000 - abs(value)
+    return None
+
+
 def _best_child(children, stm_white, own_move=None):
     """The child the side to move stands on, among informed ``children``.
 
@@ -2584,8 +2640,19 @@ def _best_child(children, stm_white, own_move=None):
     above: grounding, proof rank, heavier support, shallower chain, the
     position's own search move (``own_move``), and the move alphabetically,
     so that a replay decides the same.
+
+    When every move is a mate against the mover, the longest defence on
+    one scale instead of the raw value (see the block above).
     """
     sign = 1 if stm_white else -1
+    defences = [_defence_moves(c, stm_white) for c in children]
+    if children and all(d is not None for d in defences):
+        length = dict(zip(map(id, children), defences))
+        return max(sorted(children, key=lambda c: c.move or ''),
+                   key=lambda c: (_grounding(c), length[id(c)],
+                                  _proof_rank(c, stm_white), c.quality,
+                                  -c.plies,
+                                  own_move is not None and c.move == own_move))
     return max(sorted(children, key=lambda c: c.move or ''),
                key=lambda c: (sign * c.value, _grounding(c),
                               _proof_rank(c, stm_white), c.quality,

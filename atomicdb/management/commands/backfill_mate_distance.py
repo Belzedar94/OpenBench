@@ -24,6 +24,8 @@ A row the recurrence would only lengthen, name or clear is left as it is
 unless it stands on a shortened row.  ``--all`` is the full recompute
 described above, the Wolfram case included.  Either way a witness swapped
 for another one just as good is not a change (§ ``_equivalent_witness``).
+``--keys-file`` starts instead from a given list of rows, re-derived in any
+direction, and then climbs from them like the other passes.
 
 LA RECURRENCIA (la misma funcion que usa la cascada, ``mate_distance_refresh``,
 para que las dos converjan al MISMO punto fijo y no a dos parecidos):
@@ -168,6 +170,13 @@ class Command(BaseCommand):
                  'too), not only the distances that are too long and the '
                  'rows that stand on them.')
         parser.add_argument(
+            '--keys-file', default=None,
+            help='Start from the positions listed in this file (one key per '
+                 'line) instead of scanning the closed set: their distance '
+                 'is re-derived whichever way it moves, and so is whatever '
+                 'stands on them. For a known list of rows, such as the '
+                 'loser-to-move witnesses shorter than a closed reply.')
+        parser.add_argument(
             '--batch-size', type=int, default=2_000,
             help='Closed positions read per query (default: 2000).')
         parser.add_argument(
@@ -230,7 +239,12 @@ class Command(BaseCommand):
         sample = options['sample']
         dry_run = options['dry_run']
         all_rows = options['all_rows']
-        scope = 'all' if all_rows else 'too-long'
+        seed_keys = None
+        if options['keys_file']:
+            with open(options['keys_file'], encoding='utf-8') as handle:
+                seed_keys = {line.strip() for line in handle if line.strip()}
+        scope = ('keys-file' if seed_keys is not None
+                 else 'all' if all_rows else 'too-long')
         if batch_size <= 0:
             raise ValueError('--batch-size must be positive')
         if options['write_batch'] <= 0:
@@ -286,15 +300,20 @@ class Command(BaseCommand):
         # que sube una cadena de 60 plies cuesta 60 pasadas baratas en vez
         # de 60 barridos completos de la tabla.
         frontier = None
+        first = True
 
         while passes < max_passes:
             passes += 1
             # Only the first pass picks its rows by scope; the frontier
             # passes re-derive whatever stands on what moved, whatever way
             # the recurrence moves it.
+            # With --keys-file the first pass reads only those rows, in any
+            # direction, exactly as a frontier pass reads its rows.
             pending, scanned = self._one_pass(
-                batch_size, overlay, frozen, origin, keys=frontier,
-                shorter_only=frontier is None and not all_rows)
+                batch_size, overlay, frozen, origin,
+                keys=seed_keys if first else frontier,
+                shorter_only=first and seed_keys is None and not all_rows)
+            first = False
             if passes == 1:
                 counts['scanned'] = scanned
                 counts['seeds'] = len(pending)
