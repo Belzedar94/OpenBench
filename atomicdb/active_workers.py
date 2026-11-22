@@ -33,6 +33,23 @@ requests and the server's own picks, then shows that account's rows.  The accoun
 workers come first, then the fastest.  The groups are built from the rows
 above, so they cost no read of their own.
 
+INSIDE AN ACCOUNT THE ROWS GO BY SERVER.  A worker run with ``--jobs`` names
+each slot ``<machine>#<n>``, so the server is the machine name without that
+suffix; a name without one is a server of its own.  When some server of the
+account has more than one slot, the account opens to one collapsed row per
+server (its live slots out of all it had, threads, speed and searches), and
+each server row opens to its slots.  Otherwise the account opens straight to
+its rows, as before.
+
+A SERVER THAT WENT QUIET.  A worker that stops sending heartbeats leaves the
+live list without a trace, so the page also reads the pings of the same
+accounts heard in the last day but not in the live window: those slots are
+"quiet".  Each server row says how many of its slots are live out of all it
+had, how many are quiet and when the last of them was heard, and the quiet
+slots are listed under the live ones.  A server whose slots are all quiet
+still has its row, inside the account, as long as one worker of the account
+is live; an account with no live worker at all is not on the page.
+
 Nothing else of the ping reaches the template: the rows are built here from
 named fields, and the lease token never leaves the database (the query only
 asks whether there is one).
@@ -45,8 +62,9 @@ here exactly as it is absent there.  The rules are restated rather than
 shared because ``home`` keeps them inline; ``test_active_workers`` pins the
 two pages to the same answer.
 
-WHAT IT COSTS.  Three indexed reads whatever the size of the fleet: the live
-pings (``last_seen`` is indexed), the live leases of those machines (the
+WHAT IT COSTS.  Four indexed reads whatever the size of the fleet: the live
+pings (``last_seen`` is indexed), the quiet pings of the same accounts (one
+day of the same index), the live leases of those machines (the
 LEASED band of ``state``, a few rows) and the searches those machines
 finished in the last hour (the COMPLETED band of the (state, completed)
 index: one hour of searches, never the whole table).  The lines come from the
@@ -83,6 +101,31 @@ def live_pings(now):
     pings.sort(key=lambda ping: (ping.user.lower(), ping.user,
                                  _natural(ping.machine), ping.machine))
     return pings
+
+
+QUIET_HOURS = 24
+
+_SLOT = re.compile(r'#\d+$')
+
+
+def server_of(machine):
+    """``box#14`` and ``box#3`` run on ``box``; ``box`` runs on itself."""
+    return _SLOT.sub('', machine or '') or (machine or '')
+
+
+def quiet_pings(owners, now):
+    """``[(user, machine, last_seen)]`` of the given accounts: heard in the
+    last ``QUIET_HOURS`` but not within the live window of ``live_pings``.
+
+    ``(machine, user)`` is unique, so a quiet row is never a live one too.
+    """
+    if not owners:
+        return []
+    since = now - timedelta(seconds=metrics.LIVE_SECONDS)
+    return list(WorkerPing.objects
+                .filter(last_seen__gte=now - timedelta(hours=QUIET_HOURS),
+                        last_seen__lt=since, user__in=sorted(owners))
+                .values_list('user', 'machine', 'last_seen'))
 
 
 def _natural(text):
@@ -217,10 +260,13 @@ def present(now=None):
             'searches_h': views._human(searches),
         })
         group['workers'].append(workers[-1])
+    quiet = {}
+    for user, machine, seen in quiet_pings(groups.keys(), now):
+        quiet.setdefault(user, []).append((machine, seen))
     threads = sum(worker['threads'] for worker in workers)
     return {
         'workers': workers,
-        'groups': _groups(groups.values()),
+        'groups': _groups(groups.values(), quiet, speed, now),
         'count': len(workers),
         'busy': sum(1 for worker in workers if worker['task']),
         'accounts': len({worker['owner'] for worker in workers}),
@@ -230,10 +276,64 @@ def present(now=None):
     }
 
 
-def _groups(groups):
+def _quiet_rows(slots, now):
+    """The quiet slots of a server or an account, in slot order."""
+    return [{'machine': machine, 'seen': contributors._ago(seen, now),
+             'seen_iso': seen.isoformat(timespec='minutes')}
+            for machine, seen in sorted(
+                slots, key=lambda slot: (_natural(slot[0]), slot[0]))]
+
+
+def _last_heard(slots, now):
+    """When the last of the quiet slots was heard, as text and as a stamp."""
+    if not slots:
+        return '', ''
+    seen = max(seen for _, seen in slots)
+    return contributors._ago(seen, now), seen.isoformat(timespec='minutes')
+
+
+def _servers(owner, rows, quiet, speed, now):
+    """One summary per server of an account, in name order."""
+    by_server = {}
+    for row in rows:
+        by_server.setdefault(server_of(row['machine']),
+                             {'live': [], 'quiet': []})['live'].append(row)
+    for machine, seen in quiet:
+        by_server.setdefault(server_of(machine),
+                             {'live': [], 'quiet': []})['quiet'].append(
+                                 (machine, seen))
+    servers = []
+    for name in sorted(by_server, key=lambda name: (_natural(name), name)):
+        live, gone = by_server[name]['live'], by_server[name]['quiet']
+        threads = sum(row['threads'] for row in live)
+        nps = sum(speed.get((owner, row['machine']), (0, 0))[0]
+                  for row in live)
+        searches = sum(row['searches'] for row in live)
+        heard, heard_iso = _last_heard(gone, now)
+        servers.append({
+            'name': name,
+            'workers': live,
+            'quiet_workers': _quiet_rows(gone, now),
+            'live': len(live),
+            'slots': len(live) + len(gone),
+            'quiet': len(gone),
+            'heard': heard,
+            'heard_iso': heard_iso,
+            'busy': sum(1 for row in live if row['task']),
+            'threads': threads,
+            'threads_h': views._human(threads),
+            'nps_h': views._human(round(nps)) if nps else '',
+            'searches': searches,
+            'searches_h': views._human(searches),
+        })
+    return servers
+
+
+def _groups(groups, quiet, speed, now):
     """One summary per account, the most workers first, then the fastest.
 
-    Within an account the rows keep the order of ``live_pings``.
+    Within an account the rows keep the order of ``live_pings``.  An account
+    with a server of more than one slot is also split by server.
     """
     presented = []
     for group in groups:
@@ -241,6 +341,10 @@ def _groups(groups):
         tasks = [row['task'] for row in rows if row['task']]
         threads = sum(row['threads'] for row in rows)
         requests = sum(1 for task in tasks if task['source'] == USER)
+        gone = quiet.get(group['owner'], [])
+        servers = _servers(group['owner'], rows, gone, speed, now)
+        split = any(server['slots'] > 1 for server in servers)
+        heard, heard_iso = _last_heard(gone, now)
         presented.append({
             'owner': group['owner'],
             'workers': rows,
@@ -256,6 +360,13 @@ def _groups(groups):
             'requests': requests,
             'server': len(tasks) - requests,
             'idle': len(rows) - len(tasks),
+            'quiet': len(gone),
+            'heard': heard,
+            'heard_iso': heard_iso,
+            'quiet_workers': _quiet_rows(gone, now),
+            'servers': servers if split else [],
+            'down': (sum(1 for server in servers if not server['live'])
+                     if split else 0),
         })
     presented.sort(key=lambda group: (-group['count'], -group['nps'],
                                       group['owner'].lower(), group['owner']))

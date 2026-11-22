@@ -368,6 +368,135 @@ class GroupTests(TestCase):
         self.assertIn('href="/atomicdb/user/alice/"', summary)
 
 
+class ServerTests(TestCase):
+    """Inside an account, the slots of one server go together, and a slot
+    that stopped sending heartbeats stays visible for a day."""
+
+    def _group(self, owner):
+        return [g for g in active_workers.present()['groups']
+                if g['owner'] == owner][0]
+
+    def test_the_server_is_the_machine_without_its_slot(self):
+        self.assertEqual(
+            [active_workers.server_of(name) for name in (
+                'jeanHeibig-NLDW4-3-07-41-atomicdb#14',
+                'jeanHeibig-pc-jh-atomicdb#0', 'plain-box', 'box#a', '#3')],
+            ['jeanHeibig-NLDW4-3-07-41-atomicdb', 'jeanHeibig-pc-jh-atomicdb',
+             'plain-box', 'box#a', '#3'])
+
+    def test_slots_group_by_server_in_name_order(self):
+        _ping('vm#10', 'jean', threads=4)
+        _ping('vm#2', 'jean', threads=4)
+        _ping('pc#0', 'jean', threads=16)
+        _done('vm#2', 'jean', nodes=60_000_000, seconds=60)
+        _done('vm#10', 'jean', nodes=30_000_000, seconds=60)
+
+        servers = self._group('jean')['servers']
+
+        self.assertEqual(
+            [(s['name'], [w['machine'] for w in s['workers']], s['live'],
+              s['slots'], s['threads_h'], s['nps_h'], s['searches'])
+             for s in servers],
+            [('pc', ['pc#0'], 1, 1, '16', '', 0),
+             ('vm', ['vm#2', 'vm#10'], 2, 2, '8',
+              views._human(1_500_000), 2)])
+        raw = _page()
+        self.assertEqual(raw.count('<details class="fleet-server">'), 2)
+        self.assertNotIn('<details class="fleet-server" open', raw)
+        summary = raw[raw.index('<summary class="fleet-owner-row '
+                                'fleet-server-row">'):]
+        summary = _reading(summary[:summary.index('</summary>')])
+        self.assertEqual(summary, 'pc between tasks 1 slot 16 threads '
+                                  'no search finished 0 searches')
+
+    def test_an_account_of_single_machines_opens_straight_to_its_rows(self):
+        _ping('a-box', 'alice')
+        _ping('b-box', 'alice')
+
+        self.assertEqual(self._group('alice')['servers'], [])
+        self.assertNotIn('fleet-server', _page())
+
+    def test_a_quiet_slot_flags_its_server(self):
+        now = timezone.now()
+        for slot in range(10):
+            _ping(f'vm#{slot}', 'jean')
+        _ping('vm#10', 'jean', seen=now - timedelta(minutes=50))
+        _ping('vm#11', 'jean', seen=now - timedelta(minutes=40))
+
+        group = self._group('jean')
+        server = group['servers'][0]
+
+        self.assertEqual((server['live'], server['slots'], server['quiet'],
+                          server['heard']),
+                         (10, 12, 2, '40\xa0minutes ago'))
+        self.assertEqual([q['machine'] for q in server['quiet_workers']],
+                         ['vm#10', 'vm#11'])
+        self.assertEqual((group['count'], group['quiet'], group['down']),
+                         (10, 2, 0))
+        body = _reading(_page())
+        self.assertIn('vm 2 quiet, last heard 40 minutes ago 10/12 live', body)
+        self.assertIn('jean between tasks · 2 quiet 10 workers', body)
+        self.assertIn('vm#11 quiet, last heard 40 minutes ago', body)
+
+    def test_a_server_with_every_slot_quiet_is_down(self):
+        now = timezone.now()
+        _ping('vm#0', 'jean')
+        _ping('vm#1', 'jean')
+        _ping('pc#0', 'jean', seen=now - timedelta(hours=3))
+        _ping('pc#1', 'jean', seen=now - timedelta(hours=2))
+
+        group = self._group('jean')
+
+        self.assertEqual([(s['name'], s['live'], s['slots'])
+                          for s in group['servers']],
+                         [('pc', 0, 2), ('vm', 2, 2)])
+        self.assertEqual(group['down'], 1)
+        body = _reading(_page())
+        self.assertIn('pc down, last heard 2 hours ago 0/2 live', body)
+        self.assertIn('jean between tasks · 1 server down', body)
+
+    def test_a_quiet_single_machine_is_listed_without_servers(self):
+        _ping('a-box', 'alice')
+        _ping('b-box', 'alice', seen=timezone.now() - timedelta(hours=1))
+
+        group = self._group('alice')
+
+        self.assertEqual((group['servers'], group['quiet'], group['down']),
+                         ([], 1, 0))
+        body = _reading(_page())
+        self.assertIn('alice between tasks · 1 quiet', body)
+        self.assertIn('b-box quiet, last heard 1 hour ago', body)
+
+    def test_only_the_last_day_of_live_accounts_is_quiet(self):
+        now = timezone.now()
+        _ping('vm#0', 'jean')
+        _ping('vm#1', 'jean', seen=now - timedelta(
+            hours=active_workers.QUIET_HOURS, minutes=1))
+        # Another account under the same machine name, and an account with
+        # no live worker at all: neither is jean's, and the second is not on
+        # the page.
+        _ping('vm#2', 'bob', seen=now - timedelta(hours=1))
+        _ping('other#0', 'carol', seen=now - timedelta(hours=1))
+
+        page = active_workers.present(now)
+
+        self.assertEqual([(g['owner'], g['quiet']) for g in page['groups']],
+                         [('jean', 0)])
+        self.assertEqual(page['groups'][0]['servers'], [])
+        self.assertNotIn('quiet', _reading(_page()))
+
+    def test_the_live_window_boundary_is_live_not_quiet(self):
+        now = timezone.now()
+        window = timedelta(seconds=metrics.LIVE_SECONDS)
+        _ping('vm#0', 'jean', seen=now)
+        _ping('vm#1', 'jean', seen=now - window)
+        _ping('vm#2', 'jean', seen=now - window - timedelta(seconds=1))
+
+        server = active_workers.present(now)['groups'][0]['servers'][0]
+
+        self.assertEqual((server['live'], server['quiet']), (2, 1))
+
+
 class SpeedTests(TestCase):
     """A worker's speed: its searches of the last hour, nodes over time."""
 
@@ -599,8 +728,26 @@ class CostTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return sum(len(context.captured_queries) for context in captured)
 
-    def test_a_warm_page_reads_pings_leases_and_speeds_and_nothing_else(self):
-        self.assertEqual(self._cost(3, warm=True), 3)
+    def test_a_warm_page_reads_pings_quiet_leases_and_speeds_only(self):
+        # Live pings, quiet pings of the same accounts, leases, speeds.
+        self.assertEqual(self._cost(3, warm=True), 4)
+
+    def test_quiet_slots_cost_nothing_more(self):
+        quiet = timezone.now() - timedelta(hours=2)
+        for slot in range(12):
+            _ping(f'gone#{slot}', 'owner0', seen=quiet)
+
+        self.assertEqual(self._cost(3, warm=True), 4)
+
+    def test_no_live_worker_skips_the_quiet_read(self):
+        _ping('gone', 'alice', seen=timezone.now() - timedelta(hours=2))
+        request = RequestFactory().get('/atomicdb/workers/')
+        request.user = AnonymousUser()
+        with CaptureQueriesContext(
+                connections[settings.ATOMICDB_DATABASE_ALIAS]) as captured:
+            active_workers.present()
+
+        self.assertEqual(len(captured.captured_queries), 1)
 
     def test_three_workers_and_twelve_cost_the_same_warm(self):
         three = self._cost(3, warm=True)
