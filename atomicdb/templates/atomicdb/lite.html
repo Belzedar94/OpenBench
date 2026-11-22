@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>AtomicDB lite</title>
+<style>
+body { background: #fff; color: #000; font-family: Georgia, serif; font-size: 18px; line-height: 1.4; margin: 8px; }
+a { color: #000; text-decoration: underline; }
+h1 { font-size: 22px; margin: 0 0 6px 0; }
+p { margin: 6px 0; }
+.nav a { margin-right: 14px; }
+.board { border-collapse: collapse; border: 2px solid #000; margin: 8px 0; }
+.board td { width: 36px; height: 36px; padding: 0; text-align: center; vertical-align: middle; font-size: 30px; line-height: 36px; }
+.board td.l { background: #fff; }
+.board td.d { background: #999; }
+.board td.lbl { width: 18px; font-size: 14px; background: #fff; }
+.board tr.files td { height: 18px; line-height: 18px; font-size: 14px; background: #fff; }
+.letters .board td { font-family: "Courier New", monospace; font-weight: bold; font-size: 24px; }
+.letters .board td.w { text-decoration: underline; }
+.moves { border-collapse: collapse; margin: 6px 0; }
+.moves th, .moves td { border-bottom: 1px solid #000; padding: 4px 10px 4px 0; text-align: left; vertical-align: top; }
+.small { font-size: 15px; }
+.err { border: 2px solid #000; padding: 6px; font-weight: bold; }
+input[type=text] { font-size: 16px; width: 95%; max-width: 560px; border: 1px solid #000; padding: 4px; }
+input[type=submit] { font-size: 16px; border: 2px solid #000; background: #fff; padding: 3px 10px; }
+</style>
+</head>
+<body{% if letters %} class="letters"{% endif %}>
+<h1>AtomicDB lite</h1>
+<p class="nav">{% if back_url %}<a href="{{ back_url }}">&laquo; Back</a>{% endif %}<a href="{{ start_url }}">Start</a>{% if explorer_url %}<a href="{{ explorer_url }}">Full explorer</a>{% endif %}{% if letters_url %}<a href="{{ letters_url }}">{% if letters %}Piece symbols{% else %}Piece letters{% endif %}</a>{% endif %}</p>
+
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+
+{% if board %}
+<table class="board" summary="Board, White at the bottom">
+{% for rank, cells in board %}<tr><td class="lbl">{{ rank }}</td>{% for label, dark, white in cells %}<td class="{% if dark %}d{% else %}l{% endif %}{% if label and white %} w{% endif %}">{{ label }}</td>{% endfor %}</tr>
+{% endfor %}<tr class="files"><td class="lbl"></td><td>a</td><td>b</td><td>c</td><td>d</td><td>e</td><td>f</td><td>g</td><td>h</td></tr>
+</table>
+<p><strong>{{ stm }} to move.</strong>{% if letters %} <span class="small">Capitals and underlined letters are White.</span>{% endif %}</p>
+{% endif %}
+
+{% if pos %}
+<p>{% if header.verdict %}<strong>{{ header.verdict }}</strong> &middot; {{ header.closure }}{% if header.mate %} &middot; <strong>{{ header.mate }}</strong>{% endif %}{% elif header.eval %}Eval for {{ stm }}: <strong>{{ header.eval }}</strong>{% if header.backed_plies %} (backed {{ header.backed_plies }}){% endif %}{% else %}Not analysed yet.{% endif %}</p>
+{% if best_san %}<p>Best move: <strong>{{ best_san }}</strong></p>{% endif %}
+{% if won_line_san %}<p>Winning line: {{ won_line_san }}</p>
+{% elif engine_line %}<p>Engine line: {{ engine_line.0 }}{% if engine_line.1 %} ({{ engine_line.1 }}){% endif %}</p>{% endif %}
+
+{% if moves %}
+<table class="moves">
+<tr><th>Move</th><th>Eval</th><th>Status</th></tr>
+{% for m in moves %}<tr><td>{% if m.url %}<a href="{{ m.url }}">{{ m.san }}</a>{% else %}{{ m.san }}{% endif %}</td><td>{{ m.value }}{% if m.notes %}<br><span class="small">{{ m.notes }}</span>{% endif %}</td><td class="small">{{ m.state }}</td></tr>
+{% endfor %}</table>
+<p class="small">Evals are in centipawns for {{ stm }}. M3 means mate in 3.</p>
+{% elif pos.closure == 'TERMINAL' %}<p>The game is over in this position.</p>
+{% else %}<p>No moves from here are in AtomicDB yet.</p>{% endif %}
+{% if offtree %}<p class="small">Not in AtomicDB yet: {{ offtree|join:", " }}</p>{% endif %}
+{% endif %}
+
+<form method="get" action="/atomicdb/lite/">
+<p>Go to a FEN:<br>
+<input type="text" name="fen" value="{% if fen_value %}{{ fen_value }}{% else %}{{ fen|default:'' }}{% endif %}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+{% if letters %}<input type="hidden" name="letters" value="1">{% endif %}
+<input type="submit" value="Go"></p>
+</form>
+</body>
+</html>
