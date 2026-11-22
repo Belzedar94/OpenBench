@@ -4,8 +4,8 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.vary import vary_on_cookie
 
 from . import backlog
-from . import (active_workers, name_vote_views, page_cache, preferences,
-               roots, views)
+from . import (active_workers, lite, name_vote_views, page_cache,
+               preferences, roots, views)
 from .conquest_map import map_api
 from .funquests import views as fun_views
 
@@ -120,6 +120,11 @@ urlpatterns = [
     path('', _home_cached),
     path('map/', _map_cached, name='atomicdb-map'),
     path('explore/<str:key>/', views.explore),
+    # The explorer without JavaScript, for e-readers and old browsers: one
+    # position and its children, read only, and nothing per visitor in it
+    # (no session, no CSRF form), so one short cache entry per URL serves
+    # every visitor alike and absorbs repeated page turns.
+    path('lite/', cache_page(15)(lite.lite), name='atomicdb-lite'),
     path('goto/<str:key>/<str:uci>/', views.goto),
     # Salto al origen de un valor respaldado: camina la espina de soporte y
     # redirige.  Solo LEE (a diferencia de ``goto``, que crea la arista), pero
