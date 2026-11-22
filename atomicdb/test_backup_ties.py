@@ -210,6 +210,51 @@ class TieOrderTests(TestCase):
         self.assertEqual(ingest._best_child(children[:2], False).move, 'e8f8')
 
 
+class LongestDefenceTests(TestCase):
+    """465afa99, 20-Nov: proven and unproven mates on one scale."""
+
+    def test_a_proven_longer_mate_beats_an_engine_shorter_one(self):
+        for stm_white, sign in ((True, -1), (False, 1)):
+            engine = _open('b4d6', sign * 9_995)          # mate in 5
+            proven = _proven('f8e8', sign * 10_000, 25)   # 25 plies: in 13
+            for order in ([engine, proven], [proven, engine]):
+                self.assertIs(ingest._best_child(order, stm_white), proven)
+
+    def test_an_engine_longer_mate_beats_a_proven_shorter_one(self):
+        for stm_white, sign in ((True, -1), (False, 1)):
+            engine = _open('b4d6', sign * 9_980)          # mate in 20
+            proven = _proven('f8e8', sign * 10_000, 25)
+            self.assertIs(ingest._best_child([proven, engine], stm_white),
+                          engine)
+
+    def test_equal_lengths_still_prefer_the_open_move(self):
+        for stm_white, sign in ((True, -1), (False, 1)):
+            engine = _open('b4d6', sign * 9_987)          # mate in 13
+            for plies in (25, 26):                        # in 13 either way
+                proven = _proven('f8e8', sign * 10_000, plies)
+                self.assertIs(
+                    ingest._best_child([proven, engine], stm_white), engine)
+
+    def test_a_move_that_is_not_mated_still_decides_by_value(self):
+        for stm_white, sign in ((True, -1), (False, 1)):
+            tb = _open('a7a6', sign * ingest.TB_CLAMP_CEILING)
+            proven = _proven('f8e8', sign * 10_000, 99)
+            self.assertIs(ingest._best_child([proven, tb], stm_white), tb)
+
+    def test_the_backed_value_stands_on_the_longest_defence(self):
+        node = _pos('465A-N', 'b', expanded=True, eval_cp=9_995,
+                    best_move='b4d6', nodes_invested=ENGINE)
+        _edge(node, _pos('465A-b4d6', 'w', eval_cp=9_995,
+                         nodes_invested=ENGINE), 'b4d6')
+        _edge(node, _decided('465A-f8e8', 'w', 25), 'f8e8')
+
+        ingest.backup_backed_evals([node.key])
+
+        value, move, _plies, _nodes = _backed(node)
+        self.assertEqual(move, 'f8e8')
+        self.assertEqual(value, 10_000)
+
+
 class LostPositionTests(TestCase):
     """1725116b, Black to move: every known move loses."""
 
