@@ -42,6 +42,7 @@ import tempfile
 from io import StringIO
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
 
@@ -131,6 +132,51 @@ class CountsAndBox(BacklogTestCase):
         self.assertIn('action="/atomicdb/queue/adopt/"', body)
         # Nothing was ever offered there: no buttons, and no "all adopted".
         self.assertIn('nothing to adopt', body)
+
+    def _main_and_folded(self, client=None):
+        body = (client or self.client).get('/atomicdb/queue/').content.decode()
+        box = body[body.index('id="backlog"'):]
+        if '<details class="backlog-adopted">' not in box:
+            return box, ''
+        main, folded = box.split('<details class="backlog-adopted">', 1)
+        return main, folded.split('</details>', 1)[0]
+
+    def test_a_fully_adopted_backlog_is_folded_away(self):
+        _offer(backlog.LOST_LINES, [_short('a'), _short('b')])
+        _offer(backlog.SHALLOW, [_shallow('s')])
+        backlog.adopt('moky', backlog.LOST_LINES, 25)
+        cache.clear()
+        main, folded = self._main_and_folded()
+        self.assertIn('Shallow', main)
+        self.assertNotIn('Lost lines', main)
+        self.assertIn('Show 1 fully adopted backlog</summary>', folded)
+        self.assertIn('Lost lines', folded)
+        self.assertIn('all adopted', folded)
+        # Anonymous visitors get the same fold.
+        main, folded = self._main_and_folded(Client())
+        self.assertNotIn('Lost lines', main)
+        self.assertIn('Lost lines', folded)
+
+    def test_a_backlog_with_rows_open_again_comes_back(self):
+        _offer(backlog.LOST_LINES, [_short('a'), _short('b')])
+        backlog.adopt('moky', backlog.LOST_LINES, 25)
+        BacklogItem.objects.filter(position_key=_key('a')).update(
+            state=BacklogItem.State.OPEN, adopted_by='', task_id=None)
+        cache.clear()
+        main, folded = self._main_and_folded()
+        self.assertIn('Lost lines', main)
+        self.assertNotIn('Lost lines', folded)
+
+    def test_never_offered_backlogs_stay_in_the_main_list(self):
+        main, folded = self._main_and_folded()
+        self.assertIn('nothing to adopt', main)
+        self.assertEqual(folded, '')
+        self.assertNotIn('fully adopted backlog', main)
+
+    def test_fully_adopted_reads_the_counts(self):
+        self.assertTrue(backlog.fully_adopted({'open': 0, 'adopted': 3}))
+        self.assertFalse(backlog.fully_adopted({'open': 1, 'adopted': 3}))
+        self.assertFalse(backlog.fully_adopted({'open': 0, 'adopted': 0}))
 
     def test_anonymous_visitors_see_the_box_and_a_sign_in_link(self):
         _offer(backlog.LOST_LINES, [_short('a')])

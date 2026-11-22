@@ -616,6 +616,15 @@ def boxes():
             for name in ORDER]
 
 
+def fully_adopted(entry):
+    """Nothing left to adopt, and something was: the box folds it away.
+
+    Read from the counts every time, never stored: a row that opens again
+    brings the backlog back to the main list by itself.
+    """
+    return not entry['open'] and entry['adopted'] > 0
+
+
 # ---------------- adopting a batch ----------------
 
 @dataclass
