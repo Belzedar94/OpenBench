@@ -14,28 +14,21 @@
 <table class="backlog-table">
   <tr><th>Backlog</th><th>Left</th><th>Adopted</th><th>{% if signed_in %}Adopt{% endif %}</th></tr>
   {% for b in backlogs %}
-  <tr>
-    <td><strong>{{ b.title }}</strong><div class="dim backlog-about">{{ b.about }}</div></td>
-    <td>{{ b.open }}{% if b.held %}<div class="dim" title="Kept on the list for a later round: under +33 a 128M search rarely closes them">{{ b.held }} held</div>{% endif %}</td>
-    <td class="dim">{{ b.adopted }}{% if b.adopters %} <span title="Accounts that adopted from this backlog">({{ b.adopters }} account{{ b.adopters|pluralize }})</span>{% endif %}</td>
-    <td class="backlog-adopt">{% if signed_in %}{% if b.open %}{% for size in b.sizes %}<form method="post" action="/atomicdb/queue/adopt/">
-        <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-        <input type="hidden" name="backlog" value="{{ b.name }}">
-        <input type="hidden" name="size" value="{{ size }}">
-        <button type="submit" title="Queue {{ size }} of these searches as your own requests">Adopt {{ size }}</button></form>{% endfor %}{% elif b.adopted %}<span class="dim">all adopted</span>{% else %}<span class="dim">nothing to adopt</span>{% endif %}<div class="backlog-sub">{% if b.sub and b.sub.active %}<form method="post" action="/atomicdb/queue/subscribe/">
-        <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-        <input type="hidden" name="backlog" value="{{ b.name }}">
-        <input type="hidden" name="action" value="unsubscribe">
-        <span title="Up to two batches are adopted for you whenever fewer than one batch of your adopted positions from this backlog are waiting">Subscribed, {{ b.sub.batch_size }} at a time</span>
-        <button type="submit">Unsubscribe</button></form>{% elif b.open %}<form method="post" action="/atomicdb/queue/subscribe/">
-        <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-        <input type="hidden" name="backlog" value="{{ b.name }}">
-        <select name="size" aria-label="Batch size">{% for size in b.sizes %}<option value="{{ size }}"{% if size == b.default_size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select>
-        <button type="submit" title="Adopt up to two batches for me whenever fewer than one batch of my adopted positions from this backlog are waiting">Subscribe</button></form>{% if b.sub.last_status == 'empty' %} <span class="dim">Your last subscription ended when this list ran out.</span>{% endif %}{% elif b.sub.last_status == 'empty' %}<span class="dim">Your subscription ended when this list ran out.</span>{% endif %}</div>{% endif %}</td>
-  </tr>
+  {% include 'atomicdb/_backlog_row.html' %}
   {% endfor %}
 </table>
 </div>
+{% if adopted_backlogs %}<details class="backlog-adopted">
+<summary>Show {{ adopted_backlogs|length }} fully adopted backlog{{ adopted_backlogs|length|pluralize }}</summary>
+<div class="contrib-scroll">
+<table class="backlog-table">
+  <tr><th>Backlog</th><th>Left</th><th>Adopted</th><th>{% if signed_in %}Adopt{% endif %}</th></tr>
+  {% for b in adopted_backlogs %}
+  {% include 'atomicdb/_backlog_row.html' %}
+  {% endfor %}
+</table>
+</div>
+</details>{% endif %}
 {% if signed_in %}<p class="dim backlog-note">{% if waiting_adopted %}Your adopted positions waiting take {{ waiting_adopted|floatformat:"-1" }} of the {{ waiting_max }} places an account has.{% else %}Each account has {{ waiting_max }} places for adopted positions waiting.{% endif %}{% for h in heavy %} A position from {{ h.title }} takes {{ h.weight }} places.{% endfor %} A place is one search of 128M: one at 32M takes a quarter, one at 8M a sixteenth.
   Subscribe to a backlog and up to two batches are adopted for you whenever fewer than one batch from it are waiting; it stops by itself when the list runs out.</p>
 {% else %}<p class="dim backlog-note"><a href="/login/?next=/atomicdb/queue/%23backlog">Sign in</a> to adopt a batch.</p>{% endif %}

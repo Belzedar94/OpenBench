@@ -22,7 +22,9 @@ def backlog_box(context):
     for row in rows:
         row['sub'] = subs.get(row['name'])
     return {
-        'backlogs': rows,
+        'backlogs': [row for row in rows if not backlog.fully_adopted(row)],
+        'adopted_backlogs': [row for row in rows
+                             if backlog.fully_adopted(row)],
         'signed_in': signed_in,
         'username': username,
         'waiting_adopted': backlog.adopted_waiting(username),
