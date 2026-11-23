@@ -41,6 +41,13 @@ Every value is a cumulative gauge observed near `captured_at`, except the live
 worker gauges. A UI derives hourly deltas from adjacent rows; negative deltas
 are data-quality warnings, not work to hide.
 
+`positions_total`, `positions_unknown` and `positions_closed` are exact in
+every row (one `GROUP BY status` served by the status index). The rest of the
+position breakdown — `positions_expanded`, `closure_*` and `trust_*` — needs
+a scan of the whole position table (16 to 40 minutes at 160M rows), so it is
+measured only by the first capture with no full row in the previous 24 hours,
+and is NULL ("not measured this hour") in the others. `--full` forces it.
+
 | Field | Exact meaning |
 |---|---|
 | `positions_total` | All stored unique `Position` rows. |

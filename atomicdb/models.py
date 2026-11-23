@@ -1344,6 +1344,12 @@ class ProgressSnapshot(models.Model):
     These are cumulative counters observed at capture time, not reconstructed
     history and not deltas.  ``bucket_start`` is always the start of a UTC
     hour when written by ``capture_atomicdb_progress``.
+
+    The position breakdown (``positions_expanded``, ``closure_*``,
+    ``trust_*``) needs a scan of the whole position table, so it is measured
+    once every 24 hours and is NULL in the other rows: not measured that hour
+    (§ capture_atomicdb_progress.BREAKDOWN_FIELDS).  Total, unknown and closed
+    are exact in every row.
     """
 
     bucket_start = models.DateTimeField(unique=True)
@@ -1352,7 +1358,7 @@ class ProgressSnapshot(models.Model):
     positions_total = models.BigIntegerField(default=0)
     positions_unknown = models.BigIntegerField(default=0)
     positions_closed = models.BigIntegerField(default=0)
-    positions_expanded = models.BigIntegerField(default=0)
+    positions_expanded = models.BigIntegerField(null=True)
 
     engine_nodes_total = models.BigIntegerField(default=0)
     engine_seconds_total = models.FloatField(default=0.0)
@@ -1368,11 +1374,11 @@ class ProgressSnapshot(models.Model):
     active_threads = models.BigIntegerField(default=0)
     active_nps = models.BigIntegerField(default=0)
 
-    closure_terminal = models.BigIntegerField(default=0)
-    closure_tb = models.BigIntegerField(default=0)
-    closure_mate_pv = models.BigIntegerField(default=0)
-    closure_minimax = models.BigIntegerField(default=0)
-    closure_unclassified = models.BigIntegerField(default=0)
+    closure_terminal = models.BigIntegerField(null=True)
+    closure_tb = models.BigIntegerField(null=True)
+    closure_mate_pv = models.BigIntegerField(null=True)
+    closure_minimax = models.BigIntegerField(null=True)
+    closure_unclassified = models.BigIntegerField(null=True)
 
     # pn/dn de la raiz de la campana por defecto, en el instante de la
     # captura.  Son el indicador de progreso REAL del proyecto — cuanto
@@ -1424,11 +1430,11 @@ class ProgressSnapshot(models.Model):
     human_close_median_seconds = models.BigIntegerField(default=0)
     human_close_samples = models.BigIntegerField(default=0)
 
-    trust_verified = models.BigIntegerField(default=0)
-    trust_andor = models.BigIntegerField(default=0)
-    trust_engine = models.BigIntegerField(default=0)
-    trust_disputed = models.BigIntegerField(default=0)
-    trust_unclassified = models.BigIntegerField(default=0)
+    trust_verified = models.BigIntegerField(null=True)
+    trust_andor = models.BigIntegerField(null=True)
+    trust_engine = models.BigIntegerField(null=True)
+    trust_disputed = models.BigIntegerField(null=True)
+    trust_unclassified = models.BigIntegerField(null=True)
 
     class Meta:
         ordering = ['bucket_start']

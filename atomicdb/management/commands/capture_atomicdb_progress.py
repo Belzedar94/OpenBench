@@ -5,7 +5,7 @@ no database trigger keeps them, folds in the root extremes (``roots``).
 """
 
 import json
-from datetime import timezone as datetime_timezone
+from datetime import timedelta, timezone as datetime_timezone
 
 from django.core.management.base import BaseCommand
 from django.db.models import BigIntegerField, Case, Count, F, Q, Sum, Value, When
@@ -28,7 +28,56 @@ def utc_hour(value):
     return value.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
 
 
-def _snapshot_values(observed_at):
+# EL DESGLOSE COMPLETO, UNA VEZ AL DIA (23-nov-2026).  El aggregate de abajo
+# recorre ``atomicdb_position`` entera: a 160M filas (89 GB) la captura de las
+# :05 tardaba entre 16 y 40 minutos, una CPU y el disco ocupados casi media
+# hora de cada hora.  Lo que la portada lee de esta fila — total y cerradas
+# (§ metrics._seed_tree_totals) — no necesita ese barrido: un GROUP BY status
+# lo resuelve exacto leyendo el indice de ``status``.  El resto del desglose
+# (expandidas, cierres por tipo, confianza) no lo pinta ninguna pagina; se
+# mide en la primera captura de cada 24 horas y las demas lo dejan en NULL,
+# que dice "esta hora no se midio" en vez de inventar o arrastrar un numero.
+BREAKDOWN_FIELDS = (
+    'positions_expanded',
+    'closure_terminal', 'closure_tb', 'closure_mate_pv', 'closure_minimax',
+    'closure_unclassified',
+    'trust_verified', 'trust_andor', 'trust_engine', 'trust_disputed',
+    'trust_unclassified',
+)
+FULL_BREAKDOWN_EVERY = timedelta(hours=24)
+
+
+def needs_full_breakdown(bucket):
+    """Si ninguna captura de las 24 horas anteriores a ``bucket`` lo midio."""
+    return not ProgressSnapshot.objects.filter(
+        bucket_start__gt=bucket - FULL_BREAKDOWN_EVERY,
+        bucket_start__lt=bucket,
+        positions_expanded__isnull=False).exists()
+
+
+def _status_counts():
+    """Total, abiertas y cerradas, exactas, sin leer la tabla.
+
+    ``COUNT(*)`` y no ``COUNT(key)``: la clave no esta en el indice de
+    ``status`` y contarla obligaria a visitar cada fila, que es justo el
+    barrido que esto evita.
+    """
+    by_status = dict(Position.objects.order_by().values_list('status')
+                     .annotate(n=Count('*')))
+    total = sum(by_status.values())
+    unknown = by_status.get('UNKNOWN', 0)
+    return {'positions_total': total,
+            'positions_unknown': unknown,
+            'positions_closed': total - unknown,
+            **{field: None for field in BREAKDOWN_FIELDS}}
+
+
+def _snapshot_values(observed_at, *, full=True):
+    positions = _full_position_counts() if full else _status_counts()
+    return {**positions, **_other_values(observed_at)}
+
+
+def _full_position_counts():
     closed_filter = ~Q(status='UNKNOWN')
     positions = Position.objects.aggregate(
         positions_total=Count('key'),
@@ -76,7 +125,10 @@ def _snapshot_values(observed_at):
         - positions['trust_engine']
         - positions['trust_disputed'],
     )
+    return positions
 
+
+def _other_values(observed_at):
     retry_excess = Case(
         When(attempts__gt=1, then=F('attempts') - Value(1)),
         default=Value(0),
@@ -110,7 +162,6 @@ def _snapshot_values(observed_at):
     attributed = closure_attribution_totals()
     latency = human_close_latency(now=observed_at)
     return {
-        **positions,
         **tasks,
         'recorded_rejections_total': DBEvent.objects.filter(
             kind='TB_REJECTED').count(),
@@ -140,21 +191,25 @@ def _snapshot_values(observed_at):
 
 
 @atomic()
-def capture_progress(*, now=None):
+def capture_progress(*, now=None, full=None):
     """Capture the current hour once; return ``(snapshot, created)``.
 
     An existing bucket is returned without recomputing or mutating it.  The
     optional ``now`` exists for deterministic tests; the management command
-    always captures the real current instant.
+    always captures the real current instant.  ``full`` forces (``True``) or
+    skips (``False``) the full position breakdown; ``None`` measures it when
+    no capture of the previous 24 hours did (§ BREAKDOWN_FIELDS).
     """
     observed_at = now or timezone.now()
     bucket = utc_hour(observed_at)
     existing = ProgressSnapshot.objects.filter(bucket_start=bucket).first()
     if existing is not None:
         return existing, False
+    if full is None:
+        full = needs_full_breakdown(bucket)
     return ProgressSnapshot.objects.get_or_create(
         bucket_start=bucket,
-        defaults=_snapshot_values(observed_at),
+        defaults=_snapshot_values(observed_at, full=full),
     )
 
 
@@ -207,6 +262,12 @@ class Command(BaseCommand):
                  'For reading the current numbers when this hour is already '
                  'captured; it is not a backfill and cannot become one.',
         )
+        parser.add_argument(
+            '--full', action='store_true',
+            help='Measure the full position breakdown (one scan of the whole '
+                 'position table) even if a capture of the last 24 hours '
+                 'already did. With --preview, preview it too.',
+        )
 
     def handle(self, *args, **options):
         if options['preview']:
@@ -216,12 +277,14 @@ class Command(BaseCommand):
             # fila no llego a guardar, sin romper esa garantia.
             self.stdout.write(json.dumps(
                 {'preview': True,
-                 'snapshot': _snapshot_values(timezone.now()),
+                 'snapshot': _snapshot_values(timezone.now(),
+                                              full=options['full']),
                  'main_line': roots.walk_main_line()},
                 sort_keys=True, separators=(',', ':'), default=str))
             return
         now = timezone.now()
-        snapshot, created = capture_progress(now=now)
+        snapshot, created = capture_progress(
+            now=now, full=True if options['full'] else None)
         # After the progress row has committed, and in its own transactions:
         # whatever happens to the main line cannot cost this hour's counters.
         line, line_created, folded, added = roots.capture(now=now)
