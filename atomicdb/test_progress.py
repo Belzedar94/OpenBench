@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.core.management import call_command
 
 from .management.commands.capture_atomicdb_progress import (
+    BREAKDOWN_FIELDS,
     capture_progress,
     utc_hour,
 )
@@ -189,3 +190,62 @@ class ProgressCaptureTests(TestCase):
         self.assertEqual(
             first['snapshot']['bucket_start'], '2026-07-23T10:00:00+00:00')
         self.assertEqual(first['snapshot'], second['snapshot'])
+
+    def test_hours_after_a_full_capture_skip_the_breakdown(self):
+        """Total, unknown and closed stay exact; the breakdown is NULL.
+
+        The breakdown needs a scan of the whole position table, so it is
+        measured once every 24 hours; NULL says the hour did not measure it.
+        """
+        first, _ = capture_progress(now=self.now)
+        Position.objects.create(key='later', fen='later w - - 0 1')
+        Position.objects.create(key='later-closed', fen='lc w - - 0 1',
+                                status='DRAW', closure='TERMINAL',
+                                expanded=True)
+
+        second, created = capture_progress(now=self.now + timedelta(hours=1))
+
+        self.assertTrue(created)
+        self.assertEqual(first.positions_expanded, 2)
+        self.assertEqual(
+            (second.positions_total, second.positions_unknown,
+             second.positions_closed),
+            (11, 4, 7))
+        for field in BREAKDOWN_FIELDS:
+            self.assertIsNone(getattr(second, field), field)
+        # Everything that is not a position count is still measured.
+        self.assertEqual(second.engine_nodes_total, 123)
+        self.assertEqual(second.recorded_rejections_total, 2)
+
+    def test_the_breakdown_comes_back_after_24_hours(self):
+        capture_progress(now=self.now)
+        for hours in range(1, 24):
+            snapshot, _ = capture_progress(now=self.now + timedelta(hours=hours))
+            self.assertIsNone(snapshot.positions_expanded, hours)
+
+        day_later, _ = capture_progress(now=self.now + timedelta(hours=24))
+
+        self.assertEqual(day_later.positions_expanded, 2)
+        self.assertEqual(day_later.closure_mate_pv, 2)
+        self.assertEqual(day_later.trust_verified, 2)
+
+    def test_a_missed_full_capture_is_made_up_at_the_next_hour(self):
+        """No full row in the previous 24 hours, so this one measures it."""
+        capture_progress(now=self.now, full=False)
+
+        snapshot, _ = capture_progress(now=self.now + timedelta(hours=1))
+
+        self.assertEqual(snapshot.positions_expanded, 2)
+
+    @mock.patch(
+        'atomicdb.management.commands.capture_atomicdb_progress.timezone.now')
+    def test_full_flag_forces_the_breakdown(self, now):
+        now.return_value = self.now
+        capture_progress(now=self.now)
+        now.return_value = self.now + timedelta(hours=1)
+
+        call_command('capture_atomicdb_progress', '--full', stdout=StringIO())
+
+        snapshot = ProgressSnapshot.objects.order_by('-bucket_start').first()
+        self.assertEqual(snapshot.positions_expanded, 2)
+        self.assertEqual(snapshot.closure_unclassified, 1)
