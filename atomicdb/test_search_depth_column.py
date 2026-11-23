@@ -164,8 +164,13 @@ class DepthColumnTests(TestCase):
     def test_the_header_names_the_column(self):
         body = Client().get(self.url).content.decode()
 
+        # The header carries the link to its note in the guide since the
+        # column notes moved there (741ab8f), so the label is no longer the
+        # whole cell.
         self.assertRegex(body, r'<th title="The node budget of the deepest '
-                               r'search[^"]*">depth</th>')
+                               r'search[^"]*">depth <a [^>]*'
+                               r'href="/atomicdb/docs/reading/#col-depth"'
+                               r'[^>]*>[^<]*</a></th>')
         self.assertNotIn('<th>visits</th>', body)
 
     def test_an_off_tree_row_keeps_its_bare_dash(self):
