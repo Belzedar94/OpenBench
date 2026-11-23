@@ -140,6 +140,16 @@ TB_CLAMP_CEILING = 9_500
 # mate truncada dejaria de serlo.
 STORED_PV_MAX_PLIES = 24
 CASCADE_GUARD_LIMIT = 100_000
+# How many times ONE backup_cascade call may rewrite the same position.  A
+# cascade that converges rewrites a position at most once per change among
+# its children, which in practice is a handful of times.  It is reached by a
+# cycle of closed positions whose distances hold each other up: each lap adds
+# one ply per node and the cascade never rests (23-Nov: four positions of a bishop
+# and rook shuffle counted to mate_in 40,000 inside one drainer batch, its
+# transaction open for an hour and the ingest writers blocked behind it).
+# Past the limit the position is neither written again nor climbed from,
+# and a CASCADE_CYCLE event names it; the next cascade starts a new count.
+CASCADE_REWRITE_LIMIT = 32
 PRIORITY_REFRESH_SECONDS = 30.0
 # A legal terminal mate PV remains useful ENGINE evidence when the stronger
 # exhaustive AND/OR certificate cannot be produced promptly.  This is one
@@ -1483,6 +1493,8 @@ def backup_cascade(seed_keys, report=None):
         frontier.add(pid)
     changed_total = 0
     changed_keys = []
+    rewrites = {}           # key -> writes by this call (CASCADE_REWRITE_LIMIT)
+    cycling = set()
     guard = 0
     while frontier and guard < CASCADE_GUARD_LIMIT:
         guard += 1
@@ -1549,7 +1561,14 @@ def backup_cascade(seed_keys, report=None):
                 if (new_mate, new_move) != (pos.mate_in, pos.best_move):
                     pos.mate_in, pos.best_move = new_mate, new_move
                     dirty = True
+            if dirty and rewrites.get(pos.key, 0) >= CASCADE_REWRITE_LIMIT:
+                # A cycle that never rests (§ CASCADE_REWRITE_LIMIT): the
+                # row keeps its last write and its parents are not climbed
+                # from again by this call.
+                cycling.add(pos.key)
+                dirty = False
             if dirty:
+                rewrites[pos.key] = rewrites.get(pos.key, 0) + 1
                 # Solo las columnas que ESTA cascada decide.  Un save()
                 # completo escribia la fila entera desde una lectura sin
                 # bloqueo y REVERTIA lo que otro consumer acababa de
@@ -1569,6 +1588,12 @@ def backup_cascade(seed_keys, report=None):
     if frontier:
         DBEvent.objects.create(kind='CASCADE_GUARD', payload={
             'iterations': guard, 'remaining': len(frontier),
+            'seed_count': len(seed_keys),
+        })
+    if cycling:
+        DBEvent.objects.create(kind='CASCADE_CYCLE', payload={
+            'keys': sorted(cycling)[:20], 'count': len(cycling),
+            'limit': CASCADE_REWRITE_LIMIT, 'iterations': guard,
             'seed_count': len(seed_keys),
         })
     if report is not None:
