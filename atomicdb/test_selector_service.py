@@ -126,6 +126,40 @@ class RefreshSelectorCommandTests(TestCase):
         self.assertEqual(report['pool_topped_up'], 11)
         self.assertNotIn('failed_steps', report)
 
+    def test_without_priorities_the_snapshot_is_published_once(self):
+        """The pre-pass publish only covers a long priorities pass."""
+        from . import metrics
+        out = StringIO()
+        with patch.object(metrics, 'refresh_public_snapshot',
+                          return_value=('a', 'b')) as publish:
+            call_command('refresh_selector', no_priorities=True, stdout=out)
+
+        publish.assert_called_once_with()
+        self.assertEqual(
+            json.loads(out.getvalue())['public_counters_published'], 2)
+
+    def test_with_priorities_the_snapshot_is_published_around_the_pass(self):
+        from . import metrics
+        with patch.object(ingest, 'refresh_priorities'):
+            with patch.object(metrics, 'refresh_public_snapshot',
+                              return_value=('a',)) as publish:
+                call_command('refresh_selector', stdout=StringIO())
+
+        self.assertEqual(publish.call_count, 2)
+
+    def test_no_public_counters_skips_both_publishes(self):
+        from . import metrics
+        out = StringIO()
+        with patch.object(ingest, 'refresh_priorities'):
+            with patch.object(metrics, 'refresh_public_snapshot') as publish:
+                call_command('refresh_selector', no_public_counters=True,
+                             stdout=out)
+
+        publish.assert_not_called()
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['public_counters_published'], 0)
+        self.assertNotIn('failed_steps', report)
+
     def test_autosolve_cap_is_forwarded_and_reported(self):
         """The cap is the walk's target now (§ atomicdb.autosolve)."""
         out = StringIO()

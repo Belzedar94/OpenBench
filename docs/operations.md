@@ -309,7 +309,9 @@ de la petición podía publicar en ellas.
 - **Quién publica los contadores**: `refresh_selector --loop`, al final de
   cada pasada (su JSON trae `public_counters_published: 5`), y el calentador
   de abajo cada 5 min. Una pasada del selector dura **más de una hora**, así
-  que él solo no basta y hace tiempo que no basta.
+  que él solo no basta y hace tiempo que no basta. Con `--no-priorities`
+  publica una sola vez por pasada (antes dos); con `--no-public-counters` no
+  publica nada y el único pagador es el calentador.
 - **Calentador de la portada** (`atomicdb-snapshot.timer` →
   `manage.py warm_public_snapshot`, cada 5 min): republica las **cinco
   entradas compartidas** que lee la portada — los agregados del árbol, la
