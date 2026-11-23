@@ -199,6 +199,13 @@ class Command(BaseCommand):
                  'this are waiting; a negative value drops the check '
                  '(default: %(default)s).')
         parser.add_argument(
+            '--no-public-counters', action='store_true',
+            help='Do not republish the front-page snapshots from this loop. '
+                 'For hosts where the atomicdb-snapshot timer '
+                 '(warm_public_snapshot, every 5 min) already republishes '
+                 'the same five entries: then each pass here pays them '
+                 'again for nothing.')
+        parser.add_argument(
             '--status', action='store_true',
             help='Print how many live positions carry a priority and exit.')
 
@@ -266,8 +273,17 @@ class Command(BaseCommand):
             # inline (30-40 s medidos el 4-ago).  Publicar aqui mantiene la
             # cache caliente durante TODA la pasada; el coste ya lo paga
             # este proceso y no la web, que es el reparto correcto.
-            step('public-counters-pre',
-                 lambda: len(metrics.refresh_public_snapshot()))
+            #
+            # SOLO CON PRIORIDADES (23-nov-2026).  Sin la pasada de
+            # prioridades no hay nada largo que cubrir: la publicacion de
+            # cierre llega segundos despues y repite exactamente la misma
+            # medida.  Con ``--no-priorities`` (produccion desde el 29-ago)
+            # el paso doblaba el coste de cada pasada — dos veces la
+            # atribucion de cierres sobre la semana de ``atomicdb_dbevent``.
+            publish = not options['no_public_counters']
+            if publish and not options['no_priorities']:
+                step('public-counters-pre',
+                     lambda: len(metrics.refresh_public_snapshot()))
             # ``force``: the service's own interval is the only clock that
             # matters here, not the process-local 30s cache the old inline
             # caller needed.
@@ -352,8 +368,11 @@ class Command(BaseCommand):
             # cola depende de ello, asi que si esto revienta no se lleva por
             # delante ninguna decision de planificacion — y la web tiene su
             # propia red para medirlos ella misma si este paso deja de correr.
-            published = step('public-counters',
-                             lambda: len(metrics.refresh_public_snapshot()))
+            published = 0
+            if publish:
+                published = step(
+                    'public-counters',
+                    lambda: len(metrics.refresh_public_snapshot()))
             passes += 1
             elapsed = time.monotonic() - started
             # QUE HIZO EL SELECTOR ESTA PASADA, en la misma linea de JSON que
