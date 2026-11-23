@@ -591,7 +591,8 @@ class RequestSelectedChildrenTests(TestCase):
 
         self.assertEqual(payload['skipped'], [
             {'move': 'e2e4', 'key': self._child('e2e4').key,
-             'reason': 'already-analyzed'}])
+             'reason': 'already-analyzed',
+             'completed_budget': ingest.REQUEST_BUDGET_LADDER[1]}])
         self.assertEqual(payload['queued'][0]['move'], 'd2d4')
         self.assertEqual(payload['queued'][0]['budget_nodes'],
                          ingest.REQUEST_BUDGET_LADDER[1])
@@ -700,6 +701,40 @@ class RequestSelectedChildrenTests(TestCase):
         self.assertEqual(event.payload['via'], 'api-children-select')
         self.assertEqual(event.payload['queued'], 2)
         self.assertEqual(event.payload['candidates'], 2)
+
+    def test_only_if_missing_with_select_buys_no_deeper_search(self):
+        # Any account: wolfram may not choose a budget here.
+        self._searched(self._child('e2e4'), ingest.REQUEST_BUDGET_LADDER[0])
+
+        payload = self._post(select='e2e4,d2d4', only_if_missing='1').json()
+
+        self.assertEqual(payload['skipped'], [
+            {'move': 'e2e4', 'key': self._child('e2e4').key,
+             'reason': 'already-analyzed',
+             'completed_budget': ingest.REQUEST_BUDGET_LADDER[0]}])
+        self.assertEqual([(e['move'], e['budget_nodes'])
+                          for e in payload['queued']],
+                         [('d2d4', ingest.REQUEST_BUDGET_LADDER[0])])
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=self._child('e2e4'), state='PENDING').exists())
+
+    def test_only_if_missing_without_select_caps_at_the_first_rung(self):
+        # A visit count that would ask the ladder for more than the first
+        # rung on its own: with the flag the target holds.
+        child = self._child('e2e4')
+        Position.objects.filter(key=child.key).update(visits=500)
+        with mock.patch.object(ingest, 'budget_for',
+                               return_value=ingest.REQUEST_BUDGET_LADDER[1]):
+            plain = self._post(ip='10.0.0.2').json()
+            AnalysisTask.objects.all().delete()
+            cache.clear()
+            flagged = self._post(ip='10.0.0.3', only_if_missing='true').json()
+
+        budget = {e['move']: e['budget_nodes'] for e in plain['queued']}
+        self.assertEqual(budget['e2e4'], ingest.REQUEST_BUDGET_LADDER[1])
+        budget = {e['move']: e['budget_nodes'] for e in flagged['queued']}
+        self.assertEqual(set(budget.values()),
+                         {ingest.REQUEST_BUDGET_LADDER[0]})
 
     def test_the_api_docs_describe_select(self):
         body = Client().get('/atomicdb/docs/api/').content.decode()

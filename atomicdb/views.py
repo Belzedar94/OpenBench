@@ -3348,10 +3348,15 @@ def api_public_request_children(request):
             request.POST.getlist('select'), fen)
         if refusal is not None:
             return refusal
+    # Read exactly as ``api/request`` reads it (§ api_public_request), and
+    # for any account.  The budget it can be sent with is a rung, since the
+    # subtree stop is refused above for everybody.
+    only_if_missing = request.POST.get('only_if_missing') in ('1', 'true')
     try:
         return _request_children(request, fen, user, chosen,
                                  selected=selected, illegal=illegal,
-                                 given=given)
+                                 given=given,
+                                 only_if_missing=only_if_missing)
     except OperationalError as error:
         # The answer of ``api/request``, and a retry is as safe: every move is
         # its own commit, and a move that went through comes back from the
@@ -3409,7 +3414,7 @@ def _selected_moves(values, fen):
 
 
 def _request_children(request, fen, user, chosen, selected=None, illegal=(),
-                      given=()):
+                      given=(), only_if_missing=False):
     """The batch behind ``api_public_request_children``, once the call is
     known to be well formed.
 
@@ -3550,10 +3555,14 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
         # because nobody had searched it, and that is asked again under the
         # purchase's lock, so a search that landed since is skipped rather
         # than deepened.  A child the caller named is requested as named.
+        # ``only_if_missing`` is the caller's flag of ``api/request``, and a
+        # chosen budget sets it too, as the multi-select does: either way the
+        # budget is a target (the chosen rung, or the first one).
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
             checked_route=child_route, with_place=False, one_search=True,
-            only_if_missing=chosen is not None, only_unexplored=not named)
+            only_if_missing=only_if_missing or chosen is not None,
+            only_unexplored=not named)
         status = payload['status']
         if status == 'already-solved':
             status = 'closed'    # closed while the batch ran
@@ -3573,6 +3582,9 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
             queued.append(entry)
         else:
             entry = {'move': uci, 'key': child.key, 'reason': status}
+            if payload.get('completed_budget') is not None:
+                # The search that covers the target, as ``api/request`` says.
+                entry['completed_budget'] = payload['completed_budget']
             if status == 'already-queued':
                 entry['task'] = None if task is None else task.id
                 entry['backed'] = backed

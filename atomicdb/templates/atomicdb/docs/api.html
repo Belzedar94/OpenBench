@@ -323,6 +323,12 @@ the explorer would add them. A FEN the tree does not have is seeded.</p>
   gets its first rung (its next rung, with <code>select</code>).
   <code>budget=10000000000</code> is refused here, since
   it asks for the searches below a single position.</td></tr>
+<tr><td><code>only_if_missing=1</code></td><td>Optional, with the same
+  meaning as for <a href="#request"><code>/api/request</code></a>, for every
+  account: the budget becomes a target (the rung you picked, or the first
+  one). A move already searched that deep is skipped as
+  <code>already-analyzed</code> with <code>completed_budget</code>, and no move
+  is queued above the target.</td></tr>
 <tr><td><code>select</code></td><td>Optional. The moves to request, in UCI,
   separated by commas or spaces or with the field repeated
   (<code>select=e7e5,g8f6</code>). Only those moves are requested, whether
@@ -345,7 +351,8 @@ button does:</p>
 <ul>
 <li>Every move you name is requested, even one that has been analysed
   already. Without <code>budget</code> it gets its next rung, as from its own
-  button. With <code>budget</code> that budget is a target: a move already
+  button, unless you send <code>only_if_missing=1</code>, which makes the first
+  rung the target. With <code>budget</code> that budget is a target: a move already
   searched that deep or deeper is skipped as <code>already-analyzed</code>,
   and any other gets a search of that budget.</li>
 <li>At most one search per move. A move searched up to the last rung buys
