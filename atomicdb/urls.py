@@ -277,6 +277,13 @@ urlpatterns = [
     # ruta).  Estado vivo y escribe: sin cache, como todo lo de esta lista.
     path('api/request', views.api_public_request,
          name='atomicdb-api-request'),
+    # The explorer's "analyse all unanalysed" button for scripts: every move
+    # of a FEN nobody has searched yet, one ply, through the same path as
+    # ``api/request``.  Writes: no cache.  With and without the slash, so a
+    # script's POST is never turned into a GET by a redirect.
+    path('api/request-children', views.api_public_request_children,
+         name='atomicdb-api-request-children'),
+    path('api/request-children/', views.api_public_request_children),
     path('api/frontier/<str:key>/', views.api_frontier),
     path('api/roots', _roots_api_cached, name='atomicdb-api-roots'),
     path('api/roots/', _roots_api_cached),

@@ -3256,6 +3256,232 @@ _REQUEST_REFUSALS = {
 }
 
 
+# THE EXPLORER'S "ANALYSE ALL UNANALYSED" BUTTON, AS AN API CALL.
+#
+# Community request (Discord, Nov-2026): a script that wanted the button had
+# to make one ``api/request`` call per move, twenty and more for one position.
+# ``api/request-children`` takes the FEN and does it in one call.
+#
+# The selection is the button's: every move whose position nobody has searched
+# yet (§ ``ingest.is_unexplored``), plus the legal moves that are not a node
+# yet, which nobody can have searched either.  ONE PLY: it never walks below
+# the children.  Every chosen move then takes the path of ``api/request``
+# (§ ``_queue_request``): the same identity rules, budgets, deduplication,
+# joining, per-account cap and receipts.  What the multi-select of the move
+# list adds for a batch is added here the same way (§ ``_request_moves``): one
+# search a move at most, a chosen budget as a target, a move that is not a node
+# made exactly as following it would make it, a move re-entering the line
+# skipped, and the batch stopping where the account's queue fills up.
+CHILDREN_REQUEST_CAP = ingest.UNEXPLORED_CLICK_CAP
+
+
+@csrf_exempt
+def api_public_request_children(request):
+    """Request every unanalysed move of a FEN in one call.  POST, JSON reply.
+
+    Fields: ``fen`` (required), ``budget``, ``username``/``password`` and
+    ``moves`` (alias ``route``), all with their meaning in ``api/request``.
+    ``budget=10000000000`` asks for the searches below ONE position, so it is
+    refused here for everybody.
+
+    The reply: ``status`` (``done``, ``partial`` when the account's queue
+    filled up part way, ``nothing-to-do`` when no move is left unanalysed, or
+    ``already-solved``); ``queued``, one entry per move a new request was made
+    for; ``skipped``, one entry per other legal move with its ``reason``; and
+    ``counts``.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'status': 'refused', 'reason': 'POST only'},
+                            status=405)
+    user, bad_credentials = _api_request_identity(request)
+    if bad_credentials:
+        return JsonResponse(
+            {'status': 'refused', 'reason': 'bad credentials'}, status=403)
+    try:
+        fen = _parse_public_fen(request.POST.get('fen', ''))
+    except PublicFenError as error:
+        return JsonResponse({'status': 'refused', 'reason': str(error)},
+                            status=400)
+    except Exception:
+        return JsonResponse(
+            {'status': 'refused', 'reason': 'that FEN could not be read'},
+            status=400)
+    raw_budget = request.POST.get('budget')
+    if depth.asks_for_subtree(raw_budget):
+        # Refused on what was asked, not on who asked (§ api_public_request).
+        return JsonResponse(
+            {'status': 'refused',
+             'reason': (f'budget {ingest.SUBTREE_REQUEST_NODES} queues '
+                        'searches below one position; this endpoint queues '
+                        'one search per move, at a rung of the ladder')},
+            status=400)
+    chosen, invalid = depth.chosen_rung_for(raw_budget, user)
+    if invalid:
+        return JsonResponse(
+            {'status': 'refused',
+             'reason': ('budget must be one of the ladder rungs ('
+                        + ', '.join(str(rung)
+                                    for rung in ingest.REQUEST_BUDGET_LADDER)
+                        + ')')},
+            status=400)
+    try:
+        return _request_children(request, fen, user, chosen)
+    except OperationalError as error:
+        # The answer of ``api/request``, and a retry is as safe: every move is
+        # its own commit, and a move that went through comes back from the
+        # retry as already requested or queued.
+        message = str(error).lower()
+        if 'database is locked' not in message \
+                and 'database table is locked' not in message:
+            raise
+        response = JsonResponse(
+            {'status': 'refused', 'reason': 'server busy, retry'}, status=503)
+        response['Retry-After'] = '2'
+        return response
+
+
+def _request_children(request, fen, user, chosen):
+    """The batch behind ``api_public_request_children``, once the call is
+    known to be well formed."""
+    username = user.username if user is not None else ''
+    ip = _client_ip(request)
+    key = logic.key_of(fen)
+    seeded = False
+    closed_below = []
+    with atomic():
+        pos = Position.objects.filter(key=key).first()
+        if pos is None:
+            pos, closed_below = ingest.get_or_create_position_linked(fen)
+            seeded = True
+            DBEvent.objects.create(kind='SEEDED', payload={
+                'key': pos.key, 'fen': pos.fen, 'ip': ip, 'via': 'api'})
+        # One receipt per call, in the same log as ``api/request``.
+        ApiRequestLog.objects.create(account=username, ip=ip)
+    if closed_below:
+        ingest.settle_linked_children(pos)
+    reply = {'key': pos.key, 'fen': pos.fen, 'seeded': seeded}
+
+    raw_moves = request.POST.get('moves')
+    if raw_moves is None:
+        raw_moves = request.POST.get('route')
+    route, moves_reason = ('', '')
+    if (raw_moves or '').strip():
+        route, moves_reason = _api_moves_route(raw_moves, pos.key)
+        if route:
+            reply['moves'] = route
+        elif moves_reason:
+            reply['moves_ignored'] = moves_reason
+
+    if pos.status != 'UNKNOWN':
+        reply.update({'status': 'already-solved', 'queued': [], 'skipped': [],
+                      'counts': {}})
+        return JsonResponse(reply)
+    if _account_queue_full(username):
+        body, code = _queue_full_payload(username)
+        reply.update(body)
+        reply['reason'] = _REQUEST_REFUSALS[body['status']]
+        return JsonResponse(reply, status=code)
+
+    # The line the request is on, to skip a move that re-enters it, as the
+    # move list does: the caller's line when it was usable, else the tree's.
+    explicit = None
+    if route:
+        try:
+            explicit = _validated_play_route(route, pos.key)
+        except (PlayRouteError, PlayRouteConflict):
+            explicit = None
+    top, line, active_ucis = (explicit if explicit is not None
+                              else _canonical_route(pos))
+    on_line = set(_route_prefix_keys(top, line, active_ucis) or ())
+    on_line.add(pos.key)
+    child_route_fits = (bool(route)
+                        and len(route.split(',')) < API_MOVES_MAX_PLIES)
+
+    legal = list(logic.legal_moves(pos.fen))
+    edges = {edge.move_uci: edge.child for edge in
+             Edge.objects.filter(parent=pos, move_uci__in=legal)
+             .select_related('child')}
+    keys = _child_keys(pos, [uci for uci in legal if uci not in edges])
+    keys.update((uci, child.key) for uci, child in edges.items())
+    known = Position.objects.in_bulk(
+        [keys[uci] for uci in legal if uci not in edges], field_name='key')
+
+    queued, skipped = [], []
+    candidates = []
+    for uci in legal:
+        child = edges.get(uci) or known.get(keys[uci])
+        if keys[uci] in on_line:
+            skipped.append({'move': uci, 'key': keys[uci],
+                            'reason': 'blocked'})
+        elif child is not None and child.status != 'UNKNOWN':
+            skipped.append({'move': uci, 'key': child.key,
+                            'reason': 'closed'})
+        elif child is not None and not ingest.is_unexplored(child):
+            skipped.append({'move': uci, 'key': child.key,
+                            'reason': 'already-analyzed'})
+        else:
+            candidates.append(uci)
+
+    for index, uci in enumerate(candidates):
+        if len(queued) >= CHILDREN_REQUEST_CAP:
+            # The button's cap counts what it bought, so a move already
+            # waiting costs nothing and a second call reaches the rest.
+            skipped.extend({'move': rest, 'key': keys[rest],
+                            'reason': 'batch-cap'}
+                           for rest in candidates[index:])
+            break
+        child = edges.get(uci)
+        if child is None:
+            child = _materialise_child(pos, uci)
+            if child.status != 'UNKNOWN':
+                # Making the node discovered that the move ends the game.
+                skipped.append({'move': uci, 'key': child.key,
+                                'reason': 'closed'})
+                continue
+        payload, _code = _queue_request(
+            child, ip, requested_by=username, chosen=chosen,
+            checked_route=(f'{route},{uci}' if child_route_fits else ''),
+            with_place=False, one_search=True,
+            only_if_missing=chosen is not None)
+        status = payload['status']
+        if status == 'queue-full-account':
+            skipped.extend({'move': rest, 'key': keys[rest],
+                            'reason': 'queue-full-account'}
+                           for rest in candidates[index:])
+            break
+        task, backed = _api_request_task(child, username)
+        if status == 'queued':
+            queued.append({
+                'move': uci, 'key': child.key,
+                'task': None if task is None else task.id,
+                'budget_nodes': None if task is None else task.budget_nodes})
+        else:
+            entry = {'move': uci, 'key': child.key, 'reason': status}
+            if status == 'already-queued':
+                entry['task'] = None if task is None else task.id
+                entry['backed'] = backed
+            skipped.append(entry)
+
+    order = {uci: index for index, uci in enumerate(legal)}
+    skipped.sort(key=lambda entry: order[entry['move']])
+    counts = {'queued': len(queued)}
+    for entry in skipped:
+        counts[entry['reason']] = counts.get(entry['reason'], 0) + 1
+    left_out = counts.get('queue-full-account', 0)
+    DBEvent.objects.create(kind='BULK_REQUEST', payload={
+        'ip': ip, 'key': pos.key, 'via': 'api-children',
+        'queued': len(queued), 'candidates': len(candidates)})
+    if left_out:
+        status = 'partial'
+    elif not candidates:
+        status = 'nothing-to-do'
+    else:
+        status = 'done'
+    reply.update({'status': status, 'queued': queued, 'skipped': skipped,
+                  'counts': counts})
+    return JsonResponse(reply)
+
+
 # ---------------- paginas publicas ----------------
 
 def _board_rows(fen):
@@ -9005,6 +9231,7 @@ def _docs_context(current=''):
         'queue_cap': f'{REQUEST_QUEUE_MAX:,}',
         'subtree_cap': ingest.SUBTREE_TASK_CAP,
         'multi_request_cap': MULTI_REQUEST_CAP,
+        'children_cap': CHILDREN_REQUEST_CAP,
     }
     slugs = [slug for slug, _ in DOCS_PAGES]
     if current in slugs:

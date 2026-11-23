@@ -48,6 +48,11 @@ Public API, described for users on `/atomicdb/docs/`:
   are optional and put the request on an account. `only_if_missing=1` turns
   the budget into a target: nothing is queued when a search that ran already
   covers it, and nothing above it otherwise.
+- `POST api/request-children` asks for analysis of every legal move of a FEN
+  whose position nobody has searched yet, one ply deep, each through the same
+  path as `api/request` (budget, credentials, deduplication and per-account
+  queue cap). The reply lists the moves queued and the moves skipped, each
+  with its reason.
 - `POST api/my-queue/` with `username` and `password` lists the pending and
   running requests of that account. A signed-in browser can `GET` it.
 - `POST api/queue-bump/<id>/` and `POST api/queue-cancel/<id>/` move one of
