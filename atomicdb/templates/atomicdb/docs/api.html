@@ -322,7 +322,9 @@ the explorer would add them. A FEN the tree does not have is seeded.</p>
   it asks for the searches below a single position.</td></tr>
 <tr><td><code>moves</code> (or <code>route</code>)</td><td>Optional, as for
   <code>/api/request</code>: the line that reached <code>fen</code>. Each
-  request is then listed under that line followed by its own move.</td></tr>
+  request is then listed under that line followed by its own move, so the line
+  can be at most 63 plies long here; a longer one is left out and
+  <code>moves_ignored</code> says why.</td></tr>
 </table></div>
 <p>At most {{ children_cap }} moves are requested per call. If your queue fills
 up partway, the moves requested so far stay requested and the rest are skipped

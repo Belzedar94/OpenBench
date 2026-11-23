@@ -366,6 +366,79 @@ class RequestChildrenApiTests(TestCase):
             pk=finished.pk).exists())
         self.assertEqual(len(payload['queued']), len(self.legal) - 1)
 
+    def test_known_transpositions_are_linked_before_they_are_skipped(self):
+        target = self._e4()
+        searched = ingest.get_or_create_position(
+            logic.apply_move(target.fen, 'e7e5'))
+        closed = ingest.get_or_create_position(
+            logic.apply_move(target.fen, 'd7d5'))
+        Position.objects.filter(key=searched.key).update(nodes_invested=1)
+        Position.objects.filter(key=closed.key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+        self.assertFalse(Edge.objects.filter(parent=target).exists())
+
+        with mock.patch.object(ingest, 'backup_cascade',
+                               wraps=ingest.backup_cascade) as cascade:
+            payload = self._post(fen=target.fen,
+                                 **self._credentials()).json()
+
+        skipped = {e['move']: e['reason'] for e in payload['skipped']}
+        self.assertEqual(skipped['e7e5'], 'already-analyzed')
+        self.assertEqual(skipped['d7d5'], 'closed')
+        linked = dict(Edge.objects.filter(parent=target)
+                      .values_list('move_uci', 'child_id'))
+        self.assertEqual(linked['e7e5'], searched.key)
+        self.assertEqual(linked['d7d5'], closed.key)
+        # The closure reaches the parent, as following the move does.
+        cascade.assert_any_call([target.key])
+        self.assertFalse(AnalysisTask.objects.filter(
+            position__in=[searched, closed]).exists())
+
+    @mock.patch('atomicdb.depth.may_choose', return_value=True)
+    def test_a_deeper_follow_up_behind_a_running_search_is_reported(self, _):
+        target = self._e4()
+        child = ingest.get_or_create_position(
+            logic.apply_move(target.fen, 'e7e5'))
+        running = AnalysisTask.objects.create(
+            position=child, generation=child.visits,
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[0],
+            source=AnalysisTask.Source.USER, requested_by='eclipsia',
+            state=AnalysisTask.TState.LEASED)
+        deeper = ingest.REQUEST_BUDGET_LADDER[1]
+
+        payload = self._post(fen=target.fen, moves='e2e4',
+                             budget=str(deeper),
+                             **self._credentials()).json()
+
+        entry = next(e for e in payload['queued'] if e['move'] == 'e7e5')
+        follow_up = AnalysisTask.objects.get(position=child,
+                                             state=AnalysisTask.TState.PENDING)
+        self.assertNotEqual(entry['task'], running.id)
+        self.assertEqual(entry['task'], follow_up.id)
+        self.assertEqual(entry['budget_nodes'], deeper)
+        self.assertEqual(entry['moves'], 'e2e4,e7e5')
+        self.assertEqual(follow_up.route, 'e2e4,e7e5')
+        running.refresh_from_db()
+        self.assertEqual(running.route, '')
+
+    @mock.patch('atomicdb.views.API_MOVES_MAX_PLIES', 1)
+    def test_a_line_at_the_ply_limit_is_ignored_with_its_reason(self):
+        # With the limit at one ply, ``e2e4`` is a line ``api/request``
+        # accepts, and one more ply for each child would be past it.
+        target = self._e4()
+
+        payload = self._post(fen=target.fen, moves='e2e4',
+                             **self._credentials()).json()
+
+        self.assertNotIn('moves', payload)
+        self.assertEqual(
+            payload['moves_ignored'],
+            'the line is longer than 0 plies, which leaves no room for the '
+            'move of each request')
+        self.assertTrue(payload['queued'])
+        self.assertEqual(set(AnalysisTask.objects.values_list(
+            'route', flat=True)), {''})
+
     def test_nginx_rate_limits_both_spellings(self):
         import re
         from pathlib import Path

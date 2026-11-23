@@ -3012,19 +3012,25 @@ def _api_request_identity(request):
     return (None, True) if user is None else (user, False)
 
 
-def _api_request_task(pos, username):
+def _api_request_task(pos, username, newest=False):
     """La fila viva de esta posicion y si ``username`` figura como respaldo.
 
     Lo que el que llama necesita saber de vuelta es cual es SU tarea y si su
     nombre quedo anotado: 'already-queued' a secas no distingue "ya la pediste
     tu" de "acabas de sumarte a la de otra persona", y esa diferencia es la que
     decide si va a sonarle la campana cuando el analisis aterrice.
+
+    ``newest=True`` is for a ``queued`` answer: a deeper request on a
+    position whose smaller search is already running is queued as the NEXT
+    generation behind it (§ ``ingest._request_rung``), and the row this
+    request created or promoted is that one, not the running one.
     """
     task = (AnalysisTask.objects
             .filter(position=pos, source=AnalysisTask.Source.USER,
                     state__in=(AnalysisTask.TState.PENDING,
                                AnalysisTask.TState.LEASED))
-            .order_by('id').first())
+            .order_by(*(('-generation', '-id') if newest else ('id',)))
+            .first())
     if task is None:
         return None, False
     backed = bool(username) and username in (task.also_requested_by or [])
@@ -3373,6 +3379,12 @@ def _request_children(request, fen, user, chosen):
     route, moves_reason = ('', '')
     if (raw_moves or '').strip():
         route, moves_reason = _api_moves_route(raw_moves, pos.key)
+        if route and len(route.split(',')) >= API_MOVES_MAX_PLIES:
+            # Each request is listed under the line plus its own move, and
+            # that one more ply is past what the explorer can show.
+            route, moves_reason = '', (
+                f'the line is longer than {API_MOVES_MAX_PLIES - 1} plies, '
+                'which leaves no room for the move of each request')
         if route:
             reply['moves'] = route
         elif moves_reason:
@@ -3400,8 +3412,7 @@ def _request_children(request, fen, user, chosen):
                               else _canonical_route(pos))
     on_line = set(_route_prefix_keys(top, line, active_ucis) or ())
     on_line.add(pos.key)
-    child_route_fits = (bool(route)
-                        and len(route.split(',')) < API_MOVES_MAX_PLIES)
+    child_route_fits = bool(route)
 
     legal = list(logic.legal_moves(pos.fen))
     edges = {edge.move_uci: edge.child for edge in
@@ -3419,7 +3430,17 @@ def _request_children(request, fen, user, chosen):
         if keys[uci] in on_line:
             skipped.append({'move': uci, 'key': keys[uci],
                             'reason': 'blocked'})
-        elif child is not None and child.status != 'UNKNOWN':
+            continue
+        if (child is not None and uci not in edges
+                and (child.status != 'UNKNOWN'
+                     or not ingest.is_unexplored(child))):
+            # A transposition: the position is in the tree, reached by
+            # another move order, but this move was never followed from here.
+            # Linked first, as following it would link it, so what that
+            # position knows (a closure, a value) reaches this parent too.
+            child = _materialise_child(pos, uci)
+            edges[uci] = child
+        if child is not None and child.status != 'UNKNOWN':
             skipped.append({'move': uci, 'key': child.key,
                             'reason': 'closed'})
         elif child is not None and not ingest.is_unexplored(child):
@@ -3458,7 +3479,8 @@ def _request_children(request, fen, user, chosen):
                             'reason': 'queue-full-account'}
                            for rest in candidates[index:])
             break
-        task, backed = _api_request_task(child, username)
+        task, backed = _api_request_task(child, username,
+                                         newest=status == 'queued')
         if status == 'queued':
             entry = {
                 'move': uci, 'key': child.key,
