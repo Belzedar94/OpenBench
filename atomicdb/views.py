@@ -2636,7 +2636,7 @@ def _api_moves_route(raw, target_key):
 
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
                    only_if_missing=False, with_place=True, one_search=False,
-                   checked_route=None):
+                   checked_route=None, only_unexplored=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2660,6 +2660,11 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     answers ``ingest.LADDER_SPENT`` instead of buying the searches below it
     (§ ``ingest.request_analysis``).  The same multi-select passes it, so one
     click on sixty-four moves cannot turn into thousands of searches.
+
+    ``only_unexplored=True`` buys a first look and nothing else: a position a
+    search reached since the caller picked it answers ``already-analyzed``,
+    decided under the purchase's row lock (§ ``ingest._request_rung``).
+    ``api/request-children`` passes it.
     """
     if only_if_missing and pos.status == 'UNKNOWN':
         # Answered before the dedup and the queue cap: a call with nothing to
@@ -2729,7 +2734,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
         outcome = ingest.request_analysis(pos, requested_by=requested_by,
                                           route=route, budget_floor=chosen,
                                           only_if_missing=only_if_missing,
-                                          one_search=one_search)
+                                          one_search=one_search,
+                                          only_unexplored=only_unexplored)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -3438,11 +3444,14 @@ def _request_children(request, fen, user, chosen):
                 skipped.append({'move': uci, 'key': child.key,
                                 'reason': 'closed'})
                 continue
+        child_route = f'{route},{uci}' if child_route_fits else ''
+        # ``only_unexplored``: the child was picked because nobody had
+        # searched it, and that is asked again under the purchase's lock, so a
+        # search that landed since is skipped rather than deepened.
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
-            checked_route=(f'{route},{uci}' if child_route_fits else ''),
-            with_place=False, one_search=True,
-            only_if_missing=chosen is not None)
+            checked_route=child_route, with_place=False, one_search=True,
+            only_if_missing=chosen is not None, only_unexplored=True)
         status = payload['status']
         if status == 'queue-full-account':
             skipped.extend({'move': rest, 'key': keys[rest],
@@ -3451,16 +3460,23 @@ def _request_children(request, fen, user, chosen):
             break
         task, backed = _api_request_task(child, username)
         if status == 'queued':
-            queued.append({
+            entry = {
                 'move': uci, 'key': child.key,
                 'task': None if task is None else task.id,
-                'budget_nodes': None if task is None else task.budget_nodes})
+                'budget_nodes': None if task is None else task.budget_nodes}
+            queued.append(entry)
         else:
             entry = {'move': uci, 'key': child.key, 'reason': status}
             if status == 'already-queued':
                 entry['task'] = None if task is None else task.id
                 entry['backed'] = backed
             skipped.append(entry)
+        if child_route and task is not None:
+            # The label rules of ``api/request`` (§ ``_api_moves_outcome``):
+            # a live request with no line yet takes this one, also on a
+            # repeated call or when joining a request already on an engine,
+            # and a line already there stays.
+            entry.update(_api_moves_outcome(payload, task, child_route, ''))
 
     order = {uci: index for index, uci in enumerate(legal)}
     skipped.sort(key=lambda entry: order[entry['move']])

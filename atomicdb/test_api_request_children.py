@@ -273,6 +273,117 @@ class RequestChildrenApiTests(TestCase):
 
         self.assertEqual(payload['moves'], 'e2e4')
 
+    def _e4(self):
+        return ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'e2e4'))
+
+    def test_a_line_sent_on_a_repeated_call_labels_the_requests(self):
+        target = self._e4()
+        self._post(fen=target.fen, **self._credentials())
+        self.assertEqual(set(AnalysisTask.objects.values_list(
+            'route', flat=True)), {''})
+
+        payload = self._post(fen=target.fen, moves='e2e4',
+                             **self._credentials()).json()
+
+        self.assertEqual({e['reason'] for e in payload['skipped']},
+                         {'already-requested'})
+        for entry in payload['skipped']:
+            self.assertEqual(entry['moves'], 'e2e4,' + entry['move'])
+        for task in AnalysisTask.objects.select_related('position'):
+            uci = next(e['move'] for e in payload['skipped']
+                       if e['key'] == task.position.key)
+            self.assertEqual(task.route, 'e2e4,' + uci)
+
+    def test_joining_a_request_already_on_an_engine_labels_it(self):
+        target = self._e4()
+        self._post(fen=target.fen, **self._credentials('eclipsia'))
+        AnalysisTask.objects.update(state=AnalysisTask.TState.LEASED)
+
+        payload = self._post(fen=target.fen, ip='10.0.0.2', moves='e2e4',
+                             **self._credentials()).json()
+
+        self.assertEqual({e['reason'] for e in payload['skipped']},
+                         {'already-queued'})
+        for task in AnalysisTask.objects.select_related('position'):
+            self.assertEqual(task.state, AnalysisTask.TState.LEASED)
+            self.assertTrue(task.route.startswith('e2e4,'))
+            self.assertEqual(logic.key_of(logic.apply_move(
+                target.fen, task.route.split(',')[1])), task.position.key)
+
+    def test_a_line_already_on_a_request_stays(self):
+        target = self._e4()
+        child = ingest.get_or_create_position(
+            logic.apply_move(target.fen, 'e7e5'))
+        AnalysisTask.objects.create(
+            position=child, generation=child.visits,
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[0],
+            source=AnalysisTask.Source.USER, requested_by='eclipsia',
+            route='e2e4,e7e5,x', state=AnalysisTask.TState.LEASED)
+
+        payload = self._post(fen=target.fen, ip='10.0.0.2', moves='e2e4',
+                             **self._credentials()).json()
+
+        entry = next(e for e in payload['skipped'] if e['move'] == 'e7e5')
+        self.assertEqual(entry['moves_ignored'],
+                         'this request already shows another line')
+        self.assertEqual(AnalysisTask.objects.get(position=child).route,
+                         'e2e4,e7e5,x')
+
+    def test_a_search_landing_during_the_batch_is_not_deepened(self):
+        """The first move's first search lands after the batch picked it.
+
+        The purchase asks again under its row lock and skips the move, rather
+        than buying the next rung of the ladder on top of what just landed.
+        """
+        from . import views
+        real = views._queue_request
+        raced = self._child(self.legal[0])
+        finished = AnalysisTask.objects.create(
+            position=raced, generation=raced.visits,
+            budget_nodes=ingest.REQUEST_BUDGET_LADDER[0],
+            source=AnalysisTask.Source.USER, requested_by='eclipsia',
+            state=AnalysisTask.TState.PENDING)
+
+        def landing_first(pos, *args, **kwargs):
+            if pos.key == raced.key:
+                AnalysisTask.objects.filter(pk=finished.pk).update(
+                    state=AnalysisTask.TState.COMPLETED)
+                Position.objects.filter(key=raced.key).update(
+                    nodes_invested=ingest.REQUEST_BUDGET_LADDER[0],
+                    visits=raced.visits + 1)
+            return real(pos, *args, **kwargs)
+
+        with mock.patch.object(views, '_queue_request',
+                               side_effect=landing_first):
+            payload = self._post(**self._credentials()).json()
+
+        entries = {e['move']: e
+                   for e in payload['queued'] + payload['skipped']}
+        self.assertEqual(entries[self.legal[0]].get('reason'),
+                         'already-analyzed')
+        self.assertFalse(AnalysisTask.objects.filter(position=raced).exclude(
+            pk=finished.pk).exists())
+        self.assertEqual(len(payload['queued']), len(self.legal) - 1)
+
+    def test_nginx_rate_limits_both_spellings(self):
+        import re
+        from pathlib import Path
+
+        conf = (Path(__file__).resolve().parent.parent / 'docs' / 'server'
+                / 'nginx-openbench.conf').read_text(encoding='utf-8')
+        match = re.search(r'location ~ (\^/atomicdb/api/\S+) \{\s*\n'
+                          r'\s*limit_req zone=atomicdb_api', conf)
+        self.assertIsNotNone(match)
+        limited = re.compile(match.group(1))
+
+        for path in ('/atomicdb/api/request-children',
+                     '/atomicdb/api/request-children/',
+                     '/atomicdb/api/request'):
+            self.assertTrue(limited.search(path), path)
+        for path in ('/atomicdb/api/lease', '/atomicdb/api/submit'):
+            self.assertFalse(limited.search(path), path)
+
     def test_a_fen_the_tree_does_not_have_is_seeded(self):
         fresh = logic.apply_move(
             logic.apply_move(self.root.fen, 'g1f3'), 'g8f6')

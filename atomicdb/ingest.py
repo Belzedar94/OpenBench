@@ -6847,7 +6847,7 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
 
 
 def _request_rung(pos, requested_by='', route='', budget_floor=None,
-                  only_if_missing=False):
+                  only_if_missing=False, only_unexplored=False):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
@@ -6880,13 +6880,23 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
 
     Both are decided after the row lock below, so two callers cannot slip
     past each other.  A live request somebody else made at a larger budget is
-    joined as it stands: it is theirs, and this call did not cause it."""
+    joined as it stands: it is theirs, and this call did not cause it.
+
+    ``only_unexplored`` is for a door that only buys a FIRST look
+    (§ ``views.api_public_request_children``): it picked the position because
+    nobody had searched it, and a search that landed since must not turn that
+    into a deeper one.  Asked again under the same lock: a position that is
+    no longer unexplored (§ ``is_unexplored``) answers ``already-analyzed``
+    and nothing is bought."""
     # The caller may hold a stale Position instance while another submit has
     # just advanced visits. Lock and refresh before choosing the generation so
     # a 512M/2B request cannot accidentally target the completed rung.
     pos = Position.objects.select_for_update().get(pk=pos.pk)
     if pos.status != 'UNKNOWN':
         return 'already-solved'
+    if only_unexplored and not is_unexplored(pos):
+        return RequestOutcome('already-analyzed',
+                              completed_budget=searched_budget(pos))
     target = None
     if only_if_missing:
         target = budget_floor or REQUEST_BUDGET_LADDER[0]
@@ -7707,7 +7717,8 @@ def _breadth_swap_eligible(pos):
 
 
 def request_analysis(pos, requested_by='', route='', budget_floor=None,
-                     only_if_missing=False, one_search=False):
+                     only_if_missing=False, one_search=False,
+                     only_unexplored=False):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -7753,9 +7764,13 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
 
     Devuelve 'queued' | 'already-queued' | 'already-solved' | 'expanded'
     | 'saturated', y 'already-analyzed' solo con ``only_if_missing``, y
-    LADDER_SPENT solo con ``one_search``."""
+    LADDER_SPENT solo con ``one_search``.
+
+    ``only_unexplored`` (§ ``_request_rung``) only buys a first look, so it
+    turns the swap off too and answers 'already-analyzed' for a position a
+    search reached since the caller picked it."""
     if budget_floor == SUBTREE_REQUEST_NODES:
-        if only_if_missing or one_search:
+        if only_if_missing or one_search or only_unexplored:
             raise ValueError('the subtree request buys searches below the '
                              'position; only_if_missing and one_search ask '
                              'about the position itself')
@@ -7763,7 +7778,7 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
     with atomic():
         swapped = False
         if budget_floor is None and not only_if_missing and not one_search \
-                and _breadth_swap_eligible(pos):
+                and not only_unexplored and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
                                         route=route)
@@ -7776,7 +7791,7 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
                        if isinstance(value, (int, str))}})
                 return outcome
         outcome = _request_rung(pos, requested_by, route, budget_floor,
-                                only_if_missing)
+                                only_if_missing, only_unexplored)
         if isinstance(outcome, RequestOutcome):
             return outcome      # it carries its own detail
         if outcome != _LADDER_EXHAUSTED:
