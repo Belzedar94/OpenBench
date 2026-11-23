@@ -715,3 +715,29 @@ class SynchronousVsQueuedTests(TestCase):
 
         self.assertEqual(synchronous['edges'], queued['edges'])
         self.assertEqual(synchronous['positions'], queued['positions'])
+
+
+class OpenJobsIndexTests(TestCase):
+    """El reclamo vive de un indice parcial con solo las filas abiertas.
+
+    Si el indice cubriera menos estados de los que ``ready_jobs`` lee, el
+    planificador no podria usarlo y el reclamo volveria a recorrer la pkey
+    entera (§ migracion 0073); si cubriera DONE, volveria a medir la historia.
+    """
+
+    def test_index_covers_exactly_the_states_the_claim_reads(self):
+        index = next(i for i in IngestJob._meta.indexes
+                     if i.name == 'atomic_ingest_open_by_id')
+        self.assertEqual(index.fields, ['id'])
+        (lookup, states), = index.condition.children
+        self.assertEqual(lookup, 'state__in')
+        self.assertEqual(set(states), {IngestJob.JState.PENDING,
+                                       IngestJob.JState.PROCESSING})
+
+    def test_migration_creates_the_index(self):
+        from django.db import connections
+        connection = connections[IngestJob.objects.db]
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(
+                cursor, IngestJob._meta.db_table)
+        self.assertIn('atomic_ingest_open_by_id', constraints)
