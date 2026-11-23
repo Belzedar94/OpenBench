@@ -140,22 +140,12 @@ class Position(models.Model):
     updated   = models.DateTimeField(auto_now=True)
 
     class Meta:
+        # Sin ``atomic_pos_queue`` (status, -priority) ni
+        # ``atomic_pos_unreached`` desde la migracion 0075: el planificador
+        # dejo de leer el primero el 12-nov (la cima de la cola sale por el
+        # indice de ``priority``) y el segundo no se leyo nunca.  6,5 + 1,3
+        # GiB que solo costaban escrituras.
         indexes = [
-            # LA CIMA DE LA COLA, en un solo salto.  Las dos consultas que la
-            # piden — el arriendo (``next_tasks``) y el widget "Up next" de la
-            # portada — son la misma forma: ``status='UNKNOWN'`` ordenado por
-            # ``-priority``, cortado en unas pocas filas.  Con los dos indices
-            # sueltos que habia, el motor bajaba por el de ``priority`` y
-            # descartaba fila a fila lo que no fuera UNKNOWN... y lo cerrado
-            # CONSERVA su prioridad, porque el refresco solo repuntua lo
-            # abierto: cada cierre en la zona alta deja una entrada mas que
-            # saltar, para siempre.  Con el compuesto, doce filas leidas son
-            # doce entradas del indice.
-            #
-            # El orden descendente esta en el indice a proposito: es el unico
-            # sentido en el que se recorre esto, y asi el corte es el prefijo.
-            models.Index(fields=['status', '-priority'],
-                         name='atomic_pos_queue'),
             # QUE SE HA MOVIDO DESDE LAS Y CUARTO.  Lo pregunta el modo delta
             # del selector (§ ingest, ``_delta_keys``) y el completado de
             # cobertura, que pide las mas recientes con un ``order_by
@@ -172,17 +162,6 @@ class Position(models.Model):
             # ``AddIndex``, o sea un ``CREATE INDEX`` a secas en los dos
             # motores, que es exactamente lo que se pide.
             models.Index(fields=['updated'], name='atomic_pos_updated'),
-            # Indice PARCIAL sobre el lado que se consulta: los NO alcanzables.
-            # En una base sana casi todo cuelga de la raiz, asi que un indice
-            # completo sobre el booleano seria una copia de la tabla para
-            # responder "dame los pocos raros"; con la condicion, el indice
-            # tiene el tamano de la respuesta.  Quien pregunta: el backfill
-            # (lo que le queda por marcar) y el chequeo de salud del selector
-            # (cuantos cajetines sueltos hay).  El camino caliente — el
-            # selector acotado — no consulta esta columna con un filtro: se la
-            # lleva en el mismo ``values_list`` por lotes que ya paga.
-            models.Index(fields=['reachable'], name='atomic_pos_unreached',
-                         condition=models.Q(reachable=False)),
         ]
 
 
@@ -614,8 +593,10 @@ class ProofNode(models.Model):
     infinitos sigue sin desbordar en Python antes del clamp.
     """
 
+    # Sin indice propio: ``campaign`` es el prefijo de ``uniq_proof_node``
+    # (campaign, position), que ya sirve cualquier filtro por campana.
     campaign = models.ForeignKey(ProofCampaign, on_delete=models.CASCADE,
-                                 related_name='nodes')
+                                 related_name='nodes', db_index=False)
     position = models.ForeignKey(Position, on_delete=models.CASCADE,
                                  related_name='proof_nodes')
     pn = models.BigIntegerField(default=1)
@@ -673,9 +654,9 @@ class IngestJob(models.Model):
     updated  = models.DateTimeField(auto_now=True)
 
     class Meta:
+        # ``atomic_ingest_ready`` (state, next_attempt_at, id) se borro en la
+        # 0075: crecia con cada fila DONE y el parcial de abajo lo sustituyo.
         indexes = [
-            models.Index(fields=['state', 'next_attempt_at', 'id'],
-                         name='atomic_ingest_ready'),
             # El reclamo (``ingest_queue.claim_next``) solo mira las filas
             # abiertas y las quiere por id.  Sin este parcial, con millones de
             # DONE, el planificador recorria la pkey entera o un bitmap de
@@ -1003,14 +984,12 @@ class ClosureProvenance(models.Model):
     task_id    = models.BigIntegerField(null=True)
     account    = models.CharField(max_length=64, blank=True, default='')
     engine_sha = models.CharField(max_length=64, blank=True, default='')
-
-    class Meta:
-        # The two questions this table exists for: everything one account
-        # closed, and everything one engine build closed.
-        indexes = [models.Index(fields=['account', 'closed_at'],
-                                name='atomic_prov_account'),
-                   models.Index(fields=['engine_sha', 'closed_at'],
-                                name='atomic_prov_engine')]
+    # No secondary indexes since migration 0075.  The (account, closed_at)
+    # and (engine_sha, closed_at) ones were built for "everything one account
+    # / one engine build closed", but no code asks that: the table is only
+    # upserted by its primary key, and the two indexes were never read in
+    # production (2 GiB).  A one-off audit can scan the table (~2 GB); if
+    # such a question becomes a page, add back the index it needs.
 
 
 class PlannerShadowCycle(models.Model):
@@ -1101,20 +1080,9 @@ class ApiRequestLog(models.Model):
     account = models.CharField(max_length=64, default='', blank=True)
     ip      = models.GenericIPAddressField()
     created = models.DateTimeField(auto_now_add=True, db_index=True)
-
-    class Meta:
-        indexes = [
-            # La unica consulta que hace el tope: las MIAS en la ultima hora.
-            # Compuestos y no dos indices sueltos: con ``account`` a secas
-            # habria que bajar por todas las llamadas de esa cuenta desde que
-            # existe la tabla y descartar por fecha, y el prefijo izquierdo de
-            # estos ya sirve para cualquier consulta por cuenta o por
-            # direccion a secas — un indice suelto encima seria una copia que
-            # solo cuesta escrituras.
-            models.Index(fields=['account', 'created'],
-                         name='atomic_apireq_account'),
-            models.Index(fields=['ip', 'created'], name='atomic_apireq_ip'),
-        ]
+    # Los indices (account, created) e (ip, created) eran del tope horario,
+    # que el propietario retiro el 17-ago; nadie los leia y se borraron en la
+    # migracion 0075.  Si vuelve un tope, vuelve con ellos.
 
 
 class RequestNotification(models.Model):
@@ -1158,9 +1126,13 @@ class RequestNotification(models.Model):
     username = models.CharField(max_length=64)
     position = models.ForeignKey(Position, on_delete=models.CASCADE,
                                  related_name='notifications')
+    # Sin indice propio: toda busqueda por tarea (el SET_NULL incluido) es
+    # ``task_id = X`` o ``IN (...)``, que sirve el parcial de
+    # ``uniq_notification_per_task`` (task, username).
     task     = models.ForeignKey(AnalysisTask, null=True,
                                  on_delete=models.SET_NULL,
-                                 related_name='notifications')
+                                 related_name='notifications',
+                                 db_index=False)
     # El ORDEN DE JUGADAS del peticionario, copiado de la tarea al avisar y
     # no leido via ``task`` porque la tarea es SET_NULL y el aviso la
     # sobrevive.  Un DAG transpone: sin esto, el enlace del aviso llevaba al

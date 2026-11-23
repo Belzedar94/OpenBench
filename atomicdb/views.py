@@ -5692,12 +5692,10 @@ def home(request):
     # La cima de la cola, y SOLO la clave.  Un ``Position`` entero arrastra la
     # FEN, la ``won_line`` y el ``last_analysis`` — un JSON de MultiPV por
     # fila — y de las cinco filas que se pintan no se usa ni una de esas
-    # columnas: solo la clave, para el rotulo y el enlace.  Con el indice
-    # ``atomic_pos_queue`` (status, priority DESC) la consulta ademas se
-    # resuelve dentro del propio indice: doce entradas leidas y ninguna fila
-    # visitada.  Antes, con el indice suelto de ``priority``, habia que bajar
-    # por TODAS las prioridades altas descartando las cerradas — que conservan
-    # la suya, porque el refresco solo repuntua UNKNOWN — hasta juntar doce.
+    # columnas: solo la clave, para el rotulo y el enlace.  La resuelve el
+    # indice de ``priority`` bajando desde arriba y descartando lo cerrado (el
+    # compuesto ``atomic_pos_queue`` que se creo para esto lo dejo de escoger
+    # el planificador y se borro en la migracion 0075).
     upnext_keys = []
     for key in (Position.objects.filter(status='UNKNOWN', priority__gt=-1e8)
                 .order_by('-priority').values_list('key', flat=True)[:12]):
