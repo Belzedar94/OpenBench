@@ -673,8 +673,17 @@ class IngestJob(models.Model):
     updated  = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=['state', 'next_attempt_at', 'id'],
-                                name='atomic_ingest_ready')]
+        indexes = [
+            models.Index(fields=['state', 'next_attempt_at', 'id'],
+                         name='atomic_ingest_ready'),
+            # El reclamo (``ingest_queue.claim_next``) solo mira las filas
+            # abiertas y las quiere por id.  Sin este parcial, con millones de
+            # DONE, el planificador recorria la pkey entera o un bitmap de
+            # cientos de miles de entradas viejas (§ migracion 0073).
+            models.Index(fields=['id'], name='atomic_ingest_open_by_id',
+                         condition=models.Q(state__in=[
+                             'PENDING', 'PROCESSING'])),
+        ]
 
     def __str__(self):
         return f'ingest job {self.pk} for task {self.task_id} ({self.state})'
