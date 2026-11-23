@@ -18,6 +18,9 @@ reading and requesting work without an account.</p>
   moves leading there.</td></tr>
 <tr><td><code>POST /atomicdb/api/request</code></td><td>Ask for analysis of a
   position, exactly like the explorer button.</td></tr>
+<tr><td><code>POST /atomicdb/api/request-children</code></td><td>Ask for
+  analysis of every move of a position that has not been analysed yet, like
+  the explorer's "Analyse the unanalysed moves" button.</td></tr>
 <tr><td><code>POST /atomicdb/api/my-queue/</code></td><td>List your own
   waiting and running requests (credentials needed).</td></tr>
 <tr><td><code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code><br>
@@ -33,7 +36,7 @@ reading and requesting work without an account.</p>
 <h3 id="pace">Rate limit</h3>
 <ul>
 <li>The endpoints a script can call (<code>query</code>,
-  <code>principal-variations</code>, <code>backed-source</code>, <code>request</code>, <code>live-request</code>, <code>frontier</code>,
+  <code>principal-variations</code>, <code>backed-source</code>, <code>request</code>, <code>request-children</code>, <code>live-request</code>, <code>frontier</code>,
   <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code>,
   <code>map</code> and <code>roots</code>) take 10 requests a second from one
   address, with bursts of up to 100.</li>
@@ -294,6 +297,87 @@ Send <code>moves</code> to have it listed under yours:</p>
 <li><code>503</code>: your queue is full (<code>queue-full-account</code>), or
   the database is busy (<code>refused</code> with a <code>Retry-After</code>).</li>
 </ul>
+
+<h3 id="request-children">Request every unanalysed move</h3>
+<p><code>POST /atomicdb/api/request-children</code> does in one call what the
+explorer's "Analyse the unanalysed moves" button does: it asks for analysis of
+every legal move of <code>fen</code> whose position no engine has searched
+yet. It goes one move deep and never further.</p>
+<p>Each of those moves is requested exactly as
+<a href="#request"><code>/api/request</code></a> would request it: the same
+budget ladder, deduplication, joining rule, per-person queue cap and
+credentials. Moves that are not in the tree yet are added, as following them in
+the explorer would add them. A FEN the tree does not have is seeded.</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>fen</code></td><td>Required. The position whose moves you
+  want analysed.</td></tr>
+<tr><td><code>username</code>, <code>password</code></td><td>Optional, as
+  for <code>/api/request</code>. Without them the requests are
+  anonymous.</td></tr>
+<tr><td><code>budget</code></td><td>Optional, as for
+  <code>/api/request</code>: one rung of the ladder for every move, honoured for
+  the accounts the explorer offers the depth slider to. Without it each move
+  gets its first rung. <code>budget=10000000000</code> is refused here, since
+  it asks for the searches below a single position.</td></tr>
+<tr><td><code>moves</code> (or <code>route</code>)</td><td>Optional, as for
+  <code>/api/request</code>: the line that reached <code>fen</code>. Each
+  request is then listed under that line followed by its own move, so the line
+  can be at most 63 plies long here; a longer one is left out and
+  <code>moves_ignored</code> says why.</td></tr>
+</table></div>
+<p>At most {{ children_cap }} moves are requested per call. If your queue fills
+up partway, the moves requested so far stay requested and the rest are skipped
+with <code>queue-full-account</code>; send the call again once some of your
+requests have landed.</p>
+<div class="raw"><div class="rawline">curl --data-urlencode "fen=rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" -d moves=e2e4 -d username=me -d password=secret https://belzedar.duckdns.org/atomicdb/api/request-children</div></div>
+
+<h4>The reply</h4>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>status</code></td><td><code>done</code>; <code>partial</code>
+  when your queue filled up partway; <code>nothing-to-do</code> when no move is
+  left unanalysed; <code>already-solved</code> when
+  the position itself is closed; <code>queue-full-account</code> (HTTP
+  <code>503</code>) when your queue was already full; or
+  <code>refused</code> with a <code>reason</code>.</td></tr>
+<tr><td><code>key</code>, <code>fen</code>, <code>seeded</code></td><td>As
+  for <code>/api/request</code>, about the position you sent.</td></tr>
+<tr><td><code>queued</code></td><td>One entry per move a new request was
+  made for: <code>move</code> (UCI), <code>key</code> of the position it
+  leads to, <code>task</code> and <code>budget_nodes</code>.</td></tr>
+<tr><td><code>skipped</code></td><td>One entry per other legal move:
+  <code>move</code>, <code>key</code> and <code>reason</code> (see
+  below).</td></tr>
+<tr><td><code>counts</code></td><td>How many moves were queued, and how many
+  were skipped for each reason.</td></tr>
+<tr><td><code>moves</code>, <code>moves_ignored</code></td><td>Only when you
+  sent <code>moves</code>, as for <code>/api/request</code>: at the top for
+  your line, and on each entry with a live request for the line that request
+  is shown with. A request keeps the first line it was given.</td></tr>
+</table></div>
+<div class="docs-table-wrap"><table>
+<tr><th><code>reason</code></th><th>Meaning</th></tr>
+<tr><td><code>already-analyzed</code></td><td>An engine has already searched
+  that move's position, or its value is backed by searches below it. With a
+  <code>budget</code>, also when a search already covers the rung you
+  picked.</td></tr>
+<tr><td><code>closed</code></td><td>That move's position is solved.</td></tr>
+<tr><td><code>already-queued</code></td><td>The position was already waiting
+  or being searched. You are recorded as another requester
+  (<code>backed</code> is <code>true</code>) unless the request was already
+  yours; <code>task</code> is the live request.</td></tr>
+<tr><td><code>already-requested</code></td><td>Your address already has a
+  live request on that position.</td></tr>
+<tr><td><code>blocked</code></td><td>The move goes back to a position on the
+  line that reached <code>fen</code>.</td></tr>
+<tr><td><code>queue-full-account</code></td><td>Your queue filled up before
+  this move was reached.</td></tr>
+<tr><td><code>batch-cap</code></td><td>More than {{ children_cap }} moves
+  needed analysis and this call requested the first {{ children_cap }}; send
+  the call again for the rest.</td></tr>
+</table></div>
+<p>Refusals use the same HTTP codes as <code>/api/request</code>.</p>
 
 <h3 id="my-queue">Your queue</h3>
 <ul>
