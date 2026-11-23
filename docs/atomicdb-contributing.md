@@ -52,7 +52,8 @@ Public API, described for users on `/atomicdb/docs/`:
   whose position nobody has searched yet, one ply deep, each through the same
   path as `api/request` (budget, credentials, deduplication and per-account
   queue cap). The reply lists the moves queued and the moves skipped, each
-  with its reason.
+  with its reason. `select` names the moves instead (at most 64 legal ones),
+  requested as the explorer's move-list multi-select requests them.
 - `POST api/my-queue/` with `username` and `password` lists the pending and
   running requests of that account. A signed-in browser can `GET` it.
 - `POST api/queue-bump/<id>/` and `POST api/queue-cancel/<id>/` move one of

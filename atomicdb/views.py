@@ -3296,6 +3296,12 @@ def api_public_request_children(request):
     ``budget=10000000000`` asks for the searches below ONE position, so it is
     refused here for everybody.
 
+    ``select`` (torom, Discord, Nov-2026) names the moves instead: those
+    legal moves and no others, as the multi-select of the move list requests
+    them (§ ``_selected_moves``, ``_request_children``), so a script makes one
+    call per parent position.  Its own parameter is called ``moves`` there,
+    but here ``moves`` already is the line of ``api/request``.
+
     The reply: ``status`` (``done``, ``partial`` when the account's queue
     filled up part way, ``nothing-to-do`` when no move is left unanalysed, or
     ``already-solved``); ``queued``, one entry per move a new request was made
@@ -3336,8 +3342,16 @@ def api_public_request_children(request):
                                     for rung in ingest.REQUEST_BUDGET_LADDER)
                         + ')')},
             status=400)
+    selected, illegal, given = None, [], []
+    if 'select' in request.POST:
+        selected, illegal, given, refusal = _selected_moves(
+            request.POST.getlist('select'), fen)
+        if refusal is not None:
+            return refusal
     try:
-        return _request_children(request, fen, user, chosen)
+        return _request_children(request, fen, user, chosen,
+                                 selected=selected, illegal=illegal,
+                                 given=given)
     except OperationalError as error:
         # The answer of ``api/request``, and a retry is as safe: every move is
         # its own commit, and a move that went through comes back from the
@@ -3352,9 +3366,64 @@ def api_public_request_children(request):
         return response
 
 
-def _request_children(request, fen, user, chosen):
+def _selected_moves(values, fen):
+    """``select`` read: ``(legal moves, illegal tokens, every token as it
+    is echoed, in the order given, refusal or None)``.
+
+    The move list of the explorer's multi-select (§ ``_request_moves``), sent
+    by a script: UCI moves separated by commas or spaces, or the field
+    repeated.  Deduplicated in the order given.  A token that is not a legal
+    move of ``fen`` is not refused: it comes back in ``skipped`` as
+    ``illegal`` and the legal ones go ahead, as the multi-select ignores it.
+    Refused whole, as the multi-select refuses them: a list naming no move,
+    one with no legal move at all, and more than ``MULTI_REQUEST_CAP`` legal
+    moves.
+    """
+    tokens = [token.lower() for value in values
+              for token in re.split(r'[\s,]+', value or '') if token]
+    tokens = list(dict.fromkeys(tokens))
+    if not tokens:
+        return None, [], [], JsonResponse(
+            {'status': 'refused', 'reason': 'select names no move'},
+            status=400)
+    legal = set(logic.legal_moves(fen))
+    selected = [uci for uci in tokens if uci in legal]
+    # Echoed cut to the length of a move and to the size of a call, as the
+    # multi-select echoes them, so a junk list is not echoed whole.
+    given = [token if token in legal else token[:8] for token in tokens]
+    illegal = [token[:8] for token in tokens if token not in legal]
+    if not selected:
+        return None, illegal, given, JsonResponse(
+            {'status': 'refused',
+             'reason': 'none of the moves in select is legal in this position',
+             'skipped': [{'move': token, 'key': None, 'reason': 'illegal'}
+                         for token in illegal[:MULTI_REQUEST_CAP]]},
+            status=400)
+    if len(selected) > MULTI_REQUEST_CAP:
+        return None, illegal, given, JsonResponse(
+            {'status': 'refused',
+             'reason': f'select names more than {MULTI_REQUEST_CAP} legal '
+                       'moves; send them in several calls'},
+            status=400)
+    return selected, illegal, given, None
+
+
+def _request_children(request, fen, user, chosen, selected=None, illegal=(),
+                      given=()):
     """The batch behind ``api_public_request_children``, once the call is
-    known to be well formed."""
+    known to be well formed.
+
+    ``selected`` is the ``select`` list, legal moves only: those moves and no
+    others, under the multi-select's rules (§ ``_request_moves``).  A move
+    the caller NAMED is requested whatever it has had, as from its own button:
+    the next rung, or the chosen budget as a target.  Every decision about
+    what to buy is taken under the purchase's row lock
+    (§ ``ingest._request_rung``), so a search landing while the batch runs
+    is counted, not raced: with a budget it answers ``already-analyzed`` once
+    it covers the target, and without one the rung bought is the one after
+    it, exactly as a click at that moment would buy.  Without ``selected``
+    the moves are the unexplored ones, as the button picks them."""
+    named = selected is not None
     username = user.username if user is not None else ''
     ip = _client_ip(request)
     key = logic.key_of(fen)
@@ -3425,11 +3494,19 @@ def _request_children(request, fen, user, chosen):
 
     queued, skipped = [], []
     candidates = []
-    for uci in legal:
+    skipped.extend({'move': token, 'key': None, 'reason': 'illegal'}
+                   for token in illegal[:MULTI_REQUEST_CAP])
+    for uci in (selected if named else legal):
         child = edges.get(uci) or known.get(keys[uci])
         if keys[uci] in on_line:
             skipped.append({'move': uci, 'key': keys[uci],
                             'reason': 'blocked'})
+            continue
+        if named:
+            # Asked for by name: searched or not, it is requested, and a
+            # transposition is linked when its turn comes below, by the
+            # same ``_materialise_child`` that makes a new node.
+            candidates.append(uci)
             continue
         if (child is not None and uci not in edges
                 and (child.status != 'UNKNOWN'
@@ -3459,21 +3536,28 @@ def _request_children(request, fen, user, chosen):
             break
         child = edges.get(uci)
         if child is None:
+            # A move that is not a node yet, or a transposition never
+            # followed from here: made or linked as following it would.
             child = _materialise_child(pos, uci)
-            if child.status != 'UNKNOWN':
-                # Making the node discovered that the move ends the game.
-                skipped.append({'move': uci, 'key': child.key,
-                                'reason': 'closed'})
-                continue
+        if child.status != 'UNKNOWN':
+            # Closed already, or making the node discovered that the move
+            # ends the game.
+            skipped.append({'move': uci, 'key': child.key,
+                            'reason': 'closed'})
+            continue
         child_route = f'{route},{uci}' if child_route_fits else ''
-        # ``only_unexplored``: the child was picked because nobody had
-        # searched it, and that is asked again under the purchase's lock, so a
-        # search that landed since is skipped rather than deepened.
+        # ``only_unexplored``: a child the button's rule picked was picked
+        # because nobody had searched it, and that is asked again under the
+        # purchase's lock, so a search that landed since is skipped rather
+        # than deepened.  A child the caller named is requested as named.
         payload, _code = _queue_request(
             child, ip, requested_by=username, chosen=chosen,
             checked_route=child_route, with_place=False, one_search=True,
-            only_if_missing=chosen is not None, only_unexplored=True)
+            only_if_missing=chosen is not None, only_unexplored=not named)
         status = payload['status']
+        if status == 'already-solved':
+            status = 'closed'    # closed while the batch ran
+            payload = dict(payload, status=status)
         if status == 'queue-full-account':
             skipped.extend({'move': rest, 'key': keys[rest],
                             'reason': 'queue-full-account'}
@@ -3500,14 +3584,20 @@ def _request_children(request, fen, user, chosen):
             # and a line already there stays.
             entry.update(_api_moves_outcome(payload, task, child_route, ''))
 
-    order = {uci: index for index, uci in enumerate(legal)}
-    skipped.sort(key=lambda entry: order[entry['move']])
+    # Skipped moves come back in the order of the request: the caller's list,
+    # or the legal moves.
+    order = {move: index for index, move in enumerate(
+        given if named else legal)}
+    skipped.sort(key=lambda entry: order.get(entry['move'], len(order)))
     counts = {'queued': len(queued)}
     for entry in skipped:
         counts[entry['reason']] = counts.get(entry['reason'], 0) + 1
+    if named and len(illegal) > MULTI_REQUEST_CAP:
+        counts['illegal'] = len(illegal)
     left_out = counts.get('queue-full-account', 0)
     DBEvent.objects.create(kind='BULK_REQUEST', payload={
-        'ip': ip, 'key': pos.key, 'via': 'api-children',
+        'ip': ip, 'key': pos.key,
+        'via': 'api-children-select' if named else 'api-children',
         'queued': len(queued), 'candidates': len(candidates)})
     if left_out:
         status = 'partial'

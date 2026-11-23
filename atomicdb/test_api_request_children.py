@@ -467,3 +467,249 @@ class RequestChildrenApiTests(TestCase):
         self.assertEqual(payload['status'], 'done')
         self.assertEqual(len(payload['queued']),
                          len(logic.legal_moves(fresh)))
+
+
+class RequestSelectedChildrenTests(TestCase):
+    """``select``: the moves the caller names, as the move list's
+    multi-select requests them (torom, Discord)."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = Client()
+        worker_account('wolfram', 'p')
+        worker_account('eclipsia', 'p')
+        self.root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(self.root)
+        self.e4 = ingest.get_or_create_position(
+            logic.apply_move(self.root.fen, 'e2e4'))
+
+    def _post(self, fen=None, ip='10.0.0.1', **fields):
+        return self.client.post(URL, {'fen': fen or self.root.fen,
+                                      'username': 'wolfram', 'password': 'p',
+                                      **fields}, REMOTE_ADDR=ip)
+
+    def _child(self, uci, parent=None):
+        parent = parent or self.root
+        return Position.objects.get(
+            key=logic.key_of(logic.apply_move(parent.fen, uci)))
+
+    def _searched(self, child, budget):
+        """``child`` with one completed search of ``budget``."""
+        AnalysisTask.objects.create(
+            position=child, generation=child.visits, budget_nodes=budget,
+            source=AnalysisTask.Source.USER, requested_by='eclipsia',
+            state=AnalysisTask.TState.COMPLETED, nodes_searched=budget)
+        Position.objects.filter(key=child.key).update(
+            visits=child.visits + 1, nodes_invested=budget)
+
+    def test_exactly_the_named_moves_are_queued_in_the_order_given(self):
+        payload = self._post(select='g1f3,e2e4').json()
+
+        self.assertEqual(payload['status'], 'done')
+        self.assertEqual([e['move'] for e in payload['queued']],
+                         ['g1f3', 'e2e4'])
+        self.assertEqual(payload['skipped'], [])
+        self.assertEqual(
+            set(AnalysisTask.objects.values_list('position_id', flat=True)),
+            {self._child('g1f3').key, self._child('e2e4').key})
+
+    def test_commas_spaces_and_repeated_fields_are_the_same_list(self):
+        for ip, select in (('10.0.0.1', 'g1f3, E2E4'),
+                           ('10.0.0.2', 'g1f3 e2e4'),
+                           ('10.0.0.3', ['g1f3', 'e2e4', 'g1f3'])):
+            AnalysisTask.objects.all().delete()
+            payload = self._post(ip=ip, select=select).json()
+
+            self.assertEqual([e['move'] for e in payload['queued']],
+                             ['g1f3', 'e2e4'], select)
+
+    def test_illegal_moves_are_skipped_and_the_rest_go_ahead(self):
+        payload = self._post(select='e2e4,e2e5,nonsense').json()
+
+        self.assertEqual([e['move'] for e in payload['queued']], ['e2e4'])
+        self.assertEqual(payload['skipped'], [
+            {'move': 'e2e5', 'key': None, 'reason': 'illegal'},
+            {'move': 'nonsense', 'key': None, 'reason': 'illegal'}])
+        self.assertEqual(payload['counts'], {'queued': 1, 'illegal': 2})
+
+    def test_a_list_with_no_legal_move_is_refused(self):
+        response = self._post(select='e2e5')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['status'], 'refused')
+        self.assertEqual(response.json()['skipped'][0]['reason'], 'illegal')
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    def test_an_empty_list_is_refused_not_read_as_absent(self):
+        response = self._post(select=' , ')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    @mock.patch('atomicdb.views.MULTI_REQUEST_CAP', 2)
+    def test_more_legal_moves_than_the_cap_are_refused_whole(self):
+        response = self._post(select='e2e4,d2d4,g1f3')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('more than 2 legal moves', response.json()['reason'])
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    def test_a_named_move_already_searched_gets_its_next_rung(self):
+        child = self._child('e2e4')
+        self._searched(child, ingest.REQUEST_BUDGET_LADDER[0])
+
+        named = self._post(select='e2e4').json()
+
+        entry = named['queued'][0]
+        self.assertEqual(entry['move'], 'e2e4')
+        self.assertEqual(entry['budget_nodes'],
+                         ingest.REQUEST_BUDGET_LADDER[1])
+        # Without ``select`` the same move is the button's: skipped.
+        AnalysisTask.objects.filter(state='PENDING').delete()
+        cache.clear()
+        unnamed = self._post(ip='10.0.0.2').json()
+        reasons = {e['move']: e['reason'] for e in unnamed['skipped']}
+        self.assertEqual(reasons['e2e4'], 'already-analyzed')
+
+    def test_a_named_move_at_the_top_of_the_ladder_buys_nothing(self):
+        self._searched(self._child('e2e4'), ingest.REQUEST_BUDGET_LADDER[-1])
+
+        payload = self._post(select='e2e4').json()
+
+        self.assertEqual(payload['skipped'][0]['reason'],
+                         ingest.LADDER_SPENT)
+        self.assertFalse(AnalysisTask.objects.filter(
+            state='PENDING').exists())
+
+    @mock.patch('atomicdb.depth.may_choose', return_value=True)
+    def test_a_chosen_budget_is_a_target(self, _):
+        self._searched(self._child('e2e4'), ingest.REQUEST_BUDGET_LADDER[1])
+
+        payload = self._post(select='e2e4,d2d4',
+                             budget=str(ingest.REQUEST_BUDGET_LADDER[1])
+                             ).json()
+
+        self.assertEqual(payload['skipped'], [
+            {'move': 'e2e4', 'key': self._child('e2e4').key,
+             'reason': 'already-analyzed'}])
+        self.assertEqual(payload['queued'][0]['move'], 'd2d4')
+        self.assertEqual(payload['queued'][0]['budget_nodes'],
+                         ingest.REQUEST_BUDGET_LADDER[1])
+
+    @mock.patch('atomicdb.depth.may_choose', return_value=True)
+    def test_a_shallower_named_move_gets_the_chosen_budget(self, _):
+        self._searched(self._child('e2e4'), ingest.REQUEST_BUDGET_LADDER[0])
+
+        payload = self._post(select='e2e4',
+                             budget=str(ingest.REQUEST_BUDGET_LADDER[-1])
+                             ).json()
+
+        # The chosen budget, not the next rung after 128M.
+        self.assertEqual(payload['queued'][0]['budget_nodes'],
+                         ingest.REQUEST_BUDGET_LADDER[-1])
+
+    @mock.patch('atomicdb.depth.may_choose', return_value=True)
+    def test_a_search_landing_during_the_batch_covers_the_target(self, _):
+        from . import views
+        real = views._queue_request
+        raced = self._child('e2e4')
+
+        def landing_first(pos, *args, **kwargs):
+            if pos.key == raced.key:
+                self._searched(raced, ingest.REQUEST_BUDGET_LADDER[0])
+            return real(pos, *args, **kwargs)
+
+        with mock.patch.object(views, '_queue_request',
+                               side_effect=landing_first):
+            payload = self._post(select='e2e4',
+                                 budget=str(ingest.REQUEST_BUDGET_LADDER[0])
+                                 ).json()
+
+        self.assertEqual(payload['skipped'][0]['reason'], 'already-analyzed')
+        self.assertFalse(AnalysisTask.objects.filter(
+            position=raced, state='PENDING').exists())
+
+    def test_a_closed_named_move_is_skipped(self):
+        Position.objects.filter(key=self._child('e2e4').key).update(
+            status='WHITE_WIN', closure='MINIMAX')
+
+        payload = self._post(select='e2e4').json()
+
+        self.assertEqual(payload['skipped'][0]['reason'], 'closed')
+        self.assertFalse(AnalysisTask.objects.exists())
+
+    def test_a_named_transposition_is_linked_and_queued(self):
+        known = ingest.get_or_create_position(
+            logic.apply_move(self.e4.fen, 'e7e5'))
+        Position.objects.filter(key=known.key).update(nodes_invested=1)
+        self.assertFalse(Edge.objects.filter(parent=self.e4).exists())
+
+        payload = self._post(fen=self.e4.fen, select='e7e5',
+                             moves='e2e4').json()
+
+        self.assertEqual(payload['queued'][0]['key'], known.key)
+        self.assertTrue(Edge.objects.filter(
+            parent=self.e4, move_uci='e7e5', child=known).exists())
+        # Labelled with the caller's line plus the move.
+        self.assertEqual(payload['queued'][0]['moves'], 'e2e4,e7e5')
+        self.assertEqual(AnalysisTask.objects.get(position=known).route,
+                         'e2e4,e7e5')
+
+    def test_a_move_back_onto_the_line_is_blocked(self):
+        line = ['g1f3', 'g8f6', 'f3g1']
+        fen = self.root.fen
+        for uci in line:
+            fen = logic.apply_move(fen, uci)
+            ingest.get_or_create_position(fen)
+
+        payload = self._post(fen=fen, moves=','.join(line),
+                             select='f6g8,e7e5').json()
+
+        reasons = {e['move']: e['reason'] for e in payload['skipped']}
+        self.assertEqual(reasons, {'f6g8': 'blocked'})
+        self.assertEqual([e['move'] for e in payload['queued']], ['e7e5'])
+
+    def test_a_line_sent_again_labels_the_requests_already_made(self):
+        self._post(fen=self.e4.fen, select='e7e5')
+
+        payload = self._post(fen=self.e4.fen, select='e7e5',
+                             moves='e2e4').json()
+
+        self.assertEqual(payload['skipped'][0]['reason'],
+                         'already-requested')
+        self.assertEqual(payload['skipped'][0]['moves'], 'e2e4,e7e5')
+        self.assertEqual(AnalysisTask.objects.get().route, 'e2e4,e7e5')
+
+    @mock.patch('atomicdb.views.REQUEST_QUEUE_MAX', 1)
+    def test_the_account_cap_stops_the_named_batch_part_way(self):
+        payload = self._post(select='e2e4,d2d4').json()
+
+        self.assertEqual(payload['status'], 'partial')
+        self.assertEqual([e['move'] for e in payload['queued']], ['e2e4'])
+        self.assertEqual(payload['skipped'], [
+            {'move': 'd2d4', 'key': self._child('d2d4').key,
+             'reason': 'queue-full-account'}])
+
+    def test_receipts_and_the_batch_event(self):
+        from .models import DBEvent
+        self._post(select='e2e4,d2d4')
+
+        self.assertEqual(ApiRequestLog.objects.filter(
+            account='wolfram').count(), 1)
+        event = DBEvent.objects.filter(kind='BULK_REQUEST').get()
+        self.assertEqual(event.payload['via'], 'api-children-select')
+        self.assertEqual(event.payload['queued'], 2)
+        self.assertEqual(event.payload['candidates'], 2)
+
+    def test_the_api_docs_describe_select(self):
+        body = Client().get('/atomicdb/docs/api/').content.decode()
+
+        self.assertIn('<code>select=e7e5,g8f6</code>', body)
+        self.assertRegex(body, r'more than\s+64 legal moves')
+
+    def test_without_credentials_it_is_anonymous_like_the_rest(self):
+        payload = self.client.post(URL, {'fen': self.root.fen,
+                                         'select': 'e2e4'}).json()
+
+        self.assertEqual(payload['queued'][0]['move'], 'e2e4')
+        self.assertEqual(AnalysisTask.objects.get().requested_by, '')
