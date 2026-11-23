@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db.models import Count, Min, Q, Sum
+from django.db.models.fields.json import KT
 from django.utils import timezone
 
 from . import revalidate
@@ -133,18 +134,60 @@ def _closure_sources():
     return ingest.CLOSURE_SOURCES
 
 
-def closure_attribution_totals(since=None):
-    """``{fuente: cierres}`` sobre los eventos etiquetados.
+def _source_groups(since, *windows):
+    """Cierres por valor de ``payload.source``, en UNA pasada.
 
-    Un ``COUNT`` por fuente y ninguna fila transferida.  La alternativa —
-    agrupar por la clave JSON en SQL — depende de como cada backend decodifica
-    un ``KeyTransform``, y un KPI de portada no es sitio para averiguarlo.
+    Devuelve ``[{fuente o None: cierres}]``: el primero para todo lo que hay
+    desde ``since`` (``None`` = toda la tabla) y uno mas por cada instante de
+    ``windows``, contando solo los eventos con ``ts >= instante``.
+
+    POR QUE AGRUPAR (23-nov-2026).  Antes era un ``COUNT`` por fuente, cinco
+    recorridos de ``atomicdb_dbevent`` por ventana: 51 s en la captura horaria
+    y ~34 s en cada pasada del snapshot de portada, con la tabla ya en 15M de
+    filas.  Agrupar lee cada fila una vez y extrae la clave una vez.
+
+    El texto de la clave (``KT``: ``->>`` en Postgres, ``JSON_EXTRACT`` en
+    SQLite) y no su valor JSON, porque el texto es lo que los dos backends
+    devuelven igual.  Da exactamente los mismos numeros que el filtro
+    ``payload__source=nombre`` para las cinco fuentes, que son cadenas: un
+    valor JSON cuyo texto es ``USER`` solo puede ser la cadena ``"USER"``.
+    Los grupos que no son fuentes (sin clave, ``None``) se quedan en el
+    resultado para que la suma de todos los grupos sea el total de cierres.
     """
     events = DBEvent.objects.filter(kind='NODE_CLOSED')
     if since is not None:
         events = events.filter(ts__gte=since)
-    return {name: events.filter(payload__source=name).count()
-            for name in _closure_sources()}
+    counts = {'n': Count('id')}
+    for index, instant in enumerate(windows):
+        counts[f'w{index}'] = Count('id', filter=Q(ts__gte=instant))
+    rows = (events.annotate(attributed_source=KT('payload__source'))
+            .order_by().values('attributed_source').annotate(**counts))
+    groups = [{} for _ in range(1 + len(windows))]
+    for row in rows:
+        source = row['attributed_source']
+        groups[0][source] = row['n']
+        for index in range(len(windows)):
+            groups[1 + index][source] = row[f'w{index}']
+    return groups
+
+
+def _sources_of(group):
+    return {name: group.get(name, 0) for name in _closure_sources()}
+
+
+def _window(hours, group):
+    counted = _sources_of(group)
+    return {
+        'hours': hours,
+        'sources': counted,
+        'stamped': sum(counted.values()),
+        'total': sum(group.values()),
+    }
+
+
+def closure_attribution_totals(since=None):
+    """``{fuente: cierres}`` sobre los eventos etiquetados."""
+    return _sources_of(_source_groups(since)[0])
 
 
 def closure_attribution_window(*, now=None, hours=24):
@@ -157,14 +200,7 @@ def closure_attribution_window(*, now=None, hours=24):
     """
     now = now or timezone.now()
     since = now - timedelta(hours=hours)
-    counted = closure_attribution_totals(since=since)
-    return {
-        'hours': hours,
-        'sources': counted,
-        'stamped': sum(counted.values()),
-        'total': DBEvent.objects.filter(kind='NODE_CLOSED',
-                                        ts__gte=since).count(),
-    }
+    return _window(hours, _source_groups(since)[0])
 
 
 # ---------------- LO CARO DE LA PORTADA, FUERA DE LA PETICION ----------------
@@ -522,18 +558,19 @@ def campaign_progress(campaign_ids, *, now=None, force=False):
 
 
 def _measure_attribution(now):
-    return {'day': closure_attribution_window(now=now, hours=24),
-            'week': closure_attribution_window(now=now, hours=24 * 7)}
+    # Las dos ventanas en una sola pasada sobre la semana: el dia es la
+    # semana con ``ts >= now - 24h`` (§ ``_source_groups``).
+    week, day = _source_groups(now - timedelta(hours=24 * 7),
+                               now - timedelta(hours=24))
+    return {'day': _window(24, day), 'week': _window(24 * 7, week)}
 
 
 def attribution_windows(*, now=None, force=False):
     """Las dos ventanas de atribucion de cierres, compartidas.
 
-    Doce ``COUNT`` sobre ``atomicdb_dbevent`` filtrando por una clave del
-    payload.  Se quedan tal cual estan escritos — agrupar por la clave JSON en
-    SQL depende de como decodifique cada backend un ``KeyTransform``, y eso no
-    se averigua en la portada (§ ``closure_attribution_totals``) — pero se
-    pagan una vez por ciclo y no una vez por visitante.
+    Una sola pasada agrupada sobre la ultima semana de ``atomicdb_dbevent``
+    (§ ``_source_groups``; hasta el 23-nov eran doce ``COUNT``), pagada una
+    vez por ciclo y no una vez por visitante.
 
     Sin valor de respaldo: ``None`` significa "no se ha medido", y la portada
     esconde el bloque en vez de pintar ceros que se leerian como "nadie ha

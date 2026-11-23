@@ -127,6 +127,44 @@ class ProofFrontierTests(TestCase):
 
         self.assertEqual(len(rows), 2)
 
+    def test_same_rows_as_the_join(self):
+        """Corte sobre ProofNode y paginas: lo mismo que el JOIN de antes.
+
+        Con cerradas intercaladas en el orden (fuerzan una segunda pagina),
+        empates de ``pn`` y una fila ``pn = 0`` con ``dn`` finito, que va por
+        el tramo aparte.
+        """
+        campaign = _campaign()
+        root = ingest.get_or_create_position(logic.start_fen())
+        ingest.expand(root)
+        for edge in Edge.objects.filter(parent=root):
+            ProofNode.objects.get_or_create(campaign=campaign,
+                                            position_id=edge.child_id)
+        nodes = list(ProofNode.objects.filter(campaign=campaign)
+                     .order_by('position_id'))
+        self.assertGreaterEqual(len(nodes), 12)
+        for index, node in enumerate(nodes):
+            node.pn = (0, 1, 1, 2, 3)[index % 5]
+            node.dn = (5 if index % 7 else proof.PROOF_INFINITY)
+            node.save(update_fields=['pn', 'dn'])
+        closed = [node.position_id for node in nodes[1::3]]
+        Position.objects.filter(key__in=closed).update(status='WHITE_WIN')
+
+        def joined(limit):
+            return list(ProofNode.objects.filter(
+                campaign=campaign, position__status='UNKNOWN',
+                pn__lt=proof.PROOF_INFINITY, dn__lt=proof.PROOF_INFINITY,
+            ).order_by('pn', 'position_id').values_list(
+                'position_id', 'position__fen', 'pn', 'dn')[:limit])
+
+        for limit in (1, 2, 3, 5, 8, 50):
+            self.assertEqual(proof.frontier_rows(campaign, limit=limit),
+                             joined(limit), limit)
+        with patch.object(proof, 'FRONTIER_LOOKUP_CHUNK', 1):
+            for limit in (1, 4, 50):
+                self.assertEqual(proof.frontier_rows(campaign, limit=limit),
+                                 joined(limit), limit)
+
 
 class ClosureAttributionTests(TestCase):
     """De QUIEN fue cada cierre. Se registra o se pierde."""
@@ -239,6 +277,48 @@ class ClosureAttributionTests(TestCase):
         window = metrics.closure_attribution_window(hours=24)
         self.assertEqual(window['stamped'], 0)
         self.assertEqual(window['total'], 1)
+
+    def test_one_pass_counts_match_one_count_per_source(self):
+        """Agrupar por la clave da lo mismo que el filtro por fuente.
+
+        Con payloads raros a proposito: sin clave, clave nula, un numero, una
+        lista, una fuente desconocida y otros tipos de evento.
+        """
+        now = timezone.now()
+        payloads = ([{'source': 'USER'}] * 3 + [{'source': 'AUTO'}] * 2
+                    + [{'source': 'FILL'}, {'source': 'SOLVE'},
+                       {'source': 'NONE'}, {}, {'source': None},
+                       {'source': 7}, {'source': ['USER']},
+                       {'source': 'ROBOT'}, {'source': {'x': 1}}])
+        ages = (1, 30, 200)       # horas: dentro del dia, de la semana, fuera
+        for index, payload in enumerate(payloads):
+            event = DBEvent.objects.create(kind='NODE_CLOSED',
+                                           payload=dict(payload))
+            hours = ages[index % len(ages)]
+            DBEvent.objects.filter(pk=event.pk).update(
+                ts=now - timezone.timedelta(hours=hours))
+        DBEvent.objects.create(kind='TB_REJECTED', payload={'source': 'USER'})
+
+        def per_source(since=None):
+            events = DBEvent.objects.filter(kind='NODE_CLOSED')
+            if since is not None:
+                events = events.filter(ts__gte=since)
+            return {name: events.filter(payload__source=name).count()
+                    for name in ingest.CLOSURE_SOURCES}
+
+        def window(hours):
+            since = now - timezone.timedelta(hours=hours)
+            sources = per_source(since)
+            return {'hours': hours, 'sources': sources,
+                    'stamped': sum(sources.values()),
+                    'total': DBEvent.objects.filter(
+                        kind='NODE_CLOSED', ts__gte=since).count()}
+
+        self.assertEqual(metrics.closure_attribution_totals(), per_source())
+        self.assertEqual(metrics.closure_attribution_window(now=now, hours=24),
+                         window(24))
+        self.assertEqual(metrics._measure_attribution(now),
+                         {'day': window(24), 'week': window(24 * 7)})
 
 
 class HumanCloseLatencyTests(TestCase):

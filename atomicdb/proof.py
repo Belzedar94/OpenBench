@@ -1783,12 +1783,82 @@ def frontier_rows(campaign, limit=PROOF_FRONTIER_SCAN):
     medir y para reparar, y traer ``Position`` completas arrastraria el JSON
     de ``last_analysis`` de cada fila — el mayor campo de la tabla — para leer
     de el un color al turno.
+
+    EL CORTE PRIMERO, LA POSICION DESPUES (23-nov-2026).  La forma ingenua —
+    un JOIN con ``Position`` filtrando ``status`` y ordenando por ``(pn,
+    position_id)`` — tardaba 5-10 minutos en la captura horaria: ``pn`` tiene
+    pocos valores distintos (el grupo ``pn=1`` solo pasa del millon y medio de
+    filas), asi que para ordenar por ``position_id`` dentro del grupo el plan
+    tenia que hacer el JOIN de TODO el grupo, 1,7M busquedas al azar en la
+    tabla de 89 GB, para quedarse con 20.000.  Aqui se ordena y se corta sobre
+    ``ProofNode`` solo, y despues se miran ``status`` y ``fen`` de las filas
+    del corte por clave primaria.  Si alguna no sigue abierta, se pide el
+    siguiente tramo en el mismo orden (paginacion por ``(pn, position_id)``)
+    hasta juntar ``limit``.  Mismo filtro, mismo orden y mismo corte que el
+    JOIN: el resultado es identico.
+
+    Y EL TRAMO ``pn <= 0`` APARTE.  Casi el 80 % de la tabla son nodos
+    probados (``pn = 0``, ``dn`` infinito) que el filtro descarta, pero el
+    indice ``(campaign, pn)`` no lleva ``dn``: empezar el recorrido por
+    ``pn = 0`` eran 20M filas leidas para nada (36 s).  Las filas de ese
+    tramo que si pasan el filtro — ``pn = 0`` con ``dn`` finito, que las
+    recurrencias sanas no producen — se buscan por el indice ``(campaign,
+    dn)`` sin orden ni corte, y el recorrido ordenado empieza en ``pn > 0``.
+    Todas las de ``pn <= 0`` van delante de cualquier ``pn > 0``, asi que
+    concatenar los dos tramos es el mismo orden.  Si el primer tramo fuese
+    grande (una base averiada), se recorre todo de una pieza como antes.
     """
-    return list(ProofNode.objects.filter(
-        campaign=campaign, position__status='UNKNOWN',
-        pn__lt=PROOF_INFINITY, dn__lt=PROOF_INFINITY,
-    ).order_by('pn', 'position_id').values_list(
-        'position_id', 'position__fen', 'pn', 'dn')[:limit])
+    candidates = ProofNode.objects.filter(
+        campaign=campaign, pn__lt=PROOF_INFINITY, dn__lt=PROOF_INFINITY,
+    ).order_by('pn', 'position_id')
+    # Sin ``order_by`` ni corte a proposito: con ellos el planificador vuelve
+    # a bajar por ``(campaign, pn)`` desde ``pn = 0``.
+    proved_side = list(candidates.filter(pn__lte=0).order_by()
+                       .values_list('position_id', flat=True))
+    if len(proved_side) > FRONTIER_LOOKUP_CHUNK:
+        return _frontier_pages(candidates, limit, [])
+    rows = _frontier_pages(
+        candidates.filter(pn__lte=0, position_id__in=proved_side),
+        limit, []) if proved_side else []
+    return _frontier_pages(candidates.filter(pn__gt=0), limit, rows)
+
+
+def _frontier_pages(candidates, limit, rows):
+    """Anade a ``rows`` las filas abiertas de ``candidates`` hasta ``limit``.
+
+    ``candidates`` viene ordenado por ``(pn, position_id)``; se lee por tramos
+    de ``limit`` filas de ``ProofNode`` y cada tramo se cruza con ``Position``
+    por clave primaria.
+    """
+    after = None
+    while len(rows) < limit:
+        page = candidates
+        if after is not None:
+            page = page.filter(Q(pn__gt=after[0])
+                               | Q(pn=after[0], position_id__gt=after[1]))
+        batch = list(page.values_list('position_id', 'pn', 'dn')[:limit])
+        if not batch:
+            break
+        fens = {}
+        for start in range(0, len(batch), FRONTIER_LOOKUP_CHUNK):
+            keys = [row[0] for row in
+                    batch[start:start + FRONTIER_LOOKUP_CHUNK]]
+            fens.update(Position.objects.filter(
+                key__in=keys, status='UNKNOWN').values_list('key', 'fen'))
+        for key, pn, dn in batch:
+            if key in fens:
+                rows.append((key, fens[key], pn, dn))
+                if len(rows) >= limit:
+                    break
+        if len(batch) < limit:
+            break
+        after = (batch[-1][1], batch[-1][0])
+    return rows
+
+
+# Claves por consulta al mirar ``status`` y ``fen`` del corte: lejos del tope
+# de parametros de SQLite y de un ``IN`` que el planificador lea mal.
+FRONTIER_LOOKUP_CHUNK = 2_000
 
 
 def frontier_and_rows(campaign, limit=PROOF_FRONTIER_SCAN):
