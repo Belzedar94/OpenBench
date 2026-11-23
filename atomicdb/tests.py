@@ -1732,7 +1732,10 @@ class ArrowTests(TestCase):
             'atomicdb' / 'board.js'
         ).read_text(encoding='utf-8')
         self.assertIn('autoShapes', board_js)
-        self.assertIn("brush: 'green'", board_js)
+        # The colour is a visitor setting since efef0d6: the arrow draws with
+        # its own brush, whose default is Chessground's green.
+        self.assertIn("const ARROW_DEFAULT = '#15781b';", board_js)
+        self.assertIn('brush: arrowName', board_js)
 
     def test_no_arrow_without_best_move(self):
         p = ingest.get_or_create_position(logic.start_fen())
