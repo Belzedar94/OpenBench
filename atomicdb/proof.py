@@ -83,7 +83,7 @@ from collections import namedtuple
 from django.conf import settings
 from django.db.models import Q
 
-from . import logic, solve_estimate
+from . import logic, shared_alt, solve_estimate
 from .database import connection
 from .models import (AnalysisTask, Campaign, DBEvent, Edge, Position,
                      ProofCampaign, ProofNode)
@@ -1709,6 +1709,9 @@ def descend_value(campaign, counter=0, max_plies=DESCENT_MAX_PLIES, avoid=(),
     path, cycled = _walk_spine(campaign, node.key, node.fen, node.backed_move,
                                node.nodes_invested, {node.key}, max_plies,
                                node.backed_plies)
+    # Shadow only, OFF by default: logs SHARED_ALT events and returns nothing
+    # the walk reads (§ shared_alt).
+    shared_alt.observe(campaign, path, node.backed_move)
     best, best_score, usable = None, 0.0, 0
     for key, arm, floor, plies, line in _value_plans(campaign, path, cycled,
                                                      bucket, max_plies):
