@@ -302,7 +302,9 @@ Send <code>moves</code> to have it listed under yours:</p>
 <p><code>POST /atomicdb/api/request-children</code> does in one call what the
 explorer's "Analyse the unanalysed moves" button does: it asks for analysis of
 every legal move of <code>fen</code> whose position no engine has searched
-yet. It goes one move deep and never further.</p>
+yet. With <code>select</code> it asks for the moves you name instead, like
+the explorer's move list when you tick moves. It goes one move deep and never
+further.</p>
 <p>Each of those moves is requested exactly as
 <a href="#request"><code>/api/request</code></a> would request it: the same
 budget ladder, deduplication, joining rule, per-person queue cap and
@@ -318,8 +320,19 @@ the explorer would add them. A FEN the tree does not have is seeded.</p>
 <tr><td><code>budget</code></td><td>Optional, as for
   <code>/api/request</code>: one rung of the ladder for every move, honoured for
   the accounts the explorer offers the depth slider to. Without it each move
-  gets its first rung. <code>budget=10000000000</code> is refused here, since
+  gets its first rung (its next rung, with <code>select</code>).
+  <code>budget=10000000000</code> is refused here, since
   it asks for the searches below a single position.</td></tr>
+<tr><td><code>only_if_missing=1</code></td><td>Optional, with the same
+  meaning as for <a href="#request"><code>/api/request</code></a>, for every
+  account: the budget becomes a target (the rung you picked, or the first
+  one). A move already searched that deep is skipped as
+  <code>already-analyzed</code> with <code>completed_budget</code>, and no move
+  is queued above the target.</td></tr>
+<tr><td><code>select</code></td><td>Optional. The moves to request, in UCI,
+  separated by commas or spaces or with the field repeated
+  (<code>select=e7e5,g8f6</code>). Only those moves are requested, whether
+  or not they have been analysed; see below.</td></tr>
 <tr><td><code>moves</code> (or <code>route</code>)</td><td>Optional, as for
   <code>/api/request</code>: the line that reached <code>fen</code>. Each
   request is then listed under that line followed by its own move, so the line
@@ -331,6 +344,26 @@ up partway, the moves requested so far stay requested and the rest are skipped
 with <code>queue-full-account</code>; send the call again once some of your
 requests have landed.</p>
 <div class="raw"><div class="rawline">curl --data-urlencode "fen=rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" -d moves=e2e4 -d username=me -d password=secret https://belzedar.duckdns.org/atomicdb/api/request-children</div></div>
+
+<p><strong>Choosing the moves.</strong> With <code>select</code> the call does
+what ticking those moves in the explorer's move list and pressing its request
+button does:</p>
+<ul>
+<li>Every move you name is requested, even one that has been analysed
+  already. Without <code>budget</code> it gets its next rung, as from its own
+  button, unless you send <code>only_if_missing=1</code>, which makes the first
+  rung the target. With <code>budget</code> that budget is a target: a move already
+  searched that deep or deeper is skipped as <code>already-analyzed</code>,
+  and any other gets a search of that budget.</li>
+<li>At most one search per move. A move searched up to the last rung buys
+  nothing and comes back as <code>ladder-spent</code>.</li>
+<li>Moves that are not legal in <code>fen</code> come back in
+  <code>skipped</code> as <code>illegal</code> and the others go ahead. A list
+  with no legal move at all, an empty list, or more than
+  {{ multi_request_cap }} legal moves is refused with <code>400</code>.</li>
+<li>Skipped moves are listed in the order you sent them.</li>
+</ul>
+<div class="raw"><div class="rawline">curl --data-urlencode "fen=rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" -d select=e7e5,g8f6,c7c5 -d username=me -d password=secret https://belzedar.duckdns.org/atomicdb/api/request-children</div></div>
 
 <h4>The reply</h4>
 <div class="docs-table-wrap"><table>
@@ -373,7 +406,12 @@ requests have landed.</p>
   line that reached <code>fen</code>.</td></tr>
 <tr><td><code>queue-full-account</code></td><td>Your queue filled up before
   this move was reached.</td></tr>
-<tr><td><code>batch-cap</code></td><td>More than {{ children_cap }} moves
+<tr><td><code>illegal</code></td><td>Only with <code>select</code>: not a
+  legal move in <code>fen</code>. <code>key</code> is
+  <code>null</code>.</td></tr>
+<tr><td><code>ladder-spent</code></td><td>Only with <code>select</code>: the
+  move has been searched up to the last rung.</td></tr>
+<tr><td><code>batch-cap</code></td><td>Without <code>select</code>: more than {{ children_cap }} moves
   needed analysis and this call requested the first {{ children_cap }}; send
   the call again for the rest.</td></tr>
 </table></div>
