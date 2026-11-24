@@ -378,7 +378,9 @@ button does:</p>
   for <code>/api/request</code>, about the position you sent.</td></tr>
 <tr><td><code>queued</code></td><td>One entry per move a new request was
   made for: <code>move</code> (UCI), <code>key</code> of the position it
-  leads to, <code>task</code> and <code>budget_nodes</code>.</td></tr>
+  leads to, <code>task</code>, <code>budget_nodes</code> and
+  <code>task_state</code> (<code>waiting</code> or <code>searching</code>, as
+  for <code>/api/request</code>).</td></tr>
 <tr><td><code>skipped</code></td><td>One entry per other legal move:
   <code>move</code>, <code>key</code> and <code>reason</code> (see
   below).</td></tr>
@@ -399,9 +401,11 @@ button does:</p>
 <tr><td><code>already-queued</code></td><td>The position was already waiting
   or being searched. You are recorded as another requester
   (<code>backed</code> is <code>true</code>) unless the request was already
-  yours; <code>task</code> is the live request.</td></tr>
+  yours; <code>task</code>, <code>budget_nodes</code> and
+  <code>task_state</code> describe the live request.</td></tr>
 <tr><td><code>already-requested</code></td><td>Your address already has a
-  live request on that position.</td></tr>
+  live request on that position; <code>task</code>,
+  <code>budget_nodes</code> and <code>task_state</code> describe it.</td></tr>
 <tr><td><code>blocked</code></td><td>The move goes back to a position on the
   line that reached <code>fen</code>.</td></tr>
 <tr><td><code>queue-full-account</code></td><td>Your queue filled up before

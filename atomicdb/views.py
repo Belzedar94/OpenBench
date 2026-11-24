@@ -3579,19 +3579,25 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
             break
         task, backed = _api_request_task(child, username,
                                          newest=status == 'queued')
+        # The same task fields as ``api/request`` (§ its payload): which
+        # search, how deep, and whether it waits or is already on an engine.
+        task_fields = {
+            'task': None if task is None else task.id,
+            'budget_nodes': None if task is None else task.budget_nodes,
+            'task_state': None if task is None else (
+                'searching' if task.state == AnalysisTask.TState.LEASED
+                else 'waiting')}
         if status == 'queued':
-            entry = {
-                'move': uci, 'key': child.key,
-                'task': None if task is None else task.id,
-                'budget_nodes': None if task is None else task.budget_nodes}
+            entry = {'move': uci, 'key': child.key, **task_fields}
             queued.append(entry)
         else:
             entry = {'move': uci, 'key': child.key, 'reason': status}
             if payload.get('completed_budget') is not None:
                 # The search that covers the target, as ``api/request`` says.
                 entry['completed_budget'] = payload['completed_budget']
+            if status in ('already-queued', 'already-requested'):
+                entry.update(task_fields)
             if status == 'already-queued':
-                entry['task'] = None if task is None else task.id
                 entry['backed'] = backed
             skipped.append(entry)
         if child_route and task is not None:

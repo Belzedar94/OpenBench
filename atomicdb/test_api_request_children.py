@@ -69,6 +69,35 @@ class RequestChildrenApiTests(TestCase):
             self.assertEqual(task.budget_nodes,
                              ingest.REQUEST_BUDGET_LADDER[0])
             self.assertEqual(entry['budget_nodes'], task.budget_nodes)
+            self.assertEqual(entry['task_state'], 'waiting')
+
+    def test_an_already_queued_move_says_how_deep_and_whether_it_runs(self):
+        """torom, 24-Nov: ``task_state`` on every entry with a task, and
+        ``budget_nodes`` on ``already-queued`` too, as ``api/request``
+        answers for one position."""
+        self.client.post('/atomicdb/api/request',
+                         {'fen': self._child('g1f3').fen,
+                          **self._credentials('eclipsia')},
+                         REMOTE_ADDR='10.0.0.2')
+        task = AnalysisTask.objects.get(position=self._child('g1f3'),
+                                        source=AnalysisTask.Source.USER)
+
+        payload = self._post(**self._credentials()).json()
+        entry = {e['move']: e for e in payload['skipped']}['g1f3']
+        self.assertEqual(entry['reason'], 'already-queued')
+        self.assertEqual(entry['task'], task.id)
+        self.assertEqual(entry['budget_nodes'], task.budget_nodes)
+        self.assertEqual(entry['task_state'], 'waiting')
+
+        AnalysisTask.objects.filter(pk=task.pk).update(
+            state=AnalysisTask.TState.LEASED)
+        payload = self._post(**self._credentials()).json()
+        entry = {e['move']: e for e in payload['skipped']}['g1f3']
+        # Second call from the same account: already joined.
+        self.assertEqual(entry['reason'], 'already-requested')
+        self.assertEqual(entry['task'], task.id)
+        self.assertEqual(entry['budget_nodes'], task.budget_nodes)
+        self.assertEqual(entry['task_state'], 'searching')
 
     def test_one_ply_only(self):
         self._post(**self._credentials())
