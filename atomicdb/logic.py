@@ -145,11 +145,21 @@ def en_passant_changes_the_game(parts):
 
 @lru_cache(maxsize=MOVE_CACHE_ENTRIES)
 def _en_passant_right_exists(prefix):
+    # Both questions go through the position memo (``_legal_moves``), not
+    # straight to pyffish.  The two FENs asked here are exactly the two
+    # candidates for the canonical FEN — counters ``0 1``, with and without
+    # the square — so whichever one ``canonical_fen`` keeps is the very next
+    # thing every caller asks about (``terminal_status`` of a child born in
+    # ``expand``, the next node of a proof), and it is then already
+    # answered.  Same strings, same pyffish call, same answer: only the
+    # second asking disappears.  An exception still propagates out of
+    # ``_legal_moves`` (``lru_cache`` remembers nothing for a raise), so the
+    # fallback below is unchanged.
     with_right = prefix + ' 0 1'
     without_right = ' '.join(prefix.split()[:3] + ['-', '0', '1'])
     try:
-        return (set(pf.legal_moves(VARIANT, with_right, []))
-                != set(pf.legal_moves(VARIANT, without_right, [])))
+        return (set(_legal_moves(with_right))
+                != set(_legal_moves(without_right)))
     except Exception:
         return True
 
@@ -190,8 +200,43 @@ def _legal_moves(fen):
     return tuple(pf.legal_moves(VARIANT, fen, []))
 
 
-@lru_cache(maxsize=POSITION_CACHE_ENTRIES)
+# THE IMMEDIATE-END FLAG WITH BOTH KINGS ON THE BOARD IS ALWAYS FALSE.
+#
+# The 23-nov ingest profile (8 workers, 5,338 samples) put 26% of all the CPU
+# in ``pf.is_immediate_game_end`` — one full pyffish call, attack tables and
+# all, per node of every proof and per child of every expansion — and the
+# answer is fixed by the board for every position this module ever asks
+# about.  ``Position::is_immediate_game_end`` in the pinned movegen, for the
+# ``atomic`` variant and an empty move list, can only fire on:
+#
+# * EXTINCTION.  Atomic declares ``extinctionPieceTypes = {COMMONER}`` (the
+#   king is a commoner) with the default counts, so it fires exactly when one
+#   side has no king left: the king that was blown up.
+# * Everything else in that function is off for atomic (capture-the-flag,
+#   castling wins, n-check, connect-n, full-board adjudication, two boards,
+#   tsume mode — ``pf.set_option`` is never called), or needs a move history
+#   (bikjang / double pass look at ``st->previous`` only when
+#   ``pliesFromNull > 0``; every call here passes ``[]``).
+#
+# So with a ``K`` and a ``k`` in the board field the flag is false, and that
+# is all this shortcut answers.  A position missing a king still asks
+# pyffish, as before: that is the only case where the flag can be true, and
+# it is a terminal leaf (rare, and ``game_result`` is asked there anyway).
+# The equivalence is pinned by ``MovegenShortcutTests`` against the real
+# pyffish over positions from the live tree and every child of each.
+def _both_kings_on_board(fen):
+    board = fen.split(' ', 1)[0]
+    return 'K' in board and 'k' in board
+
+
 def _immediate_end(fen):
+    if _both_kings_on_board(fen):
+        return False
+    return _immediate_end_movegen(fen)
+
+
+@lru_cache(maxsize=POSITION_CACHE_ENTRIES)
+def _immediate_end_movegen(fen):
     immediate, _ = pf.is_immediate_game_end(VARIANT, fen, [])
     return bool(immediate)
 
@@ -237,7 +282,7 @@ def is_zeroing(fen, uci):
 
 def clear_caches():
     """Forget every remembered movegen answer, as a restarted process would."""
-    for remembered in (_legal_moves, _immediate_end, _game_result,
+    for remembered in (_legal_moves, _immediate_end_movegen, _game_result,
                        _fen_after, apply_move, _en_passant_right_exists):
         remembered.cache_clear()
 

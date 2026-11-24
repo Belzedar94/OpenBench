@@ -196,6 +196,112 @@ class MovegenMemoTests(SimpleTestCase):
                          list(logic.pf.legal_moves(logic.VARIANT, fen, [])))
 
 
+class MovegenShortcutTests(SimpleTestCase):
+    """The immediate-end flag is answered from the board when both kings are
+    on it (23-nov ingest profile), and the e.p. probe shares the position
+    memo.  Both must give exactly the movegen's answer and only save calls.
+    """
+
+    # Real positions plus a few edge cases: a king already blown up on either
+    # side, a real e.p. right, a phantom one, castling rights.
+    FENS = (
+        FORCED_MATE_FEN,
+        COOPERATIVE_FEN,
+        *(fen for fen, *_ in MovegenMemoTests.REAL_LINES),
+        'rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 1',
+        'rnbqkbnr/pppp1ppp/8/8/3Pp3/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1',
+        'r3k2r/pppq1ppp/2n1bn2/3pp3/3PP3/2N1BN2/PPPQ1PPP/R3K2R w KQkq - 0 1',
+        '8/8/8/8/8/8/8/K7 b - - 0 1',
+        'k7/8/8/8/8/8/8/8 w - - 0 1',
+        'k7/1p6/8/8/8/8/8/1R5K w - - 0 1',
+        'rnbq1bnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQ - 0 1',
+    )
+
+    def _positions(self):
+        """Every FEN above, canonical, and every child of each."""
+        seen = []
+        for fen in self.FENS:
+            fen = logic.canonical_fen(fen)
+            seen.append(fen)
+            for uci in logic.pf.legal_moves(logic.VARIANT, fen, []):
+                seen.append(logic.canonical_fen(
+                    logic.pf.get_fen(logic.VARIANT, fen, [uci])))
+        return seen
+
+    def test_immediate_end_matches_the_movegen_everywhere(self):
+        positions = self._positions()
+        missing_king = 0
+        for fen in positions:
+            with self.subTest(fen=fen):
+                truth = bool(logic.pf.is_immediate_game_end(
+                    logic.VARIANT, fen, [])[0])
+                self.assertEqual(logic._immediate_end(fen), truth)
+                if logic._both_kings_on_board(fen):
+                    self.assertFalse(truth)
+                else:
+                    missing_king += 1
+                    self.assertTrue(truth)
+        # The sample really contains blown-up kings, not just the easy case.
+        self.assertGreaterEqual(missing_king, 3)
+
+    def test_terminal_status_matches_the_movegen_everywhere(self):
+        def reference(fen):
+            moves = logic.pf.legal_moves(logic.VARIANT, fen, [])
+            immediate = logic.pf.is_immediate_game_end(
+                logic.VARIANT, fen, [])[0]
+            if moves and not immediate:
+                return None
+            res = logic.pf.game_result(logic.VARIANT, fen, [])
+            white = fen.split()[1] == 'w'
+            if res > 0:
+                return ('WHITE_WIN' if white else 'BLACK_WIN', 'terminal')
+            if res < 0:
+                return ('BLACK_WIN' if white else 'WHITE_WIN', 'terminal')
+            return ('DRAW', 'terminal')
+
+        logic.clear_caches()
+        for fen in self._positions():
+            with self.subTest(fen=fen):
+                self.assertEqual(logic.terminal_status(fen), reference(fen))
+
+    def test_both_kings_ask_pyffish_nothing(self):
+        logic.clear_caches()
+        fen = logic.canonical_fen(FORCED_MATE_FEN)
+        result, calls = MovegenMemoTests._recorded(
+            MovegenMemoTests(), lambda: logic._immediate_end(fen))
+        self.assertFalse(result)
+        self.assertEqual(calls, [])
+
+    def test_a_proof_never_asks_the_flag_with_both_kings(self):
+        logic.clear_caches()
+        result, calls = MovegenMemoTests._recorded(
+            MovegenMemoTests(), lambda: logic.prove_forced_mate(
+                FORCED_MATE_FEN, True, 4, budget_positions=3_000,
+                return_run=True))
+        self.assertEqual(result, ('PROVEN', 3))
+        for name, args in calls:
+            if name == 'is_immediate_game_end':
+                fen = eval(args)[1]
+                self.assertFalse(logic._both_kings_on_board(fen), fen)
+
+    def test_en_passant_probe_answers_the_next_question(self):
+        for fen, kept in (
+                ('rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6'
+                 ' 0 1', True),
+                ('rnbqkbnr/pppp1ppp/8/8/3Pp3/8/PPP1PPPP/RNBQKBNR b KQkq d3'
+                 ' 0 1', None)):
+            with self.subTest(fen=fen):
+                logic.clear_caches()
+                canonical = logic.canonical_fen(fen)
+                if kept is not None:
+                    self.assertEqual(canonical.split()[3] != '-', kept)
+                moves, calls = MovegenMemoTests._recorded(
+                    MovegenMemoTests(), lambda: logic.legal_moves(canonical))
+                self.assertEqual(calls, [])
+                self.assertEqual(moves, list(logic.pf.legal_moves(
+                    logic.VARIANT, canonical, [])))
+
+
 class VerifyMatesCommandTests(TestCase):
 
     def _mate_position(self, fen=FORCED_MATE_FEN,
