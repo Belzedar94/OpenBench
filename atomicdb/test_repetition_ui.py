@@ -13,7 +13,7 @@ Ng8 devuelve la partida a la posicion inicial exacta (los contadores no
 existen en la identidad canonica, § logic.canonical_fen).
 """
 
-from django.test import Client
+from django.test import Client, override_settings
 
 from . import logic
 from .models import Edge, Position
@@ -81,6 +81,11 @@ class BlockedMoveTests(KnightLoopFixture):
                    if m['uci'] == 'f6g8')
         self.assertTrue(row['blocked'])
 
+    # The view links an unexpanded node to the children that exist
+    # (§ views._relink_on_view), and the start position does exist, so the
+    # deleted edge would come back as a table row.  Off the valve, the move
+    # stays off the tree, which is what this test is about.
+    @override_settings(ATOMICDB_LINK_CHILDREN_AT_CREATION=False)
     def test_offtree_reply_into_the_line_is_disabled_too(self):
         """Sin arista materializada la jugada seria un goto que CREA el
         bucle: bloqueada igual que sus hermanas con arista."""
@@ -89,6 +94,17 @@ class BlockedMoveTests(KnightLoopFixture):
         self.assertEqual(response.status_code, 200)
         row = next(u for u in response.context['offtree']
                    if u['uci'] == 'f6g8')
+        self.assertTrue(row['blocked'])
+        self.assertIsNone(row['url'])
+        self.assertNotIn('f6g8', response.context['legal_ucis'])
+
+    def test_a_reply_relinked_on_view_into_the_line_is_disabled_too(self):
+        """The same move, linked back by the view, is a blocked table row."""
+        Edge.objects.filter(parent=self.p3, move_uci='f6g8').delete()
+        response = self._explore(self.p3.key, play=','.join(self.route))
+        self.assertEqual(response.status_code, 200)
+        row = next(m for m in response.context['moves']
+                   if m['uci'] == 'f6g8')
         self.assertTrue(row['blocked'])
         self.assertIsNone(row['url'])
         self.assertNotIn('f6g8', response.context['legal_ucis'])
