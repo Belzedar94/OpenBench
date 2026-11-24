@@ -72,6 +72,7 @@ POST_BASELINE_ATOMICDB_TABLES = (
     'atomicdb_backlogitem',             # 0067_backlog_item
     'atomicdb_backlogsubscription',     # 0068_backlog_subscription
     'atomicdb_openingroute',            # 0072_opening_routes
+    'atomicdb_realparent',              # 0076_real_parent
 )
 # Ordenado: el verificador compara esta tupla contra lo que encuentra en el
 # fichero, y ``current_atomicdb_tables()`` sale ordenado del registro.
