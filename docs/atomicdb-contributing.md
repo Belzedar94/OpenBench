@@ -159,9 +159,22 @@ points it at a local engine build. Without `--engine` it downloads the
 reference engine and moves to a newly published one while it runs;
 `--no-engine-update` turns that off. Each search prints one line when it
 starts and one when it ends; `-v`/`--verbose` adds the server's raw replies.
-Ctrl+C, SIGTERM, a closed terminal and, on Windows, Ctrl+Break or closing the
-console window all stop it the same way: the engines are ended, the tasks it
-holds are handed back, and it exits.
+The first Ctrl+C drains the worker: no job takes another task, each running
+search finishes and is submitted (the job then prints `[N] has finished
+working`), and the worker exits once every job has finished. A task leased as
+the drain began is handed back unsearched. When `--drain-timeout` runs out
+(`10m` by default; a plain number is seconds) the worker prints `Timeout
+expired, returning remaining tasks back to server` and stops as below. A
+second Ctrl+C, SIGTERM, a closed terminal and, on Windows, Ctrl+Break or
+closing the console window all stop it at once: the engines are ended, the
+tasks it holds are handed back in one `api/release` call, and it exits.
+`--drain-timeout 0` makes the first Ctrl+C stop at once too. SIGTERM is not
+drained because service managers follow it with a SIGKILL long before a
+search ends; to drain a worker under systemd, set `KillSignal=SIGINT` and a
+`TimeoutStopSec` longer than the drain timeout. The engines run in a process
+group of their own so that the console's Ctrl+C does not end their searches;
+every stop still ends them, and an engine whose worker died quits when its
+standard input closes. `--once` is never drained.
 
 By default every thread of `-T` runs its own engine of one thread (at most 32
 engines, the server's cap per machine), each with a hash sized to the free

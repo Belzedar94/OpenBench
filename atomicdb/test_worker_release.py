@@ -941,6 +941,7 @@ class WorkerProcessStopTests(SimpleTestCase):
         return int(Path(self.marker + '.pid').read_text())
 
     def test_sigterm_hands_the_task_back_and_exits(self):
+        # Draining is on by default; SIGTERM still stops at once.
         server = _StandInServer()
         self.addCleanup(server.close)
         process = self.start(server)
@@ -963,9 +964,11 @@ class WorkerProcessStopTests(SimpleTestCase):
         self.assertTrue(_wait_until(lambda: _gone(self.engine_pid()), 10))
 
     def test_ctrl_c_hands_the_task_back_and_exits(self):
+        # With draining off the first Ctrl+C stops at once, as it did before
+        # build 2026112401 (the drain itself: test_worker_drain).
         server = _StandInServer()
         self.addCleanup(server.close)
-        process = self.start(server)
+        process = self.start(server, '--drain-timeout', '0')
         self.assertTrue(self.searching(), 'the worker never started a search')
 
         code, took, out = self.stop(process, signal.SIGINT)
