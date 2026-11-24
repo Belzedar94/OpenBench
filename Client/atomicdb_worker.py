@@ -27,8 +27,12 @@ El motor descargado se renueva sin parar el worker: cada 15 min se relee el
 manifest y, si hay un binario nuevo, se descarga junto al actual, se comprueba
 y cada analisis lo toma entre tareas (--no-engine-update lo desactiva).
 
-Stopping it (Ctrl+C, SIGTERM, Ctrl+Break or closing its console window) ends
-the engines and hands the tasks it holds back to the server at once.
+The first Ctrl+C lets the running searches finish: no job takes another task,
+each one sends its result and says it has finished, and the worker exits once
+all of them have, or hands what is left back to the server when
+--drain-timeout (10 minutes by default; 0 turns this off) runs out.  A second
+Ctrl+C, SIGTERM, Ctrl+Break or closing the console window ends the engines and
+hands the tasks it holds back to the server at once.
 
 Each search prints one line when it starts and one when it ends, plus a
 short status every few minutes; -v/--verbose adds the server's raw replies.
@@ -70,7 +74,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026112101
+ATOMICDB_WORKER_BUILD = 2026112401
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -147,6 +151,12 @@ RELEASE_TIMEOUT_SECONDS = 3
 ENGINE_FAILURE_BACKOFF_SECONDS = 10
 ENGINE_FAILURE_BACKOFF_MAX_SECONDS = 300
 CONSOLE_CLOSE_WAIT_SECONDS = 4.5
+# Draining (the first Ctrl+C, § Drain): how long the running searches get
+# before the worker stops as a second Ctrl+C would, how often the console is
+# told how long is left, and how often a waiting job looks at the drain.
+DRAIN_TIMEOUT_DEFAULT_SECONDS = 10 * 60
+DRAIN_STATUS_SECONDS = 60
+DRAIN_POLL_SECONDS = 0.25
 # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT: Windows ends
 # the process as soon as its console handlers return.
 _CONSOLE_CLOSE_EVENTS = (2, 5, 6)
@@ -840,6 +850,28 @@ class _EngineProcesses:
 _ENGINE_PROCESSES = _EngineProcesses()
 
 
+def _engine_process_options():
+    """``subprocess.Popen`` options that keep a console's Ctrl+C away from
+    an engine.
+
+    A Ctrl+C typed in a console or terminal goes to every process attached
+    to it, the engines included, and an engine ended by it cannot finish the
+    search that the first Ctrl+C (§ Drain) wants finished.  So each engine
+    starts in a process group of its own: on Windows a new process group,
+    which ignores Ctrl+C (Ctrl+Break and a closing window still reach it, and
+    both stop the worker at once anyway); elsewhere a new session, which
+    neither the terminal's SIGINT nor its SIGHUP reaches.
+
+    The engines still end with the worker: every stop ends them itself
+    (``_stop_engines``), and a worker that dies without stopping closes their
+    standard input, on which a UCI engine quits.
+    """
+    if os.name == 'nt':
+        return {'creationflags': getattr(subprocess,
+                                         'CREATE_NEW_PROCESS_GROUP', 0x200)}
+    return {'start_new_session': True}
+
+
 def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
     """End every engine process this worker runs.  Returns how many were
     killed; never raises.
@@ -1032,9 +1064,130 @@ class GracefulStop:
             self.done.set()
 
 
+def parse_duration(text):
+    """'600' or '600s' -> 600.0, '10m' -> 600.0, '1.5h' -> 5400.0, '0' -> 0.
+
+    The argparse ``type`` of --drain-timeout: a plain number is seconds.
+    """
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([smh]?)',
+                         str(text).strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f'{text!r} is not a duration (examples: 0, 90s, 10m, 1h)')
+    return float(match.group(1)) * {'': 1, 's': 1, 'm': 60,
+                                    'h': 3600}[match.group(2)]
+
+
+class Drain:
+    """The first Ctrl+C: the running searches finish, nothing new starts.
+
+    Requested by Eclipsia (24-Nov-2026).  Once ``begin`` has been called:
+
+    1. No job asks for another task.  A job that is searching finishes its
+       search, sends the result as usual and then says so
+       (``finished``: "[N] has finished working") and ends.  A task leased
+       just as the drain began is handed back unsearched.
+    2. The worker exits once every job has ended (``_supervise``), after
+       handing back anything still held.
+    3. ``timeout`` seconds after ``begin`` the worker stops as a second
+       Ctrl+C would: engines ended, every lease still held handed back in one
+       ``api/release`` call (``GracefulStop``).
+
+    A second Ctrl+C, SIGTERM, SIGHUP, Ctrl+Break or a closing console window
+    always stops at once.  SIGTERM is not drained on purpose: it is what a
+    service manager (systemd, Docker) sends before a SIGKILL that comes after
+    a much shorter wait than a search, and a SIGKILL hands nothing back.
+    ``timeout`` 0 turns draining off: the first Ctrl+C stops at once, as
+    before build 2026112401.
+    """
+
+    def __init__(self, timeout, clock=time.monotonic):
+        self.timeout = max(0.0, float(timeout or 0))
+        self._clock = clock
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._finished = set()
+        self.deadline = None
+        self._next_status = None
+
+    @property
+    def enabled(self):
+        return self.timeout > 0
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def begin(self, working=None):
+        """Start draining; False when it is off or already under way (the
+        caller then stops at once).  ``working``: how many jobs are busy."""
+        with self._lock:
+            if not self.enabled or self._event.is_set():
+                return False
+            now = self._clock()
+            self.deadline = now + self.timeout
+            self._next_status = now + DRAIN_STATUS_SECONDS
+            self._event.set()
+        busy = (f'{_count(working, "running job")}'
+                if working is not None else 'the running jobs')
+        _say(f'Termination signal received: no new tasks; waiting for '
+             f'{busy} to finish, hard stop in {human_duration(self.timeout)} '
+             '(Ctrl+C again to stop now)')
+        return True
+
+    def remaining(self):
+        if self.deadline is None:
+            return self.timeout
+        return max(0.0, self.deadline - self._clock())
+
+    def expired(self):
+        return self.deadline is not None and self._clock() >= self.deadline
+
+    def report(self, working):
+        """Every ``DRAIN_STATUS_SECONDS`` while draining: how many jobs are
+        still at work and how long until the hard stop."""
+        with self._lock:
+            if self._next_status is None or self._clock() < self._next_status:
+                return False
+            self._next_status = self._clock() + DRAIN_STATUS_SECONDS
+        _say(f'Draining: {_count(working, "job")} still working, hard stop '
+             f'in {human_duration(self.remaining())} (Ctrl+C again to stop '
+             'now)')
+        return True
+
+    def finished(self, name):
+        """A job (``name``: its slot, or 'solve') leaves for the drain."""
+        with self._lock:
+            if name in self._finished:
+                return
+            self._finished.add(name)
+        _say(f'[{name}] has finished working')
+
+
+def _idle_wait(stop, drain, seconds):
+    """``stop.wait(seconds)`` for a job that is not searching, which also
+    ends at once when a drain begins.  True when the job should leave its
+    pause (stopped or draining), as ``stop.wait`` is."""
+    if drain is None:
+        return stop.wait(seconds)
+    deadline = time.monotonic() + seconds
+    while True:
+        if drain.is_set() or stop.is_set():
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        if stop.wait(min(DRAIN_POLL_SECONDS, left)):
+            return True
+
+
+class _HardStop(KeyboardInterrupt):
+    """A signal that stops the worker at once, even with draining on."""
+
+
 def _interrupt(signum, frame):
-    """SIGTERM, SIGHUP and Ctrl+Break stop the worker as Ctrl+C does."""
-    raise KeyboardInterrupt
+    """SIGTERM, SIGHUP and Ctrl+Break stop the worker as a second Ctrl+C
+    does: at once, never through a drain (§ Drain)."""
+    raise _HardStop
 
 
 def _on_console_event(graceful, event):
@@ -1077,8 +1230,10 @@ class _ConsoleCloseHandler:
 def _stop_signals(graceful):
     """Route every way of stopping the worker to ``graceful``.
 
-    Ctrl+C raises KeyboardInterrupt in the main thread already; SIGTERM,
-    SIGHUP (the terminal went away) and Ctrl+Break are made to raise it too.
+    Ctrl+C raises KeyboardInterrupt in the main thread already (the first
+    one drains, § Drain); SIGTERM, SIGHUP (the terminal went away) and
+    Ctrl+Break are made to raise ``_HardStop``, a KeyboardInterrupt that
+    never drains.
     A signal that was not left at its default -- ignored under ``nohup``,
     say -- is left as it was.  On Windows a console handler covers the
     window being closed.  Everything is put back on the way out.
@@ -1112,7 +1267,7 @@ def _stop_signals(graceful):
                 pass
 
 
-def _supervise(threads, graceful, poll=0.5):
+def _supervise(threads, graceful, poll=0.5, drain=None, helpers=()):
     """Start the job threads and wait for them to end, or for a stop.
 
     True when the worker was stopped: its leases are handed back by then
@@ -1120,20 +1275,60 @@ def _supervise(threads, graceful, poll=0.5):
     which on Windows holds Ctrl+C back until the thread ends -- and a job
     thread does not end by itself.  When every job ends on its own, what
     they still hold (a search an engine abandoned) is handed back too.
+
+    With ``drain`` (§ Drain) the first Ctrl+C begins it instead of stopping:
+    the wait goes on until every job, and every one of ``helpers`` (the
+    solver), has ended -- then the worker stops, with nothing left to hand
+    back but what a failed submit kept -- or until the drain's timeout, when
+    it stops as at once.  A second Ctrl+C, or any ``_HardStop`` signal, stops
+    at once.  ``helpers`` start with the jobs and are waited for only while
+    draining: outside a drain the worker ends when its jobs do, as before.
     """
-    try:
-        for thread in threads:
-            thread.start()
-        while (not graceful.requested.is_set()
-               and any(thread.is_alive() for thread in threads)):
-            graceful.requested.wait(poll)
-    except KeyboardInterrupt:
-        pass
-    else:
-        if not graceful.requested.is_set():
-            if graceful.held.snapshot():
-                graceful.run()
-            return False
+    outcome = None              # 'ended', 'drained' or 'stop'
+    started = False
+    while outcome is None:
+        try:
+            if not started:
+                for thread in (*helpers, *threads):
+                    thread.start()
+                started = True
+            while True:
+                if graceful.requested.is_set():
+                    outcome = 'stop'
+                    break
+                draining = drain is not None and drain.is_set()
+                watched = (*threads, *helpers) if draining else threads
+                working = sum(thread.is_alive() for thread in watched)
+                if not working:
+                    outcome = 'drained' if draining else 'ended'
+                    break
+                if draining:
+                    if drain.expired():
+                        _say('Timeout expired, returning remaining tasks '
+                             'back to server')
+                        outcome = 'stop'
+                        break
+                    drain.report(working)
+                graceful.requested.wait(poll)
+        except KeyboardInterrupt as interrupt:
+            try:
+                if (not isinstance(interrupt, _HardStop) and started
+                        and drain is not None
+                        and drain.begin(sum(
+                            thread.is_alive()
+                            for thread in (*threads, *helpers)))):
+                    continue
+                if drain is not None and drain.is_set():
+                    _say('Second interrupt: stopping now')
+            except KeyboardInterrupt:
+                pass        # yet another one while answering this one
+            outcome = 'stop'
+    if outcome == 'ended':
+        if graceful.held.snapshot():
+            graceful.run()
+        return False
+    if outcome == 'drained':
+        _say('All jobs have finished working; exiting')
     try:
         graceful.run()
     except KeyboardInterrupt:
@@ -1269,7 +1464,8 @@ def check_engine_identity(path, timeout=60):
     try:
         process = subprocess.Popen(
             [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True)
+            stderr=subprocess.DEVNULL, text=True,
+            **_engine_process_options())
     except OSError as exc:
         return f'it cannot be started: {exc}'
     try:
@@ -1303,7 +1499,8 @@ class Engine:
         self._stop_requested = False
         self._searching = False
         self.p = subprocess.Popen([path], stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, text=True, bufsize=1)
+                                  stdout=subprocess.PIPE, text=True, bufsize=1,
+                                  **_engine_process_options())
         _ENGINE_PROCESSES.add(self.p)
         # The most nodes the last search reported, whatever its lines said.
         self.last_nodes = 0
@@ -1995,7 +2192,8 @@ def _probe_engine(path, timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
     try:
         process = subprocess.Popen(
             [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1)
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            **_engine_process_options())
     except OSError as exc:
         raise EngineUpdateError(f'cannot start {path}: {exc}') from exc
     lines = queue.Queue()
@@ -2374,7 +2572,7 @@ class Solver:
         # process (Â§ _stop_engines): a proof runs for minutes.
         running = subprocess.Popen(
             [self.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE, text=True, **_engine_process_options())
         _ENGINE_PROCESSES.add(running)
         try:
             stdout, stderr = running.communicate(command + '\nquit\n')
@@ -2578,7 +2776,8 @@ def _solve_once(server, auth, solver, lease_session, current_task=None):
     return True
 
 
-def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
+def _solve_loop(server, auth, solver, stop_event, engines=None, held=None,
+                drain=None):
     """Proof thread. The solver is single-threaded, so it runs BESIDE the
     analysis engine instead of in front of it: one core proves while the
     engine's threads keep the analysis queue (and visitor requests) moving.
@@ -2591,7 +2790,8 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
     proof is always signed by the binary that ran it.
 
     With ``held`` (a HeldLeases) the proof it holds is handed back when the
-    worker stops."""
+    worker stops.  With ``drain`` (§ Drain) the thread ends between proofs
+    once a drain has begun: a proof under way finishes first."""
     current_task = SolveLeaseState(held, auth.get('machine', ''))
     threading.Thread(
         target=_solve_heartbeat_loop,
@@ -2607,6 +2807,9 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
     generation = 0
     proven = None      # (path, sha) of the last binary that really solved
     while not stop_event.is_set():
+        if drain is not None and drain.is_set():
+            drain.finished('solve')
+            return
         if engines is not None:
             offered, path, provenance = engines.current()
             if offered != generation:
@@ -2660,7 +2863,7 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
                       f'engine failures: {solver.path} cannot solve. No solve '
                       'task was consumed; analysis keeps running. Proofs '
                       'resume when a new engine is published.', flush=True)
-                while not stop_event.wait(60):
+                while not _idle_wait(stop_event, drain, 60):
                     if engines.current()[0] != generation:
                         break
                 continue
@@ -2668,7 +2871,7 @@ def _solve_loop(server, auth, solver, stop_event, engines=None, held=None):
             print(f'solve loop error: {exc}', flush=True)
             lease_session = secrets.token_urlsafe(24)
         if not did:
-            stop_event.wait(60)
+            _idle_wait(stop_event, drain, 60)
 
 
 def probe_tb(tb, fen):
@@ -3072,7 +3275,7 @@ def _hand_back(server, auth, machine, task, held=None, slot=0,
 
 
 def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
-                   owns_updates, engines=None, held=None, jobs=1):
+                   owns_updates, engines=None, held=None, jobs=1, drain=None):
     """One independent leaseholder: its own engine, lease and heartbeat.
 
     A slot is a worker in every sense the server cares about.  It has its own
@@ -3092,6 +3295,11 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     hands back, from the lease until the server answers its submit.  Once
     ``stop`` is set nothing more is submitted: an engine told to quit may
     still print ``bestmove``, and what it searched by then is cut short.
+
+    With ``drain`` (§ Drain) the slot ends once a drain has begun: a search
+    under way finishes and is submitted, a task not yet started is handed
+    back, and the slot says it has finished working.  No update, engine
+    switch or new lease happens after that.
     """
     machine = auth.get('machine', '')
     username = auth.get('username', '')
@@ -3138,6 +3346,9 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
     lease_failures = 0
 
     while not stop.is_set():
+        if drain is not None and drain.is_set():
+            drain.finished(slot)
+            break
         # Only one slot drives the self-update, and it does so between batches
         # exactly as before.  A successful update re-execs the process, which
         # ends every slot at once -- their leases then expire and are recycled,
@@ -3173,13 +3384,12 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             delay = min(ENGINE_FAILURE_BACKOFF_SECONDS
                         * (2 ** min(engine_failures - 1, 5)),
                         ENGINE_FAILURE_BACKOFF_MAX_SECONDS)
-            if stop.wait(delay):
-                break
+            if _idle_wait(stop, drain, delay):
+                continue            # stopped or draining: the loop says which
         if held is not None and held.handing_over.is_set():
             # An update is restarting the worker: a lease taken now would be
             # left behind (Â§ _hand_over_for_restart).
-            if stop.wait(1):
-                break
+            _idle_wait(stop, drain, 1)
             continue
         try:
             tasks = _request_tasks(a.S, auth, lease_session)
@@ -3192,8 +3402,7 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                         LEASE_RETRY_MAX_SECONDS)
             print(f'[{slot}] lease response error: {e}; retrying in {delay}s',
                   flush=True)
-            if stop.wait(delay):
-                break
+            _idle_wait(stop, drain, delay)
             continue
         lease_failures = 0
         lease_session = secrets.token_urlsafe(24)
@@ -3201,16 +3410,21 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             print(f'[{slot}] no tasks available; waiting 60s', flush=True)
             if a.once:
                 break
-            if stop.wait(60):
-                break
+            _idle_wait(stop, drain, 60)
             continue
         if held is not None:
             # A machine gets a new assignment only once its previous one is
             # over, so this replaces whatever the slot held before.
             held.hold('analysis', machine, tasks)
-        for t in tasks:
+        for index, t in enumerate(tasks):
             if stop.is_set():
                 break          # still held: the stop hands it back
+            if drain is not None and drain.is_set():
+                # Leased as the drain began (or behind a search that
+                # finished during it): not started, so it goes back now.
+                for unstarted in tasks[index:]:
+                    _hand_back(a.S, auth, machine, unstarted, held, slot)
+                break
             # A stop meant for the previous task must not cut this one short.
             reset_stop = getattr(eng, 'reset_stop', None)
             if reset_stop is not None:
@@ -3278,6 +3492,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
                 # instead of when its lease expires.  A stop never gets here:
                 # it hands back everything held itself.
                 _hand_back(a.S, auth, machine, t, held, slot)
+                if drain is not None and drain.is_set():
+                    continue    # no new engine for a job about to end
                 # A newly offered engine that keeps failing real searches is
                 # taken back for every job (no-op for the engine the worker
                 # started with, or one that already is a return).
@@ -3380,7 +3596,10 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             current_task.clear()
         if a.once:
             break
-    eng.close()
+    try:
+        eng.close()
+    except Exception:
+        pass                    # an engine that already died is gone anyway
 
 
 # The server hands one physical machine at most this many live analyses at once
@@ -3867,6 +4086,16 @@ def main():
                     help='keep --hash as given even when the engines would '
                          'not fit in the free memory (by default the hash, '
                          'and if need be the number of jobs, is reduced)')
+    ap.add_argument('--drain-timeout', type=parse_duration,
+                    default=DRAIN_TIMEOUT_DEFAULT_SECONDS, metavar='TIME',
+                    help='the first Ctrl+C lets the running searches finish '
+                         'and takes no new task; after TIME (e.g. 90s, 10m, '
+                         '1h; a plain number is seconds) whatever is still '
+                         'running is stopped and handed back to the server.  '
+                         'A second Ctrl+C stops at once, and so do SIGTERM, '
+                         'Ctrl+Break and closing the window.  0: the first '
+                         'Ctrl+C stops at once.  Default: '
+                         f'{human_duration(DRAIN_TIMEOUT_DEFAULT_SECONDS)}')
     ap.add_argument('--skip-engine-check', action='store_true',
                     help='start even if the engine does not identify itself '
                          'as an Atomic-Stockfish build')
@@ -4006,6 +4235,9 @@ def main():
     held = HeldLeases()
     graceful = GracefulStop(a.S, dict(auth_base, machine=machines[0]), held,
                             stop)
+    # The first Ctrl+C (§ Drain).  A single pass (--once) is not drained: it
+    # runs in the main thread, where Ctrl+C has always ended it.
+    drain = None if a.once else Drain(a.drain_timeout)
     # Only the downloaded reference engine follows the manifest: a binary
     # given with --engine is the contributor's choice and stays.
     engines = None
@@ -4035,15 +4267,21 @@ def main():
         print(f'engine updates: a newly published engine is installed while '
               f'running (checked every {engines.interval / 60:g} min; '
               '--no-engine-update turns this off)', flush=True)
+    if drain is not None and drain.enabled:
+        print(f'stopping: Ctrl+C once lets the running searches finish (at '
+              f'most {human_duration(drain.timeout)}, --drain-timeout), '
+              'Ctrl+C twice stops at once', flush=True)
 
     with _stop_signals(graceful):
+        helpers = []
         if solver is not None and not a.once:
-            threading.Thread(
+            # Started by _supervise with the jobs, and waited for by a drain.
+            helpers.append(threading.Thread(
                 target=_solve_loop,
                 args=(a.S, dict(auth_base, machine=machines[0]), solver, stop,
                       engines),
-                kwargs={'held': held},
-                name='atomicdb-solver', daemon=True).start()
+                kwargs={'held': held, 'drain': drain},
+                name='atomicdb-solver', daemon=True))
 
         if a.once:
             # The single pass runs in this thread, so a stop arrives in it as
@@ -4072,7 +4310,9 @@ def main():
                                    owns_updates=False, held=held, jobs=1)
             except KeyboardInterrupt:
                 graceful.run()
-                raise
+                # A plain KeyboardInterrupt, not a _HardStop: Python exits
+                # with the Ctrl+C status only for that exact type.
+                raise KeyboardInterrupt from None
             # A window closing during the pass stops it from another thread;
             # an engine failure leaves its lease held.
             if graceful.requested.is_set() or held.snapshot():
@@ -4088,11 +4328,11 @@ def main():
                            threads=slot_threads[slot]),
                       provenance, slot_threads[slot], stop, slot == 0,
                       engines),
-                kwargs={'held': held, 'jobs': jobs},
+                kwargs={'held': held, 'jobs': jobs, 'drain': drain},
                 name=f'atomicdb-analysis-{slot}')
             for slot in range(jobs)]
-        graceful.threads = threads
-        if _supervise(threads, graceful):
+        graceful.threads = threads + helpers
+        if _supervise(threads, graceful, drain=drain, helpers=helpers):
             _exit_now(0)
 
 
