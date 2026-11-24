@@ -43,7 +43,8 @@
 
 {% if root_chart %}{% include "atomicdb/_root_chart.html" %}{% endif %}
 
-<h2>Main line by day</h2>
+<details id="main-line-by-day">
+<summary style="cursor:pointer"><h2 style="display:inline-block">Main line by day</h2></summary>
 <p class="dim campaign-lede">The last recording of each day (UTC), for the
   last {{ history_days }} days.</p>
 {% if history %}
@@ -63,6 +64,7 @@
 {% else %}
 <p class="dim">Nothing recorded yet.</p>
 {% endif %}
+</details>
 
 <h2 id="openings">Named openings</h2>
 <p class="dim campaign-lede">Every position the opening catalogue names, and
