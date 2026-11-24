@@ -548,7 +548,7 @@ def link_children_at_creation_enabled():
     return bool(getattr(settings, 'ATOMICDB_LINK_CHILDREN_AT_CREATION', True))
 
 
-def link_existing_children(pos):
+def link_existing_children(pos, moves=None):
     """Write the edges from ``pos`` to the children it already has.
 
     Returns the keys of the linked children that are closed (status other
@@ -557,14 +557,20 @@ def link_existing_children(pos):
     the edge from its own parent, if any, is written.  An empty list means
     nothing to climb.  A position that is closed or already expanded is left
     alone, as ``expand`` leaves it.
+
+    ``moves``, when given, is the list of ``(uci, child key)`` to look at
+    instead of every legal move: the explorer passes only the legal moves
+    that have no edge yet, with the keys it already has at hand, so a view
+    pays no move generation of its own (§ ``views._relink_on_view``).
     """
     if (not link_children_at_creation_enabled() or pos.expanded
             or pos.status != 'UNKNOWN'):
         return []
     # Two moves can lead to the same position (two pieces capturing on the
     # same square both explode), and ``expand`` writes one edge per move.
-    moves = [(uci, logic.key_of(logic.apply_move(pos.fen, uci)))
-             for uci in logic.legal_moves(pos.fen)]
+    if moves is None:
+        moves = [(uci, logic.key_of(logic.apply_move(pos.fen, uci)))
+                 for uci in logic.legal_moves(pos.fen)]
     if not moves:
         return []
     found = {key: (status, priority) for key, status, priority in

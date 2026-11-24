@@ -14,7 +14,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
 from django.core.cache import cache
-from django.db import IntegrityError, OperationalError
+from django.db import DatabaseError, IntegrityError, OperationalError
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -263,6 +263,11 @@ ROUTE_LABEL_VERSION = 2
 # dos minutos de vida.  ``0`` lo desactiva y cada render vuelve a preguntarle
 # al movegen.
 CHILD_KEY_CACHE_SECONDS = 3600
+# How long a view of a node remembers that it already linked the node to the
+# children that exist (§ ``_relink_on_view``).  Within the window a second
+# view does not look again; past it, a child born since then gets its edge on
+# the next view.  ``0`` looks on every view.
+RELINK_ON_VIEW_SECONDS = 600
 PLAY_ROUTE_MAX_PLIES = 64
 PLAY_ROUTE_MAX_CHARS = PLAY_ROUTE_MAX_PLIES * 6
 PLAY_UCI_RE = re.compile(r'^[a-h][1-8][a-h][1-8][qrbn]?$')
@@ -5546,6 +5551,60 @@ def _child_keys(pos, ucis):
     return {uci: keys[uci] for uci in wanted}
 
 
+def _relink_on_view(pos, legal_ucis):
+    """Link a node that is being shown to the children that already exist.
+
+    Since #287 a node born outside ``expand`` is linked at birth to the
+    children already in the tree (§ ``ingest.link_existing_children``).  A
+    node born before that, or by a path that does not link, still shows only
+    the moves somebody clicked until its first search lands, even when the
+    other children exist through a transposition.  Opening it in the explorer
+    is the moment someone cares, so the link happens here, on demand, and not
+    as a sweep of the whole tree (MoKy, 24-Nov).
+
+    The same rules as at birth: nothing is created that was not there, the
+    node stays ``expanded=False``, a closed or expanded node is left alone,
+    and a link to a closed child runs the same climb as every other discovery
+    of one (§ ``ingest.settle_linked_children``).  It costs, at most, one
+    read of the node's edges, one indexed lookup of the missing children and
+    one insert; the child keys come from the shared cache the move table
+    reads anyway (§ ``_child_keys``), so no move generation is paid twice.
+    A short cache entry per node (§ ``RELINK_ON_VIEW_SECONDS``) makes repeated
+    views free, and a node with an edge for every legal move costs one read.
+
+    Returns ``pos``, read again when the climb ran.
+    """
+    if (pos.expanded or pos.status != 'UNKNOWN' or not legal_ucis
+            or not ingest.link_children_at_creation_enabled()):
+        return pos
+    cache_key = f'atomicdb.relinked.v1.{pos.key}'
+    if RELINK_ON_VIEW_SECONDS > 0 and cache.get(cache_key):
+        return pos
+    linked = set(Edge.objects.filter(parent=pos)
+                 .values_list('move_uci', flat=True))
+    missing = [uci for uci in legal_ucis if uci not in linked]
+    closed = []
+    if missing:
+        keys = _child_keys(pos, missing)
+        try:
+            with atomic():
+                closed = ingest.link_existing_children(
+                    pos, [(uci, keys[uci]) for uci in missing])
+        except DatabaseError:
+            # A view never fails because of this: the page is drawn with the
+            # edges there are, and the next view tries again.
+            logger.exception('relink on view failed for %s', pos.key)
+            return pos
+    if RELINK_ON_VIEW_SECONDS > 0:
+        cache.set(cache_key, True, RELINK_ON_VIEW_SECONDS)
+    if closed:
+        parent_keys = list(dict.fromkeys(
+            Edge.objects.filter(child=pos)
+            .values_list('parent_id', flat=True)))
+        pos = ingest.settle_linked_children(pos, parent_keys)
+    return pos
+
+
 def _line_value(pos, line_no, stm_white):
     """Lo que dice de su jugada la linea VIGENTE ``line_no`` de este nodo, en
     centipeones desde el bando que mueve; None si no hay tal linea o si trae
@@ -8920,6 +8979,14 @@ def explore(request, key):
         # Leida = VISITADA: lo que apaga un aviso es llegar a su posicion —
         # desde el propio aviso o por su pie — no abrir el panel.
         notifications.mark_position_seen(viewer, pos.key)
+    # tambien en posiciones resueltas: se puede explorar la winning line
+    legal_ucis = ([] if pos.closure == 'TERMINAL'
+                  else logic.legal_moves(pos.fen))
+    # An unexpanded node is linked here to the children that already exist,
+    # before its table is read, so the page shows them without a request
+    # (§ _relink_on_view).  Only the node being shown: a ``?play=`` route
+    # materialises nothing, and this node already exists.
+    pos = _relink_on_view(pos, legal_ucis)
     # The depth column of the table, one aggregate for every row
     # (§ _with_search_depth), and the marks of work in flight on each row,
     # two more statements for the whole table (§ _with_pending_marks).
@@ -8964,9 +9031,6 @@ def explore(request, key):
         top, line, active_ucis = _canonical_route(pos)
     else:
         top, line, active_ucis = explicit_route
-    # tambien en posiciones resueltas: se puede explorar la winning line
-    legal_ucis = ([] if pos.closure == 'TERMINAL'
-                  else logic.legal_moves(pos.fen))
     known = {m['uci'] for m in moves}
     current_opening_match, route_ply, active_ucis = _navigation_opening(
         active_ucis,
