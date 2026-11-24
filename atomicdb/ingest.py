@@ -23,7 +23,7 @@ from django.db import (DatabaseError, IntegrityError, OperationalError, router,
 from django.db.models import Case, Max, Q, Value, When
 from django.utils import timezone
 
-from . import logic, proof, solve_estimate, tb
+from . import logic, proof, score_bands, solve_estimate, tb
 from .database import atomic, connection, current_alias
 from .models import (AnalysisTask, Campaign, ClosureProvenance, DBEvent,
                      Edge, PendingClaim, Position, TrustedAccount)
@@ -89,7 +89,9 @@ FRONTIER_DESCENT_MAX_PLIES = 32
 # positions.
 SUBTREE_SCAN_CAP = 4_096
 SUBTREE_CHUNK = 64
-MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
+# |eval| >=: el motor ya vio mate (o tablas, o un eval enorme); cerrar es
+# cuestion de PV.  Es el primer valor que no es un cp normal (§ score_bands).
+MATE_BAND = score_bands.BIG_LOW          # 9000
 # ---------------- mate CORTO: verificacion, no excavacion ----------------
 #
 # LA UNIDAD, PRIMERO, porque aqui se mezclan dos.  ``Position.mate_in`` cuenta
@@ -115,20 +117,21 @@ MATE_BAND = 9_000   # |eval| >=: el motor ya vio mate; cerrar es cuestion de PV
 # (``_revoke_contradicted_mate`` -> ``_queue_disputed_reanalysis``, y la deuda
 # F0 de la flota), maquinaria que este clamp no toca.
 #
-# NI LOS MATES LARGOS NI LA BANDA SIN DISTANCIA SE MUEVEN.  Solo se clampa una
-# distancia CONOCIDA y corta.  Un cp de tablebase entra en la banda recortado a
-# +-9_500 por el worker y a proposito "sin fingir distancia de mate":
-# decodificarlo daria cientos de jugadas, asi que no pasa el umbral y conserva
-# su 128M.  Un ``backed_eval`` de banda caminado por un visitante tampoco tiene
-# distancia, y ``budget_for`` ni lo mira.
+# NI LOS MATES LARGOS NI LA BANDA SIN DISTANCIA DE MATE SE MUEVEN.  Solo se
+# clampa una distancia de mate CONOCIDA y corta.  Un cp de tablebase entra en
+# la banda como 9_500 - plies hasta las tablas (§ score_bands, 24-nov; antes,
+# 9_500 plano): eso es distancia a las TABLAS, no a un mate, asi que no pasa
+# el umbral y conserva su 128M.  Un ``backed_eval`` de banda caminado por un
+# visitante tampoco tiene distancia, y ``budget_for`` ni lo mira.
 MATE_CLAMP_PLIES = 6            # hasta M3 contando el ply del defensor
 MATE_CLAMP_FLOOR = 2_000_000    # el F0 con el que el solver contesta esto
 MATE_CLAMP_PER_PLY = 4_000_000
 MATE_CLAMP_CAP = 32_000_000
 MATE_CLAMP_MULTIPV = 1
-# Techo del recorte que el worker aplica a los cp de tablebase.  Por ENCIMA de
-# el, un |eval_cp| solo puede venir de la formula de mate.
-TB_CLAMP_CEILING = 9_500
+# Techo de la banda de tablebase (§ score_bands: 9_500 - plies hasta las
+# tablas; antes, el recorte plano del worker).  Por ENCIMA de el, un |eval_cp|
+# solo puede venir de la formula de mate.
+TB_CLAMP_CEILING = score_bands.TB_TOP    # 9500
 # Tope de la PV que se guarda por linea.  ``last_analysis`` es un JSON por
 # POSICION, asi que su tamano medio se multiplica por el numero de posiciones:
 # a 1 KB por fila son 45 GB a 45M posiciones, mas que la tabla de posiciones
@@ -285,7 +288,8 @@ def claimed_mate_plies(pos):
        fuente que cubre el caso frecuente — un hijo SEMBRADO desde la linea
        MultiPV del padre (``_seed_child_eval``) tiene ``eval_cp`` y nada mas.
 
-    Un ``mate`` de la banda pero sin distancia (cp de tablebase recortado)
+    Un valor de la banda pero sin distancia de mate (un cp de tablebase, con
+    su distancia a las tablas, o un eval enorme comprimido; § score_bands)
     cae por el suelo de las tres y devuelve ``None``, que es lo que hace que
     conserve el comportamiento de siempre.
     """
@@ -928,6 +932,8 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
         snapshot = Position.objects.only('fen', 'status').get(key=position_key)
         if snapshot.status != 'UNKNOWN':
             return {'skipped': 'already-closed'}
+        lines = score_bands.normalize_lines(
+            lines, snapshot.fen.split()[1] == 'w')
         mate_proofs = prepare_mate_proofs(snapshot.fen, lines)
 
     arbiter = (nodes_budget if arbiter_budget is None
@@ -939,6 +945,12 @@ def ingest_analysis(position_key, lines, nodes_budget, machine='',
 
         expand(pos)
         stm_white = pos.fen.split()[1] == 'w'
+        # Every cp score on the stored scale, re-derived from the raw UCI line
+        # the worker sends with it: tablebase wins by their distance to the
+        # tables, huge evals compressed below them (§ score_bands).  Idempotent,
+        # so a caller that already did it (ingest_queue.apply_job) loses
+        # nothing, and a line without a raw line keeps its value.
+        lines = score_bands.normalize_lines(lines, stm_white)
 
         # REFRESCAR UNA SIEMBRA ES ARBITRAR, asi que solo lo hace quien arbitra.
         # Un pase mas superficial que la foto vigente no manda en este nodo — ni

@@ -145,9 +145,17 @@ from White's side instead (9500 becomes 95.00).</p>
 <li><strong>9501 to 9999</strong>: an engine announced a mate it has not
   proven: 10000 minus the number of moves to mate after this move, so 9997 is
   mate in 3 more moves. Negative numbers are the same for the other side.</li>
-<li><strong>9500</strong>: an engine reported a winning score that is not a
-  mate count, such as a tablebase win. Those scores are capped at 9500, so 9500
-  never means a long mate.</li>
+<li><strong>9250 to 9500</strong>: an engine found a tablebase win, not a
+  mate count: 9500 minus the number of plies (half-moves) until its line
+  reaches the tablebase position, so 9481 is a tablebase win 19 plies down
+  and a shorter way in ranks higher. 9500 itself is a position already in
+  the tables, or an older result whose distance was not kept. None of these
+  is a mate distance.</li>
+<li><strong>9000 to 9249</strong>: a very large engine eval that is neither a
+  mate nor a tablebase win. Scores from 9000 up to about 15000 are squeezed
+  into this range in order, so they always rank below any tablebase win.</li>
+<li><strong>up to 8999</strong>: a plain engine eval, as the engine printed
+  it.</li>
 <li><strong>not analysed</strong>: no value yet. These rows sort just above
   proven losses, so a run of them can sit between the open moves and the proven
   losses at the bottom.</li>

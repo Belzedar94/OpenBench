@@ -93,6 +93,15 @@ backed-value button, down to the position whose own search or proof it is.</p>
 its move list. Scores are centipawns from the side to move (the chessdb.cn
 convention). A position the tree does not have returns <code>404</code>; add
 it with the request endpoint below, the FEN box or the explorer.</p>
+<p id="score-scale">Every score is on one scale, by absolute value: up to
+8999 a plain engine eval; 9000 to 9249 a larger engine eval, squeezed in
+order; 9250 to 9500 an engine tablebase win, 9500 minus the plies until the
+line reaches the tables (9500 itself: already in the tables, or an older
+result whose distance was not kept); 9501 to 9999 an engine mate, 10000
+minus the moves to mate; 10000 proven. Higher always means better for the
+side it favours. The raw engine line, in <code>analysis</code>, still shows
+the score the engine printed (a tablebase win there is 20000 minus the
+plies).</p>
 <div class="docs-table-wrap"><table>
 <tr><th>Field</th><th>Meaning</th></tr>
 <tr><td><code>status</code>, <code>closure</code></td><td>The verdict and
