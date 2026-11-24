@@ -29,9 +29,11 @@ class _IsolatedViewCache:
     """
 
     def _pre_setup(self):
-        from . import autosolve, community_names, idle_repair, ingest
+        from . import (autosolve, community_names, idle_repair, ingest,
+                       real_parent)
 
         cache.clear()
+        real_parent.reset_state()
         # The hidden opening names are memoised in the process on top of the
         # cache (§ community_names.hidden_keys).
         community_names.reset_hidden_memo()

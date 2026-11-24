@@ -1277,6 +1277,29 @@ class OpeningRoute(models.Model):
         return f'{self.position_key[:12]}: {self.line_san or self.line}'
 
 
+class RealParent(models.Model):
+    """The edge a position is reached by from the root (MoKy, 24-Nov-2026).
+
+    Published by the regret Dijkstra (§ atomicdb.real_parent): for every node
+    a pass settles, the parent and move on its least-regret path from the
+    root.  The breadcrumb walks these pointers instead of searching the DAG.
+
+    A table of its own and not a column on ``Position``: an ALTER of that
+    table is hours, and only the nodes the selector actually reaches (a small
+    ball near the root) ever get a row.  Keys and not FKs, like
+    ``OpeningRoute``: a pointer whose edge stops existing is simply not
+    followed (the reader checks the edge), so it needs no constraint.
+    """
+    position_key = models.CharField(max_length=64, primary_key=True)
+    parent_key   = models.CharField(max_length=64)
+    move_uci     = models.CharField(max_length=8)
+    updated      = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return (f'{self.position_key[:12]} <- {self.move_uci} '
+                f'{self.parent_key[:12]}')
+
+
 class WorkerPing(models.Model):
     """Presencia de workers de AtomicDB, para la pagina /machines/."""
     machine    = models.CharField(max_length=64)

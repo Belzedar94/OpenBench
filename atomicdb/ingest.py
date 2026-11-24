@@ -5329,8 +5329,27 @@ class _BoundedNode:
         self.priority = priority
 
 
+def _offer_real_parent(parents, child, nr, parent, move, edge_id, tie_cp):
+    """Remember ``(parent, move)`` as a way into ``child`` at regret ``nr``.
+
+    Keeps every candidate within ``tie_cp`` of the best one seen so far, not
+    just the best: the tie is broken after the pass (§ atomicdb.real_parent),
+    where the stored pointer and the proof numbers are at hand.  In-degree is
+    small, so the list is too.
+    """
+    cands = parents.get(child)
+    if cands is None:
+        parents[child] = [(nr, parent, move, edge_id)]
+        return
+    cands.append((nr, parent, move, edge_id))
+    floor = min(c[0] for c in cands)
+    if len(cands) > 1:
+        cands[:] = [c for c in cands if c[0] <= floor + tie_cp]
+
+
 def _regret_from_root_bounded(campaign_votes=None, top_n=None,
-                              batch_size=BOUNDED_BATCH):
+                              batch_size=BOUNDED_BATCH, parents=None,
+                              max_settled=None, tie_cp=0.0):
     """El mismo regret que ``_regret_from_root``, sin la foto del grafo.
 
     MISMA SEMANTICA, OTRA MEMORIA.  Los gaps se calculan igual, los nodos
@@ -5366,6 +5385,15 @@ def _regret_from_root_bounded(campaign_votes=None, top_n=None,
     recien nacido o una fila que aun no se ve, se salta, y la pasada siguiente
     la encuentra.  Saltarla cuesta un minuto de prioridad vieja; el
     ``KeyError`` costaba la pasada entera.
+
+    THE REAL PARENT (MoKy, 24-Nov-2026; § atomicdb.real_parent).  With a
+    ``parents`` dict, the relaxation also remembers WHICH edge gave each node
+    its regret: ``parents[key]`` is the list of ``(regret, parent, move,
+    edge_id)`` within ``tie_cp`` of the best way in.  The edge query then
+    reads ``move_uci`` and ``id`` too; nothing else changes and the returned
+    regrets are the same numbers.  ``max_settled`` stops the pass once that
+    many nodes are final, for callers that only want the pointers and must
+    not pay a ball the horizon fails to bound.  Both default off.
     """
     if campaign_votes is None:
         campaign_votes = _active_campaign_votes()
@@ -5419,11 +5447,22 @@ def _regret_from_root_bounded(campaign_votes=None, top_n=None,
         expanding = [key for _, key in batch
                      if key in node and not node[key].settled]
         adjacency = {}
-        if expanding:
+        edge_meta = {}
+        if expanding and parents is None:
             for parent, child in Edge.objects.filter(
                     parent_id__in=expanding).values_list('parent_id',
                                                          'child_id'):
                 adjacency.setdefault(parent, []).append(child)
+        elif expanding:
+            for parent, child, move, edge_id in Edge.objects.filter(
+                    parent_id__in=expanding).values_list(
+                        'parent_id', 'child_id', 'move_uci', 'id'):
+                adjacency.setdefault(parent, []).append(child)
+                # Two moves into the same child (an explosion can do that):
+                # the oldest edge speaks for the pair.
+                held = edge_meta.get((parent, child))
+                if held is None or edge_id < held[1]:
+                    edge_meta[(parent, child)] = (move, edge_id)
         _load_bounded_nodes(node, {child for kids in adjacency.values()
                                    for child in kids})
 
@@ -5447,9 +5486,15 @@ def _regret_from_root_bounded(campaign_votes=None, top_n=None,
                     gap = ((best - target.value) if row.white_stm
                            else (target.value - best))
                 nr = r + gap
+                if parents is not None:
+                    move, edge_id = edge_meta[(key, child)]
+                    _offer_real_parent(parents, child, nr, key, move,
+                                       edge_id, tie_cp)
                 if nr < regret.get(child, INF):
                     regret[child] = nr
                     heapq.heappush(heap, (nr, child))
+        if max_settled is not None and len(done) >= max_settled:
+            break
     return done
 
 
@@ -5921,7 +5966,15 @@ def refresh_priorities_v2(force=False, top_k=None, delta=None):
     # ventana del tamano de la pasada en la que una escritura no la ve nadie.
     delivered_at = timezone.now()
     campaign_votes = _active_campaign_votes()
-    regret = _regret_from_root_bounded(campaign_votes=campaign_votes)
+    # The real-parent pointers ride this pass for free when their writer is on
+    # (§ atomicdb.real_parent): same Dijkstra, the predecessor kept.  Never in
+    # shadow mode, which writes nothing.
+    from . import real_parent
+    parents = ({} if top_k is None and real_parent.writer_enabled()
+               else None)
+    regret = _regret_from_root_bounded(campaign_votes=campaign_votes,
+                                       parents=parents,
+                                       tie_cp=real_parent.TIE_CP)
     collector = _TopK(top_k) if top_k is not None else None
     since = None if collector is not None else _delta_since(delivered_at,
                                                             delta)
@@ -5960,6 +6013,8 @@ def refresh_priorities_v2(force=False, top_k=None, delta=None):
         return collector.as_dict()
     if dirty:
         Position.objects.bulk_update(dirty, ['priority'])
+    if parents is not None:
+        real_parent.publish_from_pass(regret, parents)
     cached['at'] = now
     _record_pass('delta' if since is not None else 'full', scored, started,
                  delivered_at=delivered_at, written=written,
