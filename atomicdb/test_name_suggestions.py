@@ -401,7 +401,7 @@ class ModerationFlowTests(TestCase):
         body = Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
         # The name stands on its own line, with no label in front of it.
-        self.assertIn('Belfast Gambit</h2>', body)
+        self.assertIn('Belfast Gambit</a></h2>', body)
         self.assertNotIn('Community name', body)
 
     def test_an_approved_name_labels_the_parent_edge(self):
@@ -544,9 +544,10 @@ class EditModerationTests(TestCase):
         body = Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
 
-        # In the name's tooltip only, not as text beside it.
-        self.assertIn(f'title="Previously “{CATALOGUED_NAME}”">'
-                      f'{CORRECTED_NAME}</h2>', body)
+        # In the name's tooltip only, not as text beside it (the tooltip of
+        # the link to its roots row, since 24-Nov).
+        self.assertIn(f'· previously “{CATALOGUED_NAME}”">'
+                      f'{CORRECTED_NAME}</a></h2>', body)
         self.assertNotIn('previously', _reading(body))
 
     def test_the_static_catalogue_itself_is_untouched(self):
@@ -613,7 +614,7 @@ class EditModerationTests(TestCase):
         self.assertIsNone(community_names.name_for(self.pos.key))
         body = Client().get(
             f'/atomicdb/explore/{self.pos.key}/').content.decode()
-        self.assertIn(f'{CATALOGUED_NAME}</h2>', body)
+        self.assertIn(f'{CATALOGUED_NAME}</a></h2>', body)
         self.assertNotIn('previously', _reading(body))
         self.assertNotIn('Community correction', _reading(body))
 
@@ -863,9 +864,13 @@ class RouteInheritanceTests(TestCase):
             below, f'<a href="{url}" style="color:inherit" '
                    'title="Open the position this name belongs to">'
                    'Villager Defense, Knight Attack Open</a></h2>', html=False)
-        # On the named position itself the name is plain text.
+        # On the named position itself the name opens its row on the roots
+        # page (torom, 24-Nov), not a position.
         self.assertIsNone(own.context['opening_url'])
-        self.assertContains(own, 'Villager Defense, Knight Attack Open</h2>')
+        self.assertContains(
+            own, f'href="/atomicdb/roots/#op-{nodes[4].key}"', html=False)
+        self.assertContains(
+            own, 'Villager Defense, Knight Attack Open</a></h2>', html=False)
 
     def test_a_transposed_name_keeps_the_order_the_visitor_played(self):
         nodes = _walk(TRANSPOSED_TWO_KNIGHTS)
@@ -1076,7 +1081,7 @@ class NameCreditTests(TestCase):
 
         self.assertEqual(response.context['opening']['named_by'], 'lesha')
         body = response.content.decode()
-        self.assertIn('Belfast Gambit</h2>', body)
+        self.assertIn('Belfast Gambit</a></h2>', body)
         self.assertIn('· named by lesha</span>', body)
         self.assertIn('title="A community name, proposed by lesha"', body)
         # Only the account is public: the rest of the row stays private.
@@ -1111,7 +1116,7 @@ class NameCreditTests(TestCase):
 
         body = self._page(pos).content.decode()
 
-        self.assertIn('Second Name</h2>', body)
+        self.assertIn('Second Name</a></h2>', body)
         self.assertIn('named by bob', body)
         self.assertNotIn('alice', body)
         self.assertEqual(self._api(pos)['opening_named_by'], 'bob')
@@ -1146,7 +1151,7 @@ class NameCreditTests(TestCase):
 
         body = self._page(named).content.decode()
 
-        self.assertIn(f'{CATALOGUED_NAME}</h2>', body)
+        self.assertIn(f'{CATALOGUED_NAME}</a></h2>', body)
         self.assertNotIn('named by', body)
         data = self._api(named)
         self.assertEqual(data['opening'], CATALOGUED_NAME)
