@@ -1764,8 +1764,16 @@ def _minimax_slack(pos, edges):
         mover_wins=False)
 
 
-def mate_distance_refresh(pos, edges):
+def mate_distance_refresh(pos, edges, loop_check='raise', overrides=None):
     """``(mate_in, best_move)`` de un nodo DECISIVO ya cerrado, desde sus hijos.
+
+    ``loop_check`` and ``overrides`` belong to the rule against distances
+    counted round a repetition (see the block above _loser_distance):
+    ``'raise'``, the cascade's, looks for such a loop only when a loser node
+    would lengthen; ``'always'``, the listed repair's, looks whenever a child
+    sets the number.  ``overrides`` maps a key to the ``(mate_in, best_move)``
+    a caller holds in memory and has not written yet (the backfill's
+    overlay), so the walk reads what the caller reads.
 
     UNA sola regla, y publica: la usan la cascada exacta y el backfill
     ``backfill_mate_distance``, que asi convergen al MISMO punto fijo en vez de
@@ -1791,23 +1799,7 @@ def mate_distance_refresh(pos, edges):
     """
     mover_win = 'WHITE_WIN' if pos.fen.split()[1] == 'w' else 'BLACK_WIN'
     if pos.status != mover_win:
-        dists = [e.child.mate_in for e in edges]
-        if dists and all(d is not None for d in dists):
-            return 1 + max(dists), pos.best_move
-        own = _own_witness_plies(pos)
-        if own is None:
-            return pos.mate_in, pos.best_move
-        # Partial information under a witness of its own (quasa, 20-Nov):
-        # the witness follows ONE defence, and the replies already closed
-        # are a FLOOR under the exact ``1 + max`` above, which can only add
-        # replies to the max.  A stored line shorter than a reply already
-        # known to last longer is a horizon of the search that wrote it.
-        # The floor is taken over the witness, never over the stored number,
-        # so a child that later shortens brings the parent back down.
-        known = [1 + e.child.mate_in for e in edges
-                 if e.child.status == pos.status
-                 and e.child.mate_in is not None]
-        return max([own] + known), pos.best_move
+        return _loser_distance(pos, edges, loop_check, overrides)
 
     winners = [e for e in edges if e.child.status == pos.status
                and e.child.mate_in is not None]
@@ -1828,6 +1820,206 @@ def mate_distance_refresh(pos, edges):
             # acortaba se perdio): el testigo exportado vuelve con ella
             return new_mate, line[0]
     return new_mate, pos.best_move
+
+
+# ---------------- a repetition cannot lengthen a mate ----------------
+#
+# THE CASE (25-Nov-2026).  db0d0bb0 (Black to move, MATE_PV, some replies
+# still open) read M145: 289 plies over a won line of 30.  Its reply ...Ra5
+# led to 578b4b77 (White, MINIMAX), whose only closed move Bd2 led to
+# a1753496 (Black, every reply closed), whose reply ...Ra8 led to a09a3f5b
+# (White), whose only closed move Bc1 led back to db0d0bb0.  Each of the four
+# took its number from the next one: the side that is mated takes its longest
+# reply, so db0d0bb0 took 1 + 578b4b77 over its own 30, and the loop had no
+# finite solution.  Every lap added four plies, CASCADE_REWRITE_LIMIT stopped
+# each cascade after 32 writes, and the next cascade went on from there.
+#
+# THE RULE.  A defence that repeats back into a position already proven
+# cannot make that position's mate longer: the winner who meets it again
+# plays on from the position as before.  So when the side that is mated
+# would take a reply's number, and the chain of moves that number stands on
+# (_support_next) comes back to the position itself within MATE_SUPPORT_HOPS,
+# that reply is set aside and the next longest one is looked at, until one
+# does not come back or what is left is the position's own witness.  If
+# nothing is left on a position whose replies are all closed, its distance
+# becomes unknown (None); the status stays, only the number goes.
+#
+# WHEN IT LOOKS.  A loop can only inflate by raising, so the cascade looks
+# only when a loser node would lengthen (one indexed query per hop of the
+# chain, and the chain ends at the first own witness).  The listed repair
+# (backfill_mate_distance --keys-file) looks whenever a child sets the
+# number, so a loop already inflated and at rest is found too.
+# CASCADE_REWRITE_LIMIT stays as the backstop for loops longer than the hop
+# limit.
+MATE_SUPPORT_HOPS = 64
+
+
+class _SupportNode:
+    """What _support_next reads of a position (see _own_witness_plies)."""
+
+    __slots__ = ('key', 'fen', 'status', 'closure', 'proof', 'won_line',
+                 'mate_in', 'best_move')
+
+    def __init__(self, key, fen, status, closure, proof, won_line, mate_in,
+                 best_move):
+        self.key, self.fen, self.status = key, fen, status
+        self.closure, self.proof, self.won_line = closure, proof, won_line
+        self.mate_in, self.best_move = mate_in, best_move
+
+
+def _support_next(node, children):
+    """The child the distance of ``node`` stands on, or ``None``.
+
+    ``children`` are ``(move, key, status, mate_in)``.  The side that mates
+    stands on its shortest winning child, the stored best move first among
+    equals; the side that is mated on its longest reply that still fits
+    under its stored number (a reply longer than that is one the position
+    has set aside, or a raise not written yet: with no witness of its own
+    and no reply that fits, the longest reply).  Either one stands on
+    nothing below when its own witness gives the number or when no child
+    gives it.  A position with no number, or a mated one whose replies have
+    none, stands on the move it was closed through (``best_move``) while
+    that move is still a win for the same side.
+    """
+    if node.status not in ('WHITE_WIN', 'BLACK_WIN'):
+        return None
+    mover_win = 'WHITE_WIN' if node.fen.split()[1] == 'w' else 'BLACK_WIN'
+    own = _own_witness_plies(node)
+    same = [c for c in children if c[2] == node.status and c[3] is not None]
+    if node.mate_in is None or (node.status != mover_win and own is None
+                                and not same):
+        # No number, or a number no counted reply holds up: what is left of
+        # it stands on the move it was closed through, if that is still a
+        # win for the same side.
+        if own is not None:
+            return None
+        through = [c for c in children if c[0] == node.best_move
+                   and c[2] == node.status]
+        return through[0][1] if through else None
+    if node.status == mover_win:
+        if not same:
+            return None
+        best = min(same, key=lambda c: (c[3], c[0] != node.best_move, c[0]))
+        if own is not None and own <= 1 + best[3]:
+            return None
+        return best[1]
+    fitting = [c for c in same if 1 + c[3] <= node.mate_in]
+    if not fitting:
+        if own is not None or not same:
+            return None
+        # No reply fits under a number nothing of its own holds up: a raise
+        # still on its way, and it is the longest reply that will set it.
+        fitting = same
+    top = max(fitting, key=lambda c: (c[3], c[0] == node.best_move, c[0]))
+    if own is not None and own >= 1 + top[3]:
+        return None
+    return top[1]
+
+
+def support_reaches(start, target, hops=None, overrides=None):
+    """True when the chain of moves the distance of ``start`` stands on
+    reaches ``target`` within ``hops`` positions (see the block above).
+
+    One indexed query per position, on the edges of its parent column; the
+    position's own columns come in the same rows.  A chain that ends, comes
+    back to a position it already passed without passing ``target``, or
+    runs past ``hops`` does not reach it.
+    """
+    overrides = overrides or {}
+    hops = MATE_SUPPORT_HOPS if hops is None else hops
+    key, seen = start, set()
+    for _hop in range(hops):
+        if key == target:
+            return True
+        if key is None or key in seen:
+            return False
+        seen.add(key)
+        rows = list(Edge.objects.filter(parent_id=key).values_list(
+            'move_uci', 'child_id', 'child__status', 'child__mate_in',
+            'parent__fen', 'parent__status', 'parent__closure',
+            'parent__proof', 'parent__won_line', 'parent__mate_in',
+            'parent__best_move'))
+        if not rows:
+            return False
+        fen, status, closure, proof, won_line, mate_in, best_move = rows[0][4:]
+        if key in overrides:
+            mate_in, best_move = overrides[key]
+        node = _SupportNode(key, fen, status, closure, proof, won_line,
+                            mate_in, best_move)
+        children = [(move, child, child_status,
+                     overrides[child][0] if child in overrides else child_mate)
+                    for move, child, child_status, child_mate, *_rest in rows]
+        key = _support_next(node, children)
+    return False
+
+
+def _loser_distance(pos, edges, loop_check='raise', overrides=None):
+    """The loser-to-move half of mate_distance_refresh (see its docstring
+    and the block above MATE_SUPPORT_HOPS)."""
+    dists = [e.child.mate_in for e in edges]
+    full = bool(dists) and all(d is not None for d in dists)
+    own = _own_witness_plies(pos)
+    if not full and own is None:
+        return pos.mate_in, pos.best_move
+    if full:
+        counted = list(edges)
+        floor = None
+    else:
+        # Partial information under a witness of its own (quasa, 20-Nov):
+        # the witness follows ONE defence, and the replies already closed
+        # are a FLOOR under the exact ``1 + max`` of full information,
+        # which can only add replies to the max.  A stored line shorter
+        # than a reply already known to last longer is a horizon of the
+        # search that wrote it.  The floor is taken over the witness, never
+        # over the stored number, so a child that later shortens brings the
+        # parent back down.
+        counted = [e for e in edges if e.child.status == pos.status
+                   and e.child.mate_in is not None]
+        floor = own
+    candidate = max([1 + e.child.mate_in for e in counted]
+                    + ([floor] if floor is not None else []))
+    key = getattr(pos, 'key', None)
+    looks = key is not None and (
+        loop_check == 'always'
+        or (loop_check == 'raise'
+            and (pos.mate_in is None or candidate > pos.mate_in)))
+    excluded = set()
+    if looks:
+        for edge in sorted(counted, key=lambda e: (-e.child.mate_in,
+                                                   e.move_uci)):
+            length = 1 + edge.child.mate_in
+            if floor is not None and length <= floor:
+                break           # the own witness gives the number from here
+            if (loop_check == 'raise' and pos.mate_in is not None
+                    and length <= pos.mate_in):
+                break           # no longer a raise: nothing to inflate
+            if not support_reaches(edge.child.key, key,
+                                   overrides=overrides):
+                break
+            excluded.add(edge.move_uci)
+    if not excluded:
+        return candidate, pos.best_move
+    rest = [e for e in counted if e.move_uci not in excluded]
+    if full:
+        # A reply set aside is no longer a known distance: the own witness
+        # is a floor again, exactly as under partial information.
+        floor = own
+    lengths = [1 + e.child.mate_in for e in rest]
+    value = max(lengths + ([floor] if floor is not None else []),
+                default=None)
+    move = pos.best_move
+    if move in excluded:
+        # The exported defence must not be the one that comes back here.
+        line = (pos.won_line or '').split()
+        source = max(rest, key=lambda e: (e.child.mate_in, e.move_uci),
+                     default=None)
+        if source is not None and 1 + source.child.mate_in == value:
+            move = source.move_uci
+        elif own is not None and own == value and line:
+            move = line[0]
+        else:
+            move = None
+    return value, move
 
 
 def _own_witness_plies(pos):
