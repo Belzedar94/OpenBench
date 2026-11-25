@@ -30,7 +30,9 @@ y cada analisis lo toma entre tareas (--no-engine-update lo desactiva).
 The first Ctrl+C lets the running searches finish: no job takes another task,
 each one sends its result and says it has finished, and the worker exits once
 all of them have, or hands what is left back to the server when
---drain-timeout (10 minutes by default; 0 turns this off) runs out.  A second
+--drain-timeout (by default 10 minutes, or as long as the longest running
+search is expected to need plus a quarter, at most 2 hours; 0 turns this off)
+runs out.  A second
 Ctrl+C, SIGTERM, Ctrl+Break or closing the console window ends the engines and
 hands the tasks it holds back to the server at once.
 
@@ -155,6 +157,11 @@ CONSOLE_CLOSE_WAIT_SECONDS = 4.5
 # before the worker stops as a second Ctrl+C would, how often the console is
 # told how long is left, and how often a waiting job looks at the drain.
 DRAIN_TIMEOUT_DEFAULT_SECONDS = 10 * 60
+# Without an explicit --drain-timeout the hard stop waits for the longest
+# running search too: its estimated time left times this margin, at most this
+# long after the first Ctrl+C (§ Drain).
+DRAIN_ADAPTIVE_MARGIN = 1.25
+DRAIN_ADAPTIVE_MAX_SECONDS = 2 * 60 * 60
 DRAIN_STATUS_SECONDS = 60
 DRAIN_POLL_SECONDS = 0.25
 # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT: Windows ends
@@ -255,11 +262,16 @@ class CurrentTaskState:
         self._started_at = 0.0
         self._progress_at = 0.0
         self._lost = False
+        self._budget = 0
 
-    def start(self, task_id, lease_token=''):
+    def start(self, task_id, lease_token='', budget_nodes=0):
         with self._lock:
             self._task_id = task_id
             self._lease_token = lease_token or ''
+            try:
+                self._budget = max(0, int(budget_nodes or 0))
+            except (TypeError, ValueError, OverflowError):
+                self._budget = 0
             self._nps = 0
             self._last_nodes = -1
             self._lost = False
@@ -292,6 +304,19 @@ class CurrentTaskState:
             self._started_at = 0.0
             self._progress_at = 0.0
             self._lost = False
+            self._budget = 0
+
+    def seconds_left(self):
+        """How long the search in progress still needs at its speed so far:
+        (budget - nodes searched) / nodes per second, less the time since
+        it last reported.  None when no search is running or it has not
+        reported its speed yet (§ Drain)."""
+        with self._lock:
+            if (self._task_id is None or self._budget <= 0
+                    or self._nps <= 0 or self._last_nodes < 0):
+                return None
+            left = max(0, self._budget - self._last_nodes) / self._nps
+            return max(0.0, left - (self._clock() - self._progress_at))
 
     def _grace(self):
         # Twice the age the search had when it last reported progress, not
@@ -872,6 +897,23 @@ def _engine_process_options():
     return {'start_new_session': True}
 
 
+def _close_pipe(stream):
+    """Close one end of an engine's pipe; never raises.
+
+    A text pipe to an engine that has exited still holds whatever was last
+    written into it (a ``quit``, say) when the write failed.  Left to the
+    garbage collector it tries to send that again and Python prints
+    "Exception ignored while finalizing file ... BrokenPipeError".  Closed
+    here, the failed flush is swallowed and the file is closed all the same.
+    """
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
 def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
     """End every engine process this worker runs.  Returns how many were
     killed; never raises.
@@ -890,7 +932,9 @@ def _stop_engines(processes=None, timeout=ENGINE_QUIT_SECONDS):
                 process.stdin.write('quit\n')
                 process.stdin.flush()
         except (AttributeError, OSError, ValueError):
-            pass
+            # It exited between ``poll`` and the write: nothing will ever
+            # read this pipe again.
+            _close_pipe(getattr(process, 'stdin', None))
     deadline = time.monotonic() + timeout
     killed = []
     for process in processes:
@@ -996,6 +1040,24 @@ def _release_leases(server, auth, leases, timeout=RELEASE_TIMEOUT_SECONDS,
     return None, outcome.get('problem', f'no answer within {timeout:g}s')
 
 
+def _describe_release(released, named):
+    """What a stop says once ``api/release`` answered for ``named`` leases.
+
+    The server takes back only a lease that is still this worker's under
+    the same token.  One it does not take back had already gone back to the
+    queue: its heartbeat had stopped naming it -- a search silent for longer
+    than its progress grace (``CurrentTaskState.snapshot``) -- and the
+    recycler requeued it ``LEASE_MINUTES`` later, as for any silent lease.
+    Nothing is lost either way.
+    """
+    if released >= named:
+        return f'the server took back {released}'
+    gone = named - released
+    return (f'the server took back {released}; '
+            f'{_count(gone, "task")} {"was" if gone == 1 else "were"} '
+            'already back in the queue (the lease had lapsed)')
+
+
 def _say(message):
     """Print for a stop: a console that is closing must not stop the stop."""
     try:
@@ -1057,7 +1119,7 @@ class GracefulStop:
                     _say(f'the server did not take them back ({problem}); '
                          'they return to the queue when their leases expire')
                 else:
-                    _say(f'the server took back {released}')
+                    _say(_describe_release(released, len(leases)))
         except Exception as exc:  # a stop must always end in an exit
             _say(f'stop: {exc}')
         finally:
@@ -1099,16 +1161,55 @@ class Drain:
     a much shorter wait than a search, and a SIGKILL hands nothing back.
     ``timeout`` 0 turns draining off: the first Ctrl+C stops at once, as
     before build 2026112401.
+
+    ``adaptive`` (no --drain-timeout given; build 2026112501): ``timeout`` is
+    only the least the hard stop waits.  A 2G-node task of Torom's was still
+    searching when the ten minutes ran out.  So the deadline also covers the
+    running search that needs longest -- its estimated time left
+    (``CurrentTaskState.seconds_left``, the jobs ``watch``-ed here) times
+    ``DRAIN_ADAPTIVE_MARGIN`` -- and never comes later than
+    ``DRAIN_ADAPTIVE_MAX_SECONDS`` after ``begin``.  It is worked out again
+    whenever it is read and only ever moves later: a burst of speed does not
+    cut a search short, and a search that has not reported its speed yet
+    counts once it has.  The heartbeats keep every lease alive meanwhile:
+    they run until the stop, draining or not.
     """
 
-    def __init__(self, timeout, clock=time.monotonic):
+    def __init__(self, timeout, clock=time.monotonic, adaptive=False):
         self.timeout = max(0.0, float(timeout or 0))
+        self.adaptive = bool(adaptive)
         self._clock = clock
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._finished = set()
+        self._searches = []
+        self.began = None
         self.deadline = None
         self._next_status = None
+
+    def watch(self, search):
+        """A job's ``CurrentTaskState``, for the adaptive deadline."""
+        with self._lock:
+            self._searches.append(search)
+
+    def _extend(self):
+        """Move an adaptive deadline later if the longest search needs it."""
+        if not self.adaptive or self.deadline is None:
+            return
+        with self._lock:
+            searches = list(self._searches)
+        left = [seconds for seconds in
+                (search.seconds_left() for search in searches)
+                if seconds is not None]
+        if not left:
+            return
+        now = self._clock()
+        wanted = min(now + max(left) * DRAIN_ADAPTIVE_MARGIN,
+                     self.began + max(self.timeout,
+                                      DRAIN_ADAPTIVE_MAX_SECONDS))
+        with self._lock:
+            if wanted > self.deadline:
+                self.deadline = wanted
 
     @property
     def enabled(self):
@@ -1124,23 +1225,29 @@ class Drain:
             if not self.enabled or self._event.is_set():
                 return False
             now = self._clock()
+            self.began = now
             self.deadline = now + self.timeout
             self._next_status = now + DRAIN_STATUS_SECONDS
             self._event.set()
         busy = (f'{_count(working, "running job")}'
                 if working is not None else 'the running jobs')
         _say(f'Termination signal received: no new tasks; waiting for '
-             f'{busy} to finish, hard stop in {human_duration(self.timeout)} '
+             f'{busy} to finish, hard stop in '
+             f'{human_duration(self.remaining())} '
              '(Ctrl+C again to stop now)')
         return True
 
     def remaining(self):
         if self.deadline is None:
             return self.timeout
+        self._extend()
         return max(0.0, self.deadline - self._clock())
 
     def expired(self):
-        return self.deadline is not None and self._clock() >= self.deadline
+        if self.deadline is None:
+            return False
+        self._extend()
+        return self._clock() >= self.deadline
 
     def report(self, working):
         """Every ``DRAIN_STATUS_SECONDS`` while draining: how many jobs are
@@ -1640,15 +1747,32 @@ class Engine:
         with self._io_lock:
             self._stop_requested = True
             if self._searching:
-                self._send('stop')
+                try:
+                    self._send('stop')
+                except (OSError, ValueError):
+                    # The engine is gone (a stop ended it): the search
+                    # reads the end of its output and says so itself.
+                    pass
 
     def close(self):
+        """Quit the engine and close its pipes; never raises.
+
+        A stop may have ended the process already (``_stop_engines``): a
+        ``quit`` written into its dead pipe is skipped, and both pipes are
+        closed here rather than by the garbage collector (``_close_pipe``).
+        """
         try:
-            self._send('quit')
+            if self.p.poll() is None:
+                self._send('quit')
             self.p.wait(timeout=5)
         except Exception:
-            self.p.kill()
+            try:
+                self.p.kill()
+            except OSError:
+                pass
         finally:
+            _close_pipe(self.p.stdin)
+            _close_pipe(self.p.stdout)
             _ENGINE_PROCESSES.discard(self.p)
 
 
@@ -3360,6 +3484,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
         return offered
 
     current_task = CurrentTaskState()
+    if drain is not None:
+        drain.watch(current_task)   # its time left sizes the hard stop
 
     def stop_lost_search():
         # Runs on this slot's heartbeat thread, under current_task's lock
@@ -3465,7 +3591,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             reset_stop = getattr(eng, 'reset_stop', None)
             if reset_stop is not None:
                 reset_stop()
-            current_task.start(t['id'], t.get('lease_token', ''))
+            current_task.start(t['id'], t.get('lease_token', ''),
+                               t.get('budget_nodes'))
             t0 = time.time()
             print(format_task_start(t, username, slot, jobs), flush=True)
             if verbose:
@@ -4123,7 +4250,7 @@ def main():
                          'not fit in the free memory (by default the hash, '
                          'and if need be the number of jobs, is reduced)')
     ap.add_argument('--drain-timeout', type=parse_duration,
-                    default=DRAIN_TIMEOUT_DEFAULT_SECONDS, metavar='TIME',
+                    default=None, metavar='TIME',
                     help='the first Ctrl+C lets the running searches finish '
                          'and takes no new task; after TIME (e.g. 90s, 10m, '
                          '1h; a plain number is seconds) whatever is still '
@@ -4131,7 +4258,12 @@ def main():
                          'A second Ctrl+C stops at once, and so do SIGTERM, '
                          'Ctrl+Break and closing the window.  0: the first '
                          'Ctrl+C stops at once.  Default: '
-                         f'{human_duration(DRAIN_TIMEOUT_DEFAULT_SECONDS)}')
+                         f'{human_duration(DRAIN_TIMEOUT_DEFAULT_SECONDS)}, '
+                         'or longer when a running search needs it (its '
+                         'estimated time left plus '
+                         f'{round((DRAIN_ADAPTIVE_MARGIN - 1) * 100)}%%, at '
+                         'most '
+                         f'{human_duration(DRAIN_ADAPTIVE_MAX_SECONDS)})')
     ap.add_argument('--skip-engine-check', action='store_true',
                     help='start even if the engine does not identify itself '
                          'as an Atomic-Stockfish build')
@@ -4273,7 +4405,11 @@ def main():
                             stop)
     # The first Ctrl+C (§ Drain).  A single pass (--once) is not drained: it
     # runs in the main thread, where Ctrl+C has always ended it.
-    drain = None if a.once else Drain(a.drain_timeout)
+    # Without --drain-timeout the hard stop also waits for the longest running
+    # search (§ Drain, ``adaptive``); a TIME given keeps its exact meaning.
+    drain = None if a.once else Drain(
+        DRAIN_TIMEOUT_DEFAULT_SECONDS if a.drain_timeout is None
+        else a.drain_timeout, adaptive=a.drain_timeout is None)
     # Only the downloaded reference engine follows the manifest: a binary
     # given with --engine is the contributor's choice and stays.
     engines = None
@@ -4304,9 +4440,14 @@ def main():
               f'running (checked every {engines.interval / 60:g} min; '
               '--no-engine-update turns this off)', flush=True)
     if drain is not None and drain.enabled:
-        print(f'stopping: Ctrl+C once lets the running searches finish (at '
-              f'most {human_duration(drain.timeout)}, --drain-timeout), '
-              'Ctrl+C twice stops at once', flush=True)
+        limit = (f'at least {human_duration(drain.timeout)}, more for a '
+                 'search that needs it, at most '
+                 f'{human_duration(DRAIN_ADAPTIVE_MAX_SECONDS)}'
+                 if drain.adaptive
+                 else f'at most {human_duration(drain.timeout)}')
+        print(f'stopping: Ctrl+C once lets the running searches finish '
+              f'({limit}, --drain-timeout), Ctrl+C twice stops at once',
+              flush=True)
 
     with _stop_signals(graceful):
         helpers = []
