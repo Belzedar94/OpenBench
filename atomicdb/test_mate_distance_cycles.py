@@ -229,15 +229,21 @@ class RepetitionLoopTests(TestCase):
         Position.objects.filter(key=pa.key).update(mate_in=9)
         self.assertFalse(ingest.support_reaches(pa.key, pb.key))
 
-    def test_a_loop_longer_than_the_hop_limit_is_left_to_the_backstop(self):
-        start, pa, pb, pc = self._loop(a=9, b=None, c=None, s=None)
-        Position.objects.filter(key__in=[pb.key, pc.key, start.key]).update(
-            mate_in=3)
+    def test_a_loop_longer_than_the_hop_limit_is_not_set_aside(self):
+        """The rule itself, read on one row, so no cascade order is involved.
 
-        with patch('atomicdb.ingest.MATE_SUPPORT_HOPS', 3), \
-                patch('atomicdb.ingest.CASCADE_REWRITE_LIMIT', 2):
-            ingest.backup_cascade([pc.key, start.key, pb.key, pa.key])
+        A cascade over this loop with a short hop limit is no good to test
+        on: backup_cascade pops its frontier from a set, so the order it
+        rewrites the four rows in follows the interpreter's string hashing,
+        and how far a loop it cannot see climbs before CASCADE_REWRITE_LIMIT
+        cuts it differs from run to run (that backstop has its own test in
+        test_performance_guards).
+        """
+        start, pa, pb, pc = self._loop(a=9, b=12, c=11, s=10)
+        row = Position.objects.get(key=pa.key)
+        edges = list(Edge.objects.filter(parent=row).select_related('child'))
 
-        # Not seen, so it climbs, and the rewrite cap still stops it.
-        self.assertGreater(self._mates(pa)[0], 9)
-        self.assertLess(self._mates(pa)[0], 40)
+        # B -> C -> S -> A: four positions, so three hops do not see it.
+        with patch('atomicdb.ingest.MATE_SUPPORT_HOPS', 3):
+            self.assertEqual(ingest.mate_distance_refresh(row, edges)[0], 13)
+        self.assertEqual(ingest.mate_distance_refresh(row, edges)[0], 9)
