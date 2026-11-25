@@ -553,7 +553,7 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
               throw error;
             }
             // Structured application statuses (including 429 rate-limited
-            // and 503 queue-full) still use their existing user-facing text.
+            // and 429 queue-full) still use their existing user-facing text.
             // Only an unparseable server response is an opaque server error.
             if (!data) {
               const error = new Error('server error');

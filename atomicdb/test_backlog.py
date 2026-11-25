@@ -408,6 +408,13 @@ class Caps(BacklogTestCase):
                 '/atomicdb/queue/adopt/',
                 {'backlog': 'lost-lines', 'size': '25'})
         self.assertIn('adopt=queue-full', response['Location'])
+        with patch('atomicdb.views.REQUEST_QUEUE_MAX', 3):
+            as_json = self.client.post(
+                '/atomicdb/queue/adopt/',
+                {'backlog': 'lost-lines', 'size': '25', 'format': 'json'})
+        self.assertEqual(as_json.status_code, 429)
+        self.assertIn('Retry-After', as_json)
+        self.assertEqual(as_json.json()['status'], 'queue-full')
         self.assertEqual(AnalysisTask.objects.filter(arm='relines').count(),
                          0)
         self.assertTrue(DBEvent.objects.filter(

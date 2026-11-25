@@ -443,7 +443,8 @@ class AccountQueueCapTests(TestCase):
 
         response = self._request(self.targets[0].key, 'busy')
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 429)
+        self.assertIn('Retry-After', response)
         self.assertEqual(response.json()['status'], 'queue-full-account')
 
     def test_a_full_account_blocks_nobody_else(self):
@@ -539,6 +540,8 @@ class AccountQueueCapTests(TestCase):
         response = self.client.post(
             f'/atomicdb/request-unexplored/{self.root.key}/')
 
+        self.assertEqual(response.status_code, 429)
+        self.assertIn('Retry-After', response)
         self.assertEqual(response.json()['status'], 'queue-full-account')
 
 

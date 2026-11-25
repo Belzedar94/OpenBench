@@ -165,6 +165,12 @@ REQUEST_QUEUE_MAX = 10_000
 # que reintenta sin pausa escribia una fila por intento, unas 110 por minuto
 # de una sola cuenta el 2-nov.
 LANE_CAP_RECEIPT_WINDOW = timedelta(minutes=1)
+# A full per-account queue is the caller's own condition, not the server's:
+# 429 Too Many Requests, with a Retry-After long enough for some of the
+# account's waiting requests to be served.  It was a 503, which told scripts
+# the server was down (§ _queue_full_payload).
+QUEUE_FULL_STATUS = 429
+QUEUE_FULL_RETRY_AFTER = 300
 # How many moves one click of the move list's multi-select may request
 # (§ api_request_moves).  The same ceiling as the other one-click batches,
 # the unanalysed-moves button and the frontier expansion
@@ -652,13 +658,20 @@ def _queue_full_payload(requested_by):
             'account': account,
             'waiting': REQUEST_QUEUE_MAX,
         })
-    return {'status': 'queue-full-account'}, 503
+    return {'status': 'queue-full-account'}, QUEUE_FULL_STATUS
+
+
+def _with_queue_full_retry(response):
+    """``Retry-After`` on a whole-response queue-full refusal (429)."""
+    if response.status_code == QUEUE_FULL_STATUS:
+        response['Retry-After'] = str(QUEUE_FULL_RETRY_AFTER)
+    return response
 
 
 def _queue_full_response(requested_by):
     """La misma negativa para las puertas que devuelven ``JsonResponse``."""
     body, code = _queue_full_payload(requested_by)
-    return JsonResponse(body, status=code)
+    return _with_queue_full_retry(JsonResponse(body, status=code))
 
 
 def machine_base(machine):
@@ -2537,7 +2550,7 @@ def _api_request_once(request, key):
                   .update(then_verify=True))
         if marked:
             payload['then_verify'] = True
-    return JsonResponse(payload, status=status)
+    return _with_queue_full_retry(JsonResponse(payload, status=status))
 
 
 def _expected_budget(raw):
@@ -3219,7 +3232,7 @@ def api_public_request(request):
         payload.update(_api_moves_outcome(payload, task, route, moves_reason))
     if payload['status'] in _REQUEST_REFUSALS:
         payload['reason'] = _REQUEST_REFUSALS[payload['status']]
-    return JsonResponse(payload, status=status)
+    return _with_queue_full_retry(JsonResponse(payload, status=status))
 
 
 def _api_moves_outcome(payload, task, route, reason):
@@ -3477,7 +3490,7 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
         body, code = _queue_full_payload(username)
         reply.update(body)
         reply['reason'] = _REQUEST_REFUSALS[body['status']]
-        return JsonResponse(reply, status=code)
+        return _with_queue_full_retry(JsonResponse(reply, status=code))
 
     # The line the request is on, to skip a move that re-enters it, as the
     # move list does: the caller's line when it was usable, else the tree's.

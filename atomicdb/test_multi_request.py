@@ -854,7 +854,8 @@ class AccountCapTests(TestCase):
         with mock.patch.object(views, 'REQUEST_QUEUE_MAX', 0):
             response = _signed_in().post(self.url, {'moves': 'e2e4,d2d4'})
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 429)
+        self.assertIn('Retry-After', response)
         self.assertEqual(response.json(), {'status': 'queue-full-account'})
         self.assertFalse(Edge.objects.filter(parent=self.root).exists())
         self.assertFalse(AnalysisTask.objects.exists())
