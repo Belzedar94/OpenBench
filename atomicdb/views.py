@@ -2012,13 +2012,16 @@ def api_my_queue(request):
             .filter(requested_by=account, state__in=live)
             .select_related('position')
             .annotate(_run=running_first)
-            .order_by('_run', 'queue_seq', 'id'))
+            # Normal before background: the order the account is served in
+            # (§ ``live_request.fair_share``).
+            .order_by('_run', 'background', 'queue_seq', 'id'))
     tasks = [{'task_id': t.id,
               'position': t.position.key,
               'fen': t.position.fen,
               'budget_nodes': t.budget_nodes,
               'state': t.state,
               'queue_seq': t.queue_seq,
+              'priority': _priority_word(t),
               'backed': False,
               # The line the request shows on the queue pages (comma
               # separated UCI from the start position), '' when none was
@@ -2038,6 +2041,7 @@ def api_my_queue(request):
          'budget_nodes': t.budget_nodes,
          'state': t.state,
          'queue_seq': t.queue_seq,
+         'priority': _priority_word(t),
          'backed': True,
          'moves': t.route,
          'bump': None,
@@ -2654,7 +2658,8 @@ def _api_moves_route(raw, target_key):
 
 def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
                    only_if_missing=False, with_place=True, one_search=False,
-                   checked_route=None, only_unexplored=False):
+                   checked_route=None, only_unexplored=False,
+                   background=False):
     """EL camino de una peticion de analisis, y es uno solo para las dos puertas.
 
     El click del explorador entra por aqui desde siempre; la API oficial
@@ -2683,6 +2688,11 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
     search reached since the caller picked it answers ``already-analyzed``,
     decided under the purchase's row lock (§ ``ingest._request_rung``).
     ``api/request-children`` passes it.
+
+    ``background=True`` is a background request (§ ``_request_priority``):
+    the default of the script doors, never of a page.  A normal request lifts
+    the background mark from the live request it lands on, also when it is
+    answered ``already-requested`` (§ ``ingest._merge_priority``).
     """
     if only_if_missing and pos.status == 'UNKNOWN':
         # Answered before the dedup and the queue cap: a call with nothing to
@@ -2733,6 +2743,14 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
         # profundidad que nunca llegaria a pedirse.  Solo alcanza a quien tiene
         # derecho a elegir (el resto llega con ``chosen is None``), y el techo
         # de cola de abajo sigue acotando el gasto igual que siempre.
+        if not background:
+            # The same address asking again from a page: what its script
+            # queued in the background is now wanted at the normal level.
+            AnalysisTask.objects.filter(
+                position=pos, source=AnalysisTask.Source.USER,
+                state__in=(AnalysisTask.TState.PENDING,
+                           AnalysisTask.TState.LEASED),
+                background=True).update(background=False)
         return {'status': 'already-requested'}, 200
     if _account_queue_full(requested_by):
         return _queue_full_payload(requested_by)
@@ -2753,7 +2771,8 @@ def _queue_request(pos, ip, requested_by='', chosen=None, raw_route='',
                                           route=route, budget_floor=chosen,
                                           only_if_missing=only_if_missing,
                                           one_search=one_search,
-                                          only_unexplored=only_unexplored)
+                                          only_unexplored=only_unexplored,
+                                          background=background)
         # 'saturated' bought nothing, but it walked the tree to find that out
         # and the honest answer is still an answer: one click, one receipt,
         # so the per-position dedup keeps bounding what a descent costs us.
@@ -3030,6 +3049,47 @@ def _api_request_identity(request):
     return (None, True) if user is None else (user, False)
 
 
+# WHAT A SCRIPT QUEUES WAITS BEHIND WHAT ITS PERSON CLICKS (jean_heibig, with
+# torom and Eclipsia, 25-Nov-2026): one account, a crawler on the API and the
+# same person clicking in the explorer, and the clicks should come first.
+#
+# Told apart by the door, which is told apart by how it authenticates.  The
+# pages queue through ``request/``, ``request-unexplored/`` and
+# ``request-moves/``: session views WITHOUT ``csrf_exempt``, so a POST only
+# gets through with the CSRF token of a page the site served.  The script
+# doors (``api/request``, ``api/request-children``) are ``csrf_exempt`` and
+# never read the session cookie: the identity is the ``username``/``password``
+# in the body (§ ``_api_request_identity``).  No page of the site calls them.
+# So no request header or body field decides it, and nothing a client sends
+# can make a page click background or a script call normal without saying so
+# (``priority=normal``, below).
+API_PRIORITIES = {'low': True, 'normal': False}
+API_DEFAULT_PRIORITY = 'low'
+
+
+def _request_priority(request):
+    """``(background, refusal)`` for a script door's ``priority`` field.
+
+    ``low`` (the default) queues a background request, served after the same
+    account's requests from the pages; ``normal`` asks for the level of a
+    click.  Only the order inside the account changes, never its share of
+    the queue against other accounts (§ ``live_request.fair_share``).
+    """
+    raw = (request.POST.get('priority') or API_DEFAULT_PRIORITY)
+    background = API_PRIORITIES.get(raw.strip().lower())
+    if background is None:
+        return None, JsonResponse(
+            {'status': 'refused',
+             'reason': 'priority must be low (the default) or normal'},
+            status=400)
+    return background, None
+
+
+def _priority_word(task):
+    """The ``priority`` a reply shows for a live request: its row's own."""
+    return 'low' if task.background else 'normal'
+
+
 def _api_request_task(pos, username, newest=False):
     """La fila viva de esta posicion y si ``username`` figura como respaldo.
 
@@ -3098,7 +3158,8 @@ def api_public_request(request):
 
     Campos del POST: ``fen`` (obligatoria), ``budget`` (peldano, opcional y
     solo para quien tiene derecho a elegirlo), ``username``/``password``
-    (opcionales), ``only_if_missing`` (opcional).
+    (opcionales), ``only_if_missing`` (opcional), ``priority`` (opcional,
+    ``low`` by default: § ``_request_priority``).
 
     ``only_if_missing=1`` is for scripts.  Without it this door is the click:
     asked again once the first search has landed, it buys the next rung.
@@ -3148,6 +3209,9 @@ def api_public_request(request):
                         f'of {ingest.SUBTREE_SEARCH_NODES} below the '
                         'position')},
             status=400)
+    background, refusal = _request_priority(request)
+    if refusal is not None:
+        return refusal
     only_if_missing = request.POST.get('only_if_missing') in ('1', 'true')
     if only_if_missing and depth.asks_for_subtree(request.POST.get('budget')):
         # Refused on what was asked, not on who asked: for an account that
@@ -3194,7 +3258,8 @@ def api_public_request(request):
         payload, status = _queue_request(
             pos, ip, requested_by=username, chosen=chosen,
             only_if_missing=only_if_missing,
-            checked_route=route if moves_sent else None)
+            checked_route=route if moves_sent else None,
+            background=background)
     except OperationalError as error:
         # Mismo trato que el click, y por lo mismo: bajo SQLite un submit
         # grande puede rechazar la subida a escritura, y ningun efecto quedo
@@ -3223,6 +3288,9 @@ def api_public_request(request):
         'task_state': None if task is None else (
             'searching' if task.state == AnalysisTask.TState.LEASED
             else 'waiting'),
+        # The live request's own priority, which a normal request on the
+        # same row may already have lifted (§ ``_request_priority``).
+        'priority': None if task is None else _priority_word(task),
         # Un 'already-queued' con esto a True es "ya estaba pedida y tu nombre
         # quedo anotado en ella": te avisara cuando aterrice y tu espera cuenta
         # para adelantarla.
@@ -3360,6 +3428,9 @@ def api_public_request_children(request):
                                     for rung in ingest.REQUEST_BUDGET_LADDER)
                         + ')')},
             status=400)
+    background, refusal = _request_priority(request)
+    if refusal is not None:
+        return refusal
     selected, illegal, given = None, [], []
     if 'select' in request.POST:
         selected, illegal, given, refusal = _selected_moves(
@@ -3374,7 +3445,8 @@ def api_public_request_children(request):
         return _request_children(request, fen, user, chosen,
                                  selected=selected, illegal=illegal,
                                  given=given,
-                                 only_if_missing=only_if_missing)
+                                 only_if_missing=only_if_missing,
+                                 background=background)
     except OperationalError as error:
         # The answer of ``api/request``, and a retry is as safe: every move is
         # its own commit, and a move that went through comes back from the
@@ -3432,7 +3504,7 @@ def _selected_moves(values, fen):
 
 
 def _request_children(request, fen, user, chosen, selected=None, illegal=(),
-                      given=(), only_if_missing=False):
+                      given=(), only_if_missing=False, background=True):
     """The batch behind ``api_public_request_children``, once the call is
     known to be well formed.
 
@@ -3580,7 +3652,7 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
             child, ip, requested_by=username, chosen=chosen,
             checked_route=child_route, with_place=False, one_search=True,
             only_if_missing=only_if_missing or chosen is not None,
-            only_unexplored=not named)
+            only_unexplored=not named, background=background)
         status = payload['status']
         if status == 'already-solved':
             status = 'closed'    # closed while the batch ran
@@ -3599,7 +3671,8 @@ def _request_children(request, fen, user, chosen, selected=None, illegal=(),
             'budget_nodes': None if task is None else task.budget_nodes,
             'task_state': None if task is None else (
                 'searching' if task.state == AnalysisTask.TState.LEASED
-                else 'waiting')}
+                else 'waiting'),
+            'priority': None if task is None else _priority_word(task)}
         if status == 'queued':
             entry = {'move': uci, 'key': child.key, **task_fields}
             queued.append(entry)

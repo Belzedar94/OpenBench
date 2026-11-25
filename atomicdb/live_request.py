@@ -207,6 +207,19 @@ def fair_share(queryset, now=None):
     salen ordenadas junto a las demas y quien llama las descarta despues —
     ``choose_pending`` porque su lote solo bloquea PENDING, ``queue_ahead``
     porque solo cuenta PENDING.
+
+    BACKGROUND REQUESTS GO BEHIND THE ACCOUNT'S NORMAL ONES (§
+    ``AnalysisTask.background``: by default, what a script queues through the
+    API).  Inside the partition the window puts every waiting normal row
+    first, so a background row's ``lane_ahead`` includes the budgets of every
+    normal row of the same account and it sorts behind all of them (a worker
+    that skips a normal row it cannot take, for its budget cap, the tables or
+    the deep cap, still goes on to the next row, as for any other row).  The
+    partition's rows and their budgets are the same, so the set of
+    ``lane_ahead`` values the account holds against everybody else is the
+    same: other accounts see no change, and the account keeps its fair share.
+    Only which of its own requests takes each of its turns changes.  With the
+    flag off on every row this is the historic order.
     """
     running_first = Case(When(state=LEASED, then=Value(0)), default=Value(1),
                          output_field=IntegerField())
@@ -214,8 +227,8 @@ def fair_share(queryset, now=None):
             .annotate(_fair_cumulative=Window(
                 expression=Sum('budget_nodes'),
                 partition_by=[F('source'), _effective_account()],
-                order_by=(running_first.asc(), F('queue_seq').asc(),
-                          F('id').asc())))
+                order_by=(running_first.asc(), F('background').asc(),
+                          F('queue_seq').asc(), F('id').asc())))
             .annotate(lane_ahead=Case(
                 When(source=USER,
                      then=F('_fair_cumulative') - F('budget_nodes')),

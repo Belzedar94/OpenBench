@@ -206,9 +206,34 @@ does not have is seeded (added) rather than refused.</p>
   position, as UCI moves from the start position separated by commas or
   spaces (<code>moves=g1f3,f7f6,b1c3</code>). The queue pages and their
   explorer links then show your request in that move order; see below.</td></tr>
+<tr><td><code>priority</code></td><td>Optional. <code>low</code> (the
+  default) or <code>normal</code>; see below.</td></tr>
 </table></div>
 <p>Session cookies are deliberately ignored here, so a page open in your
 browser cannot spend your queue behind your back.</p>
+
+<p id="priority"><strong>Priority.</strong> What a script queues through the
+API waits behind what its account asks for on the website: within one
+account, requests made from the explorer's buttons are served before requests
+made through <code>/api/request</code> and <code>/api/request-children</code>.
+So a crawler and its owner clicking in the explorer can share one account, and
+the clicks do not wait behind the crawl.</p>
+<ul>
+<li>It only changes the order of your own requests. Your share of the queue
+  against other accounts is exactly the same, and nobody else's requests move.</li>
+<li><code>priority=normal</code> puts an API request at the level of a click.
+  <code>priority=low</code> is the default and can be left out.</li>
+<li>A normal request for a position that is already waiting as a low one lifts
+  it to normal: clicking it in the explorer, or a <code>priority=normal</code>
+  call. A low request never lowers a request that is already normal.</li>
+<li>The replies say which level the live request is at, in
+  <code>priority</code>, and the queue pages tag low requests as
+  <em>background</em>.</li>
+<li>The level comes from the door, not from anything a page or a script sends:
+  the explorer queues through session endpoints that need the page's own CSRF
+  token, and the API endpoints ignore the session and take the credentials in
+  the body.</li>
+</ul>
 <p>There is no hourly limit on this door, same as the explorer button. What
 governs both is the per-person cap on queued requests and the per-account
 sharing of the service order (see <a href="/atomicdb/docs/queue/">The
@@ -264,6 +289,10 @@ Send <code>moves</code> to have it listed under yours:</p>
   on that position and its budget, when there is one.</td></tr>
 <tr><td><code>task_state</code></td><td><code>waiting</code> while it is in
   the queue, <code>searching</code> once an engine has it.</td></tr>
+<tr><td><code>priority</code></td><td><code>low</code> or
+  <code>normal</code>: the level of the live request, which can be
+  <code>normal</code> although you sent <code>low</code> when somebody asked
+  for it at the normal level (see <a href="#priority">Priority</a>).</td></tr>
 <tr><td><code>ahead</code></td><td>How many requests are served
   first.</td></tr>
 <tr><td><code>backed</code></td><td><code>true</code> when you joined a
@@ -300,7 +329,9 @@ Send <code>moves</code> to have it listed under yours:</p>
 <p>Every answer that is not accepted carries a <code>reason</code>. Refusals by
   HTTP code:</p>
 <ul>
-<li><code>400</code>: an unreadable FEN or a bad budget.</li>
+<li><code>400</code>: an unreadable FEN, a bad budget or a
+  <code>priority</code> other than <code>low</code> or
+  <code>normal</code>.</li>
 <li><code>403</code>: wrong credentials.</li>
 <li><code>405</code>: anything but a <code>POST</code>.</li>
 <li><code>429</code>: too many calls, or your queue is full
@@ -350,6 +381,9 @@ the explorer would add them. A FEN the tree does not have is seeded.</p>
   request is then listed under that line followed by its own move, so the line
   can be at most 63 plies long here; a longer one is left out and
   <code>moves_ignored</code> says why.</td></tr>
+<tr><td><code>priority</code></td><td>Optional, as for
+  <a href="#priority"><code>/api/request</code></a>: <code>low</code> (the
+  default) or <code>normal</code>, for every move of the call.</td></tr>
 </table></div>
 <p>At most {{ children_cap }} moves are requested per call. If your queue fills
 up partway, the moves requested so far stay requested and the rest are skipped
@@ -391,9 +425,10 @@ button does:</p>
   for <code>/api/request</code>, about the position you sent.</td></tr>
 <tr><td><code>queued</code></td><td>One entry per move a new request was
   made for: <code>move</code> (UCI), <code>key</code> of the position it
-  leads to, <code>task</code>, <code>budget_nodes</code> and
-  <code>task_state</code> (<code>waiting</code> or <code>searching</code>, as
-  for <code>/api/request</code>).</td></tr>
+  leads to, <code>task</code>, <code>budget_nodes</code>,
+  <code>task_state</code> (<code>waiting</code> or <code>searching</code>) and
+  <code>priority</code> (<code>low</code> or <code>normal</code>), as for
+  <code>/api/request</code>.</td></tr>
 <tr><td><code>skipped</code></td><td>One entry per other legal move:
   <code>move</code>, <code>key</code> and <code>reason</code> (see
   below).</td></tr>
@@ -414,11 +449,13 @@ button does:</p>
 <tr><td><code>already-queued</code></td><td>The position was already waiting
   or being searched. You are recorded as another requester
   (<code>backed</code> is <code>true</code>) unless the request was already
-  yours; <code>task</code>, <code>budget_nodes</code> and
-  <code>task_state</code> describe the live request.</td></tr>
+  yours; <code>task</code>, <code>budget_nodes</code>,
+  <code>task_state</code> and <code>priority</code> describe the live
+  request.</td></tr>
 <tr><td><code>already-requested</code></td><td>Your address already has a
   live request on that position; <code>task</code>,
-  <code>budget_nodes</code> and <code>task_state</code> describe it.</td></tr>
+  <code>budget_nodes</code>, <code>task_state</code> and
+  <code>priority</code> describe it.</td></tr>
 <tr><td><code>blocked</code></td><td>The move goes back to a position on the
   line that reached <code>fen</code>.</td></tr>
 <tr><td><code>queue-full-account</code></td><td>Your queue filled up before
@@ -440,8 +477,14 @@ button does:</p>
   <code>password</code> (your OpenBench credentials, same as a worker) returns
   your PENDING and LEASED requests: task ids, position keys, budgets, state,
   <code>moves</code> (the line the request is shown with, empty when it has
-  none), and the <code>bump</code> / <code>cancel</code> paths each row accepts. A
-  logged-in browser can simply <code>GET</code> it.</li>
+  none), <code>priority</code> (<code>low</code> or <code>normal</code>, see
+  <a href="#priority">Priority</a>), and the <code>bump</code> /
+  <code>cancel</code> paths each row accepts. Normal requests are listed
+  before low ones, the order they are served in. A logged-in browser can
+  simply <code>GET</code> it.</li>
+<li>Moving a request to the front puts it at the front of its own level: a
+  low request moves ahead of your other low ones, still behind your normal
+  ones.</li>
 <li>The ids plug into <code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code>
   and <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code>, with the same
   credentials (form or JSON). <code>undo=1</code> on cancel restores the
