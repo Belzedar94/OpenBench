@@ -167,7 +167,7 @@ class BackfillCycleTests(TestCase):
     base no es consistente: la contencion es congelar, no inflar.
     """
 
-    def test_an_ungrounded_cycle_is_frozen_instead_of_inflated(self):
+    def test_an_ungrounded_cycle_comes_to_rest_instead_of_inflating(self):
         cycle = [('g1f3', logic.start_fen())]
         for uci in ('g8f6', 'f3g1', 'f6g8'):
             cycle.append((uci, logic.apply_move(cycle[-1][1], cycle[-1][0])))
@@ -190,12 +190,19 @@ class BackfillCycleTests(TestCase):
         call_command('backfill_mate_distance', '--all', stdout=out,
                      stderr=out)
 
+        # Since 25-Nov the side that is mated sets aside a reply whose
+        # number comes back to it (ingest.support_reaches): the cycle comes
+        # to rest at once instead of climbing until it is frozen.  The
+        # position that only had the loop loses its number, so does the one
+        # that only stood on it; nothing climbs round the loop.
         report = out.getvalue()
-        self.assertIn('frozen=4', report)
-        self.assertIn('written=0', report)
+        self.assertIn('fixed_point=True', report)
+        self.assertIn('frozen=0', report)
+        self.assertIn('cleared=2', report)
         for node, _uci in nodes:
             node.refresh_from_db()
-            self.assertEqual(node.mate_in, 10)     # ni una fila empeorada
+            self.assertEqual(node.status, 'WHITE_WIN')
+            self.assertTrue(node.mate_in is None or node.mate_in <= 11)
 
 
 class DeepChainTests(TestCase):

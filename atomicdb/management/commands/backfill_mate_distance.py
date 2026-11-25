@@ -25,7 +25,11 @@ unless it stands on a shortened row.  ``--all`` is the full recompute
 described above, the Wolfram case included.  Either way a witness swapped
 for another one just as good is not a change (§ ``_equivalent_witness``).
 ``--keys-file`` starts instead from a given list of rows, re-derived in any
-direction, and then climbs from them like the other passes.
+direction, and then climbs from them like the other passes.  In that scope
+every loser-to-move row whose number a reply sets is also checked against
+repetition loops (§ ``ingest.support_reaches``), not only the rows that
+would lengthen, so a distance counted round a loop and already at rest is
+brought down to what the rows outside the loop give it.
 
 LA RECURRENCIA (la misma funcion que usa la cascada, ``mate_distance_refresh``,
 para que las dos converjan al MISMO punto fijo y no a dos parecidos):
@@ -312,7 +316,8 @@ class Command(BaseCommand):
             pending, scanned = self._one_pass(
                 batch_size, overlay, frozen, origin,
                 keys=seed_keys if first else frontier,
-                shorter_only=first and seed_keys is None and not all_rows)
+                shorter_only=first and seed_keys is None and not all_rows,
+                loop_check='always' if seed_keys is not None else 'raise')
             first = False
             if passes == 1:
                 counts['scanned'] = scanned
@@ -403,7 +408,7 @@ class Command(BaseCommand):
     # ---------------- una pasada completa ----------------
 
     def _one_pass(self, batch_size, overlay, frozen, origin, keys=None,
-                  shorter_only=False):
+                  shorter_only=False, loop_check='raise'):
         """Devuelve ``({key: (mate_in, best_move)}, filas_leidas)``.
 
         Con ``keys`` (la frontera) solo se relee ese subconjunto; los filtros
@@ -455,8 +460,11 @@ class Command(BaseCommand):
                     current = live.get(row['key'],
                                        (row['mate_in'], row['best_move']))
                     node = _Node(row, current[0], current[1])
+                    # The walk against repetition loops reads the same
+                    # values this pass reads (§ ingest.support_reaches).
                     new_mate, new_move = ingest.mate_distance_refresh(
-                        node, out_edges)
+                        node, out_edges, loop_check=loop_check,
+                        overrides=live)
                     if (new_mate, new_move) == current:
                         continue
                     if (new_mate == current[0]

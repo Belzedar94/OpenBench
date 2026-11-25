@@ -84,7 +84,11 @@ class CascadeCycleTests(TestCase):
 
     def test_a_cycle_that_never_rests_is_cut_by_the_rewrite_limit(self):
         nodes = self._cycle()
+        # The walk against repetition loops (MATE_SUPPORT_HOPS) brings this
+        # cycle to rest by itself; with a hop limit too short to see it, the
+        # rewrite limit is the backstop measured here.
         with mock.patch('atomicdb.ingest.CASCADE_GUARD_LIMIT', 5_000), \
+                mock.patch('atomicdb.ingest.MATE_SUPPORT_HOPS', 1), \
                 mock.patch('atomicdb.ingest.CASCADE_REWRITE_LIMIT', 3):
             ingest.backup_cascade([nodes[0].key])
 
