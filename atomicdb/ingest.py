@@ -6535,6 +6535,10 @@ def front_of_own_queue(task):
                     state=AnalysisTask.TState.PENDING)
             .filter(Q(lane_account=account)
                     | Q(lane_account='', requested_by=account))
+            # The fair share serves an account's normal requests before its
+            # background ones (§ ``AnalysisTask.background``), so the front
+            # is the front of the task's own group.
+            .filter(background=task.background)
             .exclude(pk=task.pk))
     front = mine.order_by('queue_seq', 'id').values_list(
         'queue_seq', 'id').first()
@@ -6845,7 +6849,7 @@ def _stamp_request(task, now=None):
 
 
 def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
-                      source=AnalysisTask.Source.USER):
+                      source=AnalysisTask.Source.USER, background=False):
     """Bring a withdrawn row back as the request being made NOW.
 
     (position, generation) is unique, so a withdrawn row keeps the slot of its
@@ -6882,15 +6886,35 @@ def _revive_withdrawn(task, budget, multipv, requested_by='', route='',
     task.queue_seq = 0
     task.route = route
     task.multipv = multipv
+    # The priority is the new request's too (§ AnalysisTask.background).
+    task.background = background
     _stamp_request(task)
     task.save(update_fields=['state', 'completed', 'budget_nodes',
                              'source', 'requested_by', 'also_requested_by',
                              'backers', 'queue_seq', 'route', 'multipv',
-                             'requested_at'])
+                             'requested_at', 'background'])
+
+
+def _merge_priority(task, background, fresh=False):
+    """Apply a request's priority to a row it lands on.  Returns the fields
+    to save (empty when nothing changed).
+
+    ``fresh`` is a row that only now becomes a request (server work promoted
+    to the visitor band): it takes this request's priority as it is.  On a
+    row that already is a request a normal one wins: a normal request clears
+    the background flag and a background one never sets it
+    (§ ``AnalysisTask.background``).
+    """
+    wanted = background if fresh else (task.background and background)
+    if wanted == task.background:
+        return []
+    task.background = wanted
+    return ['background']
 
 
 def _request_rung(pos, requested_by='', route='', budget_floor=None,
-                  only_if_missing=False, only_unexplored=False):
+                  only_if_missing=False, only_unexplored=False,
+                  background=False):
     """Buy the next ladder rung for ONE position. The caller owns the tx.
 
     Devuelve 'queued' | 'already-queued' | 'already-solved', o el centinela
@@ -6973,7 +6997,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         position=pos, generation=pos.visits,
         defaults={'budget_nodes': floor, 'source': 'USER',
                   'requested_by': requested_by, 'route': route,
-                  'requested_at': timezone.now(),
+                  'requested_at': timezone.now(), 'background': background,
                   'multipv': multipv_for(pos.visits, floor, clamp=clamp)})
     if created:
         _apply_lifo_preference(task, requested_by)
@@ -6986,7 +7010,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         # un boton de deshacer en una condena.
         _revive_withdrawn(task, floor,
                           multipv_for(pos.visits, floor, clamp=clamp),
-                          requested_by, route)
+                          requested_by, route, background=background)
         _apply_lifo_preference(task, requested_by)
         return 'queued'
     if is_absorbed(task):
@@ -7007,7 +7031,7 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         # later.
         _revive_withdrawn(task, floor,
                           multipv_for(pos.visits, floor, clamp=clamp),
-                          requested_by, route)
+                          requested_by, route, background=background)
         _apply_lifo_preference(task, requested_by)
         return 'queued'
     if task.state == 'PENDING':
@@ -7019,12 +7043,13 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
                    and task.source == 'USER')
         task.budget_nodes = max(task.budget_nodes, floor)
         promoted = task.source != 'USER'
+        fields = (['source', 'budget_nodes', 'requested_by', 'route']
+                  + _merge_priority(task, background, fresh=promoted))
         task.source = 'USER'   # promocion: al frente de la cola
         if requested_by and not task.requested_by:
             task.requested_by = requested_by
         if route and not task.route:
             task.route = route
-        fields = ['source', 'budget_nodes', 'requested_by', 'route']
         if promoted or adopted:
             # Server work becoming a request, or an anonymous request taking
             # a name: either way a request made now, on an old row.
@@ -7058,11 +7083,14 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
                     position=pos, generation=generation,
                     budget_nodes=floor, source='USER',
                     requested_by=requested_by, route=route,
-                    requested_at=timezone.now(),
+                    requested_at=timezone.now(), background=background,
                     multipv=multipv_for(generation, floor, clamp=clamp))
             else:
                 follow_up.budget_nodes = max(follow_up.budget_nodes, floor)
-                fields = ['budget_nodes', 'source', 'requested_by', 'route']
+                fields = (['budget_nodes', 'source', 'requested_by', 'route']
+                          + _merge_priority(
+                              follow_up, background,
+                              fresh=follow_up.source != 'USER'))
                 if follow_up.source != 'USER' or (
                         requested_by and not follow_up.requested_by):
                     fields.append(_stamp_request(follow_up))
@@ -7076,9 +7104,15 @@ def _request_rung(pos, requested_by='', route='', budget_floor=None,
         # The existing lease already satisfies the requested rung. Mark it
         # as visitor-requested so subsequent clicks can be deduplicated
         # without consuming the hourly allowance repeatedly.
+        fields = _merge_priority(task, background,
+                                 fresh=task.source != 'USER')
         if task.source != 'USER':
             task.source = 'USER'
-            task.save(update_fields=['source', _stamp_request(task)])
+            fields += ['source', _stamp_request(task)]
+        if fields:
+            # A running search is not reordered by this, but the flag stays
+            # right if the lease is ever handed back to the queue.
+            task.save(update_fields=fields)
         # Sumarse a algo que YA esta en un motor no cambia ningun orden, pero
         # sigue habiendo alguien esperando el resultado: sin su nombre en la
         # fila, la campana solo sonaba para el primero.
@@ -7207,7 +7241,8 @@ def _ensure_expanded(pos):
     return pos
 
 
-def _expand_frontier(parent, limit=None, requested_by='', route=''):
+def _expand_frontier(parent, limit=None, requested_by='', route='',
+                     background=False):
     """Spend an exhausted request one ply deeper, proof-number style.
 
     Every selected child re-enters the ordinary ladder at its own natural
@@ -7232,7 +7267,8 @@ def _expand_frontier(parent, limit=None, requested_by='', route=''):
         counts['children_considered'] += 1
         child_route = (route + ',' + ucis[child.key]
                        if route and child.key in ucis else '')
-        outcome = _request_rung(child, requested_by, child_route)
+        outcome = _request_rung(child, requested_by, child_route,
+                                background=background)
         if outcome == _LADDER_EXHAUSTED:
             counts['children_exhausted'] += 1
         elif outcome == 'already-solved':
@@ -7248,7 +7284,7 @@ def _descent_outcome(status, stop, node, plies, totals):
                           descent_stop=stop, **totals)
 
 
-def _descend_frontier(pos, requested_by='', route=''):
+def _descend_frontier(pos, requested_by='', route='', background=False):
     """Follow the spent line down until the click finds something to buy.
 
     Proof-number search does not give up on a node whose whole frontier is
@@ -7294,7 +7330,7 @@ def _descend_frontier(pos, requested_by='', route=''):
             for name, value in _expand_frontier(
                     node, limit=remaining,
                     requested_by=requested_by,
-                    route=walked_route).items():
+                    route=walked_route, background=background).items():
                 totals[name] += value
             return _descent_outcome('expanded', 'queued', node, plies, totals)
         # Every candidate here is spent: charge the level and step down.
@@ -7503,7 +7539,7 @@ def _subtree_coverage(keys, requested_by):
     return searched, live
 
 
-def request_subtree(pos, requested_by='', route=''):
+def request_subtree(pos, requested_by='', route='', background=False):
     """Buy up to SUBTREE_TASK_CAP searches of SUBTREE_SEARCH_NODES below
     ``pos``, on the lines that decide it and the best lines first.
 
@@ -7593,6 +7629,16 @@ def request_subtree(pos, requested_by='', route=''):
                     whose = live.get(child.key)
                     if whose == 'mine':
                         counts['searches_waiting'] += 1
+                        if not background:
+                            # A normal request lifts the requester's own
+                            # background searches it counts as its own
+                            # (§ ``_merge_priority``).
+                            AnalysisTask.objects.filter(
+                                position__key=child.key,
+                                source=AnalysisTask.Source.USER,
+                                state__in=(AnalysisTask.TState.PENDING,
+                                           AnalysisTask.TState.LEASED),
+                                background=True).update(background=False)
                         continue
                     if whose == 'others':
                         counts['positions_others'] += 1
@@ -7601,7 +7647,8 @@ def request_subtree(pos, requested_by='', route=''):
                     # locks and re-reads the row itself.
                     outcome = _request_rung(Position(key=child.key),
                                             requested_by, child_route,
-                                            only_if_missing=True)
+                                            only_if_missing=True,
+                                            background=background)
                     if outcome == 'already-analyzed':
                         # Its search landed between the look and the lock.
                         counts['positions_searched'] += 1
@@ -7761,7 +7808,7 @@ def _breadth_swap_eligible(pos):
 
 def request_analysis(pos, requested_by='', route='', budget_floor=None,
                      only_if_missing=False, one_search=False,
-                     only_unexplored=False):
+                     only_unexplored=False, background=False):
     """Peticion publica: encola (o promociona) la tarea de esta posicion.
     Suelo de 128M: quien pide analisis merece profundidad de verdad.
     ``requested_by`` (cuenta OB del visitante logueado, o vacio) viaja hasta
@@ -7811,20 +7858,25 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
 
     ``only_unexplored`` (§ ``_request_rung``) only buys a first look, so it
     turns the swap off too and answers 'already-analyzed' for a position a
-    search reached since the caller picked it."""
+    search reached since the caller picked it.
+
+    ``background`` marks every task this request creates as a background
+    request, served after the same account's normal ones; a normal request
+    lifts that mark from the rows it lands on (§ ``_merge_priority``)."""
     if budget_floor == SUBTREE_REQUEST_NODES:
         if only_if_missing or one_search or only_unexplored:
             raise ValueError('the subtree request buys searches below the '
                              'position; only_if_missing and one_search ask '
                              'about the position itself')
-        return request_subtree(pos, requested_by=requested_by, route=route)
+        return request_subtree(pos, requested_by=requested_by, route=route,
+                               background=background)
     with atomic():
         swapped = False
         if budget_floor is None and not only_if_missing and not one_search \
                 and not only_unexplored and _breadth_swap_eligible(pos):
             swapped = True
             outcome = _descend_frontier(pos, requested_by=requested_by,
-                                        route=route)
+                                        route=route, background=background)
             if outcome != 'saturated':
                 DBEvent.objects.create(kind='BREADTH_SWAP', payload={
                     'key': pos.key, 'outcome': str(outcome),
@@ -7834,7 +7886,8 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
                        if isinstance(value, (int, str))}})
                 return outcome
         outcome = _request_rung(pos, requested_by, route, budget_floor,
-                                only_if_missing, only_unexplored)
+                                only_if_missing, only_unexplored,
+                                background=background)
         if isinstance(outcome, RequestOutcome):
             return outcome      # it carries its own detail
         if outcome != _LADDER_EXHAUSTED:
@@ -7843,7 +7896,8 @@ def request_analysis(pos, requested_by='', route='', budget_floor=None,
             return RequestOutcome('saturated')
         if one_search:
             return RequestOutcome(LADDER_SPENT)
-        return request_subtree(pos, requested_by=requested_by, route=route)
+        return request_subtree(pos, requested_by=requested_by, route=route,
+                               background=background)
 
 
 def notification_deserved(source, budget_nodes):

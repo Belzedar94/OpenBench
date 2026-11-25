@@ -63,6 +63,19 @@ request, which waits behind 2B, last.</title>
 anyone's second; B's second request waits behind its own 2B.</figcaption>
 </figure>
 
+<h3 id="background">Website first, scripts after</h3>
+<ul>
+<li>Within one account, requests made on the website are served before
+  requests a script made through the API. The script's requests are tagged
+  <em>background</em> on the queue pages.</li>
+<li>Your share of the queue against other accounts does not change: when it
+  is your turn, your website requests take it first.</li>
+<li>Clicking a position your script already queued lifts it to the website
+  level. A script can ask for that level itself with
+  <code>priority=normal</code> (see <a href="/atomicdb/docs/api/#priority">the
+  API</a>).</li>
+</ul>
+
 <h3 id="cap">How much you can queue</h3>
 <ul>
 <li>The cap is per person: <strong>{{ queue_cap }}</strong> queued requests,

@@ -147,7 +147,7 @@ class ApiRequestMovesTests(TestCase):
         self.assertNotIn('moves_ignored', payload)
         self.assertLessEqual(set(payload), {
             'status', 'key', 'fen', 'seeded', 'task', 'budget_nodes',
-            'task_state', 'backed', 'ahead'})
+            'task_state', 'backed', 'ahead', 'priority'})
         self.assertEqual(self._task().route, '')
         # And the queue keeps showing the tree's own path.
         body = Client().get('/atomicdb/queue/moky/').content.decode()

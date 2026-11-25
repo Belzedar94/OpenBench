@@ -469,6 +469,18 @@ class AnalysisTask(models.Model):
     # cuenta ya tenia, nunca uno mejor, asi que la cola de los demas no se
     # entera (§ views.api_queue_bump).
     queue_seq = models.BigIntegerField(default=0)
+    # A BACKGROUND request: what a script queues through the request API
+    # (``priority=low``, the default there; § views._request_priority).
+    # Served after every normal request of the same account (§ live_request.
+    # fair_share, which sorts it behind them inside the account's own
+    # partition).  Community request (jean_heibig, torom, Eclipsia,
+    # 25-Nov-2026): a crawler on the API and the same person clicking in the
+    # explorer share one account, and the clicks should not wait behind the
+    # crawl.  Only the account's own order changes: its fair share against
+    # everybody else is the same.  A normal request on the same row clears
+    # the flag; a background one never sets it on a row that is already
+    # normal.  False on every existing row and every request from a page.
+    background = models.BooleanField(default=False)
     # Ruta (UCIs separados por coma) por la que el peticionario LLEGO a la
     # posicion, ya validada contra las reglas de Atomic.  El DAG transpone:
     # el linaje canonico puede ensenar otro orden de jugadas y el autor no

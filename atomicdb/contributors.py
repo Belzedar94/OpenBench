@@ -433,8 +433,11 @@ def _queue_rows(username):
     # nadie ha adelantado nada — es literalmente el orden de llegada de antes;
     # en cuanto alguien adelanta una suya, listarlas por ``id`` pintaria la
     # adelantada en su sitio viejo con el numero de sitio nuevo al lado.
+    # ``background`` first of all: the account's normal requests are served
+    # before its background ones (§ AnalysisTask.background).
     pending = list(mine.filter(state=PENDING)
-                   .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
+                   .order_by('background', 'queue_seq', 'id')
+                   [:QUEUE_ROWS + 1])
     places = live_request.queue_ahead_map(pending)
     for task in pending:
         # El mapa devuelve ``(cuantas delante, cuantas tuyas)``: aqui se pinta
@@ -912,7 +915,8 @@ def present(username, now=None, every_worker=False):
                     # las ensena juntas.  El de la POSICION es el otro camino,
                     # para la que se esta mirando (§ live_request).
                     'task_id': task.id,
-                    'backers': task.backers})
+                    'backers': task.backers,
+                    'background': task.background})
         for task in pending]
     done_rows = [
         _presented(task, labels, now,
@@ -1050,7 +1054,8 @@ def present_queue(username, now=None, live=False):
         _presented(task, labels, now,
                    {'place': None if task.ahead is None else task.ahead + 1,
                     'when': _ago(task.request_time, now),
-                    'backers': task.backers})
+                    'backers': task.backers,
+                    'background': task.background})
         for task in pending]
     done_rows = [_presented(task, labels, now,
                             {'when': _ago(task.completed, now),
@@ -1080,7 +1085,8 @@ def present_anonymous(now=None):
     now = now or timezone.now()
     mine = _requests_of('')
     pending = list(mine.filter(state=PENDING)
-                   .order_by('queue_seq', 'id')[:QUEUE_ROWS + 1])
+                   .order_by('background', 'queue_seq', 'id')
+                   [:QUEUE_ROWS + 1])
     places = live_request.queue_ahead_map(pending)
     pending, pending_more = _overflow(pending, QUEUE_ROWS,
                                       mine.filter(state=PENDING))
@@ -1109,7 +1115,8 @@ def present_anonymous(now=None):
         pending_rows.append(_presented(task, labels, now, {
             'place': None if place is None else place[0] + 1,
             'when': _ago(task.request_time, now),
-            'backers': task.backers}))
+            'backers': task.backers,
+            'background': task.background}))
     done_rows = [_presented(task, labels, now,
                             {'when': _ago(task.completed, now),
                              'nodes': human(task.nodes_searched)})
