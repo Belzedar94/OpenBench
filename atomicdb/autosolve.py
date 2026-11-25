@@ -16,9 +16,11 @@ WHAT QUALIFIES is read off a search's showcase (the current lines of
   mate, and only while the position is open.
 
 "Scores a mate" is a value beyond the clamp, ``TB_CLAMP_CEILING`` < |eval| <
-10000: the worker writes ``score mate N`` as ``(10000 - N)`` and clamps every
-centipawn score to +-9500 (§ ingest, mate CORTO).  So exactly +-9500 is not a
-mate the engine found but a tablebase win or a huge eval with no distance, and
+10000: the worker writes ``score mate N`` as ``(10000 - N)`` and every
+centipawn score lands at +-9500 or below (§ score_bands: a tablebase win as
+9500 minus its plies to the tables, a huge eval compressed under that).  So a
+value up to +-9500 is not a mate the engine found but a tablebase win or a
+huge eval with no mate distance, and
 the solver's certificates end on real terminal positions, never on a table
 (§ solve, "every leaf is genuinely terminal").  Replayed at 8M on the open
 positions at the band (29-Oct, a 1/512 key sample, the df-pn build of 22-Aug,

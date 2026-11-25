@@ -168,4 +168,5 @@ class TableHelpTests(TestCase):
         # The values the eval note explains are the ones the code prints.
         self.assertIn('9997 is\nmate in 3 more moves'.replace('\n', ' '),
                       ' '.join(body.split()))
-        self.assertIn('capped at 9500', ' '.join(body.split()))
+        self.assertIn('so 9481 is a tablebase win 19 plies down',
+                      ' '.join(body.split()))

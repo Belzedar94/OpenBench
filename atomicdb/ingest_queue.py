@@ -37,7 +37,7 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import ingest, logic, preferences, propagation_queue
+from . import ingest, logic, preferences, propagation_queue, score_bands
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -271,6 +271,9 @@ def apply_job(job):
         # whatever tables the worker had.
         tb_prepared = ingest.prepare_server_tb_closure(job.position_id, fen)
         if tb_prepared is None:
+            # The stored scale first (§ score_bands); ingest_analysis does it
+            # again, idempotently, for its other callers.
+            lines = score_bands.normalize_lines(lines, fen.split()[1] == 'w')
             mate_proofs = ingest.prepare_mate_proofs(fen, lines)
 
     # De QUE cola salio este trabajo.  Es lo unico que sabe la procedencia de

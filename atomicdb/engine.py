@@ -4,6 +4,8 @@ Usado por el runner local (M1) y por el worker distribuido (M2)."""
 import re
 import subprocess
 
+from . import score_bands
+
 
 class Engine:
     def __init__(self, path, threads=1, hash_mb=256, syzygy=''):
@@ -57,9 +59,9 @@ class Engine:
                          'eval_cp': None, 'mate': None,
                          'raw': line.strip()}
                 if kind == 'cp':
-                    # scores TB del motor (fuera de escala de mate): clamp para
-                    # que prioricen (banda >=9000) sin fingir distancia de mate
-                    val = max(-9_500, min(9_500, val))
+                    # La escala almacenada (§ score_bands): tablas por su
+                    # distancia, evals enormes comprimidos por debajo.
+                    val = score_bands.engine_cp_to_stored(val)
                     entry['eval_cp'] = val if stm_white else -val
                 else:
                     entry['mate'] = val if stm_white else -val
