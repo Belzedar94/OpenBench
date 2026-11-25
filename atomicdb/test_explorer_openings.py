@@ -91,6 +91,22 @@ class ExplorerOpeningRouteTests(TestCase):
         self.assertTrue(response.context['opening']['exact'])
         self.assertContains(response, 'data-play="g1f3,f7f6,b1c3"')
 
+    def test_on_the_named_position_the_name_links_to_its_roots_row(self):
+        """torom, 24-Nov: on the position that bears the name there is no
+        position to link to, so the name opens its row on /atomicdb/roots/
+        (rows carry ``id="op-<key>"``)."""
+        ucis = ['g1f3', 'f7f6', 'b1c3']
+        target = self._materialize(ucis)[-1]
+
+        response = self.client.get(
+            f'/atomicdb/explore/{target.key}/', {'play': ','.join(ucis)})
+
+        self.assertEqual(response.context['opening']['position_key'],
+                         target.key)
+        self.assertIsNone(response.context['opening_url'])
+        self.assertContains(
+            response, f'href="/atomicdb/roots/#op-{target.key}"')
+
     def test_route_with_missing_intermediate_lands_on_deepest_prefix(self):
         # Antes esto era un 409 "not fully materialized".  Desde el 8-ago
         # (reporte de comunidad: "it should just build a tree from the pgn")
