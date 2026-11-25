@@ -15,7 +15,7 @@ pantalla.
 """
 
 import pathlib
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.core.cache import cache
@@ -157,6 +157,129 @@ class WindowTests(TestCase):
         self.assertEqual(day['rows'], [])
         self.assertEqual(_names(life), ['alice', 'bob'])
         self.assertIn('last 24 hours', day['empty'])
+
+
+class TodayWindowTests(TestCase):
+    """"Today (UTC)": since 00:00 UTC of the current day, next to the 24h."""
+
+    NOW = datetime(2026, 11, 25, 6, 0, tzinfo=dt_timezone.utc)
+
+    def setUp(self):
+        contributors.reset_cache()
+        self.client = Client()
+
+    def _at(self, name, nodes, moment, uci='a2a3'):
+        task = _searched(name, nodes, uci=uci)
+        AnalysisTask.objects.filter(pk=task.pk).update(completed=moment)
+        return task
+
+    def _boards(self):
+        contributors.reset_cache()
+        return contributors.leaderboard(
+            now=self.NOW, with_today=True)['contrib_boards']
+
+    def test_yesterday_late_counts_in_24h_but_not_today(self):
+        self._at('alice', 5_000_000, datetime(2026, 11, 24, 23, 59,
+                                              tzinfo=dt_timezone.utc))
+        self._at('bob', 2_000_000, datetime(2026, 11, 25, 0, 1,
+                                            tzinfo=dt_timezone.utc),
+                 uci='b2b3')
+
+        today, day, life = self._boards()
+
+        self.assertEqual(today['window'], 'Today (UTC)')
+        self.assertEqual(_names(today), ['bob'])
+        self.assertEqual(today['fleet_h'], '2.0M')
+        self.assertEqual(_names(day), ['alice', 'bob'])
+        self.assertEqual(day['fleet_h'], '7.0M')
+        self.assertEqual(_names(life), ['alice', 'bob'])
+
+    def test_midnight_itself_belongs_to_today(self):
+        self._at('alice', 1_000_000, datetime(2026, 11, 25, 0, 0,
+                                              tzinfo=dt_timezone.utc))
+
+        today, _day, _life = self._boards()
+
+        self.assertEqual(_names(today), ['alice'])
+
+    def test_today_keeps_the_stamped_and_unclaimed_split(self):
+        # Same attribution as the other boards: a stamped delivery is a fact,
+        # a machine with no account counts for the fleet only.
+        task = self._at('alice', 3_000_000, datetime(2026, 11, 25, 1, 0,
+                                                     tzinfo=dt_timezone.utc))
+        task.delivered_by = 'carol'
+        task.save(update_fields=['delivered_by'])
+        orphan = _completed(_child('b2b3'), 'orphan-box-atomicdb',
+                            1_000_000, 1.0)
+        AnalysisTask.objects.filter(pk=orphan.pk).update(
+            completed=datetime(2026, 11, 25, 2, 0, tzinfo=dt_timezone.utc))
+
+        today, _day, _life = self._boards()
+
+        self.assertEqual(_names(today), ['carol'])
+        self.assertEqual(today['fleet_h'], '4.0M')
+        self.assertEqual(today['unclaimed_h'], '1.0M')
+        self.assertEqual(today['rows'][0]['share'], 75.0)
+
+    def test_an_empty_day_says_so(self):
+        self._at('alice', 1_000_000, datetime(2026, 11, 24, 20, 0,
+                                              tzinfo=dt_timezone.utc))
+
+        today, day, _life = self._boards()
+
+        self.assertEqual(today['rows'], [])
+        self.assertIn('00:00 UTC', today['empty'])
+        self.assertEqual(_names(day), ['alice'])
+
+    def test_an_entry_from_before_midnight_does_not_leak_yesterday(self):
+        self._at('alice', 1_000_000, datetime(2026, 11, 24, 23, 30,
+                                              tzinfo=dt_timezone.utc))
+        contributors.reset_cache()
+        before = datetime(2026, 11, 24, 23, 59, 50, tzinfo=dt_timezone.utc)
+        contributors.leaderboard(now=before, with_today=True)
+        after = datetime(2026, 11, 25, 0, 0, 20, tzinfo=dt_timezone.utc)
+
+        # Still fresh (30 s old), so the same entry is served after midnight.
+        today, day, _life = contributors.leaderboard(
+            now=after, with_today=True)['contrib_boards']
+
+        self.assertEqual(today['rows'], [])
+        self.assertEqual(_names(day), ['alice'])
+
+    def test_the_midnight_is_utc_whatever_the_offset_of_now(self):
+        tokyo = dt_timezone(timedelta(hours=9))
+        # 08:00 in Tokyo on the 26th is 23:00 UTC on the 25th.
+        moment = datetime(2026, 11, 26, 8, 0, tzinfo=tokyo)
+
+        self.assertEqual(contributors.utc_midnight(moment),
+                         datetime(2026, 11, 25, tzinfo=dt_timezone.utc))
+
+    def test_the_snapshot_costs_no_extra_query(self):
+        # Today comes out of the 24h GROUP BY: the pings, the all-time pass
+        # and the 24h pass, three queries, as before.
+        self._at('alice', 1_000_000, datetime(2026, 11, 25, 1, 0,
+                                              tzinfo=dt_timezone.utc))
+        alias = settings.ATOMICDB_DATABASE_ALIAS
+        with CaptureQueriesContext(connections[alias]) as queries:
+            snap = contributors.measure_fleet(self.NOW)
+
+        self.assertEqual(len(queries), 3)
+        self.assertEqual(snap['nodes_today'], 1_000_000)
+        self.assertEqual(snap['users_today'],
+                         {'alice': {'nodes': 1_000_000, 'tasks': 1}})
+
+    def test_the_page_shows_today_first_and_home_does_not(self):
+        _searched('alice', 4_000_000, ago_hours=0)
+
+        page = self.client.get('/atomicdb/contributors/').content.decode()
+        home = self.client.get('/atomicdb/').content.decode()
+
+        self.assertIn('Today (UTC)', page)
+        self.assertLess(page.index('Today (UTC)'),
+                        page.index('Last 24 hours'))
+        self.assertLess(page.index('Last 24 hours'), page.index('All time'))
+        self.assertNotIn('Today (UTC)', home)
+        self.assertIn('Last 24 hours', home)
 
 
 class AttributionTests(TestCase):
@@ -336,8 +459,9 @@ class MobileOverflowTests(TestCase):
 
         body = self.client.get('/atomicdb/contributors/').content.decode()
 
-        # Una por ventana, y siempre POR FUERA de su tabla.
-        self.assertEqual(body.count('contrib-scroll'), 2)
+        # Una por ventana (today, 24h, all time), y siempre POR FUERA de su
+        # tabla.
+        self.assertEqual(body.count('contrib-scroll'), 3)
         self.assertLess(body.index('contrib-scroll'), body.index('lb-table'))
 
     def test_the_container_really_scrolls(self):
