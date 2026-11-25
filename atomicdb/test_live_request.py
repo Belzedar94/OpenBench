@@ -43,8 +43,9 @@ from .testing import TestCase
 # de borrarse para que el test que la suma siga contando el dia que alguien
 # vuelva a colgar consultas del render de una peticion viva.
 LANE_LAYOUT_QUERIES = 0
-# The aggregate behind ``served_rank``: who was served least recently
-# (§ ``live_request.served_rank``).  One statement, not one per row.
+# The lookup behind ``served_rank``: who was served least recently
+# (§ ``live_request._served_stamps``).  One statement, not one per row or
+# per account.
 SERVED_RANK_QUERIES = 1
 
 # El texto de la linea, tal y como sale del minificador (que reordena

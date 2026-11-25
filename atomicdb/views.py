@@ -127,6 +127,10 @@ DEEP_LEASES_FLOOR = 1
 # Cuantos ids de la cola ya ordenada se bloquean de una vez.  Mismo tamano que
 # el ``chunk_size`` con el que esto se recorria cuando era un solo cursor.
 LEASE_SCAN_CHUNK = 64
+# How many ordered ids the first page of step one reads (§
+# ``_lease_order_pages``); the second reads eight times as many, and after
+# that the whole queue is read.
+LEASE_PAGE_ROWS = 4 * LEASE_SCAN_CHUNK
 MAX_REPORTED_NPS = 1_000_000_000_000
 # Techo de peticiones humanas esperando POR PERSONA (PENDING, source USER,
 # sobre posiciones aun sin resolver).  Cinco mil salen de los numeros del
@@ -747,6 +751,47 @@ def _lease_order(ordered, max_budget=None):
             if budget <= max_budget]
 
 
+def _lease_order_pages(ordered, max_budget=None):
+    """``_lease_order`` in pages: the first ``LEASE_PAGE_ROWS`` ids, then the
+    next ``LEASE_PAGE_ROWS * 8``, then the whole list.  Each page is fetched
+    only when everything before it has been handed out.
+
+    WHY (25-Nov-2026).  With about 20k rows charged, step one pulled every
+    ordered id into Python, plus a final sort of the whole queue of about a
+    second, and ``choose_pending`` can run three times per lease; almost
+    always the first chunk decides.  A page is the same statement with
+    ``LIMIT``/``OFFSET``: the WHERE is the same, so the fair-share window
+    still sums over every row and every row keeps its place, and PostgreSQL
+    only keeps the top of the sort.  The pages are consecutive slices of the
+    same total order (it ends in ``id``), so they hand out the ids in the
+    order of the full list.
+
+    THE LAST STEP IS THE FULL LIST, NOT ANOTHER OFFSET.  Each page is a new
+    statement, and between two of them a row can complete or be leased and
+    shift the rows behind it; an offset could then step over a row.  The full
+    list, minus the ids already handed out, cannot.
+    """
+    seen = set()
+    start = 0
+    for size in (LEASE_PAGE_ROWS, LEASE_PAGE_ROWS * 8):
+        if max_budget is None:
+            page = list(ordered.values_list('id', flat=True)
+                        [start:start + size])
+            ids = page
+        else:
+            page = list(ordered.values_list('id', 'budget_nodes')
+                        [start:start + size])
+            ids = [task_id for task_id, _budget in page]
+        seen.update(ids)
+        yield ([task_id for task_id, budget in page if budget <= max_budget]
+               if max_budget is not None else ids)
+        if len(page) < size:
+            return
+        start += size
+    yield [task_id for task_id in _lease_order(ordered, max_budget)
+           if task_id not in seen]
+
+
 def _locked_in_order(ordered, max_budget=None):
     """Recorre ``ordered`` devolviendo las filas YA bloqueadas, en ese orden.
 
@@ -777,22 +822,25 @@ def _locked_in_order(ordered, max_budget=None):
     the other workers until this transaction ends.  Read here, those tasks
     are never locked and stay in the queue, in their place, for everyone
     else.  Step one costs the same query with one more column.  None keeps
-    the historic query, column list included.
+    the historic column list.
+
+    The ids come in pages (§ ``_lease_order_pages``): the rest of the queue
+    is only read when nothing in the first pages could be taken.
     """
-    order = _lease_order(ordered, max_budget)
-    for start in range(0, len(order), LEASE_SCAN_CHUNK):
-        chunk = order[start:start + LEASE_SCAN_CHUNK]
-        rows = {task.id: task for task in AnalysisTask.objects
-                .select_for_update(skip_locked=True, of=('self',))
-                .select_related('position')
-                .filter(id__in=chunk, state='PENDING')}
-        for task_id in chunk:
-            task = rows.get(task_id)
-            # The budget is read again under the lock: a pending task can be
-            # raised to a larger budget between the two steps.
-            if task is not None and (max_budget is None
-                                     or task.budget_nodes <= max_budget):
-                yield task
+    for order in _lease_order_pages(ordered, max_budget):
+        for start in range(0, len(order), LEASE_SCAN_CHUNK):
+            chunk = order[start:start + LEASE_SCAN_CHUNK]
+            rows = {task.id: task for task in AnalysisTask.objects
+                    .select_for_update(skip_locked=True, of=('self',))
+                    .select_related('position')
+                    .filter(id__in=chunk, state='PENDING')}
+            for task_id in chunk:
+                task = rows.get(task_id)
+                # The budget is read again under the lock: a pending task
+                # can be raised to a larger budget between the two steps.
+                if task is not None and (max_budget is None
+                                         or task.budget_nodes <= max_budget):
+                    yield task
 
 
 def _requeue_leases(leases):

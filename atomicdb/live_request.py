@@ -54,7 +54,7 @@ contradicting the other.
 from datetime import timedelta
 
 from django.db.models import (BigIntegerField, Case, CharField, F,
-                              IntegerField, Max, Q, Sum, Value, When, Window)
+                              IntegerField, Q, Sum, Value, When, Window)
 from django.utils import timezone
 
 from .ingest import notification_deserved
@@ -206,7 +206,10 @@ def fair_share(queryset, now=None):
     aqui lo arrendado seria descontarlo de la suma.  Las filas arrendadas
     salen ordenadas junto a las demas y quien llama las descarta despues —
     ``choose_pending`` porque su lote solo bloquea PENDING, ``queue_ahead``
-    porque solo cuenta PENDING.
+    porque solo cuenta PENDING.  And no more than that: ``served_rank`` only
+    ranks the accounts that have USER rows in ``CHARGED`` (§
+    ``_served_stamps``), so a row of an account with nothing there would
+    read 0.
 
     BACKGROUND REQUESTS GO BEHIND THE ACCOUNT'S NORMAL ONES (§
     ``AnalysisTask.background``: by default, what a script queues through the
@@ -272,30 +275,87 @@ def served_rank(now=None):
     It sits after every other service key, so it only orders rows that would
     otherwise fall to ``id``; equal timestamps share a rank and still do.
 
-    ONE aggregate per call, keyed by account (the same partition as the fair
-    share: USER only, so '' is the anonymous tide alone), read through the
-    ``atomic_task_state_done`` index: LEASED rows plus COMPLETED rows that
-    finished inside the window (a lease inside the window can only have
-    completed inside it).  The result is a handful of accounts, turned into a
-    ``Case``.
+    The stamp of an account is its last ``leased_at`` among its USER rows
+    (keyed by ``_effective_account()``, the partition of the fair share, so
+    '' is the anonymous tide alone) that are LEASED, or COMPLETED inside the
+    window, with the lease itself inside the window.
     """
-    cutoff = (now or timezone.now()) - SERVED_WINDOW
-    last = list(AnalysisTask.objects
-                .filter(source=USER, leased_at__gte=cutoff)
-                .filter(Q(state=LEASED)
-                        | Q(state=COMPLETED, completed__gte=cutoff))
-                .annotate(_served_account=_effective_account())
-                .order_by().values('_served_account')
-                .annotate(last=Max('leased_at'))
-                .values_list('_served_account', 'last'))
-    stamps = sorted({stamp for _account, stamp in last})
+    return _rank_case(_served_stamps((now or timezone.now()) - SERVED_WINDOW))
+
+
+def _rank_case(last):
+    """The ``served_rank`` expression for ``{account: last lease}``."""
+    stamps = sorted(set(last.values()))
     rank = {stamp: index + 1 for index, stamp in enumerate(stamps)}
     whens = [When(Q(source=USER) & _account_q(account),
                   then=Value(rank[stamp]))
-             for account, stamp in last]
+             for account, stamp in last.items()]
     if not whens:
         return Value(0, output_field=IntegerField())
     return Case(*whens, default=Value(0), output_field=IntegerField())
+
+
+def _served_stamps(cutoff):
+    """``{account: last lease}`` for the accounts with USER rows in the queue.
+
+    ONE statement, and it reads no row per row of the window (25-Nov-2026).
+    The aggregate it replaces grouped every lease of the last hour: through
+    ``atomic_task_state_done`` that was every task COMPLETED in the hour, AUTO
+    and FILL included, 14k rows and 68k heap blocks, 1.3-2.7 s on every pass
+    of ``choose_pending``, to produce about seven timestamps.
+
+    ONLY THE ACCOUNTS IN THE QUEUE.  The rank orders rows of the queryset it
+    annotates, and every queryset that reads it is a part of the USER band's
+    ``CHARGED`` rows (§ ``fair_share``, which needs them: a window only sees
+    the rows that survive the WHERE).  An account with no such row has no row
+    to order, and dropping its stamp only renumbers the others: the rank is
+    the place of a stamp among the distinct stamps, so it keeps the order and
+    the ties of every account that is left, and 0 stays 0.  The ordering any
+    reader sees is the same.
+
+    One max per account, as two probes of an index on (account, leased_at)
+    each: the author's rows with no lane (``atomic_task_user_served``) and the
+    rows that travel with the account's lane (``atomic_task_lane_served``).
+    Together they are exactly the rows whose ``_effective_account()`` is that
+    account (§ ``_account_q``).  The present accounts come from the rows the
+    order reads anyway.
+    """
+    from django.db import connections
+    from django.utils.dateparse import parse_datetime
+
+    alias = AnalysisTask.objects.db
+    connection = connections[alias]
+    table = connection.ops.quote_name(AnalysisTask._meta.db_table)
+    stamp = connection.ops.adapt_datetimefield_value(cutoff)
+    # The enum values go in as literals, not parameters: the planner has to
+    # see ``source = 'USER'`` to match the partial indexes, also under a
+    # driver that binds parameters on the server.  They are model constants.
+    user, leased = USER.value, LEASED.value
+    served = (f"t.leased_at >= %s AND (t.state = '{leased}' "
+              f"OR (t.state = '{COMPLETED.value}' AND t.completed >= %s))")
+    sql = (
+        'SELECT q.account, '
+        f"(SELECT MAX(t.leased_at) FROM {table} t WHERE t.source = '{user}' "
+        "AND t.requested_by = q.account AND t.lane_account = '' "
+        f'AND {served}), '
+        f"(SELECT MAX(t.leased_at) FROM {table} t WHERE t.source = '{user}' "
+        "AND t.lane_account = q.account AND t.lane_account <> '' "
+        f'AND {served}) '
+        "FROM (SELECT DISTINCT CASE WHEN lane_account = '' THEN requested_by "
+        f'ELSE lane_account END AS account FROM {table} '
+        f"WHERE source = '{user}' "
+        f"AND state IN ('{PENDING.value}', '{leased}')) q")
+    params = [stamp, stamp, stamp, stamp]
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    last = {}
+    for account, by_author, by_lane in rows:
+        stamps = [parse_datetime(value) if isinstance(value, str) else value
+                  for value in (by_author, by_lane) if value is not None]
+        if stamps:
+            last[account] = max(stamps)
+    return last
 
 
 # Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
