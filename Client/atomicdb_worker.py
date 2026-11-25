@@ -74,7 +74,7 @@ from urllib3.util.retry import Retry
 # start.  Such a worker refuses any file that does not speak its protocol,
 # so it never installs this build and never takes that path because of it.
 ATOMICDB_WORKER_UPDATE_PROTOCOL = 2
-ATOMICDB_WORKER_BUILD = 2026112401
+ATOMICDB_WORKER_BUILD = 2026112501
 WORKER_UPDATE_INTERVAL_SECONDS = 30 * 60
 # Windows restart: how long the new worker must stay up before this one
 # hands over and exits.  Failures of the restart itself (a mangled command
@@ -3090,13 +3090,49 @@ def format_task_start(task, username, slot=0, jobs=1):
     return slot_prefix(slot, jobs) + ' | '.join(parts)
 
 
+# The engine prints a tablebase score as ``score cp +-(20000 - d)``, d the
+# plies to the position where the tables were probed.  Copied from
+# atomicdb/score_bands.py (ENGINE_TB_CP, TB_DISTANCE_MAX, ENGINE_TB_MIN_CP):
+# this file has to stand alone, so keep the three in step with it.
+ENGINE_TB_CP = 20_000
+TB_DISTANCE_MAX = 250
+ENGINE_TB_MIN_CP = ENGINE_TB_CP - TB_DISTANCE_MAX
+_RAW_SCORE_CP = re.compile(r'\bscore cp (-?\d+)\b')
+
+
+def engine_cp(line):
+    """The engine's own cp score of a line, White's point of view.
+
+    ``eval_cp`` is what is sent, clamped to +-9500 (the server reads the
+    distance to the tables from ``raw``).  The console wants what the engine
+    said, so a clamped value is put back from the raw line, with the sign
+    ``eval_cp`` already gives it.  None for a line without a cp score.
+    """
+    value = line.get('eval_cp')
+    if value is None:
+        return None
+    match = _RAW_SCORE_CP.search(line.get('raw') or '')
+    if match is not None and value != 0:
+        said = abs(int(match.group(1)))
+        if said > abs(value):
+            return said if value > 0 else -said
+    return value
+
+
 def format_eval(line):
-    """'+1.23', '-0.40' or '#5' / '#-3', from White's point of view."""
+    """From White's point of view: '+1.23', '-0.40', '#5' / '#-3', or
+    'TB win, 19 plies' / 'TB loss, 19 plies' for a tablebase score (White
+    wins or loses, the tables 19 plies down)."""
     if line.get('mate') is not None:
         return f"#{line['mate']}"
-    if line.get('eval_cp') is None:
+    cp = engine_cp(line)
+    if cp is None:
         return '?'
-    return f"{line['eval_cp'] / 100:+.2f}"
+    if abs(cp) >= ENGINE_TB_MIN_CP:
+        plies = min(TB_DISTANCE_MAX, max(0, ENGINE_TB_CP - abs(cp)))
+        return (f"TB {'win' if cp > 0 else 'loss'}, {plies} "
+                f"{'ply' if plies == 1 else 'plies'}")
+    return f'{cp / 100:+.2f}'
 
 
 def describe_submit_reply(status, body):
