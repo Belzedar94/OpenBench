@@ -33,6 +33,16 @@ M = 1_000_000
 TB_FEN = '4k3/8/8/8/8/8/PPP5/KQ6 w - - 0 1'
 
 
+def _no_head_pages(*args, **kwargs):
+    return False
+    yield  # pragma: no cover - makes this a generator that yields nothing
+
+
+def no_heads():
+    """Turn the head of the queue off: the lease reads only the pages."""
+    return mock.patch.object(views, '_lease_head_pages', _no_head_pages)
+
+
 def old_served_rank(now=None):
     """``live_request.served_rank`` as it was before 25-Nov-2026: the oracle."""
     cutoff = (now or timezone.now()) - live_request.SERVED_WINDOW
@@ -271,12 +281,16 @@ class _LeaseCompare(_Queue):
         return tasks[0]['id'] if tasks else None
 
     def chosen(self, paged, page_rows=2, **post):
-        """The task this lease would hand out, with nothing kept."""
+        """The task this lease would hand out, with nothing kept.  The head
+        of the queue (§ ``views._lease_head_pages``, held to the same oracle
+        in ``test_lease_heads``) is off on both sides: here the pages alone
+        are compared with the whole list."""
         whole = (lambda ordered, max_budget=None:
                  iter([views._lease_order(ordered, max_budget)]))
-        patches = ([mock.patch.object(views, 'LEASE_PAGE_ROWS', page_rows)]
-                   if paged else
-                   [mock.patch.object(views, '_lease_order_pages', whole)])
+        patches = [no_heads()]
+        patches += ([mock.patch.object(views, 'LEASE_PAGE_ROWS', page_rows)]
+                    if paged else
+                    [mock.patch.object(views, '_lease_order_pages', whole)])
         with transaction.atomic(using=self.alias):
             for patch in patches:
                 patch.start()
@@ -382,7 +396,7 @@ class PagedLeaseEquivalenceTests(_LeaseCompare):
             calls.append(args)
             return original(*args, **kwargs)
 
-        with mock.patch.object(views, '_lease_order', spy), \
+        with mock.patch.object(views, '_lease_order', spy), no_heads(), \
                 CaptureQueriesContext(connections[self.alias]) as queries:
             self.assertIsNotNone(self._post())
 

@@ -317,8 +317,9 @@ def _served_stamps(cutoff):
     each: the author's rows with no lane (``atomic_task_user_served``) and the
     rows that travel with the account's lane (``atomic_task_lane_served``).
     Together they are exactly the rows whose ``_effective_account()`` is that
-    account (§ ``_account_q``).  The present accounts come from the rows the
-    order reads anyway.
+    account (§ ``_account_q``).  The present accounts come from
+    ``_queued_accounts_sql``: one index probe per account, not a pass over
+    the queue.
     """
     from django.db import connections
     from django.utils.dateparse import parse_datetime
@@ -333,18 +334,16 @@ def _served_stamps(cutoff):
     user, leased = USER.value, LEASED.value
     served = (f"t.leased_at >= %s AND (t.state = '{leased}' "
               f"OR (t.state = '{COMPLETED.value}' AND t.completed >= %s))")
+    with_accounts, accounts = _queued_accounts_sql(table)
     sql = (
-        'SELECT q.account, '
+        f'{with_accounts} SELECT q.account, '
         f"(SELECT MAX(t.leased_at) FROM {table} t WHERE t.source = '{user}' "
         "AND t.requested_by = q.account AND t.lane_account = '' "
         f'AND {served}), '
         f"(SELECT MAX(t.leased_at) FROM {table} t WHERE t.source = '{user}' "
         "AND t.lane_account = q.account AND t.lane_account <> '' "
         f'AND {served}) '
-        "FROM (SELECT DISTINCT CASE WHEN lane_account = '' THEN requested_by "
-        f'ELSE lane_account END AS account FROM {table} '
-        f"WHERE source = '{user}' "
-        f"AND state IN ('{PENDING.value}', '{leased}')) q")
+        f'FROM ({accounts}) q')
     params = [stamp, stamp, stamp, stamp]
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
@@ -356,6 +355,155 @@ def _served_stamps(cutoff):
         if stamps:
             last[account] = max(stamps)
     return last
+
+
+# The predicates of the three partial indexes behind the head of the queue
+# (§ ``queue_heads``, migration 0078).  Written once and used verbatim by the
+# queries: PostgreSQL only uses a partial index when it can prove the query's
+# WHERE implies the index's, and the same text is the simplest proof.
+QUEUE_AUTHOR_WHERE = ("source = 'USER' AND state = 'PENDING' "
+                      "AND lane_account = ''")
+QUEUE_LANE_WHERE = ("source = 'USER' AND state = 'PENDING' "
+                    "AND lane_account <> ''")
+QUEUE_IRREGULAR_WHERE = ("source = 'USER' AND state IN ('PENDING', 'LEASED') "
+                         "AND (backers > 0 OR lane_account <> '' "
+                         "OR requested_by = '')")
+
+
+def _queued_accounts_sql(table):
+    """``(WITH clause, SELECT)`` naming every account with USER rows in
+    ``CHARGED``, keyed like ``_effective_account()``.
+
+    A loose index scan: the waiting rows are walked one account at a time
+    through ``atomic_task_queue_author`` and ``atomic_task_queue_lane``
+    (each step is "the next account after this one", one probe), so ten
+    accounts holding 17k rows cost about twenty probes instead of a pass over
+    the 17k.  The leased rows are read whole: they are one per busy slot.
+    The set is exactly the one ``SELECT DISTINCT`` over ``CHARGED`` gave.
+    """
+    def walk(name, column, where):
+        return (
+            f'{name}(account) AS ('
+            f'SELECT (SELECT {column} FROM {table} WHERE {where} '
+            f'ORDER BY {column} LIMIT 1) '
+            'UNION ALL '
+            f'SELECT (SELECT {column} FROM {table} WHERE {where} '
+            f'AND {column} > {name}.account ORDER BY {column} LIMIT 1) '
+            f'FROM {name} WHERE {name}.account IS NOT NULL)')
+
+    with_clause = ('WITH RECURSIVE '
+                   + walk('qa', 'requested_by', QUEUE_AUTHOR_WHERE) + ', '
+                   + walk('ql', 'lane_account', QUEUE_LANE_WHERE))
+    select = (
+        'SELECT account FROM qa WHERE account IS NOT NULL '
+        'UNION SELECT account FROM ql WHERE account IS NOT NULL '
+        "UNION SELECT CASE WHEN lane_account = '' THEN requested_by "
+        f'ELSE lane_account END FROM {table} '
+        f"WHERE source = '{USER.value}' AND state = '{LEASED.value}'")
+    return with_clause, select
+
+
+def _cursor_rows(sql, params=()):
+    from django.db import connections
+    connection = connections[AnalysisTask.objects.db]
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def queued_accounts():
+    """The accounts with USER rows in ``CHARGED`` (§ ``_queued_accounts_sql``)."""
+    from django.db import connections
+    connection = connections[AnalysisTask.objects.db]
+    table = connection.ops.quote_name(AnalysisTask._meta.db_table)
+    with_clause, select = _queued_accounts_sql(table)
+    return {row[0] for row in _cursor_rows(f'{with_clause} {select}')}
+
+
+def queue_heads(accounts, rows):
+    """``{account: [(background, queue_seq, id), ...]}``: the first ``rows +
+    1`` waiting USER rows of each account, in the order the fair-share window
+    walks them (§ ``fair_share``: leased first, then ``background``,
+    ``queue_seq``, ``id``).
+
+    One statement, two index range scans of ``rows + 1`` entries per account
+    (the author's rows without a lane, and the rows travelling with the
+    account's lane), merged here.  Nothing else is read: no position, no
+    window.  Getting ``rows + 1`` tells a complete head from a cut one.
+    """
+    from django.db import connections
+    connection = connections[AnalysisTask.objects.db]
+    table = connection.ops.quote_name(AnalysisTask._meta.db_table)
+    parts, params = [], []
+    columns = 'id, background, queue_seq, requested_by, lane_account'
+    order = f'ORDER BY background, queue_seq, id LIMIT {int(rows) + 1}'
+    for account in sorted(accounts):
+        parts.append(f'SELECT * FROM (SELECT {columns} FROM {table} '
+                     f'WHERE {QUEUE_AUTHOR_WHERE} AND requested_by = %s '
+                     f'{order}) h{len(parts)}')
+        params.append(account)
+        if account:
+            parts.append(f'SELECT * FROM (SELECT {columns} FROM {table} '
+                         f'WHERE {QUEUE_LANE_WHERE} AND lane_account = %s '
+                         f'{order}) h{len(parts)}')
+            params.append(account)
+    heads = {account: [] for account in accounts}
+    if not parts:
+        return heads
+    for task_id, background, queue_seq, author, lane in _cursor_rows(
+            ' UNION ALL '.join(parts), params):
+        heads[lane or author].append((bool(background), queue_seq, task_id))
+    for account, head in heads.items():
+        head.sort()
+        del head[int(rows) + 1:]
+    return heads
+
+
+def irregular_accounts(names, now=None):
+    """The accounts whose live USER rows do not all share one place among
+    the keys that come BEFORE ``lane_ahead`` in the lease order.
+
+    The lease order (§ ``views.choose_pending``) sorts on ``-own_first``
+    and ``-named_first`` before the fair share.  On a PLAIN row, one whose
+    author is the account it is charged to (no lane, or its own), that
+    nobody in ``names`` backed and that is not an anonymous request past
+    ``STARVED_AFTER``, both keys are a function of the account alone: the
+    worker's own account, its listed accounts and the named stratum are all
+    matched on ``requested_by``.  So all the plain rows of an account share
+    those keys, and inside the account they are ordered by ``lane_ahead``,
+    which only grows down the account's queue.  An account with any other
+    row is returned here, and the lease reads it whole.
+
+    ``names`` are the accounts a backer match counts for in this lease: the
+    worker's own and its listed ones, as ``views._backed_q`` receives them.
+    The rows looked at come from ``atomic_task_queue_irregular``: the
+    backed rows, the lane rows and the anonymous ones.
+    """
+    import json
+    from django.db import connections
+    connection = connections[AnalysisTask.objects.db]
+    table = connection.ops.quote_name(AnalysisTask._meta.db_table)
+    # Read after the order took its own ``now``, so this cutoff is the later
+    # one and flags every row the order counts as starved (and maybe more).
+    cutoff = connection.ops.adapt_datetimefield_value(
+        (now or timezone.now()) - STARVED_AFTER)
+    wanted = {name for name in names if name}
+    irregular = set()
+    for author, lane, backers, starved in _cursor_rows(
+            'SELECT requested_by, lane_account, also_requested_by, '
+            f'CASE WHEN created < %s THEN 1 ELSE 0 END FROM {table} '
+            f'WHERE {QUEUE_IRREGULAR_WHERE}', [cutoff]):
+        account = lane or author
+        if lane and lane != author:
+            irregular.add(account)
+        elif not author and starved:
+            irregular.add(account)
+        if wanted:
+            if isinstance(backers, (str, bytes)):
+                backers = json.loads(backers)
+            if wanted.intersection(backers or []):
+                irregular.add(account)
+    return irregular
 
 
 # Los escalones que el ORDEN DE SERVICIO y el ESTIMADOR comparten, LITERALES y
