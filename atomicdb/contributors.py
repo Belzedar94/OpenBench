@@ -29,7 +29,7 @@ import hashlib
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 from django.core.cache import cache
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.utils.timesince import timesince
@@ -63,7 +63,9 @@ SPARK_MAX_BAR = 34
 # se sigue sirviendo mientras alguien la renueva (§ ``fleet``).  Sesenta
 # segundos porque es la cadencia del servicio que la publica.
 FLEET_CACHE_SECONDS = 60
-FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v1'
+# v2: the entry gained ``users_today``/``nodes_today``; a v1 entry left in
+# the cache by the previous release would lack them.
+FLEET_CACHE_KEY = 'atomicdb.contributors.fleet.v2'
 # La portada ensena DIEZ y dice cuantas quedan fuera.  La lista completa seria
 # un directorio, y lo que hace falta en una portada es el cabecero honesto y
 # un camino a la pagina de cada cual.
@@ -123,8 +125,15 @@ def _ago(moment, now):
     return f'{text} ago'
 
 
-def _totals(owner, since=None, until=None):
+def _totals(owner, since=None, until=None, split=None):
     """Totales por MAQUINA y por CUENTA de una ventana, en UN solo GROUP BY.
+
+    ``split`` (an instant inside the window, or ``None``) also returns the
+    per-account totals of the tail of the window from that instant on, from
+    the SAME pass: two conditional aggregates (``FILTER (WHERE ...)`` on
+    Postgres and recent SQLite, ``CASE WHEN`` elsewhere) over rows the
+    window already reads.  No second scan, no second query.  The third
+    value is ``{'users': ..., 'nodes': ...}``, or ``None`` without ``split``.
 
     Agrupar por ``(machine, delivered_by)`` cuesta lo mismo que agrupar por
     maquina (el indice recorrido es el de ``(state, completed)`` igual, y la
@@ -144,10 +153,16 @@ def _totals(owner, since=None, until=None):
     # than all time (cz_eclipsia, 15-Nov-2026: 12.04B vs 11.78B).
     if until is not None:
         rows = rows.filter(completed__lte=until)
+    aggregates = {'nodes': Sum('nodes_searched'), 'tasks': Count('id'),
+                  'seconds': Sum('elapsed_seconds')}
+    if split is not None:
+        tail = Q(completed__gte=split)
+        aggregates['tail_nodes'] = Sum('nodes_searched', filter=tail)
+        aggregates['tail_tasks'] = Count('id', filter=tail)
     rows = (rows.values('machine', 'delivered_by')
-            .annotate(nodes=Sum('nodes_searched'), tasks=Count('id'),
-                      seconds=Sum('elapsed_seconds')).order_by())
+            .annotate(**aggregates).order_by())
     machines, users = {}, {}
+    tail_users, tail_nodes = {}, 0
     for row in rows:
         m = machines.setdefault(row['machine'],
                                 {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
@@ -161,7 +176,13 @@ def _totals(owner, since=None, until=None):
         user = row['delivered_by'] or owner.get(row['machine'])
         if user:
             _fold(users, user, row['nodes'], row['tasks'])
-    return machines, users
+        if split is not None and row['tail_tasks']:
+            tail_nodes += row['tail_nodes'] or 0
+            if user:
+                _fold(tail_users, user, row['tail_nodes'], row['tail_tasks'])
+    tail = (None if split is None
+            else {'users': tail_users, 'nodes': tail_nodes})
+    return machines, users, tail
 
 
 def _owner_of_machine():
@@ -202,17 +223,29 @@ def measure_fleet(now):
     al GROUP BY.
     """
     owner = _owner_of_machine()
-    machines_all, users_all = _totals(owner, until=now)
-    machines_24h, users_24h = _totals(owner, since=now - timedelta(hours=24),
-                                      until=now)
+    machines_all, users_all, _ = _totals(owner, until=now)
+    # "Today (UTC)" rides on the 24h pass: midnight UTC is always inside the
+    # last 24 hours, so since-midnight is a tail of rows that pass already
+    # reads, and two conditional sums in the same GROUP BY give it for free.
+    midnight = utc_midnight(now)
+    machines_24h, users_24h, today = _totals(
+        owner, since=now - timedelta(hours=24), until=now, split=midnight)
     return {
         'machines_all': machines_all,
         'machines_24h': machines_24h,
         'users_all': users_all,
         'users_24h': users_24h,
+        'users_today': today['users'],
         'nodes_24h': sum(row['nodes'] for row in machines_24h.values()),
+        'nodes_today': today['nodes'],
         'nodes_all': sum(row['nodes'] for row in machines_all.values()),
     }
+
+
+def utc_midnight(now):
+    """00:00 UTC of the calendar day ``now`` falls in (UTC)."""
+    return now.astimezone(dt_timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
 
 
 def fleet(now=None):
@@ -324,7 +357,8 @@ HOME_LEADERBOARD_ROWS = 5
 FULL_LEADERBOARD_ROWS = 500
 
 
-def leaderboard(now=None, limit=LEADERBOARD_ROWS, all_time_limit=None):
+def leaderboard(now=None, limit=LEADERBOARD_ROWS, all_time_limit=None,
+                with_today=False):
     """Las dos tablas de la portada, del MISMO snapshot que ya se calcula.
 
     Ni una consulta por fila ni una consulta por ventana: los dos ordenes
@@ -337,9 +371,26 @@ def leaderboard(now=None, limit=LEADERBOARD_ROWS, all_time_limit=None):
     Las claves llevan prefijo ``contrib_``: la portada ya usa ``board`` para
     el tablero de la posicion inicial y dos cosas distintas con el mismo
     nombre en el mismo contexto es una plantilla que se rompe callando.
+
+    ``with_today`` puts a "Today (UTC)" board first: a calendar day that only
+    grows until midnight, next to the rolling 24 hours that also drops what
+    leaves the window.  It is read from the same snapshot (§ measure_fleet).
     """
     snapshot = fleet(now=now)
-    boards = [
+    boards = []
+    if with_today:
+        users_today, nodes_today = (snapshot['users_today'],
+                                    snapshot['nodes_today'])
+        # An entry measured before midnight holds YESTERDAY's day: for the
+        # minute or so until it is renewed, the new day starts empty.
+        measured = snapshot.get('measured_at')
+        if measured and measured < utc_midnight(now or timezone.now()):
+            users_today, nodes_today = {}, 0
+        boards.append(
+            {'window': 'Today (UTC)',
+             'empty': 'No worker has searched anything since 00:00 UTC.',
+             **_standings(users_today, nodes_today, limit)})
+    boards += [
         {'window': 'Last 24 hours',
          'empty': 'No worker has searched anything in the last 24 hours.',
          **_standings(snapshot['users_24h'], snapshot['nodes_24h'], limit)},

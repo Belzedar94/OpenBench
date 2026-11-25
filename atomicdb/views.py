@@ -6270,7 +6270,8 @@ def contributors_page(request):
         **_suggestions_badge(request),
         **contributors.leaderboard(
             now=timezone.now(),
-            all_time_limit=contributors.FULL_LEADERBOARD_ROWS),
+            all_time_limit=contributors.FULL_LEADERBOARD_ROWS,
+            with_today=True),
         'contrib_shown': contributors.LEADERBOARD_ROWS,
         'contrib_shown_neg': -contributors.LEADERBOARD_ROWS,
         'contrib_shown_slice': f':{contributors.LEADERBOARD_ROWS}',
