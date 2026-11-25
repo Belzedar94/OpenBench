@@ -12,6 +12,7 @@ SIGINT through its process group, as a terminal does: the engines must not
 receive it.
 """
 
+import gc
 import io
 import json
 import os
@@ -22,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +148,134 @@ class IdleWaitTests(SimpleTestCase):
 # The analysis slot
 # ---------------------------------------------------------------------------
 
+class _Search:
+    """A job's ``CurrentTaskState`` on the test's clock."""
+
+    def __init__(self, clock, budget, nodes, seconds):
+        self.state = worker.CurrentTaskState(clock=clock)
+        self.state.start(7, 'tok-7', budget)
+        if nodes:
+            self.state.progress(nodes, seconds)
+
+
+class AdaptiveDrainTests(SimpleTestCase):
+    """No --drain-timeout given: the hard stop waits for the longest
+    running search, at least ten minutes and at most two hours."""
+
+    def drain(self, *searches, adaptive=True):
+        clock = searches[0].state._clock if searches else _Clock()
+        drain = worker.Drain(600, clock=clock, adaptive=adaptive)
+        for search in searches:
+            drain.watch(search.state)
+        return drain
+
+    def begin(self, drain):
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertTrue(drain.begin(1))
+        return out.getvalue()
+
+    def test_time_left_is_what_the_budget_needs_at_the_speed_so_far(self):
+        clock = _Clock()
+        search = _Search(clock, 2_000_000_000, 200_000_000, 200.0)
+        self.assertEqual(search.state.seconds_left(), 1800)
+        clock.now += 60                 # silent since: a minute less left
+        self.assertEqual(search.state.seconds_left(), 1740)
+        self.assertIsNone(_Search(clock, 2_000_000_000, 0, 0)
+                          .state.seconds_left())      # no speed yet
+        self.assertIsNone(_Search(clock, 0, 100, 1.0).state.seconds_left())
+        search.state.clear()
+        self.assertIsNone(search.state.seconds_left())
+
+    def test_a_big_search_moves_the_hard_stop_later(self):
+        clock = _Clock()
+        drain = self.drain(_Search(clock, 2_000_000_000, 200_000_000, 200.0),
+                           _Search(clock, 1_000_000, 500_000, 1.0))
+
+        out = self.begin(drain)
+
+        self.assertIn('hard stop in 37m30s', out)  # 1800 s x 1.25
+        clock.now += 2249
+        self.assertFalse(drain.expired())
+        clock.now += 1
+        self.assertTrue(drain.expired())
+
+    def test_short_searches_keep_the_ten_minutes(self):
+        clock = _Clock()
+        drain = self.drain(_Search(clock, 1_000_000, 500_000, 1.0))
+        self.assertIn('hard stop in 10m00s', self.begin(drain))
+        clock.now += 600
+        self.assertTrue(drain.expired())
+
+    def test_the_wait_is_capped_at_two_hours(self):
+        clock = _Clock()
+        drain = self.drain(_Search(clock, 10 ** 12, 1_000_000, 1.0))
+        self.assertIn('hard stop in 2h00m', self.begin(drain))
+        clock.now += 2 * 3600
+        self.assertTrue(drain.expired())
+
+    def test_a_search_that_reports_its_speed_later_still_counts(self):
+        clock = _Clock()
+        search = _Search(clock, 2_000_000_000, 0, 0)
+        drain = self.drain(search)
+        self.assertIn('hard stop in 10m00s', self.begin(drain))
+        clock.now += 100
+        search.state.progress(100_000_000, 100.0)    # 1900 s left
+        self.assertAlmostEqual(drain.remaining(), 1900 * 1.25)
+
+    def test_the_deadline_never_moves_earlier(self):
+        clock = _Clock()
+        search = _Search(clock, 2_000_000_000, 200_000_000, 200.0)
+        drain = self.drain(search)
+        self.begin(drain)
+        deadline = drain.deadline
+        search.state.progress(1_900_000_000, 210.0)  # a burst of speed
+        drain.expired()
+        self.assertEqual(drain.deadline, deadline)
+
+    def test_an_explicit_timeout_keeps_its_exact_meaning(self):
+        clock = _Clock()
+        drain = self.drain(_Search(clock, 2_000_000_000, 200_000_000, 200.0),
+                           adaptive=False)
+        self.assertIn('hard stop in 10m00s', self.begin(drain))
+        clock.now += 600
+        self.assertTrue(drain.expired())
+
+
+class DrainHeartbeatTests(SimpleTestCase):
+    """The heartbeats keep the leases alive for the whole drain: they run
+    until the stop, so a lease cannot lapse on the server (4 minutes
+    without one) while its search is still finishing."""
+
+    def test_a_drain_does_not_stop_the_heartbeat(self):
+        drain, stop = worker.Drain(600), threading.Event()
+        current = worker.CurrentTaskState()
+        current.start(5275448, 'tok', 2_000_000_000)
+        current.progress(1000, 1.0)
+        named = []
+
+        def post(url, data, timeout):
+            named.append(data.get('task_id'))
+            return _Response(200, {'ok': True})
+
+        session = mock.Mock(post=post)
+        with redirect_stdout(io.StringIO()):
+            drain.begin(1)
+            with mock.patch.object(worker, 'HEARTBEAT_INTERVAL_SECONDS',
+                                   0.01), \
+                    mock.patch.object(worker, '_http_session',
+                                      return_value=session):
+                beat = threading.Thread(target=worker._heartbeat_loop,
+                                        args=('https://server', {}, current,
+                                              stop))
+                beat.start()
+                self.assertTrue(_wait_until(lambda: len(named) >= 3, 10))
+                stop.set()
+                beat.join(10)
+
+        self.assertFalse(beat.is_alive())
+        self.assertEqual(set(named), {5275448})
+
+
 LINES = [{'move': 'e2e4', 'pv': ['e2e4'], 'eval_cp': 10, 'mate': None,
           'raw': 'info depth 1 nodes 100 pv e2e4'}]
 
@@ -158,11 +288,12 @@ def _task(task_id=9):
 class SlotDrainTests(SimpleTestCase):
     """``_analysis_slot`` with a drain."""
 
-    def run_slot(self, leases, search=lambda drain: LINES, begun=False):
+    def run_slot(self, leases, search=lambda drain: LINES, begun=False,
+                 adaptive=False):
         """``leases``: what each api/lease answers, as functions of the drain
         (the slot then stops after the script runs out)."""
         stop = threading.Event()
-        drain = worker.Drain(600)
+        drain = worker.Drain(600, adaptive=adaptive)
         held = worker.HeldLeases()
         log = []
         script = list(leases)
@@ -189,6 +320,7 @@ class SlotDrainTests(SimpleTestCase):
             def analyse(self, fen, nodes, multipv, searchmoves=None,
                         progress=None):
                 log.append('search')
+                drain.progress = progress     # for a search to report
                 return search(drain)
 
             def close(self):
@@ -258,6 +390,24 @@ class SlotDrainTests(SimpleTestCase):
         self.assertLess(time.monotonic() - started, 10, 'waited the 60 s')
         self.assertEqual(log, ['lease', 'close'])
         self.assertIn('[0] has finished working', out)
+
+    def test_the_hard_stop_is_sized_to_the_running_search(self):
+        def lease(drain):
+            return [dict(_task(), budget_nodes=2_000_000_000)]
+
+        def search(drain):
+            # A 2G-node task, 200M nodes in at 1M nodes per second: about
+            # 30 minutes left, so the hard stop comes in about 37m30s.
+            drain.progress(200_000_000, 200.0)
+            drain.begin(1)
+            return LINES
+
+        log, held, stop, out = self.run_slot([lease], search=search,
+                                             adaptive=True)
+
+        self.assertRegex(out, r'waiting for 1 running job to finish, hard '
+                              r'stop in 37m(29|30)s ')
+        self.assertIn(('submit', 9), log)
 
 
 class SolveLoopDrainTests(SimpleTestCase):
@@ -420,6 +570,128 @@ class SupervisorDrainTests(SimpleTestCase):
         self.assertFalse(stopped)
         self.graceful.run.assert_not_called()
         self.stop.set()
+
+
+_HANGING_ENGINE = (
+    'import sys, time\n'
+    'for line in sys.stdin:\n'
+    '    command = line.strip()\n'
+    '    if command == "uci":\n'
+    '        print("uciok", flush=True)\n'
+    '    elif command == "isready":\n'
+    '        print("readyok", flush=True)\n'
+    '    elif command == "quit":\n'
+    '        time.sleep(60)          # ignores it: the stop kills it\n')
+
+
+class DeadEnginePipeTests(SimpleTestCase):
+    """The hard stop writes to engines it has just ended.
+
+    Reported by Torom (Linux, Python 3.15, --jobs 32) at the end of a drain:
+    "Exception ignored while finalizing file <_io.TextIOWrapper name=41>:
+    BrokenPipeError".  The stop killed the engine, the slot's
+    ``Engine.close`` then wrote ``quit`` into the dead pipe, and the line
+    left in the buffer was flushed again when the slot's thread ended and
+    the pipe was garbage-collected.
+    """
+
+    def setUp(self):
+        self.unraisable, self.uncaught = [], []
+        hook = mock.patch.object(
+            sys, 'unraisablehook',
+            lambda info: self.unraisable.append(info.exc_value))
+        thread_hook = mock.patch.object(
+            threading, 'excepthook',
+            lambda args: self.uncaught.append(args.exc_value))
+        hook.start()
+        thread_hook.start()
+        self.addCleanup(hook.stop)
+        self.addCleanup(thread_hook.stop)
+
+    def engine(self, registry):
+        script = Path(tempfile.mkdtemp()) / 'hanging engine.py'
+        script.write_text(_HANGING_ENGINE, encoding='utf-8')
+        real_popen = subprocess.Popen
+
+        def popen(argv, *args, **kwargs):
+            return real_popen([sys.executable, *argv], *args, **kwargs)
+
+        with mock.patch.object(worker.subprocess, 'Popen', popen), \
+                mock.patch.object(worker, '_ENGINE_PROCESSES', registry):
+            engine = worker.Engine(str(script))
+        # Weakly: a cleanup holding the process would keep its pipes alive
+        # past the test's own ``gc.collect``.
+        ref = weakref.ref(engine.p)
+        self.addCleanup(lambda: ref() is not None and ref().poll() is None
+                        and ref().kill())
+        self.addCleanup(lambda: script.unlink() or script.parent.rmdir())
+        self.assertTrue(engine.ready)
+        return engine
+
+    def test_the_hard_stop_on_a_dead_engine_raises_nothing(self):
+        registry = worker._EngineProcesses()
+        held = worker.HeldLeases()
+        held.hold('analysis', 'box-atomicdb#13',
+                  [{'id': 5275448, 'lease_token': 'tok'}])
+        stop = threading.Event()
+        engine = self.engine(registry)
+        engine._searching = True        # a search was under way
+        process = engine.p
+        stopper = worker.GracefulStop('https://server', {'machine': 'box'},
+                                      held, stop, processes=registry)
+        out = io.StringIO()
+
+        def slot():
+            # What the slot and its heartbeat do once the stop has ended
+            # the engine: a late ``stop`` from the heartbeat, then close.
+            engine.stop_search()
+            engine.close()
+
+        with mock.patch.object(worker, '_release_leases',
+                               lambda *args: (0, '')), \
+                redirect_stdout(out):
+            stopper.run()
+            self.assertIsNotNone(process.poll())     # the stop killed it
+            thread = threading.Thread(target=slot)
+            thread.start()
+            thread.join(10)
+        del engine, process, thread
+        gc.collect()
+
+        self.assertEqual(self.uncaught, [])
+        self.assertEqual(self.unraisable, [])
+        self.assertIn('the server took back 0; 1 task was already back in '
+                      'the queue (the lease had lapsed)', out.getvalue())
+
+    def test_a_write_that_fails_in_the_stop_closes_the_pipe(self):
+        engine = self.engine(worker._EngineProcesses())
+        process = engine.p
+        process.kill()
+        process.wait(10)
+        engine.p = SimpleNamespace(       # dead, but not reaped yet
+            poll=lambda: None, stdin=process.stdin,
+            wait=process.wait, kill=process.kill)
+
+        self.assertEqual(worker._stop_engines([engine.p], timeout=0.5), 0)
+
+        self.assertTrue(process.stdin.closed)
+        process.stdout.close()
+        del engine, process
+        gc.collect()
+        self.assertEqual(self.unraisable, [])
+
+
+class ReleaseMessageTests(SimpleTestCase):
+
+    def test_every_lease_taken_back(self):
+        self.assertEqual(worker._describe_release(3, 3),
+                         'the server took back 3')
+
+    def test_leases_that_had_lapsed_are_said_to_be_back_in_the_queue(self):
+        self.assertEqual(
+            worker._describe_release(1, 3),
+            'the server took back 1; 2 tasks were already back in the queue '
+            '(the lease had lapsed)')
 
 
 class SignalRoutingTests(SimpleTestCase):

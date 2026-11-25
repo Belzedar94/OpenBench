@@ -10,6 +10,11 @@ Worker build 2026112101:
     after LEASE_MINUTES and the search ended in a 409 at submit;
   * a heartbeat answered 409 ``stale-lease``/``not-your-lease`` stops that
     slot's search and the slot sends nothing; the other slots go on.
+
+Worker build 2026112501: with a known budget and speed the grace above no
+longer applies.  The lease is renewed while the engine process runs and the
+search is younger than twice its expected length plus ten minutes
+(``ExpectedLengthRenewalTests``).
 """
 
 import io
@@ -98,6 +103,133 @@ class ScaledGraceTests(SimpleTestCase):
         self.assertEqual(state.grace(), 5 * MINUTE)
         now[0] += 5 * MINUTE + 1
         self.assertIsNone(state.snapshot())
+
+
+class ExpectedLengthRenewalTests(SimpleTestCase):
+    """Worker build 2026112501: a search with a known budget and speed keeps
+    its lease while its engine process runs and it is younger than twice its
+    expected length plus ten minutes, however long it goes without a node
+    counter.  Task 5275448 (2G nodes) was leased 217 times without a result:
+    each deep iteration went quiet past the grace and the lease lapsed."""
+
+    def search(self, now, alive=lambda: True, budget=2_000_000_000):
+        state = _state(now)
+        state.start(5275448, 'tok', budget, alive=alive)
+        return state
+
+    def test_a_2g_search_keeps_its_lease_through_a_20_minute_iteration(self):
+        now = [0.0]
+        state = self.search(now)
+        now[0] = 8 * MINUTE
+        state.progress(480_000_000, now[0])     # 1M nodes per second
+        now[0] = 28 * MINUTE                    # 20 minutes of silence
+
+        self.assertLess(state.grace(), 20 * MINUTE)  # the old rule dropped it
+        self.assertEqual(state.renewal_limit(), 2 * 2000 + 10 * MINUTE)
+        snapshot = state.snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot['id'], 5275448)
+
+    def test_a_dead_engine_process_stops_the_renewal_at_once(self):
+        now = [0.0]
+        running = [True]
+        state = self.search(now, alive=lambda: running[0])
+        now[0] = MINUTE
+        state.progress(60_000_000, now[0])
+        self.assertIsNotNone(state.snapshot())
+
+        running[0] = False                       # the engine died
+        self.assertIsNone(state.snapshot())
+
+    def test_a_probe_that_fails_counts_as_a_dead_engine(self):
+        def probe():
+            raise OSError('gone')
+
+        state = self.search([0.0], alive=probe)
+        self.assertIsNone(state.snapshot())
+
+    def test_a_search_far_past_twice_its_expected_length_is_dropped(self):
+        now = [0.0]
+        state = self.search(now)
+        now[0] = MINUTE
+        state.progress(60_000_000, now[0])      # 2000 s expected
+        limit = 2 * 2000 + 10 * MINUTE
+
+        now[0] = limit - 1
+        self.assertIsNotNone(state.snapshot())  # a hung engine, still running
+        now[0] = limit + 1
+        self.assertIsNone(state.snapshot())
+        now[0] = 10 * limit
+        self.assertIsNone(state.snapshot())
+
+    def test_before_its_first_counter_a_search_uses_the_known_speed(self):
+        now = [0.0]
+        state = self.search(now)
+        now[0] = MINUTE
+        state.progress(60_000_000, now[0])
+        state.clear()
+        state.start(2, 'tok-2', 2_000_000_000, alive=lambda: True)
+        now[0] += 6 * MINUTE                     # past the old 5-minute floor
+
+        self.assertIsNotNone(state.snapshot())
+        self.assertEqual(state.renewal_limit(), 2 * 2000 + 10 * MINUTE)
+
+    def test_without_a_known_speed_the_old_grace_applies(self):
+        now = [0.0]
+        state = self.search(now)
+        self.assertIsNone(state.renewal_limit())
+        now[0] = 5 * MINUTE + 1
+        self.assertIsNone(state.snapshot())
+
+    def test_engine_alive_asks_the_process(self):
+        self.assertTrue(worker._engine_alive(
+            SimpleNamespace(p=SimpleNamespace(poll=lambda: None))))
+        self.assertFalse(worker._engine_alive(
+            SimpleNamespace(p=SimpleNamespace(poll=lambda: -9))))
+        self.assertTrue(worker._engine_alive(SimpleNamespace()))
+
+    def test_the_slot_gives_its_engine_and_budget_to_the_heartbeat(self):
+        started = {}
+        real_start = worker.CurrentTaskState.start
+
+        def start(state, task_id, lease_token='', budget_nodes=0,
+                  alive=None):
+            started.update(budget=budget_nodes, alive=alive())
+            return real_start(state, task_id, lease_token, budget_nodes,
+                              alive)
+
+        stop = threading.Event()
+
+        class Engine:
+            p = SimpleNamespace(poll=lambda: None)
+
+            def __init__(self, *args, **kwargs):
+                self.ready = True
+
+            def analyse(self, *args, **kwargs):
+                stop.set()
+                return []
+
+            def close(self):
+                pass
+
+        tasks = [[{'id': 9, 'fen': START_FEN, 'budget_nodes': 2_000_000_000,
+                   'multipv': 1, 'lease_token': 'tok-9'}]]
+        a = SimpleNamespace(engine='engine', hash=16, syzygy='',
+                            S='https://server', no_auto_update=True,
+                            once=False)
+        with mock.patch.object(worker.CurrentTaskState, 'start', start), \
+                mock.patch.object(worker, 'Engine', Engine), \
+                mock.patch.object(worker, '_request_tasks',
+                                  lambda *args: tasks.pop(0) if tasks
+                                  else stop.set() or []), \
+                mock.patch.object(worker, '_heartbeat_loop',
+                                  lambda *args: None), \
+                redirect_stdout(io.StringIO()):
+            worker._analysis_slot(0, a, None, {'machine': 'box#0'}, {}, 1,
+                                  stop, False)
+
+        self.assertEqual(started, {'budget': 2_000_000_000, 'alive': True})
 
 
 class _Answer:

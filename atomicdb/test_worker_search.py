@@ -383,6 +383,27 @@ class IterationFilterTests(SimpleTestCase):
         self.assertEqual(set(lines[0]), {'move', 'pv', 'eval_cp', 'mate',
                                          'raw'})
 
+    def test_a_tablebase_score_is_sent_as_before_and_shown_with_its_distance(
+            self):
+        # Build 2026112501 changed only the console: the lines sent still
+        # carry the clamped eval_cp and the raw line, and nothing else (the
+        # server reads the distance from the raw line, score_bands.py).
+        fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+        tb = _info(30, 1, ('cp', 19981), 5000, 'e7e5')
+        big = _info(30, 2, ('cp', -12345), 5000, 'g8f6')
+        engine = _engine('readyok\n' + tb + big + 'bestmove e7e5\n')
+
+        lines = engine.analyse(fen, 1000, 2)
+
+        self.assertEqual([line['eval_cp'] for line in lines], [-9500, 9500])
+        self.assertEqual([line['raw'] for line in lines],
+                         [tb.strip(), big.strip()])
+        for line in lines:
+            self.assertEqual(set(line), {'move', 'pv', 'eval_cp', 'mate',
+                                         'raw'})
+        self.assertEqual(worker.format_eval(lines[0]), 'TB loss, 19 plies')
+        self.assertEqual(worker.format_eval(lines[1]), '+123.45')
+
 
 # An engine as a process: it logs what it hears, with the time it heard it,
 # and searches according to its go line.

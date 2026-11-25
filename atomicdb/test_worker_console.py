@@ -82,6 +82,57 @@ class NumberTests(SimpleTestCase):
                          '#-3')
         self.assertEqual(worker.format_eval({}), '?')
 
+    @staticmethod
+    def _cp_line(sent, said):
+        """A line as the worker builds it: ``sent`` White-POV and clamped,
+        the engine's own score ``said`` (side to move) in the raw line."""
+        return {'eval_cp': sent, 'mate': None,
+                'raw': f'info depth 30 seldepth 41 multipv 1 score cp {said} '
+                       'nodes 5000 nps 1000000 tbhits 3 time 5 pv e2e4'}
+
+    def test_tablebase_scores_show_their_distance(self):
+        # Before build 2026112501 every one of these printed (+95.00) or
+        # (-95.00): the console showed the clamped value that is sent.
+        line = self._cp_line
+        self.assertEqual(worker.format_eval(line(9500, 19981)),
+                         'TB win, 19 plies')
+        self.assertEqual(worker.format_eval(line(-9500, 19981)),
+                         'TB loss, 19 plies')      # Black to move wins
+        self.assertEqual(worker.format_eval(line(-9500, -19960)),
+                         'TB loss, 40 plies')
+        self.assertEqual(worker.format_eval(line(9500, 19999)),
+                         'TB win, 1 ply')
+        self.assertEqual(worker.format_eval(line(9500, 20000)),
+                         'TB win, 0 plies')
+        # The engine's MAX_PLY is 246, the widest distance it can print.
+        self.assertEqual(worker.format_eval(line(-9500, 19754)),
+                         'TB loss, 246 plies')
+        self.assertEqual(worker.ENGINE_TB_MIN_CP, 19750)
+
+    def test_huge_plain_evals_are_not_clamped_on_the_console(self):
+        line = self._cp_line
+        self.assertEqual(worker.format_eval(line(9500, 12345)), '+123.45')
+        self.assertEqual(worker.format_eval(line(9500, -12345)), '+123.45')
+        self.assertEqual(worker.format_eval(line(-9500, 15146)), '-151.46')
+        self.assertEqual(worker.format_eval(line(9500, 9500)), '+95.00')
+        self.assertEqual(worker.format_eval(line(-31, 31)), '-0.31')
+
+    def test_the_tablebase_constants_follow_score_bands(self):
+        from . import score_bands
+        self.assertEqual(worker.ENGINE_TB_CP, score_bands.ENGINE_TB_CP)
+        self.assertEqual(worker.TB_DISTANCE_MAX, score_bands.TB_DISTANCE_MAX)
+        self.assertEqual(worker.ENGINE_TB_MIN_CP,
+                         score_bands.ENGINE_TB_MIN_CP)
+        for said in (19981, 19754, 20000, 12345, 31):
+            distance = score_bands.tb_distance(said)
+            shown = worker.format_eval(self._cp_line(9500 if said > 9500
+                                                     else said, said))
+            if distance is None:
+                self.assertFalse(shown.startswith('TB'), shown)
+            else:
+                self.assertTrue(shown.startswith(f'TB win, {distance} pl'),
+                                shown)
+
 
 class AsciiTests(SimpleTestCase):
     """A console that cannot encode a character must not end the job."""
