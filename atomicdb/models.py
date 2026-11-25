@@ -566,6 +566,27 @@ class AnalysisTask(models.Model):
                          name='atomic_task_lane_served',
                          condition=(models.Q(source='USER')
                                     & ~models.Q(lane_account=''))),
+            # The head of each account's queue, in the order the fair share
+            # walks it (§ live_request.queue_heads), and the rows that keep
+            # an account from being read by its head alone (§ live_request.
+            # irregular_accounts).  Created CONCURRENTLY (0078).
+            models.Index(fields=['requested_by', 'background', 'queue_seq',
+                                 'id'],
+                         name='atomic_task_queue_author',
+                         condition=models.Q(source='USER', state='PENDING',
+                                            lane_account='')),
+            models.Index(fields=['lane_account', 'background', 'queue_seq',
+                                 'id'],
+                         name='atomic_task_queue_lane',
+                         condition=(models.Q(source='USER', state='PENDING')
+                                    & ~models.Q(lane_account=''))),
+            models.Index(fields=['id'],
+                         name='atomic_task_queue_irregular',
+                         condition=(models.Q(source='USER',
+                                             state__in=['PENDING', 'LEASED'])
+                                    & (models.Q(backers__gt=0)
+                                       | ~models.Q(lane_account='')
+                                       | models.Q(requested_by='')))),
         ]
 
 

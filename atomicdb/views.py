@@ -1,5 +1,6 @@
 """API de AtomicDB (worker) + paginas publicas del Explorer."""
 
+import functools
 import hashlib
 import hmac
 import json
@@ -131,6 +132,10 @@ LEASE_SCAN_CHUNK = 64
 # ``_lease_order_pages``); the second reads eight times as many, and after
 # that the whole queue is read.
 LEASE_PAGE_ROWS = 4 * LEASE_SCAN_CHUNK
+# How many waiting rows of each account the head of the queue reads (§
+# ``_lease_head_pages``); the second try reads eight times as many, and after
+# that the pages above take over.
+LEASE_HEAD_ROWS = LEASE_SCAN_CHUNK
 MAX_REPORTED_NPS = 1_000_000_000_000
 # Techo de peticiones humanas esperando POR PERSONA (PENDING, source USER,
 # sobre posiciones aun sin resolver).  Cinco mil salen de los numeros del
@@ -792,7 +797,98 @@ def _lease_order_pages(ordered, max_budget=None):
            if task_id not in seen]
 
 
-def _locked_in_order(ordered, max_budget=None):
+def _lease_head_pages(ordered, max_budget=None, names=(), row_filter=None,
+                      user_only=False):
+    """The first ids of ``ordered``, in its order, read from the head of
+    each account's queue instead of the whole queue.  A generator of id
+    lists, like ``_lease_order_pages``; its return value says whether the
+    lists covered every row of ``ordered`` (then nothing else needs reading).
+
+    WHY (25-Nov-2026).  Even paged, ``ordered`` sums the fair-share window
+    over every live row and joins every one to its position: about 17k rows
+    on every lease, 2-5 s each under load, twenty at a time.  Only the head
+    of each account's queue can be the next lease.
+
+    WHY IT IS THE SAME ORDER.  The window sums each account's rows in the
+    order leased first, then ``background``, ``queue_seq``, ``id``: a prefix
+    sum.  The row set read here is, for each account, every leased row plus
+    its first ``LEASE_HEAD_ROWS`` waiting rows in that order, which is a
+    prefix of that order; the WHERE of ``ordered`` (closed positions, a
+    worker's own filter) drops single rows and leaves a prefix a prefix.  So
+    every row read gets the sums, and with them the keys, the whole queue
+    would give it, and these rows come out in the order of the whole list.
+
+    WHERE THE HEAD STOPS BEING ENOUGH.  The rows left out of an account
+    (its tail) sort after its last row read: before ``lane_ahead`` the order
+    has ``-source``, ``-own_first`` and ``-named_first``, and on an account
+    with only plain rows those are one value for the whole account (§
+    ``live_request.irregular_accounts``; the other accounts are read whole),
+    while ``lane_ahead`` grows strictly down the account's queue.  So the
+    list is exact up to and including the first "last row read" of any
+    account that has a tail, and it is cut there.  Past that point the next
+    try reads eight times as many rows, and then ``_lease_order_pages``
+    reads the whole queue, minus what was already handed out.
+
+    ``names`` are the accounts a backer match counts for (the worker's own
+    and its listed ones); ``row_filter`` is the worker's own filter applied
+    to ``ordered`` (the house accounts, a personal worker), so an account it
+    leaves out entirely is not mistaken for one whose head is all closed;
+    ``user_only`` says ``ordered`` holds no selector work, so a head that
+    covers every account covers the whole list.
+    """
+    accounts = live_request.queued_accounts()
+    irregular = live_request.irregular_accounts(names) & accounts
+    regular = accounts - irregular
+    for rows in (LEASE_HEAD_ROWS, LEASE_HEAD_ROWS * 8):
+        heads = live_request.queue_heads(regular, rows)
+        if row_filter is not None:
+            # A plain row passes the worker's filter or not by its account
+            # alone (the filter matches authors and backers, like the keys
+            # above), so one row answers for the account.
+            first = {head[0][2]: account
+                     for account, head in heads.items() if head}
+            admitted = {first[task_id] for task_id in AnalysisTask.objects
+                        .filter(row_filter, id__in=list(first))
+                        .values_list('id', flat=True)}
+            heads = {account: head for account, head in heads.items()
+                     if account in admitted}
+        cut_accounts = {account for account, head in heads.items()
+                        if len(head) > rows}
+        if not cut_accounts and not user_only:
+            # Every account fits: the queue is small and the pages below
+            # read all of it, selector work included, cheaply.
+            return False
+        wanted = (Q(id__in=[task_id for head in heads.values()
+                            for _background, _seq, task_id in head[:rows]])
+                  | Q(state=AnalysisTask.TState.LEASED,
+                      source=AnalysisTask.Source.USER))
+        for account in irregular:
+            wanted |= (Q(source=AnalysisTask.Source.USER)
+                       & live_request._account_q(account))
+        result = list(ordered.filter(wanted).values_list(
+            'id', 'budget_nodes', 'lane_account', 'requested_by'))
+        last = {}
+        for index, (_id, _budget, lane, author) in enumerate(result):
+            if (lane or author) in cut_accounts:
+                last[lane or author] = index
+        cut = len(result)
+        for account in cut_accounts:
+            index = last.get(account)
+            # No row of it read (its whole head on closed positions), or a
+            # last row with no budget (the next one could tie with it):
+            # nothing here is certain.
+            if index is None or result[index][1] <= 0:
+                cut = 0
+                break
+            cut = min(cut, index + 1)
+        yield [task_id for task_id, budget, _lane, _author in result[:cut]
+               if max_budget is None or budget <= max_budget]
+        if not cut_accounts:
+            return True
+    return False
+
+
+def _locked_in_order(ordered, max_budget=None, heads=None):
     """Recorre ``ordered`` devolviendo las filas YA bloqueadas, en ese orden.
 
     El paso uno (``ordered``) calcula el sitio de cada tarea con una funcion
@@ -825,9 +921,25 @@ def _locked_in_order(ordered, max_budget=None):
     the historic column list.
 
     The ids come in pages (§ ``_lease_order_pages``): the rest of the queue
-    is only read when nothing in the first pages could be taken.
+    is only read when nothing in the first pages could be taken.  With
+    ``heads`` (a ``_lease_head_pages`` bound to ``ordered``) the first pages
+    come from the head of each account's queue, and the whole-queue pages
+    only follow, minus the ids already handed out, when those did not cover
+    the whole list.
     """
-    for order in _lease_order_pages(ordered, max_budget):
+    handed = set()
+
+    def pages():
+        complete = False
+        if heads is not None:
+            complete = yield from heads(max_budget)
+        if not complete:
+            for order in _lease_order_pages(ordered, max_budget):
+                yield [task_id for task_id in order
+                       if task_id not in handed]
+
+    for order in pages():
+        handed.update(order)
         for start in range(0, len(order), LEASE_SCAN_CHUNK):
             chunk = order[start:start + LEASE_SCAN_CHUNK]
             rows = {task.id: task for task in AnalysisTask.objects
@@ -1010,6 +1122,12 @@ def api_lease(request):
         favoured = requester_q(serve_first) if serve_first else Q()
         personal_q = (requester_q(personal_for)
                       if worker_mode == 'personal' else Q(pk__in=[]))
+        # Every name a backer match counts for in the three Qs above: a row
+        # one of them backed can sort apart from its account's other rows
+        # (§ ``live_request.irregular_accounts``).
+        backed_names = [user.username] + _account_names(
+            [name for name in list(serve_first) + list(personal_for)
+             if name.lower() != 'anonymous'])
 
         def choose_pending(honour_deep_cap=True, sweep_only=False):
             # Scan the ordered queue, rather than an arbitrary prefix: a
@@ -1113,11 +1231,14 @@ def api_lease(request):
                 .filter(live_request.SERVEABLE)
                 .annotate(queue_rank=human_rank, own_first=own_first,
                           named_first=named_first))
+            # The worker's own row filter, kept for the head of the queue
+            # (§ ``_lease_head_pages``), which has to know it.
+            row_filter = None
             # P7: la casa no toca peticiones USER ajenas (v. HOUSE_ACCOUNTS).
             if user.username in HOUSE_ACCOUNTS:
-                ordered = ordered.exclude(
-                    Q(source=AnalysisTask.Source.USER)
-                    & ~Q(requested_by=user.username))
+                row_filter = ~(Q(source=AnalysisTask.Source.USER)
+                               & ~Q(requested_by=user.username))
+                ordered = ordered.filter(row_filter)
             # The worker's own setting (§ ``worker_mode`` above).  A band key
             # goes in front of ``-source`` only when a campaign is followed:
             # its tasks are selector work, AUTO or FILL, and have to beat
@@ -1135,9 +1256,11 @@ def api_lease(request):
             first_band = Q(source=AnalysisTask.Source.USER)
             if worker_mode == 'personal':
                 first_band &= own_q | personal_q
-                ordered = ordered.filter(
-                    first_band | in_campaign if in_campaign is not None
-                    else first_band)
+                personal_filter = (first_band | in_campaign
+                                   if in_campaign is not None else first_band)
+                row_filter = (personal_filter if row_filter is None
+                              else row_filter & personal_filter)
+                ordered = ordered.filter(personal_filter)
             band_keys = ()
             if in_campaign is not None:
                 ordered = ordered.annotate(serve_band=Case(
@@ -1155,6 +1278,7 @@ def api_lease(request):
             # (``served_rank`` tambien: vale 0 fuera de USER.)
             # que decide.  Ponerlo al final es lo que permite compartir los de
             # en medio literalmente.
+            heads = None
             if sweep_only:
                 # The +16 sweep's share of the fleet (see atomicdb.sweep):
                 # its own tasks, oldest first, through the same checks below.
@@ -1164,7 +1288,15 @@ def api_lease(request):
                            .order_by(*band_keys, '-source', '-own_first',
                                      *live_request.SERVICE_KEYS,
                                      '-queue_rank', 'id'))
-            for candidate in _locked_in_order(ordered, max_budget):
+                # The head of each account's queue first (§
+                # ``_lease_head_pages``).  Not with a campaign: its band key
+                # comes before everything and is read from the position.
+                if in_campaign is None:
+                    heads = functools.partial(
+                        _lease_head_pages, ordered, names=backed_names,
+                        row_filter=row_filter,
+                        user_only=worker_mode == 'personal')
+            for candidate in _locked_in_order(ordered, max_budget, heads):
                 # A queued follow-up is an intent for the next visit, not a
                 # parallel analysis. It becomes runnable only after the prior
                 # generation commits, and never runs if that visit solved the
