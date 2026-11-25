@@ -123,8 +123,17 @@ HEARTBEAT_INTERVAL_SECONDS = 60
 # late in a 2B search on a slow slot one iteration takes longer than this.  So
 # the grace grows with the search (``CurrentTaskState.grace``): twice the age
 # the search had at its last counter, never less than this floor.
+#
+# Since build 2026112501 that rule applies only to a search whose budget or
+# speed is not known yet.  Otherwise the lease is renewed while the engine
+# process runs and the search is younger than FACTOR x its expected length
+# (budget / nodes per second) + MARGIN (``CurrentTaskState.renewal_limit``):
+# the grown grace still let deep iterations of 2G-node tasks go quiet past
+# it, and task 5275448 was leased 217 times without a result.
 HEARTBEAT_PROGRESS_GRACE_SECONDS = 5 * 60
 HEARTBEAT_PROGRESS_GRACE_FACTOR = 2
+HEARTBEAT_EXPECTED_FACTOR = 2
+HEARTBEAT_EXPECTED_MARGIN_SECONDS = 10 * 60
 # The heartbeat answers this way when the lease is no longer this slot's: the
 # task went back to the queue (and maybe to another worker), so the search
 # could never be submitted.
@@ -238,13 +247,22 @@ class CurrentTaskState:
     """Thread-safe snapshot of the assignment currently making progress.
 
     A live Python process is not sufficient evidence that Stockfish is alive.
-    Heartbeats expose the assignment only while its UCI ``nodes`` counter has
-    advanced recently; after the grace period the server is free to let the
-    lease expire and fence a replacement assignment with a new lease token.
+    Heartbeats name the assignment only while its search is believed alive;
+    once they stop, the server lets the lease expire and fences a
+    replacement assignment with a new lease token.
 
-    The grace period scales with the search (``grace``), because the engine
-    reports its node counter only once per iteration and iterations get
-    longer as the search goes deeper.
+    Since build 2026112501 a search is believed alive while its engine
+    process runs (``alive``, given to ``start``) and the search is younger
+    than ``HEARTBEAT_EXPECTED_FACTOR`` times its expected length (budget /
+    nodes per second) plus ``HEARTBEAT_EXPECTED_MARGIN_SECONDS``
+    (``renewal_limit``).  Before, it had to have printed a node counter
+    within ``grace``, and an engine prints one only at the end of an
+    iteration: a deep iteration of a 2G-node task outlasted that, its lease
+    lapsed and the task was searched again from zero elsewhere (task
+    5275448: 217 attempts, no result).  An engine that hangs while its
+    process lives is still caught, at the expected-length bound; one whose
+    process died at once.  The old rule remains for a search whose budget
+    or speed is not known yet.
 
     When the server says the lease is gone (``mark_lost``), the task is
     flagged so that its search is never submitted, and the heartbeat stops
@@ -263,11 +281,18 @@ class CurrentTaskState:
         self._progress_at = 0.0
         self._lost = False
         self._budget = 0
+        self._alive = None
+        # The speed this slot's engine last reported, kept across tasks: the
+        # estimate for a search that has not reported its own yet.
+        self._known_nps = 0
 
-    def start(self, task_id, lease_token='', budget_nodes=0):
+    def start(self, task_id, lease_token='', budget_nodes=0, alive=None):
+        """``alive``: a callable that says whether the engine process still
+        runs (``_engine_alive``); None when nobody can tell."""
         with self._lock:
             self._task_id = task_id
             self._lease_token = lease_token or ''
+            self._alive = alive
             try:
                 self._budget = max(0, int(budget_nodes or 0))
             except (TypeError, ValueError, OverflowError):
@@ -293,6 +318,8 @@ class CurrentTaskState:
             self._last_nodes = nodes
             self._nps = min(MAX_REPORTED_NPS,
                             max(0, round(nodes / elapsed)))
+            if self._nps > 0:
+                self._known_nps = self._nps
             self._progress_at = self._clock()
 
     def clear(self):
@@ -305,6 +332,7 @@ class CurrentTaskState:
             self._progress_at = 0.0
             self._lost = False
             self._budget = 0
+            self._alive = None
 
     def seconds_left(self):
         """How long the search in progress still needs at its speed so far:
@@ -331,9 +359,39 @@ class CurrentTaskState:
 
     def grace(self):
         """Seconds of silence the current search may have before the
-        heartbeat stops renewing its lease."""
+        heartbeat stops renewing its lease, for a search whose budget or
+        speed is not known (``renewal_limit`` is None)."""
         with self._lock:
             return self._grace()
+
+    def _renewal_limit(self):
+        nps = self._nps or self._known_nps
+        if self._budget <= 0 or nps <= 0:
+            return None
+        return (HEARTBEAT_EXPECTED_FACTOR * self._budget / nps
+                + HEARTBEAT_EXPECTED_MARGIN_SECONDS)
+
+    def renewal_limit(self):
+        """The age past which the heartbeat stops renewing the lease of the
+        current search: twice its expected length plus a margin.  None
+        when its budget or the engine's speed is not known."""
+        with self._lock:
+            return self._renewal_limit()
+
+    def _renewable(self):
+        """Whether the search in progress is believed alive (see the class
+        docstring).  Called under the lock."""
+        if self._alive is not None:
+            try:
+                if not self._alive():
+                    return False        # the engine process has ended
+            except Exception:                        # noqa: BLE001
+                return False
+        now = self._clock()
+        limit = self._renewal_limit()
+        if limit is not None:
+            return now - self._started_at <= limit
+        return now - self._progress_at <= self._grace()
 
     def mark_lost(self, task_id, lease_token, on_lost=None):
         """The server no longer holds ``task_id`` for this slot.
@@ -367,7 +425,7 @@ class CurrentTaskState:
     def snapshot(self):
         with self._lock:
             if (self._task_id is None or self._lost
-                    or self._clock() - self._progress_at > self._grace()):
+                    or not self._renewable()):
                 return None
             return {
                 'id': self._task_id,
@@ -1045,9 +1103,11 @@ def _describe_release(released, named):
 
     The server takes back only a lease that is still this worker's under
     the same token.  One it does not take back had already gone back to the
-    queue: its heartbeat had stopped naming it -- a search silent for longer
-    than its progress grace (``CurrentTaskState.snapshot``) -- and the
-    recycler requeued it ``LEASE_MINUTES`` later, as for any silent lease.
+    queue: its heartbeat had stopped naming it (``CurrentTaskState
+    .snapshot``: an engine that died, or a search past twice its expected
+    length; before build 2026112501 also any deep iteration that outlasted
+    the progress grace) and the recycler requeued it ``LEASE_MINUTES``
+    later, as for any silent lease.
     Nothing is lost either way.
     """
     if released >= named:
@@ -1587,6 +1647,18 @@ def check_engine_identity(path, timeout=60):
     except (OSError, ValueError) as exc:
         return f'it stopped answering: {exc}'
     return engine_identity_problem(output)
+
+
+def _engine_alive(engine):
+    """False once ``engine``'s process has exited; True while it runs, and
+    for an engine without a process to ask (a stand-in)."""
+    process = getattr(engine, 'p', None)
+    if process is None:
+        return True
+    try:
+        return process.poll() is None
+    except Exception:                                # noqa: BLE001
+        return False
 
 
 class Engine:
@@ -3592,7 +3664,8 @@ def _analysis_slot(slot, a, tb, auth, provenance, engine_threads, stop,
             if reset_stop is not None:
                 reset_stop()
             current_task.start(t['id'], t.get('lease_token', ''),
-                               t.get('budget_nodes'))
+                               t.get('budget_nodes'),
+                               alive=lambda: _engine_alive(eng))
             t0 = time.time()
             print(format_task_start(t, username, slot, jobs), flush=True)
             if verbose:
