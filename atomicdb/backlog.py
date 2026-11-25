@@ -816,11 +816,12 @@ def api_adopt(request):
         size = 0
     outcome = adopt(request.user.username, backlog, size)
     if wants_json:
-        code = {'bad-request': 400, 'queue-full': 503}.get(outcome.status,
-                                                           200)
-        return JsonResponse({'status': outcome.status,
-                             'adopted': outcome.adopted,
-                             'dropped': outcome.dropped}, status=code)
+        from .views import QUEUE_FULL_STATUS, _with_queue_full_retry
+        code = {'bad-request': 400,
+                'queue-full': QUEUE_FULL_STATUS}.get(outcome.status, 200)
+        return _with_queue_full_retry(JsonResponse(
+            {'status': outcome.status, 'adopted': outcome.adopted,
+             'dropped': outcome.dropped}, status=code))
     query = urlencode({'adopt': outcome.status, 'backlog': backlog,
                        'n': outcome.adopted, 'dropped': outcome.dropped})
     return redirect(f'{QUEUE_PAGE}?{query}#backlog')

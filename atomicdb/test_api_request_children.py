@@ -201,7 +201,8 @@ class RequestChildrenApiTests(TestCase):
     def test_a_full_queue_refuses_like_api_request(self):
         response = self._post(**self._credentials())
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 429)
+        self.assertIn('Retry-After', response)
         self.assertEqual(response.json()['status'], 'queue-full-account')
         self.assertIn('clear your queue', response.json()['reason'])
         self.assertFalse(AnalysisTask.objects.exists())

@@ -291,8 +291,9 @@ Send <code>moves</code> to have it listed under yours:</p>
 <tr><td><code>already-requested</code></td><td>Your address already has a
   live request on this position; wait for it to land.</td></tr>
 <tr><td><code>queue-full-account</code></td><td>You already have the maximum
-  number of requests waiting (HTTP <code>503</code>); let some land or clear
-  your queue.</td></tr>
+  number of requests waiting (HTTP <code>429</code> with a
+  <code>Retry-After</code> header); let some land or clear your
+  queue.</td></tr>
 <tr><td><code>refused</code></td><td>Not accepted; <code>reason</code> says
   why (see the HTTP codes below).</td></tr>
 </table></div>
@@ -302,9 +303,11 @@ Send <code>moves</code> to have it listed under yours:</p>
 <li><code>400</code>: an unreadable FEN or a bad budget.</li>
 <li><code>403</code>: wrong credentials.</li>
 <li><code>405</code>: anything but a <code>POST</code>.</li>
-<li><code>429</code>: too many calls.</li>
-<li><code>503</code>: your queue is full (<code>queue-full-account</code>), or
-  the database is busy (<code>refused</code> with a <code>Retry-After</code>).</li>
+<li><code>429</code>: too many calls, or your queue is full
+  (<code>queue-full-account</code>); both carry a <code>Retry-After</code>
+  header.</li>
+<li><code>503</code>: the database is busy (<code>refused</code> with a
+  <code>Retry-After</code>).</li>
 </ul>
 
 <h3 id="request-children">Request every unanalysed move</h3>
@@ -381,7 +384,8 @@ button does:</p>
   when your queue filled up partway; <code>nothing-to-do</code> when no move is
   left unanalysed; <code>already-solved</code> when
   the position itself is closed; <code>queue-full-account</code> (HTTP
-  <code>503</code>) when your queue was already full; or
+  <code>429</code> with a <code>Retry-After</code> header) when your queue
+  was already full; or
   <code>refused</code> with a <code>reason</code>.</td></tr>
 <tr><td><code>key</code>, <code>fen</code>, <code>seeded</code></td><td>As
   for <code>/api/request</code>, about the position you sent.</td></tr>
