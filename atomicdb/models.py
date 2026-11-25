@@ -556,6 +556,16 @@ class AnalysisTask(models.Model):
             # completadas del proyecto para acabar devolviendo cero filas.
             models.Index(fields=['requested_by', 'state', 'id'],
                          name='atomic_task_requester'),
+            # An account's last lease, one probe each (§ live_request.
+            # _served_stamps): the author's requests, and the ones that
+            # travel with somebody's lane.  Created CONCURRENTLY (0077).
+            models.Index(fields=['requested_by', 'leased_at'],
+                         name='atomic_task_user_served',
+                         condition=models.Q(source='USER')),
+            models.Index(fields=['lane_account', 'leased_at'],
+                         name='atomic_task_lane_served',
+                         condition=(models.Q(source='USER')
+                                    & ~models.Q(lane_account=''))),
         ]
 
 
