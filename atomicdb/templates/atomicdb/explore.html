@@ -932,6 +932,10 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
     each one opens the part of the position page guide that explains that
     column (docs/reading.html, #col-*).  ``col-info`` is a hook for the
     tests; the first two headers stay bare, the tests read them.{% endcomment %}
+    {% comment %}On a route a move can repeat, and the rows say what the moves
+    are worth by that route; the value above is the position's own
+    (§ views._line_note).{% endcomment %}
+    {% if line_note %}<p class="dim line-note" style="font-size:.8rem">The move values follow the line you came by: a move that repeats it counts as a draw.</p>{% endif %}
     <div class="table-scroll movecols">
     <table aria-labelledby="moves-heading">
       <tr><th{% if multi_request %} style="min-width:3rem;box-sizing:content-box"{% endif %}></th><th>move</th><th>state <a class="col-info" href="/atomicdb/docs/reading/#col-state" title="What the state column means" aria-label="About the state column" style="text-decoration:none;font-weight:normal">&#9432;</a></th><th>eval <a class="col-info" href="/atomicdb/docs/reading/#col-eval" title="What the eval column means" aria-label="About the eval column" style="text-decoration:none;font-weight:normal">&#9432;</a></th>
@@ -947,15 +951,17 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       {% for m in moves %}
       <tr>
         <td>{% comment %}One mark per row (seaside_cliff, 5-Nov-2026): a row that can be ticked is its checkbox, coloured like its chip, inside the chip's span so every row still opens with it; a solved row keeps its plain chip.{% endcomment %}{% if multi_request and not m.blocked and m.status == 'UNKNOWN' %}<span class="chip {{ m.css }} ms-host"><label class="ms-pick"><input type="checkbox" class="ms-box {{ m.css }}" data-ms="{{ m.uci }}"{% if m.unexplored %} data-unanalysed{% endif %} aria-label="Select {{ m.san }}" autocomplete="off"></label></span>{% else %}<span class="chip {{ m.css }}"></span>{% endif %}</td>
-        {% comment %}Una fila BLOQUEADA por repeticion conserva todo su
-        conocimiento — status, eval, pn/dn — y pierde el enlace: la jugada
-        vuelve a una posicion que ya esta en la linea actual y las
-        repeticiones estan desactivadas (invariante 6, decision del
-        propietario 6-ago).  El chip es el de siempre.{% endcomment %}
+        {% comment %}Una fila BLOQUEADA por repeticion conserva su status y
+        su pn/dn y pierde el enlace: la jugada vuelve a una posicion que ya
+        esta en la linea actual y las repeticiones estan desactivadas
+        (invariante 6, decision del propietario 6-ago).  Its eval is the
+        draw of the repetition, 0 (owner, 26-Nov-2026), and when that is the
+        arrow the eval cell says "repeat = draw".  El chip es el de
+        siempre.{% endcomment %}
         {% comment %}The move in SAN, its UCI in the tooltip; the link, the
         box and the scripts keep the UCI.{% endcomment %}
         <td>{% if m.blocked %}<strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong> <span class="backed-mark"
-          title="this move returns to a position already on this line. Repetitions are disabled; reach that position through the line above instead">repetition</span>
+          title="this move returns to a position already on this line, so it counts as a draw (0). Repetitions are disabled; reach that position through the line above instead">repetition</span>
           {% else %}<a href="{{ m.url }}"{% if m.enters_opening %}
           title="Enters {{ m.enters_opening }}"{% endif %}><strong{% if m.san != m.uci %} title="{{ m.uci }}" data-uci="{{ m.uci }}"{% endif %}>{{ m.san }}</strong></a>
           {% if m.enters_opening %}<span class="opening-enters">{{ m.enters_opening }}</span>{% endif %}{% endif %}</td>
@@ -1009,9 +1015,13 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
             class="backed-mark light eval-borrowed"{% if m.borrowed_url %}
             href="{{ m.borrowed_url }}"
             aria-label="jump to the position whose search wrote this number"{% endif %}
-            title="number from another position's search{% if m.borrowed_url %}, click to open it{% endif %}; the best line counts only searched moves until this one is searched">borrowed</{% if m.borrowed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.repetition %} <span
+            title="number from another position's search{% if m.borrowed_url %}, click to open it{% endif %}; the best line counts only searched moves until this one is searched">borrowed</{% if m.borrowed_url %}a{% else %}span{% endif %}>{% endif %}{% if m.blocked %}{% if m.repetition and m.uci == best_move %} <span
+            class="backed-mark repeat-draw"
+            title="this move repeats a position already on this line, and a repetition counts as a draw (0). Nothing known here is better for the side to move">repeat = draw</span>{% endif %}{% elif m.repetition %} <span
             class="backed-mark"
-            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
+            title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% elif m.returns %} <span
+            class="backed-mark line-returns"
+            title="on this line the move comes back to a position already played, so it is worth the best way out of that loop: {{ m.line_value }} here, whatever its own page claims">returns</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         {% comment %}How deep the move's position has been searched, in the
         slider's unit, where the visit count used to be ("it would be more

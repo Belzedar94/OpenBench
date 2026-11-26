@@ -5984,8 +5984,8 @@ def _own_line_values(pos):
     return values
 
 
-def _repetition_moves(pos):
-    """Las jugadas de esta tabla que solo valen TABLAS, cuando hay que decirlo.
+def _repetition_moves(pos, route_keys=None):
+    """The moves of this table valued on the line: ``{uci: (value, repeats)}``.
 
     Un nodo que publica un cero de repeticion tiene que enseñar ese cero en la
     fila de la que sale, o el visitante lee una cabecera a 0 sobre una tabla en
@@ -5993,20 +5993,33 @@ def _repetition_moves(pos):
     ninguno de los dos (Wolfram, 12-ago: "0 was propagated from repetition
     somehow but was not displayed at child node").
 
-    La pregunta cuesta un paseo por el grafo, asi que se hace SOLO cuando hay
-    un numero que explicar: el nodo esta abierto y su respaldo son tablas
-    apoyadas en una arista.  Bajo el contrato de ``ingest._backed_for`` ese es
-    exactamente el estado en el que un cero de repeticion puede estar
-    publicado, asi que la puerta no se deja fuera ninguna fila que contradiga a
-    su cabecera; y en el resto de la base — que es toda ella — no cuesta nada.
+    The question used to be asked only when the position published exactly
+    0.  That left out a returning move the backup values at its way out of
+    the loop (+29, say): the row then showed the number its position stores,
+    which came round the loop (+1141), tied with the real best move.  So it
+    is asked of every open position.
+
+    ``route_keys`` is the line the visitor came by, this position included
+    (see _route_prefix_keys).  Without one the line is this position alone,
+    as the backup reads it (see ingest.line_moves).  A proven position never
+    reads its children, and pays nothing.
     """
-    if pos.status != 'UNKNOWN' or not pos.backed_move or pos.backed_eval != 0:
-        return frozenset()
-    return ingest.repetition_moves(pos)
+    if pos.status != 'UNKNOWN':
+        return {}
+    return ingest.line_moves(pos, frozenset(route_keys or ()))
 
 
-def _child_moves(pos):
+def _child_moves(pos, route_keys=None):
     """Tabla de hijos en perspectiva DEL QUE MUEVE (convencion chessdb.cn).
+
+    ``route_keys``, the line the visitor came by (see _route_prefix_keys),
+    decides what a move that comes back to it is worth.  A move that lands
+    on the line is a repetition, worth 0 (``repetition``); a move whose own
+    line comes back to it is worth its value on that line (``returns``,
+    ``line_value``).  Without a route the line is this position alone, as
+    the backup reads it.  Stored values are never touched: this is what the
+    moves are worth BY THIS PATH (invariant 6).
+
     El almacenamiento interno sigue siendo White-POV; solo la vista voltea —
     exactamente UN cambio de signo por ply mostrado.
     Cada fila muestra el MEJOR CONOCIMIENTO ACTUAL del hijo (status probado >
@@ -6062,7 +6075,11 @@ def _child_moves(pos):
     stm_white = pos.fen.split()[1] == 'w'
     win = 'WHITE_WIN' if stm_white else 'BLACK_WIN'
     loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
-    repeats = _repetition_moves(pos)
+    # A proven position quotes its verdict and never reads its children's
+    # values (see ingest._backed_for), so its rows keep theirs.
+    on_route = (frozenset(route_keys or ()) if pos.status == 'UNKNOWN'
+                else frozenset())
+    on_line = _repetition_moves(pos, route_keys)
     moves = []
     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
     numbers = _proof_numbers_for([edge.child.key for edge in edges])
@@ -6120,7 +6137,13 @@ def _child_moves(pos):
         else:
             # sin analizar: encima de perder, debajo de lo caminado
             score, rank, tier = None, -9_999.5, 1
-        repetition = e.move_uci in repeats
+        seen = on_line.get(e.move_uci)
+        # A move that lands on the route repeats whatever the walk says, and
+        # a move whose line comes back is a repetition when that line's
+        # verdict is the draw.
+        repetition = c.key in on_route or (seen is not None and seen[1])
+        returns = not repetition and seen is not None
+        line_value = None
         if repetition:
             # LA FILA DICE LO QUE EL PADRE USA (§ ingest, el bloque de la
             # repeticion).  Por esta arista el respaldo de arriba no usa el
@@ -6139,6 +6162,19 @@ def _child_moves(pos):
             # repeticion, y para eso esta su propia marca.
             score, rank, tier = 0, 0.0, 2
             backed_plies, backed_light, walked = 0, False, False
+            line_value = 0
+        elif returns:
+            # THE LINE COMES BACK, AND SOMEBODY ON IT LEAVES THE LOOP
+            # (see ingest._resolve_returning_children).  The number the
+            # move's position stores went round the loop, through the very
+            # position it is being read from; on this line the move is worth
+            # the best way out, which is what the backup uses.  The backed
+            # chip goes for the reason the repetition row loses it: the chain
+            # it would jump down is the loop.
+            score = seen[0] if stm_white else -seen[0]
+            rank = max(-9_999.0, min(9_999.0, float(score)))
+            backed_plies, backed_light, walked = 0, False, False
+            line_value = score
         # THE ROW SAYS WHAT THE POSITION DOES WITH IT (see ingest.is_floor).
         # A move nobody searched, valued from the replies somebody opened,
         # holds a floor; when it lies outside this position's current lines
@@ -6146,7 +6182,8 @@ def _child_moves(pos):
         # and neither does the arrow.  The number stays where its value puts
         # it, because the table orders by value and by nothing else, and the
         # ink and the tooltip say the rest.
-        floor = not repetition and ingest.refuses_floor(pos, c, e.move_uci)
+        floor = (line_value is None
+                 and ingest.refuses_floor(pos, c, e.move_uci))
         # A NUMBER THIS POSITION NEVER SAID (see _own_line_values).  Nothing
         # has searched the move, the number is the claim the child stores (a
         # backing has its chip, a floor its note, a repetition its zero), and
@@ -6164,7 +6201,7 @@ def _child_moves(pos):
         # think this is too much").  The tooltip still says where the number
         # is from (``foreign``), and never credits a pass that never ran.
         borrowed = foreign and bool(own_values)
-        if c.status in (win, loss):
+        if c.status in (win, loss) and not repetition:
             # distancia de mate: mate_in propagado por minimax; fallback a la
             # linea verificada. La jugada de la fila cuenta como primer ply.
             plies = None
@@ -6211,6 +6248,12 @@ def _child_moves(pos):
                       # (§ _repetition_moves): el numero de la celda son las
                       # tablas que el respaldo de arriba usa por esta arista.
                       'repetition': repetition,
+                      # The move's line comes back to this one and the row
+                      # shows its value on the line (``line_value``, from the
+                      # side to move, also set on a repetition row: 0).
+                      # None wherever the row shows what its position stores.
+                      'returns': returns,
+                      'line_value': line_value,
                       # Lo que decide el tier viaja en la fila: la marca que
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.
@@ -6924,7 +6967,12 @@ def _query_block(pos):
               'searched_nodes': m['searched_nodes'], 'floor': m['floor'],
               # The explorer's ``borrowed`` chip (§ _child_moves): a number
               # another position's search wrote.  Additive, after the rest.
-              'borrowed': m['borrowed']}
+              'borrowed': m['borrowed'],
+              # The move's value comes back to this position: ``repetition``
+              # when it is worth the draw (0), ``returns`` when it is worth
+              # its way out of the loop.  ``score`` already is that value.
+              # Additive, after the rest.
+              'repetition': m['repetition'], 'returns': m['returns']}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el
@@ -8916,10 +8964,22 @@ def _arrow_move(moves, pos):
     (§ _first_among_equals), so the arrow and the top row agree.
 
     Mismo contrato que tenia el inline de ``explore`` — la primera fila con
-    valor manda, y sin valor manda ``pos.best_move`` — con una resta: una
-    fila bloqueada por repeticion no puede ser la recomendacion, y si el
-    ``best_move`` almacenado es justo la jugada bloqueada, la flecha calla en
-    vez de contradecir al bloqueo.
+    valor manda, y sin valor manda ``pos.best_move``.
+
+    A REPETITION IS A MOVE TOO (owner, 26-Nov-2026).  A move that lands on
+    the line the visitor came by is worth 0 (see _child_moves) and stays a
+    candidate: when the draw is the best the side to move has, which is the
+    defender's case, the arrow points at it, labelled as the repetition it
+    is.  The arrow used to pass over it, and on a loop of the Sicilian
+    family the defender was shown castling into -1160 instead of the draw
+    that repeating gives him.  An attacker's repetition loses to any move
+    worth more than 0 the ordinary way.  Only when no row carries a number
+    does a blocked ``best_move`` keep the arrow quiet, as before.
+
+    A row valued on the line (``line_value``: a repetition, or a move whose
+    line comes back) is not what the header's number was worked out from,
+    so the header's move gives way to the table's order wherever such a row
+    sits at or above it.
 
     A floor the position does not take (§ ingest.refuses_floor) is passed
     over the same way: the arrow goes to the first row the backup can stand
@@ -8928,16 +8988,37 @@ def _arrow_move(moves, pos):
     blocked = {m['uci'] for m in moves if m.get('blocked')}
     header_move = _header_move(pos)
     for move in moves:
-        if (move['uci'] == header_move
-                and not (move.get('blocked') or move.get('floor'))):
+        if move.get('line_value') is not None:
+            break             # the line, not the header, decides from here
+        if move['uci'] == header_move and not move.get('floor'):
             return header_move
     for move in moves:
-        if move.get('blocked') or move.get('floor'):
+        if move.get('floor'):
             continue
         if move.get('score') is not None or move.get('mate') is not None:
             return move['uci']
         break
     return None if pos.best_move in blocked else pos.best_move
+
+
+def _line_note(moves, arrow, eval_stm, route_keys):
+    """Whether the page says that its rows follow the line, not the header.
+
+    The value a position stores is a fact about the position, worked out
+    with that position alone as the line (invariant 6).  The rows are what
+    the moves are worth by the route the visitor came by, and on a route
+    that a move repeats they can disagree: on the Sicilian loop, Black's
+    page quotes -1141 for a position where Bf8 repeats and is worth 0.
+    True only on a route where some row is valued on that line and the best
+    row's number is not the header's.
+    """
+    if route_keys is None or eval_stm is None or arrow is None:
+        return False
+    if not any(move.get('line_value') is not None for move in moves):
+        return False
+    best = next((move for move in moves if move['uci'] == arrow), None)
+    return (best is not None and best.get('score') is not None
+            and best.get('mate') is None and best['score'] != eval_stm)
 
 
 def _pv_cut_at_repetition(pos, line):
@@ -9260,10 +9341,6 @@ def explore(request, key):
     # (§ _relink_on_view).  Only the node being shown: a ``?play=`` route
     # materialises nothing, and this node already exists.
     pos = _relink_on_view(pos, legal_ucis)
-    # The depth column of the table, one aggregate for every row
-    # (§ _with_search_depth), and the marks of work in flight on each row,
-    # two more statements for the whole table (§ _with_pending_marks).
-    moves = _with_pending_marks(_with_search_depth(_child_moves(pos)))
     # The parent's FEN rides on the same query, so the page names each move in
     # SAN without a read per parent (§ san).  Only shown with two or more.
     parents = [{'key': parent_key, 'uci': uci, 'fen': parent_fen}
@@ -9304,7 +9381,6 @@ def explore(request, key):
         top, line, active_ucis = _canonical_route(pos)
     else:
         top, line, active_ucis = explicit_route
-    known = {m['uci'] for m in moves}
     current_opening_match, route_ply, active_ucis = _navigation_opening(
         active_ucis,
         request.GET.get(OPENING_ANCHOR_PARAM),
@@ -9323,8 +9399,17 @@ def explore(request, key):
     # pregunta suelta es un viaje a Redis (§ community_names.approved_map).
     community_map = community_names.approved_map()
     # The keys of the active route, one per ply, or None without one.  The
-    # name below and the repetition guard further down read the same line.
+    # name below, the values of the table and the repetition guard further
+    # down read the same line.
     route_keys = _route_prefix_keys(top, line, active_ucis)
+    # The table, valued on that line (§ _child_moves): a move that repeats
+    # it is worth 0 and a move whose line comes back is worth its value on
+    # the line.  The depth column of the table, one aggregate for every row
+    # (§ _with_search_depth), and the marks of work in flight on each row,
+    # two more statements for the whole table (§ _with_pending_marks).
+    moves = _with_pending_marks(_with_search_depth(
+        _child_moves(pos, route_keys)))
+    known = {m['uci'] for m in moves}
     # Un nombre comunitario aprobado solo puede aparecer donde el catalogo
     # auditado calla sobre ESTA posicion, y gana a un nombre heredado de un
     # ancestro. La navegacion (anclas firmadas) sigue anclada al catalogo.
@@ -9492,6 +9577,8 @@ def explore(request, key):
     # linea caminada ensenaba su eval sembrada tan segura como una de 512M
     # (§ _walked_value).  Mismo predicado que ordena la tabla de abajo.
     eval_walked = eval_stm is not None and _walked_value(pos)
+    arrow_move = (None if pos.closure == 'TERMINAL'
+                  else _arrow_move(moves, pos))
     # El boton de verificar y su selector se deciden JUNTOS y en este orden:
     # sin plies que ofrecer no hay boton, y sin boton no hay por que preguntar
     # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
@@ -9585,12 +9672,14 @@ def explore(request, key):
         # busqueda propia: cuando un respaldo adelanta, tabla y flecha deben
         # moverse JUNTAS o el tablero contradice a su propia columna (bug
         # reportado 29-jul; misma leccion de la fuente unica de verdad).
-        # Y nunca a una fila BLOQUEADA por repeticion: recomendar lo que no
-        # se puede pinchar es contradecir el bloqueo con la flecha.
+        # A row blocked by repetition is worth 0 and may be the arrow when
+        # that draw is the best move (owner, 26-Nov-2026; § _arrow_move).
         # The top row yields to the move the header's number comes from
         # (§ _arrow_move).
-        'best_move': (None if pos.closure == 'TERMINAL'
-                      else _arrow_move(moves, pos)),
+        'best_move': arrow_move,
+        # The rows follow the line the visitor came by and the header does
+        # not (§ _line_note): said once, under the table's own heading.
+        'line_note': _line_note(moves, arrow_move, eval_stm, route_keys),
         'stm': 'White' if stm_white else 'Black',
         # ``w`` or ``b``: the side every number on this page is measured
         # from, for the cog's "White, in pawns" view (§ base.html).

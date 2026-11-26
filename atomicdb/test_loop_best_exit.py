@@ -257,7 +257,7 @@ class NoWayOutTests(TestCase):
         self.assertEqual(_state('DRAW-W', 'DRAW-B'),
                          [(0, 'wb', 1, 0), (0, 'bw', 1, 0)])
         w = Position.objects.get(key=_key('DRAW-W'))
-        self.assertEqual(ingest.repetition_moves(w), {'wb'})
+        self.assertEqual(ingest.repetition_moves(w), {'wb': 0})
         self.assertTrue(DBEvent.objects.filter(
             kind='CYCLE_DISAMBIGUATION').exists())
 

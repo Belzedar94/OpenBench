@@ -72,7 +72,10 @@ are playing, never to the position itself.</p>
 <ul>
 <li>Repetitions are switched off in navigation, not merely labelled. A move
   that would re-enter the line you are playing shows as a disabled row with
-  the chip.</li>
+  the chip, valued at 0. It is still a move: when the draw is the best the
+  side to move has, the board arrow points at it.</li>
+<li>A move whose own line comes back to the line you are playing shows its
+  value on that line, with the <strong>returns</strong> chip.</li>
 <li>A stored line is shown only up to its first self crossing. Reach that
   position through the line above it instead.</li>
 </ul>

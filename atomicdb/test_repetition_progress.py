@@ -246,7 +246,7 @@ class DrawStillDrawsTests(TestCase):
         self.assertEqual([value for value, _move in _published(ring)],
                          [0] * 4)
         self.assertEqual(_published(ring)[0], (0, 'd6f6'))
-        self.assertEqual(ingest.repetition_moves(ring[0]), {'d6f6'})
+        self.assertEqual(ingest.repetition_moves(ring[0]), {'d6f6': 0})
 
 
 class TieBreakTests(TestCase):

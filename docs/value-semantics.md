@@ -170,7 +170,12 @@ Every position value on the site is in exactly one of four states:
      route can never re-enter a position it already went through — the
      crossing move is disabled, an incoming route that contains a crossing
      is truncated there. Repetitions are switched off, not merely
-     labelled (owner decision, 2026-08-06).
+     labelled (owner decision, 2026-08-06). The disabled move is still
+     valued, at 0, and is the board arrow when that draw is the best the
+     side to move has; a move whose own line comes back to the route shows
+     its value on that line, computed by the same walk and valuation as the
+     backup. Rows follow the route; stored values do not (owner decision,
+     2026-11-26).
 
    Open nodes whose pn/dn sit at saturation are *not* frontier (there is
    no effort left to estimate in a saturated number) but they never leave

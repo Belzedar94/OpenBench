@@ -2562,7 +2562,7 @@ def _resolve_spine_steps(cache, walks):
 
 
 def _resolve_returning_children(by_parent, cache, line=frozenset(),
-                                budget=None, only=None):
+                                budget=None, only=None, unresolved=None):
     """Value a returning child ON THE LINE THAT RETURNS, not at a flat zero.
 
     WHAT THE FLAT ZERO GOT WRONG.  The walk establishes one fact: the
@@ -2611,6 +2611,11 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
 
     ``only`` restricts the work to the parents that will use it: a proven
     row never looks at its children (see _backed_for).
+
+    ``unresolved``, when given, collects ``(parent_key, move_uci)`` of the
+    returning children the budget ran out on.  The backup does not need it
+    (the walk's verdict stands); the explorer does, to show such a row at
+    its stored value instead (see line_moves).
     """
     if budget is None:
         _cycle_deadline[0] = time.monotonic() + BACKED_CYCLE_MAX_SECONDS
@@ -2624,6 +2629,8 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
             spent = [BACKED_CYCLE_MAX_NODES] if budget is None else budget
             seen = _value_on_line(child.key, played, cache, spent)
             if seen is None:
+                if unresolved is not None:
+                    unresolved.add((parent_key, child.move))
                 continue      # out of budget: the walk's verdict stands
             value, quality, plies, spine, repeats = seen
             if repeats:
@@ -2704,26 +2711,63 @@ def _line_verdict(row, kids, played):
     return value, max(quality, row.nodes_invested or 0), plies, move, False
 
 
-def repetition_moves(row):
-    """Las jugadas de ``row`` que solo valen TABLAS: su valor vuelve aqui.
+def line_moves(row, line=frozenset()):
+    """The moves of ``row`` whose value depends on the line, and that value.
 
-    El explorador la llama para poder ENSEÑAR la repeticion en la fila de la
-    que sale (§ views._child_moves): un nodo que publica tablas por repeticion
-    y una tabla en la que ninguna fila dice 0 es el sintoma (b) del reporte del
-    12-ago, y son dos numeros para una misma arista.
+    Returns ``{move_uci: (value, repeats)}``, ``value`` from White's side,
+    for every move that lands on the line or whose own line comes back to
+    it.  ``repeats`` says the move is worth the draw of the repetition (0);
+    otherwise ``value`` is what the move is worth on the line: the best way
+    out of the loop (see _resolve_returning_children).  Every other move is
+    worth the value its position stores and is left out.
 
-    Es el MISMO paseo que usa el respaldo, no una segunda copia del predicado:
-    dos definiciones de "esto cicla" son dos definiciones que se separan, y la
-    que se separa siempre es la de la vista.  Cuesta la consulta de las aristas
-    mas un puñado del paseo, asi que el llamante la pide solo cuando tiene un
-    numero que explicar.
+    ``line`` is the positions the line has already been through above
+    ``row``.  Empty, the line is ``row`` alone, which is exactly how the
+    backup values the moves of ``row`` (played = {row}), so the rows of the
+    explorer and the backed value read the same numbers.  The explorer
+    passes the route the visitor came by (see views._child_moves).
+
+    It is the SAME walk and the same valuation the backup runs, under the
+    same budget, not a second copy of the predicate: two definitions of
+    "this returns" are two definitions that drift apart.  A returning move
+    the budget runs out on is left out, so the explorer shows its stored
+    value.  Nothing is written.
     """
     children = _backed_children_by_parent([row.key])
     cache = _SpineCache()
-    _draw_cycling_children(children, cache)
-    _resolve_returning_children(children, cache)
-    return {child.move for child in children.get(row.key, ())
-            if child.cycles}
+    line = frozenset(line)
+    _draw_cycling_children(children, cache, line)
+    kids = children.get(row.key, ())
+    marked = {child.move for child in kids if child.cycles}
+    if not marked:
+        return {}
+    unresolved = set()
+    _resolve_returning_children(children, cache, line, unresolved=unresolved)
+    out = {}
+    for child in kids:
+        if child.move not in marked:
+            continue
+        if child.cycles:
+            if (row.key, child.move) in unresolved:
+                continue      # out of budget: the stored value is shown
+            out[child.move] = (0, True)
+        elif child.value is not None:
+            out[child.move] = (child.value, False)
+    return out
+
+
+def repetition_moves(row, line=frozenset()):
+    """``{move_uci: value}``: the moves of ``row`` valued on the line.
+
+    The value of each such move on the line, from White's side: 0 for a move
+    that repeats, the best way out for a move whose line returns
+    (see line_moves).  It was a set of the moves still worth a flat 0, which
+    dropped a returning move valued at its way out, and the explorer then
+    showed that move at the number its position stores, which came round
+    the loop.
+    """
+    return {move: value
+            for move, (value, _repeats) in line_moves(row, line).items()}
 
 
 def coverage_is_partial(row, children):
