@@ -27,6 +27,72 @@ def _child(parent, uci, value):
     return child
 
 
+class LineWalkBudgetTests(TestCase):
+    """Up to 26 move tables per call share ONE repetition-walk budget.
+
+    Each table may walk the repetition for up to the backup's own 1 s
+    (see views._repetition_moves); a call that reaches many positions must
+    not pay that per table.  The clock is patched: every walk costs a full
+    second, and once views.LINE_WALK_REQUEST_SECONDS are spent the tables
+    that remain show stored values without walking.
+    """
+
+    def setUp(self):
+        self.root = _node(logic.start_fen(), 40)
+        for index, uci in enumerate(('e2e4', 'd2d4', 'g1f3', 'c2c4', 'e2e3')):
+            first = _child(self.root, uci, 50 - index)
+            reply = _child(first, 'a7a6', 40 - index)
+            _child(reply, 'a2a3', 30 - index)
+
+    def test_many_tables_stay_within_one_budget(self):
+        from unittest import mock
+        import types
+        from . import views
+        clock = [0.0]
+        calls = []
+
+        def walk(pos, line=frozenset(), deadline=None):
+            calls.append((clock[0], deadline))
+            clock[0] += 1.0       # every walk spends a whole second
+            return {}
+
+        tables = []
+        real = views._repetition_moves
+
+        def counted(pos, route_keys=None):
+            tables.append(pos.key)
+            return real(pos, route_keys)
+
+        fake_time = types.SimpleNamespace(monotonic=lambda: clock[0])
+        with mock.patch.object(views, 'time', fake_time), \
+                mock.patch.object(ingest, 'line_moves', side_effect=walk), \
+                mock.patch.object(views, '_repetition_moves', counted):
+            response = Client().get(URL, {'fen': self.root.fen})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body['lines']), 5)
+        self.assertEqual(body['lines']['e2e4'], ['e2e4', 'a7a6', 'a2a3'])
+        # Root plus fifteen positions on the lines, and only the walks that
+        # fit in the budget ran.
+        self.assertGreaterEqual(len(tables), 16)
+        budget = views.LINE_WALK_REQUEST_SECONDS
+        self.assertEqual(len(calls), int(-(-budget // 1.0)))
+        # Every walk got the request's deadline, which caps its own 1 s.
+        self.assertTrue(all(deadline == budget for _t, deadline in calls))
+        self.assertLessEqual(max(t for t, _d in calls), budget)
+
+    def test_without_a_request_budget_a_table_walks_as_before(self):
+        from . import views
+        self.assertIsNone(views._line_walk_deadline.get())
+        from unittest import mock
+        with mock.patch.object(ingest, 'line_moves',
+                               return_value={}) as walk:
+            views._child_moves(self.root)
+        walk.assert_called_once()
+        self.assertIsNone(walk.call_args.kwargs['deadline'])
+
+
 class PrincipalVariationsTests(TestCase):
 
     def setUp(self):

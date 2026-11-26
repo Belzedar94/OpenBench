@@ -1620,20 +1620,30 @@ class RepetitionZeroContractTests(TestCase):
         self.assertIsNotNone(
             re.search(r'<td>(?:<span[^>]*class=\"ev\"[^>]*>)?0(?:</span>)?\s*<span[^>]*>repetition</span>', body))
 
-    def test_a_node_that_is_not_standing_on_a_draw_pays_for_no_walk(self):
-        # La pregunta cuesta un paseo, asi que solo se hace cuando hay un
-        # numero que explicar.  Un nodo normal no paga por una repeticion que
-        # no tiene: ni marca, ni consulta.
+    def test_a_node_with_no_returning_move_pays_for_one_read(self):
+        # Every open position is asked now, not only one standing on a 0
+        # (26-Nov-2026: a returning move valued at its way out was missed).
+        # A position whose children borrow nothing has no spine to walk:
+        # one read of its edges, no mark.
         parent = _pos('NOWALK-P', 'w', expanded=True)
         _edge(parent, _pos('NOWALK-C', 'b', eval_cp=250,
                            nodes_invested=1_000), 'd2d4')
         ingest.backup_backed_evals([parent.key])
         parent.refresh_from_db()
 
-        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
-            self.assertEqual(views._repetition_moves(parent), frozenset())
+        with self.assertNumQueries(1, using=settings.ATOMICDB_DATABASE_ALIAS):
+            self.assertEqual(views._repetition_moves(parent), {})
 
-        self.assertFalse(views._child_moves(parent)[0]['repetition'])
+        row = views._child_moves(parent)[0]
+        self.assertFalse(row['repetition'])
+        self.assertFalse(row['returns'])
+        self.assertIsNone(row['line_value'])
+
+    def test_a_proven_node_pays_for_no_walk(self):
+        parent = _pos('NOWALK-WON', 'w', status='WHITE_WIN',
+                      closure='MINIMAX')
+        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
+            self.assertEqual(views._repetition_moves(parent), {})
 
 
 class WalkedChipTests(TestCase):

@@ -47,7 +47,15 @@ column shows how much search each move has had.</figcaption>
 <li>In the header: the chain that leads here returns to a position it has
   already been through.</li>
 <li>On a disabled row: the move would re-enter the line you are
-  playing.</li>
+  playing. It counts as a draw (0), and when that draw is the best the side to
+  move has, the board arrow points at it, marked <strong>repeat =
+  draw</strong>.</li>
+<li><strong>returns</strong> on a move row: on this line, the move's own
+  line comes back to a position already played, so the move is worth the best
+  way out of that loop, not the number its own page shows.</li>
+<li>The values of the rows follow the line you came by. Where that makes the
+  best row differ from the position's value above, the page says so under
+  the table's heading.</li>
 </ul>
 </details>
 <details>

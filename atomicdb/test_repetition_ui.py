@@ -196,18 +196,38 @@ class PvCutTests(KnightLoopFixture):
 
 
 class ArrowTests(KnightLoopFixture):
+    """A repetition is worth 0 and stays a move (owner, 26-Nov-2026).
 
-    def test_arrow_never_points_at_a_blocked_move(self):
-        # El ``best_move`` almacenado apunta justo a la jugada bloqueada: la
-        # flecha calla (o señala otra fila) antes que contradecir al bloqueo.
+    The blocked row keeps its chip and loses its link, but it is no longer
+    passed over by the arrow: when 0 is the best the side to move has, the
+    arrow points at it, marked as the repetition it is.
+    """
+
+    def test_the_repeating_row_is_worth_a_draw(self):
+        Position.objects.filter(key=self.start_key).update(
+            eval_cp=35, nodes_invested=1_000_000)
+        response = self._explore(self.p3.key, play=','.join(self.route))
+        row = next(m for m in response.context['moves']
+                   if m['uci'] == 'f6g8')
+        self.assertTrue(row['blocked'])
+        self.assertTrue(row['repetition'])
+        self.assertEqual(row['score'], 0)
+
+    def test_the_arrow_points_at_the_draw_when_it_is_the_best_move(self):
+        # The only row: the repetition, worth 0, is the best there is.
         self.p3.best_move = 'f6g8'
         self.p3.save(update_fields=['best_move'])
         response = self._explore(self.p3.key, play=','.join(self.route))
-        self.assertNotEqual(response.context['best_move'], 'f6g8')
+        self.assertEqual(response.context['best_move'], 'f6g8')
+        self.assertContains(response, 'repeat = draw')
 
-    def test_arrow_never_points_at_a_blocked_backed_move(self):
-        # Not even when the header's number comes through it: the block wins.
+    def test_the_header_move_through_the_repetition_is_valued_at_0(self):
+        # The header's number comes through the repeating move; on this line
+        # that move is worth 0, and it is still the best row.
         Position.objects.filter(key=self.p3.key).update(
             backed_eval=35, backed_move='f6g8', backed_plies=1)
         response = self._explore(self.p3.key, play=','.join(self.route))
-        self.assertIsNone(response.context['best_move'])
+        self.assertEqual(response.context['best_move'], 'f6g8')
+        # Black's page quotes -35, its best row says 0: the page says why.
+        self.assertTrue(response.context['line_note'])
+        self.assertContains(response, 'follow the line you came by')

@@ -104,7 +104,7 @@ class ReturningLineTests(TestCase):
         b.refresh_from_db()
         self.assertEqual((b.backed_eval, b.backed_move, b.backed_nodes),
                          (0, 'f6f5', 0))
-        self.assertEqual(ingest.repetition_moves(b), {'f6f5'})
+        self.assertEqual(ingest.repetition_moves(b), {'f6f5': 0})
 
     def test_one_touch_settles_the_whole_loop(self):
         # No lap of corrections any more: wherever the ascent starts, the four

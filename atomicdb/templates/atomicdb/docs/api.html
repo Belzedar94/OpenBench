@@ -146,6 +146,11 @@ plies).</p>
 <li><code>borrowed</code>: <code>true</code> for a number nothing has searched
   and none of this position's own lines gives: it was written by another
   position's search (the explorer's <em>borrowed</em> chip).</li>
+<li><code>repetition</code>: <code>true</code> when the move's value comes
+  back to this position and is worth the draw of the repetition (0);
+  <code>returns</code>: <code>true</code> when it comes back and is worth the
+  best way out of that loop. Either way <code>score</code> is that value, the
+  one the backed value of this position uses.</li>
 </ul>
 <details>
 <summary>Details: <code>floor</code> and <code>searched_nodes</code></summary>
