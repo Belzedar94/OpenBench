@@ -53,7 +53,9 @@ class HeadlineValueTests(TestCase):
 
         body = self._explore(pos).content.decode()
         self.assertIn('White wins · MINIMAX', body)
-        self.assertNotIn('best line', body)   # no cp headline on a proof
+        # No cp headline on a proof (it read "· best line +420cp"; the
+        # "Play best line" button is not it).
+        self.assertNotRegex(body, r'best line [-+]?\d')
 
         payload = self._api(pos)
         self.assertEqual(payload['score'], 10_000)   # the proof, mover-POV

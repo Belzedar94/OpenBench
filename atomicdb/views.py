@@ -45,6 +45,7 @@ from . import idle_repair
 from . import sweep
 from . import proposed_campaigns
 from . import san as move_names
+from . import wdl as wdl_bars
 
 # How long a lease lives without a heartbeat before the next ``api/lease``
 # gives the task to somebody else.  A worker beats every 60 seconds and gives
@@ -9452,6 +9453,30 @@ def _opening_name_url(opening, pos_key, active_ucis, route_keys):
     return _explore_url(named_key, list(route) if route else None)
 
 
+def _playline(pos, moves, arrow_move):
+    """What the explorer's "Play best line" / "Play random line" read here.
+
+    Display only, like the rest of the page.  The player walks the page's own
+    links one position at a time (explore.html), and on each page it needs:
+
+      * ``open``: False on a closed or terminal position, where it stops;
+      * ``best``: the arrow's move (§ _arrow_move), the move the best line
+        plays, which is the top row of the table bar its tie rules;
+      * ``rows``: the stored moves a click can follow, in table order, with
+        the link the row itself carries and its value from the side to move.
+        A row blocked by repetition has no link and is left out, as are the
+        legal moves not in the tree (the player only walks stored moves).
+    """
+    return {
+        'key': pos.key,
+        'open': pos.status == 'UNKNOWN' and pos.closure != 'TERMINAL',
+        'best': arrow_move,
+        'rows': [{'uci': m['uci'], 'key': m['key'], 'url': m['url'],
+                  'score': m['score']}
+                 for m in moves if not m.get('blocked') and m.get('url')],
+    }
+
+
 def explore(request, key):
     try:
         pos = Position.objects.get(key=key)
@@ -9718,6 +9743,11 @@ def explore(request, key):
     eval_walked = eval_stm is not None and _walked_value(pos)
     arrow_move = (None if pos.closure == 'TERMINAL'
                   else _arrow_move(moves, pos))
+    # The win / draw / loss bar of each row, from the side to move, read off
+    # what the row already shows (§ wdl): display only.
+    loss = 'BLACK_WIN' if stm_white else 'WHITE_WIN'
+    for move in moves:
+        move['wdl'] = wdl_bars.row_wdl(move, win, loss)
     # El boton de verificar y su selector se deciden JUNTOS y en este orden:
     # sin plies que ofrecer no hay boton, y sin boton no hay por que preguntar
     # al arbol que candidatos tiene (§ _pv_verify_lines cuesta una consulta
@@ -9816,6 +9846,9 @@ def explore(request, key):
         # The top row yields to the move the header's number comes from
         # (§ _arrow_move).
         'best_move': arrow_move,
+        # What "Play best line" / "Play random line" read on this page to pick
+        # the next step (§ _playline): the rows a click can follow.
+        'playline': _playline(pos, moves, arrow_move),
         # The rows follow the line the visitor came by and the header does
         # not (§ _line_note): said once, under the table's own heading.
         'line_note': _line_note(moves, arrow_move, eval_stm, route_keys),

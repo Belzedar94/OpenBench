@@ -21,6 +21,10 @@ from . import ingest, logic, views
 from .models import AnalysisTask, DBEvent, Edge, Position
 from .testing import TestCase
 
+# The win / draw / loss bar that may close an eval cell (§ wdl): an empty
+# span of coloured segments after the number.
+WDL_BAR = r'(?:<span[^>]*class="wdl[^"]*"[^>]*>(?:<span[^>]*></span>)*</span>)?'
+
 
 def _key(name):
     return hashlib.sha256(name.encode()).hexdigest()
@@ -1895,7 +1899,7 @@ class LineProvenanceTests(TestCase):
                        .content.decode()
 
         # The number sits in an eval span since the cog's eval view.
-        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?</td>')
+        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?' + WDL_BAR + r'</td>')
         self.assertNotIn('eval-claim', body)
         self.assertNotIn('>line 1</span>', body)
         self.assertNotIn('>walked</span>', body)
@@ -1944,7 +1948,7 @@ class LineProvenanceTests(TestCase):
         # entero en la suya.
         self.assertEqual(sum('eval-claim' in row for row in rows), 2)
         # The number sits in an eval span since the cog's eval view.
-        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?</td>')
+        self.assertRegex(body, r'<td>(?:<span[^>]*>)?40(?:</span>)?' + WDL_BAR + r'</td>')
         self.assertIn('walked 5</a>', body)
 
     def test_the_refreshed_value_orders_where_its_number_says(self):
