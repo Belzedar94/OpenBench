@@ -212,8 +212,11 @@ class ExplorePageTests(TestCase):
 
     def test_the_bars_can_be_switched_off(self):
         _, body = self.page()
-        self.assertIn('id="wdl-toggle"', body)
-        self.assertIn("'atomicdb-wdl-hidden'", body)
+        # In Settings > Explorer columns, with the other columns.
+        self.assertIn('value="wdl"', body)
+        self.assertIn('<span>W/D/L bars</span>', body)
+        self.assertIn('state|pn|depth|wdl', body)
+        self.assertNotIn('id="wdl-toggle"', body)
         self.assertIn('class="wdl', body)
 
     def test_a_closed_position_tells_the_player_to_stop(self):

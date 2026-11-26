@@ -982,10 +982,8 @@ main {
 .wdl-d { background: var(--draw); }
 .wdl-l { background: var(--lost); }
 .wdl.wdl-est { opacity: .6; }
-/* Switched off from the explorer's "W/D/L bars" box (localStorage). */
-:root.wdl-hidden .wdl { display: none; }
-.wdl-toggle { white-space: nowrap; cursor: pointer; }
-.wdl-toggle input { vertical-align: -2px; margin: 0 2px 0 0; }
+/* Switched off from Settings > Explorer columns > "W/D/L bars". */
+:root[data-hidecols~="wdl"] .wdl { display: none; }
 :root[data-eval="white"] .wdl[data-stm="b"] { flex-direction: row-reverse; }
 :root[data-eval="white"] .wdl[data-stm="b"] .wdl-w { background: var(--lost); }
 :root[data-eval="white"] .wdl[data-stm="b"] .wdl-l { background: var(--won); }
