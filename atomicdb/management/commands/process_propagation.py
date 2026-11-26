@@ -10,6 +10,7 @@ corrupts nothing (each batch is claimed under row locks) but brings the
 contention back.
 """
 
+import contextlib
 import json
 import logging
 import signal
@@ -34,6 +35,10 @@ class Command(BaseCommand):
         parser.add_argument(
             '--idle-seconds', type=float, default=1.0,
             help='Sleep between polls when the queue is empty.')
+        parser.add_argument(
+            '--proof-inline', action='store_true',
+            help='Refresh each batch\'s proof numbers on this thread, right '
+                 'after its commit, instead of beside the next climb.')
         parser.add_argument(
             '--status', action='store_true',
             help='Print the backlog (rows waiting, oldest age) and exit.')
@@ -62,17 +67,24 @@ class Command(BaseCommand):
 
         batch = max(1, options['batch'])
         totals = {'settled': 0, 'failed_batches': 0, 'batches': 0}
-        while not stopping['now']:
-            # One batch per turn, so a SIGTERM waits for one climb at most.
-            result = propagation_queue.drain(max_batches=1, limit=batch)
-            for name in totals:
-                totals[name] += result[name]
-            if options['once']:
-                if result['batches'] == 0 or (result['settled'] == 0
-                                              and result['failed_batches']):
-                    break
-                continue
-            if result['batches'] == 0 or result['settled'] == 0:
-                propagation_queue.wait_idle(options['idle_seconds'],
-                                            lambda: stopping['now'])
+        # The proof refresh of each batch runs beside the next climb
+        # (§ propagation_queue.ProofPipeline); leaving the block waits for
+        # the refreshes already handed over.
+        pipeline = (contextlib.nullcontext() if options['proof_inline']
+                    else propagation_queue.proof_pipeline())
+        with pipeline:
+            while not stopping['now']:
+                # One batch per turn, so a SIGTERM waits for one climb at most.
+                result = propagation_queue.drain(max_batches=1, limit=batch)
+                for name in totals:
+                    totals[name] += result[name]
+                if options['once']:
+                    if result['batches'] == 0 or (
+                            result['settled'] == 0
+                            and result['failed_batches']):
+                        break
+                    continue
+                if result['batches'] == 0 or result['settled'] == 0:
+                    propagation_queue.wait_idle(options['idle_seconds'],
+                                                lambda: stopping['now'])
         self.stdout.write(json.dumps(totals, sort_keys=True))

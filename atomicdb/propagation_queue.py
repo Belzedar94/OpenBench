@@ -25,8 +25,10 @@ drainer (``manage.py process_propagation``, its own service) takes up to
 ``BATCH_SIZE`` rows at a time under a row lock, merges their seeds, runs
 ``ingest.propagate_landings`` on them (the very calls that ended
 ``ingest_analysis``, moved and not rewritten) and deletes the rows in the
-same transaction.  A failure rolls the whole batch back and the rows retry,
-one at a time, with backoff.
+same transaction.  A deadlock against a stage (a) writer rolls the batch back
+and the same rows climb again at once, as one batch (TRANSIENT_RETRIES); any
+other failure rolls the whole batch back and the rows retry, one at a time,
+with backoff.
 
 Why a dedicated drainer and not the ingest writers between jobs: the convoy
 IS several writers climbing the same ancestors at once.  One drainer climbs
@@ -82,10 +84,12 @@ positions and the deferred PV verification after the commit, as in
 
 import contextlib
 import logging
+import queue
+import threading
 import time
 
 from django.conf import settings
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, connections, transaction
 from django.db.models import Count, Min
 from django.utils import timezone
 
@@ -101,6 +105,45 @@ logger = logging.getLogger(__name__)
 # a few seconds even in a flood.
 BATCH_SIZE = 32
 BACKOFF_SECONDS = (5, 30, 120, 600)
+
+# THE DEADLOCKS (26-Nov-2026).  Live, with batches of 128, the drainer lost 4
+# to 6 batches an hour to "deadlock detected" against the stage (a) writers
+# (atomicdb_position rows, atomicdb_closureprovenance index entries).  A
+# deadlock is a race with a short transaction that has committed by the time
+# the drainer hears of it; it says nothing about the rows.  But the failure
+# path treated it as a bad row: the 128 rows went to the backoff and then
+# climbed ONE AT A TIME, about 0.8 s each, so one deadlock cost 100 s of
+# single climbs for what a batch climbs in 20 to 30 s, plus the lost batch.
+# About 80 s per deadlock, 9-13% of the drainer's time.
+#
+# THE RULE.  A deadlock or serialization failure climbs the same rows again
+# at once, as one batch, up to TRANSIENT_RETRIES times.  The pages the failed
+# attempt read are still in the cache, so the retry is cheaper than the
+# first try.  Only an error that is not transient, or a deadlock that keeps
+# coming back, takes the old path (backoff, then one row at a time).  The
+# retry runs the very climb the batch would have run; nothing is written
+# between the attempts, so the values are the batch's.
+TRANSIENT_RETRIES = 2
+TRANSIENT_RETRY_SLEEP = 0.5          # seconds, times the attempt number
+_TRANSIENT_SQLSTATES = frozenset({
+    '40P01',    # deadlock_detected
+    '40001',    # serialization_failure
+})
+
+
+def _is_transient(error):
+    """A deadlock or serialization failure, wherever the driver put its
+    SQLSTATE (psycopg2 ``pgcode``, psycopg 3 ``sqlstate``; Django keeps the
+    driver's error as ``__cause__``)."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        code = (getattr(error, 'pgcode', None)
+                or getattr(error, 'sqlstate', None))
+        if code in _TRANSIENT_SQLSTATES:
+            return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def deferral_enabled():
@@ -238,6 +281,111 @@ def _refresh_proof_after_commit(calls):
                          '(%d cascades) failed', len(calls))
 
 
+# ---------------- the proof numbers beside the next climb ----------------
+#
+# THE COST (26-Nov-2026).  Sampled live (py-spy, 180 s, backlog at 15k), the
+# drainer spent 52% of its time in the climb (cascade 35%, backed ascent
+# 13%), 39% in the proof refresh that follows each commit, and the rest in
+# claims, records and commits.  Nearly all of it (88%) waiting on Postgres,
+# and Postgres waiting on the disk: a random read at a time, ~0.5 ms each,
+# on NVMe drives at 40-65% use.  The refresh holds no lock and nothing in
+# the climb reads pn/dn, yet the next climb waited for it.
+#
+# THE RULE.  With a pipeline open (the drainer service opens one), the
+# refresh of a batch runs on one thread of its own, with its own connection,
+# while the next batch climbs.  The same calls, with the same seeds, in
+# commit order: one thread, first in first out.  At most PIPELINE_DEPTH
+# refreshes wait; a drainer that gets that far ahead waits for the refresh,
+# after its commit, holding nothing, so the refresh can never fall behind
+# without bound and the two never wait on each other inside a transaction.
+# What changes is only WHEN a refresh runs relative to the rechecks of its
+# batch and the next climb: the rechecks and the climb read status, values
+# and edges, never pn/dn, so their writes are the same; and a refresh that
+# reads a status the next climb has just committed reads what the next
+# batch's own refresh would read anyway (§ ingest.proof_refresh_after_commit
+# on why a refresh outside the transaction only reaches further).  pn/dn
+# only order the selector; values and closures never read them.
+#
+# Leaving the pipeline waits for every queued refresh, so a SIGTERM loses
+# none that a commit handed over.  A process that dies loses the queued ones,
+# exactly as it lost the after-commit refresh before: the numbers order a
+# little worse until the next refresh that reaches them.
+PIPELINE_DEPTH = 1
+
+
+class ProofPipeline:
+    """One thread that runs the batches' proof refreshes in commit order."""
+
+    def __init__(self, depth=PIPELINE_DEPTH, refresh=None):
+        self._refresh = refresh or _refresh_proof_after_commit
+        self._queue = queue.Queue(maxsize=max(1, depth))
+        self._thread = threading.Thread(target=self._run,
+                                        name='atomicdb-proof-refresh',
+                                        daemon=True)
+        self._thread.start()
+
+    def submit(self, calls):
+        """Hand a committed batch's refresh over; waits while the queue is
+        full (the backpressure that keeps the refresh in step)."""
+        self._queue.put(calls)
+
+    def close(self):
+        """Run what is queued, then stop the thread."""
+        self._queue.put(None)
+        self._thread.join()
+
+    def _run(self):
+        used = False
+        try:
+            while True:
+                calls = self._queue.get()
+                if calls is None:
+                    return
+                try:
+                    used = True
+                    connections[current_alias()].close_if_unusable_or_obsolete()
+                    self._refresh(calls)
+                except Exception:       # noqa: BLE001 - never kill the thread
+                    logger.exception('AtomicDB propagation: the proof '
+                                     'refresh thread failed on a batch')
+        finally:
+            if used:
+                # This thread's own connections; the drainer's are its own.
+                connections.close_all()
+
+
+_pipeline = {'current': None}
+
+
+@contextlib.contextmanager
+def proof_pipeline(depth=PIPELINE_DEPTH):
+    """Run the batches' proof refreshes beside the next climb while open.
+
+    ``ATOMICDB_PROOF_PIPELINE = False`` keeps them on the drainer's thread,
+    right after each commit, as before.  Yields the pipeline, or None.
+    """
+    if (not getattr(settings, 'ATOMICDB_PROOF_PIPELINE', True)
+            or _pipeline['current'] is not None):
+        yield _pipeline['current']
+        return
+    pipeline = ProofPipeline(depth=depth)
+    _pipeline['current'] = pipeline
+    try:
+        yield pipeline
+    finally:
+        _pipeline['current'] = None
+        pipeline.close()
+
+
+def _hand_over_proof(calls):
+    """The batch's refresh: to the pipeline if one is open, else here."""
+    pipeline = _pipeline['current']
+    if pipeline is not None:
+        pipeline.submit(calls)
+    else:
+        _refresh_proof_after_commit(calls)
+
+
 def _claim_size(limit):
     """A row that failed before climbs alone, so one bad row never holds a
     whole batch back again."""
@@ -255,55 +403,76 @@ def drain_batch(limit=BATCH_SIZE):
     if not size:
         return 0
     ids = []
-    summaries, landings, jobs = {}, [], {}
-    proof_later = proof_after_commit_enabled()
-    try:
-        with ingest.carried_cuts() as cut:
-            with atomic():
-                rows = list(ready_seeds().select_for_update(skip_locked=True)
-                            [:size])
-                if not rows:
-                    return 0
-                ids = [row.pk for row in rows]
-                with contextlib.ExitStack() as stack:
-                    if proof_later:
-                        # Registered before any recheck, so it runs first
-                        # after the commit, where the refresh used to end
-                        # the transaction (§ ingest.proof_refresh_after_commit).
-                        calls = stack.enter_context(
-                            ingest.proof_refresh_after_commit())
+    attempt = 0
+    while True:
+        summaries, landings, jobs = {}, [], {}
+        proof_later = proof_after_commit_enabled()
+        try:
+            with ingest.carried_cuts() as cut:
+                with atomic():
+                    claim = ready_seeds()
+                    if ids:
+                        # A retry after a deadlock: the very rows of the
+                        # batch that rolled back, no others.
+                        claim = claim.filter(pk__in=ids)
+                    rows = list(claim.select_for_update(skip_locked=True)
+                                [:size])
+                    if not rows:
+                        return 0
+                    ids = [row.pk for row in rows]
+                    with contextlib.ExitStack() as stack:
+                        if proof_later:
+                            # Registered before any recheck, so it is the
+                            # first thing after the commit, where the refresh
+                            # used to end the transaction
+                            # (§ ingest.proof_refresh_after_commit).  With a
+                            # pipeline open it hands the calls over and the
+                            # refresh runs beside the next climb.
+                            calls = stack.enter_context(
+                                ingest.proof_refresh_after_commit())
 
-                        def refresh_proof():
-                            _refresh_proof_after_commit(calls)
+                            def refresh_proof():
+                                _hand_over_proof(calls)
 
-                        transaction.on_commit(refresh_proof,
-                                              using=current_alias(),
-                                              robust=True)
-                    # One closure source per climb: the cascade reads it for
-                    # every closure it writes (§ ingest.closure_attribution).
-                    groups = {}
-                    for row in rows:
-                        groups.setdefault(row.source or '', []).append(row)
-                    for source, group in groups.items():
-                        with ingest.closure_attribution(source or None):
-                            merged, merged_jobs = _merge(group)
-                            summaries.update(
-                                ingest.propagate_landings(merged))
-                            landings.extend(merged)
-                            for key, payloads in merged_jobs.items():
-                                jobs.setdefault(key, []).extend(payloads)
-                _record(landings, jobs, summaries, len(rows))
-                PropagationSeed.objects.filter(pk__in=ids).delete()
-    except Exception as error:      # noqa: BLE001 - the rows keep the work
-        if ids:
-            try:
-                _mark_failure(ids, error)
-            except DatabaseError:
-                logger.exception('AtomicDB propagation: recording a failure '
+                            transaction.on_commit(refresh_proof,
+                                                  using=current_alias(),
+                                                  robust=True)
+                        # One closure source per climb: the cascade reads it
+                        # for every closure it writes
+                        # (§ ingest.closure_attribution).
+                        groups = {}
+                        for row in rows:
+                            groups.setdefault(row.source or '', []).append(row)
+                        for source, group in groups.items():
+                            with ingest.closure_attribution(source or None):
+                                merged, merged_jobs = _merge(group)
+                                summaries.update(
+                                    ingest.propagate_landings(merged))
+                                landings.extend(merged)
+                                for key, payloads in merged_jobs.items():
+                                    jobs.setdefault(key, []).extend(payloads)
+                    _record(landings, jobs, summaries, len(rows))
+                    PropagationSeed.objects.filter(pk__in=ids).delete()
+        except Exception as error:      # noqa: BLE001 - the rows keep the work
+            if ids and attempt < TRANSIENT_RETRIES and _is_transient(error):
+                attempt += 1
+                logger.warning('AtomicDB propagation of %d seeds hit a '
+                               'transient error, climbing them again as one '
+                               'batch (%d/%d): %s', len(ids), attempt,
+                               TRANSIENT_RETRIES, error)
+                time.sleep(TRANSIENT_RETRY_SLEEP * attempt)
+                continue
+            if ids:
+                try:
+                    _mark_failure(ids, error)
+                except DatabaseError:
+                    logger.exception('AtomicDB propagation: recording a '
+                                     'failure failed')
+            else:
+                logger.exception('AtomicDB propagation: claiming a batch '
                                  'failed')
-        else:
-            logger.exception('AtomicDB propagation: claiming a batch failed')
-        return -1
+            return -1
+        break
     # The batch has committed: what follows never puts its rows back.
     _after_commit(landings, jobs, cut, proof_later)
     return len(ids)
