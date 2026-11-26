@@ -51,7 +51,7 @@ class LineWalkBudgetTests(TestCase):
         clock = [0.0]
         calls = []
 
-        def walk(pos, line=frozenset(), deadline=None):
+        def walk(pos, line=frozenset(), deadline=None, detail=None):
             calls.append((clock[0], deadline))
             clock[0] += 1.0       # every walk spends a whole second
             return {}
@@ -59,9 +59,9 @@ class LineWalkBudgetTests(TestCase):
         tables = []
         real = views._repetition_moves
 
-        def counted(pos, route_keys=None):
+        def counted(pos, route_keys=None, detail=None):
             tables.append(pos.key)
-            return real(pos, route_keys)
+            return real(pos, route_keys, detail)
 
         fake_time = types.SimpleNamespace(monotonic=lambda: clock[0])
         with mock.patch.object(views, 'time', fake_time), \

@@ -1904,6 +1904,23 @@ h2 {
   cursor: help;
 }
 
+/* The returns chip names the line that comes back ("returns after …Bf8 Bh6
+   Be7"); on a phone that does not fit beside the number, so it says only
+   how many plies ("returns in 3") and the tooltip keeps the line. */
+.line-returns .returns-narrow {
+  display: none;
+}
+
+@media (max-width: 560px) {
+  .line-returns .returns-wide {
+    display: none;
+  }
+
+  .line-returns .returns-narrow {
+    display: inline;
+  }
+}
+
 /* El chip ES el salto al ply donde NACE el valor: el numero de plies vive
    dentro de la etiqueta y todo el chip se pincha.  En reposo no se distingue
    del chip mudo — la tinta apagada de .backed-mark manda sobre el color de

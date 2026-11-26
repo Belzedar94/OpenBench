@@ -6008,7 +6008,7 @@ def _line_walk_budget(seconds=None):
         _line_walk_deadline.reset(token)
 
 
-def _repetition_moves(pos, route_keys=None):
+def _repetition_moves(pos, route_keys=None, detail=None):
     """The moves of this table valued on the line: ``{uci: (value, repeats)}``.
 
     Un nodo que publica un cero de repeticion tiene que enseñar ese cero en la
@@ -6027,6 +6027,9 @@ def _repetition_moves(pos, route_keys=None):
     (see _route_prefix_keys).  Without one the line is this position alone,
     as the backup reads it (see ingest.line_moves).  A proven position never
     reads its children, and pays nothing.
+
+    ``detail``, when given, receives where each returning line comes back
+    and who leaves it (see ingest.line_moves).
     """
     if pos.status != 'UNKNOWN':
         return {}
@@ -6034,7 +6037,73 @@ def _repetition_moves(pos, route_keys=None):
     if deadline is not None and time.monotonic() >= deadline:
         return {}             # the request's budget is spent: stored values
     return ingest.line_moves(pos, frozenset(route_keys or ()),
-                             deadline=deadline)
+                             deadline=deadline, detail=detail)
+
+
+# A returning line longer than this is cut in the chip: its head says where
+# it goes, its tail what brings it back, and the tooltip has it whole.
+RETURNS_CHIP_MAX_PLIES = 6
+
+
+def _returning_lines(pos, detail):
+    """``{uci: {...}}``: the words of each returning row, from ``detail``.
+
+    The chip used to say only "returns", which reads as if the move itself
+    repeated, when the line comes back a few plies later (26-Nov-2026: "one
+    ply off").  So it says where: "returns after …Bf8 Bh6 Be7", and the
+    tooltip says who leaves the loop and with what, the move the backup
+    took the value from.
+
+    The positions on the way back are known by key from the walk; their
+    FENs, which SAN needs, come in ONE query for the whole table, and only
+    when some row returns.
+    """
+    if not detail:
+        return {}
+    keys = {key for item in detail.values() for key, _m in item['path']}
+    fens = dict(Position.objects.filter(key__in=keys)
+                .values_list('key', 'fen'))
+    out = {}
+    for uci, item in detail.items():
+        path = item['path']
+        if not all(key in fens for key, _m in path):
+            continue
+        sans = [move_names.san(fens[key], move) for key, move in path]
+        ucis = [move for _k, move in path]
+        lead = '…' if fens[path[0][0]].split()[1] == 'b' else ''
+        if len(path) > RETURNS_CHIP_MAX_PLIES:
+            short_san = sans[:3] + ['…'] + sans[-2:]
+            short_uci = ucis[:3] + ['…'] + ucis[-2:]
+        else:
+            short_san, short_uci = sans, ucis
+        exit_info = None
+        if item['exit'] is not None:
+            index, move, value = item['exit']
+            fen = fens[path[index][0]]
+            white = fen.split()[1] == 'w'
+            exit_info = {
+                'index': index, 'uci': move,
+                'san': move_names.san(fen, move),
+                'side': 'White' if white else 'Black',
+                # From the side that leaves, in pawns as the White view of
+                # the table prints them.
+                'pawns': _signed_pawns(None if value is None else (
+                    value if white else -value)),
+                'value': value}
+        out[uci] = {'ucis': ucis, 'sans': sans, 'lead': lead,
+                    'short_san': ' '.join(short_san),
+                    'short_uci': ' '.join(short_uci),
+                    'full_san': lead + ' '.join(sans),
+                    'plies': len(path), 'exit': exit_info}
+    return out
+
+
+def _signed_pawns(cp):
+    """``+0.29``, ``−1.50``, ``0.00``: centipawns as the White view prints."""
+    if cp is None:
+        return ''
+    sign = '+' if cp > 0 else '−' if cp < 0 else ''
+    return f'{sign}{abs(cp) / 100:.2f}'
 
 
 def _child_moves(pos, route_keys=None):
@@ -6107,7 +6176,9 @@ def _child_moves(pos, route_keys=None):
     # values (see ingest._backed_for), so its rows keep theirs.
     on_route = (frozenset(route_keys or ()) if pos.status == 'UNKNOWN'
                 else frozenset())
-    on_line = _repetition_moves(pos, route_keys)
+    returning_detail = {}
+    on_line = _repetition_moves(pos, route_keys, returning_detail)
+    returning = _returning_lines(pos, returning_detail)
     moves = []
     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
     numbers = _proof_numbers_for([edge.child.key for edge in edges])
@@ -6282,6 +6353,11 @@ def _child_moves(pos, route_keys=None):
                       # None wherever the row shows what its position stores.
                       'returns': returns,
                       'line_value': line_value,
+                      # Where that line comes back and who leaves it (see
+                      # _returning_lines), for the chip and its tooltip.
+                      # None wherever the walk could not say.
+                      'returning': (returning.get(e.move_uci)
+                                    if returns else None),
                       # Lo que decide el tier viaja en la fila: la marca que
                       # pinta la plantilla y el orden tienen que salir del
                       # MISMO hecho o la tabla vuelve a decir dos cosas.
@@ -6967,6 +7043,24 @@ def api_query(request):
     return JsonResponse(block)
 
 
+def _api_returns_line(row):
+    """``returns_line`` of an API move row (see _query_block)."""
+    returning = row.get('returning')
+    return list(returning['ucis']) if returning else None
+
+
+def _api_returns_exit(row, stm_white):
+    """``returns_exit`` of an API move row (see _query_block)."""
+    returning = row.get('returning')
+    found = returning and returning['exit']
+    if not found:
+        return None
+    value = found['value']
+    return {'index': found['index'], 'uci': found['uci'],
+            'score': None if value is None else (
+                value if stm_white else -value)}
+
+
 def _query_block(pos):
     """The body of ``api_query`` for one position, as a dict.
 
@@ -7000,7 +7094,15 @@ def _query_block(pos):
               # when it is worth the draw (0), ``returns`` when it is worth
               # its way out of the loop.  ``score`` already is that value.
               # Additive, after the rest.
-              'repetition': m['repetition'], 'returns': m['returns']}
+              'repetition': m['repetition'], 'returns': m['returns'],
+              # Where a returning move's line comes back: the moves after
+              # this one, in UCI, until the line is on a position it has
+              # been through; and the way out the value comes from, as the
+              # index in ``returns_line`` of the position that leaves, its
+              # move, and that move's ``score`` from this position's side
+              # to move.  None unless ``returns``.  Additive.
+              'returns_line': _api_returns_line(m),
+              'returns_exit': _api_returns_exit(m, stm_white)}
              for m in children]
     # ``best_move`` sale del TOP de la MISMA lista que ``moves``, no del
     # ``pos.best_move`` de la ultima busqueda propia: ``score`` titula el

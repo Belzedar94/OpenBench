@@ -244,7 +244,7 @@ class PageTests(SicilianLoopFixture):
     def test_the_returning_row_wears_its_chip(self):
         response = Client().get(f'/atomicdb/explore/{self.p.key}/')
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '>returns</span>')
+        self.assertContains(response, 'class="backed-mark line-returns"')
         self.assertEqual(response.context['best_move'], 'e4f5')
         # No route, no note: the rows are the backup's own reading.
         self.assertFalse(response.context['line_note'])
@@ -256,3 +256,99 @@ class PageTests(SicilianLoopFixture):
         self.assertTrue(row['returns'])
         self.assertFalse(row['repetition'])
         self.assertEqual(block['best_move'], 'e4f5')
+
+
+class ReturningLineChipTests(SicilianLoopFixture):
+    """The chip says WHERE the line returns (report of 26-Nov-2026).
+
+    On P, Bg5 is no repetition: it leads to C, and the game is back on P
+    only after …Bf8 Bh6 Be7.  A bare "returns" read as if Bg5 itself
+    repeated ("one ply off").  The value is White's way out at X, O-O.
+    """
+
+    def test_line_moves_reports_the_path_and_the_exit(self):
+        detail = {}
+        self.assertEqual(ingest.line_moves(self.p, detail=detail),
+                         {'h6g5': (29, False)})
+        self.assertEqual(detail['h6g5']['path'],
+                         [(self.c.key, 'e7f8'), (self.x.key, 'g5h6'),
+                          (self.y.key, 'f8e7')])
+        # The second position of the line, X, leaves with O-O at +29.
+        self.assertEqual(detail['h6g5']['exit'], (1, 'e1g1', 29))
+
+    def test_the_row_carries_the_san_line_and_the_exit(self):
+        _rows, by_uci = self._rows(self.p)
+        returning = by_uci['h6g5']['returning']
+        self.assertEqual(returning['ucis'], ['e7f8', 'g5h6', 'f8e7'])
+        self.assertEqual(returning['full_san'], '…Bf8 Bh6 Be7')
+        self.assertEqual(returning['exit']['san'], 'O-O')
+        self.assertEqual(returning['exit']['side'], 'White')
+        self.assertEqual(returning['exit']['pawns'], '+0.29')
+        self.assertIsNone(by_uci['e4f5']['returning'])
+
+    def test_the_bg5_chip_shows_the_line_and_the_tooltip_the_exit(self):
+        response = Client().get(f'/atomicdb/explore/{self.p.key}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, 'after …<span data-uci="e7f8 g5h6 f8e7">Bf8 Bh6 Be7'
+                      '</span>')
+        self.assertContains(response, 'in 3</span>')
+        self.assertContains(
+            response, "White's best way to avoid going back is O-O "
+                      "(+0.29 for White)")
+        self.assertContains(
+            response, 'the line comes back to a position already played '
+                      'after …Bf8 Bh6 Be7')
+
+    def test_the_api_gives_the_line_and_the_exit(self):
+        block = views._query_block(self.p)
+        row = next(m for m in block['moves'] if m['uci'] == 'h6g5')
+        self.assertEqual(row['returns_line'], ['e7f8', 'g5h6', 'f8e7'])
+        self.assertEqual(row['returns_exit'],
+                         {'index': 1, 'uci': 'e1g1', 'score': 29})
+        best = next(m for m in block['moves'] if m['uci'] == 'e4f5')
+        self.assertIsNone(best['returns_line'])
+        self.assertIsNone(best['returns_exit'])
+
+    def test_one_query_names_the_whole_line(self):
+        detail = {}
+        ingest.line_moves(self.p, detail=detail)
+        with self.assertNumQueries(1):
+            views._returning_lines(self.p, detail)
+        with self.assertNumQueries(0):
+            self.assertEqual(views._returning_lines(self.p, {}), {})
+
+    def test_a_long_line_is_cut_in_the_middle(self):
+        detail = {}
+        ingest.line_moves(self.p, detail=detail)
+        path = detail['h6g5']['path']
+        # Eight plies round the same positions: head, ellipsis, tail.
+        detail['h6g5']['path'] = (path * 3)[:8]
+        detail['h6g5']['exit'] = None
+        named = views._returning_lines(self.p, detail)['h6g5']
+        self.assertEqual(named['plies'], 8)
+        self.assertEqual(named['short_san'], 'Bf8 Bh6 Be7 … Bf8 Bh6')
+        self.assertEqual(named['full_san'],
+                         '…Bf8 Bh6 Be7 Bf8 Bh6 Be7 Bf8 Bh6')
+        self.assertIsNone(named['exit'])
+
+    def test_out_of_budget_the_page_still_renders_without_a_line(self):
+        with mock.patch.object(ingest, 'BACKED_CYCLE_MAX_NODES', 0):
+            detail = {}
+            self.assertEqual(ingest.line_moves(self.p, detail=detail), {})
+            self.assertEqual(detail, {})
+            response = Client().get(f'/atomicdb/explore/{self.p.key}/')
+            block = views._query_block(self.p)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'line-returns')
+        row = next(m for m in block['moves'] if m['uci'] == 'h6g5')
+        self.assertIsNone(row['returns_line'])
+        self.assertIsNone(row['returns_exit'])
+
+    def test_an_exit_the_walk_cannot_name_keeps_the_old_tooltip(self):
+        with mock.patch.object(ingest, '_line_exit', return_value=None):
+            response = Client().get(f'/atomicdb/explore/{self.p.key}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Bf8 Bh6 Be7</span>')
+        self.assertContains(response, 'It is worth the best way out of '
+                                      'that loop: 29 here')

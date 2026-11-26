@@ -52,7 +52,10 @@ column shows how much search each move has had.</figcaption>
   draw</strong>.</li>
 <li><strong>returns</strong> on a move row: on this line, the move's own
   line comes back to a position already played, so the move is worth the best
-  way out of that loop, not the number its own page shows.</li>
+  way out of that loop, not the number its own page shows. The move itself does
+  not repeat: the chip names the moves after it that bring the line back
+  (<em>returns after &hellip;Bf8 Bh6 Be7</em>, or just how many plies on a phone),
+  and its tooltip names the way out the value comes from.</li>
 <li>The values of the rows follow the line you came by. Where that makes the
   best row differ from the position's value above, the page says so under
   the table's heading.</li>
