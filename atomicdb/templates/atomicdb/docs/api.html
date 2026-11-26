@@ -552,7 +552,9 @@ are online) and <code>workers</code>, one entry per machine:</p>
   <code>null</code>: <code>task_id</code>, <code>position</code> (the position
   key), <code>line</code> (the moves to it, in SAN), <code>moves</code> (the
   requester's declared line in UCI, empty when none) and
-  <code>budget_nodes</code>.</td></tr>
+  <code>budget_nodes</code>. Only ever an analysis your own worker holds: when
+  another account announces the same machine name, the worker's heartbeat
+  decides, and without one nothing is shown.</td></tr>
 </table></div>
 <p>The numbers are those of the page, unrounded; the 24-hour and all-time
 counts come from a shared snapshot refreshed about once a minute, as they do

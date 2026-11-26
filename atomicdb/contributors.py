@@ -767,19 +767,58 @@ def _account_cached(kind, username, build, seconds=ACCOUNT_CACHE_SECONDS):
     return hit[0]
 
 
+def _running_of(pings):
+    """``{ping.pk: leased task}``: what each of these workers is searching.
+
+    A leased task records the MACHINE NAME only, and that name is chosen by
+    the worker: two accounts can announce the same one (§
+    ``_owner_of_machine``).  Matching by name alone showed one account's
+    search under the other's worker.  So a task belongs to a ping when:
+
+    - the ping's own heartbeat names it (``current_task_id``, written by the
+      authenticated account for that machine), on that machine; or
+    - for builds that never send that heartbeat, the machine name is claimed
+      by this ping's account alone, so the name is unambiguous.
+
+    A disputed name with no heartbeat shows no search rather than a guess.
+    Two reads, bounded by the given machines and heartbeat ids.
+    """
+    machines = sorted({ping.machine for ping in pings})
+    if not machines:
+        return {}
+    claims = {}
+    for machine, user in (WorkerPing.objects.filter(machine__in=machines)
+                          .values_list('machine', 'user')):
+        claims.setdefault(machine, set()).add(user)
+    beats = {ping.current_task_id for ping in pings
+             if ping.current_task_id is not None}
+    by_id, by_machine = {}, {}
+    for task in (AnalysisTask.objects
+                 .filter(Q(machine__in=machines) | Q(pk__in=beats),
+                         state=LEASED)
+                 .order_by('leased_at', 'id')):
+        by_id[task.id] = task
+        by_machine.setdefault(task.machine, task)
+    running = {}
+    for ping in pings:
+        task = by_id.get(ping.current_task_id)
+        if task is None or task.machine != ping.machine:
+            task = (by_machine.get(ping.machine)
+                    if claims.get(ping.machine) == {ping.user} else None)
+        if task is not None:
+            running[ping.pk] = task
+    return running
+
+
 def _worker_rows(pings, snapshot, now):
     """The rows of the workers table for ``pings``, sorted for display.
 
-    Two reads, both bounded by the machines given: what they have leased now
-    and their speed over the last hour.  The page asks for the most recently
-    seen ones only (§ ``WORKER_ROWS``); "Show all" asks for the rest.
+    Three reads, all bounded by the machines given: who else announces those
+    names, what they have leased now and their speed over the last hour.  The
+    page asks for the most recently seen ones only (§ ``WORKER_ROWS``); "Show
+    all" asks for the rest.
     """
-    machines = sorted({ping.machine for ping in pings})
-    running = {}
-    if machines:
-        for task in AnalysisTask.objects.filter(state=LEASED,
-                                                machine__in=machines):
-            running.setdefault(task.machine, task)
+    running = _running_of(pings)
     # The table names no opening, so the labels skip the community map.
     labels = _labels([task.position_id for task in running.values()],
                      opening=False)
@@ -791,7 +830,7 @@ def _worker_rows(pings, snapshot, now):
                                            {'nodes': 0, 'tasks': 0})
         life = snapshot['machines_all'].get(
             ping.machine, {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
-        task = running.get(ping.machine)
+        task = running.get(ping.pk)
         nps, searches = speed.get((ping.user, ping.machine), (0, 0))
         row = {
             'machine': ping.machine,

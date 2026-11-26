@@ -155,6 +155,66 @@ class MyWorkersApiTests(TestCase):
         self.assertIn('offline', body)
         self.assertIn('seen 3 days ago', body)
 
+    def test_a_shared_machine_name_never_shows_another_accounts_search(self):
+        """Two accounts announce the same machine name; the leased task
+        records only the name.  Each worker shows the search its own
+        heartbeat names, and a disputed name without one shows none."""
+        _ping('shared-atomicdb', 'alice')
+        bob_ping = _ping('shared-atomicdb', 'bob')
+        bobs = _task(_child('e2e3'), state=AnalysisTask.TState.LEASED,
+                     machine='shared-atomicdb', leased_at=timezone.now(),
+                     lease_heartbeat_at=timezone.now())
+
+        def searching(account):
+            rows = self._post(username=account, password='p').json()
+            return {w['machine']: w['searching'] for w in rows['workers']}
+
+        # No heartbeat on either side: the name is disputed, nobody gets it.
+        self.assertIsNone(searching('alice')['shared-atomicdb'])
+        self.assertIsNone(searching('bob')['shared-atomicdb'])
+
+        WorkerPing.objects.filter(pk=bob_ping.pk).update(
+            current_task_id=bobs.id)
+        self.assertIsNone(searching('alice')['shared-atomicdb'])
+        self.assertEqual(searching('bob')['shared-atomicdb']['task_id'],
+                         bobs.id)
+        # The page says the same as the API.
+        page = {w['machine']: w for w in contributors.present('alice')['workers']}
+        self.assertNotIn('searching', page['shared-atomicdb'])
+        alice_body = _reading(
+            Client().get('/atomicdb/user/alice/').content.decode())
+        self.assertNotIn('searching 1. e3', alice_body)
+        bob_body = _reading(
+            Client().get('/atomicdb/user/bob/').content.decode())
+        self.assertIn('searching 1. e3', bob_body)
+        # An unshared name keeps working without a heartbeat (old builds).
+        self.assertEqual(
+            searching('alice')['alice-box-atomicdb']['task_id'],
+            self.running.id)
+
+    def test_the_json_carries_raw_text_not_html(self):
+        from unittest import mock
+
+        line = '1. a3 <b>&amp; "x" \'y\''
+        real = contributors._labels
+
+        def labels(keys, opening=True):
+            found = real(keys, opening=opening)
+            return {key: ('<&>', line, '') for key in found or keys}
+
+        with mock.patch.object(contributors, '_labels', labels):
+            response = self._post()
+
+        raw = response.content.decode()
+        box = {w['machine']: w for w in response.json()['workers']}[
+            'alice-box-atomicdb']
+        self.assertEqual(box['searching']['line'], line)
+        self.assertEqual(box['searching']['position'],
+                         self.running.position_id)
+        self.assertNotIn('&lt;', raw)
+        self.assertNotIn('&#x27;', raw)
+        self.assertNotIn('&quot;', raw)
+
     def test_nginx_rate_limits_both_spellings(self):
         import re
         from pathlib import Path
