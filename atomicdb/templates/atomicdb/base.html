@@ -40,9 +40,20 @@
   } catch (_error) {}
   // Hidden explorer columns (BManBJ, 11-Nov-2026), before the first paint so
   // a hidden column never flashes.  The settings panel below owns the key.
+  // The W/D/L bars joined these columns (BManBJ, 26-Nov-2026); a choice made
+  // with the short-lived box beside the play buttons carries over once.
+  try {
+    if (window.localStorage.getItem("atomicdb-wdl-hidden") === "1") {
+      var was = (window.localStorage.getItem("atomicdb-hidecols") || "")
+        .split(" ").filter(Boolean);
+      if (was.indexOf("wdl") < 0) was.push("wdl");
+      window.localStorage.setItem("atomicdb-hidecols", was.join(" "));
+    }
+    window.localStorage.removeItem("atomicdb-wdl-hidden");
+  } catch (_error) {}
   try {
     var hide = (window.localStorage.getItem("atomicdb-hidecols") || "")
-      .split(" ").filter(function (c) { return /^(state|pn|depth)$/.test(c); });
+      .split(" ").filter(function (c) { return /^(state|pn|depth|wdl)$/.test(c); });
     if (hide.length) root.dataset.hidecols = hide.join(" ");
   } catch (_error) {}
   // Board colours (seaside_cliff, 6-Nov-2026): set before the first paint so
@@ -180,6 +191,7 @@
             <label><input type="checkbox" class="settings-col" value="state" checked><span>State</span></label>
             <label><input type="checkbox" class="settings-col" value="pn" checked><span>pn / dn</span></label>
             <label><input type="checkbox" class="settings-col" value="depth" checked><span>Depth</span></label>
+            <label title="The win/draw/loss bar under each move's eval"><input type="checkbox" class="settings-col" value="wdl" checked><span>W/D/L bars</span></label>
           </div>
         </fieldset>
         <fieldset class="settings-row settings-board">
