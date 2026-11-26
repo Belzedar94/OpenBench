@@ -454,8 +454,11 @@ class MobileOverflowTests(TestCase):
         self.client = Client()
 
     def test_each_board_scrolls_inside_its_own_container(self):
-        _searched('belzedar-ryzen-9950x3d-node', 987_654_321)
-        _searched('a-very-long-contributor-name', 123_456_789)
+        # Seeded NOW, not an hour ago: between 00:00 and 01:00 UTC work from
+        # an hour ago belongs to yesterday, the "Today (UTC)" board renders
+        # empty, without its container, and the count read 2.
+        _searched('belzedar-ryzen-9950x3d-node', 987_654_321, ago_hours=0)
+        _searched('a-very-long-contributor-name', 123_456_789, ago_hours=0)
 
         body = self.client.get('/atomicdb/contributors/').content.decode()
 
