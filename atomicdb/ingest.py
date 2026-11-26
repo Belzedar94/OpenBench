@@ -1484,6 +1484,179 @@ def _adopt_certified_line(child, parent, prepared_proof):
     return [child.key, *materialise_won_line(child)['closed_keys']]
 
 
+# ---------------- the cascade's reads, a wave at a time ----------------
+#
+# THE COST (26-Nov-2026).  Sampled live on the drainer, 31% of its time was
+# these two lines of backup_cascade, run for every key it pops:
+#
+#     pos = Position.objects.get(key=key)
+#     edges = list(Edge.objects.filter(parent=pos).select_related('child'))
+#
+# Two round trips per visit, each a few random reads of a 56 GB table, one
+# after the other at queue depth 1.  A batch of 128 landings pops a few
+# thousand keys.
+#
+# THE SCHEME.  The visit loop is untouched: same frontier, same pops in the
+# same order, same rules, same writes, same parents climbed.  Only where a
+# visit gets its row and its children from changes.
+#
+# * A WAVE.  When the popped key's edges are not in hand, the reader loads
+#   them for the popped key AND every key still in the frontier whose edges
+#   are not in hand (up to CASCADE_WAVE_KEYS): one query for their edges,
+#   one for every row among them and their children not in hand.  The next
+#   pops of that wave are answered from memory.  A frontier of N keys costs
+#   two queries, not 2N, and the database fetches the rows of a whole wave
+#   in one bitmap scan, prefetching its pages, instead of one page at a time.
+# * WHAT IS KEPT is what the database returned: the column values of each
+#   row and the (move, child) of each edge, never a model object.  Every
+#   visit builds FRESH Position objects from them, so whatever a visit does
+#   to its objects without saving them (the rewrite limit sets fields and
+#   then declines the save) is not seen by a later visit, exactly as a fresh
+#   ``get`` would not see it.
+# * THE CASCADE'S OWN WRITES.  Its only write to a position is the save of
+#   _CASCADE_WRITTEN_FIELDS (the helpers it calls write events, provenance,
+#   claims and tasks, never a position).  Right after each save the reader
+#   copies the saved fields into the values it keeps for that key, so a
+#   later visit of the key, or of any parent that reads it as a child,
+#   reads what the database now holds: what a fresh read would return.  So
+#   in any schedule in which no other transaction writes these rows during
+#   the call, every visit reads exactly what the per-key read reads, and the
+#   call writes exactly the same values.  The tests in
+#   test_cascade_bulk_reads hold the two readers to that.
+# * EDGE ORDER.  Ties among children are broken by list order
+#   (``_witness_rank``, the witness of a new closure).  The per-key query
+#   had no ORDER BY; on Postgres its plan is an index scan of the
+#   (parent, move_uci) unique index (checked live, 26-Nov), so it listed a
+#   parent's edges by move, while SQLite listed them by id.  Both readers
+#   now say ``by move`` out loud: on Postgres the same scan answers it, so
+#   the order production climbed with is the one written down, and the two
+#   readers agree on every backend.
+# * OTHER TRANSACTIONS.  A row another transaction commits after its wave
+#   was loaded is read as it was at the load, a second or two earlier than a
+#   per-key read would read it.  Under READ COMMITTED that is a schedule the
+#   per-key reads already allow (their own read can land on either side of
+#   that commit), and the landing that wrote the row leaves its own climb,
+#   which reads it after its commit, plus the recheck after commit (see
+#   the block above RECHECK_MAX_KEYS).  Nothing reads from the cache across
+#   calls: each call starts empty.
+# * MEMORY.  Past CASCADE_CACHE_ROWS rows the reader forgets everything and
+#   loads again on the next miss.  Forgetting is always safe: a reload reads
+#   the database, which already holds every write of the call.
+#
+# ``ATOMICDB_CASCADE_BULK_READS = False`` puts back the per-key reads.
+CASCADE_WAVE_KEYS = 512
+CASCADE_CACHE_ROWS = 200_000
+_CASCADE_WRITTEN_FIELDS = ['status', 'closure', 'proof', 'best_move',
+                           'mate_in', 'clock_slack', 'updated']
+# The two JSON columns no rule of the cascade reads; a helper that did read
+# one would load it on access, from the database, as a deferred field does.
+_CASCADE_DEFERRED_FIELDS = ('last_analysis', 'analysis_passes')
+
+
+def cascade_bulk_reads_enabled():
+    return bool(getattr(settings, 'ATOMICDB_CASCADE_BULK_READS', True))
+
+
+class _CascadePerKeyReader:
+    """The reads backup_cascade always made: two queries per visit."""
+
+    def visit(self, key, frontier):
+        del frontier
+        pos = Position.objects.get(key=key)
+        return pos, list(Edge.objects.filter(parent=pos)
+                         .select_related('child').order_by('move_uci'))
+
+    def wrote(self, pos):
+        pass
+
+
+class _CascadeBulkReader:
+    """The same reads, a wave of the frontier at a time (see above)."""
+
+    def __init__(self, wave_keys=None, cache_rows=None):
+        self.wave_keys = wave_keys or CASCADE_WAVE_KEYS
+        self.cache_rows = cache_rows or CASCADE_CACHE_ROWS
+        self.fields = [field.attname for field in Position._meta.concrete_fields
+                       if field.name not in _CASCADE_DEFERRED_FIELDS]
+        self.index = {name: i for i, name in enumerate(self.fields)}
+        self.alias = current_alias()
+        self.rows = {}          # key -> list of column values, as stored
+        self.edges = {}         # parent key -> [(edge id, move, child key)]
+        self.queries = 0        # what the waves cost, for the tests
+
+    def visit(self, key, frontier):
+        if key not in self.edges:
+            self._load_wave(key, frontier)
+        values = self.rows.get(key)
+        if values is None:
+            raise Position.DoesNotExist(
+                'Position matching query does not exist.')
+        pos = self._position(values)
+        edges = []
+        for edge_id, move, child_key in self.edges[key]:
+            edge = Edge(id=edge_id, parent_id=key, move_uci=move,
+                        child_id=child_key)
+            edge._state.adding, edge._state.db = False, self.alias
+            child = self.rows.get(child_key)
+            if child is None:
+                # Forgotten since its wave, or not there at the load: read it
+                # now, and leave the edge out if it is not there at all, as
+                # the inner join of the per-key query does.
+                child = self._load_rows([child_key]).get(child_key)
+                if child is None:
+                    continue
+            edge.child = self._position(child)
+            edges.append(edge)
+        return pos, edges
+
+    def wrote(self, pos):
+        values = self.rows.get(pos.key)
+        if values is None:
+            return
+        for name in _CASCADE_WRITTEN_FIELDS:
+            values[self.index[name]] = getattr(pos, name)
+
+    def _position(self, values):
+        return Position.from_db(self.alias, self.fields, list(values))
+
+    def _load_wave(self, key, frontier):
+        if len(self.rows) > self.cache_rows:
+            self.rows, self.edges = {}, {}
+        wave = [key]
+        for other in frontier:
+            if len(wave) >= self.wave_keys:
+                break
+            if other not in self.edges:
+                wave.append(other)
+        by_parent = {parent: [] for parent in wave}
+        for edge_id, parent, move, child_key in (
+                Edge.objects.filter(parent_id__in=wave)
+                .values_list('id', 'parent_id', 'move_uci', 'child_id')):
+            by_parent[parent].append((edge_id, move, child_key))
+        self.queries += 1
+        for parent, rows in by_parent.items():
+            rows.sort(key=lambda row: row[1])
+            self.edges[parent] = rows
+        wanted = {parent for parent in wave if parent not in self.rows}
+        wanted.update(child for rows in by_parent.values()
+                      for _id, _move, child in rows
+                      if child not in self.rows)
+        if wanted:
+            self._load_rows(wanted)
+
+    def _load_rows(self, keys):
+        loaded = {}
+        keys = list(keys)
+        for start in range(0, len(keys), 5000):
+            for values in (Position.objects
+                           .filter(key__in=keys[start:start + 5000])
+                           .values_list(*self.fields)):
+                loaded[values[self.index['key']]] = list(values)
+            self.queries += 1
+        self.rows.update(loaded)
+        return loaded
+
+
 def backup_cascade(seed_keys, report=None):
     """Recalcula el STATUS hacia arriba hasta punto fijo (§3.3).
 
@@ -1514,11 +1687,15 @@ def backup_cascade(seed_keys, report=None):
     rewrites = {}           # key -> writes by this call (CASCADE_REWRITE_LIMIT)
     cycling = set()
     guard = 0
+    # How each visit reads its row and its children (see the block above
+    # _CascadeBulkReader): one query per wave of the frontier, or the two
+    # per key it always was.
+    reader = (_CascadeBulkReader() if cascade_bulk_reads_enabled()
+              else _CascadePerKeyReader())
     while frontier and guard < CASCADE_GUARD_LIMIT:
         guard += 1
         key = frontier.pop()
-        pos = Position.objects.get(key=key)
-        edges = list(Edge.objects.filter(parent=pos).select_related('child'))
+        pos, edges = reader.visit(key, frontier)
         if edges:
             statuses = [_supporting_status(pos, e) for e in edges]
             new_status = (pos.status if pos.status != 'UNKNOWN' else
@@ -1595,9 +1772,8 @@ def backup_cascade(seed_keys, report=None):
                 # ingest_analysis documenta y evita con update_fields unas
                 # llamadas mas arriba.  En PG la escritura espera al commit
                 # ajeno y luego lo pisaba: perdida garantizada, no azar.
-                pos.save(update_fields=['status', 'closure', 'proof',
-                                        'best_move', 'mate_in',
-                                        'clock_slack', 'updated'])
+                pos.save(update_fields=_CASCADE_WRITTEN_FIELDS)
+                reader.wrote(pos)
                 changed_total += 1
                 changed_keys.append(pos.key)
                 for e in Edge.objects.filter(child=pos).values_list(
