@@ -23,6 +23,9 @@ reading and requesting work without an account.</p>
   the explorer's "Analyse the unanalysed moves" button.</td></tr>
 <tr><td><code>POST /atomicdb/api/my-queue/</code></td><td>List your own
   waiting and running requests (credentials needed).</td></tr>
+<tr><td><code>POST /atomicdb/api/my-workers/</code></td><td>List your own
+  workers, as the "Your workers" table of your page shows them (credentials
+  needed).</td></tr>
 <tr><td><code>POST /atomicdb/api/queue-bump/&lt;id&gt;/</code><br>
   <code>POST /atomicdb/api/queue-cancel/&lt;id&gt;/</code></td><td>Move one of
   your requests to the front, or withdraw it.</td></tr>
@@ -37,8 +40,8 @@ reading and requesting work without an account.</p>
 <ul>
 <li>The endpoints a script can call (<code>query</code>,
   <code>principal-variations</code>, <code>backed-source</code>, <code>request</code>, <code>request-children</code>, <code>live-request</code>, <code>frontier</code>,
-  <code>my-queue</code>, <code>queue-bump</code>, <code>queue-cancel</code>,
-  <code>map</code> and <code>roots</code>) take 10 requests a second from one
+  <code>my-queue</code>, <code>my-workers</code>, <code>queue-bump</code>,
+  <code>queue-cancel</code>, <code>map</code> and <code>roots</code>) take 10 requests a second from one
   address, with bursts of up to 100.</li>
 <li>Past that the reply is <code>429</code> with a JSON body and a
   <code>Retry-After</code> header. Nothing is lost: wait and send it
@@ -513,6 +516,51 @@ button does:</p>
   for only takes your name off: the request stays in the queue under
   them.</li>
 </ul>
+
+<h3 id="my-workers">Your workers</h3>
+<p><code>POST /atomicdb/api/my-workers/</code> with <code>username</code> and
+<code>password</code> (your OpenBench credentials, form or JSON) returns every
+worker of your account, the rows of the "Your workers" table on
+<a href="/atomicdb/me/">your page</a> (all of them, as "Show all" does), in
+the same order: online machines first, then the most nodes. A logged-in
+browser can simply <code>GET</code> it. It only ever lists your own
+account.</p>
+<div class="raw"><div class="rawline">curl -d username=YOU -d password=SECRET https://belzedar.duckdns.org/atomicdb/api/my-workers/</div></div>
+<p>The reply has <code>account</code>, <code>online</code> (how many workers
+are online) and <code>workers</code>, one entry per machine:</p>
+<div class="docs-table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>machine</code></td><td>The machine name the worker
+  announces.</td></tr>
+<tr><td><code>build</code></td><td>The AtomicDB worker build it last
+  announced, <code>null</code> if it never did.</td></tr>
+<tr><td><code>threads</code>, <code>hash_mb</code>, <code>os</code></td><td>What
+  the worker reported (<code>0</code> or empty when it did not).</td></tr>
+<tr><td><code>online</code></td><td>True when the worker called the server in
+  the last 4 minutes.</td></tr>
+<tr><td><code>last_seen</code>, <code>seen</code></td><td>Its last call, as an
+  ISO time (UTC) and as the page writes it (<code>"3 minutes
+  ago"</code>).</td></tr>
+<tr><td><code>nodes_24h</code>, <code>tasks_24h</code></td><td>Engine nodes
+  and analyses completed in the last 24 hours.</td></tr>
+<tr><td><code>nodes_all</code>, <code>tasks_all</code></td><td>The same, all
+  time.</td></tr>
+<tr><td><code>nps</code>, <code>searches_last_hour</code></td><td>Nodes per
+  second over the searches it finished in the last hour, and how many those
+  were (<code>0</code> when none).</td></tr>
+<tr><td><code>searching</code></td><td>The analysis it holds right now, or
+  <code>null</code>: <code>task_id</code>, <code>position</code> (the position
+  key), <code>line</code> (the moves to it, in SAN), <code>moves</code> (the
+  requester's declared line in UCI, empty when none) and
+  <code>budget_nodes</code>. Only ever an analysis your own worker holds: when
+  another account announces the same machine name, the worker's heartbeat
+  decides, and without one nothing is shown.</td></tr>
+</table></div>
+<p>The numbers are those of the page, unrounded; the 24-hour and all-time
+counts come from a shared snapshot refreshed about once a minute, as they do
+there. Wrong credentials get
+<code>403</code> and <code>{"error": "bad credentials"}</code>; a
+<code>GET</code> without a session gets <code>401</code>.</p>
 
 <h3 id="roots">Roots</h3>
 <p><code>GET /atomicdb/api/roots</code> returns the

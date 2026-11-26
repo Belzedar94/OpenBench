@@ -767,19 +767,58 @@ def _account_cached(kind, username, build, seconds=ACCOUNT_CACHE_SECONDS):
     return hit[0]
 
 
+def _running_of(pings):
+    """``{ping.pk: leased task}``: what each of these workers is searching.
+
+    A leased task records the MACHINE NAME only, and that name is chosen by
+    the worker: two accounts can announce the same one (§
+    ``_owner_of_machine``).  Matching by name alone showed one account's
+    search under the other's worker.  So a task belongs to a ping when:
+
+    - the ping's own heartbeat names it (``current_task_id``, written by the
+      authenticated account for that machine), on that machine; or
+    - for builds that never send that heartbeat, the machine name is claimed
+      by this ping's account alone, so the name is unambiguous.
+
+    A disputed name with no heartbeat shows no search rather than a guess.
+    Two reads, bounded by the given machines and heartbeat ids.
+    """
+    machines = sorted({ping.machine for ping in pings})
+    if not machines:
+        return {}
+    claims = {}
+    for machine, user in (WorkerPing.objects.filter(machine__in=machines)
+                          .values_list('machine', 'user')):
+        claims.setdefault(machine, set()).add(user)
+    beats = {ping.current_task_id for ping in pings
+             if ping.current_task_id is not None}
+    by_id, by_machine = {}, {}
+    for task in (AnalysisTask.objects
+                 .filter(Q(machine__in=machines) | Q(pk__in=beats),
+                         state=LEASED)
+                 .order_by('leased_at', 'id')):
+        by_id[task.id] = task
+        by_machine.setdefault(task.machine, task)
+    running = {}
+    for ping in pings:
+        task = by_id.get(ping.current_task_id)
+        if task is None or task.machine != ping.machine:
+            task = (by_machine.get(ping.machine)
+                    if claims.get(ping.machine) == {ping.user} else None)
+        if task is not None:
+            running[ping.pk] = task
+    return running
+
+
 def _worker_rows(pings, snapshot, now):
     """The rows of the workers table for ``pings``, sorted for display.
 
-    Two reads, both bounded by the machines given: what they have leased now
-    and their speed over the last hour.  The page asks for the most recently
-    seen ones only (§ ``WORKER_ROWS``); "Show all" asks for the rest.
+    Three reads, all bounded by the machines given: who else announces those
+    names, what they have leased now and their speed over the last hour.  The
+    page asks for the most recently seen ones only (§ ``WORKER_ROWS``); "Show
+    all" asks for the rest.
     """
-    machines = sorted({ping.machine for ping in pings})
-    running = {}
-    if machines:
-        for task in AnalysisTask.objects.filter(state=LEASED,
-                                                machine__in=machines):
-            running.setdefault(task.machine, task)
+    running = _running_of(pings)
     # The table names no opening, so the labels skip the community map.
     labels = _labels([task.position_id for task in running.values()],
                      opening=False)
@@ -791,7 +830,7 @@ def _worker_rows(pings, snapshot, now):
                                            {'nodes': 0, 'tasks': 0})
         life = snapshot['machines_all'].get(
             ping.machine, {'nodes': 0, 'tasks': 0, 'seconds': 0.0})
-        task = running.get(ping.machine)
+        task = running.get(ping.pk)
         nps, searches = speed.get((ping.user, ping.machine), (0, 0))
         row = {
             'machine': ping.machine,
@@ -806,17 +845,23 @@ def _worker_rows(pings, snapshot, now):
             # incluida), asi que ensenar los dos numeros seria publicar dos
             # definiciones de "analisis" que no tienen por que coincidir.  El
             # que sale es el que comparte denominador con los nodos de al lado.
+            'nodes_24h': day['nodes'],
             'nodes_24h_h': human(day['nodes']),
             'tasks_24h': day['tasks'],
             'nodes_all': life['nodes'],
             'nodes_all_h': human(life['nodes']),
             'tasks_all': life['tasks'],
+            'nps': round(nps),
             'nps_h': human(round(nps)) if nps else '',
             'searches': searches,
             'searches_h': human(searches),
+            # Raw values for ``my_workers`` (the JSON door): the table prints
+            # the relative ``seen`` instead.
+            'last_seen': ping.last_seen,
         }
         if task is not None:
-            row['searching'] = _presented(task, labels, now)
+            row['searching'] = _presented(task, labels, now, {
+                'task_id': task.id, 'budget_nodes': task.budget_nodes})
         workers.append(row)
     # Lo vivo arriba y lo grande primero: una maquina apagada hace meses no
     # puede encabezar la lista solo porque su nombre empiece por 'a'.
@@ -832,6 +877,46 @@ def all_workers(username, now=None):
     return {'workers': _worker_rows(pings, fleet(now=now), now),
             'has_workers': bool(pings), 'workers_more': 0,
             'profile_user': username}
+
+
+def my_workers(username, now=None):
+    """Every worker of the account as JSON-ready dicts: ``api/my-workers``.
+
+    The rows are the ones the profile's workers table prints ("Show all",
+    § ``all_workers``), built by the same ``_worker_rows`` and in the same
+    order, so the page and the API cannot disagree.  Only the shape changes:
+    raw numbers instead of the rounded ``human`` text, and the last contact
+    as an ISO time beside the page's "3 minutes ago".
+    """
+    rows = all_workers(username, now=now)['workers']
+    workers = []
+    for row in rows:
+        task = row.get('searching')
+        workers.append({
+            'machine': row['machine'],
+            'build': row['build'],
+            'threads': row['threads'],
+            'hash_mb': row['hash_mb'],
+            'os': row['os'],
+            'online': row['online'],
+            'last_seen': (row['last_seen'].isoformat()
+                          if row['last_seen'] else None),
+            'seen': row['seen'],
+            'nodes_24h': row['nodes_24h'],
+            'tasks_24h': row['tasks_24h'],
+            'nodes_all': row['nodes_all'],
+            'tasks_all': row['tasks_all'],
+            'nps': row['nps'],
+            'searches_last_hour': row['searches'],
+            'searching': None if task is None else {
+                'task_id': task['task_id'],
+                'position': task['key'],
+                'line': task['full'],
+                'moves': task['play'],
+                'budget_nodes': task['budget_nodes'],
+            },
+        })
+    return workers
 
 
 def present(username, now=None, every_worker=False):

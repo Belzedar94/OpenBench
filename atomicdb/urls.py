@@ -222,6 +222,10 @@ urlpatterns = [
     # Sin barra tambien (30-ago): el 301 de APPEND_SLASH convertia el POST de
     # un script en GET anonimo — 401 con la credencial buena (Eclipsia).
     path('api/my-queue', views.api_my_queue),
+    # Tus workers en JSON, las mismas dos puertas que my-queue.  Sin cache:
+    # es de una sola cuenta.
+    path('api/my-workers/', views.api_my_workers, name='atomicdb-my-workers'),
+    path('api/my-workers', views.api_my_workers),
     path('api/queue-bump/<int:task_id>/', views.api_queue_bump_script,
          name='atomicdb-api-queue-bump'),
     path('api/queue-bump/<int:task_id>', views.api_queue_bump_script),

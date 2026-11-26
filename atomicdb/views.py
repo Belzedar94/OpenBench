@@ -2233,6 +2233,37 @@ def api_my_queue(request):
     return JsonResponse({'account': account, 'tasks': tasks})
 
 
+@csrf_exempt
+def api_my_workers(request):
+    """Your own workers in JSON: the "Your workers" table of your profile.
+
+    Torom (Discord, 26-Nov-2026).  The same two doors as ``api_my_queue``: a
+    signed-in browser GETs it with its session, a script POSTs ``username``
+    and ``password`` (form or JSON, § ``_resolve_script_account``).  Only the
+    caller's own account is ever read: no parameter names another one.
+
+    The rows come from ``contributors.my_workers``, which is the builder the
+    profile table uses (§ ``contributors._worker_rows``), with the same reads
+    bounded by the account's machines and the shared fleet snapshot.
+    """
+    if request.method == 'POST':
+        account, err = _resolve_script_account(request)
+        if err is not None:
+            return err
+    elif request.method != 'GET':
+        return JsonResponse({'error': 'GET or POST only'}, status=405)
+    elif request.user.is_authenticated:
+        account = request.user.username
+    else:
+        return JsonResponse({'error': 'login required'}, status=401)
+    workers = contributors.my_workers(account)
+    return JsonResponse({
+        'account': account,
+        'online': sum(1 for row in workers if row['online']),
+        'workers': workers,
+    })
+
+
 def _account_names(names):
     """``names`` plus the account names they match without case.
 
