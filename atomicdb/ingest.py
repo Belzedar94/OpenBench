@@ -2563,7 +2563,7 @@ def _resolve_spine_steps(cache, walks):
 
 def _resolve_returning_children(by_parent, cache, line=frozenset(),
                                 budget=None, only=None, unresolved=None,
-                                deadline=None):
+                                deadline=None, verdicts=None):
     """Value a returning child ON THE LINE THAT RETURNS, not at a flat zero.
 
     WHAT THE FLAT ZERO GOT WRONG.  The walk establishes one fact: the
@@ -2621,6 +2621,11 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
     ``deadline``, a ``time.monotonic()`` instant, can only shorten the
     top-level call's own BACKED_CYCLE_MAX_SECONDS: a request that builds
     many tables shares one (see views._line_walk_budget).
+
+    ``verdicts``, when given, collects what each position on the way back
+    chose on its line, ``{(key, played): (move, value, repeats)}`` (see
+    _value_on_line).  The backup does not need it; the explorer reads from
+    it where the line leaves the loop (see line_moves).
     """
     if budget is None:
         _cycle_deadline[0] = time.monotonic() + BACKED_CYCLE_MAX_SECONDS
@@ -2634,7 +2639,7 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
             if not child.cycles or child.key in played:
                 continue      # not returning, or the repetition itself
             spent = [BACKED_CYCLE_MAX_NODES] if budget is None else budget
-            seen = _value_on_line(child.key, played, cache, spent)
+            seen = _value_on_line(child.key, played, cache, spent, verdicts)
             if seen is None:
                 if unresolved is not None:
                     unresolved.add((parent_key, child.move))
@@ -2647,7 +2652,7 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
             child.plies, child.spine = plies, spine
 
 
-def _value_on_line(key, played, cache, budget):
+def _value_on_line(key, played, cache, budget, verdicts=None):
     """What ``key`` is worth to a line that already went through ``played``.
 
     The same negamax the node would run for itself (see _backed_for), with
@@ -2691,8 +2696,13 @@ def _value_on_line(key, played, cache, budget):
         return None
     children = _backed_children_by_parent([key])
     _draw_cycling_children(children, cache, played)
-    _resolve_returning_children(children, cache, played, budget)
-    return _line_verdict(row, children.get(key, ()), played)
+    _resolve_returning_children(children, cache, played, budget,
+                                verdicts=verdicts)
+    verdict = _line_verdict(row, children.get(key, ()), played)
+    if verdicts is not None:
+        value, _quality, _plies, move, repeats = verdict
+        verdicts[(key, frozenset(played))] = (move, value, repeats)
+    return verdict
 
 
 def _line_verdict(row, kids, played):
@@ -2718,7 +2728,7 @@ def _line_verdict(row, kids, played):
     return value, max(quality, row.nodes_invested or 0), plies, move, False
 
 
-def line_moves(row, line=frozenset(), deadline=None):
+def line_moves(row, line=frozenset(), deadline=None, detail=None):
     """The moves of ``row`` whose value depends on the line, and that value.
 
     Returns ``{move_uci: (value, repeats)}``, ``value`` from White's side,
@@ -2740,6 +2750,20 @@ def line_moves(row, line=frozenset(), deadline=None):
     the budget runs out on is left out, so the explorer shows its stored
     value.  ``deadline`` can only shorten that budget (see
     _resolve_returning_children).  Nothing is written.
+
+    ``detail``, when given, is filled for every move valued at its way out
+    (``repeats`` false) with WHERE the line returns and WHO leaves it, so
+    the explorer can say so instead of a bare "returns" that reads as if the
+    move itself repeated (a report of 26-Nov-2026: "one ply off"):
+
+      * ``path``: ``[(key, move_uci), ...]``, the positions after the move
+        and the move each one plays until the line is back on a position it
+        has been through.  It is the very walk that marked the move, read
+        back from the walk's cache, so it costs no query;
+      * ``exit``: ``(index, move_uci, value)``, the first position of
+        ``path`` (by index) whose choice on the line is not to go on round
+        the loop, the move it plays instead, and what that move is worth
+        from White's side.  ``None`` when the walk cannot say.
     """
     children = _backed_children_by_parent([row.key])
     cache = _SpineCache()
@@ -2749,9 +2773,18 @@ def line_moves(row, line=frozenset(), deadline=None):
     marked = {child.move for child in kids if child.cycles}
     if not marked:
         return {}
+    # The returning lines, read back from the walk before the valuation
+    # below replaces each child's ``spine`` with its choice on the line.
+    paths = {}
+    if detail is not None:
+        played = line | {row.key}
+        for child in kids:
+            if child.cycles and child.key not in played:
+                paths[child.move] = _returning_path(child.key, played, cache)
     unresolved = set()
+    verdicts = {} if detail is not None else None
     _resolve_returning_children(children, cache, line, unresolved=unresolved,
-                                deadline=deadline)
+                                deadline=deadline, verdicts=verdicts)
     out = {}
     for child in kids:
         if child.move not in marked:
@@ -2762,7 +2795,56 @@ def line_moves(row, line=frozenset(), deadline=None):
             out[child.move] = (0, True)
         elif child.value is not None:
             out[child.move] = (child.value, False)
+            if detail is not None and paths.get(child.move):
+                path = paths[child.move]
+                detail[child.move] = {
+                    'path': path,
+                    'exit': _line_exit(path, line | {row.key}, verdicts)}
     return out
+
+
+def _returning_path(key, played, cache):
+    """The walk from ``key`` back onto ``played``, as ``[(key, move)]``.
+
+    The same pointers _draw_cycling_children followed to mark the move,
+    taken from the cache it filled: no query.  Empty when they no longer
+    lead back (the walk only marks what does, so that is a cache gap).
+    """
+    path, seen = [], set()
+    node = key
+    for _ in range(BACKED_CYCLE_MAX_PLIES):
+        move = cache.spines.get(node)
+        step = cache.steps.get((node, move)) if move else None
+        if step is None or node in seen:
+            return []
+        seen.add(node)
+        path.append((node, move))
+        node = step[0]
+        if node in played:
+            return path
+    return []
+
+
+def _line_exit(path, played, verdicts):
+    """Where ``path`` leaves its loop: ``(index, move, value)`` or None.
+
+    Each position of the returning line chose a move on its line
+    (``verdicts``, see _value_on_line).  While that choice is the next step
+    of the loop the line goes on round; the first one that chooses
+    otherwise is the way out the move is worth.
+    """
+    played = frozenset(played)
+    for index, (key, move) in enumerate(path):
+        verdict = verdicts.get((key, played)) if verdicts else None
+        if verdict is None:
+            return None
+        chosen, value, repeats = verdict
+        if repeats or chosen is None:
+            return None
+        if chosen != move:
+            return index, chosen, value
+        played = played | {key}
+    return None
 
 
 def repetition_moves(row, line=frozenset()):

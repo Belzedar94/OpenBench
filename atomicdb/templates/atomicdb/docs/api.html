@@ -151,6 +151,14 @@ plies).</p>
   <code>returns</code>: <code>true</code> when it comes back and is worth the
   best way out of that loop. Either way <code>score</code> is that value, the
   one the backed value of this position uses.</li>
+<li><code>returns_line</code>: for a <code>returns</code> move, the moves after
+  it, in UCI, until the line is back on a position it has already been through;
+  <code>returns_exit</code>: the way out that move is worth, as
+  <code>{"index", "uci", "score"}</code>, where <code>index</code> is the
+  position in <code>returns_line</code> that leaves the loop, <code>uci</code> the
+  move it plays instead and <code>score</code> that move's value from this
+  position's side to move. Both are <code>null</code> on any other move, and
+  wherever the walk could not say.</li>
 </ul>
 <details>
 <summary>Details: <code>floor</code> and <code>searched_nodes</code></summary>
