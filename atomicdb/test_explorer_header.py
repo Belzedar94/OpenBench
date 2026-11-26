@@ -408,8 +408,11 @@ class StatusUnderTheBoardTests(TestCase):
         body = self._body()
 
         self.assertNotIn('class="verdict', body)
-        for gone in ('UNSOLVED', 'White to move', 'best line'):
+        for gone in ('UNSOLVED', 'White to move'):
             self.assertNotIn(gone, body)
+        # The old headline was "· best line +30cp"; the "Play best line"
+        # button under the board is not it.
+        self.assertNotRegex(body, r'best line [-+]?\d')
 
     def test_an_open_backed_position_leaves_its_chip_to_the_table(self):
         # The backed number and its jump sit in the row above the board;

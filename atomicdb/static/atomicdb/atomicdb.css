@@ -962,6 +962,41 @@ main {
 .chip.warm { background: var(--warm); }
 .chip.cold { background: var(--cold); }
 
+/* Win / draw / loss bar under a move's eval, from the side to move
+   (atomicdb/wdl.py).  A proven result is drawn solid; an estimate from the
+   score is fainter.  With the eval shown from White's side, a Black-to-move
+   page turns the bar around and swaps its ends' colours, so its left end is
+   always White's. */
+.wdl {
+  display: flex;
+  width: 4.5rem;
+  max-width: 100%;
+  height: 5px;
+  margin-top: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+.wdl > span { display: block; height: 100%; }
+.wdl-w { background: var(--won); }
+.wdl-d { background: var(--draw); }
+.wdl-l { background: var(--lost); }
+.wdl.wdl-est { opacity: .6; }
+:root[data-eval="white"] .wdl[data-stm="b"] { flex-direction: row-reverse; }
+:root[data-eval="white"] .wdl[data-stm="b"] .wdl-w { background: var(--lost); }
+:root[data-eval="white"] .wdl[data-stm="b"] .wdl-l { background: var(--won); }
+
+/* The explorer's "Play best / random line" row and its keys hint. */
+.playrow .keys-hint kbd {
+  padding: 0 .25rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  font: inherit;
+}
+@media (hover: none) {
+  .playrow .keys-hint { display: none; }
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

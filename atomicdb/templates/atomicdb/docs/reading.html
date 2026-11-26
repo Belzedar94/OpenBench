@@ -177,6 +177,23 @@ side to move here: <span class="chip won"></span> proven win,
 proven draw. Open moves are coloured by the size of their value, for either
 side: <span class="chip hot"></span> 500 or more, <span class="chip warm"></span>
 200 to 499, <span class="chip cold"></span> less than 200 or no value.</p>
+<p id="col-wdl">The thin bar under a value splits it into win, draw and loss
+for the side to move here: green, blue and red, left to right. Hover it for
+the numbers.</p>
+<ul>
+<li>A proven result (mate, tablebase, minimax, a finished game) and a move
+  that repeats the line you came by (a draw) fill the bar with that one
+  outcome.</li>
+<li>Any other value gets an <strong>estimate from the score</strong>, drawn
+  fainter: nothing in the tree stores a win/draw/loss, so the page turns the
+  number into one with a simple logistic curve,
+  win&nbsp;=&nbsp;1&nbsp;/&nbsp;(1&nbsp;+&nbsp;e<sup>(400&nbsp;&minus;&nbsp;cp)&nbsp;/&nbsp;150</sup>),
+  loss the same for the other side, draw the rest. It is not calibrated on
+  Atomic games: at 0 it reads 6 / 88 / 6, at +400 even odds of a win, at
+  +1000 98 / 2 / 0. A move with no value has no bar.</li>
+<li>With the eval switched to Pawns, the bar is turned to White's side too:
+  its left end is White's.</li>
+</ul>
 
 <h4 id="col-pndn">pn / dn</h4>
 <p>Proof and disproof numbers of the active proof campaign: an estimate of how
@@ -188,4 +205,19 @@ not probabilities. Empty when the campaign has no estimate for that move.</p>
 <p>The node budget of the deepest search the move's position has had, or a dash
 if none has reached it yet; see <a href="#table">the moves table</a>
 above.</p>
+
+<h3 id="play">Playing a line, and keys</h3>
+<p>Under the board, <strong>Play best line</strong> walks forward from the
+position on screen, one position about every second, along the move the
+arrow shows. <strong>Play random line</strong> does the same with a move
+picked at random among those whose value is within 30 of the best. Each step
+is an ordinary page, so Back retraces the line. It only follows moves already
+in the tree, and stops on a proven or finished position, where there is no
+such move to follow, or after 40 plies. The button you pressed turns into
+<strong>Stop</strong>; Esc, Back or a click anywhere else stops it too.</p>
+<p>On a computer the position page also takes keys, except while you are
+typing in a box: <kbd>&larr;</kbd> and <kbd>&rarr;</kbd> go back and forward,
+<kbd>F</kbd> turns the board round (for the rest of the visit in that tab),
+<kbd>Q</kbd> presses the Request button on a position that has one, and
+<kbd>Esc</kbd> stops a line in play.</p>
 {% endblock %}

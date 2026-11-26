@@ -825,6 +825,210 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
     {% if provenance %}
     <p class="dim provenance" style="font-size:.8rem">{{ provenance.text }}{% if provenance.url %} <a href="{{ provenance.url }}">{{ provenance.link_text }}</a>{% endif %}</p>
     {% endif %}
+    {% comment %}Play a line (inspired by chessdb's explorer): walk forward
+    from here along the stored moves, one page at a time, through the same
+    links the move table carries, so every step is a real page with its own
+    URL, its ?play= route and its entry in the browser history.  "Best" plays
+    the arrow's move at each step; "random" plays any stored move whose value
+    is within PLAY_MARGIN_CP of it.  It stops on a closed or terminal
+    position, where no stored move can be followed, or after PLAY_MAX_PLIES
+    plies; Stop, Esc or any other navigation ends it.  Where it is on the line
+    lives in sessionStorage, keyed by the position it is about to land on, so
+    a page reached any other way (Back, a click, another tab) is not played
+    from.  The row and the keys hint stay hidden without JavaScript.{% endcomment %}
+    <p class="reqrow playrow" id="playrow" hidden>
+      <button type="button" class="reqbtn" id="play-best"
+        title="Step forward along the best stored move at each position, the move the arrow shows">Play best line</button>
+      <button type="button" class="reqbtn" id="play-random"
+        title="Step forward along a random stored move at each position, among those within 30cp of the best">Play random line</button>
+      <span class="reqnote" id="playnote" hidden></span>
+      <span class="dim keys-hint" style="font-size:.75rem"
+        title="Keyboard shortcuts, off while typing in a box">keys: <kbd>&larr;</kbd> <kbd>&rarr;</kbd> back / forward · <kbd>F</kbd> flip board{% if pos.status == 'UNKNOWN' %} · <kbd>Q</kbd> request analysis{% endif %} · <kbd>Esc</kbd> stop line</span>
+    </p>
+    {{ playline|json_script:"atomicdb-playline" }}
+    <script>
+    (function () {
+      const node = document.getElementById('atomicdb-playline');
+      const row = document.getElementById('playrow');
+      if (!node || !row) { return; }
+      const data = JSON.parse(node.textContent);
+      const STORE = 'atomicdb-autoplay';
+      const PLAY_MAX_PLIES = 40;
+      const PLAY_MARGIN_CP = 30;
+      const PLAY_STEP_MS = 900;
+      const buttons = {best: document.getElementById('play-best'),
+                       random: document.getElementById('play-random')};
+      const labels = {best: buttons.best.textContent,
+                      random: buttons.random.textContent};
+      const note = document.getElementById('playnote');
+      let timer = null;
+      function load() {
+        try { return JSON.parse(sessionStorage.getItem(STORE) || 'null'); }
+        catch (e) { return null; }
+      }
+      function save(state) {
+        try {
+          if (state) { sessionStorage.setItem(STORE, JSON.stringify(state)); }
+          else { sessionStorage.removeItem(STORE); }
+          return true;
+        } catch (e) { return false; }
+      }
+      function say(text) {
+        note.textContent = text || '';
+        note.hidden = !text;
+      }
+      function lineName(mode) {
+        return mode === 'random' ? 'random line' : 'best line';
+      }
+      function plies(n) { return n + (n === 1 ? ' ply' : ' plies'); }
+      // Why nothing can be played from here, or '' when something can.
+      function blocked() {
+        if (!data.open) { return 'this position is closed'; }
+        if (!data.rows.length) { return 'no stored moves here'; }
+        if (!data.rows.some(r => r.uci === data.best)) {
+          return 'the best move here is not a stored move to follow';
+        }
+        return '';
+      }
+      // The next row: the arrow's move, or for the random line any row with
+      // a value within the margin of it, the arrow's move included.
+      function pick(mode) {
+        const best = data.rows.find(r => r.uci === data.best);
+        if (!best || mode !== 'random' || best.score === null) { return best; }
+        const pool = data.rows.filter(
+          r => r.score !== null && r.score >= best.score - PLAY_MARGIN_CP);
+        return pool[Math.floor(Math.random() * pool.length)] || best;
+      }
+      function idle(text) {
+        clearTimeout(timer);
+        timer = null;
+        ['best', 'random'].forEach(mode => {
+          buttons[mode].textContent = labels[mode];
+          buttons[mode].disabled = false;
+          buttons[mode].removeAttribute('aria-pressed');
+        });
+        say(text);
+      }
+      function playing(state) {
+        ['best', 'random'].forEach(mode => {
+          const on = mode === state.mode;
+          buttons[mode].textContent = on ? 'Stop' : labels[mode];
+          buttons[mode].disabled = !on;
+          buttons[mode].setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+        say('Playing the ' + lineName(state.mode) + ': ' + plies(state.ply)
+            + ' of at most ' + state.max);
+      }
+      function finish(state, reason) {
+        save(null);
+        idle(state.ply
+          ? 'Played ' + plies(state.ply) + ' of the ' + lineName(state.mode)
+            + '; stopped: ' + reason
+          : 'Nothing to play: ' + reason);
+      }
+      function step() {
+        timer = null;
+        const state = load();
+        // Stopped, or this page was reached some other way.
+        if (!state || state.at !== data.key) { idle(''); return; }
+        const reason = state.ply >= state.max
+          ? 'reached the ' + state.max + '-ply limit' : blocked();
+        if (reason) { finish(state, reason); return; }
+        const next = pick(state.mode);
+        state.at = next.key;
+        state.ply += 1;
+        if (!save(state)) { idle('Playing a line needs browser storage'); return; }
+        location.assign(next.url);
+      }
+      function stop() {
+        const state = load();
+        if (!state || state.at !== data.key) { return false; }
+        save(null);
+        idle('Stopped after ' + plies(state.ply) + ' of the '
+             + lineName(state.mode));
+        return true;
+      }
+      function start(mode) {
+        const state = {mode: mode, at: data.key, ply: 0, max: PLAY_MAX_PLIES};
+        if (!save(state)) { idle('Playing a line needs browser storage'); return; }
+        playing(state);
+        step();
+      }
+      ['best', 'random'].forEach(mode => {
+        buttons[mode].addEventListener('click', function () {
+          if (!stop()) { start(mode); }
+        });
+      });
+      // Esc and the history keys end a line in play (the keys script below).
+      window.atomicdbStopLine = stop;
+      function resume() {
+        clearTimeout(timer);
+        timer = null;
+        const state = load();
+        if (state && state.at === data.key) {
+          playing(state);
+          timer = setTimeout(step, PLAY_STEP_MS);
+        } else {
+          // A line that was heading somewhere else is over.
+          if (state) { save(null); }
+          idle('');
+        }
+      }
+      // Back to a page restored from the back/forward cache: its old timer
+      // must not walk on from a line that has moved past it.
+      window.addEventListener('pageshow', function (event) {
+        if (event.persisted) { resume(); }
+      });
+      window.addEventListener('pagehide', function () {
+        clearTimeout(timer);
+        timer = null;
+      });
+      row.hidden = false;
+      resume();
+    }());
+    </script>
+    <script>
+    (function () {
+      // Keyboard shortcuts, never while typing: arrows walk the browser
+      // history, F flips the board (board.js), Q clicks the Request button
+      // when the page has one, Esc stops a line in play.
+      document.addEventListener('keydown', function (event) {
+        if (event.defaultPrevented || event.ctrlKey || event.metaKey
+            || event.altKey) { return; }
+        const target = event.target;
+        if (target && (target.isContentEditable
+            || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) { return; }
+        const stopLine = window.atomicdbStopLine || function () { return false; };
+        switch (event.key) {
+          case 'ArrowLeft':
+            stopLine();
+            history.back();
+            break;
+          case 'ArrowRight':
+            stopLine();
+            history.forward();
+            break;
+          case 'f':
+          case 'F':
+            window.dispatchEvent(new CustomEvent('atomicdb-flip'));
+            break;
+          case 'q':
+          case 'Q': {
+            const request = document.getElementById('reqbtn');
+            if (!request || request.disabled) { return; }
+            request.click();
+            break;
+          }
+          case 'Escape':
+            if (!stopLine()) { return; }
+            break;
+          default:
+            return;
+        }
+        event.preventDefault();
+      });
+    }());
+    </script>
     {% comment %}The FEN of this position, editable: change it, or paste
     another FEN or a PGN, and Go travels there (the home page's box).{% endcomment %}
     <form class="fenbox fenbox-here" method="post" action="/atomicdb/fen/">{% csrf_token %}
@@ -1021,7 +1225,15 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
             class="backed-mark"
             title="the value of this move comes back to this very position, so the line repeats. A repetition is worth a draw: here the move is worth no more than 0, whatever its own page claims">repetition</span>{% elif m.returns %} <span
             class="backed-mark line-returns"
-            title="{% if m.returning %}this move does not repeat by itself: the line comes back to a position already played after {{ m.returning.full_san }}. {% if m.returning.exit %}{{ m.returning.exit.side }}'s best way to avoid going back is {{ m.returning.exit.san }} ({{ m.returning.exit.pawns }} for {{ m.returning.exit.side }}), so here the move is worth {{ m.line_value }}{% else %}It is worth the best way out of that loop: {{ m.line_value }} here{% endif %}, whatever its own page claims{% else %}on this line the move comes back to a position already played, so it is worth the best way out of that loop: {{ m.line_value }} here, whatever its own page claims{% endif %}">returns{% if m.returning %}<span class="returns-wide">&nbsp;after {{ m.returning.lead }}<span data-uci="{{ m.returning.short_uci }}">{{ m.returning.short_san }}</span></span><span class="returns-narrow">&nbsp;in {{ m.returning.plies }}</span>{% endif %}</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}</td>
+            title="{% if m.returning %}this move does not repeat by itself: the line comes back to a position already played after {{ m.returning.full_san }}. {% if m.returning.exit %}{{ m.returning.exit.side }}'s best way to avoid going back is {{ m.returning.exit.san }} ({{ m.returning.exit.pawns }} for {{ m.returning.exit.side }}), so here the move is worth {{ m.line_value }}{% else %}It is worth the best way out of that loop: {{ m.line_value }} here{% endif %}, whatever its own page claims{% else %}on this line the move comes back to a position already played, so it is worth the best way out of that loop: {{ m.line_value }} here, whatever its own page claims{% endif %}">returns{% if m.returning %}<span class="returns-wide">&nbsp;after {{ m.returning.lead }}<span data-uci="{{ m.returning.short_uci }}">{{ m.returning.short_san }}</span></span><span class="returns-narrow">&nbsp;in {{ m.returning.plies }}</span>{% endif %}</span>{% endif %}{% else %}<span class="dim" data-fold style="white-space:nowrap">not analysed</span>{% endif %}{% if m.wdl %}<span
+            class="wdl{% if not m.wdl.proven %} wdl-est{% endif %}" data-stm="{{ stm_char }}"
+            role="img" title="{{ m.wdl.title }}" aria-label="{{ m.wdl.title }}">{% if m.wdl.w %}<span class="wdl-w" style="width:{{ m.wdl.w }}%"></span>{% endif %}{% if m.wdl.d %}<span class="wdl-d" style="width:{{ m.wdl.d }}%"></span>{% endif %}{% if m.wdl.l %}<span class="wdl-l" style="width:{{ m.wdl.l }}%"></span>{% endif %}</span>{% endif %}</td>
+        {% comment %}The win / draw / loss bar under the eval, from the side to
+        move (§ wdl): a proven result or a repetition draw fills it with one
+        outcome; any other number gets a logistic estimate, drawn fainter
+        (``wdl-est``) and named so in the tooltip.  With the eval shown from
+        White's side the sheet turns the bar of a Black-to-move page around, so
+        its left end is always White's.  Display only.{% endcomment %}
         <td class="dim proofnums">{% if m.pn_h %}{{ m.pn_h }} / {{ m.dn_h }}{% endif %}</td>
         {% comment %}How deep the move's position has been searched, in the
         slider's unit, where the visit count used to be ("it would be more

@@ -63,9 +63,21 @@ if (board && movesNode) {
   }
   const initialArrow = arrowColour();
   const initialBrushes = arrowBrushes(initialArrow);
+  // The side at the bottom.  A flip (the explorer's F key, which sends
+  // 'atomicdb-flip') holds for the rest of the visit in this tab, so walking
+  // a line keeps the board the way it was turned; a new tab starts White.
+  const ORIENTATION_KEY = 'atomicdb-orientation';
+  function storedOrientation() {
+    try {
+      return window.sessionStorage.getItem(ORIENTATION_KEY) === 'black'
+        ? 'black' : 'white';
+    } catch (_error) {
+      return 'white';
+    }
+  }
   ground = Chessground(board, {
     fen: board.dataset.fen,
-    orientation: 'white',
+    orientation: storedOrientation(),
     turnColor: board.dataset.turn,
     coordinates: true,
     animation: { enabled: false },
@@ -105,6 +117,15 @@ if (board && movesNode) {
         },
       },
     },
+  });
+
+  window.addEventListener('atomicdb-flip', () => {
+    ground.toggleOrientation();
+    try {
+      window.sessionStorage.setItem(ORIENTATION_KEY, ground.state.orientation);
+    } catch (_error) {
+      // No storage: the flip lasts as long as this page.
+    }
   });
 
   window.addEventListener('atomicdb-arrow', (event) => {
