@@ -806,17 +806,23 @@ def _worker_rows(pings, snapshot, now):
             # incluida), asi que ensenar los dos numeros seria publicar dos
             # definiciones de "analisis" que no tienen por que coincidir.  El
             # que sale es el que comparte denominador con los nodos de al lado.
+            'nodes_24h': day['nodes'],
             'nodes_24h_h': human(day['nodes']),
             'tasks_24h': day['tasks'],
             'nodes_all': life['nodes'],
             'nodes_all_h': human(life['nodes']),
             'tasks_all': life['tasks'],
+            'nps': round(nps),
             'nps_h': human(round(nps)) if nps else '',
             'searches': searches,
             'searches_h': human(searches),
+            # Raw values for ``my_workers`` (the JSON door): the table prints
+            # the relative ``seen`` instead.
+            'last_seen': ping.last_seen,
         }
         if task is not None:
-            row['searching'] = _presented(task, labels, now)
+            row['searching'] = _presented(task, labels, now, {
+                'task_id': task.id, 'budget_nodes': task.budget_nodes})
         workers.append(row)
     # Lo vivo arriba y lo grande primero: una maquina apagada hace meses no
     # puede encabezar la lista solo porque su nombre empiece por 'a'.
@@ -832,6 +838,46 @@ def all_workers(username, now=None):
     return {'workers': _worker_rows(pings, fleet(now=now), now),
             'has_workers': bool(pings), 'workers_more': 0,
             'profile_user': username}
+
+
+def my_workers(username, now=None):
+    """Every worker of the account as JSON-ready dicts: ``api/my-workers``.
+
+    The rows are the ones the profile's workers table prints ("Show all",
+    § ``all_workers``), built by the same ``_worker_rows`` and in the same
+    order, so the page and the API cannot disagree.  Only the shape changes:
+    raw numbers instead of the rounded ``human`` text, and the last contact
+    as an ISO time beside the page's "3 minutes ago".
+    """
+    rows = all_workers(username, now=now)['workers']
+    workers = []
+    for row in rows:
+        task = row.get('searching')
+        workers.append({
+            'machine': row['machine'],
+            'build': row['build'],
+            'threads': row['threads'],
+            'hash_mb': row['hash_mb'],
+            'os': row['os'],
+            'online': row['online'],
+            'last_seen': (row['last_seen'].isoformat()
+                          if row['last_seen'] else None),
+            'seen': row['seen'],
+            'nodes_24h': row['nodes_24h'],
+            'tasks_24h': row['tasks_24h'],
+            'nodes_all': row['nodes_all'],
+            'tasks_all': row['tasks_all'],
+            'nps': row['nps'],
+            'searches_last_hour': row['searches'],
+            'searching': None if task is None else {
+                'task_id': task['task_id'],
+                'position': task['key'],
+                'line': task['full'],
+                'moves': task['play'],
+                'budget_nodes': task['budget_nodes'],
+            },
+        })
+    return workers
 
 
 def present(username, now=None, every_worker=False):
