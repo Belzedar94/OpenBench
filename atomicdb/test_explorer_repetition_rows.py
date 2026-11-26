@@ -24,9 +24,13 @@ Black answers Bf8, and White's best move that does not repeat is O-O.
 C's own way out, O-O for Black, is worth +1160 to White.
 """
 
+import contextlib
 from unittest import mock
 
+from django.conf import settings
+from django.db import connections
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 
 from . import ingest, logic, views
 from .models import Edge, Position
@@ -311,12 +315,22 @@ class ReturningLineChipTests(SicilianLoopFixture):
         self.assertIsNone(best['returns_exit'])
 
     def test_one_query_names_the_whole_line(self):
+        # The FENs live wherever AtomicDB's rows are routed: ``default`` on
+        # one database, ``atomicdb`` once the database is split.  Count both,
+        # so a query routed to either is seen.
         detail = {}
         ingest.line_moves(self.p, detail=detail)
-        with self.assertNumQueries(1):
+        aliases = sorted({settings.ATOMICDB_DATABASE_ALIAS, 'default'})
+        with contextlib.ExitStack() as stack:
+            seen = [stack.enter_context(CaptureQueriesContext(connections[a]))
+                    for a in aliases]
             views._returning_lines(self.p, detail)
-        with self.assertNumQueries(0):
+        self.assertEqual(sum(len(c.captured_queries) for c in seen), 1)
+        with contextlib.ExitStack() as stack:
+            seen = [stack.enter_context(CaptureQueriesContext(connections[a]))
+                    for a in aliases]
             self.assertEqual(views._returning_lines(self.p, {}), {})
+        self.assertEqual(sum(len(c.captured_queries) for c in seen), 0)
 
     def test_a_long_line_is_cut_in_the_middle(self):
         detail = {}
