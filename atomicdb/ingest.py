@@ -2562,7 +2562,8 @@ def _resolve_spine_steps(cache, walks):
 
 
 def _resolve_returning_children(by_parent, cache, line=frozenset(),
-                                budget=None, only=None, unresolved=None):
+                                budget=None, only=None, unresolved=None,
+                                deadline=None):
     """Value a returning child ON THE LINE THAT RETURNS, not at a flat zero.
 
     WHAT THE FLAT ZERO GOT WRONG.  The walk establishes one fact: the
@@ -2616,9 +2617,15 @@ def _resolve_returning_children(by_parent, cache, line=frozenset(),
     returning children the budget ran out on.  The backup does not need it
     (the walk's verdict stands); the explorer does, to show such a row at
     its stored value instead (see line_moves).
+
+    ``deadline``, a ``time.monotonic()`` instant, can only shorten the
+    top-level call's own BACKED_CYCLE_MAX_SECONDS: a request that builds
+    many tables shares one (see views._line_walk_budget).
     """
     if budget is None:
         _cycle_deadline[0] = time.monotonic() + BACKED_CYCLE_MAX_SECONDS
+        if deadline is not None:
+            _cycle_deadline[0] = min(_cycle_deadline[0], deadline)
     for parent_key, children in by_parent.items():
         if only is not None and parent_key not in only:
             continue
@@ -2711,7 +2718,7 @@ def _line_verdict(row, kids, played):
     return value, max(quality, row.nodes_invested or 0), plies, move, False
 
 
-def line_moves(row, line=frozenset()):
+def line_moves(row, line=frozenset(), deadline=None):
     """The moves of ``row`` whose value depends on the line, and that value.
 
     Returns ``{move_uci: (value, repeats)}``, ``value`` from White's side,
@@ -2731,7 +2738,8 @@ def line_moves(row, line=frozenset()):
     same budget, not a second copy of the predicate: two definitions of
     "this returns" are two definitions that drift apart.  A returning move
     the budget runs out on is left out, so the explorer shows its stored
-    value.  Nothing is written.
+    value.  ``deadline`` can only shorten that budget (see
+    _resolve_returning_children).  Nothing is written.
     """
     children = _backed_children_by_parent([row.key])
     cache = _SpineCache()
@@ -2742,7 +2750,8 @@ def line_moves(row, line=frozenset()):
     if not marked:
         return {}
     unresolved = set()
-    _resolve_returning_children(children, cache, line, unresolved=unresolved)
+    _resolve_returning_children(children, cache, line, unresolved=unresolved,
+                                deadline=deadline)
     out = {}
     for child in kids:
         if child.move not in marked:

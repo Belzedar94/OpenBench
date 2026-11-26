@@ -1,5 +1,7 @@
 """API de AtomicDB (worker) + paginas publicas del Explorer."""
 
+import contextlib
+import contextvars
 import functools
 import hashlib
 import hmac
@@ -5984,6 +5986,28 @@ def _own_line_values(pos):
     return values
 
 
+# ONE BUDGET FOR A REQUEST THAT BUILDS MANY TABLES.  Each table may spend up
+# to the backup's own 1 s on its returning moves (ingest.BACKED_CYCLE_MAX_SECONDS),
+# and api_principal_variations builds up to 26 of them.  Inside
+# ``_line_walk_budget`` they share this many seconds; once spent, the tables
+# that remain show stored values, exactly as when one table's budget runs out.
+LINE_WALK_REQUEST_SECONDS = 1.5
+_line_walk_deadline = contextvars.ContextVar('_line_walk_deadline',
+                                             default=None)
+
+
+@contextlib.contextmanager
+def _line_walk_budget(seconds=None):
+    """Share one deadline among every line walk made inside the block."""
+    token = _line_walk_deadline.set(
+        time.monotonic() + (LINE_WALK_REQUEST_SECONDS if seconds is None
+                            else seconds))
+    try:
+        yield
+    finally:
+        _line_walk_deadline.reset(token)
+
+
 def _repetition_moves(pos, route_keys=None):
     """The moves of this table valued on the line: ``{uci: (value, repeats)}``.
 
@@ -6006,7 +6030,11 @@ def _repetition_moves(pos, route_keys=None):
     """
     if pos.status != 'UNKNOWN':
         return {}
-    return ingest.line_moves(pos, frozenset(route_keys or ()))
+    deadline = _line_walk_deadline.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        return {}             # the request's budget is spent: stored values
+    return ingest.line_moves(pos, frozenset(route_keys or ()),
+                             deadline=deadline)
 
 
 def _child_moves(pos, route_keys=None):
@@ -7039,6 +7067,15 @@ def api_principal_variations(request):
                               PV_API_MAX_LINES, PV_API_MAX_LINES)
     ply_count = _bounded_int(request.GET.get('ply_count'),
                              PV_API_MAX_PLIES, PV_API_MAX_PLIES)
+    # Up to 26 move tables in one call, each of which may walk the
+    # repetition (§ _repetition_moves): they share ONE budget, and the
+    # tables past it show stored values.
+    with _line_walk_budget():
+        return _principal_variations(root, line_count, ply_count)
+
+
+def _principal_variations(root, line_count, ply_count):
+    """The reply of ``api_principal_variations`` for ``root``."""
     block = _query_block(root)
     lines, positions, known = {}, {}, {}
 

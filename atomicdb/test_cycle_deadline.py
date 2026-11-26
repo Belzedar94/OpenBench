@@ -32,6 +32,14 @@ class CycleDeadlineTests(SimpleTestCase):
         self.assertGreaterEqual(ingest._cycle_deadline[0],
                                 before + ingest.BACKED_CYCLE_MAX_SECONDS)
 
+    def test_a_request_deadline_can_only_shorten_the_top_level_one(self):
+        soon = time.monotonic() + 0.25
+        ingest._resolve_returning_children({}, None, deadline=soon)
+        self.assertEqual(ingest._cycle_deadline[0], soon)
+        before = time.monotonic()
+        ingest._resolve_returning_children({}, None, deadline=before + 60)
+        self.assertLess(ingest._cycle_deadline[0], before + 60)
+
     def test_a_nested_call_keeps_the_running_deadline(self):
         ingest._cycle_deadline[0] = 123.0
         ingest._resolve_returning_children({}, None, budget=[1])
