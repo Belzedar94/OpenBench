@@ -842,9 +842,29 @@ buttons; without JavaScript they are the plain toggles they were.{% endcomment %
       <button type="button" class="reqbtn" id="play-random"
         title="Step forward along a random stored move at each position, among those within 30cp of the best">Play random line</button>
       <span class="reqnote" id="playnote" hidden></span>
+      <label class="dim wdl-toggle" style="font-size:.75rem"
+        title="Show or hide the win/draw/loss bar under each move's eval; remembered in this browser"><input type="checkbox" id="wdl-toggle" autocomplete="off"> W/D/L bars</label>
       <span class="dim keys-hint" style="font-size:.75rem"
         title="Keyboard shortcuts, off while typing in a box">keys: <kbd>&larr;</kbd> <kbd>&rarr;</kbd> back / forward · <kbd>F</kbd> flip board{% if pos.status == 'UNKNOWN' %} · <kbd>Q</kbd> request analysis{% endif %} · <kbd>Esc</kbd> stop line</span>
     </p>
+    {% comment %}The W/D/L bars can be switched off (BManBJ, 26-Nov-2026):
+    the choice lives in localStorage and is a class on the root element, so
+    the stylesheet hides every bar at once.{% endcomment %}
+    <script>
+    (function () {
+      const KEY = 'atomicdb-wdl-hidden';
+      const box = document.getElementById('wdl-toggle');
+      let hidden = false;
+      try { hidden = localStorage.getItem(KEY) === '1'; } catch (e) {}
+      document.documentElement.classList.toggle('wdl-hidden', hidden);
+      if (!box) { return; }
+      box.checked = !hidden;
+      box.addEventListener('change', function () {
+        document.documentElement.classList.toggle('wdl-hidden', !box.checked);
+        try { localStorage.setItem(KEY, box.checked ? '0' : '1'); } catch (e) {}
+      });
+    })();
+    </script>
     {{ playline|json_script:"atomicdb-playline" }}
     <script>
     (function () {

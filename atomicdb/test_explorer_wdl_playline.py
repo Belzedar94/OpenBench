@@ -210,6 +210,12 @@ class ExplorePageTests(TestCase):
         self.assertNotIn('<kbd>Q</kbd>', closed)
         self.assertIn('<kbd>F</kbd>', closed)
 
+    def test_the_bars_can_be_switched_off(self):
+        _, body = self.page()
+        self.assertIn('id="wdl-toggle"', body)
+        self.assertIn("'atomicdb-wdl-hidden'", body)
+        self.assertIn('class="wdl', body)
+
     def test_a_closed_position_tells_the_player_to_stop(self):
         response, _ = self.page(self.proven)
         self.assertFalse(response.context['playline']['open'])
