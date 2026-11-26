@@ -146,12 +146,14 @@ class SuggestionFormTests(TestCase):
                          'Defensa Atómica de Belzedar')
 
     def test_the_same_ip_cannot_pile_up_on_one_position(self):
+        """A second send edits the first instead of filing another row."""
         self._post()
 
         response = self._post(name='Another Try')
 
-        self.assertIn('suggested=duplicate', response['Location'])
-        self.assertEqual(OpeningNameSuggestion.objects.count(), 1)
+        self.assertIn('suggested=updated', response['Location'])
+        self.assertEqual(OpeningNameSuggestion.objects.get().proposed_name,
+                         'Another Try')
 
     def test_a_resolved_suggestion_reopens_the_position_for_that_ip(self):
         self._post()
@@ -287,8 +289,11 @@ class EditSuggestionFormTests(TestCase):
 
         response = self._post(name='Yet Another Knight Attack')
 
-        self.assertIn('suggested=duplicate', response['Location'])
-        self.assertEqual(OpeningNameSuggestion.objects.count(), 1)
+        self.assertIn('suggested=updated', response['Location'])
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.proposed_name, 'Yet Another Knight Attack')
+        self.assertEqual(row.kind, 'EDIT')
+        self.assertEqual(row.previous_name, CATALOGUED_NAME)
 
     def test_the_daily_cap_counts_corrections_too(self):
         """El tope diario es anti-spam de texto que el propietario aprueba a
@@ -321,6 +326,236 @@ class EditSuggestionFormTests(TestCase):
 
         self.assertIn('suggested=rate-limited', response['Location'])
         self.assertEqual(OpeningNameSuggestion.objects.count(), 10)
+
+
+class EditOwnPendingSuggestionTests(TestCase):
+    """The author of a PENDING suggestion edits it by sending again
+    (BManBJ, 27-Nov-2026), and nobody else can."""
+
+    def setUp(self):
+        self.pos = _unnamed_position()
+        self.client = Client()
+        community_names.invalidate()
+
+    def tearDown(self):
+        community_names.invalidate()
+
+    def _send(self, client=None, pos=None, **data):
+        payload = {'name': 'Belfast Gambit', 'comment': 'seen on Discord'}
+        payload.update(data)
+        return (client or self.client).post(
+            f'/atomicdb/suggest/{(pos or self.pos).key}/', payload)
+
+    def _member(self, username, ip='127.0.0.1', approver=False):
+        user = User.objects.create_user(username=username, password='pw')
+        Profile.objects.create(user=user, enabled=True, approver=approver)
+        client = Client(REMOTE_ADDR=ip)
+        client.login(username=username, password='pw')
+        return client
+
+    def test_the_author_edits_the_text_of_the_same_row(self):
+        self._send()
+        before = OpeningNameSuggestion.objects.get()
+
+        response = self._send(name='Belfast Countergambit',
+                              comment='the name in the 1931 book',
+                              line=' '.join(UNNAMED_ROUTE))
+
+        self.assertIn('suggested=updated', response['Location'])
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.id, before.id)
+        self.assertEqual(row.created, before.created)
+        self.assertEqual(row.proposed_name, 'Belfast Countergambit')
+        self.assertEqual(row.comment, 'the name in the 1931 book')
+        self.assertEqual(row.line, ','.join(UNNAMED_ROUTE))
+        self.assertEqual(row.status, 'PENDING')
+
+    def test_the_box_opens_on_the_pending_text(self):
+        self._send(line=' '.join(UNNAMED_ROUTE))
+
+        body = self.client.get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn('>Edit your pending suggestion</summary>', body)
+        self.assertIn('value="Belfast Gambit"', body)
+        self.assertIn('value="seen on Discord"', body)
+        self.assertIn('Update suggestion', body)
+        self.assertNotIn('>Suggest name</summary>', body)
+
+    def test_the_box_is_plain_for_anybody_else(self):
+        self._send()
+
+        body = Client(REMOTE_ADDR='10.9.9.9').get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn('>Suggest name</summary>', body)
+        self.assertNotIn('value="Belfast Gambit"', body)
+        self.assertNotIn('seen on Discord', body)
+
+    def test_the_updated_message_is_shown(self):
+        body = self.client.get(
+            f'/atomicdb/explore/{self.pos.key}/?suggested=updated'
+        ).content.decode()
+
+        self.assertIn(views.SUGGESTION_MESSAGES['updated'], body)
+
+    def test_an_edit_goes_through_the_same_validation(self):
+        self._send()
+
+        for bad in ('x', '<script>alert(1)</script>'):
+            with self.subTest(name=bad):
+                response = self._send(name=bad)
+                self.assertIn('suggested=invalid', response['Location'])
+        response = self._send(line='e2e4 e7e5')
+        self.assertIn('suggested=line-invalid', response['Location'])
+        response = self._send(comment='c' * 281)
+        self.assertIn('suggested=invalid', response['Location'])
+
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.proposed_name, 'Belfast Gambit')
+        self.assertEqual(row.comment, 'seen on Discord')
+
+    def test_kind_and_previous_name_are_decided_here_on_an_edit(self):
+        named = _named_position()
+        self._send(pos=named, name=CORRECTED_NAME)
+
+        self._send(pos=named, name='Nimble Knight', kind='NEW',
+                   previous_name='Whatever I Type')
+
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.proposed_name, 'Nimble Knight')
+        self.assertEqual(row.kind, 'EDIT')
+        self.assertEqual(row.previous_name, CATALOGUED_NAME)
+
+    def test_an_edit_to_an_empty_name_becomes_a_hide(self):
+        named = _named_position()
+        self._send(pos=named, name=CORRECTED_NAME)
+
+        response = self._send(pos=named, name='', comment='not a real name')
+
+        self.assertIn('suggested=updated', response['Location'])
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.kind, 'HIDE')
+        self.assertEqual(row.proposed_name, '')
+        self.assertEqual(row.previous_name, CATALOGUED_NAME)
+
+    def test_an_edit_does_not_count_against_the_daily_cap(self):
+        self._send()
+        for index in range(9):
+            other = ingest.get_or_create_position(
+                logic.apply_move(self.pos.fen,
+                                 logic.legal_moves(self.pos.fen)[index]))
+            self._send(pos=other, name=f'Name Number {index}')
+        self.assertEqual(OpeningNameSuggestion.objects.count(), 10)
+
+        response = self._send(name='Belfast Countergambit')
+
+        self.assertIn('suggested=updated', response['Location'])
+        self.assertEqual(OpeningNameSuggestion.objects.count(), 10)
+
+    def test_another_address_cannot_edit_an_anonymous_row(self):
+        self._send()
+
+        response = self._send(client=Client(REMOTE_ADDR='10.9.9.9'),
+                              name='Hijacked Gambit')
+
+        self.assertIn('suggested=ok', response['Location'])
+        self.assertEqual(
+            OpeningNameSuggestion.objects.get(ip='127.0.0.1').proposed_name,
+            'Belfast Gambit')
+        self.assertEqual(OpeningNameSuggestion.objects.count(), 2)
+
+    def test_anonymous_cannot_edit_a_row_filed_while_signed_in(self):
+        self._send(client=self._member('bmanbj'))
+
+        response = self._send(name='Hijacked Gambit')
+
+        self.assertIn('suggested=duplicate', response['Location'])
+        self.assertEqual(OpeningNameSuggestion.objects.get().proposed_name,
+                         'Belfast Gambit')
+
+    def test_signing_in_does_not_reach_an_anonymous_row(self):
+        self._send()
+
+        response = self._send(client=self._member('bmanbj'),
+                              name='Hijacked Gambit')
+
+        self.assertIn('suggested=duplicate', response['Location'])
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.proposed_name, 'Belfast Gambit')
+        self.assertEqual(row.suggested_by, '')
+
+    def test_a_member_edits_their_row_from_another_address(self):
+        self._send(client=self._member('bmanbj', ip='10.0.0.1'))
+        moved = Client(REMOTE_ADDR='10.0.0.2')
+        moved.login(username='bmanbj', password='pw')
+
+        response = self._send(client=moved, name='Belfast Countergambit')
+
+        self.assertIn('suggested=updated', response['Location'])
+        row = OpeningNameSuggestion.objects.get()
+        self.assertEqual(row.proposed_name, 'Belfast Countergambit')
+        self.assertEqual(row.suggested_by, 'bmanbj')
+
+    def test_a_member_cannot_edit_another_members_row(self):
+        self._send(client=self._member('bmanbj', ip='10.0.0.1'))
+
+        # Same address: bounces, as it always did.
+        response = self._send(client=self._member('mallory', ip='10.0.0.1'),
+                              name='Hijacked Gambit')
+        self.assertIn('suggested=duplicate', response['Location'])
+        # Another address: files mallory's own row.
+        other = Client(REMOTE_ADDR='10.0.0.3')
+        other.login(username='mallory', password='pw')
+        response = self._send(client=other, name='Hijacked Gambit')
+        self.assertIn('suggested=ok', response['Location'])
+
+        self.assertEqual(OpeningNameSuggestion.objects.get(
+            suggested_by='bmanbj').proposed_name, 'Belfast Gambit')
+
+    def test_a_resolved_row_is_not_edited(self):
+        for state in (OpeningNameSuggestion.SState.APPROVED,
+                      OpeningNameSuggestion.SState.REJECTED):
+            with self.subTest(state=state):
+                OpeningNameSuggestion.objects.all().delete()
+                pos = _unnamed_position()
+                old = OpeningNameSuggestion.objects.create(
+                    position=pos, proposed_name='Old Gambit',
+                    ip='127.0.0.1', status=state, resolved_by='boss',
+                    resolved_at=timezone.now())
+                community_names.invalidate()
+
+                self._send(pos=pos, name='Newer Gambit')
+
+                old.refresh_from_db()
+                self.assertEqual(old.proposed_name, 'Old Gambit')
+                self.assertEqual(old.status, state)
+                self.assertEqual(OpeningNameSuggestion.objects.filter(
+                    status='PENDING').count(), 1)
+
+    def test_votes_on_the_shown_name_are_not_touched(self):
+        """Votes are on the name a position SHOWS, never on a pending
+        text, so an edit has none of its own to clear."""
+        from .models import OpeningNameVote
+        named = _named_position()
+        OpeningNameVote.objects.create(
+            position_key=named.key, voter='t:abc', name=CATALOGUED_NAME,
+            value=1)
+        self._send(pos=named, name=CORRECTED_NAME)
+
+        self._send(pos=named, name='Nimble Knight')
+
+        self.assertEqual(OpeningNameVote.objects.get().name, CATALOGUED_NAME)
+
+    def test_the_moderator_sees_the_latest_text(self):
+        self._send()
+        self._send(name='Belfast Countergambit')
+        approver = self._member('boss', ip='10.5.5.5', approver=True)
+
+        body = approver.get('/atomicdb/suggestions/').content.decode()
+
+        self.assertIn('Belfast Countergambit', body)
+        self.assertNotIn('Belfast Gambit', body)
 
 
 class ModerationGateTests(TestCase):

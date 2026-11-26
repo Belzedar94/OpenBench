@@ -7677,6 +7677,7 @@ def _route_community_opening(top, line, ucis, route_keys, catalog_match,
 SUGGESTION_MESSAGES = {
     'ok': 'Thanks: your name is queued for review.',
     'duplicate': 'You already have a pending suggestion for this position.',
+    'updated': 'Thanks: your pending suggestion is updated.',
     'rate-limited': 'Daily suggestion limit reached, try again tomorrow.',
     'invalid': 'A name is 2 to 60 characters of ordinary text.',
     'unchanged': 'That is already the name this position shows.',
@@ -7728,6 +7729,12 @@ def suggest_opening_name(request, key):
     sola propuesta pendiente por IP y posicion, tope diario por IP, longitud y
     alfabeto validados.  Lo unico que se anade es que una "correccion" que no
     corrige nada no llega a la cola.
+
+    Re-sending while one's OWN suggestion here is still pending edits that
+    row (``suggested=updated``) instead of bouncing; see
+    ``_own_pending_suggestions`` for who counts as the author.  The edit goes
+    through every check above, and ``previous_name`` is frozen again at the
+    edit: it is what the proposer is looking at when writing the new text.
     """
     try:
         pos = Position.objects.get(key=key)
@@ -7779,6 +7786,25 @@ def suggest_opening_name(request, key):
             return back('line-invalid')
 
     ip = _client_ip(request)
+    # The fields the proposer writes, all decided above exactly as for a new
+    # row: ``kind`` and ``previous_name`` are read here, never from the POST.
+    written = dict(proposed_name=name, comment=comment, kind=kind,
+                   previous_name=current or '', line=line)
+    # The proposer's OWN pending suggestion here is edited instead of
+    # bouncing as a duplicate (BManBJ, 27-Nov-2026: "I prematurely submitted
+    # one and would like to modify it more").  Locked and re-read as PENDING
+    # inside the transaction, so an approver deciding at the same moment
+    # either sees the old text and resolves it (and this files a new row) or
+    # waits and sees the new one.  No row is created, so the daily cap,
+    # which bounds rows in the queue, is not charged again.
+    with atomic():
+        own = (_own_pending_suggestions(request, pos, ip)
+               .select_for_update().first())
+        if own is not None:
+            for field, value in written.items():
+                setattr(own, field, value)
+            own.save(update_fields=list(written))
+            return back('updated')
     if OpeningNameSuggestion.objects.filter(
             ip=ip, position=pos,
             status=OpeningNameSuggestion.SState.PENDING).exists():
@@ -7788,11 +7814,58 @@ def suggest_opening_name(request, key):
             ip=ip, created__gte=day_ago).count() >= SUGGESTIONS_PER_IP_DAY:
         return back('rate-limited')
     OpeningNameSuggestion.objects.create(
-        position=pos, proposed_name=name, comment=comment, ip=ip,
-        kind=kind, previous_name=current or '', line=line,
+        position=pos, ip=ip,
         suggested_by=(request.user.username
-                      if request.user.is_authenticated else ''))
+                      if request.user.is_authenticated else ''),
+        **written)
     return back(ok)
+
+
+def _own_pending_suggestions(request, pos, ip):
+    """The viewer's own PENDING suggestions on ``pos``, newest first.
+
+    Signed in: the rows filed under the account, from any address.  Without
+    an account it is strict: the same address AND no account on the row, so
+    an anonymous visitor never reaches a row somebody filed while signed in.
+    Anybody else's pending row on the same address still bounces as a
+    duplicate, as before.
+    """
+    rows = OpeningNameSuggestion.objects.filter(
+        position=pos, status=OpeningNameSuggestion.SState.PENDING)
+    if request.user.is_authenticated:
+        rows = rows.filter(suggested_by=request.user.username)
+    else:
+        rows = rows.filter(ip=ip, suggested_by='')
+    return rows.order_by('-created', '-id')
+
+
+def _suggest_pending_context(request, pos):
+    """What the suggestion box prefills with: the viewer's own pending row
+    on ``pos`` (§ _own_pending_suggestions), or ``None``.
+
+    Per viewer: it only belongs on a page rendered per request, as the
+    explorer is (no ``cache_page`` in § urls).  Putting the explorer behind a
+    shared cache would show one visitor's pending text to another.
+    """
+    try:
+        row = _own_pending_suggestions(request, pos, _client_ip(request)).only(
+            'proposed_name', 'comment', 'line').first()
+    except Exception:
+        # Fail open like the community-name layer: the page lives without
+        # the prefill, and the endpoint still edits on send.
+        logger.exception('pending suggestion unavailable for %s', pos.key)
+        return None
+    if row is None:
+        return None
+    line = ''
+    if row.line:
+        ucis = row.line.split(',')
+        try:
+            line = opening_routes.san_text(ucis)
+        except Exception:
+            line = ''
+        line = line or ' '.join(ucis)
+    return {'name': row.proposed_name, 'comment': row.comment, 'line': line}
 
 
 def _suggestions_badge(request):
@@ -9940,7 +10013,11 @@ def explore(request, key):
         'suggest_comment_max': SUGGESTION_COMMENT_MAX_CHARS,
         'suggest_message': SUGGESTION_MESSAGES.get(
             request.GET.get('suggested', '')),
-        'suggest_ok': request.GET.get('suggested') in ('ok', 'hide-ok'),
+        'suggest_ok': request.GET.get('suggested') in ('ok', 'hide-ok',
+                                                       'updated'),
+        # The viewer's own pending suggestion here, if any: the box opens on
+        # its text and sends an edit of it (§ suggest_opening_name).
+        'suggest_pending': _suggest_pending_context(request, pos),
         # Proponer una campana se hace desde la posicion que se esta mirando:
         # la raiz de la campana ES esta posicion, y pedirle a alguien que
         # copie una clave de 64 hex en otra pagina es pedirle que no lo haga.

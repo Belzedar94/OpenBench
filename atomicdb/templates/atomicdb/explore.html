@@ -67,9 +67,17 @@ most eight (§ views.explore).{% endcomment %}
 </details>
 {% endif %}
 <details class="suggest-name"{% if suggest_message and not suggest_ok %} open{% endif %}>
+  {% if suggest_pending %}
+  <summary title="Edit your pending suggestion for this position">Edit your pending suggestion</summary>
+  {% else %}
   <summary title="{% if suggest_current_name %}Suggest a correction to this name{% else %}Suggest a name for this position{% endif %}">{% if suggest_current_name %}Suggest correction{% else %}Suggest name{% endif %}</summary>
+  {% endif %}
   {% if suggest_message %}
   <p class="suggest-status{% if suggest_ok %} ok{% endif %}">{{ suggest_message }}</p>
+  {% endif %}
+  {% if suggest_pending %}
+  <p class="suggest-current dim">Your suggestion is still waiting for
+    review. Sending again replaces it.</p>
   {% endif %}
   {% if suggest_current_name %}
   <p class="suggest-current dim">Current name:
@@ -82,16 +90,18 @@ most eight (§ views.explore).{% endcomment %}
     <input type="hidden" name="opening" value="{{ suggest_anchor }}">
     <label>Name
       <input name="name" maxlength="{{ suggest_name_max }}"{% if not suggest_current_name %} required{% endif %}
-        value="{{ suggest_current_name }}"
+        value="{% if suggest_pending %}{{ suggest_pending.name }}{% else %}{{ suggest_current_name }}{% endif %}"
         placeholder="{% if suggest_current_name %}empty: this position should have no name{% else %}e.g. Belfast Gambit{% endif %}" spellcheck="false"
         autocomplete="off"></label>
     <label>Reference or comment <span class="dim">({% if suggest_current_name %}required for an empty name{% else %}optional{% endif %})</span>
-      <input name="comment" maxlength="{{ suggest_comment_max }}"
+      <input name="comment" maxlength="{{ suggest_comment_max }}"{% if suggest_pending %}
+        value="{{ suggest_pending.comment }}"{% endif %}
         placeholder="{% if suggest_current_name %}where the name comes from, or why it should go{% else %}where the name comes from{% endif %}" autocomplete="off"></label>
     <label>Move order <span class="dim">(optional: the moves from the start position, SAN or UCI)</span>
-      <input name="line" maxlength="2000" placeholder="e.g. 1. Nf3 f6 2. Nc3"
+      <input name="line" maxlength="2000" placeholder="e.g. 1. Nf3 f6 2. Nc3"{% if suggest_pending %}
+        value="{{ suggest_pending.line }}"{% endif %}
         spellcheck="false" autocomplete="off"></label>
-    <button class="reqbtn">Send for review</button>
+    <button class="reqbtn">{% if suggest_pending %}Update suggestion{% else %}Send for review{% endif %}</button>
     <span class="dim">Public, no account. An approver reviews it before it
       shows up.</span>
   </form>
