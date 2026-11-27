@@ -123,7 +123,9 @@ class ClosureRaceTests(TestCase):
             self.assertEqual(_status(fork), 'UNKNOWN')
             self.assertIn(fork.key, ingest.closable_rows([fork.key]))
 
-        self.assertEqual(len(callbacks), 1)
+        # The landing's recheck, then its climb's (see the block above
+        # ingest.CLIMB_RECHECK_MAX_KEYS).
+        self.assertEqual(len(callbacks), 2)
         fork.refresh_from_db()
         self.assertEqual((fork.status, fork.closure), ('WHITE_WIN', 'MINIMAX'))
         closed = DBEvent.objects.get(kind='NODE_CLOSED',
@@ -226,7 +228,7 @@ class ClosureRaceTests(TestCase):
                 self.captureOnCommitCallbacks(using='default') as on_default:
             _land(link)
 
-        self.assertEqual(len(on_alias), 1)
+        self.assertEqual(len(on_alias), 2)      # landing and climb rechecks
         if alias != 'default':
             self.assertEqual(on_default, [])
         # Nothing ran before the commit: the callbacks were only captured.

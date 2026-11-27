@@ -1428,7 +1428,8 @@ def propagate_landings(landings):
                                for key in landing.backed_seeds() if key})
     cascade = {}
     changed = backup_cascade(cascade_seeds, report=cascade)
-    backed = backup_backed_evals(backed_seeds)
+    climb = {}
+    backed = backup_backed_evals(backed_seeds, report=climb)
     from . import autosolve, idle_repair
     landed = {landing.key for landing in landings}
     closed_all = {key for landing in landings for key in landing.closed}
@@ -1478,6 +1479,9 @@ def propagate_landings(landings):
         if autosolved:
             summary['autosolved'] = autosolved
         summaries[pos.key] = summary
+    # And, after the rechecks of each landing, the rows where this climb
+    # may have met another one (see the block above CLIMB_RECHECK_MAX_KEYS).
+    _recheck_meeting_points_once_committed(landings[0].key, climb)
     return summaries
 
 def _revoke_contradicted_mate(child, parent, prepared_proof):
@@ -4572,7 +4576,9 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
     ``generation`` goes into any BACKED_GUARD event (see the block above
     BACKED_GUARD_KEYS).  ``report``, a dict, is filled with how the ascent
     ended: ``levels``, ``processed``, ``changed``, the ``guard`` that cut
-    it (or None) and how many keys it ``left``; and, when a database error
+    it (or None), how many keys it ``left``, the ``rested_keys`` it decided
+    and found already stored and the ``written_keys`` it rewrote, both in
+    level order (see the block above CLIMB_RECHECK_MAX_KEYS); and, when a database error
     stops it, ``aborted`` and the ``frontier`` a retry has to start from.
     """
     frontier = [key for key in dict.fromkeys(seed_keys) if key]
@@ -4584,6 +4590,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
     spines = _SpineCache()       # memoria del paseo de repeticion, por llamada
     guard, left = None, []       # why the ascent stopped with work left
     written = []                 # what the current level has committed
+    rested, wrote = [], []       # read for the meeting points (see below)
     try:
         while frontier and plies < max_plies:
             plies += 1
@@ -4607,6 +4614,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
                     continue
                 value, move, below, quality = decided[row.key]
                 if _backed_stored(row, value, move, below, quality):
+                    rested.append(row.key)
                     continue
                 if _backed_worth_propagating(row, value, move):
                     propagate.append(row.key)
@@ -4622,6 +4630,7 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
                                              batch_size=500)
                 changed_total += len(dirty)
                 written = [row.key for row in dirty]
+                wrote.extend(written)
             _queue_quality_convergence(level.discrepancies)
             _queue_cycle_disambiguation(level.cycle_picks)
             # The other positions of a loop this level could not open get one
@@ -4705,7 +4714,8 @@ def backup_backed_evals(seed_keys, max_plies=BACKED_MAX_PLIES,
         report.update(levels=plies, processed=processed,
                       changed=changed_total,
                       guard=guard or ('revisit-cap' if dropped else None),
-                      left=len(set(left) | set(dropped)))
+                      left=len(set(left) | set(dropped)),
+                      rested_keys=rested, written_keys=wrote)
     return changed_total
 
 
@@ -5042,6 +5052,84 @@ def _recheck(landed, keys, climbed, memo=None):
         DBEvent.objects.create(kind=RECHECK_EVENT,
                                payload={'key': landed, **summary})
     return summary
+
+
+# ---------------- two climbs that meet higher up ----------------
+#
+# THE CASE (27-Nov-2026).  0db83faa (after ...Qa7), Black to move, held
+# 1294 via ...e6e5 for fourteen hours, while ...e6e5 read 1324 and ...h6g8
+# 1316.  Two climbs ran in the same second, in two transactions:
+#
+# * the inline ingest of the reply after ...e6e5 raised ...e6e5 to 1324 and
+#   read 0db83faa again, two plies up.  Its other child ...e6d5 still read
+#   1290 there, so 0db83faa stood on 1290 via ...e6d5 exactly as stored, and
+#   that climb wrote nothing more;
+# * the drainer's climb of a search three plies under ...e6d5 raised ...e6d5
+#   to 1330 and read 0db83faa too.  ...e6e5 still read 1294 there (the other
+#   transaction had not committed), so it wrote 1294 via ...e6e5.
+#
+# At READ COMMITTED each one decided from a sibling the other was changing,
+# and neither wrote what both changes together decide (1316 via ...h6g8).
+# The recheck of a landing reads the landed position and its parents only,
+# and the sweep looks for merge points two plies up from each job: this one
+# was two plies above one landing and three above the other.
+#
+# THE RULE.  Once a climb has committed, the rows it decided are read again
+# with stale_backed_rows: the rows it rewrote and the rows where it found its
+# decision already stored.  Of two climbs that meet at a row, the one that
+# commits last has that row on its list: the other one's change made it
+# either rewrite the row (from a sibling the other was changing) or find it
+# stored (because the other had rewritten it from the old number).  Read
+# after its commit, the row shows both changes, and a row still stale climbs
+# from there, as the recheck of a landing does.  The rows are read from the
+# top of the climb down, CLIMB_RECHECK_MAX_KEYS at most: climbs meet where
+# their paths join, above both landings.  What a wider climb leaves unread
+# is still the sweep's.
+CLIMB_RECHECK_MAX_KEYS = 256
+
+
+def _meeting_points(climb):
+    """The rows a committed climb reads again, from the top down."""
+    rows = [*reversed(climb.get('rested_keys') or ()),
+            *reversed(climb.get('written_keys') or ())]
+    return list(dict.fromkeys(rows))[:CLIMB_RECHECK_MAX_KEYS]
+
+
+def _recheck_meeting_points_once_committed(landed, climb):
+    """Register recheck_meeting_points for when this transaction commits."""
+    keys = _meeting_points(climb)
+    if not keys:
+        return
+
+    def recheck():
+        recheck_meeting_points(landed, keys)
+
+    transaction.on_commit(recheck, using=current_alias(), robust=True)
+
+
+def recheck_meeting_points(landed, keys):
+    """The rows of a committed climb that one level of the backup would
+    rewrite now, climbed again (see the block above CLIMB_RECHECK_MAX_KEYS).
+
+    Returns ``{'checked', 'stale', 'changed'}``, or None when it failed.  It
+    never raises: the climb it follows has committed, and what a failed
+    recheck leaves is the sweep's.
+    """
+    try:
+        stale = sorted(stale_backed_rows(keys))
+        summary = {'checked': len(keys), 'stale': stale, 'changed': 0}
+        if not stale:
+            return summary
+        with _brief_lock_waits():
+            summary['changed'] = backup_backed_evals_retrying(
+                stale, sleeps=RECHECK_RETRY_SLEEPS, generation=1)
+        DBEvent.objects.create(kind=RECHECK_EVENT, payload={
+            'key': landed, 'closed': [], 'meeting': True, **summary})
+        return summary
+    except Exception:       # noqa: BLE001 - the climb stands without it
+        logger.exception('AtomicDB recheck of the climb from %s failed',
+                         landed)
+        return None
 
 
 def known_eval_of(status, backed_eval, eval_cp):
