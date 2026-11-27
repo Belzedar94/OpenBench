@@ -105,10 +105,19 @@ _queue_cached = _live_for_members(views.queue_page)
 # linea principal, que se registra una vez por hora.  Nada de lo que pinta
 # tiene que ser mas fresco que la misma cache corta de ``docs``, variada por
 # cookie por las mismas razones.
-_roots_cached = cache_page(30)(vary_on_cookie(csrf_protect(roots.roots_page)))
+#
+# Both sit behind the front page's stale-while-revalidate instead of a bare
+# ``cache_page(30)``: a scripted client polling every few minutes always found
+# the entry expired and paid the full recompute itself, which under analysis
+# bursts went past its 15 s read timeout about once an hour (torom, 27-Nov:
+# six 499s in nine hours).  Now an expired copy is served at once and one
+# thread rebuilds it; the 30 s freshness is unchanged.
+_roots_cached = page_cache.stale_while_revalidate(
+    vary_on_cookie(csrf_protect(roots.roots_page)), fresh_seconds=30)
 # The same tables as JSON: the same for everybody and nothing in it depends on
 # the session, so no cookie variation.
-_roots_api_cached = cache_page(30)(roots.roots_api)
+_roots_api_cached = page_cache.stale_while_revalidate(
+    roots.roots_api, fresh_seconds=30)
 # Every active worker and what it is searching.  Public and the same for every
 # visitor, like the queue: two small indexed reads plus the line labels the
 # home page already caches, so the short cache only absorbs F5 storms, and it
