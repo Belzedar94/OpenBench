@@ -59,9 +59,26 @@ def _legacy_materialise(pos):
 _SKIP = {'updated'}
 
 
+def _campaign_name(campaign_id):
+    """A campaign by its name, not its id.
+
+    Each run builds its own campaigns, and on Postgres the rolled-back run
+    still spends sequence values, so the same campaign gets a different id
+    in each run.  The name is what the two runs share.
+    """
+    if campaign_id is None:
+        return None
+    return Campaign.objects.get(pk=campaign_id).name
+
+
+def _value(row, attname):
+    value = getattr(row, attname)
+    return _campaign_name(value) if attname == 'campaign_id' else value
+
+
 def _snapshot():
     positions = sorted(
-        tuple((field.attname, getattr(row, field.attname))
+        tuple((field.attname, _value(row, field.attname))
               for field in Position._meta.concrete_fields
               if field.attname not in _SKIP)
         for row in Position.objects.all())
@@ -76,8 +93,8 @@ def _snapshot():
 
 
 def _children_view(children):
-    return [(child.key, child.campaign_id, child.reachable, child.priority,
-             child.status) for child in children]
+    return [(child.key, _campaign_name(child.campaign_id), child.reachable,
+             child.priority, child.status) for child in children]
 
 
 class _Equivalence(TestCase):
