@@ -1197,6 +1197,12 @@ class RequestNotification(models.Model):
         return f'notification for {self.username} on {self.position_id}'
 
 
+# Longest opening name a visitor can propose, and the width of every column
+# that stores one (suggestions, votes, review flags).  The suggestion form and
+# its validation read it from here, so changing it needs a migration only.
+OPENING_NAME_MAX_CHARS = 80
+
+
 class OpeningNameSuggestion(models.Model):
     """Nombre de apertura propuesto por la comunidad, sin cuenta.
 
@@ -1250,13 +1256,14 @@ class OpeningNameSuggestion(models.Model):
 
     position      = models.ForeignKey(Position, on_delete=models.CASCADE,
                                       related_name='name_suggestions')
-    proposed_name = models.CharField(max_length=60)
+    proposed_name = models.CharField(max_length=OPENING_NAME_MAX_CHARS)
     # Un flag explicito y no "previous_name != ''": lo que decide si algo
     # puede desplazar al catalogo auditado tiene que decir lo que ES, no
     # deducirse de que una cadena venga vacia.
     kind          = models.CharField(max_length=4, choices=SKind.choices,
                                      default=SKind.NEW)
-    previous_name = models.CharField(max_length=60, blank=True, default='')
+    previous_name = models.CharField(max_length=OPENING_NAME_MAX_CHARS,
+                                     blank=True, default='')
     comment       = models.CharField(max_length=280, blank=True, default='')
     # Cuenta del PROPONENTE si estaba logueado ('' si anonimo) — el aprobador
     # quiere ver quien lo pide.  CharField y no FK por el router, como
@@ -1646,7 +1653,7 @@ class OpeningNameVote(models.Model):
 
     position_key = models.CharField(max_length=64)
     voter = models.CharField(max_length=80)
-    name = models.CharField(max_length=60)
+    name = models.CharField(max_length=OPENING_NAME_MAX_CHARS)
     value = models.SmallIntegerField()        # +1 up, -1 down
     ip = models.GenericIPAddressField(null=True, blank=True)
     # The cookie was minted by this very request: the visitor did not send
@@ -1693,7 +1700,7 @@ class OpeningNameFlag(models.Model):
         STALE = 'STALE'
 
     position_key = models.CharField(max_length=64)
-    name = models.CharField(max_length=60)
+    name = models.CharField(max_length=OPENING_NAME_MAX_CHARS)
     catalogue_name = models.CharField(max_length=120, blank=True, default='')
     named_by = models.CharField(max_length=64, blank=True, default='')
     community = models.BooleanField(default=False)

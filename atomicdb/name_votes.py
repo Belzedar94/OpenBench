@@ -29,7 +29,7 @@ from django.utils import timezone
 
 from . import community_names, openings
 from .database import atomic
-from .models import OpeningNameFlag, OpeningNameVote
+from .models import OPENING_NAME_MAX_CHARS, OpeningNameFlag, OpeningNameVote
 
 logger = logging.getLogger(__name__)
 
@@ -425,7 +425,8 @@ def apply_flag(flag_id, action, *, approver, ip, new_name=''):
             if entry is None or not catalogue or catalogue == name:
                 return 'invalid'
             change = dict(kind=OpeningNameSuggestion.SKind.EDIT,
-                          proposed_name=catalogue[:60], suggested_by='')
+                          proposed_name=catalogue[:OPENING_NAME_MAX_CHARS],
+                          suggested_by='')
         elif action == 'remove':
             if entry is None:
                 return 'invalid'
@@ -494,7 +495,8 @@ def hide_position(key, *, approver, ip, comment=''):
             return 'unnamed'
         row = OpeningNameSuggestion.objects.create(
             position=position, kind=OpeningNameSuggestion.SKind.HIDE,
-            proposed_name='', previous_name=name[:60], suggested_by='',
+            proposed_name='', previous_name=name[:OPENING_NAME_MAX_CHARS],
+            suggested_by='',
             ip=ip or '0.0.0.0',
             comment=(comment or HIDE_COMMENT)[:280])
         resolve_suggestion(row, OpeningNameSuggestion.SState.APPROVED,

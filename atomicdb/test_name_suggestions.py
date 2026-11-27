@@ -120,7 +120,7 @@ class SuggestionFormTests(TestCase):
                          f'/atomicdb/explore/{self.pos.key}/?suggested=ok')
 
     def test_names_are_validated(self):
-        for bad in ('x', 'y' * 61, '<script>alert(1)</script>',
+        for bad in ('x', 'y' * 81, '<script>alert(1)</script>',
                     '"quoted"'):
             with self.subTest(name=bad):
                 response = self._post(name=bad)
@@ -137,6 +137,32 @@ class SuggestionFormTests(TestCase):
 
         self.assertIn('suggested=invalid', response['Location'])
         self.assertEqual(OpeningNameSuggestion.objects.count(), 0)
+
+    def test_names_up_to_eighty_characters_are_accepted(self):
+        name = 'Villager Defense, Knight Attack By Sea: Bremerhaven Variation'
+        self.assertEqual(len(name), 61)
+        for good in (name, 'z' * 80):
+            with self.subTest(length=len(good)):
+                OpeningNameSuggestion.objects.all().delete()
+                response = self._post(name=good)
+
+                self.assertIn('suggested=ok', response['Location'])
+                self.assertEqual(
+                    OpeningNameSuggestion.objects.get().proposed_name, good)
+
+    def test_an_eighty_one_character_name_is_rejected(self):
+        response = self._post(name='z' * 81)
+
+        self.assertIn('suggested=invalid', response['Location'])
+        self.assertEqual(OpeningNameSuggestion.objects.count(), 0)
+
+    def test_the_form_and_the_message_carry_the_limit(self):
+        body = self.client.get(
+            f'/atomicdb/explore/{self.pos.key}/').content.decode()
+
+        self.assertIn('maxlength="80"', body)
+        self.assertIn('2 to 80 characters',
+                      views.SUGGESTION_MESSAGES['invalid'])
 
     def test_accented_names_are_accepted(self):
         response = self._post(name='Defensa Atómica de Belzedar')
@@ -273,7 +299,7 @@ class EditSuggestionFormTests(TestCase):
         self.assertEqual(row.previous_name, 'Belfast Gambit')
 
     def test_the_same_validation_applies_to_a_correction(self):
-        for bad in ('x', 'y' * 61, '<script>alert(1)</script>'):
+        for bad in ('x', 'y' * 81, '<script>alert(1)</script>'):
             with self.subTest(name=bad):
                 response = self._post(name=bad)
                 self.assertIn('suggested=invalid', response['Location'])

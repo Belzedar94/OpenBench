@@ -40,7 +40,7 @@ from .models import (AnalysisTask, ApiRequestLog, Campaign, CampaignVote,
                      DBEvent, Edge, IngestJob, OpeningNameSuggestion,
                      PendingClaim, Position, ProgressSnapshot, ProofCampaign,
                      ProofNode, RequestLog, SolveTask, WorkerPing)
-from .models import ContributorPref
+from .models import ContributorPref, OPENING_NAME_MAX_CHARS
 from . import idle_repair
 from . import sweep
 from . import proposed_campaigns
@@ -328,7 +328,7 @@ OPENING_ANCHOR_MAX_CHARS = 1024
 OPENING_ANCHOR_PLAY_PREFIX = 'signed-opening.'
 # Propuestas publicas de nombre de apertura (§ community_names). Mismo patron
 # de rate-limit que RequestLog: contar filas propias por IP en una ventana.
-SUGGESTION_NAME_MAX_CHARS = 60
+SUGGESTION_NAME_MAX_CHARS = OPENING_NAME_MAX_CHARS
 SUGGESTION_NAME_MIN_CHARS = 2
 SUGGESTION_COMMENT_MAX_CHARS = 280
 SUGGESTIONS_PER_IP_DAY = 10
@@ -7679,7 +7679,8 @@ SUGGESTION_MESSAGES = {
     'duplicate': 'You already have a pending suggestion for this position.',
     'updated': 'Thanks: your pending suggestion is updated.',
     'rate-limited': 'Daily suggestion limit reached, try again tomorrow.',
-    'invalid': 'A name is 2 to 60 characters of ordinary text.',
+    'invalid': (f'A name is {SUGGESTION_NAME_MIN_CHARS} to '
+                f'{SUGGESTION_NAME_MAX_CHARS} characters of ordinary text.'),
     'unchanged': 'That is already the name this position shows.',
     'hide-ok': 'Thanks: your request to leave this position unnamed is '
                'queued for review.',
@@ -8066,6 +8067,7 @@ def suggestions(request):
         'review_outcome': request.GET.get('review', ''),
         'hide_outcome': request.GET.get('hide', ''),
         'line_outcome': request.GET.get('line', ''),
+        'suggest_name_max': SUGGESTION_NAME_MAX_CHARS,
         **name_vote_views.flags_context(),
         **name_vote_views.hidden_context(),
         **name_vote_views.routes_context(),

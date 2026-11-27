@@ -41,7 +41,7 @@
       </form>
       <form method="post" action="/atomicdb/suggestions/flags/" class="review-actions">{% csrf_token %}
         <input type="hidden" name="flag" value="{{ item.flag.id }}">
-        <input type="text" name="name" maxlength="60" placeholder="New name" aria-label="New name for {{ item.flag.name }}" required>
+        <input type="text" name="name" maxlength="{{ suggest_name_max }}" placeholder="New name" aria-label="New name for {{ item.flag.name }}" required>
         <button class="reqbtn" name="action" value="rename">Rename</button>
       </form>
     </td>
