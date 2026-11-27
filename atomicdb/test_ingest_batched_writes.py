@@ -99,17 +99,23 @@ def _children_view(children):
 
 class _Equivalence(TestCase):
 
-    def _both(self, setup, legacy, batched):
-        """Run ``legacy`` and ``batched`` on the tree ``setup`` builds."""
+    def _both(self, setup, legacy, batched, view=lambda result: result):
+        """Run ``legacy`` and ``batched`` on the tree ``setup`` builds.
+
+        ``view`` turns a result into what is compared, inside its own run:
+        the first run's rows are gone once it is rolled back.
+        """
         with transaction.atomic(using=current_alias()):
             subject = setup()
             with CaptureQueriesContext(connection) as old_queries:
                 old_result = legacy(subject)
+            old_result = view(old_result)
             old = _snapshot()
             transaction.set_rollback(True, using=current_alias())
         subject = setup()
         with CaptureQueriesContext(connection) as new_queries:
             new_result = batched(subject)
+        new_result = view(new_result)
         new = _snapshot()
         return (old, old_result, len(old_queries)), \
             (new, new_result, len(new_queries))
@@ -158,11 +164,11 @@ class ExpandTests(_Equivalence):
 
     def test_a_half_known_expansion_writes_what_the_loop_wrote(self):
         (old, old_children, old_count), (new, new_children, new_count) = \
-            self._both(self._tree, _legacy_expand, ingest.expand)
+            self._both(self._tree, _legacy_expand, ingest.expand,
+                       view=_children_view)
 
         self.assertEqual(new, old)
-        self.assertEqual(_children_view(new_children),
-                         _children_view(old_children))
+        self.assertEqual(new_children, old_children)
         self.assertLess(new_count, old_count)
 
     def test_terminal_children_are_born_closed_as_before(self):
@@ -172,13 +178,14 @@ class ExpandTests(_Equivalence):
                 '7k/6p1/8/8/8/8/8/6QK w - - 0 1')
 
         (old, old_children, _), (new, new_children, _) = \
-            self._both(tree, _legacy_expand, ingest.expand)
+            self._both(tree, _legacy_expand, ingest.expand,
+                       view=lambda children: (
+                           _children_view(children),
+                           [child.closure for child in children]))
 
         self.assertEqual(new, old)
-        self.assertTrue(any(child.closure == 'TERMINAL'
-                            for child in new_children))
-        self.assertEqual(_children_view(new_children),
-                         _children_view(old_children))
+        self.assertIn('TERMINAL', new_children[1])
+        self.assertEqual(new_children, old_children)
 
     def test_an_expansion_is_a_handful_of_statements(self):
         parent = _line('g1f3')
