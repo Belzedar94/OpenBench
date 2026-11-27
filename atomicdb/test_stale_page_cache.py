@@ -414,3 +414,54 @@ class UnchangedContractTests(TestCase):
 
         self.assertIsNotNone(key)
         self.assertIsNotNone(cache.get(key))
+
+
+@override_settings(CACHES=CACHE_FOR_TESTS)
+class RootsApiStaleTests(TestCase):
+    """``api/roots`` behind the same relay (torom, 27-Nov-2026).
+
+    His queue bot polls every few minutes, so it always found the 30 s entry
+    expired and paid the whole recompute, past its 15 s timeout about once an
+    hour.  An expired entry must now come from the stale copy, with no query,
+    and leave exactly one rebuild behind.
+    """
+
+    URL = '/atomicdb/api/roots'
+
+    def setUp(self):
+        cache.clear()
+        self.client = Client()
+        self.refreshes = _Deferred()
+        patch = mock.patch.object(page_cache, 'REFRESH_EXECUTOR',
+                                  self.refreshes)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _expire_fresh(self):
+        from django.test import RequestFactory
+        from django.utils.cache import get_cache_key
+
+        key = get_cache_key(RequestFactory().get(self.URL), '', 'GET',
+                            cache=cache)
+        self.assertIsNotNone(key)
+        self.assertIsNotNone(cache.get(key + page_cache.STALE_SUFFIX))
+        cache.delete(key)
+
+    def test_an_expired_roots_entry_is_served_stale_without_queries(self):
+        first = self.client.get(self.URL)
+        self.assertEqual(first.status_code, 200)
+        self._expire_fresh()
+
+        from django.conf import settings
+
+        with self.assertNumQueries(0, using=settings.ATOMICDB_DATABASE_ALIAS):
+            served = self.client.get(self.URL)
+
+        self.assertEqual(served.headers[page_cache.STATE_HEADER],
+                         page_cache.STALE)
+        self.assertEqual(served.json(), first.json())
+        self.assertEqual(self.refreshes.run_all(), 1)
+
+        again = self.client.get(self.URL)
+        self.assertEqual(again.headers[page_cache.STATE_HEADER],
+                         page_cache.HIT)

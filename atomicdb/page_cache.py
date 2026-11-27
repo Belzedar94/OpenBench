@@ -222,7 +222,7 @@ def _refresh(view, request, key, fresh_seconds, stale_ttl_seconds,
             # Un refresco que revienta no puede tumbar a nadie: no hay nadie
             # esperandolo.  Se anota, se suelta el cerrojo y lo reintenta el
             # siguiente visitante que encuentre la copia caducada.
-            logger.exception('atomicdb: could not refresh the front page')
+            logger.exception('atomicdb: could not refresh %s', clone.path)
         finally:
             cache.delete(lock)
 
