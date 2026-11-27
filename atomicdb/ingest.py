@@ -516,6 +516,81 @@ def _get_or_create_position(fen, campaign_id=None):
     return pos, created
 
 
+# ---------------- many positions at once ----------------
+#
+# ``expand`` used to call ``get_or_create_position`` and then
+# ``Edge.objects.get_or_create`` once per legal move: a SELECT, and for a new
+# row a SAVEPOINT, an INSERT and a RELEASE, twice per move.  On the live box
+# (27-Nov, 12 cores at load 30, the ingest queue growing) one of those round
+# trips cost 0.7 to 1.8 ms, an expansion of 35 moves paid about 280 of them,
+# and ``expand`` plus the same pair in ``materialise_won_line`` were half of
+# a writer's time (py-spy, two writers, 40 s each).
+#
+# ``positions_for`` is that same upsert for a whole set of keys: one SELECT of
+# what exists, one INSERT of what does not (``ON CONFLICT DO NOTHING``, in key
+# order so two writers inserting overlapping sets take the unique-index locks
+# in the same order) and one SELECT of what the INSERT was about.  Each row it
+# makes is the row ``_get_or_create_position`` makes: the canonical FEN, the
+# campaign it is given, reachable when it is the root (or ``born_reachable``),
+# and closed as TERMINAL, with mate_in 0 and the full clock margin for a
+# decisive end, when the position is terminal.  A row that already exists is
+# returned as it is, except the root row of an older base, which gets its
+# ``reachable`` mark as there.  A row a concurrent writer inserts between the
+# two statements is returned as that writer left it, exactly what the
+# IntegrityError branch of ``get_or_create`` returned.
+
+def positions_for(wanted, born_reachable=False):
+    """``{key: Position}`` for ``wanted = {key: (canonical fen, campaign_id)}``.
+
+    The keys must be ``logic.key_of`` of their FENs, and the FENs canonical.
+    """
+    if not wanted:
+        return {}
+    rows = existing_positions(wanted)
+    rows.update(create_positions(
+        {key: value for key, value in wanted.items() if key not in rows},
+        born_reachable=born_reachable))
+    return rows
+
+
+def existing_positions(keys):
+    """The rows that already exist among ``keys``, with the root fix-up of
+    ``_get_or_create_position`` applied to them."""
+    rows = {row.key: row for row in Position.objects.filter(key__in=list(keys))}
+    root = rows.get(root_key())
+    if root is not None and not root.reachable:
+        root.reachable = True
+        root.save(update_fields=['reachable'])
+    return rows
+
+
+def create_positions(new, born_reachable=False):
+    """Insert the missing ``new = {key: (fen, campaign_id)}`` and return them
+    as stored (§ ``positions_for``)."""
+    if not new:
+        return {}
+    root = root_key()
+    objs = []
+    for key in sorted(new):
+        fen, campaign_id = new[key]
+        obj = Position(key=key, fen=fen, campaign_id=campaign_id,
+                       reachable=key == root or bool(born_reachable))
+        terminal = logic.terminal_status(fen)
+        if terminal:
+            obj.status, obj.closure, obj.mate_in = (terminal[0], 'TERMINAL',
+                                                    0)
+            if terminal[0] != 'DRAW':
+                obj.clock_slack = logic.CLOCK_SLACK_MAX
+        objs.append(obj)
+    Position.objects.bulk_create(objs, ignore_conflicts=True)
+    rows = {row.key: row for row in Position.objects.filter(key__in=list(new))}
+    for key in sorted(set(new) - set(rows)):
+        # Not reachable: a row that went missing between the INSERT and the
+        # SELECT (nothing deletes positions).  The one-row door, as before.
+        rows[key] = _get_or_create_position(new[key][0], new[key][1])[0]
+    return rows
+
+
 # ---------------- linking a new node to the children it already has ----------
 #
 # A node's edges are written by ``expand``, and ``expand`` runs when the
@@ -652,26 +727,41 @@ def expand(pos):
     """
     if pos.expanded or pos.status != 'UNKNOWN':
         return []
-    children = []
+    # One movegen, then the whole move list in a handful of statements
+    # (§ the block above ``positions_for``): the rows the per-move
+    # ``get_or_create`` pair left, in the same order, with the same values.
+    moves = []
     for uci in logic.legal_moves(pos.fen):
-        child_fen = logic.apply_move(pos.fen, uci)
-        child = get_or_create_position(child_fen,
-                                       campaign_id=pos.campaign_id)
-        Edge.objects.get_or_create(parent=pos, move_uci=uci,
-                                   defaults={'child': child})
-        touched = []
-        if child.priority <= DEAD / 2:
-            child.priority = 0.0   # ruta nueva via transposicion: revive
-            touched.append('priority')
-        if pos.reachable and not child.reachable:
-            child.reachable = True
-            touched.append('reachable')
-        if touched:
-            child.save(update_fields=touched)
-        children.append(child)
+        child_fen = logic.canonical_fen(logic.apply_move(pos.fen, uci))
+        moves.append((uci, child_fen, logic.key_of(child_fen)))
+    rows = positions_for({key: (fen, pos.campaign_id)
+                          for _uci, fen, key in moves},
+                         born_reachable=pos.reachable)
+    # Movegen order, as the loop wrote them: readers that ``order_by('id')``
+    # take it for the order of the moves.
+    Edge.objects.bulk_create(
+        [Edge(parent_id=pos.key, move_uci=uci, child_id=key)
+         for uci, _fen, key in moves],
+        ignore_conflicts=True)
+    # Ruta nueva via transposicion: revive.  Only the two columns the loop's
+    # ``save(update_fields=...)`` wrote, so ``updated`` stays untouched as it
+    # did there.
+    dead = sorted(key for key, child in rows.items()
+                  if child.priority <= DEAD / 2)
+    if dead:
+        Position.objects.filter(key__in=dead).update(priority=0.0)
+        for key in dead:
+            rows[key].priority = 0.0
+    if pos.reachable:
+        unmarked = sorted(key for key, child in rows.items()
+                          if not child.reachable)
+        if unmarked:
+            Position.objects.filter(key__in=unmarked).update(reachable=True)
+            for key in unmarked:
+                rows[key].reachable = True
     pos.expanded = True
     pos.save(update_fields=['expanded'])
-    return children
+    return [rows[key] for _uci, _fen, key in moves]
 
 
 def prepare_mate_proofs(parent_fen, lines, budget_positions=200_000,
@@ -5045,16 +5135,91 @@ def materialise_won_line(pos, verify=False):
     grade = (pos.proof if pos.proof in ('ANDOR', 'ENGINE', TB_LINE_VERDICT)
              else None)
     slack = pos.clock_slack
+    chain = _won_line_chain(pos, line)
+    if chain is None:
+        return _materialise_stepwise(pos, line, tb_line, grade, slack)
+    links, rows, created_edges = chain
+    closed = 0
+    closed_keys = []
+    for index, key in links:
+        if _close_won_line_link(pos, rows[key], line[index + 1:], tb_line,
+                                grade, slack):
+            closed += 1
+            closed_keys.append(key)
+    return {'created_edges': created_edges, 'closed': closed,
+            'plies': len(links), 'closed_keys': closed_keys}
+
+
+def _won_line_chain(pos, line):
+    """The chain of ``pos``'s witness, written in a few statements.
+
+    Returns ``(links, rows, created_edges)``: ``links`` the ``(index, key)``
+    of every ply walked, ``rows`` one shared ``Position`` per key, so a
+    position the line visits twice is one object, as the second
+    ``get_or_create`` of the step-by-step walk saw the first one's writes.
+    Or None, with nothing written, when the walk cannot be done ahead of
+    the rows (a move that raises, or a stored FEN that is not the one the
+    walk computed): the caller then walks step by step, as before.
+
+    What it writes is what the step-by-step walk wrote: the walk stops at
+    the first move that is not legal, each new node inherits the
+    ``campaign_id`` of the node before it in the line (§ ``expand``), and
+    each ply gets its edge unless ``(parent, move)`` already has one.
+    """
+    walk = []
+    fen, parent = pos.fen, pos.key
+    try:
+        for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
+            if uci not in logic.legal_moves(fen):
+                break                   # testigo historico ya no legal
+            child_fen = logic.canonical_fen(logic.apply_move(fen, uci))
+            child = logic.key_of(child_fen)
+            walk.append((index, uci, parent, child_fen, child))
+            fen, parent = child_fen, child
+    except Exception:
+        return None
+    if not walk:
+        return [], {}, 0
+    rows = existing_positions({step[4] for step in walk})
+    if any(step[4] in rows and rows[step[4]].fen != step[3] for step in walk):
+        return None
+    # Misma herencia que en ``expand``: la PV verificada tambien materializa
+    # nodos nuevos, y los que nacen bajo una campana son suyos.
+    new, campaign = {}, pos.campaign_id
+    for _index, _uci, _parent, child_fen, child in walk:
+        if child in rows:
+            campaign = rows[child].campaign_id
+        elif child in new:
+            campaign = new[child][1]
+        else:
+            new[child] = (child_fen, campaign)
+    rows.update(create_positions(new))
+    pairs = list(dict.fromkeys((parent, uci, child)
+                               for _index, uci, parent, _fen, child in walk))
+    have = set(Edge.objects.filter(
+        parent_id__in={parent for parent, _uci, _child in pairs},
+        move_uci__in={uci for _parent, uci, _child in pairs},
+    ).values_list('parent_id', 'move_uci'))
+    missing, seen = [], set(have)
+    for parent, uci, child in pairs:
+        if (parent, uci) not in seen:
+            seen.add((parent, uci))
+            missing.append(Edge(parent_id=parent, move_uci=uci,
+                                child_id=child))
+    if missing:
+        Edge.objects.bulk_create(missing, ignore_conflicts=True)
+    return [(index, child) for index, _uci, _parent, _fen, child in walk], \
+        rows, len(missing)
+
+
+def _materialise_stepwise(pos, line, tb_line, grade, slack):
+    """The walk one ply at a time: a row, an edge and a closure per ply."""
     created_edges = closed = 0
     closed_keys = []
     node, walked = pos, 0
     for index, uci in enumerate(line[:WON_LINE_MAX_PLIES]):
         if uci not in logic.legal_moves(node.fen):
             break                       # testigo historico ya no legal
-        # Misma herencia que en ``expand``: la PV verificada tambien
-        # materializa nodos nuevos, y los que nacen bajo una campana son
-        # suyos.  Por el ``campaign_id`` y no por la instancia, que aqui
-        # ademas se pagaria una vez por ply.
         child = get_or_create_position(logic.apply_move(node.fen, uci),
                                        campaign_id=node.campaign_id)
         _edge, made = Edge.objects.get_or_create(
@@ -5062,35 +5227,42 @@ def materialise_won_line(pos, verify=False):
         if made:
             created_edges += 1
         walked += 1
-        suffix = line[index + 1:]
-        if (tb_line and not suffix and child.status == 'UNKNOWN'
-                and _close_tb_line_end(child, pos.status)):
+        if _close_won_line_link(pos, child, line[index + 1:], tb_line,
+                                grade, slack):
             closed += 1
             closed_keys.append(child.key)
-        if suffix and child.status == 'UNKNOWN':
-            child.status = pos.status
-            child.closure = 'MATE_PV'
-            child.proof = grade
-            child.won_line = ' '.join(suffix)
-            child.mate_in = None if tb_line else len(suffix)
-            child.best_move = suffix[0]
-            child.clock_slack = slack
-            # Mismo CAS que el cierre de hijos del ingest: por transposicion
-            # este nodo puede estar cerrandose a la vez desde otra PV en otro
-            # consumer, y el que pierde no debe pisar ni duplicar eventos.
-            claimed = Position.objects.filter(
-                key=child.key, status='UNKNOWN',
-            ).update(status=child.status, closure=child.closure,
-                     proof=child.proof, won_line=child.won_line,
-                     mate_in=child.mate_in, best_move=child.best_move,
-                     clock_slack=child.clock_slack, updated=timezone.now())
-            if claimed:
-                _emit_closure_events(child)
-                closed += 1
-                closed_keys.append(child.key)
         node = child
     return {'created_edges': created_edges, 'closed': closed, 'plies': walked,
             'closed_keys': closed_keys}
+
+
+def _close_won_line_link(pos, child, suffix, tb_line, grade, slack):
+    """Close one node of ``pos``'s chain; True when this call closed it."""
+    closed = False
+    if (tb_line and not suffix and child.status == 'UNKNOWN'
+            and _close_tb_line_end(child, pos.status)):
+        closed = True
+    if suffix and child.status == 'UNKNOWN':
+        child.status = pos.status
+        child.closure = 'MATE_PV'
+        child.proof = grade
+        child.won_line = ' '.join(suffix)
+        child.mate_in = None if tb_line else len(suffix)
+        child.best_move = suffix[0]
+        child.clock_slack = slack
+        # Mismo CAS que el cierre de hijos del ingest: por transposicion
+        # este nodo puede estar cerrandose a la vez desde otra PV en otro
+        # consumer, y el que pierde no debe pisar ni duplicar eventos.
+        claimed = Position.objects.filter(
+            key=child.key, status='UNKNOWN',
+        ).update(status=child.status, closure=child.closure,
+                 proof=child.proof, won_line=child.won_line,
+                 mate_in=child.mate_in, best_move=child.best_move,
+                 clock_slack=child.clock_slack, updated=timezone.now())
+        if claimed:
+            _emit_closure_events(child)
+            closed = True
+    return closed
 
 
 def _tb_line_still_wins(pos, line):
