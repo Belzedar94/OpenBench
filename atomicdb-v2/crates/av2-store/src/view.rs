@@ -17,22 +17,31 @@ pub struct Shard {
     pub region: u64,
     pub slots: u64,
     pub count: u64,
+    /// The region is in the odd arena slot (`REGION_ODD` on disk).
+    pub odd: bool,
 }
 
 impl Shard {
     pub fn decode(b: &[u8]) -> Shard {
+        let r = u64::from_le_bytes(b[0..8].try_into().unwrap());
         Shard {
-            region: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            region: r & !REGION_ODD,
             slots: u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64,
             count: u32::from_le_bytes(b[12..16].try_into().unwrap()) as u64,
+            odd: r & REGION_ODD != 0,
         }
     }
     pub fn encode(&self) -> [u8; DIR_ENTRY] {
         let mut b = [0u8; DIR_ENTRY];
-        b[0..8].copy_from_slice(&self.region.to_le_bytes());
+        b[0..8].copy_from_slice(&(self.region | if self.odd { REGION_ODD } else { 0 }).to_le_bytes());
         b[8..12].copy_from_slice(&(self.slots as u32).to_le_bytes());
         b[12..16].copy_from_slice(&(self.count as u32).to_le_bytes());
         b
+    }
+    /// The arena file slot holding the region.
+    #[inline]
+    pub fn file(&self) -> u8 {
+        if self.odd { F_KM_ARENA_ODD } else { F_KM_ARENA }
     }
     #[inline]
     pub fn fblocks(&self) -> u64 {
@@ -137,7 +146,7 @@ impl<'a> View<'a> {
 
     pub fn filter_may_contain(&self, sh: &Shard, fp: &Fingerprint) -> bool {
         let (base, bits) = sh.filter_block(fp);
-        let Some(block) = self.maps.f(F_KM_ARENA).get(base, 64) else { return true };
+        let Some(block) = self.maps.f(sh.file()).get(base, 64) else { return true };
         bits.iter().all(|&b| block[b as usize / 8] & (1 << (b % 8)) != 0)
     }
 
@@ -147,7 +156,7 @@ impl<'a> View<'a> {
         if sh.slots == 0 || !self.filter_may_contain(&sh, fp) {
             return None;
         }
-        let a = self.maps.f(F_KM_ARENA);
+        let a = self.maps.f(sh.file());
         let base = sh.slots_at();
         let mut s = sh.home(fp, self.shard_bits);
         for _ in 0..sh.slots {
@@ -195,9 +204,9 @@ impl<'a> View<'a> {
 
     /// Every `(fingerprint, id)` pair of the key map (unordered).
     pub fn key_pairs(&self, out: &mut Vec<(Fingerprint, PosId)>) {
-        let a = self.maps.f(F_KM_ARENA);
         for s in 0..(1u64 << self.shard_bits) {
             let sh = self.shard(s);
+            let a = self.maps.f(sh.file());
             let base = sh.slots_at();
             for i in 0..sh.slots {
                 if let Some(b) = a.get(base + i * SLOT as u64, SLOT) {

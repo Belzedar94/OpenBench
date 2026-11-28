@@ -146,6 +146,25 @@ impl Mapped {
     }
 }
 
+impl Mapped {
+    /// A copy of this file's bytes in anonymous memory (eligible for
+    /// transparent huge pages on Linux), behind the same interface.  For
+    /// measuring the read path against an in-memory graph (`av2-perf
+    /// --explore-only`); not used by the store.
+    pub fn anon_copy(&self) -> io::Result<Mapped> {
+        let map = if self.len > 0 {
+            let mut m = MmapOptions::new().len(self.len as usize).map_anon()?;
+            #[cfg(target_os = "linux")]
+            let _ = m.advise(memmap2::Advice::HugePage);
+            m.copy_from_slice(self.get(0, self.len as usize).unwrap());
+            Some(MmapRaw::from(m))
+        } else {
+            None
+        };
+        Ok(Mapped { file: self.file.try_clone()?, map, len: self.len, path: self.path.clone() })
+    }
+}
+
 /// One mapping per file of `graph/`.
 pub struct Maps {
     pub m: [Arc<Mapped>; NFILES],
@@ -156,7 +175,14 @@ impl Maps {
     pub fn open(dir: &Path, min_lens: &[u64; NFILES], km_gen: u64) -> io::Result<Maps> {
         let mut v = Vec::with_capacity(NFILES);
         for i in 0..NFILES {
-            let name = if i == crate::layout::F_KM_ARENA as usize { crate::layout::arena_name(km_gen) } else { NAMES[i].to_string() };
+            // The arena slots hold the current generation and the next one.
+            let name = if i == crate::layout::arena_slot(km_gen) as usize {
+                crate::layout::arena_name(km_gen)
+            } else if i == crate::layout::arena_slot(km_gen + 1) as usize {
+                crate::layout::arena_name(km_gen + 1)
+            } else {
+                NAMES[i].to_string()
+            };
             v.push(Arc::new(Mapped::open(&dir.join(name), min_lens[i])?));
         }
         Ok(Maps { m: v.try_into().ok().unwrap() })
@@ -176,6 +202,15 @@ impl Maps {
         let mut m = self.m.clone();
         m[f as usize] = Arc::new(new);
         Ok(Maps { m })
+    }
+
+    /// Every file copied into anonymous memory (see `Mapped::anon_copy`).
+    pub fn anon_copy(&self) -> io::Result<Maps> {
+        let mut v = Vec::with_capacity(NFILES);
+        for m in self.m.iter() {
+            v.push(Arc::new(m.anon_copy()?));
+        }
+        Ok(Maps { m: v.try_into().ok().unwrap() })
     }
 
     /// A copy of these maps with file `f` replaced by `m`.

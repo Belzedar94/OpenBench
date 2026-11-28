@@ -325,42 +325,104 @@ fn main() {
     LEAN.store(a.flag("lean"), Ordering::Relaxed);
     PIPELINE.store(a.flag("pipeline"), Ordering::Relaxed);
     if a.flag("until-compaction") {
-        // Land searches (32 per commit) until the key map compacts; report
-        // the arena before and after and what that commit cost.
+        // Land searches (32 per commit) until the key map has compacted once;
+        // report the arena before and after, and what the commits during the
+        // compaction cost against the ones before it.
         drop(s);
         let mut s = Store::open(&work, Config { km_compact_min: 1 << 20, ..cfg() }).unwrap();
         let mut rng = Rng::new(77);
-        let (mut commits, mut worst) = (0u64, 0f64);
-        let km = |s: &Store| s.live_bytes().0[av2_store::layout::F_KM_ARENA as usize];
+        let km = |s: &Store| {
+            let l = s.live_bytes().0;
+            l[av2_store::layout::F_KM_ARENA as usize] + l[av2_store::layout::F_KM_ARENA_ODD as usize]
+        };
+        let (mut before, mut during) = (Lat::new(), Lat::new());
+        let (mut moving_commits, mut arena_before) = (0u64, 0u64);
         loop {
-            let before = km(&s);
             let mut b = s.batch();
             let mut facts = Vec::new();
             for _ in 0..32 {
                 landing(&mut b, &mut rng, &payload, &mut facts);
             }
+            let size = km(&s);
             let t = Instant::now();
             s.commit(b, &av2_facts::encode_all(&facts)).unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3;
-            commits += 1;
+            let cursor = s.reader().read(|v| v.counter(av2_store::layout::C_KM_CURSOR));
+            if cursor != 0 || s.stats().compactions > 0 {
+                if moving_commits == 0 {
+                    arena_before = size;
+                }
+                moving_commits += 1;
+                during.add(ms);
+            } else {
+                before.add(ms);
+            }
             if s.stats().compactions > 0 {
-                let ct = s.last_commit();
                 let n = s.reader().read(|v| v.len());
                 emit(
                     &out,
                     &format!(
-                        "{{\"stage\":\"compaction\",\"commits_before\":{commits},\"positions\":{n},\"arena_before\":{before},\"arena_after\":{},\"commit_ms\":{ms:.2},\"apply_ms\":{:.2},\"other_commits_worst_ms\":{worst:.2}}}",
+                        "{{\"stage\":\"compaction\",\"commits_before\":{},\"commits_during\":{moving_commits},\"positions\":{n},\"arena_before\":{arena_before},\"arena_after\":{},\"commit_ms_before\":{},\"commit_ms_during\":{}}}",
+                        before.len(),
                         km(&s),
-                        ct.apply.as_secs_f64() * 1e3
+                        before.json(),
+                        during.json()
                     ),
                 );
                 break;
             }
-            worst = worst.max(ms);
-            if commits > 20_000 {
+            if before.len() > 20_000 {
                 emit(&out, "{\"stage\":\"compaction\",\"note\":\"none after 20000 commits\"}");
                 break;
             }
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&work);
+        return;
+    }
+    if a.flag("explore-only") {
+        // The read path alone: explorer pages from 1 and N readers on the
+        // mapped files, then on the same bytes copied into anonymous memory
+        // (what an in-memory graph would read), same code.
+        let fps: Arc<Vec<av2_model::Fingerprint>> = Arc::new(s.reader().read(|v| {
+            let mut pairs = Vec::new();
+            v.key_pairs(&mut pairs);
+            let mut f = vec![av2_model::Fingerprint::default(); v.len() as usize];
+            for (fp, id) in pairs {
+                f[id.index()] = fp;
+            }
+            f
+        }));
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_from(s.reader(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"reader\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
+            );
+        }
+        let mapped = s.maps_snapshot();
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_mem(mapped.clone(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"view\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
+            );
+        }
+        let t = Instant::now();
+        let mem = Arc::new(s.in_memory_copy().unwrap());
+        let copy_ms = t.elapsed().as_secs_f64() * 1e3;
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_mem(mem.clone(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"anonymous\",\"via\":\"view\",\"copy_ms\":{copy_ms:.0},\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
+            );
         }
         drop(s);
         let _ = std::fs::remove_dir_all(&work);
@@ -500,6 +562,48 @@ fn main() {
     if !a.flag("keep") {
         let _ = std::fs::remove_dir_all(&work);
     }
+}
+
+/// Like `readers_from`, on an in-memory copy (no writer, no epoch).
+fn readers_mem(maps: Arc<av2_store::mapped::Maps>, threads: usize, secs: f64, fps: Arc<Vec<av2_model::Fingerprint>>) -> (f64, String) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let total = Arc::new(AtomicU64::new(0));
+    let mut hs = Vec::new();
+    for t in 0..threads {
+        let (stop, total, fps, maps) = (stop.clone(), total.clone(), fps.clone(), maps.clone());
+        hs.push(std::thread::spawn(move || {
+            let v = av2_store::view::View::new(&maps);
+            let mut rng = Rng::new(0xF0 + t as u64);
+            let mut es = Vec::with_capacity(64);
+            let mut ps = Vec::with_capacity(8);
+            let mut lat = Lat::new();
+            let mut n = 0u64;
+            let mut sink = 0i64;
+            while !stop.load(Ordering::Relaxed) {
+                for _ in 0..256 {
+                    let t0 = if n.is_multiple_of(16) { Some(Instant::now()) } else { None };
+                    let pick = rng.next_u64();
+                    let id = PosId(((pick as u128 * v.len() as u128) >> 64) as u64);
+                    let mut local = Rng::new(pick);
+                    sink += explore_once(&v, id, &mut local, &fps, &mut es, &mut ps);
+                    if let Some(t0) = t0 {
+                        lat.add(t0.elapsed().as_nanos() as f64 / 1e3);
+                    }
+                    n += 1;
+                }
+            }
+            total.fetch_add(n, Ordering::Relaxed);
+            std::hint::black_box(sink);
+            lat
+        }));
+    }
+    std::thread::sleep(Duration::from_secs_f64(secs));
+    stop.store(true, Ordering::Relaxed);
+    let mut all = Lat::new();
+    for h in hs {
+        all.extend(h.join().unwrap());
+    }
+    (total.load(Ordering::Relaxed) as f64 / secs, all.json())
 }
 
 /// N readers for `secs`: (reads per second, latency summary in microseconds).

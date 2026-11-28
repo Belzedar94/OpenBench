@@ -7,7 +7,7 @@ use av2_model::record::{CORE_SIZE, EXT_SIZE};
 /// Magic at the start of `ctl`: "AV2GRAPH".
 pub const MAGIC: u64 = 0x4850_4152_4732_5641;
 /// Format version of the files in `graph/`.  Bump on any layout change.
-pub const FORMAT_VERSION: u64 = 2;
+pub const FORMAT_VERSION: u64 = 3;
 
 pub type FileId = u8;
 pub const F_CTL: FileId = 0;
@@ -20,16 +20,35 @@ pub const F_OUT_ARENA: FileId = 6;
 pub const F_INX_ARENA: FileId = 7;
 pub const F_BLOB_ARENA: FileId = 8;
 pub const F_KM_DIR: FileId = 9;
+/// The key-map arena of the current generation lives in the slot of its
+/// parity: even generations in `F_KM_ARENA`, odd ones in `F_KM_ARENA_ODD`.
+/// While a compaction runs, the next generation fills the other slot.
 pub const F_KM_ARENA: FileId = 10;
-pub const NFILES: usize = 11;
+pub const F_KM_ARENA_ODD: FileId = 11;
+pub const NFILES: usize = 12;
+
+/// The file slot of arena generation `generation`.
+#[inline]
+pub fn arena_slot(generation: u64) -> FileId {
+    if generation % 2 == 0 { F_KM_ARENA } else { F_KM_ARENA_ODD }
+}
+/// Bit 63 of a directory entry's region: the region lives in the odd slot.
+pub const REGION_ODD: u64 = 1 << 63;
 /// Not a file: the logical redo record of a key-map shard rebuild (see
 /// `batch::rebuild_region`).  Offset = shard index, payload = region, slots.
 pub const F_KM_REBUILD: FileId = 0x80;
-/// Not a file: the logical record of a key-map insert (slot + filter bits).
+/// Not a file: the logical record of a key-map insert (slot + filter bits)
+/// into the even slot; `F_KM_INSERT_ODD` into the odd one.
 pub const F_KM_INSERT: FileId = 0x81;
-/// Not a file: the logical record of a key-map compaction into a new
-/// generation of `keymap.arena`.
-pub const F_KM_COMPACT: FileId = 0x82;
+pub const F_KM_INSERT_ODD: FileId = 0x83;
+/// Not a file: start of an incremental compaction into arena generation
+/// `offset` (a new, empty file in that generation's slot).
+pub const F_KM_MIGRATE_START: FileId = 0x82;
+/// Not a file: one shard moved into the next generation (old region named,
+/// new region given; replay copies it again).
+pub const F_KM_MOVE: FileId = 0x84;
+/// Not a file: end of the compaction: generation `offset` becomes current.
+pub const F_KM_MIGRATE_END: FileId = 0x85;
 
 /// File name of generation `generation` of the key-map arena.
 pub fn arena_name(generation: u64) -> String {
@@ -56,6 +75,7 @@ pub const NAMES: [&str; NFILES] = [
     "blob.arena",
     "keymap.dir",
     "keymap.arena",
+    "keymap.arena.1",
 ];
 
 /// Bytes per position in each per-position column.
@@ -104,6 +124,14 @@ pub const C_COUNTERS: usize = C_POSITIONS;
 pub const C_COUNTERS_LEN: usize = 56;
 /// Generation of the key-map arena file (written by compaction).
 pub const C_KM_GEN: usize = 80;
+/// While a compaction runs: bytes used and live in the next generation's
+/// file, and the next shard to move + 1 (0 = no compaction running).
+pub const C_KM_NEXT_TAIL: usize = 88;
+pub const C_KM_NEXT_LIVE: usize = 96;
+pub const C_KM_CURSOR: usize = 104;
+/// Bytes of shard regions moved per commit by a running compaction (at
+/// least one shard): about 0.4 ms of copying on the tower.
+pub const MOVE_BUDGET: u64 = 1 << 20;
 
 // ---- key map
 /// Bytes per key-map slot: 96-bit fingerprint + id+1 in 40 bits.

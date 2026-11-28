@@ -45,6 +45,8 @@ pub struct Batch {
     n0: u64,
     blob0: u64,
     compact_min: u64,
+    /// A compaction may start in this batch (see `finalize`, step 8).
+    pub(crate) can_compact: bool,
     new_cores: Vec<Core>,
     new_fens: Vec<PackedFen>,
     new_fps: Vec<Fingerprint>,
@@ -97,6 +99,7 @@ impl Batch {
             n0,
             blob0,
             compact_min,
+            can_compact: false,
             new_cores: Vec::new(),
             new_fens: Vec::new(),
             new_fps: Vec::new(),
@@ -328,9 +331,18 @@ impl Batch {
             }
             op(&mut f, F_PARENT, n0 * PARENT_SIZE as u64, &run);
         }
-        // 7. Key map: new fingerprints, by shard then id.
+        // 7. Key map: new fingerprints, by shard then id.  The current
+        //    generation's arena is in the slot of its parity; while a
+        //    compaction runs, the next generation fills the other slot.
+        let km_gen = v.counter(C_KM_GEN);
+        let cur_odd = km_gen % 2 == 1;
+        let next_odd = !cur_odd;
+        let mut cursor = v.counter(C_KM_CURSOR);
         let mut km_tail = v.counter(C_KM_TAIL);
         let mut km_live = v.counter(C_KM_LIVE);
+        let mut next_tail = v.counter(C_KM_NEXT_TAIL);
+        let mut next_live = v.counter(C_KM_NEXT_LIVE);
+        let (tail0, next_tail0, cursor0) = (km_tail, next_tail, cursor);
         let mut keyed: Vec<(u64, u64)> = (0..n_new).map(|i| (shard_of(&self.new_fps[i], self.shard_bits), i as u64)).collect();
         keyed.sort_unstable();
         let mut post: Vec<(u64, Shard)> = Vec::new();
@@ -347,7 +359,8 @@ impl Batch {
             let sh = v.shard(s);
             let total = sh.count + keys.len() as u64;
             // A shard past its maximal load is rebuilt, twice as large, into a
-            // fresh region at the arena tail.  The frame logs the rebuild as one
+            // fresh region at the tail of the current arena (of the next one
+            // while a compaction runs).  The frame logs the rebuild as one
             // logical record naming the old region and the new one: replay
             // recomputes the new region from the old one, which nothing writes
             // after the rebuild, so the record can be replayed over a state
@@ -355,16 +368,36 @@ impl Batch {
             let mut region_mem: Option<Vec<u8>> = None;
             let cur = if sh.slots == 0 || total * MAX_LOAD_DEN > sh.slots * MAX_LOAD_NUM {
                 let slots = ((total as f64 / REBUILD_LOAD).ceil() as u64).max(MIN_SLOTS);
-                let (nsh, reg) = rebuild_region(v.maps, self.shard_bits, &sh, km_tail, slots)?;
-                op_rebuild(&mut f, s, &sh, km_tail, slots);
-                km_tail += reg.len() as u64;
-                km_live = km_live + reg.len() as u64 - if sh.slots > 0 { region_bytes(sh.slots) } else { 0 };
+                let into_next = cursor != 0;
+                let at = Shard {
+                    region: if into_next { next_tail } else { km_tail },
+                    slots,
+                    count: sh.count,
+                    odd: if into_next { next_odd } else { cur_odd },
+                };
+                let (nsh, reg) = rebuild_region(v.maps, self.shard_bits, &sh, &at)?;
+                op_rebuild(&mut f, s, &sh, &at);
+                let n = reg.len() as u64;
+                if into_next {
+                    next_tail += n;
+                    next_live += n;
+                } else {
+                    km_tail += n;
+                    km_live += n;
+                }
+                if sh.slots > 0 {
+                    if sh.odd == cur_odd {
+                        km_live -= region_bytes(sh.slots);
+                    } else {
+                        next_live -= region_bytes(sh.slots);
+                    }
+                }
                 region_mem = Some(reg);
                 nsh
             } else {
                 sh
             };
-            let a = v.maps.f(F_KM_ARENA);
+            let a = v.maps.f(cur.file());
             let base = cur.slots_at();
             let slot_used = |k: u64| -> Result<bool, GraphError> {
                 Ok(match &region_mem {
@@ -390,40 +423,76 @@ impl Batch {
                     }
                 }
                 taken.push(s_);
-                op_insert(&mut f, base + s_ * SLOT as u64, fp, n0 + k, cur.filter_block_offset(fp));
+                op_insert(&mut f, cur.odd, base + s_ * SLOT as u64, fp, n0 + k, cur.filter_block_offset(fp));
             }
             let nsh = Shard { count: total, ..cur };
             op(&mut f, F_KM_DIR, s * DIR_ENTRY as u64 + 12, &(total as u32).to_le_bytes());
             post.push((s, nsh));
         }
-        // 8. Counters, one run.
+        // 8. Key-map compaction, incremental: once the old regions left
+        //    behind by rebuilds reach half the live ones (with doubling,
+        //    garbage stays just under the live size forever, so "garbage >
+        //    live" would never fire), the live regions move into a new arena
+        //    file (the next generation), at most `MOVE_BUDGET` bytes per
+        //    commit, so the writer never stops for the whole copy.  Each move
+        //    is a logical record naming the old region, which nothing writes
+        //    afterwards: replay copies it again.  A compaction starts only
+        //    once the last checkpoint is past the previous one (`can_compact`),
+        //    so no recovery can need the file its slot reuses.
+        let nshards = 1u64 << self.shard_bits;
+        let garbage = km_tail - km_live;
+        if cursor == 0 && self.can_compact && garbage * 2 >= km_live && garbage >= self.compact_min {
+            record(&mut f, F_KM_MIGRATE_START, km_gen + 1, &[]);
+            cursor = 1;
+            next_tail = 0;
+            next_live = 0;
+        }
+        let mut finish = false;
+        if cursor != 0 {
+            let mut moved = 0u64;
+            while cursor - 1 < nshards && (moved == 0 || moved < MOVE_BUDGET) {
+                let s = cursor - 1;
+                let k = post.binary_search_by_key(&s, |p| p.0);
+                let sh = match k {
+                    Ok(k) => post[k].1,
+                    Err(_) => v.shard(s),
+                };
+                if sh.slots > 0 && sh.odd != next_odd {
+                    let to = Shard { region: next_tail, odd: next_odd, ..sh };
+                    op_move(&mut f, s, &sh, &to);
+                    let n = region_bytes(sh.slots);
+                    next_tail += n;
+                    next_live += n;
+                    km_live -= n;
+                    moved += n;
+                    match k {
+                        Ok(k) => post[k].1 = to,
+                        Err(k) => post.insert(k, (s, to)),
+                    }
+                }
+                cursor += 1;
+            }
+            finish = cursor - 1 == nshards;
+        }
+        // 9. Counters, one run (and the compaction's, if one runs).
         let mut ctl = [0u8; C_COUNTERS_LEN];
         for (k, val) in [n1, self.ext_tail, out_tail, inx_tail, self.blob_tail, km_tail, km_live].iter().enumerate() {
             ctl[k * 8..k * 8 + 8].copy_from_slice(&val.to_le_bytes());
         }
         op(&mut f, F_CTL, C_COUNTERS as u64, &ctl);
-        // 9. Key-map compaction, last: once the old regions left behind by
-        //    rebuilds reach half the live ones (with doubling, garbage stays
-        //    just under the live size forever, so "garbage > live" would never
-        //    fire; at one half the arena stays under 1.5x live), every live region is copied,
-        //    packed in shard order, into a new arena file (the next
-        //    generation).  Logged as one record naming every live region of
-        //    the old generation, which is never written again: replay copies
-        //    them again and gets the same file.
-        let garbage = km_tail - km_live;
-        if garbage * 2 >= km_live && garbage >= self.compact_min {
-            let mut live: Vec<(u64, Shard)> = Vec::new();
-            for s in 0..(1u64 << self.shard_bits) {
-                let sh = match post.binary_search_by_key(&s, |p| p.0) {
-                    Ok(k) => post[k].1,
-                    Err(_) => v.shard(s),
-                };
-                if sh.slots > 0 {
-                    live.push((s, sh));
-                }
-            }
-            op_compact(&mut f, v.counter(C_KM_GEN), &live);
+        if cursor != cursor0 || next_tail != next_tail0 || cursor != 0 {
+            let mut m = [0u8; 24];
+            m[0..8].copy_from_slice(&next_tail.to_le_bytes());
+            m[8..16].copy_from_slice(&next_live.to_le_bytes());
+            m[16..24].copy_from_slice(&cursor.to_le_bytes());
+            op(&mut f, F_CTL, C_KM_NEXT_TAIL as u64, &m);
         }
+        if finish {
+            // Last: the next generation becomes the current one (its tail and
+            // live bytes become the counters', the compaction state clears).
+            record(&mut f, F_KM_MIGRATE_END, km_gen + 1, &[]);
+        }
+        let _ = tail0;
         Ok(f)
     }
 }
@@ -479,16 +548,18 @@ fn op(f: &mut Finalized, file: u8, off: u64, bytes: &[u8]) {
 }
 
 /// The logical record of a key-map insert, with the slot's byte offset as
-/// offset: `[fingerprint 12][id+1 u40][filter block offset u64]`.  Applying it
-/// writes the slot and sets the key's bits in the filter block, so the filter
-/// costs no log bytes; setting bits is idempotent.
-fn op_insert(f: &mut Finalized, slot_off: u64, fp: &Fingerprint, id: u64, block_off: u64) {
+/// offset: `[fingerprint 12][id+1 u40][filter block offset u64]`, kind
+/// `F_KM_INSERT` or `F_KM_INSERT_ODD` by the arena slot.  Applying it writes
+/// the slot and sets the key's bits in the filter block, so the filter costs
+/// no log bytes; setting bits is idempotent.
+fn op_insert(f: &mut Finalized, odd: bool, slot_off: u64, fp: &Fingerprint, id: u64, block_off: u64) {
     let mut b = [0u8; INSERT_LEN];
     b[..12].copy_from_slice(&fp.0);
     put_u40(&mut b[12..17], id + 1);
     b[17..25].copy_from_slice(&block_off.to_le_bytes());
-    record(f, F_KM_INSERT, slot_off, &b);
-    need(f, F_KM_ARENA, (slot_off + SLOT as u64).max(block_off + 64));
+    let (kind, file) = if odd { (F_KM_INSERT_ODD, F_KM_ARENA_ODD) } else { (F_KM_INSERT, F_KM_ARENA) };
+    record(f, kind, slot_off, &b);
+    need(f, file, (slot_off + SLOT as u64).max(block_off + 64));
 }
 
 pub(crate) const INSERT_LEN: usize = 25;
@@ -499,75 +570,55 @@ pub(crate) fn decode_insert(b: &[u8]) -> Option<(&[u8], u64)> {
 }
 
 /// The logical redo record of a shard rebuild, with the shard index as
-/// offset: `[old region u64][old slots u64][old count u64][new region u64][new slots u64]`.
-fn op_rebuild(f: &mut Finalized, shard: u64, old: &Shard, region: u64, slots: u64) {
-    record(f, F_KM_REBUILD, shard, &encode_rebuild(old, region, slots));
-    need(f, F_KM_ARENA, region + region_bytes(slots));
+/// offset: `[old region u64][old slots u64][old count u64][new region u64][new slots u64]`
+/// (regions with `REGION_ODD` for the odd arena slot).
+fn op_rebuild(f: &mut Finalized, shard: u64, old: &Shard, to: &Shard) {
+    record(f, F_KM_REBUILD, shard, &encode_two(old, to));
+    need(f, to.file(), to.region + region_bytes(to.slots));
 }
 
-/// The logical record of a compaction, with the new generation as offset:
-/// `[old generation u64][entries u32]` then per live shard
-/// `[shard u32][region u64][slots u32][count u32]`, in shard order.
-fn op_compact(f: &mut Finalized, old_gen: u64, live: &[(u64, Shard)]) {
-    let mut b = Vec::with_capacity(12 + live.len() * 20);
-    b.extend_from_slice(&old_gen.to_le_bytes());
-    b.extend_from_slice(&(live.len() as u32).to_le_bytes());
-    for (s, sh) in live {
-        b.extend_from_slice(&(*s as u32).to_le_bytes());
-        b.extend_from_slice(&sh.region.to_le_bytes());
-        b.extend_from_slice(&(sh.slots as u32).to_le_bytes());
-        b.extend_from_slice(&(sh.count as u32).to_le_bytes());
-    }
-    record(f, F_KM_COMPACT, old_gen + 1, &b);
-}
-
-/// `(old generation, live shards)` of a compaction record.
-pub(crate) fn decode_compact(b: &[u8]) -> Option<(u64, Vec<(u64, Shard)>)> {
-    if b.len() < 12 {
-        return None;
-    }
-    let old = u64::from_le_bytes(b[..8].try_into().unwrap());
-    let n = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-    if b.len() != 12 + n * 20 {
-        return None;
-    }
-    let mut v = Vec::with_capacity(n);
-    for c in b[12..].as_chunks::<20>().0 {
-        let s = u32::from_le_bytes(c[0..4].try_into().unwrap()) as u64;
-        let region = u64::from_le_bytes(c[4..12].try_into().unwrap());
-        let slots = u32::from_le_bytes(c[12..16].try_into().unwrap()) as u64;
-        let count = u32::from_le_bytes(c[16..20].try_into().unwrap()) as u64;
-        v.push((s, Shard { region, slots, count }));
-    }
-    Some((old, v))
+/// A shard moved into the next generation: same layout as a rebuild record
+/// (the slot count does not change).
+fn op_move(f: &mut Finalized, shard: u64, old: &Shard, to: &Shard) {
+    record(f, F_KM_MOVE, shard, &encode_two(old, to));
+    need(f, to.file(), to.region + region_bytes(to.slots));
 }
 
 pub(crate) const REBUILD_LEN: usize = 40;
 
-pub(crate) fn encode_rebuild(old: &Shard, region: u64, slots: u64) -> [u8; REBUILD_LEN] {
+fn tagged(sh: &Shard) -> u64 {
+    sh.region | if sh.odd { REGION_ODD } else { 0 }
+}
+
+fn untagged(r: u64, slots: u64, count: u64) -> Shard {
+    Shard { region: r & !REGION_ODD, slots, count, odd: r & REGION_ODD != 0 }
+}
+
+pub(crate) fn encode_two(old: &Shard, to: &Shard) -> [u8; REBUILD_LEN] {
     let mut b = [0u8; REBUILD_LEN];
-    for (i, v) in [old.region, old.slots, old.count, region, slots].iter().enumerate() {
+    for (i, v) in [tagged(old), old.slots, old.count, tagged(to), to.slots].iter().enumerate() {
         b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
     }
     b
 }
 
-/// `(old shard, new region, new slots)` of a rebuild record.
-pub(crate) fn decode_rebuild(b: &[u8]) -> Option<(Shard, u64, u64)> {
+/// `(old shard, new shard)` of a rebuild or move record (the new shard's
+/// count is the old one's).
+pub(crate) fn decode_two(b: &[u8]) -> Option<(Shard, Shard)> {
     if b.len() != REBUILD_LEN {
         return None;
     }
     let v = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
-    Some((Shard { region: v(0), slots: v(1), count: v(2) }, v(3), v(4)))
+    Some((untagged(v(0), v(1), v(2)), untagged(v(3), v(4), v(2))))
 }
 
-/// Rebuild `old` (a shard as committed in `maps`) into a region of `slots`
-/// slots at `region`: its entries, in slot order.  Used by `finalize` and by
+/// Rebuild `old` (a shard as committed in `maps`) into the region `to` (its
+/// slot count, offset and arena slot): its entries, in slot order.  Used by `finalize` and by
 /// the apply/replay of the logical record, so both produce the same bytes.
-pub(crate) fn rebuild_region(maps: &Maps, shard_bits: u32, old: &Shard, region: u64, slots: u64) -> Result<(Shard, Vec<u8>), GraphError> {
+pub(crate) fn rebuild_region(maps: &Maps, shard_bits: u32, old: &Shard, to: &Shard) -> Result<(Shard, Vec<u8>), GraphError> {
     let mut entries = Vec::with_capacity(old.count as usize);
     if old.slots > 0 {
-        let a = maps.f(F_KM_ARENA);
+        let a = maps.f(old.file());
         let base = old.slots_at();
         let b = a.get(base, old.slots as usize * SLOT).ok_or_else(|| GraphError::Store("key map shard out of bounds".into()))?;
         for c in b.as_chunks::<SLOT>().0 {
@@ -580,7 +631,7 @@ pub(crate) fn rebuild_region(maps: &Maps, shard_bits: u32, old: &Shard, region: 
     if entries.len() as u64 != old.count {
         return Err(GraphError::Store(format!("key map shard holds {} entries, its directory says {}", entries.len(), old.count)));
     }
-    let nsh = Shard { region, slots, count: old.count };
+    let nsh = Shard { count: old.count, ..*to };
     let r = build_region(&nsh, &entries, shard_bits);
     Ok((nsh, r))
 }

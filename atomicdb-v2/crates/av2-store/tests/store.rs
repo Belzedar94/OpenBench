@@ -188,10 +188,11 @@ fn replay_over_a_state_ahead_of_the_checkpoint() {
     }
 }
 
-/// Compaction of the key map: rebuilt shards leave garbage, which is copied
-/// away into a new arena generation; replay from a checkpoint taken before
-/// the compaction, over files already past it, must give the same state, and
-/// the old generations go once a checkpoint no longer needs them.
+/// Compaction of the key map: rebuilt shards leave garbage, which moves, a
+/// few shards per commit, into a new arena generation.  Replay from a
+/// checkpoint taken before (or during) a compaction, over files already
+/// past it, must give the same state, and old generations go once a
+/// checkpoint no longer needs them.
 #[test]
 fn key_map_compaction_survives_replay() {
     let d = tempfile::tempdir().unwrap();
@@ -202,7 +203,11 @@ fn key_map_compaction_survives_replay() {
     while s.stats().compactions < 3 {
         seq += 1;
         step(&mut s, seq);
-        assert!(seq < 3000, "no compaction after {seq} batches: {:?}", s.stats());
+        // A compaction starts only once a checkpoint is at the current generation.
+        if seq % 40 == 0 {
+            s.checkpoint().unwrap();
+        }
+        assert!(seq < 4000, "no compaction after {seq} batches: {:?}", s.stats());
     }
     for _ in 0..20 {
         seq += 1;
@@ -211,24 +216,53 @@ fn key_map_compaction_survives_replay() {
     let want = model_digest(&model_at(seq));
     assert_eq!(store_digest(&s), want);
     let (per_file, _) = s.live_bytes();
+    let replay_from = s.recovery.checkpoint_seq;
     drop(s);
+    // Replays every frame since the last checkpoint over files that are already past them.
+    let s = Store::open(d.path(), cfg.clone()).unwrap();
+    assert!(s.recovery.frames_replayed > 0 || replay_from == seq);
+    assert_eq!(store_digest(&s), want);
+    assert_eq!(s.live_bytes().0, per_file);
+    s.checkpoint().unwrap();
     let arenas = || {
         std::fs::read_dir(d.path().join("graph"))
             .unwrap()
             .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("keymap.arena"))
             .count()
     };
-    assert!(arenas() >= 2, "the checkpoint's generation and the current one");
-    // Replays every frame since seq 0 over files that are already compacted three times.
-    let s = Store::open(d.path(), cfg.clone()).unwrap();
-    assert_eq!(s.recovery.frames_replayed, seq);
-    assert_eq!(store_digest(&s), want);
-    assert_eq!(s.live_bytes().0, per_file);
-    s.checkpoint().unwrap();
-    assert_eq!(arenas(), 1, "older generations deleted after a checkpoint");
+    assert!(arenas() <= 3, "the current generation, the next one, at most one being deleted");
     drop(s);
     let s = Store::open(d.path(), cfg).unwrap();
     assert_eq!(store_digest(&s), want);
+}
+
+/// A compaction moves at most `MOVE_BUDGET` bytes of regions per commit:
+/// no commit copies the whole key map.
+#[test]
+fn compaction_is_spread_over_commits() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = small_cfg(false);
+    cfg.shard_bits = 6;
+    cfg.ckpt_bytes = u64::MAX;
+    let mut s = Store::create(d.path(), cfg.clone()).unwrap();
+    let mut seq = 0u64;
+    let mut migrating_commits = 0u64;
+    while s.stats().compactions < 1 {
+        seq += 1;
+        step(&mut s, seq);
+        if seq % 40 == 0 {
+            s.checkpoint().unwrap();
+        }
+        let cursor = s.reader().read(|v| v.counter(av2_store::layout::C_KM_CURSOR));
+        if cursor != 0 {
+            migrating_commits += 1;
+        }
+        assert!(seq < 6000, "no compaction after {seq} batches");
+    }
+    assert_eq!(store_digest(&s), model_digest(&model_at(seq)));
+    // 64 shards of a few KiB each fit one commit's budget; with the small
+    // threshold of the tests a compaction may still finish in one commit.
+    assert!(migrating_commits <= 64, "{migrating_commits}");
 }
 
 /// Pipelined commits: batch n+1 is computed (on an overlay that reads
