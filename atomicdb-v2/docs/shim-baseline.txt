@@ -1,0 +1,3 @@
+# Tests that pass on AtomicDB v2 through the shim (atomicdb/v2shim).
+# CI fails if one of them stops passing.  Regenerate with
+# atomicdb-v2/scripts/shim_report.py REPORT.json --update-baseline

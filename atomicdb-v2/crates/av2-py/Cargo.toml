@@ -1,0 +1,22 @@
+[package]
+name = "av2-py"
+description = "AtomicDB v2: Python extension (PyO3) exposing the in-memory graph and the ported entry points to v1's test suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "av2"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Off by default so `cargo test`/`clippy` link; scripts/build_av2_py.py turns it on.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+av2-model.workspace = true
+av2-shim = { path = "../av2-shim" }
+serde_json.workspace = true
+pyo3 = { version = "0.27", features = ["abi3-py39"] }
