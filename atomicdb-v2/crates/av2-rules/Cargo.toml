@@ -14,3 +14,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+# Tests only: av2-proof's optional bench feature depends on av2-tools,
+# which depends on this crate, so a normal dependency would be a cycle.
+av2-proof = { path = "../av2-proof" }

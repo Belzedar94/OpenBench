@@ -141,6 +141,7 @@ version = "0.1.0"
 dependencies = [
  "av2-facts",
  "av2-model",
+ "av2-proof",
  "proptest",
  "serde_json",
 ]
