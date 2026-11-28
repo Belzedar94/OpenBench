@@ -37,7 +37,8 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import ingest, logic, preferences, propagation_queue, score_bands
+from . import (ingest, logic, perf_events, preferences, propagation_queue,
+               score_bands)
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -423,9 +424,16 @@ def process_job(job):
         # transaccion revertida entera: el arbol no queda a medias y el
         # trabajo vuelve a la cola con backoff.
         exhausted = _mark_failure(job, error)
+        perf_events.event('job', job=job.pk, error=type(error).__name__,
+                          ms=round((time.monotonic() - started) * 1000, 2))
         return None, ('failed' if exhausted else 'retry')
+    elapsed = time.monotonic() - started
     logger.info('AtomicDB ingest job %s applied in %.3fs: %s',
-                job.pk, time.monotonic() - started, summary)
+                job.pk, elapsed, summary)
+    # One line per applied job for the v1 baseline (§ perf_events); a no-op
+    # unless ATOMICDB_PERF_DIR is set.
+    perf_events.event('job', job=job.pk, ms=round(elapsed * 1000, 2),
+                      deferred=summary.get('propagation') == 'deferred')
     return summary, None
 
 

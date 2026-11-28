@@ -1,0 +1,32 @@
+# AtomicDB v1 baseline sampler (docs/atomicdb/v2-plan.md, section 9).
+#
+#     sudo install -d -m 0755 /var/lib/atomicdb-perf
+#     sudo cp atomicdb-perf-sample.service atomicdb-perf-sample.timer /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now atomicdb-perf-sample.timer
+#
+# One run a minute, a fraction of a second of CPU, idle I/O class.  It reads
+# the perf events of the drainer and the ingest writers (drop-in
+# atomicdb-perf.conf below), the nginx timing log
+# (nginx-atomicdb-timing.conf), the cgroup files of the units and a handful
+# of cheap catalogue queries, and appends one JSON line to
+# /var/lib/atomicdb-perf/samples-YYYYMMDD.jsonl.
+#
+# Rollback: systemctl disable --now atomicdb-perf-sample.timer; nothing else
+# depends on it.
+
+[Unit]
+Description=AtomicDB v1 baseline sampler (one sample)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/openbench
+EnvironmentFile=/etc/openbench/atomicdb-pg.env
+Environment=ATOMICDB_PERF_DIR=/var/lib/atomicdb-perf
+ExecStart=/opt/openbench/.venv/bin/python /opt/openbench/Scripts/atomicdb_perf_sample.py
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=50
+MemoryMax=512M
