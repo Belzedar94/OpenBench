@@ -180,7 +180,8 @@ coverage arm or the drainer: they come with stage (a) and the queue model.
   changed)` is called at the end of every cascade (PN-8.1); `proofs::ProofCalls`
   wraps the batch's effect sink, collects the calls in order (plus
   `ProofCalls::landing` for PN-8.4) and the writer replays them after the
-  commit with `av2_proof::Proofs::after_batch(&committed, &calls, seq, now)`
+  commit (`Rules::after_commit`, see "The writer pipeline" below) with
+  `av2_proof::Proofs::after_batch(&committed, &calls, seq, now)`
   (gate-off numbers, `RefreshConfig::default()`).  `tests/proofs.rs`: a
   closure reaches the root's numbers; the property test
   `replay_after_commit_equals_inline` (200 cases) shows that replaying after
@@ -383,3 +384,58 @@ positions), so the D2 columns are not a paired comparison.  The slice has
 no FEN, witness lines or showcases (see the tool's header); the
 closure-workload count of climbs is lower because a pick that finds no
 open child is skipped.
+
+## The writer pipeline (`av2-server`, `--rules pipeline`)
+
+`crates/av2-server/src/pipeline.rs`, `PipelineRules`: what the single
+writer runs per batch, in input order, on the batch's overlay.
+
+- **A landing** (`PreparedLanding`: the position, its legal children with
+  their keys and FENs and terminal status, eval, best move, nodes, the task,
+  the analysis blob): EXP-2.7 a closed position changes nothing (the queue
+  still absorbs the task); otherwise the children are created (terminal
+  children born closed), the position is expanded and its numbers written
+  (EXP-1.1, EXP-2.2, EXP-2.6), the `SearchLanded` fact is logged, and the
+  position is climbed (`climb::climb`) with `V1Loops`, `BoardZeroing`, the
+  proof calls collected by `ProofCalls`, and the queue's quality arm as the
+  ascent's `TaskSink` (`av2_queue::QualityBuyer`, below).  Each closure is
+  then a queue `PositionClosed` (CAS-7.1) and the landing a queue `Landed`
+  (EXP-5.2); every queue change goes into the frame as a `queue.v1` fact,
+  the rules' events as facts too.
+- **A queue input** (lease, release, refill...): `QueueState::apply`, logged.
+- **After the commit**: `Rules::after_commit(committed, seq)` (new, with
+  `abandoned` for a failed commit) replays the batch's proof calls with
+  `Proofs::after_batch` under the shared proofs' write lock; the writer calls
+  it right after acknowledging, batches in the order they were computed.
+- **Stage (a) is a stand-in here**: `land()` takes prepared children as
+  given.  The real expansion (move generation, tablebases, mate-PV
+  verification) is `stage-a`'s (#360) and replaces it.
+- The purchase adapter: `av2_queue::quality` (Q-8.15).  Room = min(the
+  `quality` arm's hourly room, `QUALITY_QUEUE_CAP` minus its PENDING tasks);
+  a purchase is `get_or_create(child, visits)` with `multipv_for`, source
+  `FILL`, arm `quality`, or raises a smaller PENDING budget; the buyer's
+  deltas travel as one `Input::Purchases` fact per batch.
+
+### End-to-end benchmark (28-Nov)
+
+`av2-server --rules stub|pipeline --fsync-delay-ms 10` (prod's in-place log
+fsync measured 8-11 ms), fresh store on the C: NVMe, synthetic landings
+(20-38 children with FENs, a 1.2 kB analysis blob and the `SearchLanded`
+fact per landing, for both rule sets), 20 s per row, Windows 10, 5950X,
+release build:
+
+| Clients | Rules | Landings/s | Mean batch | Submit-to-visible mean | Compute per batch | Post-commit per batch |
+|---:|---|---:|---:|---:|---:|---:|
+| 128 | stub | 3,864 (1,706 in a run with a disk stall) | 64 | | | |
+| 128 | pipeline | **3,135** / 2,982 | 64 | ~41 ms | ~4 ms | ~1.9 ms |
+| 256 | stub | 4,589 | 128 | | | |
+| 256 | pipeline | **3,719** | 128 | 68.6 ms | 10.3 ms | 4.5 ms |
+| 512 | stub | 9,067 | 255 | | | |
+| 512 | pipeline | **5,662** | 255 | 89.9 ms | 22 ms | 9.7 ms |
+
+For reference, v1's writer on prod with 128 clients: 2,239 landings/s (batch
+64, mean 57 ms).  The C: disk is shared with other agents' runs, so the stub
+rows are noisy; the pipeline rows are the real rules on a young graph
+(shallow climbs), not the production slice.  The post-commit proof replay
+runs on the writer thread between commits; moving it to its own thread is
+the next lever if batches grow.

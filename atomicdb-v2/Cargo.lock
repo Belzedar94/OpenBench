@@ -153,6 +153,8 @@ version = "0.1.0"
 dependencies = [
  "av2-facts",
  "av2-model",
+ "av2-proof",
+ "av2-queue",
  "av2-rules",
  "av2-store",
  "tempfile",
