@@ -18,6 +18,9 @@ cargo fmt --all --check
 cargo build --release -p atomicdb-v2-bench   # the bench: needs libclang, see bench/README.md
 ```
 
+Docs: `docs/store.md` (storage design, protocol, measurements). Export SQL
+for the loader: `sql/export.sql`. Power-cut test (Linux): `scripts/powercut/`.
+
 Builds on this tower: keep to `-j 12` (an OpenBench worker uses 8 threads).
 
 Rules for code in this workspace:

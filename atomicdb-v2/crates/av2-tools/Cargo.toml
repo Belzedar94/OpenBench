@@ -1,0 +1,20 @@
+[package]
+name = "av2-tools"
+description = "AtomicDB v2 tools: loader from a Postgres export, checker, replay, crash test, performance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+av2-model.workspace = true
+av2-facts.workspace = true
+av2-store.workspace = true
+av2-rules.workspace = true
+csv.workspace = true
+serde_json.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
