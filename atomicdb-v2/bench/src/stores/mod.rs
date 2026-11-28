@@ -1,8 +1,11 @@
 pub mod fjalls;
+#[cfg(feature = "cstores")]
 pub mod lmdb;
 pub mod mem;
 pub mod mmapcol;
 pub mod pg;
 pub mod redbs;
+#[cfg(feature = "cstores")]
 pub mod rocks;
+#[cfg(feature = "cstores")]
 pub mod sqlite;
