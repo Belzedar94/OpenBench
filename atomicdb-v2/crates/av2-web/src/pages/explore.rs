@@ -13,7 +13,7 @@
 
 use super::{Page, json_script};
 use crate::format::*;
-use crate::islands::board::Board;
+use crate::islands::board::{Board, BoardData};
 use crate::islands::request::{RequestProps, RequestRow};
 use crate::pages::shell::{Meta, play_param};
 use crate::read::*;
@@ -517,15 +517,21 @@ fn render_inner(e: ExplorerView, route: &[String]) -> Page {
         view! { {tree}{off} }.into_any()
     };
 
-    let legal: Vec<String> = e.legal.iter().map(|m| m.uci.clone()).collect();
+    let board_props = BoardData {
+        key: p.key.clone(),
+        fen: p.fen.clone(),
+        turn: (if white { "white" } else { "black" }).to_string(),
+        best_move: p.best_move.clone().unwrap_or_default(),
+        play: route_str.clone(),
+        legal: e.legal.iter().map(|m| m.uci.clone()).collect(),
+    };
     let body = view! {
         {(!e.line.is_empty()).then(|| line_box(&e))}
         {opening_line(&e)}
         {pos_tools(&e, &play)}
         <div class="cols" style="column-gap:1.1rem">
             <div class="board-col">
-                <Board key=p.key.clone() fen=p.fen.clone() turn=(if white { "white" } else { "black" }).to_string()
-                    best_move=p.best_move.clone().unwrap_or_default() play=route_str.clone() legal=legal/>
+                <Board props=board_props/>
                 <noscript><p class="dim">"Enable JavaScript for the interactive board; legal moves remain available in the move table."</p></noscript>
                 {request}
                 {open.then(|| view! { <p class="dim" id="cascade" style="font-size:.8rem;margin:.45rem 0 0" hidden=true></p> })}
@@ -579,6 +585,6 @@ fn render_inner(e: ExplorerView, route: &[String]) -> Page {
         },
         main_class: "",
         body: body.to_html(),
-        scripts: vec!["explore.js"],
+        scripts: vec!["explore.js", "explore-nav.js"],
     }
 }

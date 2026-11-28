@@ -5,10 +5,15 @@
 //! (`server.rs`); a page is a pure function of what `SiteRead` returns, so
 //! two renders at the same epoch are byte-identical and share one `ETag`.
 
+pub mod backlog;
 pub mod contributors;
+pub mod docs;
 pub mod explore;
+pub mod feeds;
+pub mod home;
 pub mod map;
 pub mod queue;
+pub mod root_chart;
 pub mod roots;
 pub mod shell;
 

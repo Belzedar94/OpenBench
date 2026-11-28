@@ -54,13 +54,15 @@ pub struct User {
 #[derive(Clone, Debug, Default)]
 pub struct Identity {
     pub user: Option<User>,
+    /// The account's notices (bell), when signed in.
+    pub notices: Option<crate::read::Notices>,
     /// v1 `identity_next`: the request path, quoted.
     pub next: String,
 }
 
 impl Identity {
     pub fn anonymous(path_and_query: &str) -> Identity {
-        Identity { user: None, next: quote_path(path_and_query) }
+        Identity { user: None, notices: None, next: quote_path(path_and_query) }
     }
 }
 
@@ -320,18 +322,22 @@ const FOOTER: &str = r##"<footer>AtomicDB, a practical solving effort for Atomic
   // accepts the raw secret of the csrftoken cookie as the form token, so it
   // is filled in here; a visitor without the cookie gets one minted the way
   // Django mints it (32 characters of [A-Za-z0-9]).
-  try {
-    var m = document.cookie.match(/(?:^|; )csrftoken=([A-Za-z0-9]{32}|[A-Za-z0-9]{64})(?:;|$)/);
-    var token = m ? m[1] : "";
-    if (!token) {
-      var abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      var bytes = new Uint8Array(32);
-      window.crypto.getRandomValues(bytes);
-      for (var i = 0; i < 32; i++) token += abc[bytes[i] % 62];
-      document.cookie = "csrftoken=" + token + "; path=/; max-age=31449600; samesite=lax";
-    }
-    Array.prototype.forEach.call(document.querySelectorAll("input[name=csrfmiddlewaretoken]"), function (f) { f.value = token; });
-  } catch (_error) {}
+  // Also run again after an in-place navigation (explore-nav.js).
+  window.atomicdbCsrf = function () {
+    try {
+      var m = document.cookie.match(/(?:^|; )csrftoken=([A-Za-z0-9]{32}|[A-Za-z0-9]{64})(?:;|$)/);
+      var token = m ? m[1] : "";
+      if (!token) {
+        var abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        var bytes = new Uint8Array(32);
+        window.crypto.getRandomValues(bytes);
+        for (var i = 0; i < 32; i++) token += abc[bytes[i] % 62];
+        document.cookie = "csrftoken=" + token + "; path=/; max-age=31449600; samesite=lax";
+      }
+      Array.prototype.forEach.call(document.querySelectorAll("input[name=csrfmiddlewaretoken]"), function (f) { f.value = token; });
+    } catch (_error) {}
+  };
+  window.atomicdbCsrf();
 }());
 </script>
 "##;
@@ -377,9 +383,14 @@ pub fn identity_zone(id: &Identity) -> String {
     let mut s = String::with_capacity(SETTINGS_START.len() + 2048);
     match &id.user {
         Some(u) => {
-            // The bell's list (v1 RequestNotification) is not ported yet: the
-            // bell links to the v1 notifications page.
-            s.push_str(r#"    <div class="bell-wrap" id="bell-wrap">
+            // The bell (v1 base.html): the account's latest notices, read or
+            // not, and the unseen count on the badge (99+ above 99).
+            let notices = id.notices.clone().unwrap_or_default();
+            let unseen = notices.unseen;
+            let quiet = if unseen > 0 { format!("Analyses you asked for, {unseen} new") } else { "Analyses you asked for".into() };
+            let badge = if unseen > 99 { "99+".to_string() } else { unseen.to_string() };
+            s.push_str(&format!(
+                r#"    <div class="bell-wrap" id="bell-wrap">
       <a class="bell" id="bell" href="/atomicdb/notifications/"
         aria-haspopup="true" aria-expanded="false" aria-controls="bell-panel"
         title="Analyses you asked for">
@@ -387,19 +398,40 @@ pub fn identity_zone(id: &Identity) -> String {
           <path d="M18 15.4V10a6 6 0 1 0-12 0v5.4l-1.5 2.1h15z"></path>
           <path d="M9.8 20.4a2.4 2.4 0 0 0 4.4 0"></path>
         </svg>
-        <span class="visually-hidden" data-quiet="Analyses you asked for">Analyses you asked for</span>
-      </a>
-      <div class="bell-panel" id="bell-panel" hidden>
-        <div class="bell-panel-head"><span title="The latest results, read or not. The badge on the bell counts only the unread ones, so the two numbers can differ">Analyses you asked for</span>
-        </div>
-        <ul class="bell-list">
-          <li class="bell-empty">Nothing yet. Ask for an analysis from any
-            position and it lands here when a worker serves it.</li>
-        </ul>
-        <a class="bell-all" href="/atomicdb/notifications/">See all</a>
-      </div>
-    </div>
-"#);
+        <span class="visually-hidden" data-quiet="Analyses you asked for">{quiet}</span>
+"#
+            ));
+            if unseen > 0 {
+                s.push_str(&format!(
+                    "        <span class=\"bell-badge\" aria-hidden=\"true\" title=\"{unseen} unread result{}\">{badge}</span>\n",
+                    if unseen == 1 { "" } else { "s" }
+                ));
+            }
+            s.push_str("      </a>\n      <div class=\"bell-panel\" id=\"bell-panel\" hidden>\n        <div class=\"bell-panel-head\"><span title=\"The latest results, read or not. The badge on the bell counts only the unread ones, so the two numbers can differ\">Analyses you asked for</span>\n");
+            if unseen > 0 {
+                s.push_str(&format!(
+                    "          <form class=\"bell-markall\" method=\"post\" action=\"/atomicdb/notifications/\"><input type=\"hidden\" name=\"csrfmiddlewaretoken\" value=\"\">\n            <input type=\"hidden\" name=\"back\" value=\"{}\">\n            <button type=\"submit\">Mark all read</button>\n          </form>\n",
+                    esc(&id.next)
+                ));
+            }
+            s.push_str("        </div>\n        <ul class=\"bell-list\">\n");
+            if notices.rows.is_empty() {
+                s.push_str("          <li class=\"bell-empty\">Nothing yet. Ask for an analysis from any\n            position and it lands here when a worker serves it.</li>\n");
+            }
+            for n in &notices.rows {
+                let play = if n.play.is_empty() { String::new() } else { format!("?play={}", query_value(&n.play)) };
+                s.push_str(&format!(
+                    "          <li class=\"bell-item{}\">\n            <a href=\"/atomicdb/explore/{}/{play}\" title=\"{}\">\n              <span class=\"bell-line\">Your analysis of <b>{}</b> is ready</span>\n              <span class=\"bell-when\">{}</span>\n            </a>\n          </li>\n",
+                    if n.seen { "" } else { " unseen" },
+                    esc(&n.key),
+                    esc(&n.full),
+                    esc(&n.san),
+                    esc(&n.ago)
+                ));
+            }
+            s.push_str(
+                "        </ul>\n        <a class=\"bell-all\" href=\"/atomicdb/notifications/\">See all</a>\n      </div>\n    </div>\n",
+            );
             s.push_str(&format!(
                 "    <a class=\"identity-user\" href=\"/atomicdb/me/\"\n      title=\"Your AtomicDB contributions\">{}</a>\n    <a class=\"identity-link\" href=\"/logout/?next={}\">Sign out</a>\n",
                 esc(&u.username),
@@ -475,7 +507,7 @@ mod tests {
         let anon = identity_zone(&Identity::anonymous("/atomicdb/roots/?sort=name"));
         assert!(anon.contains("/login/?next=/atomicdb/roots/%3Fsort%3Dname"));
         assert!(!anon.contains("Account settings"));
-        let user = Identity { user: Some(User { id: 1, username: "a<b".into(), is_staff: false }), next: "/x/".into() };
+        let user = Identity { user: Some(User { id: 1, username: "a<b".into(), is_staff: false }), notices: None, next: "/x/".into() };
         let z = identity_zone(&user);
         assert!(z.contains("a&lt;b") && z.contains("Account settings") && z.contains("Sign out"));
     }

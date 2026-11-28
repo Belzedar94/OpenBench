@@ -1,0 +1,260 @@
+{
+ "counters_at": "2026-11-28 07:00",
+ "total": 207200000,
+ "closed": 51000000,
+ "nodes": 805380000000000,
+ "analyses": 6400000,
+ "requested": 11563,
+ "workers": 274,
+ "cores": 288,
+ "nps": 387800000,
+ "positions_pm": 167,
+ "root_pn": 142,
+ "root_dn": 4176,
+ "campaign_cards": [
+  {
+   "root_key": "d67fbcc3d1d1ba8e5ac46e16c2e88ff850de217fa16021a4c1b46572cef6be19",
+   "title": "Should be easiest proof for nf3 e5",
+   "line_shown": "1. Nf3 e5 2. e4",
+   "votes": 18,
+   "explored": 4991,
+   "total": 65347,
+   "resolved": 5901,
+   "solved_pct": 9.0,
+   "proposed_by": "quasa"
+  }
+ ],
+ "progress": {
+  "solved_first": 0,
+  "n_first": 20,
+  "solved_pct": 24.6,
+  "closed_24h": 1700000,
+  "nodes_24h": 31110000000000
+ },
+ "health": {
+  "dn_median": 69,
+  "and_nodes": 213,
+  "thin": 46,
+  "thin_pct": 21.6,
+  "dn_floor": 2,
+  "saturated": 0,
+  "human_close": "2.9h",
+  "human_close_samples": 247,
+  "at": "2026-11-28 07:00"
+ },
+ "attribution": {
+  "stamped_24h": 1677719,
+  "total_24h": 1677719,
+  "rows_24h": [
+   {
+    "source": "USER",
+    "pct": 99.5,
+    "count": 1669576
+   },
+   {
+    "source": "FILL",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "AUTO",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "SOLVE",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "NONE",
+    "pct": 0.5,
+    "count": 8143
+   }
+  ],
+  "stamped_7d": 17901949,
+  "total_7d": 17901949,
+  "rows_7d": [
+   {
+    "source": "USER",
+    "pct": 99.9,
+    "count": 17876441
+   },
+   {
+    "source": "FILL",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "AUTO",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "SOLVE",
+    "pct": 0.0,
+    "count": 0
+   },
+   {
+    "source": "NONE",
+    "pct": 0.1,
+    "count": 25508
+   }
+  ]
+ },
+ "analyzing": [
+  {
+   "key": "38748898adf32c16eb2f1f691f8c265f3424d6b8471022db66e6a9f144e25541",
+   "play": "",
+   "full": "1. Nf3 d6 2. Ng5 f5 3. e3 Qd7 4. Nf7 Qb5 5. Bxb5 c6 6. e4 Nd7 7. d4 e6 8. Nxh8 h5 9. Bg5 g6 10. c4 a5 11. O-O Nb8 12. a3 Bg7 13. e5 Na6 14. h4 Nb4",
+   "san": "1. Nf3 d6 2. Ng5 f5 … Bg7 13. e5 Na6 14. h4 Nb4",
+   "source": "USER",
+   "opening": "Villager Defense, Knight Attack By Sea",
+   "budget": 512000000,
+   "machine": "BManBJ-Blake-atomicdb#0"
+  },
+  {
+   "key": "d60abd48e2418aa6253274d6ab6dd3771d8ed41186ec6704167ea7fbb2b0c05f",
+   "play": "",
+   "full": "1. Nf3 d6 2. Ng5 f5 3. e3 Qd7 4. Nf7 Qb5 5. Bxb5 c6 6. e4 Nd7 7. d4 e6 8. Nxh8 h5 9. Bg5 g6 10. c4 a5 11. O-O Nb8 12. a3 Bg7 13. e5 Na6 14. h4 b6",
+   "san": "1. Nf3 d6 2. Ng5 f5 … Bg7 13. e5 Na6 14. h4 b6",
+   "source": "USER",
+   "opening": "Villager Defense, Knight Attack By Sea",
+   "budget": 512000000,
+   "machine": "BManBJ-Blake-atomicdb#1"
+  },
+  {
+   "key": "ca2f9e7f9ce8ea15a60350e9f08106c95f006b2c50619e5c7ddcd4bb350f73fe",
+   "play": "",
+   "full": "1. Nf3 d6 2. Ng5 f5 3. e3 Qd7 4. Nf7 Qb5 5. Bxb5 c6 6. e4 Nd7 7. d4 e6 8. Nxh8 h5 9. Bg5 g6 10. c4 a5 11. O-O Nb8 12. a3 Bg7 13. e5 Na6 14. h4 Kf8",
+   "san": "1. Nf3 d6 2. Ng5 f5 … Bg7 13. e5 Na6 14. h4 Kf8",
+   "source": "USER",
+   "opening": "Villager Defense, Knight Attack By Sea",
+   "budget": 512000000,
+   "machine": "BManBJ-Blake-atomicdb#10"
+  },
+  {
+   "key": "b0850e1837db7b39fbd2519a47a953bebc625acac7a2e155e65b218d2f206f7e",
+   "play": "",
+   "full": "1. Nf3 d6 2. Ng5 f5 3. Nf7 Qd7 4. e4 h5 5. Bb5 Qxb5 6. d4 g6 7. Nxh8 Bd7 8. e5 Bb5 9. Bh6 Bg7 10. c4 Ba4 11. b3 h4 12. a3 Kd8",
+   "san": "1. Nf3 d6 2. Ng5 f5 … Ba4 11. b3 h4 12. a3 Kd8",
+   "source": "USER",
+   "opening": "Villager Defense, Knight Attack By Sea: Bremerhaven Variation",
+   "budget": 512000000,
+   "machine": "BManBJ-Blake-atomicdb#11"
+  },
+  {
+   "key": "5e5bb59ea70119d47e705e96dab05b3461ee7f4c0394d558b2c99eae8d2db18b",
+   "play": "",
+   "full": "1. Nf3 d6 2. Ng5 f5 3. e3 Qd7 4. Nf7 Qb5 5. Bxb5 c6 6. e4 Nd7 7. d4 e6 8. Nxh8 h5 9. Bg5 g6 10. c4 a5 11. O-O Nb8 12. a3 Bg7 13. e5 Na6 14. h4 Kf7",
+   "san": "1. Nf3 d6 2. Ng5 f5 … Bg7 13. e5 Na6 14. h4 Kf7",
+   "source": "USER",
+   "opening": "Villager Defense, Knight Attack By Sea",
+   "budget": 512000000,
+   "machine": "BManBJ-Blake-atomicdb#2"
+  }
+ ],
+ "upnext": [
+  {
+   "key": "dfa5d13b960f05f023e5ab72f031af534fc5c2d725a70aeb51969f4dc8c5ba5c",
+   "play": "",
+   "full": "deep line, ply ≥35 · … h4 Kf7 Kh1 Bd5",
+   "san": "deep line, ply ≥35 · … h4 Kf7 Kh1 Bd5",
+   "source": null,
+   "opening": null,
+   "budget": null,
+   "machine": null
+  },
+  {
+   "key": "1521e88201c48a50c7cc8125250410b932bb4bf5b767de50b9054c9a3272571e",
+   "play": "",
+   "full": "deep line, ply ≥35 · … Ke5 a5 Kf4 c8=B",
+   "san": "deep line, ply ≥35 · … Ke5 a5 Kf4 c8=B",
+   "source": null,
+   "opening": null,
+   "budget": null,
+   "machine": null
+  },
+  {
+   "key": "df0c0bfe9ed93370ac4e851ec5faa3f1794f031b99ec6777031f8bbdd489b6f6",
+   "play": "",
+   "full": "deep line, ply ≥42 · … Bxd3 a6 d3 Kg2",
+   "san": "deep line, ply ≥42 · … Bxd3 a6 d3 Kg2",
+   "source": null,
+   "opening": null,
+   "budget": null,
+   "machine": null
+  },
+  {
+   "key": "8f8dc2c1df1b9e678772bc27ccdcc6d658de38e86f7f96ea6f6cb89608073735",
+   "play": "",
+   "full": "deep line, ply ≥41 · … Kf7 Bd7 Kg6 a6",
+   "san": "deep line, ply ≥41 · … Kf7 Bd7 Kg6 a6",
+   "source": null,
+   "opening": null,
+   "budget": null,
+   "machine": null
+  },
+  {
+   "key": "0d8caddc6ac05754e467ebf58b87de9eca133f3ba424de026c93060419f00cfc",
+   "play": "",
+   "full": "deep line, ply ≥38 · … Ba6 Be6 Kg7 Kg1",
+   "san": "deep line, ply ≥38 · … Ba6 Be6 Kg7 Kg1",
+   "source": null,
+   "opening": null,
+   "budget": null,
+   "machine": null
+  }
+ ],
+ "campaigns_proposed": [
+  {
+   "id": 2,
+   "root_key": "025e0b7321202fe56334280db7e4c4582fe2408a61ee8871c4250b169402cf82",
+   "title": "exd5 idea op, might be easier solve than 2N somehow",
+   "line_shown": "1. Nf3 f6 2. e4",
+   "proposed_by": "Wolfram",
+   "votes": 8
+  },
+  {
+   "id": 8,
+   "root_key": "414da5b0537f0ed75001fc1a266fba995ec2d250c6ea0345fd3c4f6ddb7d42d4",
+   "title": "Is Nh3 h6 e3 e6 Nc3 a draw?",
+   "line_shown": "1. Nh3 e6 2. e3 h6 3. Nc3",
+   "proposed_by": "soothdest",
+   "votes": 7
+  },
+  {
+   "id": 1,
+   "root_key": "7e3479415bd3cd412c939e5d862ea7bc8282c61497e0946fa85a953577ae51e1",
+   "title": "Pls nh4 is more solvable than c3",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 4. Nb5 cxb5 5. Bb5 Nc6 6. d4 g6 7. Nh4",
+   "proposed_by": "67king",
+   "votes": 6
+  },
+  {
+   "id": 12,
+   "root_key": "d81709eb2b95e240676295161c23b365840b3f6e6b25c02b6703329f6fc0f5f0",
+   "title": "The weaker of the two f-pawn advances for 1. ...d6",
+   "line_shown": "1. Nf3 d6 2. Ng5 f5 3. Nf7 Qd7 4. e4",
+   "proposed_by": "MoNiKaMaDnEsS",
+   "votes": 5
+  },
+  {
+   "id": 7,
+   "root_key": "bef3e10f91b3b3fa1c38801038c9e95a4d128027c57396cff0bfee5edec42b02",
+   "title": "While this is no mate eval, no chances to solve atomic?",
+   "line_shown": "1. Nf3 f6 2. Nc3 Nc6",
+   "proposed_by": "wolfie",
+   "votes": 5
+  },
+  {
+   "id": 27,
+   "root_key": "67dfc5a4f3caf9afabd3e61f191dabc7c76705ab98b37cc5b844157e245a543f",
+   "title": "Let's solve the 2N Nh6, exf5 mainline with quasa and eclipsia",
+   "line_shown": "1. Nc3 f5 2. Nf3 e5 3. Ng5 Bb4 4. g4 Nh6 5. d4 c6 6. e4 fxe4 7. h4 d5 8. Qe2 Nxg4 9. f3 Bg4 10. Bh3",
+   "proposed_by": "soothdest",
+   "votes": 3
+  }
+ ],
+ "campaigns_proposed_total": 7
+}

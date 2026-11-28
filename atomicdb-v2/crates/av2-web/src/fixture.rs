@@ -83,6 +83,8 @@ struct FxRoots {
 #[derive(Deserialize)]
 struct FxQueue {
     rows: Vec<QueueRow>,
+    #[serde(default)]
+    backlog: Vec<BacklogRow>,
     fleet_nodes_last_hour: u64,
 }
 
@@ -101,6 +103,33 @@ struct FxSite {
 pub const EXPLORER_JSON: &str = include_str!("../fixtures/explorer.json");
 pub const ROOTS_JSON: &str = include_str!("../fixtures/roots.json");
 pub const SITE_JSON: &str = include_str!("../fixtures/site.json");
+pub const HOME_JSON: &str = include_str!("../fixtures/home.json");
+pub const ROOTS_EXTRA_JSON: &str = include_str!("../fixtures/roots_extra.json");
+pub const MISC_JSON: &str = include_str!("../fixtures/misc.json");
+
+#[derive(Deserialize)]
+struct FxMisc {
+    milestones: Vec<Milestone>,
+    campaigns: Vec<CampaignRow>,
+}
+
+#[derive(Deserialize)]
+struct FxMainLine {
+    value: Option<i32>,
+    plies: u32,
+    end_text: Option<String>,
+    at: String,
+    san: String,
+    end_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FxRootsExtra {
+    main_line: Option<FxMainLine>,
+    #[serde(default)]
+    history: Vec<HistoryDay>,
+    chart: Option<RootChartData>,
+}
 
 /// The request ladder of v1 (`ingest.REQUEST_LADDER`), for the fixture's
 /// "Request <next rung>" label.
@@ -112,6 +141,9 @@ pub struct FixtureSite {
     parents: HashMap<String, Vec<ParentLink>>,
     roots: FxRoots,
     site: FxSite,
+    home: HomeView,
+    roots_extra: FxRootsExtra,
+    misc: FxMisc,
     epoch: AtomicU64,
 }
 
@@ -135,6 +167,9 @@ impl FixtureSite {
             parents,
             roots: serde_json::from_str(roots)?,
             site: serde_json::from_str(site)?,
+            home: serde_json::from_str(HOME_JSON)?,
+            roots_extra: serde_json::from_str(ROOTS_EXTRA_JSON)?,
+            misc: serde_json::from_str(MISC_JSON)?,
             epoch: AtomicU64::new(1),
         })
     }
@@ -292,15 +327,27 @@ impl SiteRead for FixtureSite {
             since: self.roots.since.clone(),
             positions: self.roots.positions.clone(),
             openings: self.roots.openings.clone(),
-            main_line: None,
-            max_plies: 60,
-            name_min_votes: 5,
+            main_line: self.roots_extra.main_line.as_ref().map(|m| MainLine {
+                value: m.value,
+                status: Some(Status::Unknown),
+                plies: m.plies,
+                san: m.san.clone(),
+                end_text: m.end_text.clone(),
+                end_key: m.end_key.clone(),
+                at: m.at.clone(),
+            }),
+            chart: self.roots_extra.chart.clone(),
+            history: self.roots_extra.history.clone(),
+            history_days: 30,
+            max_plies: 120,
+            name_min_votes: 4,
         }
     }
 
     fn queue(&self) -> QueueView {
         QueueView {
             rows: self.site.queue.rows.clone(),
+            backlog: self.site.queue.backlog.clone(),
             ingest_pending: 0,
             ingest_oldest_seconds: None,
             propagation_backlog: 0,
@@ -326,6 +373,36 @@ impl SiteRead for FixtureSite {
             closed_24h: 0,
             workers: 0,
             cores: 0,
+        }
+    }
+
+    fn home(&self) -> HomeView {
+        self.home.clone()
+    }
+
+    fn milestones(&self) -> Vec<Milestone> {
+        self.misc.milestones.clone()
+    }
+
+    fn campaigns(&self) -> Vec<CampaignRow> {
+        self.misc.campaigns.clone()
+    }
+
+    /// The fixture has no accounts' notices: one sample, so the bell and
+    /// the page have something to show.
+    fn notices(&self, _user_id: i64) -> Notices {
+        let root = self.root.clone();
+        let nf3 = self.positions.get(&root).and_then(|p| p.moves.first()).map(|m| m.key.clone()).unwrap_or_default();
+        Notices {
+            unseen: 1,
+            rows: vec![Notice {
+                key: nf3,
+                play: "g1f3".into(),
+                san: "1. Nf3".into(),
+                full: "1. Nf3".into(),
+                ago: "3\u{a0}minutes ago".into(),
+                seen: false,
+            }],
         }
     }
 

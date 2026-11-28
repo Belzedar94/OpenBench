@@ -24,12 +24,13 @@
 //!
 //! Everything under the site root's `static/` is loaded into memory at start
 //! with its `.br`/`.gz` siblings (written by `av2-web assemble`), served with
-//! a strong `ETag`; a `?v=` URL is immutable for a year.
+//! a strong `ETag`; a `?v=` URL is immutable for a year, anything else
+//! revalidates (`no-cache`).
 
 use crate::auth::{Sessions, cookie};
 use crate::pages::{
     self, Page,
-    shell::{Assets, Identity, Rendered},
+    shell::{Assets, Identity, Rendered, User},
 };
 use crate::read::{PageKind, SiteRead};
 use axum::body::{Body, Bytes};
@@ -39,16 +40,20 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-/// One cached page.
+/// One cached response: a page (HTML, with the identity zone spliced per
+/// visitor) or the JSON of an in-place navigation.
 pub struct Cached {
     version: u64,
-    rendered: Rendered,
+    built: Instant,
+    rendered: Option<Rendered>,
     status: StatusCode,
+    ctype: &'static str,
     etag: String,
     raw: Bytes,
     br: Bytes,
@@ -58,16 +63,20 @@ pub struct Cached {
 #[derive(Default)]
 pub struct PageCache {
     map: RwLock<HashMap<String, Arc<Cached>>>,
+    rebuilding: Mutex<HashSet<String>>,
 }
 
 /// Entries kept before the cache is emptied (crude but bounded; explorer
 /// URLs carry routes, so the key space is open).
 const CACHE_MAX: usize = 20_000;
 
+/// How long an outdated copy of a slow page may be served while one thread
+/// rebuilds it (v1 `page_cache.stale_while_revalidate`: 600 s).
+const STALE_MAX: Duration = Duration::from_secs(600);
+
 impl PageCache {
-    fn get(&self, key: &str, version: u64) -> Option<Arc<Cached>> {
-        let m = self.map.read().ok()?;
-        m.get(key).filter(|c| c.version == version).cloned()
+    fn get(&self, key: &str) -> Option<Arc<Cached>> {
+        self.map.read().ok()?.get(key).cloned()
     }
     fn put(&self, key: String, c: Arc<Cached>) {
         if let Ok(mut m) = self.map.write() {
@@ -82,6 +91,10 @@ impl PageCache {
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Background rebuilds in flight.
+    pub fn rebuilding(&self) -> usize {
+        self.rebuilding.lock().map(|r| r.len()).unwrap_or(0)
     }
 }
 
@@ -148,6 +161,49 @@ fn if_none_match(h: &HeaderMap, etag: &str) -> bool {
 
 // ---------------------------------------------------------------- pages
 
+/// A request as the renderers see it: owned, so a rebuild can run on another
+/// thread after the request is answered.
+#[derive(Clone, Debug)]
+pub struct Req {
+    /// Path and query of the page (for a navigation JSON: of the page it
+    /// navigates to).
+    pub path: String,
+    pub query: HashMap<String, String>,
+    /// Path parameters in order (`<key>`, `<username>`...).
+    pub params: Vec<String>,
+    /// The visitor, for the few pages that differ by account (their cache
+    /// key carries the account id).
+    pub user: Option<User>,
+}
+
+impl Req {
+    pub fn param(&self, i: usize) -> &str {
+        self.params.get(i).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// What a route renders.
+pub type RenderFn = fn(&AppState, &Req) -> (Page, StatusCode);
+
+/// The two representations of a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Output {
+    Html,
+    /// `{url, title, description, canonical, main}` for explore-nav.js.
+    Nav,
+}
+
+/// How a route is cached.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Policy {
+    /// Render inline on a version change (cheap pages).
+    Fresh,
+    /// Serve the outdated copy and rebuild in the background (slow pages).
+    StaleWhileRevalidate,
+    /// The page differs by account: one cache entry per account.
+    PerAccount,
+}
+
 fn identity(state: &AppState, h: &HeaderMap, uri: &Uri) -> Identity {
     let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let mut id = Identity::anonymous(path);
@@ -155,20 +211,48 @@ fn identity(state: &AppState, h: &HeaderMap, uri: &Uri) -> Identity {
         && let Some(s) = cookie(c, "sessionid")
     {
         id.user = state.sessions.user(s);
+        id.notices = id.user.as_ref().map(|u| state.site.notices(u.id));
     }
     id
 }
 
-/// Render `page` and assemble its anonymous variant for `path` (the sign-in
-/// links carry the path, which is the cache key, so the anonymous body is
-/// the same for every anonymous visitor of that URL).
-fn build(state: &AppState, page: Page, version: u64, status: StatusCode, path: &str) -> Cached {
-    let rendered = pages::finish(page, &state.assets);
-    let raw = rendered.with_identity(&Identity::anonymous(path));
+#[derive(serde::Serialize)]
+struct NavJson<'a> {
+    url: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    canonical: Option<&'a str>,
+    main: &'a str,
+}
+
+/// Render `page` into a cache entry.  HTML: the anonymous variant is
+/// assembled for `path` (the sign-in links carry it, and the path is the
+/// cache key, so it is the same for every anonymous visitor of that URL).
+fn build(state: &AppState, page: Page, version: u64, status: StatusCode, path: &str, out: Output) -> Cached {
+    let (rendered, raw, ctype) = match out {
+        Output::Html => {
+            let rendered = pages::finish(page, &state.assets);
+            let raw = rendered.with_identity(&Identity::anonymous(path));
+            (Some(rendered), raw, "text/html; charset=utf-8")
+        }
+        Output::Nav => {
+            let json = serde_json::to_string(&NavJson {
+                url: path,
+                title: &page.meta.title,
+                description: page.meta.description.as_deref(),
+                canonical: page.meta.canonical.as_deref(),
+                main: &page.body,
+            })
+            .unwrap_or_default();
+            (None, json, "application/json")
+        }
+    };
     let hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
     Cached {
         version,
+        built: Instant::now(),
         status,
+        ctype,
         etag: format!("\"{version:x}-{hash:016x}\""),
         br: Bytes::from(brotli(raw.as_bytes(), 5)),
         gz: Bytes::from(gzip(raw.as_bytes(), 6)),
@@ -178,30 +262,30 @@ fn build(state: &AppState, page: Page, version: u64, status: StatusCode, path: &
 }
 
 fn respond(state: &AppState, h: &HeaderMap, uri: &Uri, c: &Cached, started: Instant) -> Response<Body> {
-    let id = identity(state, h, uri);
+    let id = if c.rendered.is_some() { identity(state, h, uri) } else { Identity::default() };
     let enc = negotiate(h);
     let mut b = Response::builder()
         .status(c.status)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::VARY, "Accept-Encoding, Cookie")
+        .header(header::CONTENT_TYPE, c.ctype)
+        .header(header::VARY, if c.rendered.is_some() { "Accept-Encoding, Cookie" } else { "Accept-Encoding" })
         .header("X-Content-Type-Options", "nosniff")
         .header("X-Frame-Options", "DENY");
-    let (etag, body, used) = match &id.user {
-        None => {
+    let (etag, body, used) = match (&id.user, &c.rendered) {
+        (Some(u), Some(rendered)) => {
+            let s = rendered.with_identity(&id);
+            let etag = format!("{}-u{}\"", c.etag.trim_end_matches('"'), u.id);
+            match enc {
+                Enc::Identity => (etag, Bytes::from(s), Enc::Identity),
+                _ => (etag, Bytes::from(gzip(s.as_bytes(), 1)), Enc::Gz),
+            }
+        }
+        _ => {
             let (bytes, used) = match enc {
                 Enc::Br => (c.br.clone(), Enc::Br),
                 Enc::Gz => (c.gz.clone(), Enc::Gz),
                 Enc::Identity => (c.raw.clone(), Enc::Identity),
             };
             (c.etag.clone(), bytes, used)
-        }
-        Some(u) => {
-            let s = c.rendered.with_identity(&id);
-            let etag = format!("{}-u{}\"", c.etag.trim_end_matches('"'), u.id);
-            match enc {
-                Enc::Identity => (etag, Bytes::from(s), Enc::Identity),
-                _ => (etag, Bytes::from(gzip(s.as_bytes(), 1)), Enc::Gz),
-            }
         }
     };
     b = b
@@ -217,28 +301,69 @@ fn respond(state: &AppState, h: &HeaderMap, uri: &Uri, c: &Cached, started: Inst
     b.header("Server-Timing", format!("app;dur={:.3}", us as f64 / 1000.0)).body(Body::from(body)).unwrap_or_default()
 }
 
-/// Serve a page from the cache, rendering it on a miss.
-fn page(
-    state: &AppState,
-    h: &HeaderMap,
-    uri: &Uri,
-    kind: PageKind,
-    key: Option<&str>,
-    render: impl FnOnce() -> (Page, StatusCode),
-) -> Response<Body> {
+/// Everything a cached route needs.
+pub struct Route {
+    pub kind: PageKind,
+    pub render: RenderFn,
+    pub output: Output,
+    pub policy: Policy,
+}
+
+/// Serve a route from the cache: a hit at the current page version is a
+/// lookup; a slow page with an outdated copy is served stale while one
+/// background thread rebuilds it; anything else renders inline.
+fn serve(state: &Shared, h: &HeaderMap, uri: &Uri, route: Route, req: Req) -> Response<Body> {
     let started = Instant::now();
-    let version = state.site.page_version(kind, key);
-    let ckey = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
-    let cached = match state.cache.get(&ckey, version) {
-        Some(c) => c,
-        None => {
-            let (p, status) = render();
-            let c = Arc::new(build(state, p, version, status, &ckey));
-            state.cache.put(ckey, c.clone());
-            c
+    let key = req.params.first().map(String::as_str);
+    let version = state.site.page_version(route.kind, key);
+    let mut ckey = match route.output {
+        Output::Html => req.path.clone(),
+        Output::Nav => format!("nav:{}", req.path),
+    };
+    if route.policy == Policy::PerAccount {
+        ckey.push_str(&format!("#u{}", req.user.as_ref().map(|u| u.id).unwrap_or(0)));
+    }
+    let current = state.cache.get(&ckey);
+    if let Some(c) = &current {
+        if c.version == version {
+            return respond(state, h, uri, c, started);
+        }
+        if route.policy == Policy::StaleWhileRevalidate && c.built.elapsed() < STALE_MAX {
+            rebuild_in_background(state, ckey, route, req, version);
+            return respond(state, h, uri, c, started);
+        }
+    }
+    let (p, status) = (route.render)(state, &req);
+    let c = Arc::new(build(state, p, version, status, &req.path, route.output));
+    state.cache.put(ckey, c.clone());
+    respond(state, h, uri, &c, started)
+}
+
+fn rebuild_in_background(state: &Shared, ckey: String, route: Route, req: Req, version: u64) {
+    let Ok(mut r) = state.cache.rebuilding.lock() else { return };
+    if !r.insert(ckey.clone()) {
+        return;
+    }
+    drop(r);
+    let st = state.clone();
+    let job = move || {
+        let (p, status) = (route.render)(&st, &req);
+        let c = Arc::new(build(&st, p, version, status, &req.path, route.output));
+        st.cache.put(ckey.clone(), c);
+        if let Ok(mut r) = st.cache.rebuilding.lock() {
+            r.remove(&ckey);
         }
     };
-    respond(state, h, uri, &cached, started)
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => {
+            h.spawn_blocking(job);
+        }
+        Err(_) => job(),
+    }
+}
+
+fn req(uri: &Uri, query: HashMap<String, String>, params: Vec<String>) -> Req {
+    Req { path: uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default(), query, params, user: None }
 }
 
 fn route_of(q: &HashMap<String, String>) -> Vec<String> {
@@ -249,6 +374,15 @@ fn is_key(k: &str) -> bool {
     k.len() == 64 && k.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+fn render_explore(s: &AppState, r: &Req) -> (Page, StatusCode) {
+    let k = r.param(0);
+    let route = route_of(&r.query);
+    match is_key(k).then(|| s.site.explorer(k, &route)).flatten() {
+        Some(e) => (pages::explore::render(e, &route), StatusCode::OK),
+        None => (pages::missing(None), StatusCode::NOT_FOUND),
+    }
+}
+
 async fn explore(
     State(s): State<Shared>,
     Path(key): Path<String>,
@@ -256,47 +390,73 @@ async fn explore(
     h: HeaderMap,
     uri: Uri,
 ) -> Response<Body> {
-    let route = route_of(&q);
-    let k = key.clone();
-    page(&s, &h, &uri, PageKind::Explorer, Some(&key), || match is_key(&k).then(|| s.site.explorer(&k, &route)).flatten() {
-        Some(e) => (pages::explore::render(e, &route), StatusCode::OK),
-        None => (pages::missing(None), StatusCode::NOT_FOUND),
-    })
+    let route = Route { kind: PageKind::Explorer, render: render_explore, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, q, vec![key]))
 }
 
-async fn home(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
-    let root = s.site.root_key();
-    page(&s, &h, &uri, PageKind::Home, Some(&root), || match s.site.explorer(&root, &[]) {
-        Some(e) => {
-            let mut p = pages::explore::render(e, &[]);
-            p.meta.title = "AtomicDB".into();
-            p.meta.description = None;
-            p.meta.canonical = Some("/atomicdb/".into());
-            (p, StatusCode::OK)
-        }
-        None => (pages::missing(None), StatusCode::NOT_FOUND),
-    })
+/// `nav/explore/<key>/`: the explorer page as JSON, for explore-nav.js.
+async fn nav_explore(
+    State(s): State<Shared>,
+    Path(key): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    h: HeaderMap,
+    uri: Uri,
+) -> Response<Body> {
+    let mut r = req(&uri, q, vec![key]);
+    r.path = r.path.replacen("/atomicdb/nav/", "/atomicdb/", 1);
+    let route = Route { kind: PageKind::Explorer, render: render_explore, output: Output::Nav, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, r)
 }
 
 async fn roots(State(s): State<Shared>, Query(q): Query<HashMap<String, String>>, h: HeaderMap, uri: Uri) -> Response<Body> {
-    let sort = q.get("sort").cloned().unwrap_or_default();
-    page(&s, &h, &uri, PageKind::Roots, None, || (pages::roots::render(s.site.roots(), &sort), StatusCode::OK))
+    fn render(s: &AppState, r: &Req) -> (Page, StatusCode) {
+        let sort = r.query.get("sort").cloned().unwrap_or_default();
+        (pages::roots::render(s.site.roots(), &sort), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Roots, render, output: Output::Html, policy: Policy::StaleWhileRevalidate };
+    serve(&s, &h, &uri, route, req(&uri, q, vec![]))
 }
 
 async fn queue(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
-    page(&s, &h, &uri, PageKind::Queue, None, || (pages::queue::render(s.site.queue()), StatusCode::OK))
+    fn render(s: &AppState, r: &Req) -> (Page, StatusCode) {
+        (pages::queue::render(s.site.queue(), r.user.as_ref()), StatusCode::OK)
+    }
+    // The backlog box offers its adopt buttons to an account: one entry per account.
+    let mut r = req(&uri, HashMap::new(), vec![]);
+    r.user = identity(&s, &h, &uri).user;
+    let route = Route { kind: PageKind::Queue, render, output: Output::Html, policy: Policy::PerAccount };
+    serve(&s, &h, &uri, route, r)
+}
+
+/// `docs/` and `docs/<slug>/`: static per deploy (version 0).
+async fn docs(State(s): State<Shared>, slug: Option<Path<String>>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    fn render(s: &AppState, r: &Req) -> (Page, StatusCode) {
+        match pages::docs::render(r.param(0), &s.assets.v()) {
+            Some(p) => (p, StatusCode::OK),
+            None => (pages::missing(None), StatusCode::NOT_FOUND),
+        }
+    }
+    let slug = slug.map(|Path(p)| p).unwrap_or_default();
+    let route = Route { kind: PageKind::Static, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![slug]))
 }
 
 async fn contributors(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
-    page(&s, &h, &uri, PageKind::Contributors, None, || (pages::contributors::render(s.site.leaderboard()), StatusCode::OK))
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
+        (pages::contributors::render(s.site.leaderboard()), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Contributors, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
 }
 
 async fn map(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
-    page(&s, &h, &uri, PageKind::Map, None, || {
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
         let root = s.site.root_key();
         let fen = s.site.explorer(&root, &[]).map(|e| e.pos.fen).unwrap_or_default();
         (pages::map::render(&root, &fen), StatusCode::OK)
-    })
+    }
+    let route = Route { kind: PageKind::Map, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
 }
 
 /// v1 `api/live-request/<key>/`: `{"live": false}` when nothing is in
@@ -314,10 +474,80 @@ async fn not_ported(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response
     let started = Instant::now();
     let p = pages::missing(Some("This page is not part of the v2 site yet."));
     let path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
-    let c = build(&s, p, 0, StatusCode::NOT_FOUND, &path);
+    let c = build(&s, p, 0, StatusCode::NOT_FOUND, &path, Output::Html);
+    respond(&s, &h, &uri, &c, started)
+}
+fn render_home(s: &AppState, _: &Req) -> (Page, StatusCode) {
+    let root = s.site.root_key();
+    match s.site.explorer(&root, &[]) {
+        Some(e) => (pages::home::render(e, s.site.home(), s.site.leaderboard()), StatusCode::OK),
+        None => (pages::missing(None), StatusCode::NOT_FOUND),
+    }
+}
+
+async fn home(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    let root = s.site.root_key();
+    let route = Route { kind: PageKind::Home, render: render_home, output: Output::Html, policy: Policy::StaleWhileRevalidate };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![root]))
+}
+
+async fn milestones(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
+        (pages::feeds::milestones(s.site.milestones()), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Milestones, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
+}
+
+async fn campaigns(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
+        (pages::feeds::campaigns(s.site.campaigns()), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Campaigns, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
+}
+
+/// `notifications/`: one account's page, never cached; anonymous visitors
+/// are sent to sign in, as v1 does.
+async fn notifications(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    let started = Instant::now();
+    let id = identity(&s, &h, &uri);
+    let Some(user) = id.user else {
+        return Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "/login/?next=/atomicdb/notifications/")
+            .body(Body::empty())
+            .unwrap_or_default();
+    };
+    let page = pages::feeds::notifications(s.site.notices(user.id));
+    let path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+    let c = build(&s, page, 0, StatusCode::OK, &path, Output::Html);
     respond(&s, &h, &uri, &c, started)
 }
 
+/// `sitemap.xml` (v1 `views.sitemap`): the overview pages, the docs and every
+/// named opening present in the tree.
+async fn sitemap(State(s): State<Shared>) -> Response<Body> {
+    let origin = &s.assets.origin;
+    let mut xml =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    let mut add = |path: &str| xml.push_str(&format!("  <url><loc>{origin}{path}</loc></url>\n"));
+    for p in ["/atomicdb/", "/atomicdb/roots/", "/atomicdb/docs/"] {
+        add(p);
+    }
+    for (slug, _) in pages::docs::PAGES {
+        add(&format!("/atomicdb/docs/{slug}/"));
+    }
+    for o in s.site.roots().openings.iter().filter(|o| o.present) {
+        add(&format!("/atomicdb/explore/{}/", o.key));
+    }
+    xml.push_str("</urlset>\n");
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/xml")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(xml))
+        .unwrap_or_default()
+}
 async fn static_file(State(s): State<Shared>, Path(path): Path<String>, h: HeaderMap, uri: Uri) -> Response<Body> {
     let Some(f) = s.statics.get(&path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -327,7 +557,10 @@ async fn static_file(State(s): State<Shared>, Path(path): Path<String>, h: Heade
         .header(header::CONTENT_TYPE, f.ctype)
         .header(header::ETAG, &f.etag)
         .header(header::VARY, "Accept-Encoding")
-        .header(header::CACHE_CONTROL, if versioned { "public, max-age=31536000, immutable" } else { "public, max-age=3600" });
+        // An unversioned URL (the islands bundle, a v1 page that forgot its ?v=)
+        // revalidates every time: a 304 costs one round trip, a stale WASM
+        // after a deploy costs a broken page.
+        .header(header::CACHE_CONTROL, if versioned { "public, max-age=31536000, immutable" } else { "public, no-cache" });
     if if_none_match(&h, &f.etag) {
         return b.status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap_or_default();
     }
@@ -346,10 +579,17 @@ pub fn router(state: Shared) -> Router {
     Router::new()
         .route("/atomicdb/", get(home))
         .route("/atomicdb/explore/{key}/", get(explore))
+        .route("/atomicdb/nav/explore/{key}/", get(nav_explore))
         .route("/atomicdb/roots/", get(roots))
         .route("/atomicdb/queue/", get(queue))
         .route("/atomicdb/contributors/", get(contributors))
         .route("/atomicdb/map/", get(map))
+        .route("/atomicdb/milestones/", get(milestones))
+        .route("/atomicdb/campaigns/", get(campaigns))
+        .route("/atomicdb/notifications/", get(notifications))
+        .route("/atomicdb/sitemap.xml", get(sitemap))
+        .route("/atomicdb/docs/", get(docs))
+        .route("/atomicdb/docs/{slug}/", get(docs))
         .route("/atomicdb/api/live-request/{key}/", get(live_request))
         .route("/static/{*path}", get(static_file))
         .fallback(not_ported)
@@ -584,7 +824,7 @@ mod tests {
             ("/atomicdb/queue/", "nodes searched in the last hour"),
             ("/atomicdb/contributors/", "lb-medal first"),
             ("/atomicdb/map/", "id=\"conquest-map\""),
-            ("/atomicdb/", "Starting position"),
+            ("/atomicdb/", "Now analyzing"),
         ] {
             let r = get(&app, uri, &[]).await;
             assert_eq!(r.status(), StatusCode::OK, "{uri}");
@@ -594,6 +834,89 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn nav_json_matches_the_page() {
+        let (app, site) = app();
+        let nf3 = site.explorer(ROOT, &[]).unwrap().rows[0].key.clone();
+        let r = get(&app, &format!("/atomicdb/nav/explore/{nf3}/?play=g1f3"), &[]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
+        let v: serde_json::Value = serde_json::from_str(&text(r).await).unwrap();
+        assert_eq!(v["url"], format!("/atomicdb/explore/{nf3}/?play=g1f3"));
+        let main = v["main"].as_str().unwrap();
+        assert!(main.contains("<div class=\"linebox\">") && main.contains("data-component=\"Board_"));
+        let page = text(get(&app, &format!("/atomicdb/explore/{nf3}/?play=g1f3"), &[]).await).await;
+        assert!(page.contains(main), "the JSON carries exactly the page's <main>");
+        assert!(page.contains("/static/atomicdb/v2/explore-nav.js"));
+    }
+
+    #[tokio::test]
+    async fn slow_pages_are_served_stale_and_rebuilt() {
+        let (app, site) = app();
+        let first = get(&app, "/atomicdb/roots/", &[]).await;
+        let etag1 = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        site.bump_epoch();
+        // The outdated copy answers at once; a rebuild runs in the background.
+        let stale = get(&app, "/atomicdb/roots/", &[]).await;
+        assert_eq!(stale.headers()[header::ETAG].to_str().unwrap(), etag1);
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let r = get(&app, "/atomicdb/roots/", &[]).await;
+            if r.headers()[header::ETAG].to_str().unwrap() != etag1 {
+                return;
+            }
+        }
+        panic!("the background rebuild never landed");
+    }
+    #[tokio::test]
+    async fn more_pages_render() {
+        let (app, _) = app();
+        for (uri, needle) in [
+            ("/atomicdb/milestones/", "Solved: WHITE_WIN via MINIMAX"),
+            ("/atomicdb/campaigns/", "positions to prove a White win"),
+            ("/atomicdb/docs/", "AtomicDB documentation"),
+            ("/atomicdb/docs/queue/", "docs-pager"),
+            ("/atomicdb/sitemap.xml", "/atomicdb/docs/api/"),
+            ("/atomicdb/roots/", "root-chart-svg"),
+            ("/atomicdb/roots/", "Main line by day"),
+            ("/atomicdb/queue/", "Community backlog"),
+            ("/atomicdb/", "Proposed campaigns"),
+        ] {
+            let r = get(&app, uri, &[]).await;
+            assert_eq!(r.status(), StatusCode::OK, "{uri}");
+            assert!(text(r).await.contains(needle), "{uri}: {needle}");
+        }
+        let r = get(&app, "/atomicdb/docs/nope/", &[]).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = get(&app, "/atomicdb/notifications/", &[]).await;
+        assert_eq!(r.status(), StatusCode::FOUND, "anonymous visitors sign in first");
+    }
+
+    struct OneUser;
+    impl Sessions for OneUser {
+        fn user(&self, key: &str) -> Option<User> {
+            (key == "s1").then(|| User { id: 7, username: "belzedar".into(), is_staff: false })
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_in_visitor_gets_bell_and_account_parts() {
+        let site = Arc::new(FixtureSite::load().unwrap());
+        let app = router(state(site, Arc::new(OneUser), FsPath::new("does-not-exist"), "https://example.org"));
+        let cookie = [("cookie", "sessionid=s1")];
+        let home = text(get(&app, "/atomicdb/", &cookie).await).await;
+        assert!(home.contains("identity-user") && home.contains("belzedar"));
+        assert!(home.contains("class=\"bell-badge\"") && home.contains("Your analysis of <b>1. Nf3</b> is ready"));
+        let anon = text(get(&app, "/atomicdb/", &[]).await).await;
+        assert!(anon.contains("Sign in") && !anon.contains("bell-badge"), "the anonymous copy is untouched");
+        let queue = text(get(&app, "/atomicdb/queue/", &cookie).await).await;
+        assert!(queue.contains(">Adopt 10<"), "adopt buttons for an account");
+        let queue_anon = text(get(&app, "/atomicdb/queue/", &[]).await).await;
+        assert!(!queue_anon.contains(">Adopt 10<") && queue_anon.contains("to adopt a batch"));
+        let r = get(&app, "/atomicdb/notifications/", &cookie).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(text(r).await.contains("notif-row unseen"));
+    }
     #[test]
     fn negotiation() {
         let mut h = HeaderMap::new();

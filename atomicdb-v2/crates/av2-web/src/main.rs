@@ -96,7 +96,8 @@ fn bench(site_root: &std::path::Path, n: usize) {
         use av2_web::pages::shell::{Identity, User};
         let e = av2_web::read::SiteRead::explorer(&FixtureSite::load().unwrap(), &root, &[]).unwrap();
         let rendered = av2_web::pages::finish(av2_web::pages::explore::render(e, &[]), &av2_web::pages::shell::Assets::default());
-        let id = Identity { user: Some(User { id: 7, username: "someone".into(), is_staff: false }), next: "/atomicdb/".into() };
+        let id =
+            Identity { user: Some(User { id: 7, username: "someone".into(), is_staff: false }), notices: None, next: "/atomicdb/".into() };
         let mut times: Vec<u64> = (0..2000)
             .map(|_| {
                 let t = Instant::now();

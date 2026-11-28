@@ -222,6 +222,9 @@ mod client {
         live_asks: Cell<u32>,
         live_watching: Cell<bool>,
         kids0: Cell<Option<i64>>,
+        /// `window.__av2Gen` when this row was hydrated: an in-place
+        /// navigation bumps it, and this row's timers stop (explore-nav.js).
+        generation: Cell<f64>,
     }
 
     #[derive(Clone)]
@@ -324,8 +327,18 @@ mod client {
             .sum()
     }
 
+    fn generation() -> f64 {
+        get(&window(), "__av2Gen").as_f64().unwrap_or(0.0)
+    }
+
     impl Controls {
+        /// False once the page moved on to another position in place.
+        fn alive(&self) -> bool {
+            generation() == self.state.generation.get()
+        }
+
         pub fn start(&self) {
+            self.state.generation.set(generation());
             if self.p.exhausted {
                 *self.state.below.borrow_mut() = Some(self.p.key.clone());
             }
@@ -396,6 +409,9 @@ mod client {
         }
 
         fn live_now(&self) {
+            if !self.alive() {
+                return;
+            }
             let hidden = window().document().map(|d| d.hidden()).unwrap_or(false);
             if hidden {
                 self.live_later();
@@ -434,6 +450,9 @@ mod client {
         }
 
         fn poll(&self, tries: u32) {
+            if !self.alive() {
+                return;
+            }
             if tries == 0 {
                 self.req_text.set("Still queued, check back in a while".into());
                 return;
@@ -479,6 +498,9 @@ mod client {
         }
 
         fn request(&self, attempt: u32) {
+            if !self.alive() {
+                return;
+            }
             let mut body = vec![("route", play_route())];
             if self.then_verify.get_untracked() {
                 body.push(("then_verify", "1".into()));
