@@ -14,6 +14,7 @@ The Rust workspace of AtomicDB v2 (plan: `docs/atomicdb/v2-plan.md`).
 | `crates/av2-tools` | `av2-load`, `av2-check`, `av2-replay`, `av2-crashtest`, `av2-perf` | core |
 | `crates/av2-compat` | The outside contract (`docs/api-contract.md`): replays v1's golden answers (`tests/golden/`) against a base URL and diffs them field by field; runs the worker protocol scenarios against a test instance | api-golden |
 | `crates/av2-server` | The writer service skeleton: single writer, group commit, stub rules, Prometheus `/metrics` | core |
+| `crates/av2-web` | The website: Leptos pages rendered on the server (same URLs and look as v1), WASM islands for the board and the request row, page cache keyed on page versions, precompressed static files, Django session bridge. `SiteRead` is the trait the store implements for it; a fixture implements it today. Build and design: `docs/web.md` | web |
 | `bench` | The storage race behind the plan (`docs/atomicdb/v2-storage-benchmark.md`), kept as the regression benchmark | |
 
 ```

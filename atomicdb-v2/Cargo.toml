@@ -16,6 +16,7 @@ members = [
     "crates/av2-chess",
     "crates/av2-tb",
     "crates/av2-expand",
+    "crates/av2-web",
     "bench",
 ]
 # `cargo build` / `cargo test` at the root build the v2 crates only.  The bench
@@ -36,6 +37,7 @@ default-members = [
     "crates/av2-chess",
     "crates/av2-tb",
     "crates/av2-expand",
+    "crates/av2-web",
 ]
 
 [workspace.package]
@@ -69,6 +71,16 @@ opt-level = 3
 debug = 1
 lto = "thin"
 codegen-units = 4
+
+# The islands' WASM bundle (cargo leptos: `lib-profile-release`).  Size over
+# speed: every visitor of a page with an island downloads it.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = 0
 
 # Tests exercise the store with real files; keep them reasonably fast.
 [profile.dev]
