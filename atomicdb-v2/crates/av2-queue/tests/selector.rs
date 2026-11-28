@@ -70,36 +70,38 @@ fn regret_dijkstra() {
     g.edges(bad, &[below_bad]);
     let orphan = g.node(Some(0), true);
     let r = regret_from_root(&g.g, root);
-    assert_eq!(r[root.index()], 0);
-    assert_eq!(r[best.index()], 0);
-    assert_eq!(r[bad.index()], 320);
-    assert_eq!(r[blind.index()], 0, "an unvalued child inherits the parent's regret");
-    assert_eq!(r[below_bad.index()], 320);
-    assert_eq!(r[orphan.index()], UNREACHED);
+    assert_eq!(r[root.index()], 0.0);
+    assert_eq!(r[best.index()], 0.0);
+    assert_eq!(r[bad.index()], 320.0);
+    assert_eq!(r[blind.index()], 0.0, "an unvalued child inherits the parent's regret");
+    assert_eq!(r[below_bad.index()], 320.0);
+    assert_eq!(r[orphan.index()], f64::INFINITY);
     // A closed node does not relax its children.
     g.close(bad, Status::WhiteWin);
     let r = regret_from_root(&g.g, root);
-    assert_eq!(r[below_bad.index()], UNREACHED);
+    assert_eq!(r[below_bad.index()], f64::INFINITY);
     // ...but as a child it still creates the gap (value +10000 for White).
-    assert_eq!(r[best.index()], 10000 - 20);
+    assert_eq!(r[best.index()], (10000 - 20) as f64);
 }
 
 /// PRI-1.5 / PRI-1.3 / PRI-1.4 (test_selector_v2.py::HorizonTests::test_the_two_prices_are_not_the_same_number,
 /// test_campaigns.py::SelectorBonusTests::test_more_votes_weigh_more_but_with_diminishing_returns)
 #[test]
 fn priority_formula() {
-    assert_eq!(runits(None), DISCONNECTED_REGRET);
-    assert_eq!(runits(Some(5000.0)), 30.0);
-    assert_eq!(runits(Some(150.0)), 1.5);
+    assert_eq!(runits(f64::INFINITY), DISCONNECTED_REGRET);
+    assert_eq!(runits(5000.0), 30.0);
+    assert_eq!(runits(150.0), 1.5);
     assert_ne!(FAR_REGRET, DISCONNECTED_REGRET);
     // 15 (cap) + 50 (mate band) + 2 (unexpanded) - 3*1.5 - 1.5*2
-    assert_eq!(priority_of(Some(-9500), false, 2, 1.5, 0.0), 15.0 + 50.0 + 2.0 - 4.5 - 3.0);
-    assert_eq!(priority_of(None, true, 0, 0.0, 0.0), 0.0);
-    let b1 = campaign_bonus(Some(1));
-    let b10 = campaign_bonus(Some(10));
+    let none = Votes::new();
+    assert_eq!(priority_of(Some(-9500), false, 2, None, 1.5, &none), 15.0 + 50.0 + 2.0 - 4.5 - 3.0);
+    assert_eq!(priority_of(None, true, 0, None, 0.0, &none), 0.0);
+    let votes = Votes::from([(1, 1), (2, 10), (3, 0)]);
+    let b1 = campaign_bonus(Some(1), &votes);
+    let b10 = campaign_bonus(Some(2), &votes);
     assert!(b10 > b1 && b10 < 10.0 * b1);
-    assert_eq!(campaign_bonus(None), 0.0);
-    assert_eq!(campaign_bonus(Some(0)), 0.0);
+    assert_eq!(campaign_bonus(None, &votes), 0.0);
+    assert_eq!(campaign_bonus(Some(3), &votes), 0.0);
 }
 
 /// tests.py::SelectorTests::test_global_best_first_by_eval / test_dead_branch_not_selected
@@ -118,7 +120,7 @@ fn regret_minting() {
     g.edges(dead_parent, &[lonely]);
     g.close(dead_parent, Status::Draw);
     g.visits(b, 3);
-    let votes = BTreeMap::new();
+    let votes = Votes::new();
     let sel = RegretSelector::compute(&g.g, root, &votes, &BTreeSet::new());
     assert!(sel.ranked.iter().position(|x| x.1 == a.0) < sel.ranked.iter().position(|x| x.1 == b.0));
 
@@ -136,7 +138,7 @@ fn regret_minting() {
     assert_eq!(task_of(&q, b).budget, B512, "visit ladder above the floor (visits 3)");
     assert!(q.is_dead(lonely.0));
     // Tombstones are not rescored by a pass, whatever the votes.
-    let sel2 = RegretSelector::compute(&g.g, root, &BTreeMap::from([(1, 1000)]), &BTreeSet::from([lonely.0]));
+    let sel2 = RegretSelector::compute(&g.g, root, &Votes::from([(1, 1000)]), &BTreeSet::from([lonely.0]));
     assert_eq!(sel2.ranked.last().unwrap(), &(DEAD, lonely.0));
     let _ = &mut h;
 }
@@ -316,7 +318,11 @@ fn engine_debt() {
     for i in 0..5 {
         let p = g.node(Some(9990), true);
         let mut c = g.g.core(p);
-        c.set_status(if i % 2 == 0 { Status::WhiteWin } else { Status::BlackWin }, Closure::MatePv, if i == 3 { Proof::None } else { Proof::Engine });
+        c.set_status(
+            if i % 2 == 0 { Status::WhiteWin } else { Status::BlackWin },
+            Closure::MatePv,
+            if i == 3 { Proof::None } else { Proof::Engine },
+        );
         g.g.put_core(p, c).unwrap();
         let line = g.g.put_blob(b"e2e4 e7e5").unwrap();
         g.g.put_ext(p, Ext { won_line: line, ..Default::default() }).unwrap();
@@ -357,10 +363,7 @@ fn coverage_completion() {
     h.config(|c| c.coverage_cap = 2);
     let promoted = h.auto(B128);
     let pp = h.t(promoted).pos;
-    let gaps = vec![
-        arms::CoverageGap { pos: 1000, missing: vec![pp] },
-        arms::CoverageGap { pos: 1001, missing: vec![2001, 2002] },
-    ];
+    let gaps = vec![arms::CoverageGap { pos: 1000, missing: vec![pp] }, arms::CoverageGap { pos: 1001, missing: vec![2001, 2002] }];
     h.env.add(2001);
     h.env.add(2002);
     let a = h.apply(Input::Arm { now: h.now, step: arms::ArmStep::Coverage { gaps, scanned: 2 } });

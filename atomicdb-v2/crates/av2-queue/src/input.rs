@@ -171,7 +171,9 @@ pub struct Claim {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum SubmitOut {
-    Accepted { claim: Box<Claim> },
+    Accepted {
+        claim: Box<Claim>,
+    },
     /// `200 {"ok": true, "dup": true}`.
     Dup,
     /// `400 {"error": "malformed: unknown task"}`.
@@ -289,9 +291,17 @@ pub enum SolveSubmitOut {
     NotYourLease,
     StaleLease,
     /// PROVED without a verifying certificate: FAILED, `SOLVE_REJECTED`.
-    Rejected { pos: u64, reason: String },
+    Rejected {
+        pos: u64,
+        reason: String,
+    },
     /// COMPLETED; the rules apply the closure effects (SOL-2).
-    Completed { pos: u64, goal: String, outcome: String, verified: bool },
+    Completed {
+        pos: u64,
+        goal: String,
+        outcome: String,
+        verified: bool,
+    },
 }
 
 /// A person's request (`views._queue_request` + `ingest.request_analysis`).
@@ -323,7 +333,8 @@ pub struct RequestReq {
     /// POST `then_verify == '1'` (Q-6.27).
     #[serde(default)]
     pub then_verify: bool,
-    /// Add `ahead` to the answer (Q-6.26 `with_place`).
+    /// Q-6.26 `with_place`: the HTTP layer adds `ahead` after the commit
+    /// (`QueueState::user_queue_ahead` on a read copy); logged for the audit.
     #[serde(default)]
     pub with_place: bool,
 }
@@ -361,25 +372,63 @@ pub enum Input {
     SolveSubmit(SolveSubmitReq),
     Request(RequestReq),
     /// `withdraw` door (Q-6.38): the author takes a PENDING request back.
-    Withdraw { now: Ms, account: String, task: u64 },
+    Withdraw {
+        now: Ms,
+        account: String,
+        task: u64,
+    },
     /// Undo a withdrawal (Q-6.21).
-    Undo { now: Ms, account: String, task: u64 },
+    Undo {
+        now: Ms,
+        account: String,
+        task: u64,
+    },
     /// Clear own queue (Q-6.20).
-    ClearQueue { now: Ms, account: String },
+    ClearQueue {
+        now: Ms,
+        account: String,
+    },
     /// Move to front (Q-6.37).
-    Bump { now: Ms, account: String, task: u64 },
+    Bump {
+        now: Ms,
+        account: String,
+        task: u64,
+    },
     /// Preferences of an account (Q-1.18, Q-6.41).
-    SetPref { now: Ms, account: String, pref: Pref },
+    SetPref {
+        now: Ms,
+        account: String,
+        pref: Pref,
+    },
     /// Per-machine override (Q-1.19).
-    SetServing { now: Ms, account: String, machine: String, serving: Serving },
+    SetServing {
+        now: Ms,
+        account: String,
+        machine: String,
+        serving: Serving,
+    },
     /// A position closed (CAS-7: absorb its PENDING tasks).
-    PositionClosed { now: Ms, pos: u64 },
+    PositionClosed {
+        now: Ms,
+        pos: u64,
+    },
     /// A search landed (EXP-5.2 / Q-3.13: absorb the requests it covers).
-    Landed { now: Ms, pos: u64, task: Option<u64>, arbiter: u64 },
+    Landed {
+        now: Ms,
+        pos: u64,
+        task: Option<u64>,
+        arbiter: u64,
+    },
     /// Tombstone revivals (PRI-1.7 a-d).
-    Revive { now: Ms, positions: Vec<u64> },
+    Revive {
+        now: Ms,
+        positions: Vec<u64>,
+    },
     /// Selector proposals applied as they are (PRI-4.2, PRI-4.4).
-    Mint { now: Ms, plan: crate::selector::MintPlan },
+    Mint {
+        now: Ms,
+        plan: crate::selector::MintPlan,
+    },
     /// Pool top-up (PRI-4.3) through the writer's `Refill`; `target`
     /// defaults to `config.pool_target`.
     Pool {
@@ -388,9 +437,16 @@ pub enum Input {
         target: Option<usize>,
     },
     /// The enqueue half of a background arm (Q-8.7, Q-8.9, Q-8.12, Q-8.14).
-    Arm { now: Ms, step: crate::arms::ArmStep },
+    Arm {
+        now: Ms,
+        step: crate::arms::ArmStep,
+    },
     /// The value cascade of a landing (PRI-4.9).
-    Cascade { now: Ms, pos: u64, open_before: bool },
+    Cascade {
+        now: Ms,
+        pos: u64,
+        open_before: bool,
+    },
     /// The unexplored-moves button and the AUTO callers of
     /// `enqueue_unexplored_children` (Q-8.18..Q-8.21).
     BulkChildren {
@@ -404,8 +460,13 @@ pub enum Input {
         children: Option<Vec<u64>>,
     },
     /// Periodic step: solve-lease recycle (SOL-5.4), retention.
-    Tick { now: Ms },
-    SetConfig { now: Ms, config: Box<QueueConfig> },
+    Tick {
+        now: Ms,
+    },
+    SetConfig {
+        now: Ms,
+        config: Box<QueueConfig>,
+    },
 }
 
 impl Input {
@@ -445,18 +506,39 @@ pub enum Output {
     Lease(LeaseOut),
     Heartbeat(HeartbeatOut),
     Submit(SubmitOut),
-    Release { released: usize },
-    SolveAcquire { task: Option<SolveGrant> },
-    SolveHeartbeat { ok: bool },
+    Release {
+        released: usize,
+    },
+    SolveAcquire {
+        task: Option<SolveGrant>,
+    },
+    SolveHeartbeat {
+        ok: bool,
+    },
     SolveSubmit(SolveSubmitOut),
     Request(RequestOut),
     /// `withdrawn` / `handed-over` / `refused`...
-    Status { status: String },
-    Cleared { withdrawn: usize, handed: usize },
-    Absorbed { count: usize },
-    Minted { created: usize, pending: Vec<u64> },
+    Status {
+        status: String,
+    },
+    Cleared {
+        withdrawn: usize,
+        handed: usize,
+    },
+    Absorbed {
+        count: usize,
+    },
+    Minted {
+        created: usize,
+        pending: Vec<u64>,
+    },
     /// Rows made by an arm, a cascade or the bulk button.
-    Made { count: usize },
-    Tick { recycled_solves: usize, pruned: usize },
+    Made {
+        count: usize,
+    },
+    Tick {
+        recycled_solves: usize,
+        pruned: usize,
+    },
     Ok,
 }

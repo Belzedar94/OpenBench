@@ -66,15 +66,16 @@ pub fn multipv_for(visits: i32, budget: Option<u64>, seeding: bool, clamp: Optio
     if seeding {
         return 5;
     }
-    if let (Some((cb, cm)), Some(b)) = (clamp, budget) {
-        if b <= cb {
-            return cm;
-        }
+    if let (Some((cb, cm)), Some(b)) = (clamp, budget)
+        && b <= cb
+    {
+        return cm;
     }
-    if let Some(b) = budget {
-        if visits >= 1 && b >= DEPTH_BUDGET_THRESHOLD {
-            return DEPTH_MULTIPV;
-        }
+    if let Some(b) = budget
+        && visits >= 1
+        && b >= DEPTH_BUDGET_THRESHOLD
+    {
+        return DEPTH_MULTIPV;
     }
     if visits < 3 { 5 } else { 3 }
 }
@@ -89,10 +90,10 @@ pub fn caps_interior(p: Option<&PosInfo>, budget: u64, interior_deep_rungs: bool
 
 /// `server_picked_budget(budget, clamp, pos)` (PRI-5.6).
 pub fn server_picked_budget(budget: u64, clamp: Option<Clamp>, p: Option<&PosInfo>, interior_deep_rungs: bool) -> u64 {
-    if let Some((cb, _)) = clamp {
-        if budget <= cb {
-            return budget;
-        }
+    if let Some((cb, _)) = clamp
+        && budget <= cb
+    {
+        return budget;
     }
     let mut b = budget;
     if caps_interior(p, b, interior_deep_rungs) {
@@ -116,11 +117,7 @@ pub fn rung_at_least(nodes: u64) -> u64 {
 
 /// `_rung_matching(nodes)` (PRI-5.8): first rung with `nodes <= rung * 1.01`.
 pub fn rung_matching(nodes: u64) -> u64 {
-    BUDGET_LADDER
-        .iter()
-        .copied()
-        .find(|&r| (nodes as f64) <= (r as f64) * (1.0 + RUNG_OVERSHOOT_TOLERANCE))
-        .unwrap_or(BUDGET_LADDER[4])
+    BUDGET_LADDER.iter().copied().find(|&r| (nodes as f64) <= (r as f64) * (1.0 + RUNG_OVERSHOOT_TOLERANCE)).unwrap_or(BUDGET_LADDER[4])
 }
 
 /// What the value walker quotes (PRI-4.8 `value_budget`).

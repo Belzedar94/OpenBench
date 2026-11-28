@@ -57,19 +57,58 @@ impl Ladder {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "d", rename_all = "snake_case")]
 pub enum Delta {
-    Task { task: Box<Task> },
-    DropTask { id: u64 },
-    Solve { task: Box<SolveTask> },
-    Ping { machine: String, user: String, ping: Ping },
-    Pref { account: String, pref: Pref },
-    Serving { account: String, machine: String, serving: Serving },
-    Frozen { pos: u64, ladder: Ladder },
-    Dead { pos: u64, dead: bool },
-    ArmLog { arm: String, created: Vec<Ms> },
-    Receipt { key: String, at: Ms },
-    Counters { next_task: u64, next_solve: u64, sweep_leases: u64 },
-    SweepWaiting { waiting: Option<(bool, Ms)> },
-    Config { config: Box<QueueConfig> },
+    Task {
+        task: Box<Task>,
+    },
+    DropTask {
+        id: u64,
+    },
+    Solve {
+        task: Box<SolveTask>,
+    },
+    Ping {
+        machine: String,
+        user: String,
+        ping: Ping,
+    },
+    Pref {
+        account: String,
+        pref: Pref,
+    },
+    Serving {
+        account: String,
+        machine: String,
+        serving: Serving,
+    },
+    Frozen {
+        pos: u64,
+        ladder: Ladder,
+    },
+    Dead {
+        pos: u64,
+        dead: bool,
+        #[serde(default)]
+        revived: bool,
+    },
+    ArmLog {
+        arm: String,
+        created: Vec<Ms>,
+    },
+    Receipt {
+        key: String,
+        at: Ms,
+    },
+    Counters {
+        next_task: u64,
+        next_solve: u64,
+        sweep_leases: u64,
+    },
+    SweepWaiting {
+        waiting: Option<(bool, Ms)>,
+    },
+    Config {
+        config: Box<QueueConfig>,
+    },
 }
 
 /// A log entry for the projection (v1 `DBEvent`), produced by an input.
@@ -102,7 +141,9 @@ pub(crate) struct Indexes {
     pub user_by_eff: BTreeMap<String, BTreeSet<(u8, bool, i64, u64)>>,
     /// Partitions with rows whose keys are not a function of the partition
     /// alone (backed rows, lane rows, anonymous): count of such rows.
-    pub user_irregular: BTreeMap<String, usize>,
+    pub user_irr_rows: BTreeMap<String, BTreeSet<u64>>,
+    /// PENDING USER rows per effective account.
+    pub user_pending_by_eff: BTreeMap<String, usize>,
     /// Non-USER CHARGED rows.
     pub other_charged: BTreeSet<u64>,
     pub solve_pending: BTreeSet<u64>,
@@ -138,6 +179,8 @@ pub struct QueueState {
     pub(crate) serving: BTreeMap<(String, String), Serving>,
     pub(crate) frozen: HashMap<u64, Ladder>,
     pub(crate) dead: BTreeSet<u64>,
+    /// Tombstones revived since import: v1 wrote `priority = 0.0` (PRI-1.7).
+    pub(crate) revived: BTreeSet<u64>,
     pub(crate) arm_log: BTreeMap<String, VecDeque<Ms>>,
     pub(crate) receipts: BTreeMap<String, Ms>,
     pub(crate) next_task: u64,
@@ -160,6 +203,8 @@ struct Snapshot {
     serving: Vec<(String, String, Serving)>,
     frozen: Vec<(u64, Ladder)>,
     dead: Vec<u64>,
+    #[serde(default)]
+    revived: Vec<u64>,
     arm_log: Vec<(String, Vec<Ms>)>,
     receipts: Vec<(String, Ms)>,
     next_task: u64,
@@ -214,14 +259,7 @@ impl QueueState {
     }
     /// Live (PENDING or LEASED) tasks of a position, lowest id first.
     pub fn live_tasks_of(&self, pos: u64) -> Vec<&Task> {
-        self.idx
-            .by_pos
-            .get(&pos)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.tasks.get(id))
-            .filter(|t| t.state.charged())
-            .collect()
+        self.idx.by_pos.get(&pos).into_iter().flatten().filter_map(|id| self.tasks.get(id)).filter(|t| t.state.charged()).collect()
     }
     /// The task on a slot, whatever its state (Q-1.3).
     pub fn slot(&self, pos: u64, generation: i32) -> Option<&Task> {
@@ -279,11 +317,20 @@ impl QueueState {
         }
         let eff = t.effective_account().to_string();
         if let Some(s) = idx.user_by_eff.get_mut(&eff) {
-            if s.remove(&window_key(t)) && irregular(t) {
-                let n = idx.user_irregular.get_mut(&eff).unwrap();
-                *n -= 1;
-                if *n == 0 {
-                    idx.user_irregular.remove(&eff);
+            if s.remove(&window_key(t)) {
+                if irregular(t) {
+                    let r = idx.user_irr_rows.get_mut(&eff).unwrap();
+                    r.remove(&t.id);
+                    if r.is_empty() {
+                        idx.user_irr_rows.remove(&eff);
+                    }
+                }
+                if t.state == TState::Pending {
+                    let n = idx.user_pending_by_eff.get_mut(&eff).unwrap();
+                    *n -= 1;
+                    if *n == 0 {
+                        idx.user_pending_by_eff.remove(&eff);
+                    }
                 }
             }
             if s.is_empty() {
@@ -312,17 +359,20 @@ impl QueueState {
             }
             _ => {}
         }
-        if matches!(t.state, TState::Leased | TState::Completed) {
-            if let Some(at) = t.leased_at {
-                idx.served.insert((at, t.id));
-            }
+        if matches!(t.state, TState::Leased | TState::Completed)
+            && let Some(at) = t.leased_at
+        {
+            idx.served.insert((at, t.id));
         }
         if t.state.charged() {
             if t.source == Source::User {
                 idx.user_by_author.entry(t.requested_by.clone()).or_default().insert(t.id);
                 idx.user_by_eff.entry(t.effective_account().to_string()).or_default().insert(window_key(t));
                 if irregular(t) {
-                    *idx.user_irregular.entry(t.effective_account().to_string()).or_default() += 1;
+                    idx.user_irr_rows.entry(t.effective_account().to_string()).or_default().insert(t.id);
+                }
+                if t.state == TState::Pending {
+                    *idx.user_pending_by_eff.entry(t.effective_account().to_string()).or_default() += 1;
                 }
             } else {
                 idx.other_charged.insert(t.id);
@@ -422,6 +472,38 @@ impl QueueState {
         self.pings.get_mut(&key)
     }
 
+    /// PRI-1.7 revival: the tombstone goes and v1's stored priority becomes 0.0.
+    pub(crate) fn revive(&mut self, pos: u64) {
+        let was = self.dead.remove(&pos);
+        let new = self.revived.insert(pos);
+        if was || new {
+            self.tx.dead.insert(pos);
+        }
+    }
+
+    /// `Position.priority` as the lease reads it for AUTO/FILL rows (Q-2.16
+    /// key 8).  Exact port (default): what v1 has stored today, i.e. `DEAD`
+    /// for a tombstone, 0.0 for a revived one, else the value the last pass
+    /// left (production has run `--no-priorities` since 29-Aug), which the
+    /// environment provides.  With `computed_priority` on (a later switch):
+    /// the priority computed in memory (D5).
+    pub fn queue_rank(&self, pos: u64, env: &dyn crate::env::QueueEnv) -> f64 {
+        if self.dead.contains(&pos) {
+            return DEAD;
+        }
+        if self.config.computed_priority {
+            return env.computed_priority(pos).unwrap_or(0.0);
+        }
+        if self.revived.contains(&pos) {
+            return 0.0;
+        }
+        env.queue_rank(pos)
+    }
+
+    pub fn is_revived(&self, pos: u64) -> bool {
+        self.revived.contains(&pos)
+    }
+
     pub(crate) fn set_dead(&mut self, pos: u64, dead: bool) {
         let changed = if dead { self.dead.insert(pos) } else { self.dead.remove(&pos) };
         if changed {
@@ -490,7 +572,7 @@ impl QueueState {
             out.push(Delta::Frozen { pos, ladder: self.frozen.get(&pos).copied().unwrap_or_default() });
         }
         for pos in tx.dead {
-            out.push(Delta::Dead { pos, dead: self.dead.contains(&pos) });
+            out.push(Delta::Dead { pos, dead: self.dead.contains(&pos), revived: self.revived.contains(&pos) });
         }
         for arm in tx.arms {
             let created = self.arm_log.get(&arm).map(|d| d.iter().copied().collect()).unwrap_or_default();
@@ -555,7 +637,12 @@ impl QueueState {
                         self.frozen.insert(*pos, *ladder);
                     }
                 }
-                Delta::Dead { pos, dead } => {
+                Delta::Dead { pos, dead, revived } => {
+                    if *revived {
+                        self.revived.insert(*pos);
+                    } else {
+                        self.revived.remove(pos);
+                    }
                     if *dead {
                         self.dead.insert(*pos);
                     } else {
@@ -595,6 +682,7 @@ impl QueueState {
             serving: self.serving.iter().map(|((a, m), s)| (a.clone(), m.clone(), s.clone())).collect(),
             frozen,
             dead: self.dead.iter().copied().collect(),
+            revived: self.revived.iter().copied().collect(),
             arm_log: self.arm_log.iter().map(|(a, d)| (a.clone(), d.iter().copied().collect())).collect(),
             receipts: self.receipts.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             next_task: self.next_task,
@@ -624,6 +712,7 @@ impl QueueState {
         q.serving = s.serving.into_iter().map(|(a, m, v)| ((a, m), v)).collect();
         q.frozen = s.frozen.into_iter().collect();
         q.dead = s.dead.into_iter().collect();
+        q.revived = s.revived.into_iter().collect();
         q.arm_log = s.arm_log.into_iter().map(|(a, d)| (a, d.into_iter().collect())).collect();
         q.receipts = s.receipts.into_iter().collect();
         q.next_task = s.next_task;
@@ -763,7 +852,8 @@ impl QueueState {
             || a.requeued != b.requeued
             || a.served != b.served
             || a.user_by_eff != b.user_by_eff
-            || a.user_irregular != b.user_irregular
+            || a.user_irr_rows != b.user_irr_rows
+            || a.user_pending_by_eff != b.user_pending_by_eff
             || a.user_by_author != b.user_by_author
             || a.other_charged != b.other_charged
             || a.solve_pending != b.solve_pending

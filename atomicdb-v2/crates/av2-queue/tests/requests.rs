@@ -95,6 +95,10 @@ fn joining_and_adopting() {
     let o = h.request("b", p, |r| r.ip = "2.2.2.2".into());
     assert_eq!(o.status, "already-queued");
     assert!(o.detail.get("adopted").is_none());
+    // test_public_api.py::RequestApiTests::test_a_second_account_backs_the_request_instead_of_duplicating_it
+    assert_eq!(o.detail["backed"], serde_json::json!(true));
+    assert_eq!(o.detail["task_state"], serde_json::json!("waiting"));
+    assert_eq!(o.detail["priority"], serde_json::json!("normal"));
     let t = live(&h, p);
     assert_eq!((t.requested_by.as_str(), t.also.clone(), t.backers()), ("a", vec!["b".to_string()], 1));
     assert_eq!(t.requested_at, stamped);
@@ -515,7 +519,13 @@ fn per_account_cap() {
     assert_eq!(o.status, "queue-full-account");
     assert_eq!(o.detail["retry_after"], serde_json::json!(300));
     assert_eq!(a.events[0].kind, "LANE_CAP_HIT");
-    let a2 = h.apply(Input::Request(RequestReq { now: h.now + 10 * SECOND, account: "flood".into(), pos: p, ip: "1.1.1.1".into(), ..Default::default() }));
+    let a2 = h.apply(Input::Request(RequestReq {
+        now: h.now + 10 * SECOND,
+        account: "flood".into(),
+        pos: p,
+        ip: "1.1.1.1".into(),
+        ..Default::default()
+    }));
     assert!(a2.events.is_empty(), "one receipt per account and minute");
     assert_eq!(h.request("other", p, |_| {}).status, "queued");
     // Running work does not spend the allowance.
@@ -561,7 +571,8 @@ fn the_receipt_tells_how_many_are_ahead() {
     h.advance(30 * HOUR);
     let p = h.pos();
     let o = h.request("named", p, |r| r.with_place = true);
-    assert_eq!(o.detail["ahead"], serde_json::json!(1));
+    assert_eq!(o.status, "queued");
+    assert_eq!(h.q.user_queue_ahead(p, h.now, &h.env), Some(1));
 }
 
 // ------------------------------------------------------------ bulk children
@@ -605,9 +616,23 @@ fn bulk_children_withdrawn_and_demotion() {
     h.request("x", 60, |_| {});
     let id = live(&h, 60).id;
     h.status(Input::Withdraw { now: h.now, account: "x".into(), task: id });
-    h.apply(Input::BulkChildren { now: h.now, account: "wolfram".into(), pos: p, route: String::new(), source: Source::User, children: None });
+    h.apply(Input::BulkChildren {
+        now: h.now,
+        account: "wolfram".into(),
+        pos: p,
+        route: String::new(),
+        source: Source::User,
+        children: None,
+    });
     let t = h.t(id);
     assert_eq!((t.state, t.requested_by.as_str(), t.budget), (TState::Pending, "wolfram", B128));
-    h.apply(Input::BulkChildren { now: h.now, account: String::new(), pos: p, route: String::new(), source: Source::Auto, children: Some(vec![60]) });
+    h.apply(Input::BulkChildren {
+        now: h.now,
+        account: String::new(),
+        pos: p,
+        route: String::new(),
+        source: Source::Auto,
+        children: Some(vec![60]),
+    });
     assert_eq!(h.t(id).source, Source::Auto);
 }

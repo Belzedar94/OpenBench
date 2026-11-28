@@ -103,7 +103,14 @@ fn a_restart_does_not_waste_a_running_search() {
     again.session = "bob-session".into();
     let LeaseOut::Task { grant: g2 } = h.lease_out(again) else { panic!() };
     assert!(g2.replayed && g2.token == grant.token);
-    let hb = HeartbeatReq { now: h.now, account: "bob".into(), machine: "bigbox".into(), task: Some(deep), token: grant.token.clone(), ..Default::default() };
+    let hb = HeartbeatReq {
+        now: h.now,
+        account: "bob".into(),
+        machine: "bigbox".into(),
+        task: Some(deep),
+        token: grant.token.clone(),
+        ..Default::default()
+    };
     assert!(matches!(h.apply(Input::Heartbeat(hb)).output, Output::Heartbeat(HeartbeatOut::Ok { .. })));
     h.advance(3 * MINUTE);
     let sub = SubmitReq {

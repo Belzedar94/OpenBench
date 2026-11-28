@@ -53,6 +53,11 @@ pub struct QueueConfig {
     pub coverage_cap: usize,
     pub dn_repair_cap: usize,
     pub fragile_cap: usize,
+    /// Order AUTO/FILL leases by the priority computed in memory (D5)
+    /// instead of the stored v1 values.  Off for the exact port: production
+    /// has not recomputed priority since 29-Aug (coordinator, 28-Nov).
+    #[serde(default)]
+    pub computed_priority: bool,
 }
 
 impl Default for QueueConfig {
@@ -74,6 +79,7 @@ impl Default for QueueConfig {
             coverage_cap: COVERAGE_QUEUE_CAP,
             dn_repair_cap: DN_REPAIR_QUEUE_CAP,
             fragile_cap: FRAGILE_QUEUE_CAP,
+            computed_priority: false,
         }
     }
 }

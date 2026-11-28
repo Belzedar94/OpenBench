@@ -14,9 +14,13 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     Queued,
-    AlreadyQueued { adopted: bool },
+    AlreadyQueued {
+        adopted: bool,
+    },
     AlreadySolved,
-    AlreadyAnalyzed { completed_budget: Option<u64> },
+    AlreadyAnalyzed {
+        completed_budget: Option<u64>,
+    },
     LadderSpent,
     /// Internal sentinel `_LADDER_EXHAUSTED`: never returned to a caller.
     LadderExhausted,
@@ -39,6 +43,11 @@ impl Outcome {
     }
 }
 
+/// Q-6.23 `notification_deserved(source, budget_nodes)`.
+pub fn notification_deserved(source: Source, budget: u64) -> bool {
+    source == Source::User || budget >= NOTIFY_MIN_BUDGET
+}
+
 /// `lanes.effective_account(author, backers, loads)` (Q-5.3).
 pub fn effective_account(author: &str, backers: &[String], loads: &BTreeMap<String, u64>) -> String {
     let mut cands: Vec<&str> = Vec::new();
@@ -53,12 +62,7 @@ pub fn effective_account(author: &str, backers: &[String], loads: &BTreeMap<Stri
     if cands.len() < 2 {
         return String::new();
     }
-    let best = cands
-        .iter()
-        .enumerate()
-        .min_by_key(|(i, n)| (loads.get(**n).copied().unwrap_or(0), *i))
-        .map(|(_, n)| *n)
-        .unwrap();
+    let best = cands.iter().enumerate().min_by_key(|(i, n)| (loads.get(**n).copied().unwrap_or(0), *i)).map(|(_, n)| *n).unwrap();
     if best == author { String::new() } else { best.to_string() }
 }
 
@@ -94,10 +98,7 @@ impl QueueState {
     /// `Profile.enabled` half of `may_choose` lives with the accounts.)
     pub fn ran_a_worker(&self, account: &str, now: Ms) -> bool {
         !account.is_empty()
-            && self
-                .pings
-                .iter()
-                .any(|((_, u), p)| u == account && p.last_result_at.map(|t| t >= now - CONTRIBUTOR_WINDOW).unwrap_or(false))
+            && self.pings.iter().any(|((_, u), p)| u == account && p.last_result_at.map(|t| t >= now - CONTRIBUTOR_WINDOW).unwrap_or(false))
     }
 
     /// Q-5.2 `chosen_rung_for(raw, user)`: `(chosen, invalid)`.  `may_choose`
@@ -126,12 +127,7 @@ impl QueueState {
                 continue;
             }
             if let Some(ids) = self.idx.user_by_author.get(n) {
-                let s: u64 = ids
-                    .iter()
-                    .map(|id| &self.tasks[id])
-                    .filter(|t| env.status(t.pos) == Status::Unknown)
-                    .map(|t| t.budget)
-                    .sum();
+                let s: u64 = ids.iter().map(|id| &self.tasks[id]).filter(|t| env.status(t.pos) == Status::Unknown).map(|t| t.budget).sum();
                 out.insert(n.clone(), s);
             }
         }
@@ -141,8 +137,7 @@ impl QueueState {
     /// Q-5.5 `_resolve_lane_account`.
     fn resolve_lane_account(&mut self, id: u64, env: &dyn QueueEnv) {
         let t = &self.tasks[&id];
-        let names: Vec<String> =
-            std::iter::once(t.requested_by.clone()).chain(t.also.iter().cloned()).filter(|n| !n.is_empty()).collect();
+        let names: Vec<String> = std::iter::once(t.requested_by.clone()).chain(t.also.iter().cloned()).filter(|n| !n.is_empty()).collect();
         let loads = self.charged_loads(&names, env);
         let lane = effective_account(&t.requested_by, &t.also, &loads);
         if lane != t.lane_account {
@@ -373,10 +368,10 @@ impl QueueState {
         if only_if_missing {
             let tgt = budget_floor.filter(|&b| b > 0).unwrap_or(REQUEST_BUDGET_LADDER[0]);
             target = Some(tgt);
-            if let Some(s) = self.searched_budget(pos) {
-                if s >= tgt {
-                    return Outcome::AlreadyAnalyzed { completed_budget: Some(s) };
-                }
+            if let Some(s) = self.searched_budget(pos)
+                && s >= tgt
+            {
+                return Outcome::AlreadyAnalyzed { completed_budget: Some(s) };
             }
         }
         let completed_max = self.completed_max_budget(pos);
@@ -385,10 +380,10 @@ impl QueueState {
         }
         let mut floor = next_rung(completed_max);
         let clamp = short_mate_clamp(&p);
-        if let Some((cb, _)) = clamp {
-            if cb > completed_max.unwrap_or(0) {
-                floor = cb;
-            }
+        if let Some((cb, _)) = clamp
+            && cb > completed_max.unwrap_or(0)
+        {
+            floor = cb;
         }
         floor = floor.max(budget_for(&p));
         if let Some(b) = budget_floor.filter(|&b| b > 0) {
@@ -413,7 +408,16 @@ impl QueueState {
         };
         let t = self.tasks[&existing].clone();
         if t.state == TState::Cancelled || t.is_absorbed() {
-            self.revive_withdrawn(existing, floor, multipv_for(generation, Some(floor), false, clamp), user, route, Source::User, background, now);
+            self.revive_withdrawn(
+                existing,
+                floor,
+                multipv_for(generation, Some(floor), false, clamp),
+                user,
+                route,
+                Source::User,
+                background,
+                now,
+            );
             self.apply_lifo(existing, user);
             return Outcome::Queued;
         }
@@ -590,6 +594,7 @@ impl QueueState {
             let want = r.budget_floor.unwrap_or(REQUEST_BUDGET_LADDER[0]);
             if let Some(s) = self.searched_budget(r.pos).filter(|&s| s >= want) {
                 detail.insert("completed_budget".into(), json!(s));
+                self.task_fields(r, &mut detail);
                 return RequestOut { status: "already-analyzed".into(), detail };
             }
         }
@@ -615,6 +620,7 @@ impl QueueState {
         if self.account_queue_full(&r.account, env) {
             self.lane_cap_receipt(&r.account, now);
             detail.insert("retry_after".into(), json!(QUEUE_FULL_RETRY_AFTER_SECONDS));
+            self.task_fields(r, &mut detail);
             return RequestOut { status: "queue-full-account".into(), detail };
         }
         let o = self.request_analysis(
@@ -641,11 +647,9 @@ impl QueueState {
         if matches!(o, Outcome::Queued | Outcome::AlreadyQueued { .. } | Outcome::Subtree) {
             self.log_request(&r.ip, r.pos, now);
         }
-        if r.with_place && matches!(o, Outcome::Queued | Outcome::AlreadyQueued { .. }) {
-            if let Some(ahead) = self.user_queue_ahead(r.pos, now, env) {
-                detail.insert("ahead".into(), json!(ahead));
-            }
-        }
+        // `ahead` (Q-5.8, `with_place`) is display only and v1 computes it
+        // after the commit: the HTTP layer asks `user_queue_ahead` on a read
+        // copy of the queue, so a deep queue never costs the writer.
         self.with_then_verify(r, o.status(), detail)
     }
 
@@ -661,7 +665,30 @@ impl QueueState {
                 detail.insert("then_verify".into(), json!(true));
             }
         }
+        self.task_fields(r, &mut detail);
         RequestOut { status: status.to_string(), detail }
+    }
+
+    /// The task fields of the API answer (api-contract 4.1): the live task of
+    /// the position (lowest id), its budget, `waiting`/`searching`,
+    /// `low`/`normal` and whether the caller backs it; all null without one.
+    fn task_fields(&self, r: &RequestReq, detail: &mut Map<String, Value>) {
+        let live = self.live_tasks_of(r.pos).first().map(|t| (*t).clone());
+        match live {
+            Some(t) => {
+                detail.insert("task".into(), json!(t.id));
+                detail.insert("budget_nodes".into(), json!(t.budget));
+                detail.insert("task_state".into(), json!(if t.state == TState::Leased { "searching" } else { "waiting" }));
+                detail.insert("priority".into(), json!(if t.background { "low" } else { "normal" }));
+                detail.insert("backed".into(), json!(!r.account.is_empty() && t.also.iter().any(|a| *a == r.account)));
+            }
+            None => {
+                for k in ["task", "budget_nodes", "task_state", "priority"] {
+                    detail.insert(k.into(), Value::Null);
+                }
+                detail.insert("backed".into(), json!(false));
+            }
+        }
     }
 
     // ------------------------------------------------------------ place in the queue (Q-5.8)

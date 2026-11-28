@@ -69,7 +69,8 @@ fn recent_heartbeat_prevents_expired_assignment_reclaim() {
     for _ in 0..40 {
         h.advance(3 * MINUTE);
         let tok = h.t(id).token.clone();
-        let r = HeartbeatReq { now: h.now, account: "alice".into(), machine: "box-a".into(), task: Some(id), token: tok, ..Default::default() };
+        let r =
+            HeartbeatReq { now: h.now, account: "alice".into(), machine: "box-a".into(), task: Some(id), token: tok, ..Default::default() };
         assert!(matches!(h.apply(Input::Heartbeat(r)).output, Output::Heartbeat(HeartbeatOut::Ok { .. })));
     }
     // Leased two hours ago, heartbeat fresh: nobody takes it.
@@ -360,7 +361,8 @@ fn idle_repair_slot_routing() {
     let mut h = H::new();
     let repair = h.row(B128, |t| t.arm = ARM_REPAIR.into());
     let other = h.auto(B128);
-    let pp = h.t(repair).pos; h.env.priority.insert(pp, 10.0);
+    let pp = h.t(repair).pos;
+    h.env.priority.insert(pp, 10.0);
     assert_eq!(h.lease_with("w", "wide", |r| r.telemetry.threads = 32), Some(other));
     assert_eq!(h.t(repair).state, TState::Pending);
     assert_eq!(h.lease_with("w", "none", |r| r.telemetry.threads = 0), None);
@@ -554,7 +556,8 @@ fn sweep_share() {
         t.arm = ARM_SWEEP16.into();
     });
     let auto = h.auto(B128);
-    let pp = h.t(auto).pos; h.env.priority.insert(pp, 50.0);
+    let pp = h.t(auto).pos;
+    h.env.priority.insert(pp, 50.0);
     assert_eq!(h.lease("w", "a"), Some(req));
     assert_eq!(h.lease("w", "b"), Some(sweep), "FILL before AUTO");
     assert_eq!(h.lease("w", "c"), Some(auto));

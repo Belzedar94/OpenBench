@@ -22,7 +22,7 @@ use crate::model::*;
 use crate::state::QueueState;
 use av2_model::{GraphRead, PosId, Status};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::BTreeSet;
 
 /// What a selector proposes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -144,10 +144,14 @@ impl QueueState {
     }
 
     pub fn pool_pending(&self) -> usize {
-        self.idx.pending.iter().filter(|id| {
-            let t = &self.tasks[id];
-            t.source == Source::Auto && t.arm != ARM_REPAIR
-        }).count()
+        self.idx
+            .pending
+            .iter()
+            .filter(|id| {
+                let t = &self.tasks[id];
+                t.source == Source::Auto && t.arm != ARM_REPAIR
+            })
+            .count()
     }
 
     /// `_queue_value_cascade(pos)` (PRI-4.9).  `open_before` is the status of
@@ -190,137 +194,40 @@ impl QueueState {
     }
 }
 
-// ------------------------------------------------------------ priority (PRI-1)
+// ------------------------------------------------------------ priority (PRI-1, PRI-2.1)
 
-/// `_runits(regret)` (PRI-1.3): `None` = no path from the root.
-pub fn runits(regret: Option<f64>) -> f64 {
-    match regret {
-        None => DISCONNECTED_REGRET,
-        Some(r) => r.min(REGRET_CAP) / 100.0,
-    }
-}
+/// The priority formula and the regret walk are av2-proof's (one copy):
+/// `priority_of`, `runits`, `campaign_bonus`, `regret_from_root`,
+/// `priorities`.  Re-exported for the queue's callers.
+pub use av2_proof::priority::{Votes, campaign_bonus, priorities, priority_of, regret_from_root, runits};
 
-/// `_campaign_bonus` (PRI-1.4).
-pub fn campaign_bonus(votes: Option<i64>) -> f64 {
-    match votes {
-        None => 0.0,
-        Some(v) => CAMPAIGN_BONUS * (v.max(0) as f64).ln_1p(),
-    }
-}
-
-/// `priority_of` (PRI-1.5), evaluated left to right as v1.
-pub fn priority_of(known: Option<i32>, expanded: bool, visits: i32, runits: f64, bonus: f64) -> f64 {
-    let e = known.map(|k| k.unsigned_abs() as i64).unwrap_or(0);
-    let mut p = (e.min(EVAL_PROXIMITY_CAP) as f64) / 100.0;
-    p += if e >= MATE_BAND as i64 { MATE_BAND_BONUS } else { 0.0 };
-    p += if expanded { 0.0 } else { UNEXPANDED_BONUS };
-    p -= REGRET_WEIGHT * runits;
-    p -= VISIT_WEIGHT * visits as f64;
-    p += bonus;
-    p
-}
-
-/// PRI-1.2 on a core record.
-fn known_of(core: &av2_model::Core) -> Option<i32> {
-    match core.status() {
-        Status::WhiteWin => Some(10000),
-        Status::BlackWin => Some(-10000),
-        Status::Draw => Some(0),
-        Status::Unknown => core.backed().or(core.eval()).map(i32::from),
-    }
-}
-
-/// Regret saturates here: every regret above `REGRET_CAP` prices the same.
-const SAT: u32 = u32::MAX - 1;
-pub const UNREACHED: u32 = u32::MAX;
-
-/// `_regret_from_root` (PRI-2.1): regret in cp of every position, dense by
-/// id, `UNREACHED` when no path from the root exists.  Exact v1 semantics:
-/// closed nodes do not relax their children, children without a value
-/// inherit the parent's regret, transpositions keep the minimum.  Values are
-/// saturated at `u32::MAX - 1` (far above `REGRET_CAP`, so prices are equal).
-pub fn regret_from_root<G: GraphRead + ?Sized>(graph: &G, root: PosId) -> Vec<u32> {
-    let n = graph.len() as usize;
-    let mut regret = vec![UNREACHED; n];
-    if root.index() >= n {
-        return regret;
-    }
-    regret[root.index()] = 0;
-    let mut heap = BinaryHeap::new();
-    heap.push(std::cmp::Reverse((0u32, root.0)));
-    let mut kids = Vec::new();
-    let mut vals: Vec<Option<i32>> = Vec::new();
-    while let Some(std::cmp::Reverse((r, k))) = heap.pop() {
-        if r > regret[k as usize] {
-            continue;
-        }
-        let core = graph.core(PosId(k));
-        if core.status() != Status::Unknown {
-            continue;
-        }
-        kids.clear();
-        graph.children(PosId(k), &mut kids);
-        if kids.is_empty() {
-            continue;
-        }
-        vals.clear();
-        vals.extend(kids.iter().map(|e| known_of(&graph.core(e.child))));
-        let white = !core.black_to_move();
-        let best = if white { vals.iter().flatten().max().copied() } else { vals.iter().flatten().min().copied() };
-        for (e, v) in kids.iter().zip(vals.iter()) {
-            let gap = match (best, v) {
-                (Some(b), Some(v)) => {
-                    if white { (b - v) as u32 } else { (v - b) as u32 }
-                }
-                _ => 0,
-            };
-            let nr = r.saturating_add(gap).min(SAT);
-            let c = e.child.index();
-            if c < n && nr < regret[c] {
-                regret[c] = nr;
-                heap.push(std::cmp::Reverse((nr, e.child.0)));
-            }
-        }
-    }
-    regret
-}
-
-/// The regret engine (PRI-1.5 + PRI-2.1 + PRI-4.2), priorities in memory.
+/// The regret engine (PRI-1.5 + PRI-2.1 + PRI-4.2), priorities computed in
+/// memory (D5).  This is the *computed* priority: the exact port orders
+/// AUTO/FILL leases by the stored v1 values instead (`QueueState::queue_rank`,
+/// `QueueConfig::computed_priority`), because production has not recomputed
+/// them since 29-Aug.
 #[derive(Clone, Debug, Default)]
 pub struct RegretSelector {
-    /// Open positions by priority (descending), ties by id (D3).
+    /// Open positions by priority (descending), ties by id (D3); the
+    /// tombstones last at `DEAD`.
     pub ranked: Vec<(f64, u64)>,
 }
 
 impl RegretSelector {
-    /// One priority pass (`refresh_priorities_v1` without the writes):
-    /// every open, non-tombstoned position.  `votes` are the ACTIVE
-    /// campaigns' votes; `dead` the tombstones.
-    pub fn compute<G: GraphRead + ?Sized>(graph: &G, root: PosId, votes: &BTreeMap<u32, i64>, dead: &BTreeSet<u64>) -> RegretSelector {
-        let regret = regret_from_root(graph, root);
-        let mut ranked = Vec::new();
-        let mut tomb = Vec::new();
-        for id in 0..graph.len() {
-            let core = graph.core(PosId(id));
-            if core.status() != Status::Unknown {
-                continue;
-            }
-            if dead.contains(&id) {
-                tomb.push((DEAD, id));
-                continue;
-            }
-            let ext = graph.ext(PosId(id)).unwrap_or_default();
-            let r = regret[id as usize];
-            let ru = runits(if r == UNREACHED { None } else { Some(r as f64) });
-            let bonus = if ext.campaign == 0 { 0.0 } else { campaign_bonus(votes.get(&ext.campaign).copied()) };
-            ranked.push((priority_of(known_of(&core), core.expanded(), ext.visits, ru, bonus), id));
-        }
+    /// One priority pass (`refresh_priorities_v1` without the writes).
+    pub fn compute<G: GraphRead + ?Sized>(graph: &G, root: PosId, votes: &Votes, dead: &BTreeSet<u64>) -> RegretSelector {
+        let mut ranked: Vec<(f64, u64)> =
+            priorities(graph, root, votes, |id| dead.contains(&id.0)).into_iter().map(|(id, p)| (p, id.0)).collect();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        ranked.extend(tomb);
+        for &d in dead {
+            if d < graph.len() && graph.core(PosId(d)).status() == Status::Unknown {
+                ranked.push((DEAD, d));
+            }
+        }
         RegretSelector { ranked }
     }
 
-    /// The priority of a position (`-1e9` for a tombstone, `0.0` if unscored).
+    /// The computed priority of every scored position.
     pub fn priority_map(&self) -> std::collections::HashMap<u64, f64> {
         self.ranked.iter().map(|(p, id)| (*id, *p)).collect()
     }
@@ -331,8 +238,7 @@ impl Refill for RegretSelector {
     fn next_tasks(&mut self, q: &QueueState, env: &dyn QueueEnv, n: usize, _now: Ms) -> MintPlan {
         let mut plan = MintPlan::default();
         let mut got = 0;
-        let window: Vec<u64> =
-            self.ranked.iter().map(|x| x.1).filter(|&p| env.status(p) == Status::Unknown).take(4 * n).collect();
+        let window: Vec<u64> = self.ranked.iter().map(|x| x.1).filter(|&p| env.status(p) == Status::Unknown).take(4 * n).collect();
         for pos in window {
             if got >= n {
                 break;
@@ -482,11 +388,11 @@ impl<D: Descent + ?Sized> Refill for PnSelector<'_, D> {
                 (Some(t), None) => value_budget(&t.arm, t.floor_nodes),
                 _ => budget_for(&p),
             };
-            if q.config.or_clamp {
-                if let Some(oc) = self.descent.proved_or_clamp(pos, &campaigns) {
-                    budget = budget.min(oc.0);
-                    clamp = Some(oc);
-                }
+            if q.config.or_clamp
+                && let Some(oc) = self.descent.proved_or_clamp(pos, &campaigns)
+            {
+                budget = budget.min(oc.0);
+                clamp = Some(oc);
             }
             let budget = server_picked_budget(budget, clamp, Some(&p), q.config.interior_deep_rungs);
             let arm = if start.is_some() {

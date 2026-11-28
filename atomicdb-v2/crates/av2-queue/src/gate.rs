@@ -97,10 +97,10 @@ impl GateFiles {
     pub fn policy(&self) -> Policy {
         let Some(st) = stamp(&self.policy_file) else { return Policy::default() };
         let mut c = self.policy_cache.lock().unwrap();
-        if let Some((s, p)) = c.as_ref() {
-            if *s == st {
-                return p.clone();
-            }
+        if let Some((s, p)) = c.as_ref()
+            && *s == st
+        {
+            return p.clone();
         }
         let p = std::fs::read_to_string(&self.policy_file).map(|t| parse_policy(&t)).unwrap_or_default();
         *c = Some((st, p.clone()));

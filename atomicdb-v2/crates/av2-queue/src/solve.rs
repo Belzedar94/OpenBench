@@ -24,10 +24,7 @@ impl QueueState {
             self.update_solve(id, |s| s.requeue());
         }
         if !ids.is_empty() {
-            self.event(
-                "SOLVE_LEASE_RECYCLED",
-                serde_json::json!({"freed": ids.len(), "minutes": SOLVE_LEASE_MINUTES / MINUTE}),
-            );
+            self.event("SOLVE_LEASE_RECYCLED", serde_json::json!({"freed": ids.len(), "minutes": SOLVE_LEASE_MINUTES / MINUTE}));
         }
         ids.len()
     }
@@ -158,13 +155,5 @@ impl QueueState {
 }
 
 fn grant_of(s: &SolveTask, replayed: bool) -> SolveGrant {
-    SolveGrant {
-        id: s.id,
-        pos: s.pos,
-        goal: s.goal.clone(),
-        stage: s.stage.clone(),
-        budget: s.budget,
-        token: s.token.clone(),
-        replayed,
-    }
+    SolveGrant { id: s.id, pos: s.pos, goal: s.goal.clone(), stage: s.stage.clone(), budget: s.budget, token: s.token.clone(), replayed }
 }

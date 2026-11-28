@@ -301,12 +301,8 @@ impl QueueState {
     /// Q-2.48..Q-2.50.
     pub(crate) fn release(&mut self, r: &ReleaseReq, env: &dyn QueueEnv) -> usize {
         let caller = machine_base(&r.machine);
-        let mut kept: Vec<ReleaseEntry> = r
-            .entries
-            .iter()
-            .filter(|e| !e.token.is_empty() && !caller.is_empty() && machine_base(&e.owner) == caller)
-            .cloned()
-            .collect();
+        let mut kept: Vec<ReleaseEntry> =
+            r.entries.iter().filter(|e| !e.token.is_empty() && !caller.is_empty() && machine_base(&e.owner) == caller).cloned().collect();
         kept.sort();
         let mut released_analysis = Vec::new();
         let mut released = 0;
@@ -340,13 +336,13 @@ impl QueueState {
         if !released_analysis.is_empty() {
             self.absorb_requeued(r.now, env);
             for (id, owner) in released_analysis {
-                if let Some(p) = self.pings.get(&(owner.clone(), r.account.clone())) {
-                    if p.current_task == Some(id) {
-                        let p = self.ping_mut(&owner, &r.account);
-                        p.current_task = None;
-                        p.last_nps = 0;
-                        p.nps_updated = None;
-                    }
+                if let Some(p) = self.pings.get(&(owner.clone(), r.account.clone()))
+                    && p.current_task == Some(id)
+                {
+                    let p = self.ping_mut(&owner, &r.account);
+                    p.current_task = None;
+                    p.last_nps = 0;
+                    p.nps_updated = None;
                 }
             }
         }

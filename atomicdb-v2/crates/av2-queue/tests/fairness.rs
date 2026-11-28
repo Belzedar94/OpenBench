@@ -45,6 +45,36 @@ fn user_band_fifo_and_selector_priority() {
     assert_eq!(h.drain("w", 4), vec![old, new, a_high, a_low]);
 }
 
+/// The AUTO/FILL band is ordered by the priority v1 has STORED today
+/// (production runs `--no-priorities`): the last pass's values, `DEAD` for a
+/// tombstone (PRI-1.7), 0.0 once revived; the computed priority only with
+/// the `computed_priority` switch.
+#[test]
+fn the_selector_bands_follow_the_stored_priority() {
+    let mut h = H::new();
+    let a = h.auto(B128);
+    let b = h.auto(B128);
+    let c = h.auto(B128);
+    let (pa, pb, pc) = (h.t(a).pos, h.t(b).pos, h.t(c).pos);
+    h.env.priority.insert(pa, 4.0);
+    h.env.priority.insert(pb, -7.0);
+    h.env.priority.insert(pc, 1.0);
+    h.q.import_dead(pa);
+    let r = h.lease_req("w", "m");
+    assert_eq!(h.q.peek_lease(&r, &h.env), Some(c), "a tombstone sorts last (-1e9)");
+    h.apply(Input::Revive { now: h.now, positions: vec![pa] });
+    assert_eq!(h.q.queue_rank(pa, &h.env), 0.0, "a revived position is 0.0, not its old value");
+    assert_eq!(h.q.queue_rank(pb, &h.env), -7.0);
+    assert_eq!(h.drain("w", 3), vec![c, a, b]);
+    // The computed priority is a later switch.
+    let mut h2 = H::new();
+    h2.config(|c| c.computed_priority = true);
+    let x = h2.auto(B128);
+    let px = h2.t(x).pos;
+    h2.env.priority.insert(px, 99.0);
+    assert_eq!(h2.q.queue_rank(px, &h2.env), 0.0, "MemEnv computes nothing");
+}
+
 /// test_queue_fairness.py::FairShareTests::test_the_first_request_of_each_account_precedes_every_second_one
 /// ::test_within_one_account_the_order_of_arrival_is_untouched
 #[test]
@@ -449,7 +479,12 @@ fn worker_campaigns_and_modes() {
     h.env.priority.insert(ph, 50.0);
     let pref = Pref { serve_campaign: Some(3), ..Default::default() };
     h.apply(Input::SetPref { now: h.now, account: "me".into(), pref });
-    h.apply(Input::SetServing { now: h.now, account: "me".into(), machine: "nocamp".into(), serving: Serving { mode: WorkerMode::Account, campaign: Some(0) } });
+    h.apply(Input::SetServing {
+        now: h.now,
+        account: "me".into(),
+        machine: "nocamp".into(),
+        serving: Serving { mode: WorkerMode::Account, campaign: Some(0) },
+    });
     let r = h.lease_req("me", "nocamp");
     assert_eq!(h.q.peek_lease(&r, &h.env), Some(high));
     assert_eq!(h.lease("me", "anybox"), Some(camp));
@@ -462,7 +497,12 @@ fn worker_campaigns_and_modes() {
     let camp = h.auto(B128);
     let pc = h.t(camp).pos;
     h.env.info(pc).campaign = 9;
-    h.apply(Input::SetServing { now: h.now, account: "me".into(), machine: "p".into(), serving: Serving { mode: WorkerMode::Personal, campaign: Some(9) } });
+    h.apply(Input::SetServing {
+        now: h.now,
+        account: "me".into(),
+        machine: "p".into(),
+        serving: Serving { mode: WorkerMode::Personal, campaign: Some(9) },
+    });
     assert_eq!(h.drain_as("me", "p", 3), vec![own, camp]);
 }
 
@@ -473,13 +513,23 @@ fn server_and_personal_modes() {
     let mut h = H::new();
     let stranger = h.user("stranger", B128);
     h.user("me", B128);
-    h.apply(Input::SetServing { now: h.now, account: "me".into(), machine: "srv#4".into(), serving: Serving { mode: WorkerMode::Server, campaign: None } });
+    h.apply(Input::SetServing {
+        now: h.now,
+        account: "me".into(),
+        machine: "srv#4".into(),
+        serving: Serving { mode: WorkerMode::Server, campaign: None },
+    });
     assert_eq!(h.lease("me", "srv#0"), Some(stranger), "every slot of the machine shares the row");
 
     let mut h = H::new();
     h.user("stranger", B128);
     h.auto(B128);
-    h.apply(Input::SetServing { now: h.now, account: "me".into(), machine: "p".into(), serving: Serving { mode: WorkerMode::Personal, campaign: None } });
+    h.apply(Input::SetServing {
+        now: h.now,
+        account: "me".into(),
+        machine: "p".into(),
+        serving: Serving { mode: WorkerMode::Personal, campaign: None },
+    });
     assert_eq!(h.lease("me", "p"), None);
 }
 

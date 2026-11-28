@@ -8,7 +8,15 @@ use av2_queue::*;
 use common::*;
 
 fn hb(h: &mut H, id: u64, machine: &str, token: &str) -> HeartbeatOut {
-    let r = HeartbeatReq { now: h.now, account: "w".into(), machine: machine.into(), task: Some(id), token: token.into(), nps: 1234, ..Default::default() };
+    let r = HeartbeatReq {
+        now: h.now,
+        account: "w".into(),
+        machine: machine.into(),
+        task: Some(id),
+        token: token.into(),
+        nps: 1234,
+        ..Default::default()
+    };
     match h.apply(Input::Heartbeat(r)).output {
         Output::Heartbeat(o) => o,
         o => panic!("{o:?}"),
@@ -208,7 +216,10 @@ fn release_own_leases() {
     let late = h.submit_req(a);
     assert_eq!(release(&mut h, "box#5", vec![e.clone()]), 1);
     let ta = h.t(a).clone();
-    assert_eq!((ta.state, ta.machine.as_str(), ta.token.as_str(), ta.session.as_str(), ta.heartbeat_at, ta.attempts), (TState::Pending, "", "", "", None, 1));
+    assert_eq!(
+        (ta.state, ta.machine.as_str(), ta.token.as_str(), ta.session.as_str(), ta.heartbeat_at, ta.attempts),
+        (TState::Pending, "", "", "", None, 1)
+    );
     assert!(ta.leased_at.is_some());
     // The recycler leaves b exactly in the same shape (a lease call runs it;
     // the slot below has nothing else to take than a and b).
@@ -216,7 +227,10 @@ fn release_own_leases() {
     r.max_budget = Some(1);
     h.lease_out(r);
     let tb = h.t(b).clone();
-    assert_eq!((tb.state, tb.machine.as_str(), tb.token.as_str(), tb.session.as_str(), tb.heartbeat_at, tb.attempts), (TState::Pending, "", "", "", None, 1));
+    assert_eq!(
+        (tb.state, tb.machine.as_str(), tb.token.as_str(), tb.session.as_str(), tb.heartbeat_at, tb.attempts),
+        (TState::Pending, "", "", "", None, 1)
+    );
     assert_eq!(release(&mut h, "box#5", vec![e]), 0, "releasing twice changes nothing");
     assert_eq!(h.submit(late), SubmitOut::NotLeased);
     assert_eq!(h.lease("w", "fresh"), Some(a));
@@ -271,7 +285,15 @@ fn solve_task(h: &mut H, budget: u64, arm: &str) -> u64 {
 
 fn acquire(h: &mut H, machine: &str, session: &str, max: Option<u64>) -> Option<SolveGrant> {
     let token = h.token();
-    let r = SolveAcquireReq { now: h.now, account: "s".into(), machine: machine.into(), session: session.into(), token, max_budget: max, ..Default::default() };
+    let r = SolveAcquireReq {
+        now: h.now,
+        account: "s".into(),
+        machine: machine.into(),
+        session: session.into(),
+        token,
+        max_budget: max,
+        ..Default::default()
+    };
     match h.apply(Input::SolveAcquire(r)).output {
         Output::SolveAcquire { task } => task,
         o => panic!("{o:?}"),
@@ -309,7 +331,14 @@ fn solve_protocol() {
     assert_eq!(g2.token, g.token);
     assert_eq!(h.q.solve(id).unwrap().attempts, 1);
     assert!(acquire(&mut h, "solver", "other-session", None).is_none(), "one live proof lease per identity");
-    let r = SolveHeartbeatReq { now: h.now, account: "s".into(), machine: "solver".into(), task: id, token: g.token.clone(), ..Default::default() };
+    let r = SolveHeartbeatReq {
+        now: h.now,
+        account: "s".into(),
+        machine: "solver".into(),
+        task: id,
+        token: g.token.clone(),
+        ..Default::default()
+    };
     assert_eq!(h.apply(Input::SolveHeartbeat(r.clone())).output, Output::SolveHeartbeat { ok: true });
     let mut stranger = r;
     stranger.machine = "x".into();

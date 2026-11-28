@@ -77,11 +77,19 @@ pub trait QueueEnv {
     fn server_tables_cover(&self, _pos: u64) -> bool {
         false
     }
-    /// `Position.priority` as the lease reads it for AUTO/FILL rows (Q-2.16
-    /// key 8).  v1 stores it; in production it is never recomputed (PRI-6.2),
-    /// so the default is the imported value or 0.0 (see OQ-22).
+    /// The v1 **stored** `Position.priority` (the value the last priority
+    /// pass wrote; 0.0 for positions born after 29-Aug, when production
+    /// stopped recomputing it).  Tombstones and revivals are queue state and
+    /// override it (`QueueState::queue_rank`).  The graph does not store it
+    /// (D5); for the exact port it must come from the v1 export (see
+    /// docs/queue.md, decision for the store).
     fn queue_rank(&self, _pos: u64) -> f64 {
         0.0
+    }
+    /// The priority computed in memory (`RegretSelector`, D5), used only
+    /// when `QueueConfig::computed_priority` is switched on.
+    fn computed_priority(&self, _pos: u64) -> Option<f64> {
+        None
     }
 }
 
@@ -163,11 +171,7 @@ impl<G: GraphRead + ?Sized> QueueEnv for GraphEnv<'_, G> {
             backed_eval: core.backed().map(i32::from),
             backed_move: !core.backed_move.is_none(),
             mate_in: core.mate().map(i32::from),
-            first_line_mate: if ext.analysis.is_none() {
-                None
-            } else {
-                self.graph.blob(ext.analysis).and_then(|b| first_line_mate(&b))
-            },
+            first_line_mate: if ext.analysis.is_none() { None } else { self.graph.blob(ext.analysis).and_then(|b| first_line_mate(&b)) },
             white_to_move: white,
             nodes_invested: ext.nodes_invested,
             backed_nodes: ext.backed_nodes,

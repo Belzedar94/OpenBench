@@ -41,10 +41,10 @@ fn workload(seed: u64, steps: usize) {
             let m = MACHINES[rng.below(MACHINES.len() as u64) as usize];
             let account = ACCOUNTS[1 + rng.below(4) as usize];
             let mut r = h.lease_req(account, m);
-            if rng.chance(0.7) {
-                if let Some(s) = sessions.get(m) {
-                    r.session = s.clone();
-                }
+            if rng.chance(0.7)
+                && let Some(s) = sessions.get(m)
+            {
+                r.session = s.clone();
             }
             sessions.insert(m, r.session.clone());
             if rng.chance(0.2) {
@@ -56,7 +56,8 @@ fn workload(seed: u64, steps: usize) {
         } else if pick < 50 {
             let p = positions[rng.below(positions.len() as u64) as usize];
             let account = ACCOUNTS[rng.below(5) as usize];
-            let mut r = RequestReq { now: h.now, account: account.into(), pos: p, ip: format!("10.0.0.{}", rng.below(3)), ..Default::default() };
+            let mut r =
+                RequestReq { now: h.now, account: account.into(), pos: p, ip: format!("10.0.0.{}", rng.below(3)), ..Default::default() };
             r.background = rng.chance(0.3);
             if rng.chance(0.2) {
                 r.budget_floor = Some(REQUEST_BUDGET_LADDER[rng.below(3) as usize]);
@@ -78,7 +79,14 @@ fn workload(seed: u64, steps: usize) {
                     r.gate_rejects = rng.chance(0.05);
                     Input::Submit(r)
                 } else {
-                    Input::Heartbeat(HeartbeatReq { now: h.now, account: "w".into(), machine: t.machine.clone(), task: Some(id), token, ..Default::default() })
+                    Input::Heartbeat(HeartbeatReq {
+                        now: h.now,
+                        account: "w".into(),
+                        machine: t.machine.clone(),
+                        task: Some(id),
+                        token,
+                        ..Default::default()
+                    })
                 }
             }
         } else if pick < 66 {
@@ -130,7 +138,8 @@ fn workload(seed: u64, steps: usize) {
             let p = positions[rng.below(positions.len() as u64) as usize];
             let arm = ["", ARM_REPAIR, ARM_SWEEP16, ARM_COVERAGE][rng.below(4) as usize];
             let source = if arm == ARM_SWEEP16 || arm == ARM_COVERAGE { Source::Fill } else { Source::Auto };
-            let plan = MintPlan { tasks: vec![MintTask { pos: p, budget: B128, multipv: 5, source, arm: arm.into() }], ..Default::default() };
+            let plan =
+                MintPlan { tasks: vec![MintTask { pos: p, budget: B128, multipv: 5, source, arm: arm.into() }], ..Default::default() };
             Input::Mint { now: h.now, plan }
         } else if pick < 93 {
             Input::Tick { now: h.now }
@@ -177,10 +186,11 @@ fn workload(seed: u64, steps: usize) {
         for t in before.tasks() {
             if t.state == TState::Leased {
                 let now = h.q.task(t.id);
-                if let Some(n) = now {
-                    if n.state == TState::Leased && n.token != t.token {
-                        superseded.push((t.id, t.machine.clone(), t.token.clone()));
-                    }
+                if let Some(n) = now
+                    && n.state == TState::Leased
+                    && n.token != t.token
+                {
+                    superseded.push((t.id, t.machine.clone(), t.token.clone()));
                 }
             }
         }
@@ -208,7 +218,14 @@ fn workload(seed: u64, steps: usize) {
                 continue;
             }
             let mut probe = h.q.clone();
-            let r = SubmitReq { now: h.now, account: "w".into(), machine: machine.clone(), task: *id, token: token.clone(), ..Default::default() };
+            let r = SubmitReq {
+                now: h.now,
+                account: "w".into(),
+                machine: machine.clone(),
+                task: *id,
+                token: token.clone(),
+                ..Default::default()
+            };
             let out = probe.apply(&Input::Submit(r), &h.env, &mut NoRefill).output;
             assert!(
                 !matches!(out, Output::Submit(SubmitOut::Accepted { .. })),
@@ -314,7 +331,8 @@ fn fair_share_bound_by_cost() {
             let Some(id) = h.serve("w", 1).first().copied() else { break };
             let t = h.t(id);
             *served.entry(t.requested_by.clone()).or_default() += t.budget;
-            let waiting: Vec<&String> = accounts.iter().filter(|a| h.q.tasks().any(|t| &t.requested_by == *a && t.state == TState::Pending)).collect();
+            let waiting: Vec<&String> =
+                accounts.iter().filter(|a| h.q.tasks().any(|t| &t.requested_by == *a && t.state == TState::Pending)).collect();
             for a in &waiting {
                 for b in &waiting {
                     let (x, y) = (served.get(*a).copied().unwrap_or(0), served.get(*b).copied().unwrap_or(0));

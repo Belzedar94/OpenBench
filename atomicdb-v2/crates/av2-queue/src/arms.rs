@@ -128,7 +128,8 @@ impl QueueState {
                 if !cp.exists || cp.status != Status::Unknown {
                     continue;
                 }
-                let budget = server_picked_budget(COVERAGE_SEED_NODES.max(budget_for(&cp)), None, Some(&cp), self.config.interior_deep_rungs);
+                let budget =
+                    server_picked_budget(COVERAGE_SEED_NODES.max(budget_for(&cp)), None, Some(&cp), self.config.interior_deep_rungs);
                 if self.fill_child(child, budget, DEPTH_MULTIPV, ARM_COVERAGE, now, env) {
                     made += 1;
                 }
@@ -171,7 +172,8 @@ impl QueueState {
                         break;
                     }
                     let cp = env.pos(child);
-                    let budget = server_picked_budget(DN_REPAIR_SEED_NODES.max(budget_for(&cp)), None, Some(&cp), self.config.interior_deep_rungs);
+                    let budget =
+                        server_picked_budget(DN_REPAIR_SEED_NODES.max(budget_for(&cp)), None, Some(&cp), self.config.interior_deep_rungs);
                     let mpv = multipv_for(cp.visits, Some(budget), false, None);
                     if self.fill_child(child, budget, mpv, ARM_DN, now, env) {
                         made += 1;
@@ -329,7 +331,13 @@ mod tests {
         let rows = vec![(1, Status::WhiteWin, None), (2, Status::Unknown, None)];
         assert_eq!(coverage_gap(true, &rows, 3), None);
         // ::test_too_many_blanks_is_ordinary_exploration_not_this
-        let rows = vec![(1, Status::BlackWin, None), (2, Status::Unknown, None), (3, Status::Unknown, None), (4, Status::Unknown, None), (5, Status::Unknown, None)];
+        let rows = vec![
+            (1, Status::BlackWin, None),
+            (2, Status::Unknown, None),
+            (3, Status::Unknown, None),
+            (4, Status::Unknown, None),
+            (5, Status::Unknown, None),
+        ];
         assert_eq!(coverage_gap(true, &rows, 3), None);
         // -800 exactly qualifies (counted as informed).
         let rows = vec![(1, Status::Unknown, Some(-800)), (2, Status::Unknown, None)];

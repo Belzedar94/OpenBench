@@ -14,6 +14,9 @@ bench = ["dep:av2-store"]
 [dependencies]
 av2-model.workspace = true
 av2-facts.workspace = true
+# The priority formula, the regret walk, the OR clamp and their constants
+# live in av2-proof (one copy, PR #346); the queue imports them.
+av2-proof = { path = "../av2-proof" }
 av2-store = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }

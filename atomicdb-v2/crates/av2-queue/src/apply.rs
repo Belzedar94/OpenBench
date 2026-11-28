@@ -61,17 +61,13 @@ impl QueueState {
             }
             Input::Landed { now, pos, task, arbiter } => {
                 // EXP-5.2 / Q-3.13: PENDING tasks of the position the pass covers.
-                let ids: Vec<u64> = self
-                    .live_tasks_of(*pos)
-                    .iter()
-                    .filter(|t| Some(t.id) != *task && t.budget <= *arbiter)
-                    .map(|t| t.id)
-                    .collect();
+                let ids: Vec<u64> =
+                    self.live_tasks_of(*pos).iter().filter(|t| Some(t.id) != *task && t.budget <= *arbiter).map(|t| t.id).collect();
                 Output::Absorbed { count: self.absorb(&ids, *now) }
             }
             Input::Revive { positions, .. } => {
                 for &p in positions {
-                    self.set_dead(p, false);
+                    self.revive(p);
                 }
                 Output::Ok
             }

@@ -39,11 +39,7 @@ pub fn decode(fact: &Fact) -> Option<Result<(Input, Vec<Delta>), String>> {
     if o.kind != KIND {
         return None;
     }
-    Some(
-        serde_json::from_str::<Record>(&o.data.0)
-            .map(|r| (r.input.into_owned(), r.deltas.into_owned()))
-            .map_err(|e| e.to_string()),
-    )
+    Some(serde_json::from_str::<Record>(&o.data.0).map(|r| (r.input.into_owned(), r.deltas.into_owned())).map_err(|e| e.to_string()))
 }
 
 /// Replay the queue facts of a log onto a state (recovery after the last

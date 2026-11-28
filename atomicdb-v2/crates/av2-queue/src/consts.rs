@@ -100,8 +100,8 @@ pub const AUTO_INTERIOR_MAX_NODES: u64 = 128_000_000;
 pub const DEPTH_BUDGET_THRESHOLD: u64 = 512_000_000;
 /// `ingest.DEPTH_MULTIPV` (PRI-5.5).
 pub const DEPTH_MULTIPV: u32 = 2;
-/// `ingest.MATE_BAND` / `score_bands.BIG_LOW` (PRI-1.1).
-pub const MATE_BAND: i32 = 9000;
+/// `ingest.MATE_BAND` / `score_bands.BIG_LOW` (PRI-1.1), from av2-proof.
+pub use av2_proof::gate::MATE_BAND;
 /// `ingest.TB_CLAMP_CEILING` (PRI-5.4).
 pub const TB_CLAMP_CEILING: i32 = 9500;
 /// `ingest.MATE_CLAMP_PLIES` (PRI-5.4): M<=3 counting the defender's ply.
@@ -115,17 +115,12 @@ pub const RUNG_OVERSHOOT_TOLERANCE: f64 = 0.01;
 
 // ------------------------------------------------------------ selector (PRI-1..4)
 
-/// `ingest.DEAD` (PRI-1.1): v1 tombstone value.  v2 keeps a boolean (OQ-26).
-pub const DEAD: f64 = -1e9;
-pub const REGRET_WEIGHT: f64 = 3.0;
-pub const DISCONNECTED_REGRET: f64 = 5.0;
-pub const CAMPAIGN_BONUS: f64 = 40.0;
-pub const EVAL_PROXIMITY_CAP: i64 = 1500;
-pub const MATE_BAND_BONUS: f64 = 50.0;
-pub const UNEXPANDED_BONUS: f64 = 2.0;
-pub const VISIT_WEIGHT: f64 = 1.5;
-pub const REGRET_CAP: f64 = 3000.0;
-pub const FAR_REGRET: f64 = REGRET_CAP / 100.0;
+/// The priority constants (PRI-1.1) are av2-proof's: `DEAD` is the v1
+/// tombstone value (v2 keeps a boolean, OQ-26).
+pub use av2_proof::priority::{
+    CAMPAIGN_BONUS, DEAD, DISCONNECTED_REGRET, EVAL_PROXIMITY_CAP, FAR_REGRET, MATE_BAND_BONUS, REGRET_CAP, REGRET_WEIGHT,
+    UNEXPANDED_BONUS, VISIT_WEIGHT,
+};
 /// `ingest.ANALYSIS_POOL_TARGET` (PRI-4.3).  Production passes 64 (OQ-28).
 pub const ANALYSIS_POOL_TARGET: usize = 512;
 /// `ingest.VALUE_SPINE_NODES` .. (PRI-4.8).
@@ -135,9 +130,8 @@ pub const VALUE_EXPLORE_NODES: u64 = BUDGET_LADDER[0];
 /// `ingest.VALUE_CASCADE_*` (PRI-4.9).
 pub const VALUE_CASCADE_NODES: u64 = 8_000_000;
 pub const VALUE_CASCADE_CAP: usize = 16;
-/// `proof.OR_CLAMP_*` (PRI-4.6).
-pub const OR_CLAMP_NODES: u64 = 250_000;
-pub const OR_CLAMP_MULTIPV: u32 = 1;
+/// `proof.OR_CLAMP_*` (PRI-4.6), from av2-proof.
+pub use av2_proof::clamp::{OR_CLAMP_MULTIPV, OR_CLAMP_NODES};
 
 // ------------------------------------------------------------ arms (Q-8)
 
@@ -159,14 +153,8 @@ pub const ARM_RATE_WINDOW: Ms = HOUR;
 /// `ingest.ARM_RATE_RECEIPT_WINDOW` (Q-8.4).
 pub const ARM_RATE_RECEIPT_WINDOW: Ms = 10 * MINUTE;
 /// `ingest.ARM_RATE_SETTING` defaults (Q-8.2).
-pub const ARM_RATE_DEFAULTS: &[(&str, u32)] = &[
-    (ARM_SWEEP16, 1200),
-    (ARM_CASCADE, 240),
-    (ARM_QUALITY, 120),
-    (ARM_DESCEND, 120),
-    (ARM_REPAIR, 60),
-    (ARM_AUTOSOLVE95, 60),
-];
+pub const ARM_RATE_DEFAULTS: &[(&str, u32)] =
+    &[(ARM_SWEEP16, 1200), (ARM_CASCADE, 240), (ARM_QUALITY, 120), (ARM_DESCEND, 120), (ARM_REPAIR, 60), (ARM_AUTOSOLVE95, 60)];
 
 pub const DEBT_STAGE_NODES: u64 = 2_000_000;
 pub const DEBT_QUEUE_CAP: usize = 500;

@@ -34,11 +34,7 @@ impl ServeCtx {
     pub(crate) fn new(q: &QueueState, user: &str, machine: &str) -> ServeCtx {
         let pref = q.pref(user);
         let mut serve_order = if user.is_empty() { ServeOrder::Own } else { pref.serve_order };
-        let mut serve_first = if user.is_empty() || serve_order == ServeOrder::Queue {
-            Vec::new()
-        } else {
-            pref.serve_for.clone()
-        };
+        let mut serve_first = if user.is_empty() || serve_order == ServeOrder::Queue { Vec::new() } else { pref.serve_for.clone() };
         let base: String = machine_base(machine).chars().take(64).collect();
         let (mode, pick) = if user.is_empty() {
             (WorkerMode::Account, None)
@@ -72,7 +68,7 @@ impl ServeCtx {
 
     /// `own_q`: authored (exact) or backed by this account.
     pub(crate) fn own(&self, t: &Task) -> bool {
-        t.requested_by == self.user || (!self.user.is_empty() && t.also.iter().any(|b| *b == self.user))
+        t.requested_by == self.user || (!self.user.is_empty() && t.also.contains(&self.user))
     }
 
     /// `requester_q(names)`.
@@ -105,14 +101,34 @@ impl ServeCtx {
         if t.source != Source::User {
             return 0;
         }
-        if !self.serve_first.is_empty() {
-            if let Some(b) = self.listed_band() {
-                if Self::requester(t, &self.serve_first) {
-                    return b;
-                }
-            }
+        if !self.serve_first.is_empty()
+            && let Some(b) = self.listed_band()
+            && Self::requester(t, &self.serve_first)
+        {
+            return b;
         }
         if self.own(t) {
+            return match self.serve_order {
+                ServeOrder::Own => 1,
+                ServeOrder::Queue => 0,
+                ServeOrder::Others => -1,
+            };
+        }
+        0
+    }
+
+    /// `own_first` of a plain USER row authored by `author` (no backers).
+    pub(crate) fn own_first_of_author(&self, author: &str) -> i8 {
+        if !self.serve_first.is_empty()
+            && let Some(b) = self.listed_band()
+        {
+            let listed =
+                self.serve_first.iter().any(|n| if n.to_lowercase() == "anonymous" { author.is_empty() } else { iequal(author, n) });
+            if listed {
+                return b;
+            }
+        }
+        if author == self.user {
             return match self.serve_order {
                 ServeOrder::Own => 1,
                 ServeOrder::Queue => 0,
@@ -174,8 +190,7 @@ impl QueueState {
     /// Q-2.8 `_absorb_requeued`: every PENDING row that once had a lease and
     /// sits on a closed position is absorbed (global, OQ-18 kept as in v1).
     pub(crate) fn absorb_requeued(&mut self, now: Ms, env: &dyn QueueEnv) -> usize {
-        let ids: Vec<u64> =
-            self.idx.requeued.iter().copied().filter(|id| env.status(self.tasks[id].pos) != Status::Unknown).collect();
+        let ids: Vec<u64> = self.idx.requeued.iter().copied().filter(|id| env.status(self.tasks[id].pos) != Status::Unknown).collect();
         self.absorb(&ids, now)
     }
 
@@ -322,62 +337,58 @@ impl QueueState {
             if t.state != TState::Pending || !self.passes(ctx, t, env) {
                 continue;
             }
-            let key: OrderKey =
-                (-band(t), -(t.source.rank() as i8), 0, 0, 0, 0, 0, f64_key(-env.queue_rank(t.pos)), t.id);
+            let key: OrderKey = (-band(t), -(t.source.rank() as i8), 0, 0, 0, 0, 0, f64_key(-self.queue_rank(t.pos, env)), t.id);
             out.push((key, id));
         }
         out
     }
 
     /// The same order as `lease_order`, produced lazily (the lease usually
-    /// needs only its first few rows).
+    /// needs only its first rows).
     ///
-    /// A *plain* partition (every row authored by its effective account,
-    /// nobody backing any, not anonymous) has one value of every key that
-    /// comes before `lane_ahead` (band, source, own first, named), the same
-    /// backers (0) and the same served rank; `lane_ahead` strictly grows
-    /// along the window order (budgets are positive).  So inside it the
-    /// lease order IS the window order, and only its head needs to be in the
-    /// heap.  Other partitions, AUTO/FILL rows, and workers with a personal
-    /// filter or a campaign band go through the full computation.  The
-    /// property test `lazy_order_equals_full_order` checks the equivalence.
+    /// Inside one fair-share partition `lane_ahead` strictly grows along the
+    /// window order (budgets are positive), so among the partition's rows
+    /// that share the keys before it (band, source, own first, named) the
+    /// lease order IS the window order, and the keys after it (backers,
+    /// served rank, id) never decide.  So each partition is walked once, in
+    /// window order, and only the head of each of its *classes* (own first,
+    /// named) is in the heap.  The classes present are known up front from
+    /// the plain-row count and the short list of irregular rows (backed, lane
+    /// or anonymous), so no walk goes further than the rows it hands out.
+    /// AUTO/FILL rows, and workers with a personal filter or a campaign band,
+    /// go through the full computation.  `lazy_order_equals_full_order`
+    /// (tests/properties.rs) checks the equivalence.
     pub(crate) fn merge<'a>(&'a self, ctx: &'a ServeCtx, now: Ms, env: &'a dyn QueueEnv) -> Merge<'a> {
-        let mut m = Merge { q: self, ctx, env, heap: BinaryHeap::new(), cursors: Vec::new() };
+        let mut m = Merge { q: self, ctx, env, starved: now - STARVED_AFTER, heap: BinaryHeap::new(), walkers: Vec::new() };
         if ctx.personal || ctx.campaign.is_some() {
-            m.heap.extend(self.lease_order(ctx, now, env).into_iter().map(|(k, id)| Reverse((k, id, usize::MAX))));
+            m.heap.extend(self.lease_order(ctx, now, env).into_iter().map(|(k, id)| Reverse((k, id, usize::MAX, (0, 0)))));
             return m;
         }
-        let starved = now - STARVED_AFTER;
         let ranks = self.served_ranks(now);
         for (acct, rows) in &self.idx.user_by_eff {
-            let served = ranks.get(acct.as_str()).copied().unwrap_or(0);
-            let plain = !acct.is_empty() && !self.idx.user_irregular.contains_key(acct);
-            if plain {
-                let Some(&(_, _, _, first)) = rows.iter().next() else { continue };
-                let own = ctx.own_first(&self.tasks[&first]);
-                let mut c = Cursor { iter: rows.iter(), cum: 0, served, own };
-                if let Some(head) = c.next(self, ctx, env) {
-                    let idx = m.cursors.len();
-                    m.cursors.push(c);
-                    m.heap.push(Reverse((head.0, head.1, idx)));
-                }
+            let pending = self.idx.user_pending_by_eff.get(acct).copied().unwrap_or(0);
+            if pending == 0 {
                 continue;
             }
-            let mut cum: u64 = 0;
-            for &(_, _, _, id) in rows {
-                let t = &self.tasks[&id];
-                if !self.passes(ctx, t, env) {
-                    continue;
+            let mut remaining: BTreeMap<Class, usize> = BTreeMap::new();
+            let mut irregular_pending = 0;
+            for id in self.idx.user_irr_rows.get(acct).into_iter().flatten() {
+                let t = &self.tasks[id];
+                if t.state == TState::Pending {
+                    irregular_pending += 1;
+                    *remaining.entry(class_of(ctx, t, m.starved)).or_default() += 1;
                 }
-                let ahead = cum;
-                cum = cum.saturating_add(t.budget);
-                if t.state != TState::Pending {
-                    continue;
-                }
-                let named = !t.requested_by.is_empty() || t.created < starved;
-                let key: OrderKey =
-                    (0, -(Source::User.rank() as i8), -ctx.own_first(t), -(named as i8), ahead, -(t.backers() as i64), served, f64_key(-0.0), t.id);
-                m.heap.push(Reverse((key, id, usize::MAX)));
+            }
+            if pending > irregular_pending {
+                // A plain row: authored by `acct`, nobody backing it, named.
+                *remaining.entry((ctx.own_first_of_author(acct), 1)).or_default() += pending - irregular_pending;
+            }
+            let served = ranks.get(acct.as_str()).copied().unwrap_or(0);
+            let w = m.walkers.len();
+            m.walkers.push(Walker { iter: rows.iter(), cum: 0, served, remaining, queues: BTreeMap::new() });
+            let classes: Vec<Class> = m.walkers[w].remaining.keys().copied().collect();
+            for c in classes {
+                m.refill(w, c);
             }
         }
         for &id in &self.idx.other_charged {
@@ -385,8 +396,8 @@ impl QueueState {
             if t.state != TState::Pending || !self.passes(ctx, t, env) {
                 continue;
             }
-            let key: OrderKey = (0, -(t.source.rank() as i8), 0, 0, 0, 0, 0, f64_key(-env.queue_rank(t.pos)), t.id);
-            m.heap.push(Reverse((key, id, usize::MAX)));
+            let key: OrderKey = (0, -(t.source.rank() as i8), 0, 0, 0, 0, 0, f64_key(-self.queue_rank(t.pos, env)), t.id);
+            m.heap.push(Reverse((key, id, usize::MAX, (0, 0))));
         }
         m
     }
@@ -491,10 +502,10 @@ impl QueueState {
     }
 
     fn sweep_has_waiting(&mut self, now: Ms, env: &dyn QueueEnv) -> bool {
-        if let Some((w, until)) = self.sweep_waiting {
-            if now < until {
-                return w;
-            }
+        if let Some((w, until)) = self.sweep_waiting
+            && now < until
+        {
+            return w;
         }
         let w = !self.sweep_waiting_tasks(env).is_empty();
         self.sweep_note_waiting(w, now);
@@ -601,31 +612,23 @@ impl QueueState {
     }
 }
 
-/// A plain partition walked in window order (see `QueueState::merge`).
-pub(crate) struct Cursor<'a> {
+/// (own first, named) of a USER row: the keys before `lane_ahead` that can
+/// differ inside one partition (band and source do not, in the lazy path).
+type Class = (i8, i8);
+
+fn class_of(ctx: &ServeCtx, t: &Task, starved: Ms) -> Class {
+    (ctx.own_first(t), (!t.requested_by.is_empty() || t.created < starved) as i8)
+}
+
+/// One partition walked once in window order, handing its rows out by class.
+pub(crate) struct Walker<'a> {
     iter: std::collections::btree_set::Iter<'a, (u8, bool, i64, u64)>,
     cum: u64,
     served: u32,
-    own: i8,
-}
-
-impl Cursor<'_> {
-    fn next(&mut self, q: &QueueState, ctx: &ServeCtx, env: &dyn QueueEnv) -> Option<(OrderKey, u64)> {
-        for &(_, _, _, id) in self.iter.by_ref() {
-            let t = &q.tasks[&id];
-            if !q.passes(ctx, t, env) {
-                continue;
-            }
-            let ahead = self.cum;
-            self.cum = self.cum.saturating_add(t.budget);
-            if t.state != TState::Pending {
-                continue;
-            }
-            let key: OrderKey = (0, -(Source::User.rank() as i8), -self.own, -1, ahead, 0, self.served, f64_key(-0.0), t.id);
-            return Some((key, id));
-        }
-        None
-    }
+    /// PENDING rows of each class not walked yet.
+    remaining: BTreeMap<Class, usize>,
+    /// Walked candidates of each class, in window order.
+    queues: BTreeMap<Class, std::collections::VecDeque<(OrderKey, u64)>>,
 }
 
 /// The lease order, popped one row at a time.
@@ -633,17 +636,49 @@ pub(crate) struct Merge<'a> {
     q: &'a QueueState,
     ctx: &'a ServeCtx,
     env: &'a dyn QueueEnv,
-    heap: BinaryHeap<Reverse<(OrderKey, u64, usize)>>,
-    cursors: Vec<Cursor<'a>>,
+    starved: Ms,
+    heap: BinaryHeap<Reverse<(OrderKey, u64, usize, Class)>>,
+    walkers: Vec<Walker<'a>>,
 }
 
 impl Merge<'_> {
-    pub(crate) fn pop(&mut self) -> Option<u64> {
-        let Reverse((_, id, c)) = self.heap.pop()?;
-        if c != usize::MAX {
-            if let Some(next) = self.cursors[c].next(self.q, self.ctx, self.env) {
-                self.heap.push(Reverse((next.0, next.1, c)));
+    /// Put the next row of class `c` of walker `w` in the heap, walking the
+    /// partition as far as needed (and no further than its last such row).
+    fn refill(&mut self, w: usize, c: Class) {
+        let (q, ctx, env, starved) = (self.q, self.ctx, self.env, self.starved);
+        let walker = &mut self.walkers[w];
+        loop {
+            if let Some(front) = walker.queues.get_mut(&c).and_then(|v| v.pop_front()) {
+                self.heap.push(Reverse((front.0, front.1, w, c)));
+                return;
             }
+            if walker.remaining.get(&c).copied().unwrap_or(0) == 0 {
+                return;
+            }
+            let Some(&(_, _, _, id)) = walker.iter.next() else { return };
+            let t = &q.tasks[&id];
+            let pending = t.state == TState::Pending;
+            let class = if pending { Some(class_of(ctx, t, starved)) } else { None };
+            if let Some(k) = class {
+                *walker.remaining.get_mut(&k).expect("class counted up front") -= 1;
+            }
+            if !q.passes(ctx, t, env) {
+                continue;
+            }
+            let ahead = walker.cum;
+            walker.cum = walker.cum.saturating_add(t.budget);
+            if let Some(k) = class {
+                let key: OrderKey =
+                    (0, -(Source::User.rank() as i8), -k.0, -k.1, ahead, -(t.backers() as i64), walker.served, f64_key(-0.0), t.id);
+                walker.queues.entry(k).or_default().push_back((key, id));
+            }
+        }
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<u64> {
+        let Reverse((_, id, w, c)) = self.heap.pop()?;
+        if w != usize::MAX {
+            self.refill(w, c);
         }
         Some(id)
     }
