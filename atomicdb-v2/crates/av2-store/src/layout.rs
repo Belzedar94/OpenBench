@@ -30,7 +30,7 @@ pub const NFILES: usize = 12;
 /// The file slot of arena generation `generation`.
 #[inline]
 pub fn arena_slot(generation: u64) -> FileId {
-    if generation % 2 == 0 { F_KM_ARENA } else { F_KM_ARENA_ODD }
+    if generation.is_multiple_of(2) { F_KM_ARENA } else { F_KM_ARENA_ODD }
 }
 /// Bit 63 of a directory entry's region: the region lives in the odd slot.
 pub const REGION_ODD: u64 = 1 << 63;

@@ -92,7 +92,6 @@ fn run(g: &mut TestGraph, cfg: &RulesConfig, cascade: &[PosId], backed: &[PosId]
     let att = Attribution::default();
     let mut env = ClimbEnv { cfg, effects: &mut rec, zeroing: &mut z, tasks: &mut tasks, loops, attribution: &att };
     let r = climb(g, cascade, backed, &mut env).unwrap();
-    drop(env);
     (r, rec)
 }
 
