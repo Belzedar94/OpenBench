@@ -1,0 +1,26 @@
+[package]
+name = "atomicdb-v2-bench"
+version = "0.1.0"
+edition = "2024"
+description = "Storage race for AtomicDB v2: the same graph workloads on every candidate store"
+publish = false
+
+[dependencies]
+crc32fast = "1.5.6"
+fjall = "3.1.13"
+lmdb-master-sys = "0.2.6"
+memmap2 = "0.9.12"
+postgres = "0.19.14"
+redb = "5.0.0"
+rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+opt-level = 3
+debug = 1
+lto = "thin"
+codegen-units = 4

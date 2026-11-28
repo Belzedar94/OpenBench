@@ -1,0 +1,5 @@
+{"stage":"crash_trial","store":"mmap columns + WAL","kind":"mmap","trial":0,"started_at_seq":0,"last_ack":4653,"recovered_seq":4654,"recovery_ms":165.5,"durable_ok":true,"identical":true,"positions":2538928}
+{"stage":"crash_trial","store":"mmap columns + WAL","kind":"mmap","trial":1,"started_at_seq":4654,"last_ack":13249,"recovered_seq":13249,"recovery_ms":101.9,"durable_ok":true,"identical":true,"positions":4346785}
+{"stage":"crash_trial","store":"mmap columns + WAL","kind":"mmap","trial":2,"started_at_seq":13249,"last_ack":17528,"recovered_seq":17528,"recovery_ms":171.5,"durable_ok":true,"identical":true,"positions":5246982}
+{"stage":"crash_trial","store":"mmap columns + WAL","kind":"mmap","trial":3,"started_at_seq":17528,"last_ack":24169,"recovered_seq":24170,"recovery_ms":342.5,"durable_ok":true,"identical":true,"positions":6641013}
+{"stage":"crash_trial","store":"mmap columns + WAL","kind":"mmap","trial":4,"started_at_seq":24170,"last_ack":28525,"recovered_seq":28525,"recovery_ms":182.9,"durable_ok":true,"identical":true,"positions":7560275}
