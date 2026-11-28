@@ -35,7 +35,7 @@ and FIFO cascade pops.
 |---|---|---|---|---|
 | CAS-1.1 (proofs file) `backup_status` | `exact::backup_status` | yes | unit table; through the cascade (step 4) | none |
 | CAS-1.2 (proofs file) `backup_eval` | `exact::backup_eval` | yes | unit | none (no rule of the port calls it; kept for parity) |
-| DTM-5.1 `is_zeroing` | `exact::Zeroing` trait, `exact::BoardZeroing` | yes | `test_clock_slack.py::ZeroingTests` 2/2 | v1 asks the pinned Fairy-Stockfish build for the halfmove counter after the move; the default oracle reads the parent's board (pawn move or capture of an occupied square, which is the atomic rule: en passant and promotions are pawn moves, castling never captures). A caller with the engine library can plug it in through the trait. |
+| DTM-5.1 `is_zeroing` | `exact::Zeroing` trait, `exact::BoardZeroing` | yes | `test_clock_slack.py::ZeroingTests` 2/2; differential vs the engine library, 0 of 9,994,032 pairs differ (`tests/zeroing_vs_engine.rs`) | v1 asks the pinned Fairy-Stockfish build for the halfmove counter after the move; the default oracle reads the parent's board (pawn move or capture of an occupied square, which is the atomic rule: en passant and promotions are pawn moves, castling never captures). A caller with the engine library can plug it in through the trait. |
 | DTM-5.2 `edge_slack` | `exact::edge_slack` | yes | `SlackRecurrenceTests` (2) | Takes the zeroing answer instead of `(fen, uci)`. |
 | DTM-5.3 `edge_supports` | `exact::edge_supports` | yes | unit | as DTM-5.2 |
 | DTM-5.4 `minimax_slack` | `exact::minimax_slack` | yes | `SlackRecurrenceTests` (2) | as DTM-5.2 |
@@ -193,9 +193,19 @@ coverage arm or the drainer: they come with stage (a) and the queue model.
   loop-free behaviour of steps 1-9.
 - **Stage (a)**: ends with `climb::climb(cascade_seeds, backed_seeds)`
   (EXP-6.1); a batch merges seeds with `climb::merge_seeds` (EXP-6.2).
-- **Not done here**: the zeroing differential check against the engine
-  library waits for `stage-a`'s `av2-chess`; the golden cases wait for the
-  `shim` agent's `av2-golden` (step 15's second half).
+- **Zeroing differential check** (done, 28-Nov):
+  `tests/zeroing_vs_engine.rs` plays seeded random games with `av2-chess`
+  (half the moves captures when one exists) and asks, for every legal move
+  of every position on the way, both `BoardZeroing` and
+  `av2_chess::is_zeroing` (v1's `logic.is_zeroing` through the same
+  Fairy-Stockfish library: the counter after the move is 0).  10,000 games
+  (`AV2_ZEROING_GAMES=10000`): 580,550 positions, 9,994,032 (FEN, move)
+  pairs, 3,499,167 zeroing, 182,718 captures, 36,556 promotions, 965 en
+  passant, 15,141 castling moves: **0 disagreements**.  `cargo test` runs
+  120 games (124,308 pairs, 2 s).  The board oracle stays the default; the
+  engine one can be plugged in through `exact::Zeroing` if a variant ever
+  needs it.
+- The golden cases: done with the `shim` agent's `av2-golden` (below).
 
 ## Steps 11 and 12: repetition marking and returning lines
 
