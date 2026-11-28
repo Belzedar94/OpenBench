@@ -41,7 +41,8 @@ pub fn scan(dir: &Path) -> io::Result<Vec<Seg>> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_string();
-        if let Some(stem) = name.strip_suffix(".seg")
+        // `archive/` holds the same segments compressed (`.seg.zst`).
+        if let Some(stem) = name.strip_suffix(".seg").or_else(|| name.strip_suffix(".seg.zst"))
             && let Ok(first) = stem.parse::<u64>()
         {
             v.push(Seg { first, path: e.path() });
@@ -60,6 +61,27 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     }
     let _ = dir;
     Ok(())
+}
+
+/// What one append did and how long its parts took.
+pub struct Appended {
+    pub rolled: Option<Seg>,
+    /// Building the frame, rolling the segment if needed, `write`.
+    pub write: std::time::Duration,
+    /// `fdatasync` (or `fsync` when the size changed).
+    pub sync: std::time::Duration,
+}
+
+/// The fsync a written frame still needs.
+pub struct PendingSync {
+    file: File,
+    full: bool,
+}
+
+impl PendingSync {
+    pub fn run(&self) -> io::Result<()> {
+        if self.full { self.file.sync_all() } else { self.file.sync_data() }
+    }
 }
 
 pub struct LogWriter {
@@ -95,8 +117,22 @@ impl LogWriter {
         self.dir.join(seg_name(self.cur_first))
     }
 
-    /// Append one frame.  Returns `Some(new segment)` when it rolled over.
-    pub fn append(&mut self, seq: u64, body: &[u8], durable: bool) -> io::Result<Option<Seg>> {
+    /// Append one frame and make it durable.  `rolled` is the new segment
+    /// when it rolled over.
+    pub fn append(&mut self, seq: u64, body: &[u8], durable: bool) -> io::Result<Appended> {
+        let (mut app, sync) = self.write_frame(seq, body)?;
+        if durable {
+            let t = std::time::Instant::now();
+            sync.run()?;
+            app.sync = t.elapsed();
+        }
+        Ok(app)
+    }
+
+    /// Write one frame without waiting for it to be durable; the returned
+    /// `PendingSync` does that (from any thread).
+    pub fn write_frame(&mut self, seq: u64, body: &[u8]) -> io::Result<(Appended, PendingSync)> {
+        let t0 = std::time::Instant::now();
         let len = (FRAME_HEADER + body.len()) as u64;
         let mut rolled = None;
         if self.pos > 0 && self.pos + len > self.seg_bytes {
@@ -117,16 +153,13 @@ impl LogWriter {
         self.file.seek(SeekFrom::Start(self.pos))?;
         self.file.write_all(&self.buf)?;
         self.pos += len;
-        if durable {
-            if grew || self.pos > self.cap {
-                // The size changed: sync metadata too.
-                self.file.sync_all()?;
-                self.cap = self.cap.max(self.pos);
-            } else {
-                self.file.sync_data()?;
-            }
+        // The size changed: the sync must cover metadata too.
+        let full = grew || self.pos > self.cap;
+        if self.pos > self.cap {
+            self.cap = self.pos;
         }
-        Ok(rolled)
+        let pending = PendingSync { file: self.file.try_clone()?, full };
+        Ok((Appended { rolled, write: t0.elapsed(), sync: std::time::Duration::ZERO }, pending))
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
@@ -153,27 +186,29 @@ pub fn parse_body(body: &[u8]) -> Option<Frame<'_>> {
     Some(Frame { seq, facts: &body[12..12 + flen], redo: &body[12 + flen..] })
 }
 
-/// Iterate the redo records of a frame: `(file, offset, bytes)`.
+/// Iterate the redo records of a frame: `(file, offset, bytes)`.  A record
+/// is `[file u8][offset varint][length varint][bytes]`.
 pub fn redo_records(redo: &[u8]) -> impl Iterator<Item = Result<(u8, u64, &[u8]), StoreError>> {
     let mut p = 0usize;
     std::iter::from_fn(move || {
         if p >= redo.len() {
             return None;
         }
-        if p + 13 > redo.len() {
-            p = redo.len();
-            return Some(Err(StoreError::Corrupt("redo record header cut short".into())));
-        }
         let file = redo[p];
-        let off = u64::from_le_bytes(redo[p + 1..p + 9].try_into().unwrap());
-        let l = u32::from_le_bytes(redo[p + 9..p + 13].try_into().unwrap()) as usize;
-        if p + 13 + l > redo.len() {
-            p = redo.len();
-            return Some(Err(StoreError::Corrupt("redo record cut short".into())));
+        let mut q = p + 1;
+        let parsed =
+            crate::batch::get_varint(redo, &mut q).and_then(|off| crate::batch::get_varint(redo, &mut q).map(|l| (off, l as usize)));
+        match parsed {
+            Some((off, l)) if q + l <= redo.len() => {
+                let r = (file, off, &redo[q..q + l]);
+                p = q + l;
+                Some(Ok(r))
+            }
+            _ => {
+                p = redo.len();
+                Some(Err(StoreError::Corrupt("redo record cut short".into())))
+            }
         }
-        let r = (file, off, &redo[p + 13..p + 13 + l]);
-        p += 13 + l;
-        Some(Ok(r))
     })
 }
 
@@ -192,6 +227,9 @@ pub struct SegRead {
 pub fn read_segment(path: &Path) -> io::Result<SegRead> {
     let mut data = Vec::new();
     File::open(path)?.read_to_end(&mut data)?;
+    if path.extension().is_some_and(|e| e == "zst") {
+        data = zstd::decode_all(&data[..])?;
+    }
     let mut frames = Vec::new();
     let mut pos = 0usize;
     let mut torn = false;

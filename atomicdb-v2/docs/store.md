@@ -21,7 +21,7 @@ was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
    idempotent and replays correctly over a state that is already ahead of
    it. The test `replay_over_a_state_ahead_of_the_checkpoint` exists because
    a first version of the key-map rebuild record broke this property and
-   hung recovery (section 4.4).
+   hung recovery (section 4.5).
 4. **The log alone rebuilds every change since a checkpoint**, including
    rebuilt key-map shards, so a copy of the files taken while the writer runs
    plus the log from the copy's checkpoint is a valid store (backups).
@@ -42,11 +42,12 @@ was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
               inx.arena      parent-list cells [parent u40][next u40], append-only
               blob.arena     [len u32][bytes], append-only (analysis JSON, witness lines, odd FENs)
               keymap.dir     2^shard_bits entries [region u64][slots u32][count u32]
-              keymap.arena   shard regions [Bloom filter][slots of 17 B], append-only
+              keymap.arena   shard regions [Bloom filter][slots of 17 B], append-only;
+                             keymap.arena.N after the Nth compaction
               ckpt           two checkpoint slots (generation, sequence, CRC)
               manifest       page checksums of the last checkpoint
 <store>/log/NNNNNNNNNNNNNNNN.seg     frames, named by the first sequence number
-<store>/archive/NNNN....seg          released segments, facts only (no redo)
+<store>/archive/NNNN....seg.zst      released segments, facts only (no redo), zstd
 ```
 
 All integers are little-endian at fixed offsets; ids are 40 bits on disk
@@ -77,14 +78,26 @@ to the maps between two increments of the epoch, then the batch is
 acknowledged.
 
 **Frame**: `[len u32][crc32 u32][seq u64][facts_len u32][facts][redo]*`,
-redo = `[file u8][offset u64][len u32][bytes]`, plus one logical record
-(file id `0x80`) for key-map shard rebuilds.
+redo = `[file u8][offset varint][len varint][bytes]` (format 2; format 1
+used fixed 8 + 4 byte fields), plus three logical records: `0x80` a key-map
+shard rebuild, `0x81` a key-map insert (slot + filter bits), `0x82` a
+key-map compaction. Every record, logical or not, replays to the same bytes
+over a state that is already ahead of it.
+
+**Pipelined commit** (`commit_start` / `batch_after` / `commit_finish`):
+`commit_start` finalizes the batch, writes its frame and hands the fsync to
+the store's sync thread; meanwhile the writer computes the next batch on an
+overlay that reads through the one in flight; `commit_finish` waits for the
+fsync and applies. One commit is in flight at a time, frames stay in order,
+and nothing is applied before it is durable, so recovery is unchanged. The
+writer service (`av2-server`) and the crash test (odd trials) use it.
 
 **Segments** are 64 MiB, preallocated 4 MiB at a time so that most commits
 need only an `fdatasync` of data (no size change to journal). A zero frame
 header marks the end of the written part.
 
-**Group commit** (`group::Writer`): one thread owns the store; inputs that
+**Group commit** (`av2-server`'s writer; `av2_store::group::Writer` is the
+same without pipelining or metrics): one thread owns the store; inputs that
 arrived while the previous commit was in flight form the next batch (up to
 `max_batch`), the rules run once over all of them, one frame, one fsync. If
 the rules reject a batch of several inputs, each input is retried alone.
@@ -95,8 +108,11 @@ number `s`, then load the maps (in that order: maps published before frame
 `fdatasync` every file, write the page manifest, write the checkpoint slot
 `(generation+1, s)` and fsync it, then release the segments whose frames are
 all `<= s`. The writer does not wait for any of it. Released segments are
-rewritten without their redo records into `archive/` (the facts are the
-system of record) unless the store is configured to delete them.
+rewritten without their redo records, compressed with zstd (level 3 by
+default), into `archive/` (the facts are the system of record) unless the
+store is configured to delete them. The sequence number, the key-map
+generation and the maps are read together while the epoch is even, and the
+checkpoint slot records the generation: recovery maps that arena file.
 
 **Recovery** (`Store::open`): take the valid checkpoint slot with the highest
 generation; read the segments in order; replay every frame with a sequence
@@ -129,20 +145,39 @@ region at the tail of `keymap.arena` with slots for 3/8 load (doubling, so
 the cost per insert stays constant). The bulk loader builds shards at 0.6
 load, so the first wave of rebuilds comes after +25% growth (about a week at
 today's 7M positions a day on 200M; the wave logs only one small record per
-shard, section 4.4).
+shard, section 4.5).
 
-### 4.3 What it costs and what is left
+### 4.3 Garbage and compaction
 The arena is append-only: a rebuilt shard's old region becomes garbage.
-Steady state is between 17/0.75 and 17/0.375 bytes of live slots per
-position (23 to 45 B), plus up to as much garbage between compactions.
-Measured on the production slice: 30 B per position after the load, 46 B
-after +25% growth in one go (every shard rebuilt once). **Not done in this
-PR: compaction** (rewrite the live regions into a new arena when garbage
-exceeds live, as a background task with a switch record). The plan's open
-question 4 (sorted base + small delta) remains the alternative if the
-measured write volume on the Linux box says so.
+With doubling, garbage stays just under the live size forever, so the
+trigger is **garbage >= live / 2** (and at least `km_compact_min`, 64 MiB by
+default): the arena stays under 1.5x its live part. Steady state is between
+17/0.75 and 17/0.375 bytes of live slots per position (23 to 45 B) plus at
+most half of that in garbage.
 
-### 4.4 The rebuild record
+A compaction copies every live region, packed in shard order, into a new
+file `keymap.arena.<generation+1>`, rewrites the directory and the counters,
+and maps the new file. It is the last record of the frame of the batch that
+crossed the threshold, a logical record naming every live region of the old
+generation (20 bytes per shard). The old file is never written again, so
+replay copies the same bytes even over a state already past it; it is
+deleted once a checkpoint records the new generation (not while a backup
+holds the log, which copies both). Measured on the production slice: after
+1,968 commits of 32 landings (1.83M new positions, 3.39M in all) the arena
+went from 140.5 MB to 93.7 MB (27.7 B per position live) in a 48 ms commit
+(39 ms of it the copy). That is about 0.4 ms per MB, so at 200M positions a
+compaction would stall the writer for about 2 s once every time the key map
+grows by half; moving the copy to a background thread is possible later
+(the record would then name a file built beforehand).
+
+### 4.4 Inserts
+An insert is one logical record `(slot offset, fingerprint, id, filter block
+offset)`: applying it writes the slot and sets the key's six bits in the
+filter block. The filter costs no log bytes (format 1 logged the whole
+64-byte block), and setting bits is idempotent. The directory entry's count
+is written as 4 bytes, not the whole entry.
+
+### 4.5 The rebuild record
 A shard rebuild is logged as one logical record
 `(shard, old region, old slots, old count, new region, new slots)`, not as the
 bytes of the new region: replay recomputes the new region from the old one.
@@ -235,9 +270,8 @@ similar in shape, not identical (see notes).
 
 ## 9. Not done here (and where it goes)
 
-- Key-map compaction (section 4.3).
-- zstd compression of `archive/` (restic compresses the backup anyway; the
-  archive format is the log's, so compressing it later changes nothing else).
+- Compaction runs on the writer (section 4.3); fine at today's size, a
+  background copy later if the stall matters.
 - Restart time: 5 ms on a quiet store here; Linux numbers come from phase 0.
 - The relational projection (`meta.sqlite`) and the projector: phase 5.
 - The power-cut test has only been written, not run (needs the Linux box).

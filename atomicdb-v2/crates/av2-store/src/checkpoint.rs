@@ -23,26 +23,30 @@ const SLOT_BYTES: u64 = 4096;
 pub struct Ckpt {
     pub generation: u64,
     pub seq: u64,
+    /// Generation of the key-map arena at `seq` (recovery maps that file).
+    pub km_gen: u64,
 }
 
-fn encode_slot(c: Ckpt) -> [u8; 28] {
-    let mut b = [0u8; 28];
+fn encode_slot(c: Ckpt) -> [u8; 36] {
+    let mut b = [0u8; 36];
     b[0..8].copy_from_slice(&CKPT_MAGIC.to_le_bytes());
     b[8..16].copy_from_slice(&c.generation.to_le_bytes());
     b[16..24].copy_from_slice(&c.seq.to_le_bytes());
-    let crc = crc32fast::hash(&b[..24]);
-    b[24..28].copy_from_slice(&crc.to_le_bytes());
+    b[24..32].copy_from_slice(&c.km_gen.to_le_bytes());
+    let crc = crc32fast::hash(&b[..32]);
+    b[32..36].copy_from_slice(&crc.to_le_bytes());
     b
 }
 
 fn decode_slot(b: &[u8]) -> Option<Ckpt> {
-    if b.len() < 28 || u64::from_le_bytes(b[0..8].try_into().unwrap()) != CKPT_MAGIC {
+    if b.len() < 36 || u64::from_le_bytes(b[0..8].try_into().unwrap()) != CKPT_MAGIC {
         return None;
     }
-    if crc32fast::hash(&b[..24]) != u32::from_le_bytes(b[24..28].try_into().unwrap()) {
+    if crc32fast::hash(&b[..32]) != u32::from_le_bytes(b[32..36].try_into().unwrap()) {
         return None;
     }
-    Some(Ckpt { generation: u64::from_le_bytes(b[8..16].try_into().unwrap()), seq: u64::from_le_bytes(b[16..24].try_into().unwrap()) })
+    let u = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    Some(Ckpt { generation: u(8), seq: u(16), km_gen: u(24) })
 }
 
 pub fn read(path: &Path) -> io::Result<Option<Ckpt>> {
@@ -168,14 +172,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("ckpt");
         assert_eq!(read(&p).unwrap(), None);
-        write(&p, Ckpt { generation: 1, seq: 10 }).unwrap();
-        write(&p, Ckpt { generation: 2, seq: 20 }).unwrap();
-        assert_eq!(read(&p).unwrap(), Some(Ckpt { generation: 2, seq: 20 }));
+        write(&p, Ckpt { generation: 1, seq: 10, km_gen: 0 }).unwrap();
+        write(&p, Ckpt { generation: 2, seq: 20, km_gen: 0 }).unwrap();
+        assert_eq!(read(&p).unwrap(), Some(Ckpt { generation: 2, seq: 20, km_gen: 0 }));
         // Tear the slot generation 3 would write (parity 1, offset 4096).
         let mut b = std::fs::read(&p).unwrap();
         b[4096 + 8] ^= 0xFF;
         std::fs::write(&p, &b).unwrap();
-        assert_eq!(read(&p).unwrap(), Some(Ckpt { generation: 2, seq: 20 }));
+        assert_eq!(read(&p).unwrap(), Some(Ckpt { generation: 2, seq: 20, km_gen: 0 }));
     }
 
     #[test]

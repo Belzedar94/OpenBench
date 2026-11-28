@@ -39,6 +39,25 @@ fn cfg() -> Config {
     Config { ckpt_bytes: 256 << 20, ..Config::default() }
 }
 
+/// Synthetic FENs, generated once: the store packs each one (that cost is
+/// the store's); generating random boards is the harness's and stays out of
+/// the measurement.
+fn fen_pool() -> &'static [String] {
+    static POOL: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let mut rng = Rng::new(0xFE11);
+        (0..8192).map(|_| random_fen(&mut rng)).collect()
+    })
+}
+
+/// `--lean`: landings shaped like the benchmark harness's (no FEN, no
+/// analysis blob, no search fact), to compare the store with the benchmark
+/// on the same bytes.
+static LEAN: AtomicBool = AtomicBool::new(false);
+/// `--pipeline`: compute batch n+1 while batch n's fsync is in flight
+/// (`Store::commit_start` / `batch_after` / `commit_finish`).
+static PIPELINE: AtomicBool = AtomicBool::new(false);
+
 /// One landing: expand an unexpanded position and climb.
 fn landing(b: &mut Batch, rng: &mut Rng, payload: &str, facts: &mut Vec<Fact>) {
     let n = b.len();
@@ -54,9 +73,10 @@ fn landing(b: &mut Batch, rng: &mut Rng, payload: &str, facts: &mut Vec<Fact>) {
     let k = 20 + rng.below(19) as usize;
     let mut block = Vec::with_capacity(k);
     for i in 0..k {
-        let fen = random_fen(rng);
-        let c =
-            b.create(random_fp(rng), Some(&fen), av2_model::Core { eval_cp: (rng.below(400) as i16) - 200, ..Default::default() }).unwrap();
+        let pool = fen_pool();
+        let fen = &pool[rng.below(pool.len() as u64) as usize];
+        let fen = if LEAN.load(Ordering::Relaxed) { None } else { Some(fen.as_str()) };
+        let c = b.create(random_fp(rng), fen, av2_model::Core { eval_cp: (rng.below(400) as i16) - 200, ..Default::default() }).unwrap();
         block.push(Edge { child: c, mv: Move::new((i / 8) as u8, (i % 8 + 16) as u8, 0) });
     }
     b.set_children(p, &block).unwrap();
@@ -67,11 +87,17 @@ fn landing(b: &mut Batch, rng: &mut Rng, payload: &str, facts: &mut Vec<Fact>) {
     let mut e = b.ext(p).unwrap_or_default();
     e.nodes_invested += 128_000_000;
     e.visits += 1;
-    let mut blob = vec![0u8; 1200];
-    rng.fill(&mut blob);
-    e.analysis = b.put_blob(&blob).unwrap();
+    let lean = LEAN.load(Ordering::Relaxed);
+    if !lean {
+        let mut blob = vec![0u8; 1200];
+        rng.fill(&mut blob);
+        e.analysis = b.put_blob(&blob).unwrap();
+    }
     b.put_ext(p, e).unwrap();
     climb(b, p, rng);
+    if lean {
+        return;
+    }
     facts.push(Fact::SearchLanded(SearchLanded {
         task: rng.next_u64() >> 20,
         position: format!("{:x}", p.0),
@@ -129,28 +155,112 @@ fn explore_once(
     acc + ps.len() as i64
 }
 
-/// Returns (searches per second, commit latency in ms, time building the
-/// batches in ms, time in `commit` in ms).
-fn run_landings(s: &mut Store, commits: u64, per: usize, seed: u64, payload: &str) -> (f64, Lat, f64, f64) {
+/// What a run of landings measured.
+struct Run {
+    sps: f64,
+    lat: Lat,
+    build_ms: f64,
+    commit_ms: f64,
+    finalize_ms: f64,
+    write_ms: f64,
+    grow_ms: f64,
+    grows: u64,
+    fsync_ms: f64,
+    apply_ms: f64,
+    frame_bytes: u64,
+    ops: u64,
+    commits: u64,
+}
+
+impl Run {
+    fn json(&mut self) -> String {
+        let c = self.commits.max(1) as f64;
+        format!(
+            "\"searches_per_sec\":{:.0},\"commit_ms\":{},\"per_commit_ms\":{{\"build\":{:.3},\"commit\":{:.3},\"finalize\":{:.3},\"write\":{:.3},\"grow\":{:.3},\"fsync\":{:.3},\"apply\":{:.3}}},\"frame_kb\":{:.1},\"redo_records\":{:.0},\"grows\":{}",
+            self.sps,
+            self.lat.json(),
+            self.build_ms / c,
+            self.commit_ms / c,
+            self.finalize_ms / c,
+            self.write_ms / c,
+            self.grow_ms / c,
+            self.fsync_ms / c,
+            self.apply_ms / c,
+            self.frame_bytes as f64 / c / 1024.0,
+            self.ops as f64 / c,
+            self.grows
+        )
+    }
+}
+
+fn run_landings(s: &mut Store, commits: u64, per: usize, seed: u64, payload: &str) -> Run {
     let mut rng = Rng::new(seed);
-    let mut lat = Lat::new();
-    let (mut build, mut commit) = (0f64, 0f64);
+    let mut r = Run {
+        sps: 0.0,
+        lat: Lat::new(),
+        build_ms: 0.0,
+        commit_ms: 0.0,
+        finalize_ms: 0.0,
+        write_ms: 0.0,
+        grow_ms: 0.0,
+        grows: 0,
+        fsync_ms: 0.0,
+        apply_ms: 0.0,
+        frame_bytes: 0,
+        ops: 0,
+        commits,
+    };
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let grows0 = s.stats().grows;
     let t0 = Instant::now();
+    let pipeline = PIPELINE.load(Ordering::Relaxed);
+    let mut flight: Option<av2_store::InFlight> = None;
+    let account = |r: &mut Run, s: &Store, t: Instant| {
+        let ct = s.last_commit();
+        r.finalize_ms += ms(ct.finalize);
+        r.write_ms += ms(ct.write);
+        r.grow_ms += ms(ct.grow);
+        r.fsync_ms += ms(if pipeline { ct.fsync_wait } else { ct.fsync });
+        r.apply_ms += ms(ct.apply);
+        r.frame_bytes += ct.frame_bytes;
+        r.ops += ct.ops;
+        r.lat.add(t.elapsed().as_nanos() as f64 / 1e6);
+    };
+    let mut started: Option<Instant> = None;
     for _ in 0..commits {
         let t = Instant::now();
-        let mut b = s.batch();
+        let mut b = match &flight {
+            Some(f) => s.batch_after(f),
+            None => s.batch(),
+        };
         let mut facts = Vec::new();
         for _ in 0..per {
             landing(&mut b, &mut rng, payload, &mut facts);
         }
         let bytes = av2_facts::encode_all(&facts);
         let t1 = Instant::now();
-        s.commit(b, &bytes).unwrap();
-        build += (t1 - t).as_secs_f64() * 1e3;
-        commit += t1.elapsed().as_secs_f64() * 1e3;
-        lat.add(t.elapsed().as_nanos() as f64 / 1e6);
+        r.build_ms += ms(t1 - t);
+        if pipeline {
+            // Batch n+1 was built while n's fsync ran; now finish n, start n+1.
+            if let Some(f) = flight.take() {
+                s.commit_finish(f).unwrap();
+                account(&mut r, s, started.unwrap());
+            }
+            flight = Some(s.commit_start(b, &bytes).unwrap());
+            started = Some(t);
+        } else {
+            s.commit(b, &bytes).unwrap();
+            account(&mut r, s, t);
+        }
+        r.commit_ms += ms(t1.elapsed());
     }
-    ((commits * per as u64) as f64 / t0.elapsed().as_secs_f64(), lat, build, commit)
+    if let Some(f) = flight.take() {
+        s.commit_finish(f).unwrap();
+        account(&mut r, s, started.unwrap());
+    }
+    r.sps = (commits * per as u64) as f64 / t0.elapsed().as_secs_f64();
+    r.grows = s.stats().grows - grows0;
+    r
 }
 
 fn main() {
@@ -202,6 +312,64 @@ fn main() {
         }
         f
     }));
+    LEAN.store(a.flag("lean"), Ordering::Relaxed);
+    PIPELINE.store(a.flag("pipeline"), Ordering::Relaxed);
+    if a.flag("until-compaction") {
+        // Land searches (32 per commit) until the key map compacts; report
+        // the arena before and after and what that commit cost.
+        drop(s);
+        let mut s = Store::open(&work, Config { km_compact_min: 1 << 20, ..cfg() }).unwrap();
+        let mut rng = Rng::new(77);
+        let (mut commits, mut worst) = (0u64, 0f64);
+        let km = |s: &Store| s.live_bytes().0[av2_store::layout::F_KM_ARENA as usize];
+        loop {
+            let before = km(&s);
+            let mut b = s.batch();
+            let mut facts = Vec::new();
+            for _ in 0..32 {
+                landing(&mut b, &mut rng, &payload, &mut facts);
+            }
+            let t = Instant::now();
+            s.commit(b, &av2_facts::encode_all(&facts)).unwrap();
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            commits += 1;
+            if s.stats().compactions > 0 {
+                let ct = s.last_commit();
+                let n = s.reader().read(|v| v.len());
+                emit(
+                    &out,
+                    &format!(
+                        "{{\"stage\":\"compaction\",\"commits_before\":{commits},\"positions\":{n},\"arena_before\":{before},\"arena_after\":{},\"commit_ms\":{ms:.2},\"apply_ms\":{:.2},\"other_commits_worst_ms\":{worst:.2}}}",
+                        km(&s),
+                        ct.apply.as_secs_f64() * 1e3
+                    ),
+                );
+                break;
+            }
+            worst = worst.max(ms);
+            if commits > 20_000 {
+                emit(&out, "{\"stage\":\"compaction\",\"note\":\"none after 20000 commits\"}");
+                break;
+            }
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&work);
+        return;
+    }
+    let only = a.flag("landings-only");
+    if only {
+        let b32 = a.n("b32", 200);
+        for r in 0..a.n("repeat", 3) {
+            let mut run = run_landings(&mut s, b32, 32, 100 + r, &payload);
+            emit(
+                &out,
+                &format!("{{\"stage\":\"landing_b32\",\"lean\":{},\"repeat\":{r},\"commits\":{b32},{}}}", a.flag("lean"), run.json()),
+            );
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&work);
+        return;
+    }
     // Readers on a quiet store.
     for th in [1usize, threads] {
         let (rps, lat) = readers_from(s.reader(), th, secs, fps.clone());
@@ -210,29 +378,11 @@ fn main() {
 
     // Landings.
     let b1 = a.n("b1", 2000);
-    let (sps, mut lat, build, commit) = run_landings(&mut s, b1, 1, 11, &payload);
-    let st = s.stats();
-    emit(
-        &out,
-        &format!(
-            "{{\"stage\":\"landing_b1\",\"commits\":{b1},\"searches_per_sec\":{sps:.0},\"commit_ms\":{},\"build_ms_per_commit\":{:.3},\"commit_call_ms_per_commit\":{:.3},\"fsync_us_mean\":{:.0}}}",
-            lat.json(),
-            build / b1 as f64,
-            commit / b1 as f64,
-            st.fsync_micros as f64 / st.commits.max(1) as f64
-        ),
-    );
+    let mut run = run_landings(&mut s, b1, 1, 11, &payload);
+    emit(&out, &format!("{{\"stage\":\"landing_b1\",\"commits\":{b1},{}}}", run.json()));
     let b32 = a.n("b32", 200);
-    let (sps, mut lat, build, commit) = run_landings(&mut s, b32, 32, 12, &payload);
-    emit(
-        &out,
-        &format!(
-            "{{\"stage\":\"landing_b32\",\"commits\":{b32},\"searches_per_sec\":{sps:.0},\"commit_ms\":{},\"build_ms_per_commit\":{:.3},\"commit_call_ms_per_commit\":{:.3}}}",
-            lat.json(),
-            build / b32 as f64,
-            commit / b32 as f64
-        ),
-    );
+    let mut run = run_landings(&mut s, b32, 32, 12, &payload);
+    emit(&out, &format!("{{\"stage\":\"landing_b32\",\"commits\":{b32},{}}}", run.json()));
     {
         let mut rng = Rng::new(13);
         let mut lat = Lat::new();

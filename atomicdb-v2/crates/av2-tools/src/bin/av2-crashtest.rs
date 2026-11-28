@@ -20,6 +20,9 @@
 //! script, `scripts/powercut/`), recovers it, and checks that it holds at
 //! least batch N and exactly the model's state at the batch it recovered.
 //!
+//! Odd trials run the child pipelined (batch n+1 computed while n's fsync
+//! is in flight: `commit_start` / `batch_after` / `commit_finish`).
+//!
 //! Small segments, frequent checkpoints, few key-map shards and a small
 //! initial capacity make kills land in segment rolls, checkpoints, shard
 //! rebuilds and file growth.
@@ -49,6 +52,7 @@ fn cfg(background: bool) -> Config {
         manifest_every: 3,
         shard_bits: 3,
         initial_positions: 2048,
+        km_compact_min: 16 << 10,
         ..Config::default()
     }
 }
@@ -77,6 +81,27 @@ fn child(a: &Args) {
     let mut o = stdout.lock();
     writeln!(o, "OPEN {}", s.last_seq()).unwrap();
     o.flush().unwrap();
+    if a.flag("pipeline") {
+        // Batch n+1 is computed while n's fsync is in flight; n is
+        // acknowledged once applied, so a kill can find n+1 durable but not
+        // acknowledged: the same window as a plain commit.
+        let mut flight: Option<av2_store::InFlight> = None;
+        let mut seq = s.last_seq();
+        loop {
+            seq += 1;
+            let mut b = match &flight {
+                Some(f) => s.batch_after(f),
+                None => s.batch(),
+            };
+            random_batch(&mut b, &mut batch_rng(seed, seq), size_of(seq)).unwrap_or_else(|e| die(&format!("batch {seq}: {e}")));
+            if let Some(f) = flight.take() {
+                let done = s.commit_finish(f).unwrap_or_else(|e| die(&format!("commit {}: {e}", seq - 1)));
+                writeln!(o, "ACK {done}").unwrap();
+                o.flush().unwrap();
+            }
+            flight = Some(s.commit_start(b, &facts_of(seq)).unwrap_or_else(|e| die(&format!("commit {seq}: {e}"))));
+        }
+    }
     loop {
         let seq = s.last_seq() + 1;
         let mut b = s.batch();
@@ -158,10 +183,12 @@ fn main() {
             model = MemGraph::new();
             ref_seq = 0;
         }
+        let pipelined = trial % 2 == 1;
         let mut ch = Command::new(&exe)
             .args(["--child", "--dir"])
             .arg(&dir)
             .args(["--seed", &seed.to_string()])
+            .args(if pipelined { &["--pipeline"][..] } else { &[][..] })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -251,7 +278,7 @@ fn main() {
         emit(
             &out,
             &format!(
-                "{{\"stage\":\"crash_trial\",\"trial\":{trial},\"early\":{is_early},\"opened_at\":{},\"last_ack\":{last_ack},\"recovered\":{recovered},\"frames_replayed\":{},\"torn_tail_bytes\":{},\"recovery_ms\":{recovery_ms:.2},\"durable_ok\":{durable_ok},\"identical\":{identical},\"positions\":{}}}",
+                "{{\"stage\":\"crash_trial\",\"trial\":{trial},\"pipelined\":{pipelined},\"early\":{is_early},\"opened_at\":{},\"last_ack\":{last_ack},\"recovered\":{recovered},\"frames_replayed\":{},\"torn_tail_bytes\":{},\"recovery_ms\":{recovery_ms:.2},\"durable_ok\":{durable_ok},\"identical\":{identical},\"positions\":{}}}",
                 if open_seq == u64::MAX { -1 } else { open_seq as i64 },
                 s.recovery.frames_replayed,
                 s.recovery.torn_tail_bytes,

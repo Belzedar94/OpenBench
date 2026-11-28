@@ -46,17 +46,27 @@ impl Shard {
     pub fn home(&self, fp: &Fingerprint, shard_bits: u32) -> u64 {
         (((fp.hi64() << shard_bits) as u128 * self.slots as u128) >> 64) as u64
     }
-    /// Byte offset (in the shard's filter) of `fp`'s block, and the bits to test in it.
+    /// Byte offset (in the arena) of `fp`'s filter block.
+    #[inline]
+    pub fn filter_block_offset(&self, fp: &Fingerprint) -> u64 {
+        self.region + ((fp.lo32() as u64 * self.fblocks()) >> 32) * 64
+    }
+    /// `fp`'s filter block offset and the bits to test in it.
     #[inline]
     pub fn filter_block(&self, fp: &Fingerprint) -> (u64, [u16; FILTER_PROBES as usize]) {
-        let h = xxhash_rust::xxh3::xxh3_64(&fp.0);
-        let block = ((fp.lo32() as u64 * self.fblocks()) >> 32) * 64;
-        let mut bits = [0u16; FILTER_PROBES as usize];
-        for (i, b) in bits.iter_mut().enumerate() {
-            *b = ((h >> (i * 9)) & 511) as u16;
-        }
-        (self.region + block, bits)
+        (self.filter_block_offset(fp), filter_bits(fp))
     }
+}
+
+/// The bits of `fp` in its filter block (independent of the shard's size).
+#[inline]
+pub fn filter_bits(fp: &Fingerprint) -> [u16; FILTER_PROBES as usize] {
+    let h = xxhash_rust::xxh3::xxh3_64(&fp.0);
+    let mut bits = [0u16; FILTER_PROBES as usize];
+    for (i, b) in bits.iter_mut().enumerate() {
+        *b = ((h >> (i * 9)) & 511) as u16;
+    }
+    bits
 }
 
 #[inline]

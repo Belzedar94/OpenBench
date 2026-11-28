@@ -32,8 +32,11 @@ impl Mapped {
         let mut len = file.metadata()?.len();
         if len < min_len {
             len = min_len.next_multiple_of(GROW_ALIGN);
+            // No fsync here: nothing durable depends on the new size yet.  A
+            // frame that writes past the old end is in the log, and recovery
+            // grows the file again before replaying it; the checkpoint's
+            // fdatasync makes the size durable together with the data.
             file.set_len(len)?;
-            file.sync_all()?;
         }
         let map = if len > 0 { Some(MmapOptions::new().len(len as usize).map_raw(&file)?) } else { None };
         Ok(Mapped { file, map, len, path: path.to_path_buf() })
@@ -105,10 +108,12 @@ pub struct Maps {
 }
 
 impl Maps {
-    pub fn open(dir: &Path, min_lens: &[u64; NFILES]) -> io::Result<Maps> {
+    /// Map the files of `dir`, the key-map arena at generation `km_gen`.
+    pub fn open(dir: &Path, min_lens: &[u64; NFILES], km_gen: u64) -> io::Result<Maps> {
         let mut v = Vec::with_capacity(NFILES);
         for i in 0..NFILES {
-            v.push(Arc::new(Mapped::open(&dir.join(NAMES[i]), min_lens[i])?));
+            let name = if i == crate::layout::F_KM_ARENA as usize { crate::layout::arena_name(km_gen) } else { NAMES[i].to_string() };
+            v.push(Arc::new(Mapped::open(&dir.join(name), min_lens[i])?));
         }
         Ok(Maps { m: v.try_into().ok().unwrap() })
     }
@@ -127,6 +132,13 @@ impl Maps {
         let mut m = self.m.clone();
         m[f as usize] = Arc::new(new);
         Ok(Maps { m })
+    }
+
+    /// A copy of these maps with file `f` replaced by `m`.
+    pub fn with(&self, f: u8, m: Mapped) -> Maps {
+        let mut v = self.m.clone();
+        v[f as usize] = Arc::new(m);
+        Maps { m: v }
     }
 
     #[inline]
