@@ -1,0 +1,10 @@
+[Unit]
+Description=AtomicDB v1 baseline sampler, every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:30
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

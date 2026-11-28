@@ -93,7 +93,7 @@ from django.db import DatabaseError, connections, transaction
 from django.db.models import Count, Min
 from django.utils import timezone
 
-from . import ingest
+from . import ingest, perf_events
 from .database import atomic, connection, current_alias
 from .models import IngestJob, Position, PropagationSeed
 
@@ -402,6 +402,7 @@ def drain_batch(limit=BATCH_SIZE):
     size = _claim_size(limit)
     if not size:
         return 0
+    started = time.perf_counter()
     ids = []
     attempt = 0
     while True:
@@ -474,7 +475,20 @@ def drain_batch(limit=BATCH_SIZE):
             return -1
         break
     # The batch has committed: what follows never puts its rows back.
+    committed = time.perf_counter()
+    commit_t = time.time()
     _after_commit(landings, jobs, cut, proof_later)
+    # One line per climbed batch for the v1 baseline (§ perf_events): how
+    # long the climb held its transaction, the whole batch, and which jobs
+    # became visible at ``commit_t``.  A no-op unless ATOMICDB_PERF_DIR is set.
+    perf_events.event(
+        'drain', settled=len(ids), limit=limit, attempts=attempt + 1,
+        commit_t=round(commit_t, 3),
+        climb_ms=round((committed - started) * 1000, 2),
+        ms=round((time.perf_counter() - started) * 1000, 2),
+        jobs=sorted({payload['job'] for payloads in jobs.values()
+                     for payload in payloads
+                     if isinstance(payload.get('job'), int)}))
     return len(ids)
 
 
