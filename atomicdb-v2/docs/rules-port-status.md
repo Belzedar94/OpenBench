@@ -285,6 +285,28 @@ stored pointers, which changes results).  Termination: on any graph, cycles
 included, every climb ends within the level bound and an ascent cut by a
 bound reports a `BACKED_GUARD` event (property test, 300 cases).
 
+### Benchmark with the loop rules
+
+`av2-climb` on a fresh export of the same root ball (28-Nov 09:44-09:58
+UTC, read-only, the export SQL of `bench/sql` plus `fen` and `won_line`:
+1,560,875 positions, 1,999,440 edges, 52,783 witness lines), NVMe, release,
+32 climbs per commit, one fsync per commit, 300 commits per row:
+
+| Workload | Loop rules | Noise cut | Climbs/s with commits | Rules only, µs/climb | Rows written per climb | Rows processed |
+|---|---|---|---:|---:|---:|---:|
+| re-search | no (steps 1-9) | on | 12,525 | 44.1 | 1.75 | 5.7 |
+| re-search | **yes** | on (v1) | **9,124** | 80.1 | 1.32 | 4.9 |
+| re-search | yes | off (D2) | 10,222 | 69.1 | 1.14 | 4.7 |
+| mate line closes a child | **yes** | on (v1) | **6,149** | 107.9 | 1.54 + 1.76 | 6.8 |
+| mate line closes a child | yes | off (D2) | 6,716 | 89.9 | 1.51 + 1.66 | 6.5 |
+
+With FENs in the store the fresh-context rule now reads boards (the #347
+numbers had no FEN: 31.6 µs per re-search climb, 15,876/s).  The loop rules
+cost about 36 µs per climb on top (the repetition walk of every backed child
+of every row decided, LOOP-1.1, and the pointer-loop walk of every level,
+LOOP-3.1); the rows sampled differ between rows of the table (seeds), so
+compare per-climb costs, not single rows.
+
 ### Golden cases (28-Nov, from the `shim` branch, PR #350, before it merged)
 
 `av2-golden --mode v2 --kind drain` on the 158 recorded production climbs
