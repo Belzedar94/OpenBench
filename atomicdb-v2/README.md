@@ -10,6 +10,7 @@ The Rust workspace of AtomicDB v2 (plan: `docs/atomicdb/v2-plan.md`).
 | `crates/av2-rules` | The value rules. Today only the `Rules` trait the writer calls | rules |
 | `crates/av2-tools` | `av2-load`, `av2-check`, `av2-replay`, `av2-crashtest`, `av2-perf` | core |
 | `crates/av2-compat` | The outside contract (`docs/api-contract.md`): replays v1's golden answers (`tests/golden/`) against a base URL and diffs them field by field; runs the worker protocol scenarios against a test instance | api-golden |
+| `crates/av2-server` | The writer service skeleton: single writer, group commit, stub rules, Prometheus `/metrics` | core |
 | `bench` | The storage race behind the plan (`docs/atomicdb/v2-storage-benchmark.md`), kept as the regression benchmark | |
 
 ```
@@ -19,8 +20,10 @@ cargo fmt --all --check
 cargo build --release -p atomicdb-v2-bench   # the bench: needs libclang, see bench/README.md
 ```
 
-Docs: `docs/store.md` (storage design, protocol, measurements). Export SQL
-for the loader: `sql/export.sql`. Power-cut test (Linux): `scripts/powercut/`.
+Docs: `docs/store.md` (storage design, protocol, measurements),
+`docs/server.md` (writer service). Export SQL for the loader:
+`sql/export.sql`. Power-cut test (Linux): `scripts/powercut/`. Core
+measurements on the production box: `scripts/prod/run_core_prod.sh`.
 
 Builds on this tower: keep to `-j 12` (an OpenBench worker uses 8 threads).
 

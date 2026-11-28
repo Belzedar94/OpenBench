@@ -7,7 +7,7 @@ use av2_model::record::{CORE_SIZE, EXT_SIZE};
 /// Magic at the start of `ctl`: "AV2GRAPH".
 pub const MAGIC: u64 = 0x4850_4152_4732_5641;
 /// Format version of the files in `graph/`.  Bump on any layout change.
-pub const FORMAT_VERSION: u64 = 1;
+pub const FORMAT_VERSION: u64 = 2;
 
 pub type FileId = u8;
 pub const F_CTL: FileId = 0;
@@ -25,6 +25,24 @@ pub const NFILES: usize = 11;
 /// Not a file: the logical redo record of a key-map shard rebuild (see
 /// `batch::rebuild_region`).  Offset = shard index, payload = region, slots.
 pub const F_KM_REBUILD: FileId = 0x80;
+/// Not a file: the logical record of a key-map insert (slot + filter bits).
+pub const F_KM_INSERT: FileId = 0x81;
+/// Not a file: the logical record of a key-map compaction into a new
+/// generation of `keymap.arena`.
+pub const F_KM_COMPACT: FileId = 0x82;
+
+/// File name of generation `generation` of the key-map arena.
+pub fn arena_name(generation: u64) -> String {
+    if generation == 0 { "keymap.arena".to_string() } else { format!("keymap.arena.{generation}") }
+}
+
+/// Generation of a key-map arena file name, if it is one.
+pub fn arena_generation(name: &str) -> Option<u64> {
+    if name == "keymap.arena" {
+        return Some(0);
+    }
+    name.strip_prefix("keymap.arena.").and_then(|g| g.parse().ok())
+}
 
 pub const NAMES: [&str; NFILES] = [
     "ctl",
@@ -78,9 +96,14 @@ pub const C_INX_TAIL: usize = 48;
 pub const C_BLOB_TAIL: usize = 56;
 /// Bytes used in `keymap.arena`.
 pub const C_KM_TAIL: usize = 64;
+/// Bytes of `keymap.arena` in live shard regions (the rest is garbage left
+/// by rebuilds, reclaimed by compaction).
+pub const C_KM_LIVE: usize = 72;
 /// The counters a batch rewrites, as one contiguous run.
 pub const C_COUNTERS: usize = C_POSITIONS;
-pub const C_COUNTERS_LEN: usize = 48;
+pub const C_COUNTERS_LEN: usize = 56;
+/// Generation of the key-map arena file (written by compaction).
+pub const C_KM_GEN: usize = 80;
 
 // ---- key map
 /// Bytes per key-map slot: 96-bit fingerprint + id+1 in 40 bits.

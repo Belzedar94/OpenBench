@@ -9,6 +9,7 @@ members = [
     "crates/av2-compat",
     "crates/av2-proof",
     "crates/av2-queue",
+    "crates/av2-server",
     "bench",
 ]
 # `cargo build` / `cargo test` at the root build the v2 crates only.  The bench
@@ -23,6 +24,7 @@ default-members = [
     "crates/av2-compat",
     "crates/av2-proof",
     "crates/av2-queue",
+    "crates/av2-server",
 ]
 
 [workspace.package]
@@ -48,6 +50,7 @@ serde_json = "1"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
+ruzstd = "0.8"
 
 [profile.release]
 opt-level = 3

@@ -123,6 +123,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "av2-server"
+version = "0.1.0"
+dependencies = [
+ "av2-facts",
+ "av2-model",
+ "av2-rules",
+ "av2-store",
+ "tempfile",
+]
+
+[[package]]
 name = "av2-store"
 version = "0.1.0"
 dependencies = [
@@ -132,6 +143,7 @@ dependencies = [
  "av2-rules",
  "crc32fast",
  "memmap2",
+ "ruzstd",
  "tempfile",
  "xxhash-rust",
 ]
@@ -1592,6 +1604,15 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]

@@ -53,7 +53,7 @@ impl BulkLoader {
         l[F_BLOB_ARENA as usize] = 1 << 20;
         l[F_KM_DIR as usize] = (1u64 << cfg.shard_bits) * DIR_ENTRY as u64;
         l[F_KM_ARENA as usize] = (n as f64 / BUILD_LOAD * SLOT as f64 * 1.1) as u64 + (1u64 << cfg.shard_bits) * region_bytes(MIN_SLOTS);
-        let maps = Maps::open(&g, &l)?;
+        let maps = Maps::open(&g, &l, 0)?;
         crate::store::init_ctl_for_loader(&maps, cfg.shard_bits);
         Ok(BulkLoader {
             dir: dir.to_path_buf(),
@@ -208,14 +208,14 @@ impl BulkLoader {
         }
         self.fps = Vec::new();
         let mut ctl = [0u8; C_COUNTERS_LEN];
-        for (k, v) in [self.n, self.ext_tail, self.out_tail, self.inx_tail, self.blob_tail, km_tail].iter().enumerate() {
+        for (k, v) in [self.n, self.ext_tail, self.out_tail, self.inx_tail, self.blob_tail, km_tail, km_tail].iter().enumerate() {
             ctl[k * 8..k * 8 + 8].copy_from_slice(&v.to_le_bytes());
         }
         self.maps.f(F_CTL).put(C_COUNTERS as u64, &ctl);
         for m in self.maps.m.iter() {
             m.flush()?;
         }
-        checkpoint::write(&self.dir.join("graph").join("ckpt"), Ckpt { generation: 1, seq: 0 })?;
+        checkpoint::write(&self.dir.join("graph").join("ckpt"), Ckpt { generation: 1, seq: 0, km_gen: 0 })?;
         let dir = self.dir.clone();
         let cfg = self.cfg.clone();
         drop(self);

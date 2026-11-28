@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,15 @@ pub struct Config {
     pub shard_bits: u32,
     /// Capacity reserved at creation, in positions (files grow on demand).
     pub initial_positions: u64,
+    /// Compact the key map once its garbage reaches its live size and at
+    /// least this many bytes.
+    pub km_compact_min: u64,
+    /// zstd level of `archive/`: kept for the day a C zstd is linked; the
+    /// pure-Rust encoder used now has one level (about zstd's 1).
+    pub archive_zstd_level: i32,
+    /// Simulation only: sleep this long after every fsync (to measure the
+    /// writer against a slow disk, e.g. production's 16 ms md RAID1).
+    pub fsync_delay: Duration,
 }
 
 impl Default for Config {
@@ -56,6 +65,9 @@ impl Default for Config {
             archive: Archive::Facts,
             shard_bits: 12,
             initial_positions: 1 << 20,
+            km_compact_min: 64 << 20,
+            archive_zstd_level: 3,
+            fsync_delay: Duration::ZERO,
         }
     }
 }
@@ -80,10 +92,31 @@ pub struct RecoveryReport {
     pub micros: u64,
 }
 
+/// Where the time of the last commit went.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CommitTimings {
+    /// The overlay turned into redo records.
+    pub finalize: Duration,
+    /// Frame header and CRC, segment roll, `write`.
+    pub write: Duration,
+    /// Growing graph files before the apply (rare; `set_len`, remap).
+    pub grow: Duration,
+    pub fsync: Duration,
+    /// How long `commit_finish` waited for the fsync (less than `fsync`
+    /// when the writer computed the next batch meanwhile).
+    pub fsync_wait: Duration,
+    /// Redo records applied to the maps (between the epoch bumps).
+    pub apply: Duration,
+    pub frame_bytes: u64,
+    pub ops: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub commits: u64,
     pub log_bytes: u64,
+    pub finalize_micros: u64,
+    pub write_micros: u64,
     pub fsync_micros: u64,
     pub apply_micros: u64,
     pub checkpoints: u64,
@@ -92,6 +125,15 @@ pub struct Stats {
     pub manifest_chunks_hashed: u64,
     pub grows: u64,
     pub segments_released: u64,
+    pub compactions: u64,
+    /// Log segments the pool zero-filled: new files, recycled ones, and
+    /// rolls that had to wait for one.
+    pub segments_prepared: u64,
+    pub segments_recycled: u64,
+    pub segment_waits: u64,
+    /// Facts written to `archive/`, before and after compression.
+    pub archive_raw_bytes: u64,
+    pub archive_bytes: u64,
 }
 
 pub(crate) struct CkptCtl {
@@ -99,6 +141,7 @@ pub(crate) struct CkptCtl {
     stop: bool,
     error: Option<String>,
     done_seq: u64,
+    done_km_gen: u64,
     generation: u64,
     count: u64,
 }
@@ -107,6 +150,8 @@ pub(crate) struct Shared {
     pub(crate) maps: ArcSwap<Maps>,
     epoch: AtomicU64,
     applied: AtomicU64,
+    /// Generation of the key-map arena currently mapped.
+    km_gen: AtomicU64,
     dir: PathBuf,
     cfg: Config,
     chunk_mod: Mutex<Vec<Vec<u64>>>,
@@ -120,14 +165,70 @@ pub(crate) struct Shared {
     stats: Mutex<Stats>,
     /// True while the checkpoint thread runs.
     bg: std::sync::atomic::AtomicBool,
+    /// Spare log segments (with `prealloc`).
+    pool: Mutex<Option<log::SegPool>>,
+}
+
+/// A commit whose frame is written and whose fsync is in flight.
+pub struct InFlight {
+    seq: u64,
+    batch: Arc<Batch>,
+    fin: Finalized,
+    done: mpsc::Receiver<std::io::Result<Duration>>,
+    result: Option<std::io::Result<Duration>>,
+    finalize: Duration,
+    grow: Duration,
+    write: Duration,
+}
+
+impl InFlight {
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// True once the frame's fsync has completed (it is then durable and
+    /// `commit_finish` will not wait).  Never blocks.
+    pub fn is_durable(&mut self) -> bool {
+        if self.result.is_none()
+            && let Ok(r) = self.done.try_recv()
+        {
+            self.result = Some(r);
+        }
+        self.result.is_some()
+    }
+}
+
+/// Called by the sync thread once a frame is durable (see `commit_start_notify`).
+pub type Notify = Box<dyn FnOnce() + Send>;
+
+type SyncJob = (log::PendingSync, mpsc::SyncSender<std::io::Result<Duration>>, Option<Notify>);
+
+fn sync_thread(rx: mpsc::Receiver<SyncJob>, delay: Duration) {
+    while let Ok((p, reply, notify)) = rx.recv() {
+        let t = Instant::now();
+        let r = p.run();
+        if !delay.is_zero() {
+            // Simulation only (`Config::fsync_delay`): a slower disk.
+            std::thread::sleep(delay);
+        }
+        let _ = reply.send(r.map(|_| t.elapsed()));
+        if let Some(n) = notify {
+            n();
+        }
+    }
 }
 
 pub struct Store {
+    syncer: Option<mpsc::Sender<SyncJob>>,
+    sync_handle: Option<JoinHandle<()>>,
+    pool_handle: Option<JoinHandle<()>>,
+    in_flight: bool,
     sh: Arc<Shared>,
     log: LogWriter,
     seq: u64,
     thread: Option<JoinHandle<()>>,
     pub recovery: RecoveryReport,
+    last: CommitTimings,
 }
 
 /// A lock-free reader of the committed graph.  Cheap to clone; usable from
@@ -186,6 +287,7 @@ impl Shared {
             maps: ArcSwap::from_pointee(maps),
             epoch: AtomicU64::new(0),
             applied: AtomicU64::new(applied),
+            km_gen: AtomicU64::new(ckpt.km_gen),
             dir: dir.to_path_buf(),
             cfg,
             chunk_mod: Mutex::new(vec![Vec::new(); NFILES]),
@@ -197,6 +299,7 @@ impl Shared {
                 stop: false,
                 error: None,
                 done_seq: ckpt.seq,
+                done_km_gen: ckpt.km_gen,
                 generation: ckpt.generation,
                 count: 0,
             }),
@@ -205,6 +308,7 @@ impl Shared {
             manifest: Mutex::new(manifest),
             stats: Mutex::new(Stats::default()),
             bg: std::sync::atomic::AtomicBool::new(false),
+            pool: Mutex::new(None),
         }
     }
 
@@ -244,58 +348,147 @@ impl Shared {
 
     /// Apply redo records to the maps between two epoch bumps.
     fn apply<'a>(&self, seq: u64, ops: impl Iterator<Item = (u8, u64, &'a [u8])> + Clone) -> Result<()> {
-        let maps = self.maps.load();
+        let mut maps = self.maps.load_full();
         // Chunks this frame touches, marked before any byte changes (the
         // checkpoint's manifest relies on it).
-        self.mark(
-            seq,
-            ops.clone().map(|(f, o, b)| {
-                if f == F_KM_REBUILD {
+        let mut marks: Vec<(u8, u64, usize)> = Vec::new();
+        for (f, o, b) in ops.clone() {
+            match f {
+                F_KM_REBUILD => {
                     let (_, region, slots) = crate::batch::decode_rebuild(b).unwrap_or_default();
-                    (F_KM_ARENA, region, region_bytes(slots) as usize)
-                } else {
-                    (f, o, b.len())
+                    marks.push((F_KM_ARENA, region, region_bytes(slots) as usize));
+                    marks.push((F_KM_DIR, o * DIR_ENTRY as u64, DIR_ENTRY));
                 }
-            }),
-        );
+                F_KM_INSERT => {
+                    let block = crate::batch::decode_insert(b).map(|x| x.1).unwrap_or(0);
+                    marks.push((F_KM_ARENA, o, SLOT));
+                    marks.push((F_KM_ARENA, block, 64));
+                }
+                F_KM_COMPACT => {
+                    // The whole new arena, the directory and the control block.
+                    marks.push((F_KM_ARENA, 0, maps.f(F_KM_ARENA).len() as usize));
+                    marks.push((F_KM_DIR, 0, maps.f(F_KM_DIR).len() as usize));
+                    marks.push((F_CTL, 0, CTL_SIZE as usize));
+                }
+                _ => marks.push((f, o, b.len())),
+            }
+        }
+        self.mark(seq, marks.into_iter());
         let shard_bits = maps.ctl(C_SHARD_BITS) as u32;
         let e = self.epoch.fetch_add(1, Ordering::AcqRel);
         debug_assert!(e.is_multiple_of(2));
         let mut bad = None;
         for (f, off, b) in ops {
-            if f == F_KM_REBUILD {
-                let Some((old, region, slots)) = crate::batch::decode_rebuild(b) else {
-                    bad = Some("malformed key map rebuild record".into());
-                    break;
-                };
-                match crate::batch::rebuild_region(&maps, shard_bits, &old, region, slots) {
-                    Ok((nsh, r)) if region + r.len() as u64 <= maps.f(F_KM_ARENA).len() => {
-                        maps.f(F_KM_ARENA).put(region, &r);
-                        maps.f(F_KM_DIR).put(off * DIR_ENTRY as u64, &nsh.encode());
-                        self.mark(seq, std::iter::once((F_KM_DIR, off * DIR_ENTRY as u64, DIR_ENTRY)));
-                    }
-                    Ok(_) => {
-                        bad = Some(format!("key map region {region}+{} outside the arena", region_bytes(slots)));
+            match f {
+                F_KM_REBUILD => {
+                    let Some((old, region, slots)) = crate::batch::decode_rebuild(b) else {
+                        bad = Some("malformed key map rebuild record".into());
                         break;
+                    };
+                    match crate::batch::rebuild_region(&maps, shard_bits, &old, region, slots) {
+                        Ok((nsh, r)) if region + r.len() as u64 <= maps.f(F_KM_ARENA).len() => {
+                            maps.f(F_KM_ARENA).put(region, &r);
+                            maps.f(F_KM_DIR).put(off * DIR_ENTRY as u64, &nsh.encode());
+                        }
+                        Ok(_) => {
+                            bad = Some(format!("key map region {region}+{} outside the arena", region_bytes(slots)));
+                            break;
+                        }
+                        Err(e) => {
+                            bad = Some(e.to_string());
+                            break;
+                        }
                     }
+                }
+                F_KM_INSERT => {
+                    let a = maps.f(F_KM_ARENA);
+                    match crate::batch::decode_insert(b) {
+                        Some((slot, block)) if off + SLOT as u64 <= a.len() && block + 64 <= a.len() => {
+                            a.put(off, slot);
+                            let fp = av2_model::Fingerprint(slot[..12].try_into().unwrap());
+                            let mut blk: [u8; 64] = a.get(block, 64).unwrap().try_into().unwrap();
+                            for bit in crate::view::filter_bits(&fp) {
+                                blk[bit as usize / 8] |= 1 << (bit % 8);
+                            }
+                            a.put(block, &blk);
+                        }
+                        _ => {
+                            bad = Some(format!("malformed or out-of-bounds key map insert at {off}"));
+                            break;
+                        }
+                    }
+                }
+                F_KM_COMPACT => match self.compact(&maps, off, b) {
+                    Ok(m) => maps = m,
                     Err(e) => {
                         bad = Some(e.to_string());
                         break;
                     }
+                },
+                _ => {
+                    if (f as usize) >= NFILES || off + b.len() as u64 > maps.m[f as usize].len() {
+                        bad = Some(format!("redo record outside file {f}: {off}+{}", b.len()));
+                        break;
+                    }
+                    maps.m[f as usize].put(off, b);
                 }
-                continue;
             }
-            if (f as usize) >= NFILES || off + b.len() as u64 > maps.m[f as usize].len() {
-                bad = Some(format!("redo record outside file {f}: {off}+{}", b.len()));
-                break;
-            }
-            maps.m[f as usize].put(off, b);
         }
-        self.epoch.fetch_add(1, Ordering::AcqRel);
         self.applied.store(seq, Ordering::Release);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         match bad {
             Some(s) => Err(StoreError::Corrupt(s)),
             None => Ok(()),
+        }
+    }
+
+    /// Apply a compaction record: copy every live region named by it from the
+    /// current arena generation into a new one, packed in shard order, then
+    /// point the directory and the counters at it and publish the new maps.
+    fn compact(&self, maps: &Arc<Maps>, new_gen: u64, b: &[u8]) -> Result<Arc<Maps>> {
+        let (old_gen, live) =
+            crate::batch::decode_compact(b).ok_or_else(|| StoreError::Corrupt("malformed key map compaction record".into()))?;
+        let cur = self.km_gen.load(Ordering::Acquire);
+        if old_gen != cur || new_gen != old_gen + 1 {
+            return Err(StoreError::Corrupt(format!("compaction from generation {old_gen} to {new_gen} while generation {cur} is mapped")));
+        }
+        let total: u64 = live.iter().map(|(_, sh)| region_bytes(sh.slots)).sum();
+        let path = graph_dir(&self.dir).join(arena_name(new_gen));
+        let new = crate::mapped::Mapped::open(&path, total.max(GROW_ALIGN))?;
+        let old = maps.f(F_KM_ARENA);
+        let dir = maps.f(F_KM_DIR);
+        let mut at = 0u64;
+        for (s, sh) in &live {
+            let n = region_bytes(sh.slots);
+            let src = old
+                .get(sh.region, n as usize)
+                .ok_or_else(|| StoreError::Corrupt(format!("key map shard {s} outside generation {old_gen}")))?;
+            new.put(at, src);
+            dir.put(s * DIR_ENTRY as u64, &crate::view::Shard { region: at, ..*sh }.encode());
+            at += n;
+        }
+        let ctl = maps.f(F_CTL);
+        ctl.put(C_KM_TAIL as u64, &total.to_le_bytes());
+        ctl.put(C_KM_LIVE as u64, &total.to_le_bytes());
+        ctl.put(C_KM_GEN as u64, &new_gen.to_le_bytes());
+        let next = Arc::new(maps.with(F_KM_ARENA, new));
+        self.maps.store(next.clone());
+        self.km_gen.store(new_gen, Ordering::Release);
+        self.stats.lock().unwrap().compactions += 1;
+        Ok(next)
+    }
+
+    /// Delete the arena files whose generation `drop` selects (best effort: a
+    /// file still mapped by a reader is retried at the next checkpoint).
+    fn delete_arenas(&self, drop: impl Fn(u64) -> bool) {
+        if let Ok(rd) = std::fs::read_dir(graph_dir(&self.dir)) {
+            for e in rd.flatten() {
+                if let Some(g) = arena_generation(&e.file_name().to_string_lossy())
+                    && drop(g)
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
         }
     }
 
@@ -303,12 +496,28 @@ impl Shared {
     /// sequence number, release the segments it covers.  Safe to run while
     /// the writer commits.
     fn checkpoint(&self) -> Result<u64> {
+        self.checkpoint_gen().map(|(s, _)| s)
+    }
+
+    /// A checkpoint; returns its sequence number and key-map generation.
+    fn checkpoint_gen(&self) -> Result<(u64, u64)> {
         let _one = self.ckpt_lock.lock().unwrap();
         let t0 = Instant::now();
-        // Read the sequence number first, then the maps: the maps published
-        // before frame `s` was applied include every region it wrote.
-        let s = self.applied.load(Ordering::Acquire);
-        let maps = self.maps.load_full();
+        // Sequence number, key-map generation and maps, read together while
+        // no batch is being applied (the epoch is even and does not move).
+        let (s, km_gen, maps) = loop {
+            let e = self.epoch.load(Ordering::Acquire);
+            if !e.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            let s = self.applied.load(Ordering::Acquire);
+            let g = self.km_gen.load(Ordering::Acquire);
+            let m = self.maps.load_full();
+            if self.epoch.load(Ordering::Acquire) == e {
+                break (s, g, m);
+            }
+        };
         for m in maps.m.iter() {
             m.flush()?;
         }
@@ -320,21 +529,27 @@ impl Shared {
             let hashed = self.update_manifest(&maps, s)?;
             self.stats.lock().unwrap().manifest_chunks_hashed += hashed;
         }
-        checkpoint::write(&graph_dir(&self.dir).join("ckpt"), Ckpt { generation, seq: s })?;
+        checkpoint::write(&graph_dir(&self.dir).join("ckpt"), Ckpt { generation, seq: s, km_gen })?;
         let released = self.release_segments(s)?;
+        // Older generations are needed by no recovery from now on (a backup in
+        // progress may still copy one: not while the log is pinned).
+        if self.pin.lock().unwrap().is_none() {
+            self.delete_arenas(|g| g < km_gen);
+        }
         let us = t0.elapsed().as_micros() as u64;
         {
             let mut c = self.ctl.lock().unwrap();
             c.generation = generation;
             c.count = count;
             c.done_seq = s;
+            c.done_km_gen = km_gen;
         }
         let mut st = self.stats.lock().unwrap();
         st.checkpoints += 1;
         st.checkpoint_micros_total += us;
         st.checkpoint_micros_max = st.checkpoint_micros_max.max(us);
         st.segments_released += released;
-        Ok(s)
+        Ok((s, km_gen))
     }
 
     fn update_manifest(&self, maps: &Maps, s: u64) -> Result<u64> {
@@ -394,9 +609,15 @@ impl Shared {
                 Archive::Delete => None,
             };
             if let Some(d) = dir {
-                archive_facts(&g.path, &d)?;
+                let (raw, packed) = archive_facts(&g.path, &d, self.cfg.archive_zstd_level)?;
+                let mut st = self.stats.lock().unwrap();
+                st.archive_raw_bytes += raw;
+                st.archive_bytes += packed;
             }
-            std::fs::remove_file(&g.path)?;
+            match self.pool.lock().unwrap().as_ref() {
+                Some(p) => p.recycle(&g.path)?,
+                None => std::fs::remove_file(&g.path)?,
+            }
         }
         Ok(gone.len() as u64)
     }
@@ -408,9 +629,13 @@ impl Shared {
     /// thread that checkpoints back to back can starve the caller); without
     /// one, run it here.
     fn checkpoint_covering_now(&self) -> Result<u64> {
+        self.checkpoint_covering_now_gen().map(|(s, _)| s)
+    }
+
+    fn checkpoint_covering_now_gen(&self) -> Result<(u64, u64)> {
         if !self.bg.load(Ordering::Acquire) {
             self.since_ckpt.store(0, Ordering::Relaxed);
-            return self.checkpoint();
+            return self.checkpoint_gen();
         }
         let target = self.applied.load(Ordering::Acquire);
         let mut c = self.ctl.lock().unwrap();
@@ -419,11 +644,11 @@ impl Shared {
                 return Err(StoreError::Checkpoint(e.clone()));
             }
             if c.done_seq >= target && c.done_seq > 0 || target == 0 && c.count > 0 {
-                return Ok(c.done_seq);
+                return Ok((c.done_seq, c.done_km_gen));
             }
             if c.stop {
                 drop(c);
-                return self.checkpoint();
+                return self.checkpoint_gen();
             }
             c.requested = true;
             self.cv.notify_all();
@@ -433,8 +658,9 @@ impl Shared {
 }
 
 /// Rewrite segment `seg` into `dir` with the facts of every frame and none
-/// of its redo records (atomic: temporary file, fsync, rename).
-fn archive_facts(seg: &Path, dir: &Path) -> Result<()> {
+/// of its redo records, compressed with zstd (`<name>.seg.zst`; atomic:
+/// temporary file, fsync, rename).
+fn archive_facts(seg: &Path, dir: &Path, level: i32) -> Result<(u64, u64)> {
     std::fs::create_dir_all(dir)?;
     let r = log::read_segment(seg)?;
     let mut out = Vec::with_capacity(r.end / 4);
@@ -449,16 +675,20 @@ fn archive_facts(seg: &Path, dir: &Path) -> Result<()> {
         out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         out.extend_from_slice(&body);
     }
-    let name = seg.file_name().unwrap();
-    let tmp = dir.join(format!("{}.tmp", name.to_string_lossy()));
+    // Pure-Rust zstd (ruzstd, about zstd level 1): the store links no C,
+    // so a static musl binary cross-compiles from anywhere.
+    let _ = level;
+    let packed = ruzstd::encoding::compress_to_vec(&out[..], ruzstd::encoding::CompressionLevel::Fastest);
+    let name = format!("{}.zst", seg.file_name().unwrap().to_string_lossy());
+    let tmp = dir.join(format!("{name}.tmp"));
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&out)?;
+        f.write_all(&packed)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, dir.join(name))?;
     log::sync_dir(dir)?;
-    Ok(())
+    Ok((out.len() as u64, packed.len() as u64))
 }
 
 fn checkpoint_thread(sh: Arc<Shared>) {
@@ -499,12 +729,12 @@ impl Store {
         }
         std::fs::create_dir_all(&g)?;
         std::fs::create_dir_all(log_dir(dir))?;
-        let maps = Maps::open(&g, &initial_lens(&cfg))?;
+        let maps = Maps::open(&g, &initial_lens(&cfg), 0)?;
         init_ctl(&maps, cfg.shard_bits);
         for m in maps.m.iter() {
             m.flush()?;
         }
-        checkpoint::write(&g.join("ckpt"), Ckpt { generation: 1, seq: 0 })?;
+        checkpoint::write(&g.join("ckpt"), Ckpt { generation: 1, seq: 0, km_gen: 0 })?;
         log::sync_dir(&g)?;
         log::sync_dir(dir)?;
         drop(maps);
@@ -517,14 +747,17 @@ impl Store {
         let g = graph_dir(dir);
         let ld = log_dir(dir);
         std::fs::create_dir_all(&ld)?;
-        let maps = Maps::open(&g, &[0; NFILES])?;
+        let ckpt = checkpoint::read(&g.join("ckpt"))?.ok_or_else(|| StoreError::Corrupt("no valid checkpoint record".into()))?;
+        if !g.join(arena_name(ckpt.km_gen)).exists() {
+            return Err(StoreError::Corrupt(format!("key map arena generation {} is missing", ckpt.km_gen)));
+        }
+        let maps = Maps::open(&g, &[0; NFILES], ckpt.km_gen)?;
         if maps.ctl(C_MAGIC) != MAGIC {
             return Err(StoreError::Corrupt(format!("{} is not an AtomicDB v2 graph", g.display())));
         }
         if maps.ctl(C_FORMAT) != FORMAT_VERSION {
             return Err(StoreError::Corrupt(format!("graph format {} (this build reads {})", maps.ctl(C_FORMAT), FORMAT_VERSION)));
         }
-        let ckpt = checkpoint::read(&g.join("ckpt"))?.ok_or_else(|| StoreError::Corrupt("no valid checkpoint record".into()))?;
         let manifest = Manifest::read(&g.join("manifest"))?.unwrap_or_else(Manifest::empty);
         let mut cfg = cfg;
         cfg.shard_bits = maps.ctl(C_SHARD_BITS) as u32;
@@ -533,6 +766,7 @@ impl Store {
         let mut rep = RecoveryReport { checkpoint_seq: ckpt.seq, last_seq: ckpt.seq, ..Default::default() };
         let mut last = ckpt.seq;
         let mut kept: Vec<Seg> = Vec::new();
+        let mut resume: Option<(Seg, u64)> = None;
         for (i, s) in segs.iter().enumerate() {
             let r = log::read_segment(&s.path)?;
             let is_last = i + 1 == segs.len();
@@ -555,11 +789,17 @@ impl Store {
                 let mut recs = Vec::new();
                 for rec in log::redo_records(fr.redo) {
                     let (f, off, b) = rec?;
+                    let k = F_KM_ARENA as usize;
                     if f == F_KM_REBUILD {
                         let (_, region, slots) = crate::batch::decode_rebuild(b)
                             .ok_or_else(|| StoreError::Corrupt("malformed key map rebuild record".into()))?;
-                        let k = F_KM_ARENA as usize;
                         need[k] = need[k].max(region + region_bytes(slots));
+                    } else if f == F_KM_INSERT {
+                        let (_, block) =
+                            crate::batch::decode_insert(b).ok_or_else(|| StoreError::Corrupt("malformed key map insert record".into()))?;
+                        need[k] = need[k].max((off + SLOT as u64).max(block + 64));
+                    } else if f == F_KM_COMPACT {
+                        // The compaction creates its own file.
                     } else if f as usize >= NFILES {
                         return Err(StoreError::Corrupt(format!("redo record for file {f}")));
                     } else {
@@ -573,19 +813,18 @@ impl Store {
                 rep.frames_replayed += 1;
                 rep.bytes_replayed += len as u64;
             }
-            if r.torn || r.end < r.data.len() {
-                // Cut the segment where the valid frames end: a torn tail or the
-                // unused preallocation.  Writing resumes in a new segment.
-                rep.torn_tail_bytes += if r.torn { (r.data.len() - r.end) as u64 } else { 0 };
-                let f = std::fs::OpenOptions::new().write(true).open(&s.path)?;
-                f.set_len(r.end as u64)?;
-                // A torn tail must be gone for good before new segments follow
-                // (only the last segment may end badly); unused zeros may stay.
-                if r.torn {
-                    f.sync_all()?;
-                }
+            // A torn frame is overwritten with zeros (durably) before anything
+            // follows it: only the end of the log may hold one.
+            if r.torn {
+                rep.torn_tail_bytes += log::zero_tail(&s.path, &r)?;
             }
-            if r.frames.is_empty() && r.end == 0 {
+            // Writing resumes in the last segment, after its valid frames, if
+            // its name fits the next sequence number.
+            let fits = !r.frames.is_empty() || s.first == last + 1;
+            if is_last && fits {
+                resume = Some((s.clone(), r.end as u64));
+                kept.push(s.clone());
+            } else if r.frames.is_empty() {
                 std::fs::remove_file(&s.path)?;
             } else {
                 kept.push(s.clone());
@@ -597,9 +836,27 @@ impl Store {
             return Err(StoreError::Corrupt(format!("log starts at {} but the checkpoint is at {}", first.first, ckpt.seq)));
         }
         rep.last_seq = last;
-        let log = LogWriter::create(&ld, last + 1, cfg.seg_bytes, cfg.prealloc)?;
-        kept.push(Seg { first: last + 1, path: log.path() });
+        // Generations newer than the one replay ended at belong to compactions
+        // that never became durable; older than the checkpoint's are dead.
+        let (lo, hi) = (ckpt.km_gen, sh.km_gen.load(Ordering::Acquire));
+        sh.delete_arenas(|g| g < lo || g > hi);
+        let (pool, pool_handle) = match cfg.prealloc {
+            true => {
+                let (p, h) = log::SegPool::start(&ld, cfg.seg_bytes)?;
+                (Some(p), Some(h))
+            }
+            false => (None, None),
+        };
+        let log = match resume {
+            Some((seg, pos)) => LogWriter::resume(&ld, &seg.path, seg.first, pos, cfg.seg_bytes, pool.clone())?,
+            None => {
+                let l = LogWriter::create(&ld, last + 1, cfg.seg_bytes, pool.clone())?;
+                kept.push(Seg { first: last + 1, path: l.path() });
+                l
+            }
+        };
         *sh.segs.lock().unwrap() = kept;
+        *sh.pool.lock().unwrap() = pool.clone();
         rep.micros = t0.elapsed().as_micros() as u64;
         let thread = if cfg.background_checkpoint {
             let s2 = sh.clone();
@@ -608,7 +865,21 @@ impl Store {
         } else {
             None
         };
-        Ok(Store { sh, log, seq: last, thread, recovery: rep })
+        let (stx, srx) = mpsc::channel::<SyncJob>();
+        let delay = cfg.fsync_delay;
+        let sync_handle = Some(std::thread::Builder::new().name("av2-fsync".into()).spawn(move || sync_thread(srx, delay))?);
+        Ok(Store {
+            syncer: Some(stx),
+            sync_handle,
+            pool_handle,
+            in_flight: false,
+            sh,
+            log,
+            seq: last,
+            thread,
+            recovery: rep,
+            last: CommitTimings::default(),
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -626,7 +897,7 @@ impl Store {
 
     /// A new overlay on the committed state.
     pub fn batch(&self) -> Batch {
-        Batch::new(self.sh.maps.load_full())
+        Batch::new(self.sh.maps.load_full(), self.sh.cfg.km_compact_min)
     }
 
     pub fn reader(&self) -> Reader {
@@ -636,28 +907,100 @@ impl Store {
     /// Commit `batch` with the encoded `facts` as the next frame.  Returns its
     /// sequence number once the frame is durable and applied.
     pub fn commit(&mut self, batch: Batch, facts: &[u8]) -> Result<u64> {
+        let f = self.commit_start(batch, facts)?;
+        self.commit_finish(f)
+    }
+
+    /// First half of a commit: turn `batch` into a frame, write it, and start
+    /// its fsync on the store's sync thread.  While it is in flight the
+    /// writer can compute the next batch on `batch_after` (which reads
+    /// through this one); `commit_finish` waits for the fsync and applies.
+    /// One commit may be in flight at a time.
+    pub fn commit_start(&mut self, batch: Batch, facts: &[u8]) -> Result<InFlight> {
+        self.commit_start_notify(batch, facts, None)
+    }
+
+    /// `commit_start`, and call `notify` (on the sync thread) as soon as the
+    /// frame is durable, so that a writer waiting on its own channel can wake.
+    pub fn commit_start_notify(&mut self, mut batch: Batch, facts: &[u8], notify: Option<Notify>) -> Result<InFlight> {
         if let Some(e) = self.sh.ctl.lock().unwrap().error.clone() {
             return Err(StoreError::Checkpoint(e));
         }
+        if self.in_flight {
+            return Err(StoreError::Corrupt("a commit is already in flight".into()));
+        }
+        // Nothing is in flight, so the batch this one was built on (if any) is
+        // applied: drop it and finalize against the current maps (that batch
+        // may have published new ones, e.g. a compacted key map).
+        batch.detach();
+        batch.maps = self.sh.maps.load_full();
         let seq = self.seq + 1;
-        let fin: Finalized = batch.finalize(seq, facts)?;
-        self.sh.ensure(&fin.need)?;
         let t0 = Instant::now();
-        if let Some(seg) = self.log.append(seq, &fin.body, self.sh.cfg.durable)? {
+        let fin: Finalized = batch.finalize(seq, facts)?;
+        let t1 = Instant::now();
+        self.sh.ensure(&fin.need)?;
+        let grow = t1.elapsed();
+        let (app, sync) = self.log.write_frame(seq, &fin.body)?;
+        if let Some(seg) = app.rolled {
             self.sh.segs.lock().unwrap().push(seg);
         }
-        let t1 = Instant::now();
+        let (tx, done) = mpsc::sync_channel(1);
+        if self.sh.cfg.durable {
+            self.syncer
+                .as_ref()
+                .expect("sync thread")
+                .send((sync, tx, notify))
+                .map_err(|_| StoreError::Corrupt("sync thread stopped".into()))?;
+        } else {
+            let _ = tx.send(Ok(Duration::ZERO));
+            if let Some(n) = notify {
+                n();
+            }
+        }
+        self.in_flight = true;
+        Ok(InFlight { seq, batch: Arc::new(batch), fin, done, result: None, finalize: t1 - t0, grow, write: app.write })
+    }
+
+    /// An overlay for the next batch while `f` is in flight.
+    pub fn batch_after(&self, f: &InFlight) -> Batch {
+        Batch::new_after(f.batch.clone(), self.sh.maps.load_full(), self.sh.cfg.km_compact_min)
+    }
+
+    /// Second half of a commit: wait for the frame's fsync, apply it, and
+    /// return its sequence number.
+    pub fn commit_finish(&mut self, f: InFlight) -> Result<u64> {
+        let InFlight { seq, fin, done, result, finalize, grow, write, .. } = f;
+        self.in_flight = false;
+        let t_wait = Instant::now();
+        let fsync_own = match result {
+            Some(r) => r?,
+            None => done.recv().map_err(|_| StoreError::Corrupt("sync thread stopped".into()))??,
+        };
+        let waited = t_wait.elapsed();
+        let t2 = Instant::now();
         let body = &fin.body;
         self.sh.apply(seq, fin.ops.iter().map(|o| (o.file, o.off, &body[o.at..o.at + o.len])))?;
-        let t2 = Instant::now();
+        let t3 = Instant::now();
         self.seq = seq;
         let frame = (fin.body.len() + log::FRAME_HEADER) as u64;
+        self.last = CommitTimings {
+            finalize,
+            write,
+            grow,
+            fsync: fsync_own,
+            fsync_wait: waited,
+            apply: t3 - t2,
+            frame_bytes: frame,
+            ops: fin.ops.len() as u64,
+        };
         {
             let mut st = self.sh.stats.lock().unwrap();
             st.commits += 1;
             st.log_bytes += frame;
-            st.fsync_micros += (t1 - t0).as_micros() as u64;
-            st.apply_micros += (t2 - t1).as_micros() as u64;
+            st.finalize_micros += finalize.as_micros() as u64;
+            st.write_micros += write.as_micros() as u64;
+            st.fsync_micros += fsync_own.as_micros() as u64;
+            st.apply_micros += (t3 - t2).as_micros() as u64;
         }
         let since = self.sh.since_ckpt.fetch_add(frame, Ordering::Relaxed) + frame;
         if since >= self.sh.cfg.ckpt_bytes {
@@ -697,8 +1040,20 @@ impl Store {
         }
     }
 
+    /// Timings of the last commit.
+    pub fn last_commit(&self) -> CommitTimings {
+        self.last
+    }
+
     pub fn stats(&self) -> Stats {
-        self.sh.stats.lock().unwrap().clone()
+        let mut st = self.sh.stats.lock().unwrap().clone();
+        if let Some(p) = self.sh.pool.lock().unwrap().as_ref() {
+            let ps = p.stats();
+            st.segments_prepared = ps.created;
+            st.segments_recycled = ps.recycled;
+            st.segment_waits = ps.waited;
+        }
+        st
     }
 
     /// Bytes in use per file, and their total (what a backup copies).
@@ -735,6 +1090,16 @@ impl Store {
 impl Drop for Store {
     fn drop(&mut self) {
         self.stop_thread();
+        self.syncer = None;
+        if let Some(h) = self.sync_handle.take() {
+            let _ = h.join();
+        }
+        if let Some(p) = self.sh.pool.lock().unwrap().take() {
+            p.stop();
+        }
+        if let Some(h) = self.pool_handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -840,8 +1205,8 @@ fn backup(sh: &Shared, dest: &Path) -> Result<BackupReport> {
         let mut p = sh.pin.lock().unwrap();
         *p = Some(p.map_or(now + 1, |q| q.min(now + 1)));
     }
-    let s = match sh.checkpoint_covering_now() {
-        Ok(s) => s,
+    let (s, gen_s) = match sh.checkpoint_covering_now_gen() {
+        Ok(x) => x,
         Err(e) => {
             *sh.pin.lock().unwrap() = None;
             return Err(e);
@@ -859,9 +1224,18 @@ fn backup(sh: &Shared, dest: &Path) -> Result<BackupReport> {
         let live = live_lens(&View::new(&maps));
         for f in 0..NFILES {
             let len = live[f].min(maps.m[f].len());
-            rep.graph_bytes += copy_prefix(&maps.m[f].path, &gd.join(NAMES[f]), len)?;
+            let name = maps.m[f].path.file_name().unwrap().to_owned();
+            rep.graph_bytes += copy_prefix(&maps.m[f].path, &gd.join(name), len)?;
         }
-        checkpoint::write(&gd.join("ckpt"), Ckpt { generation: 1, seq: s })?;
+        // A compaction after the checkpoint: replay needs the older arena too
+        // (it is frozen, and not deleted while the log is pinned).
+        let cur_gen = sh.km_gen.load(Ordering::Acquire);
+        if gen_s != cur_gen {
+            let p = graph_dir(&sh.dir).join(arena_name(gen_s));
+            let len = std::fs::metadata(&p)?.len();
+            rep.graph_bytes += copy_prefix(&p, &gd.join(arena_name(gen_s)), len)?;
+        }
+        checkpoint::write(&gd.join("ckpt"), Ckpt { generation: 1, seq: s, km_gen: gen_s })?;
         // Log: every segment that may hold frames after `s`, oldest first; the
         // segment being written last (a torn tail there is cut on open).
         let segs = sh.segs.lock().unwrap().clone();

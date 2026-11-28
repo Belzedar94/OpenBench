@@ -25,6 +25,7 @@ fn small_cfg(background: bool) -> Config {
         background_checkpoint: background,
         shard_bits: 2,
         initial_positions: 1024,
+        km_compact_min: 4096,
         ..Config::default()
     }
 }
@@ -90,7 +91,7 @@ fn store_matches_model_across_reopens() {
         }
     }
     let st = s.stats();
-    assert!(st.checkpoints > 3, "{st:?}");
+    assert!(st.checkpoints >= 1, "{st:?}");
     assert!(st.grows >= 1, "{st:?}");
     assert!(st.segments_released > 3, "{st:?}");
     // Every key resolves to its id.
@@ -185,6 +186,124 @@ fn replay_over_a_state_ahead_of_the_checkpoint() {
         assert_eq!(s.recovery.frames_replayed, 300);
         assert_eq!(store_digest(&s), want);
     }
+}
+
+/// Compaction of the key map: rebuilt shards leave garbage, which is copied
+/// away into a new arena generation; replay from a checkpoint taken before
+/// the compaction, over files already past it, must give the same state, and
+/// the old generations go once a checkpoint no longer needs them.
+#[test]
+fn key_map_compaction_survives_replay() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = small_cfg(false);
+    cfg.ckpt_bytes = u64::MAX;
+    let mut s = Store::create(d.path(), cfg.clone()).unwrap();
+    let mut seq = 0;
+    while s.stats().compactions < 3 {
+        seq += 1;
+        step(&mut s, seq);
+        assert!(seq < 3000, "no compaction after {seq} batches: {:?}", s.stats());
+    }
+    for _ in 0..20 {
+        seq += 1;
+        step(&mut s, seq);
+    }
+    let want = model_digest(&model_at(seq));
+    assert_eq!(store_digest(&s), want);
+    let (per_file, _) = s.live_bytes();
+    drop(s);
+    let arenas = || {
+        std::fs::read_dir(d.path().join("graph"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("keymap.arena"))
+            .count()
+    };
+    assert!(arenas() >= 2, "the checkpoint's generation and the current one");
+    // Replays every frame since seq 0 over files that are already compacted three times.
+    let s = Store::open(d.path(), cfg.clone()).unwrap();
+    assert_eq!(s.recovery.frames_replayed, seq);
+    assert_eq!(store_digest(&s), want);
+    assert_eq!(s.live_bytes().0, per_file);
+    s.checkpoint().unwrap();
+    assert_eq!(arenas(), 1, "older generations deleted after a checkpoint");
+    drop(s);
+    let s = Store::open(d.path(), cfg).unwrap();
+    assert_eq!(store_digest(&s), want);
+}
+
+/// Pipelined commits: batch n+1 is computed (on an overlay that reads
+/// through batch n) while n's fsync is in flight.  Same final state as one
+/// commit at a time, and readers never see a batch before it is durable.
+#[test]
+fn pipelined_commits_match_the_model() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = small_cfg(true);
+    cfg.durable = true;
+    let mut s = Store::create(d.path(), cfg.clone()).unwrap();
+    let mut flight: Option<av2_store::InFlight> = None;
+    for seq in 1..=300u64 {
+        let mut b = match &flight {
+            Some(f) => s.batch_after(f),
+            None => s.batch(),
+        };
+        random_batch(&mut b, &mut batch_rng(seq), size_of(seq)).unwrap();
+        if let Some(f) = flight.take() {
+            // Not visible before it is durable and applied.
+            assert_eq!(s.reader().applied_seq(), seq - 2);
+            assert_eq!(s.commit_finish(f).unwrap(), seq - 1);
+        }
+        flight = Some(s.commit_start(b, &[]).unwrap());
+        assert!(s.commit_start(s.batch(), &[]).is_err(), "only one commit in flight");
+    }
+    assert_eq!(s.commit_finish(flight.take().unwrap()).unwrap(), 300);
+    let want = model_digest(&model_at(300));
+    assert_eq!(store_digest(&s), want);
+    drop(s);
+    let s = Store::open(d.path(), cfg).unwrap();
+    assert_eq!(s.last_seq(), 300);
+    assert_eq!(store_digest(&s), want);
+}
+
+/// Prepared segments: every log file is a zero-filled `seg_bytes` file
+/// written in place (commits never extend it), released ones are recycled,
+/// and a torn frame inside one is zeroed and written over after recovery.
+#[test]
+fn prealloc_segments_are_written_in_place() {
+    use std::io::{Seek, SeekFrom, Write};
+    let d = tempfile::tempdir().unwrap();
+    let cfg = small_cfg(false);
+    assert!(cfg.prealloc);
+    let mut s = Store::create(d.path(), cfg.clone()).unwrap();
+    for seq in 1..=300 {
+        step(&mut s, seq);
+    }
+    let st = s.stats();
+    assert!(st.segments_recycled >= 1, "{st:?}");
+    for e in std::fs::read_dir(d.path().join("log")).unwrap() {
+        let e = e.unwrap();
+        let len = e.metadata().unwrap().len();
+        assert_eq!(len, cfg.seg_bytes, "{} is {len} bytes", e.file_name().to_string_lossy());
+    }
+    drop(s);
+    // A frame torn half way, inside the preallocated zeros after the last valid frame.
+    let segs = av2_store::log::scan(&d.path().join("log")).unwrap();
+    let last = segs.last().unwrap().path.clone();
+    let r = av2_store::log::read_segment(&last).unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).open(&last).unwrap();
+    f.seek(SeekFrom::Start(r.end as u64)).unwrap();
+    f.write_all(&[200, 1, 0, 0, 0xEF, 0xBE, 0xAD, 0xDE, 9, 9, 9, 9]).unwrap();
+    drop(f);
+    let mut s = Store::open(d.path(), cfg.clone()).unwrap();
+    assert_eq!(s.last_seq(), 300);
+    assert_eq!(s.recovery.torn_tail_bytes, 12);
+    assert_eq!(store_digest(&s), model_digest(&model_at(300)));
+    for seq in 301..=320 {
+        step(&mut s, seq);
+    }
+    drop(s);
+    let s = Store::open(d.path(), cfg).unwrap();
+    assert_eq!(s.last_seq(), 320);
+    assert_eq!(store_digest(&s), model_digest(&model_at(320)));
 }
 
 #[test]

@@ -13,6 +13,36 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Read-path hints for the mappings, from the environment (Linux; ignored
+/// elsewhere), so they can be compared on the production box without a
+/// rebuild:
+/// - `AV2_MMAP_POPULATE=1`: `MAP_POPULATE` (prefault the page tables at open
+///   and after growth: no minor faults on first touch, slower open);
+/// - `AV2_MMAP_ADVICE=random|willneed|hugepage|sequential|normal`: `madvise`.
+#[derive(Clone, Copy, Default)]
+pub struct Hints {
+    pub populate: bool,
+    #[cfg(unix)]
+    pub advice: Option<memmap2::Advice>,
+}
+
+pub fn hints() -> Hints {
+    static H: std::sync::OnceLock<Hints> = std::sync::OnceLock::new();
+    *H.get_or_init(|| Hints {
+        populate: std::env::var("AV2_MMAP_POPULATE").is_ok_and(|v| v == "1"),
+        #[cfg(unix)]
+        advice: match std::env::var("AV2_MMAP_ADVICE").as_deref() {
+            Ok("random") => Some(memmap2::Advice::Random),
+            Ok("willneed") => Some(memmap2::Advice::WillNeed),
+            Ok("sequential") => Some(memmap2::Advice::Sequential),
+            Ok("normal") => Some(memmap2::Advice::Normal),
+            #[cfg(target_os = "linux")]
+            Ok("hugepage") => Some(memmap2::Advice::HugePage),
+            _ => None,
+        },
+    })
+}
+
 pub struct Mapped {
     pub file: File,
     map: Option<MmapRaw>,
@@ -32,10 +62,27 @@ impl Mapped {
         let mut len = file.metadata()?.len();
         if len < min_len {
             len = min_len.next_multiple_of(GROW_ALIGN);
+            // No fsync here: nothing durable depends on the new size yet.  A
+            // frame that writes past the old end is in the log, and recovery
+            // grows the file again before replaying it; the checkpoint's
+            // fdatasync makes the size durable together with the data.
             file.set_len(len)?;
-            file.sync_all()?;
         }
-        let map = if len > 0 { Some(MmapOptions::new().len(len as usize).map_raw(&file)?) } else { None };
+        let map = if len > 0 {
+            let mut o = MmapOptions::new();
+            o.len(len as usize);
+            if hints().populate {
+                o.populate();
+            }
+            let m = o.map_raw(&file)?;
+            #[cfg(unix)]
+            if let Some(a) = hints().advice {
+                let _ = m.advise(a);
+            }
+            Some(m)
+        } else {
+            None
+        };
         Ok(Mapped { file, map, len, path: path.to_path_buf() })
     }
 
@@ -105,10 +152,12 @@ pub struct Maps {
 }
 
 impl Maps {
-    pub fn open(dir: &Path, min_lens: &[u64; NFILES]) -> io::Result<Maps> {
+    /// Map the files of `dir`, the key-map arena at generation `km_gen`.
+    pub fn open(dir: &Path, min_lens: &[u64; NFILES], km_gen: u64) -> io::Result<Maps> {
         let mut v = Vec::with_capacity(NFILES);
         for i in 0..NFILES {
-            v.push(Arc::new(Mapped::open(&dir.join(NAMES[i]), min_lens[i])?));
+            let name = if i == crate::layout::F_KM_ARENA as usize { crate::layout::arena_name(km_gen) } else { NAMES[i].to_string() };
+            v.push(Arc::new(Mapped::open(&dir.join(name), min_lens[i])?));
         }
         Ok(Maps { m: v.try_into().ok().unwrap() })
     }
@@ -127,6 +176,13 @@ impl Maps {
         let mut m = self.m.clone();
         m[f as usize] = Arc::new(new);
         Ok(Maps { m })
+    }
+
+    /// A copy of these maps with file `f` replaced by `m`.
+    pub fn with(&self, f: u8, m: Mapped) -> Maps {
+        let mut v = self.m.clone();
+        v[f as usize] = Arc::new(m);
+        Maps { m: v }
     }
 
     #[inline]

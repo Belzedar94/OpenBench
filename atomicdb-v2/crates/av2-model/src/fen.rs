@@ -42,8 +42,12 @@ impl Default for PackedFen {
 impl PackedFen {
     /// Pack `fen`, or `None` if it cannot be packed exactly (store it as a blob).
     pub fn pack(fen: &str) -> Option<PackedFen> {
-        let parts: Vec<&str> = fen.split(' ').collect();
-        if parts.len() != 6 || parts[4] != "0" || parts[5] != "1" {
+        let mut it = fen.split(' ');
+        let mut parts = [""; 6];
+        for p in parts.iter_mut() {
+            *p = it.next()?;
+        }
+        if it.next().is_some() || parts[4] != "0" || parts[5] != "1" {
             return None;
         }
         let mut b = [0u8; FEN_SIZE];
@@ -110,7 +114,9 @@ impl PackedFen {
         };
         let p = PackedFen(b);
         // Exactness check: only accept what comes back byte for byte.
-        (p.unpack().as_deref() == Some(fen)).then_some(p)
+        let mut out = [0u8; 96];
+        let n = p.unpack_into(&mut out);
+        (&out[..n] == fen.as_bytes()).then_some(p)
     }
 
     pub fn blob(r: BlobRef) -> PackedFen {
@@ -141,11 +147,22 @@ impl PackedFen {
         if self.0[0] != KIND_PACKED {
             return None;
         }
+        let mut out = [0u8; 96];
+        let n = self.unpack_into(&mut out);
+        Some(String::from_utf8_lossy(&out[..n]).into_owned())
+    }
+
+    /// Write the FEN of a packed entry into `out` (at most 92 bytes); returns its length.
+    fn unpack_into(&self, out: &mut [u8; 96]) -> usize {
         let b = &self.0;
-        let mut s = String::with_capacity(72);
+        let mut n = 0usize;
+        let mut push = |c: u8| {
+            out[n] = c;
+            n += 1;
+        };
         for r in 0..8 {
             if r > 0 {
-                s.push('/');
+                push(b'/');
             }
             let mut empty = 0u8;
             for f in 0..8 {
@@ -155,37 +172,39 @@ impl PackedFen {
                     empty += 1;
                 } else {
                     if empty > 0 {
-                        s.push((b'0' + empty) as char);
+                        push(b'0' + empty);
                         empty = 0;
                     }
-                    s.push(PIECES[code as usize] as char);
+                    push(PIECES[code as usize]);
                 }
             }
             if empty > 0 {
-                s.push((b'0' + empty) as char);
+                push(b'0' + empty);
             }
         }
-        s.push(' ');
-        s.push(if b[1] & 1 == 1 { 'b' } else { 'w' });
-        s.push(' ');
+        push(b' ');
+        push(if b[1] & 1 == 1 { b'b' } else { b'w' });
+        push(b' ');
         if b[1] >> 1 == 0 {
-            s.push('-');
+            push(b'-');
         } else {
-            for (bit, c) in [(1, 'K'), (2, 'Q'), (3, 'k'), (4, 'q')] {
+            for (bit, c) in [(1, b'K'), (2, b'Q'), (3, b'k'), (4, b'q')] {
                 if b[1] & (1 << bit) != 0 {
-                    s.push(c);
+                    push(c);
                 }
             }
         }
-        s.push(' ');
+        push(b' ');
         if b[2] == 0xFF {
-            s.push('-');
+            push(b'-');
         } else {
-            s.push((b'a' + b[2] % 8) as char);
-            s.push((b'1' + b[2] / 8) as char);
+            push(b'a' + b[2] % 8);
+            push(b'1' + b[2] / 8);
         }
-        s.push_str(" 0 1");
-        Some(s)
+        for c in *b" 0 1" {
+            push(c);
+        }
+        n
     }
 }
 

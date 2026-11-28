@@ -21,7 +21,7 @@ was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
    idempotent and replays correctly over a state that is already ahead of
    it. The test `replay_over_a_state_ahead_of_the_checkpoint` exists because
    a first version of the key-map rebuild record broke this property and
-   hung recovery (section 4.4).
+   hung recovery (section 4.5).
 4. **The log alone rebuilds every change since a checkpoint**, including
    rebuilt key-map shards, so a copy of the files taken while the writer runs
    plus the log from the copy's checkpoint is a valid store (backups).
@@ -42,11 +42,12 @@ was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
               inx.arena      parent-list cells [parent u40][next u40], append-only
               blob.arena     [len u32][bytes], append-only (analysis JSON, witness lines, odd FENs)
               keymap.dir     2^shard_bits entries [region u64][slots u32][count u32]
-              keymap.arena   shard regions [Bloom filter][slots of 17 B], append-only
+              keymap.arena   shard regions [Bloom filter][slots of 17 B], append-only;
+                             keymap.arena.N after the Nth compaction
               ckpt           two checkpoint slots (generation, sequence, CRC)
               manifest       page checksums of the last checkpoint
 <store>/log/NNNNNNNNNNNNNNNN.seg     frames, named by the first sequence number
-<store>/archive/NNNN....seg          released segments, facts only (no redo)
+<store>/archive/NNNN....seg.zst      released segments, facts only (no redo), zstd
 ```
 
 All integers are little-endian at fixed offsets; ids are 40 bits on disk
@@ -77,17 +78,43 @@ to the maps between two increments of the epoch, then the batch is
 acknowledged.
 
 **Frame**: `[len u32][crc32 u32][seq u64][facts_len u32][facts][redo]*`,
-redo = `[file u8][offset u64][len u32][bytes]`, plus one logical record
-(file id `0x80`) for key-map shard rebuilds.
+redo = `[file u8][offset varint][len varint][bytes]` (format 2; format 1
+used fixed 8 + 4 byte fields), plus three logical records: `0x80` a key-map
+shard rebuild, `0x81` a key-map insert (slot + filter bits), `0x82` a
+key-map compaction. Every record, logical or not, replays to the same bytes
+over a state that is already ahead of it.
 
-**Segments** are 64 MiB, preallocated 4 MiB at a time so that most commits
-need only an `fdatasync` of data (no size change to journal). A zero frame
-header marks the end of the written part.
+**Pipelined commit** (`commit_start` / `batch_after` / `commit_finish`):
+`commit_start` finalizes the batch, writes its frame and hands the fsync to
+the store's sync thread; meanwhile the writer computes the next batch on an
+overlay that reads through the one in flight; `commit_finish` waits for the
+fsync and applies. One commit is in flight at a time, frames stay in order,
+and nothing is applied before it is durable, so recovery is unchanged. The
+writer service (`av2-server`) and the crash test (odd trials) use it.
 
-**Group commit** (`group::Writer`): one thread owns the store; inputs that
-arrived while the previous commit was in flight form the next batch (up to
-`max_batch`), the rules run once over all of them, one frame, one fsync. If
-the rules reject a batch of several inputs, each input is retried alone.
+**Segments** are 64 MiB files **written in place, never extended**: a
+background thread (`log::SegPool`) prepares each one by writing zeros over
+the whole file (recycling released segments when it can) and syncing it, so
+rolling over is a rename and a commit's `fdatasync` flushes data only. No
+size change, no block allocation, no unwritten-extent conversion for the
+filesystem to journal: on production's ext4 over md RAID1 that is the
+difference between 13.8 ms and 6.5 ms per `fdatasync` (phase 0,
+`v2-baseline.md`). `fallocate` alone would not do: it leaves unwritten
+extents whose conversion is journaled. A zero frame header marks the end of
+the written part. Without `prealloc` (tests, tools) segments are plain
+appended files.
+
+**Group commit** (`av2-server`'s writer): one thread owns the store. While
+batch n's fsync is in flight it gathers whatever arrives; the sync thread
+wakes it the moment the fsync completes (a callback into the writer's
+channel: polling would cost a 15.6 ms timer tick on Windows); it applies n,
+answers n's senders, computes batch n+1 from everything gathered and starts
+its fsync. Batches therefore grow with the load and the latency of an input
+is at most about two fsyncs. If the batch fills up (`max_batch`) before the
+fsync completes, n+1 is computed on an overlay over n (the pipelined path
+above). If the rules reject a batch of several inputs, each is retried
+alone. `av2_store::group::Writer` is the same loop without the pipeline or
+the metrics, kept for tools.
 
 **Checkpoint** (own thread, `Shared::checkpoint`): read the applied sequence
 number `s`, then load the maps (in that order: maps published before frame
@@ -95,14 +122,19 @@ number `s`, then load the maps (in that order: maps published before frame
 `fdatasync` every file, write the page manifest, write the checkpoint slot
 `(generation+1, s)` and fsync it, then release the segments whose frames are
 all `<= s`. The writer does not wait for any of it. Released segments are
-rewritten without their redo records into `archive/` (the facts are the
-system of record) unless the store is configured to delete them.
+rewritten without their redo records, compressed with zstd (level 3 by
+default), into `archive/` (the facts are the system of record) unless the
+store is configured to delete them. The sequence number, the key-map
+generation and the maps are read together while the epoch is even, and the
+checkpoint slot records the generation: recovery maps that arena file.
 
 **Recovery** (`Store::open`): take the valid checkpoint slot with the highest
 generation; read the segments in order; replay every frame with a sequence
 number above the checkpoint, checking that sequence numbers are consecutive;
-cut the last segment at its first torn frame (only the last segment may have
-one: anywhere else it is corruption and opening fails); start a new segment.
+overwrite a torn frame at the end of the last segment with zeros and make
+that durable (only the last segment may end badly: anywhere else it is
+corruption and opening fails); resume writing in the last segment after its
+last valid frame.
 
 Why a page written early by the OS is harmless: nothing is applied to a map
 before its frame is durable, so any page on disk holds only committed bytes;
@@ -129,20 +161,39 @@ region at the tail of `keymap.arena` with slots for 3/8 load (doubling, so
 the cost per insert stays constant). The bulk loader builds shards at 0.6
 load, so the first wave of rebuilds comes after +25% growth (about a week at
 today's 7M positions a day on 200M; the wave logs only one small record per
-shard, section 4.4).
+shard, section 4.5).
 
-### 4.3 What it costs and what is left
+### 4.3 Garbage and compaction
 The arena is append-only: a rebuilt shard's old region becomes garbage.
-Steady state is between 17/0.75 and 17/0.375 bytes of live slots per
-position (23 to 45 B), plus up to as much garbage between compactions.
-Measured on the production slice: 30 B per position after the load, 46 B
-after +25% growth in one go (every shard rebuilt once). **Not done in this
-PR: compaction** (rewrite the live regions into a new arena when garbage
-exceeds live, as a background task with a switch record). The plan's open
-question 4 (sorted base + small delta) remains the alternative if the
-measured write volume on the Linux box says so.
+With doubling, garbage stays just under the live size forever, so the
+trigger is **garbage >= live / 2** (and at least `km_compact_min`, 64 MiB by
+default): the arena stays under 1.5x its live part. Steady state is between
+17/0.75 and 17/0.375 bytes of live slots per position (23 to 45 B) plus at
+most half of that in garbage.
 
-### 4.4 The rebuild record
+A compaction copies every live region, packed in shard order, into a new
+file `keymap.arena.<generation+1>`, rewrites the directory and the counters,
+and maps the new file. It is the last record of the frame of the batch that
+crossed the threshold, a logical record naming every live region of the old
+generation (20 bytes per shard). The old file is never written again, so
+replay copies the same bytes even over a state already past it; it is
+deleted once a checkpoint records the new generation (not while a backup
+holds the log, which copies both). Measured on the production slice: after
+1,968 commits of 32 landings (1.83M new positions, 3.39M in all) the arena
+went from 140.5 MB to 93.7 MB (27.7 B per position live) in a 48 ms commit
+(39 ms of it the copy). That is about 0.4 ms per MB, so at 200M positions a
+compaction would stall the writer for about 2 s once every time the key map
+grows by half; moving the copy to a background thread is possible later
+(the record would then name a file built beforehand).
+
+### 4.4 Inserts
+An insert is one logical record `(slot offset, fingerprint, id, filter block
+offset)`: applying it writes the slot and sets the key's six bits in the
+filter block. The filter costs no log bytes (format 1 logged the whole
+64-byte block), and setting bits is idempotent. The directory entry's count
+is written as 4 bytes, not the whole entry.
+
+### 4.5 The rebuild record
 A shard rebuild is logged as one logical record
 `(shard, old region, old slots, old count, new region, new slots)`, not as the
 bytes of the new region: replay recomputes the new region from the old one.
@@ -153,6 +204,22 @@ entry instead of naming the old region was not idempotent and hung recovery
 from an old checkpoint; it is kept as a test.
 
 ## 5. Readers
+
+### Read-path hints (Linux)
+Phase 0 measured the benchmark's mapped store reading at half the speed of
+the in-memory graph on the production box (level on Windows): page-table
+and TLB cost of 4 KiB file pages, and first-touch minor faults. The
+mappings take two hints from the environment so that they can be compared on
+that box without a rebuild: `AV2_MMAP_POPULATE=1` (`MAP_POPULATE`: page
+tables filled at open and after growth) and
+`AV2_MMAP_ADVICE=random|willneed|hugepage|sequential|normal` (`madvise`).
+`scripts/prod/run_core_prod.sh` runs the read benchmark with each; the
+result decides the default. Transparent huge pages do not apply to ext4
+file mappings, so if the hints do not close the gap the alternative is an
+anonymous in-memory copy of the hot columns (core, out, parent, key map)
+refreshed from the maps, which is a design change and a separate PR.
+
+### Lock-free reads
 
 `Reader::read(|view| ...)` runs the closure on the committed graph and
 repeats it if a batch was applied meanwhile (an epoch counter, odd during an
@@ -233,11 +300,71 @@ similar in shape, not identical (see notes).
 | Checkpoint of the 1.95M-position store after the runs | 310 ms (first manifest hashes everything) | 660 ms worst, on the writer thread | here on its own thread |
 | Online backup of the slice | 0.2 s | | |
 
+### 8.1 After the follow-ups (format 2, prepared segments, pipelining)
+
+Same machine and slice, while about ten other agents built on the tower
+(numbers move by 10 to 20% between runs; each line is one of two runs).
+"Full" landings write 20 to 38 positions with FENs, a 1.2 KB blob and a
+1.3 KB fact each; "lean" ones carry what the benchmark's did (no FEN, blob or
+fact). One fsync per commit; `--fsync-delay-ms 16` adds production's
+median fdatasync (phase 0) after each.
+
+| 32 landings per commit | searches/s | per commit (ms): rules+overlay / finalize / write / fsync (wait) / apply | frame |
+|---|---:|---|---:|
+| before (#340), full | 5,400 to 6,100 | 2.1 / 3.2 for finalize+write+fsync+apply together | 299 KB |
+| full | 8,104 | 1.10 / 0.31 / 0.07 (+0.31 growth) / 1.80 / 0.27 | 200 KB |
+| full, pipelined | **10,842 to 10,871** | 0.93 / 0.34 / 0.08 / 0.95 wait / 0.23 | 200 KB |
+| lean | 14,775 | 0.36 / 0.25 / 0.04 / 1.23 / 0.19 | 84 KB |
+| lean, pipelined | **15,372 to 17,324** | 0.44 / 0.26 / 0.04 / 0.84 wait / 0.21 | 84 KB |
+| benchmark `mmap` store, its own landings | 10,878 | | |
+| full, 16 ms fsync | 1,558 | p50 20 ms, p99 29 ms per commit | |
+| full, 16 ms fsync, pipelined | 1,646 | | |
+
+What changed in the commit path: redo records with varint headers (3,949
+records and 299 KB per commit became 2,100 and 200 KB), filter bits derived
+from insert records instead of logged 64-byte blocks, one run for the parent
+words of new positions, no FEN run without FENs, an allocation-free FEN
+check, a cheaper hash for the overlay's key map, no fsync on file growth,
+and the pipeline.
+
+Through the writer service (`av2-server`, group commit, stub landings,
+closed-loop clients each submitting when its previous landing is
+acknowledged):
+
+| fsync | clients | landings/s | mean batch | submit to visible |
+|---|---:|---:|---:|---|
+| tower (0.8 ms) | 1 | 1,130 | 1 | mean 0.9 ms |
+| tower | 32 | 6,353 | 16 | mean 5.0 ms, p99 <= 25 ms |
+| tower | 128 | 10,476 to 10,822 | 64 | mean 12 ms, p99 <= 100 ms |
+| +16 ms | 1 | 56 | 1 | mean 17.8 ms (one fsync) |
+| +16 ms | 16 | 429 | 8 | mean 37 ms |
+| +16 ms | 128 | 2,740 | 64 | mean 47 ms, p99 <= 100 ms |
+| +16 ms | 512 | 8,830 | 255 | mean 58 ms, p99 <= 250 ms |
+| +16 ms, open load 64/s (5x production's peak) | 64 at 1/s | 64 | 32 | mean 46 ms, p99 <= 250 ms |
+| +16 ms, open load 640/s | 64 at 10/s | 637 | 32 | mean 35 ms, p99 <= 100 ms |
+
+Closed-loop clients split into two groups that alternate between the batch
+in flight and the next one, hence a mean batch of half the clients and a
+latency of about two fsyncs; with 16 ms fsyncs the writer still takes 8,800
+landings a second, 680 times production's peak.
+
+Other numbers: explorer pages 10.1 M/s from 8 readers (8.8 M/s with the
+writer landing at full speed, p99 2.2 us); recovery of 5,000 frames (33 MB)
+194 ms; restart 13 ms (it reads the frames of the last segment and a 16 MiB
+window after them, not the whole 64 MiB); kill -9: **1,000 of 1,000 clean**
+with compaction at a small threshold and half the trials pipelined
+(recovery p50 62 ms, p99 99 ms), then 300 of 300 after the bounded read;
+archive: 194.7 MB of facts became 5.2 MB with the pure-Rust zstd encoder
+(about zstd level 1; the synthetic payloads repeat, real ones will compress
+less).
+
 ## 9. Not done here (and where it goes)
 
-- Key-map compaction (section 4.3).
-- zstd compression of `archive/` (restic compresses the backup anyway; the
-  archive format is the log's, so compressing it later changes nothing else).
+- Compaction runs on the writer (section 4.3); fine at today's size, a
+  background copy later if the stall matters.
+- Linux numbers for this PR's commit path and read hints: the script
+  `scripts/prod/run_core_prod.sh` is ready; the run on the production box is
+  the coordinator's call.
 - Restart time: 5 ms on a quiet store here; Linux numbers come from phase 0.
 - The relational projection (`meta.sqlite`) and the projector: phase 5.
 - The power-cut test has only been written, not run (needs the Linux box).

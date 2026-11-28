@@ -9,7 +9,7 @@
 
 use crate::layout::*;
 use crate::mapped::Maps;
-use crate::view::{Shard, View, shard_of};
+use crate::view::{Shard, View, filter_bits, shard_of};
 use av2_model::fen::FEN_SIZE;
 use av2_model::graph::GraphError;
 use av2_model::id::{get_u40, put_u40};
@@ -18,22 +18,51 @@ use av2_model::{BlobRef, Core, Edge, Ext, Fingerprint, GraphRead, GraphWrite, MA
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// Fingerprints are uniformly random (sha256 prefixes): their first 8 bytes
+/// are already a good hash, so the overlay's maps skip SipHash.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FpHasher(u64);
+
+impl std::hash::Hasher for FpHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut a = [0u8; 8];
+        let n = bytes.len().min(8);
+        a[..n].copy_from_slice(&bytes[..n]);
+        self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(a)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+pub(crate) type FpBuild = std::hash::BuildHasherDefault<FpHasher>;
+
 pub struct Batch {
     pub(crate) maps: Arc<Maps>,
     shard_bits: u32,
     n0: u64,
     blob0: u64,
+    compact_min: u64,
     new_cores: Vec<Core>,
     new_fens: Vec<PackedFen>,
     new_fps: Vec<Fingerprint>,
-    keys: HashMap<Fingerprint, u64>,
+    keys: HashMap<Fingerprint, u64, FpBuild>,
     cores: BTreeMap<u64, Core>,
     exts: BTreeMap<u64, Ext>,
     ext_tail: u64,
     children: BTreeMap<u64, Vec<Edge>>,
-    new_parents: BTreeMap<u64, Vec<u64>>,
+    /// First parent (id + 1, 0 = none) of each new position.
+    new_first_parent: Vec<u64>,
+    /// Every other parent added in this batch, in the order added: all of
+    /// them for existing positions, the second and later for new ones.
+    more_parents: BTreeMap<u64, Vec<u64>>,
     blobs: BTreeMap<u64, Vec<u8>>,
     blob_tail: u64,
+    /// A batch logged but not applied yet (its fsync is in flight): this one
+    /// reads through it.  See `Store::commit_start`.
+    prev: Option<Arc<Batch>>,
 }
 
 /// One redo record inside a frame body.
@@ -46,8 +75,8 @@ pub(crate) struct OpRef {
 }
 
 /// A batch turned into bytes: the frame body (sequence number, facts, redo
-/// records).  Everything, including a rebuilt key-map shard, is a redo
-/// record, so the log alone can rebuild any change (backups rely on it).
+/// records).  Everything, including a rebuilt or compacted key map, is in the
+/// redo records, so the log alone can rebuild any change (backups rely on it).
 pub(crate) struct Finalized {
     pub body: Vec<u8>,
     pub ops: Vec<OpRef>,
@@ -59,7 +88,7 @@ pub(crate) struct Finalized {
 pub(crate) const BODY_HEADER: usize = 12; // seq u64 + facts length u32
 
 impl Batch {
-    pub(crate) fn new(maps: Arc<Maps>) -> Batch {
+    pub(crate) fn new(maps: Arc<Maps>, compact_min: u64) -> Batch {
         let v = View::new(&maps);
         let (n0, ext0, blob0, shard_bits) = (v.counter(C_POSITIONS), v.counter(C_EXTS), v.counter(C_BLOB_TAIL), v.shard_bits);
         Batch {
@@ -67,17 +96,54 @@ impl Batch {
             shard_bits,
             n0,
             blob0,
+            compact_min,
             new_cores: Vec::new(),
             new_fens: Vec::new(),
             new_fps: Vec::new(),
-            keys: HashMap::new(),
+            keys: HashMap::default(),
             cores: BTreeMap::new(),
             exts: BTreeMap::new(),
             ext_tail: ext0,
             children: BTreeMap::new(),
-            new_parents: BTreeMap::new(),
+            new_first_parent: Vec::new(),
+            more_parents: BTreeMap::new(),
             blobs: BTreeMap::new(),
             blob_tail: blob0,
+            prev: None,
+        }
+    }
+
+    /// An overlay on top of `prev`, a batch whose frame is written but not yet
+    /// applied.  It must be finalized only after `prev` is applied.
+    pub(crate) fn new_after(prev: Arc<Batch>, maps: Arc<Maps>, compact_min: u64) -> Batch {
+        let mut b = Batch::new(maps, compact_min);
+        b.n0 = prev.len();
+        b.ext_tail = prev.ext_tail;
+        b.blob0 = prev.blob_tail;
+        b.blob_tail = prev.blob_tail;
+        b.prev = Some(prev);
+        b
+    }
+
+    /// The overlay this one reads through, dropped once it is applied.
+    pub(crate) fn detach(&mut self) {
+        self.prev = None;
+    }
+
+    fn base_core(&self, id: PosId) -> Core {
+        match &self.prev {
+            Some(p) => p.core(id),
+            None => self.view().core(id),
+        }
+    }
+
+    fn ext_at(&self, idx: u64) -> Option<Ext> {
+        if let Some(e) = self.exts.get(&idx) {
+            return Some(*e);
+        }
+        match &self.prev {
+            Some(p) => p.ext_at(idx),
+            None => self.view().ext_at(idx),
         }
     }
 
@@ -105,46 +171,80 @@ impl Batch {
             return &mut self.new_cores[(id - self.n0) as usize];
         }
         if !self.cores.contains_key(&id) {
-            let c = self.view().core(PosId(id));
+            let c = self.base_core(PosId(id));
             self.cores.insert(id, c);
         }
         self.cores.get_mut(&id).unwrap()
     }
 
+    fn add_parent(&mut self, child: u64, parent: u64) {
+        if child >= self.n0 {
+            let slot = &mut self.new_first_parent[(child - self.n0) as usize];
+            if *slot == 0 {
+                *slot = parent + 1;
+                return;
+            }
+        }
+        self.more_parents.entry(child).or_default().push(parent);
+    }
+
     // ------------------------------------------------------------ finalize
 
     /// Turn the batch into a frame body for sequence number `seq`.
-    pub(crate) fn finalize(self, seq: u64, facts: &[u8]) -> Result<Finalized, GraphError> {
+    pub(crate) fn finalize(&self, seq: u64, facts: &[u8]) -> Result<Finalized, GraphError> {
         let v = View { maps: &self.maps, shard_bits: self.shard_bits };
-        let mut f = Finalized { body: Vec::with_capacity(BODY_HEADER + facts.len() + 256), ops: Vec::new(), need: [0; NFILES], edges: 0 };
+        if self.prev.is_some() || v.counter(C_POSITIONS) != self.n0 {
+            return Err(GraphError::Store("batch finalized before the batch it was built on was applied".into()));
+        }
+        let n_new = self.new_cores.len();
+        let mut f = Finalized {
+            body: Vec::with_capacity(
+                BODY_HEADER
+                    + facts.len()
+                    + n_new * (CORE_SIZE + FEN_SIZE + PARENT_SIZE + INSERT_LEN + 16)
+                    + self.blobs.values().map(|b| b.len() + 16).sum::<usize>()
+                    + self.cores.len() * (CORE_SIZE + 8)
+                    + self.children.values().map(|e| e.len() * EDGE_SIZE + 24).sum::<usize>()
+                    + 1024,
+            ),
+            ops: Vec::with_capacity(16 + n_new * 2 + self.cores.len()),
+            need: [0; NFILES],
+            edges: 0,
+        };
         f.body.extend_from_slice(&seq.to_le_bytes());
         f.body.extend_from_slice(&(facts.len() as u32).to_le_bytes());
         f.body.extend_from_slice(facts);
         let n0 = self.n0;
-        let n1 = n0 + self.new_cores.len() as u64;
+        let n1 = n0 + n_new as u64;
         if n1 > MAX_ID + 1 {
             return Err(GraphError::Store("40-bit id space exhausted".into()));
         }
 
         // 1. New positions: one run of core records and one of packed FENs.
-        if !self.new_cores.is_empty() {
-            let mut run = vec![0u8; self.new_cores.len() * CORE_SIZE];
+        if n_new > 0 {
+            let mut run = vec![0u8; n_new * CORE_SIZE];
             for (i, c) in self.new_cores.iter().enumerate() {
                 let mut c = *c;
                 c.version = seq;
                 c.encode(&mut run[i * CORE_SIZE..]);
             }
             op(&mut f, F_CORE, n0 * CORE_SIZE as u64, &run);
-            let mut fr = vec![0u8; self.new_fens.len() * FEN_SIZE];
-            for (i, p) in self.new_fens.iter().enumerate() {
-                fr[i * FEN_SIZE..(i + 1) * FEN_SIZE].copy_from_slice(&p.0);
+            // FENs: the span from the first to the last new position that has
+            // one (the column is zero, i.e. "none", everywhere else).
+            let first = self.new_fens.iter().position(|p| !p.is_none());
+            let last = self.new_fens.iter().rposition(|p| !p.is_none());
+            if let (Some(a), Some(z)) = (first, last) {
+                let mut fr = vec![0u8; (z + 1 - a) * FEN_SIZE];
+                for (i, p) in self.new_fens[a..=z].iter().enumerate() {
+                    fr[i * FEN_SIZE..(i + 1) * FEN_SIZE].copy_from_slice(&p.0);
+                }
+                op(&mut f, F_FEN, (n0 + a as u64) * FEN_SIZE as u64, &fr);
             }
-            op(&mut f, F_FEN, n0 * FEN_SIZE as u64, &fr);
-            // The out and parent columns of new positions start at zero (the
-            // files are zero-filled and only ever written by applied frames),
-            // but the file must reach that far.
+            need(&mut f, F_FEN, n1 * FEN_SIZE as u64);
+            // The out column of new positions starts at zero (the files are
+            // zero-filled and only ever written by applied frames), but the
+            // file must reach that far.
             need(&mut f, F_OUT, n1 * OUT_SIZE as u64);
-            need(&mut f, F_PARENT, n1 * PARENT_SIZE as u64);
         }
         // 2. Rewrites of existing positions, in id order.
         for (id, c) in &self.cores {
@@ -182,42 +282,69 @@ impl Batch {
             out_tail += block.len() as u64;
             f.edges += es.len() as u64;
         }
-        // 6. Parent lists, in child order; new parents in the order they came.
+        // 6. Parent lists.  Existing positions one record each, in id order;
+        //    new positions one run (they almost all have exactly one parent).
         let mut inx_tail = v.counter(C_INX_TAIL);
-        for (child, ps) in &self.new_parents {
-            let mut cur = if *child < n0 { v.parent_word(*child) } else { 0 };
+        let mut push_parent = |f: &mut Finalized, cur: u64, p: u64| -> u64 {
+            if cur == 0 {
+                p + 1
+            } else if cur & PARENT_LIST == 0 {
+                let mut cells = [0u8; 2 * INX_CELL];
+                put_u40(&mut cells[0..5], cur - 1);
+                put_u40(&mut cells[10..15], p);
+                put_u40(&mut cells[15..20], inx_tail);
+                op(f, F_INX_ARENA, inx_tail * INX_CELL as u64, &cells);
+                inx_tail += 2;
+                PARENT_LIST | (inx_tail - 1)
+            } else {
+                let mut cell = [0u8; INX_CELL];
+                put_u40(&mut cell[0..5], p);
+                put_u40(&mut cell[5..10], cur & !PARENT_LIST);
+                op(f, F_INX_ARENA, inx_tail * INX_CELL as u64, &cell);
+                inx_tail += 1;
+                PARENT_LIST | (inx_tail - 1)
+            }
+        };
+        for (child, ps) in self.more_parents.range(..n0) {
+            let mut cur = v.parent_word(*child);
             for &p in ps {
-                cur = if cur == 0 {
-                    p + 1
-                } else if cur & PARENT_LIST == 0 {
-                    let mut cells = [0u8; 2 * INX_CELL];
-                    put_u40(&mut cells[0..5], cur - 1);
-                    put_u40(&mut cells[10..15], p);
-                    put_u40(&mut cells[15..20], inx_tail);
-                    op(&mut f, F_INX_ARENA, inx_tail * INX_CELL as u64, &cells);
-                    inx_tail += 2;
-                    PARENT_LIST | (inx_tail - 1)
-                } else {
-                    let mut cell = [0u8; INX_CELL];
-                    put_u40(&mut cell[0..5], p);
-                    put_u40(&mut cell[5..10], cur & !PARENT_LIST);
-                    op(&mut f, F_INX_ARENA, inx_tail * INX_CELL as u64, &cell);
-                    inx_tail += 1;
-                    PARENT_LIST | (inx_tail - 1)
-                };
+                cur = push_parent(&mut f, cur, p);
             }
             let mut w = [0u8; PARENT_SIZE];
             put_u40(&mut w, cur);
             op(&mut f, F_PARENT, child * PARENT_SIZE as u64, &w);
         }
-        // 7. Key map: new fingerprints, grouped by shard.
-        let mut km_tail = v.counter(C_KM_TAIL);
-        let mut by_shard: BTreeMap<u64, Vec<(Fingerprint, u64)>> = BTreeMap::new();
-        for (i, fp) in self.new_fps.iter().enumerate() {
-            by_shard.entry(shard_of(fp, self.shard_bits)).or_default().push((*fp, n0 + i as u64));
+        if n_new > 0 {
+            let mut run = vec![0u8; n_new * PARENT_SIZE];
+            for (i, &first) in self.new_first_parent.iter().enumerate() {
+                let child = n0 + i as u64;
+                let mut cur = first;
+                if let Some(ps) = self.more_parents.get(&child) {
+                    for &p in ps {
+                        cur = push_parent(&mut f, cur, p);
+                    }
+                }
+                put_u40(&mut run[i * PARENT_SIZE..], cur);
+            }
+            op(&mut f, F_PARENT, n0 * PARENT_SIZE as u64, &run);
         }
-        for (s, keys) in &by_shard {
-            let sh = v.shard(*s);
+        // 7. Key map: new fingerprints, by shard then id.
+        let mut km_tail = v.counter(C_KM_TAIL);
+        let mut km_live = v.counter(C_KM_LIVE);
+        let mut keyed: Vec<(u64, u64)> = (0..n_new).map(|i| (shard_of(&self.new_fps[i], self.shard_bits), i as u64)).collect();
+        keyed.sort_unstable();
+        let mut post: Vec<(u64, Shard)> = Vec::new();
+        let mut taken: Vec<u64> = Vec::new();
+        let mut i = 0usize;
+        while i < keyed.len() {
+            let s = keyed[i].0;
+            let mut j = i;
+            while j < keyed.len() && keyed[j].0 == s {
+                j += 1;
+            }
+            let keys = &keyed[i..j];
+            i = j;
+            let sh = v.shard(s);
             let total = sh.count + keys.len() as u64;
             // A shard past its maximal load is rebuilt, twice as large, into a
             // fresh region at the arena tail.  The frame logs the rebuild as one
@@ -229,8 +356,9 @@ impl Batch {
             let cur = if sh.slots == 0 || total * MAX_LOAD_DEN > sh.slots * MAX_LOAD_NUM {
                 let slots = ((total as f64 / REBUILD_LOAD).ceil() as u64).max(MIN_SLOTS);
                 let (nsh, reg) = rebuild_region(v.maps, self.shard_bits, &sh, km_tail, slots)?;
-                op_rebuild(&mut f, *s, &sh, km_tail, slots);
+                op_rebuild(&mut f, s, &sh, km_tail, slots);
                 km_tail += reg.len() as u64;
+                km_live = km_live + reg.len() as u64 - if sh.slots > 0 { region_bytes(sh.slots) } else { 0 };
                 region_mem = Some(reg);
                 nsh
             } else {
@@ -238,86 +366,180 @@ impl Batch {
             };
             let a = v.maps.f(F_KM_ARENA);
             let base = cur.slots_at();
-            let slot_used = |i: u64| -> Result<bool, GraphError> {
+            let slot_used = |k: u64| -> Result<bool, GraphError> {
                 Ok(match &region_mem {
                     Some(r) => {
-                        let at = (base - cur.region) as usize + i as usize * SLOT;
+                        let at = (base - cur.region) as usize + k as usize * SLOT;
                         r[at + 12..at + 17] != [0u8; 5]
                     }
                     None => {
                         let b =
-                            a.get(base + i * SLOT as u64, SLOT).ok_or_else(|| GraphError::Store("key map slot out of bounds".into()))?;
+                            a.get(base + k * SLOT as u64, SLOT).ok_or_else(|| GraphError::Store("key map slot out of bounds".into()))?;
                         get_u40(&b[12..17]) != 0
                     }
                 })
             };
-            let mut taken: HashMap<u64, ()> = HashMap::new();
-            let mut blocks: BTreeMap<u64, [u8; 64]> = BTreeMap::new();
-            for (fp, id) in keys {
+            taken.clear();
+            for &(_, k) in keys {
+                let fp = &self.new_fps[k as usize];
                 let mut s_ = cur.home(fp, self.shard_bits);
-                while slot_used(s_)? || taken.contains_key(&s_) {
+                while slot_used(s_)? || taken.contains(&s_) {
                     s_ += 1;
                     if s_ == cur.slots {
                         s_ = 0;
                     }
                 }
-                taken.insert(s_, ());
-                let mut slot = [0u8; SLOT];
-                slot[..12].copy_from_slice(&fp.0);
-                put_u40(&mut slot[12..17], id + 1);
-                op(&mut f, F_KM_ARENA, base + s_ * SLOT as u64, &slot);
-                let (boff, bits) = cur.filter_block(fp);
-                let blk = blocks.entry(boff).or_insert_with(|| match &region_mem {
-                    Some(r) => r[(boff - cur.region) as usize..(boff - cur.region) as usize + 64].try_into().unwrap(),
-                    None => a.get(boff, 64).map(|b| b.try_into().unwrap()).unwrap_or([0u8; 64]),
-                });
-                for b in bits {
-                    blk[b as usize / 8] |= 1 << (b % 8);
-                }
-            }
-            for (boff, blk) in &blocks {
-                op(&mut f, F_KM_ARENA, *boff, blk);
+                taken.push(s_);
+                op_insert(&mut f, base + s_ * SLOT as u64, fp, n0 + k, cur.filter_block_offset(fp));
             }
             let nsh = Shard { count: total, ..cur };
-            op(&mut f, F_KM_DIR, s * DIR_ENTRY as u64, &nsh.encode());
+            op(&mut f, F_KM_DIR, s * DIR_ENTRY as u64 + 12, &(total as u32).to_le_bytes());
+            post.push((s, nsh));
         }
         // 8. Counters, one run.
         let mut ctl = [0u8; C_COUNTERS_LEN];
-        for (i, val) in [n1, self.ext_tail, out_tail, inx_tail, self.blob_tail, km_tail].iter().enumerate() {
-            ctl[i * 8..i * 8 + 8].copy_from_slice(&val.to_le_bytes());
+        for (k, val) in [n1, self.ext_tail, out_tail, inx_tail, self.blob_tail, km_tail, km_live].iter().enumerate() {
+            ctl[k * 8..k * 8 + 8].copy_from_slice(&val.to_le_bytes());
         }
         op(&mut f, F_CTL, C_COUNTERS as u64, &ctl);
+        // 9. Key-map compaction, last: once the old regions left behind by
+        //    rebuilds reach half the live ones (with doubling, garbage stays
+        //    just under the live size forever, so "garbage > live" would never
+        //    fire; at one half the arena stays under 1.5x live), every live region is copied,
+        //    packed in shard order, into a new arena file (the next
+        //    generation).  Logged as one record naming every live region of
+        //    the old generation, which is never written again: replay copies
+        //    them again and gets the same file.
+        let garbage = km_tail - km_live;
+        if garbage * 2 >= km_live && garbage >= self.compact_min {
+            let mut live: Vec<(u64, Shard)> = Vec::new();
+            for s in 0..(1u64 << self.shard_bits) {
+                let sh = match post.binary_search_by_key(&s, |p| p.0) {
+                    Ok(k) => post[k].1,
+                    Err(_) => v.shard(s),
+                };
+                if sh.slots > 0 {
+                    live.push((s, sh));
+                }
+            }
+            op_compact(&mut f, v.counter(C_KM_GEN), &live);
+        }
         Ok(f)
     }
 }
 
 fn need(f: &mut Finalized, file: u8, end: u64) {
-    if end > f.need[file as usize] {
+    if (file as usize) < NFILES && end > f.need[file as usize] {
         f.need[file as usize] = end;
     }
 }
 
-fn op(f: &mut Finalized, file: u8, off: u64, bytes: &[u8]) {
+/// Append a LEB128 varint.
+#[inline]
+pub(crate) fn put_varint(b: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        b.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    b.push(v as u8);
+}
+
+/// Read a LEB128 varint at `*p`, advancing it.
+#[inline]
+pub(crate) fn get_varint(b: &[u8], p: &mut usize) -> Option<u64> {
+    let mut v = 0u64;
+    let mut shift = 0;
+    loop {
+        let c = *b.get(*p)?;
+        *p += 1;
+        if shift >= 64 {
+            return None;
+        }
+        v |= ((c & 0x7F) as u64) << shift;
+        if c & 0x80 == 0 {
+            return Some(v);
+        }
+        shift += 7;
+    }
+}
+
+/// A redo record: `[file u8][offset varint][length varint][bytes]`.
+fn record(f: &mut Finalized, file: u8, off: u64, bytes: &[u8]) {
     f.body.push(file);
-    f.body.extend_from_slice(&off.to_le_bytes());
-    f.body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    put_varint(&mut f.body, off);
+    put_varint(&mut f.body, bytes.len() as u64);
     let at = f.body.len();
     f.body.extend_from_slice(bytes);
     f.ops.push(OpRef { file, off, at, len: bytes.len() });
+}
+
+fn op(f: &mut Finalized, file: u8, off: u64, bytes: &[u8]) {
+    record(f, file, off, bytes);
     need(f, file, off + bytes.len() as u64);
+}
+
+/// The logical record of a key-map insert, with the slot's byte offset as
+/// offset: `[fingerprint 12][id+1 u40][filter block offset u64]`.  Applying it
+/// writes the slot and sets the key's bits in the filter block, so the filter
+/// costs no log bytes; setting bits is idempotent.
+fn op_insert(f: &mut Finalized, slot_off: u64, fp: &Fingerprint, id: u64, block_off: u64) {
+    let mut b = [0u8; INSERT_LEN];
+    b[..12].copy_from_slice(&fp.0);
+    put_u40(&mut b[12..17], id + 1);
+    b[17..25].copy_from_slice(&block_off.to_le_bytes());
+    record(f, F_KM_INSERT, slot_off, &b);
+    need(f, F_KM_ARENA, (slot_off + SLOT as u64).max(block_off + 64));
+}
+
+pub(crate) const INSERT_LEN: usize = 25;
+
+/// `(slot bytes, filter block offset)` of an insert record.
+pub(crate) fn decode_insert(b: &[u8]) -> Option<(&[u8], u64)> {
+    (b.len() == INSERT_LEN).then(|| (&b[..SLOT], u64::from_le_bytes(b[17..25].try_into().unwrap())))
 }
 
 /// The logical redo record of a shard rebuild, with the shard index as
 /// offset: `[old region u64][old slots u64][old count u64][new region u64][new slots u64]`.
 fn op_rebuild(f: &mut Finalized, shard: u64, old: &Shard, region: u64, slots: u64) {
-    let b = encode_rebuild(old, region, slots);
-    f.body.push(F_KM_REBUILD);
-    f.body.extend_from_slice(&shard.to_le_bytes());
-    f.body.extend_from_slice(&(b.len() as u32).to_le_bytes());
-    let at = f.body.len();
-    f.body.extend_from_slice(&b);
-    f.ops.push(OpRef { file: F_KM_REBUILD, off: shard, at, len: b.len() });
+    record(f, F_KM_REBUILD, shard, &encode_rebuild(old, region, slots));
     need(f, F_KM_ARENA, region + region_bytes(slots));
+}
+
+/// The logical record of a compaction, with the new generation as offset:
+/// `[old generation u64][entries u32]` then per live shard
+/// `[shard u32][region u64][slots u32][count u32]`, in shard order.
+fn op_compact(f: &mut Finalized, old_gen: u64, live: &[(u64, Shard)]) {
+    let mut b = Vec::with_capacity(12 + live.len() * 20);
+    b.extend_from_slice(&old_gen.to_le_bytes());
+    b.extend_from_slice(&(live.len() as u32).to_le_bytes());
+    for (s, sh) in live {
+        b.extend_from_slice(&(*s as u32).to_le_bytes());
+        b.extend_from_slice(&sh.region.to_le_bytes());
+        b.extend_from_slice(&(sh.slots as u32).to_le_bytes());
+        b.extend_from_slice(&(sh.count as u32).to_le_bytes());
+    }
+    record(f, F_KM_COMPACT, old_gen + 1, &b);
+}
+
+/// `(old generation, live shards)` of a compaction record.
+pub(crate) fn decode_compact(b: &[u8]) -> Option<(u64, Vec<(u64, Shard)>)> {
+    if b.len() < 12 {
+        return None;
+    }
+    let old = u64::from_le_bytes(b[..8].try_into().unwrap());
+    let n = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
+    if b.len() != 12 + n * 20 {
+        return None;
+    }
+    let mut v = Vec::with_capacity(n);
+    for c in b[12..].as_chunks::<20>().0 {
+        let s = u32::from_le_bytes(c[0..4].try_into().unwrap()) as u64;
+        let region = u64::from_le_bytes(c[4..12].try_into().unwrap());
+        let slots = u32::from_le_bytes(c[12..16].try_into().unwrap()) as u64;
+        let count = u32::from_le_bytes(c[16..20].try_into().unwrap()) as u64;
+        v.push((s, Shard { region, slots, count }));
+    }
+    Some((old, v))
 }
 
 pub(crate) const REBUILD_LEN: usize = 40;
@@ -368,9 +590,8 @@ pub(crate) fn build_region(sh: &Shard, entries: &[(Fingerprint, u64)], shard_bit
     let fbytes = (sh.fblocks() * 64) as usize;
     let mut r = vec![0u8; fbytes + sh.slots as usize * SLOT];
     for (fp, id) in entries {
-        let (boff, bits) = sh.filter_block(fp);
-        let b0 = (boff - sh.region) as usize;
-        for b in bits {
+        let b0 = (sh.filter_block_offset(fp) - sh.region) as usize;
+        for b in filter_bits(fp) {
             r[b0 + b as usize / 8] |= 1 << (b % 8);
         }
         let mut s = sh.home(fp, shard_bits);
@@ -398,29 +619,42 @@ impl GraphRead for Batch {
         if id.0 >= self.n0 {
             return self.new_cores.get((id.0 - self.n0) as usize).copied().unwrap_or_default();
         }
-        self.cores.get(&id.0).copied().unwrap_or_else(|| self.view().core(id))
+        self.cores.get(&id.0).copied().unwrap_or_else(|| self.base_core(id))
     }
     fn ext(&self, id: PosId) -> Option<Ext> {
         let i = self.core(id).ext_index()?;
-        self.exts.get(&i).copied().or_else(|| self.view().ext_at(i))
+        self.ext_at(i)
     }
     fn children(&self, id: PosId, out: &mut Vec<Edge>) {
         match self.children.get(&id.0) {
             Some(es) => out.extend_from_slice(es),
-            None if id.0 < self.n0 => self.view().children(id, out),
+            None if id.0 < self.n0 => match &self.prev {
+                Some(p) => p.children(id, out),
+                None => self.view().children(id, out),
+            },
             None => {}
         }
     }
     fn parents(&self, id: PosId, out: &mut Vec<PosId>) {
         if id.0 < self.n0 {
-            self.view().parents(id, out);
+            match &self.prev {
+                Some(p) => p.parents(id, out),
+                None => self.view().parents(id, out),
+            }
+        } else if let Some(&first) = self.new_first_parent.get((id.0 - self.n0) as usize)
+            && first != 0
+        {
+            out.push(PosId(first - 1));
         }
-        if let Some(ps) = self.new_parents.get(&id.0) {
+        if let Some(ps) = self.more_parents.get(&id.0) {
             out.extend(ps.iter().map(|&p| PosId(p)));
         }
     }
     fn lookup(&self, fp: &Fingerprint) -> Option<PosId> {
-        self.keys.get(fp).map(|&id| PosId(id)).or_else(|| self.view().lookup_committed(fp))
+        self.keys.get(fp).map(|&id| PosId(id)).or_else(|| match &self.prev {
+            Some(p) => p.lookup(fp),
+            None => self.view().lookup_committed(fp),
+        })
     }
     fn fen(&self, id: PosId) -> Option<String> {
         if id.0 >= self.n0 {
@@ -430,13 +664,19 @@ impl GraphRead for Batch {
                 _ => self.view().fen_of(p),
             };
         }
-        self.view().fen(id)
+        match &self.prev {
+            Some(p) => p.fen(id),
+            None => self.view().fen(id),
+        }
     }
     fn blob(&self, r: BlobRef) -> Option<Vec<u8>> {
         if r.0 >= self.blob0 {
             return self.blobs.get(&r.0).cloned();
         }
-        self.view().blob_at(r)
+        match &self.prev {
+            Some(p) => p.blob(r),
+            None => self.view().blob_at(r),
+        }
     }
 }
 
@@ -456,6 +696,7 @@ impl GraphWrite for Batch {
         self.new_cores.push(Core { ext: 0, version: 0, ..core });
         self.new_fens.push(packed);
         self.new_fps.push(fp);
+        self.new_first_parent.push(0);
         self.keys.insert(fp, id);
         Ok(PosId(id))
     }
@@ -506,7 +747,7 @@ impl GraphWrite for Batch {
             if old.iter().any(|x| x.child == e.child) || edges[..k].iter().any(|x| x.child == e.child) {
                 continue;
             }
-            self.new_parents.entry(e.child.0).or_default().push(parent.0);
+            self.add_parent(e.child.0, parent.0);
         }
         self.children.insert(parent.0, edges.to_vec());
         Ok(())
