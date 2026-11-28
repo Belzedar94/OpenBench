@@ -1,0 +1,29 @@
+[package]
+name = "av2-queue"
+description = "AtomicDB v2: the work queue as state of the single writer (tasks, lanes, leases, engine gate, requests, selector, background arms)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The benchmark binary opens a store built by `av2-load`.
+bench = ["dep:av2-store"]
+
+[dependencies]
+av2-model.workspace = true
+av2-facts.workspace = true
+av2-store = { workspace = true, optional = true }
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+av2-store.workspace = true
+
+[[bin]]
+name = "av2-queue-bench"
+path = "src/bin/av2-queue-bench.rs"
+required-features = ["bench"]

@@ -99,6 +99,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "av2-queue"
+version = "0.1.0"
+dependencies = [
+ "av2-facts",
+ "av2-model",
+ "av2-store",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "av2-rules"
 version = "0.1.0"
 dependencies = [
