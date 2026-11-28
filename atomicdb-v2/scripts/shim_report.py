@@ -104,6 +104,11 @@ def main():
     for name in ('v2-pass', 'v2-fail', 'v1-only', 'no-rule-call', 'fail-without-v2', 'skip'):
         out.append(f'| {name} | {classes.get(name, 0)} |')
     out.append('')
+    synthetic = sum(1 for t in tests.values() if t['class'] == 'v2-pass' and t.get('synthetic_moves'))
+    if synthetic:
+        out.append(f'{synthetic} of the v2-pass tests name moves freely in their fixtures and ran '
+                   f'with UCI stand-ins (bridge.SyntheticMoves).')
+        out.append('')
     if routed_use:
         out.append('Calls that went to v2, by function (tests): ' +
                    ', '.join(f'{n} {c}' for n, c in routed_use.most_common()))

@@ -25,6 +25,7 @@ import decimal
 import importlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -138,6 +139,12 @@ def export_settings():
     from django.conf import settings
     return {name: getattr(settings, name) for name in dir(settings)
             if name.startswith('ATOMICDB_') and not any(w in name for w in SECRET_WORDS)}
+
+
+def _prepared(name, args, kwargs, alias):
+    from .prepare import PREPARE
+    hook = PREPARE.get(name)
+    return hook(args, kwargs, alias) if hook is not None else {}
 
 
 def export_tables(tables, alias=None):
@@ -321,6 +328,69 @@ def write_back(name, reply, args, kwargs, alias):
     return unprojected
 
 
+# ---------------------------------------------------------------- moves
+
+_UCI = re.compile(r'^[a-h][1-8][a-h][1-8][nbrqk]?$')
+MOVE_COLUMNS = ('best_move', 'backed_move')
+
+
+def _is_uci(move):
+    return bool(_UCI.match(move)) and move[:2] != move[2:4]
+
+
+class SyntheticMoves:
+    """Test fixtures name moves freely (``'wb'``, ``'x1x1'``); v2 holds a
+    move in 16 bits and only takes UCI on 8x8.  For one call, every move
+    string of the exported rows that is not UCI gets a stand-in UCI move
+    that no real edge of the call uses, assigned in sorted order of the
+    names (so ties broken by move name among them keep their order), and is
+    turned back on the way out.  The per-test report counts the calls that
+    needed it (``synthetic_moves``)."""
+
+    def __init__(self, positions, edges):
+        real, names = set(), set()
+        for e in edges:
+            (real if _is_uci(e['move']) else names).add(e['move'])
+        for row in positions:
+            for col in MOVE_COLUMNS:
+                value = row.get(col)
+                if value is not None:
+                    (real if _is_uci(value) else names).add(value)
+        pool = (f'{a}{b}{c}{d}' for a in 'abcdefgh' for b in '12345678'
+                for c in 'abcdefgh' for d in '12345678' if (a, b) != (c, d))
+        self.fwd = {}
+        for name in sorted(names):
+            stand_in = next(m for m in pool if m not in real)
+            self.fwd[name] = stand_in
+        self.rev = {v: k for k, v in self.fwd.items()}
+        if self.fwd:
+            for e in edges:
+                e['move'] = self.fwd.get(e['move'], e['move'])
+            for row in positions:
+                for col in MOVE_COLUMNS:
+                    if row.get(col) is not None:
+                        row[col] = self.fwd.get(row[col], row[col])
+
+    def _map(self, value, table):
+        if not table:
+            return value
+        if isinstance(value, str):
+            return table.get(value, value)
+        if isinstance(value, list):
+            return [self._map(v, table) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._map(v, table) for v in value)
+        if isinstance(value, dict):
+            return {k: self._map(v, table) for k, v in value.items()}
+        return value
+
+    def forward(self, value):
+        return self._map(value, self.fwd)
+
+    def back(self, value):
+        return self._map(value, self.rev)
+
+
 # ---------------------------------------------------------------- the call
 
 class Stats:
@@ -335,12 +405,14 @@ class Stats:
         self.v2_errors = []
         self.v2_seconds = 0.0
         self.unprojected_facts = 0
+        self.synthetic_moves = 0
 
     def as_dict(self):
         return {'v2_calls': dict(self.v2_calls), 'v1_calls': dict(self.v1_calls),
                 'v2_errors': list(self.v2_errors),
                 'v2_ms': round(self.v2_seconds * 1000, 3),
-                'unprojected_facts': self.unprojected_facts}
+                'unprojected_facts': self.unprojected_facts,
+                'synthetic_moves': self.synthetic_moves}
 
 
 STATS = Stats()
@@ -349,16 +421,21 @@ STATS = Stats()
 def call_v2(name, args=(), kwargs=None, alias=None):
     """Run the v2 entry ``name`` on the current database's rows."""
     kwargs = kwargs or {}
+    original_args, original_kwargs = args, kwargs
     alias = alias or _alias()
     module = av2()
     started = time.perf_counter()
     positions, edges = export_graph(alias)
+    moves = SyntheticMoves(positions, edges)
+    args, kwargs = moves.forward(tuple(args)), moves.forward(dict(kwargs))
+    STATS.synthetic_moves += len(moves.fwd)
     request = {
         'positions': positions,
         'edges': edges,
         'tables': export_tables(module.entry_tables(name), alias),
         'constants': export_constants(),
         'settings': export_settings(),
+        'prepared': _prepared(name, args, kwargs, alias),
         'args': {'args': [encode(a) for a in args],
                  'kwargs': {k: encode(v) for k, v in kwargs.items()}},
     }
@@ -370,7 +447,9 @@ def call_v2(name, args=(), kwargs=None, alias=None):
             STATS.v2_errors.append({'name': name, 'code': error.code,
                                     'message': (error.message or '')[:500]})
             raise error
-        STATS.unprojected_facts += len(write_back(name, reply, args, kwargs, alias))
+        reply = moves.back(reply)
+        args, kwargs = moves.back(args), moves.back(kwargs)
+        STATS.unprojected_facts += len(write_back(name, reply, original_args, original_kwargs, alias))
         return decode(reply.get('result'), alias)
     finally:
         STATS.v2_seconds += time.perf_counter() - started

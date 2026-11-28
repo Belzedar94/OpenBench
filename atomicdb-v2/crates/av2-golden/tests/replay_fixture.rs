@@ -43,11 +43,18 @@ fn noop_lists_everything_v1_wrote() {
 }
 
 #[test]
-fn v2_mode_says_what_is_not_ported() {
-    for c in cases() {
-        let r = replay::replay(&c, "fixture", Mode::V2);
-        assert_eq!(r.status, "not_ported", "{}", r.id);
-    }
+fn v2_mode_runs_the_climb_and_says_what_is_not_ported() {
+    let c = cases();
+    // The climb is registered (`propagation_queue.drain_batch`).  The
+    // hand-written case's v1 writes are not what v1 does from these rows
+    // (its child is WHITE_WIN without a closure, so not a proof), so v2
+    // differs; what is asserted is that it ran and was classified.
+    let drain = replay::replay(&c[0], "fixture", Mode::V2);
+    assert_eq!(drain.status, "diff", "{:?}", drain.error);
+    assert_eq!(drain.counts["missing_write"], 5);
+    assert_eq!(drain.counts["extra_write"], 4);
+    // Landings (stage (a)) are not ported yet.
+    assert_eq!(replay::replay(&c[1], "fixture", Mode::V2).status, "not_ported");
 }
 
 #[test]

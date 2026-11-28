@@ -40,13 +40,17 @@ pub struct Extra {
     pub constants: Map<String, Value>,
     /// The `ATOMICDB_*` settings in force.
     pub settings: Map<String, Value>,
+    /// What the Python preparer of the entry read from v1's other models
+    /// (`atomicdb/v2shim/prepare.py`, `PREPARE`): v2's "prepared inputs".
+    pub prepared: Map<String, Value>,
 }
 
 impl Extra {
-    /// From a request or case object with `tables`, `constants`, `settings`.
+    /// From a request or case object with `tables`, `constants`, `settings`,
+    /// `prepared`.
     pub fn from_value(v: &Value) -> Extra {
         let obj = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
-        Extra { tables: obj("tables"), constants: obj("constants"), settings: obj("settings") }
+        Extra { tables: obj("tables"), constants: obj("constants"), settings: obj("settings"), prepared: obj("prepared") }
     }
 }
 
@@ -158,6 +162,9 @@ pub static ENTRIES: &[Entry] = &[
     entry!("shim.tables", shim_tables, tables = ["atomicdb_dbevent"]),
     entry!("shim.out", shim_out),
     // ---- ported v1 functions (one line each) ----
+    entry!("ingest.backup_cascade", crate::adapters::backup_cascade),
+    entry!("ingest.backup_backed_evals", crate::adapters::backup_backed_evals, tables = ["atomicdb_analysistask"]),
+    entry!("propagation_queue.drain_batch", crate::adapters::drain_batch, tables = ["atomicdb_propagationseed", "atomicdb_analysistask"]),
 ];
 
 pub fn find(name: &str) -> Option<&'static Entry> {

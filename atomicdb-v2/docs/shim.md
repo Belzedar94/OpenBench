@@ -56,6 +56,22 @@ fn backup_cascade(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
 - The return value is JSON; `{"$pos": key}` comes back to Python as a
   `Position`, `{"$set": [...]}` as a set, `{"$tuple": [...]}` as a tuple.
 
+- `ctx.extra.prepared`: what a Python preparer read from v1's other models
+  before the call (`atomicdb/v2shim/prepare.py`, `PREPARE[name]`), v2's
+  "prepared inputs". Preparers only read; writes go back as `$calls` to the
+  `apply_*` helpers of the same module (e.g. the quality arm's purchases of
+  the ascent: room in, `apply_purchase` out).
+
+Adapters for the rules live in `crates/av2-shim/src/adapters.rs`
+(`ingest.backup_cascade`, `ingest.backup_backed_evals` and, for golden
+cases, `propagation_queue.drain_batch`, the deferred climb, without the
+queue arms that follow it). Effects
+the rules report through `av2_rules::effects` map to v1 like this:
+`NODE_CLOSED` runs v1's `_emit_closure_events` after the write-back (its
+provenance, claims, tasks and campaigns belong to other ports), other
+events become their `DBEvent`, the proof-number refresh is a follow-up
+`proof.refresh_proof_numbers`, loops are `NoLoops` until steps 11-14.
+
 Nothing else is needed on the Python side: `intercept` routes every name
 `av2.entries()` lists. Golden cases use two names: `propagation_queue.drain_batch`
 (a climb) and `ingest_queue.apply_job` (a landing).
@@ -151,7 +167,8 @@ Golden cases copied from production (9 files, 16 MB compressed, 532 cases:
 |---|---|---|
 | echo | 532/532 clean: 41,828 fields and edges matched, 0 unrepresentable | 3.5 s |
 | noop | 27,909 missing writes, 12,744 missing edges, 393 unread inputs | 5.6 s |
-| v2 | 532 not ported (no entry registered yet) | 3.4 s |
+| v2, climbs (`drain_batch` on av2-rules steps 1-9, `NoLoops`) | **145 of 158 clean**; 13 differ: 1,342 extra writes, 320 value diffs, 88 missing writes, all in `backed_*` columns; 984 unread inputs | 4.3 s |
+| v2, landings | 374 not ported (stage (a)) | |
 
 Per case: load p50 0.43 ms, p99 50 ms, max 160 ms (the largest pre-image
 held 22k positions); the cases read 143,903 positions, 136,421 edges and
@@ -169,3 +186,13 @@ out), synthetic rows with a 0.5 kB analysis each:
 Portable suite (1,314 tests, SQLite, serial): 153 s on v1 with the runner,
 138 s on v2 with every function wrapped and nothing ported (1,294 `v1-only`,
 18 `no-rule-call`, 2 skips, 0 broken by the shim).
+
+With `ingest.backup_cascade` and `ingest.backup_backed_evals` registered
+(131 s): **114 pass on v2**, 45 `v2-fail`, 1,135 `v1-only`, 18
+`no-rule-call`, 2 skips, 0 broken. 21 of the passes use fixtures that name
+moves freely and ran with UCI stand-ins. The 45 failures are loop and
+repetition tests (`test_loop_best_exit` 17, `test_backprop_repetition` 8,
+`test_backed_eval` repetition classes 8, `test_repetition_progress` 5,
+`test_cycle_disambiguation` 3, `test_pointer_loop_grounding` 2,
+`test_backup_echo` 1, `test_stale_backed_sweep` 1): the adapters run
+`NoLoops` because steps 11-14 are not ported.

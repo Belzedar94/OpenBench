@@ -11,6 +11,7 @@
 //! - [`call_json`]: one call as a JSON request and reply, the whole
 //!   protocol between Python and Rust.
 
+pub mod adapters;
 pub mod graph;
 pub mod registry;
 pub mod v1;

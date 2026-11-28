@@ -93,6 +93,14 @@ class BridgeTests(TestCase):
         with mock.patch('atomicdb.ingest.CASCADE_GUARD_LIMIT', 7):
             self.assertEqual(bridge.export_constants()['ingest']['CASCADE_GUARD_LIMIT'], 7)
 
+    def test_fixture_move_names_get_stand_ins_and_come_back(self):
+        lone = Position.objects.create(key=FAKE, fen=LONE_KINGS)
+        Edge.objects.create(parent=self.root, move_uci='wb', child=lone)
+        bridge.call_v2('shim.put_rows', ({self.root.key: {'backed_move': 'wb'}},))
+        self.assertEqual(Position.objects.get(pk=self.root.key).backed_move, 'wb')
+        self.assertEqual(bridge.STATS.synthetic_moves, 1)
+        self.assertEqual(Edge.objects.filter(move_uci='wb').count(), 1)
+
     def test_a_value_v2_cannot_hold_refuses_to_run(self):
         Position.objects.filter(pk=self.root.key).update(eval_cp=1_000_000)
         with self.assertRaises(bridge.V2Error) as caught:
