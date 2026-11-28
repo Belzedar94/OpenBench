@@ -273,3 +273,64 @@ class SamplerParsingTests(SimpleTestCase):
         self.assertEqual(second['jobs']['applied'], 1)
         self.assertAlmostEqual(second['applied_per_s'], 1 / 60, places=3)
         json.dumps(second)
+
+
+def _load_report():
+    path = Path(settings.BASE_DIR) / 'Scripts' / 'atomicdb_perf_report.py'
+    spec = importlib.util.spec_from_file_location('atomicdb_perf_report',
+                                                  path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReportTests(SimpleTestCase):
+
+    def test_a_report_from_files(self):
+        report = _load_report()
+        with tempfile.TemporaryDirectory() as tmp:
+            t0 = 1_795_850_000.0
+            with open(os.path.join(tmp, 'events-20261128.jsonl'), 'w') as f:
+                for i in range(120):
+                    f.write(json.dumps({'t': t0 + i, 'kind': 'job', 'job': i,
+                                        'ms': 100.0 + i}) + '\n')
+                f.write(json.dumps({'t': t0 + 5, 'kind': 'drain',
+                                    'jobs': [1, 2], 'settled': 2,
+                                    'climb_ms': 400.0, 'ms': 450.0,
+                                    'commit_t': t0 + 6}) + '\n')
+                # Inside the excluded interval: left out.
+                f.write(json.dumps({'t': t0 + 3000, 'kind': 'job', 'job': 999,
+                                    'ms': 1.0}) + '\n')
+            with open(os.path.join(tmp, 'samples-20261128.jsonl'), 'w') as f:
+                for i, used in enumerate((100e9, 101e9)):
+                    f.write(json.dumps({
+                        't': t0 + 60 * i,
+                        'units': {'atomicdb-propagate.service': {
+                            'cpu_pct': 50.0, 'mem': 2**30}},
+                        'sizes': {'database': 270e9 + i * 1e9,
+                                  'position': 100e9, 'edge': 90e9,
+                                  'positions_est': 200_000_000,
+                                  'bytes_per_position': 1350.0,
+                                  'tables': {'atomicdb_position': {
+                                      'ins': 1000 + i * 500}}},
+                        'host_stats': {'disk_used': used, 'disk_free': 400e9,
+                                       'load': [8.0, 8.0, 8.0]},
+                        'queues': {'propagation_seeds': 10,
+                                   'propagation_oldest_s': 2.0,
+                                   'ingest_pending': 3},
+                        'sweeps': [{'stale': 338, 'changed': 20000,
+                                    'checked': 7000}] if i else []}) + '\n')
+            iso = report.iso
+            args = report.argparse.Namespace(
+                since=iso(t0 - 1).replace(' UTC', ''),
+                until=iso(t0 + 3600).replace(' UTC', ''),
+                exclude=[iso(t0 + 2900).replace(' UTC', '') + '/'
+                         + iso(t0 + 3100).replace(' UTC', '')],
+                perf_dir=tmp, timing_glob=os.path.join(tmp, 'none*'),
+                no_db=True, no_http=True)
+            text = report.report(args)
+        self.assertIn('| Searches applied (stage a), total | 120 |', text)
+        self.assertIn('| Climb batches | 1 |', text)
+        self.assertIn('atomicdb-propagate', text)
+        self.assertIn('| Stale rows found per sweep pass | 338.0 |', text)
+        self.assertIn('| New positions per day (inserts) | 720,000 |', text)
