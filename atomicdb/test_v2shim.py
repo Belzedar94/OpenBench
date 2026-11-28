@@ -81,8 +81,17 @@ class BridgeTests(TestCase):
         self.assertTrue(Position.objects.filter(fen=LONE_KINGS).exists())
 
     def test_rows_for_other_tables_are_written(self):
-        bridge.call_v2('shim.tables', ([{'kind': 'SHIM_ROW', 'payload': {'n': 2}}],))
+        got = bridge.call_v2('shim.tables', ([{'kind': 'SHIM_ROW', 'payload': {'n': 2}}],))
         self.assertEqual(DBEvent.objects.get(kind='SHIM_ROW').payload, {'n': 2})
+        # The declared table went over, and so did v1's constants and settings.
+        self.assertIn('atomicdb_dbevent', got['tables'])
+        self.assertEqual(got['constants'], len(bridge.CONSTANT_MODULES))
+        self.assertGreater(got['settings'], 0)
+
+    def test_patched_constants_are_sent_as_patched(self):
+        from unittest import mock
+        with mock.patch('atomicdb.ingest.CASCADE_GUARD_LIMIT', 7):
+            self.assertEqual(bridge.export_constants()['ingest']['CASCADE_GUARD_LIMIT'], 7)
 
     def test_a_value_v2_cannot_hold_refuses_to_run(self):
         Position.objects.filter(pk=self.root.key).update(eval_cp=1_000_000)

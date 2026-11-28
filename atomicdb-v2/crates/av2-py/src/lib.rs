@@ -23,7 +23,7 @@
 use av2_shim::{ShimGraph, call_json, registry};
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 fn parse(s: &str, what: &str) -> PyResult<Value> {
     serde_json::from_str(s).map_err(|e| PyValueError::new_err(format!("{what}: bad JSON: {e}")))
@@ -103,16 +103,17 @@ impl Graph {
         serde_json::to_string(&self.g.changes()).unwrap_or_default()
     }
 
-    /// Call an entry on this graph; reply JSON as `av2.call`.
-    #[pyo3(signature = (name, args, tables=None))]
-    fn call(&mut self, name: &str, args: &str, tables: Option<&str>) -> PyResult<String> {
+    /// Call an entry on this graph; reply JSON as `av2.call`.  `extra` is
+    /// `{"tables": ..., "constants": ..., "settings": ...}`.
+    #[pyo3(signature = (name, args, extra=None))]
+    fn call(&mut self, name: &str, args: &str, extra: Option<&str>) -> PyResult<String> {
         let args = parse(args, "args")?;
-        let tables = match tables {
-            Some(t) => parse(t, "tables")?.as_object().cloned().unwrap_or_default(),
-            None => Map::new(),
+        let extra = match extra {
+            Some(t) => registry::Extra::from_value(&parse(t, "extra")?),
+            None => registry::Extra::default(),
         };
         let issues = self.g.issues.clone();
-        Ok(match registry::call(name, &mut self.g, &args, &tables) {
+        Ok(match registry::call(name, &mut self.g, &args, &extra) {
             Ok(o) => av2_shim::outcome_json(o, &issues),
             Err(e) => av2_shim::error_json(&e, &issues),
         }
