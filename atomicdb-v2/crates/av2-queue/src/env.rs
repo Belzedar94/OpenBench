@@ -129,7 +129,7 @@ impl V1Priority {
     }
     /// Positions with a non-zero stored value.
     pub fn non_zero(&self) -> usize {
-        self.map.as_ref().map(|m| m.chunks_exact(8).filter(|c| *c != [0u8; 8]).count()).unwrap_or(0)
+        self.map.as_ref().map(|m| m.as_chunks::<8>().0.iter().filter(|c| **c != [0u8; 8]).count()).unwrap_or(0)
     }
 }
 
