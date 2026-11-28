@@ -8,6 +8,7 @@ members = [
     "crates/av2-tools",
     "crates/av2-compat",
     "crates/av2-proof",
+    "crates/av2-queue",
     "bench",
 ]
 # `cargo build` / `cargo test` at the root build the v2 crates only.  The bench
@@ -21,6 +22,7 @@ default-members = [
     "crates/av2-tools",
     "crates/av2-compat",
     "crates/av2-proof",
+    "crates/av2-queue",
 ]
 
 [workspace.package]
