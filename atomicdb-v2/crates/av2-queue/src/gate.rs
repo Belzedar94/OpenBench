@@ -69,12 +69,15 @@ pub fn rejects(policy: &Policy, references: &BTreeMap<String, String>, engine_sh
     !accepted_engines(policy, references).contains_key(engine_sha)
 }
 
+/// File -> ((length, modification time), sha256 hex).
+type DigestCache = BTreeMap<PathBuf, ((u64, i128), String)>;
+
 /// The two inputs of the gate read from disk, cached by file stamp.
 pub struct GateFiles {
     pub policy_file: PathBuf,
     pub engines_dir: PathBuf,
     policy_cache: Mutex<Option<((u64, i128), Policy)>>,
-    digest_cache: Mutex<BTreeMap<PathBuf, ((u64, i128), String)>>,
+    digest_cache: Mutex<DigestCache>,
 }
 
 fn stamp(p: &Path) -> Option<(u64, i128)> {

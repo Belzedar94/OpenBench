@@ -148,10 +148,10 @@ pub fn showcase_of(last_analysis: Option<&Value>) -> Showcase {
                 _ => None,
             },
         };
-        if let Some(Ok(m)) = head.filter(|s| !s.is_empty()).map(|s| Move::parse(&s)) {
-            if !lines.contains(&m) {
-                lines.push(m);
-            }
+        if let Some(Ok(m)) = head.filter(|s| !s.is_empty()).map(|s| Move::parse(&s))
+            && !lines.contains(&m)
+        {
+            lines.push(m);
         }
     }
     Showcase { bound, lines }
@@ -411,10 +411,10 @@ pub fn backed_for(
                 return own_back(own);
             }
             best = best_child(kids, &rest, stm, core.best_move);
-            if kids[best].cycles {
-                if let Some(p) = cycle_picks.as_deref_mut() {
-                    p.push((kids[best].mv, row.id, own_quality));
-                }
+            if kids[best].cycles
+                && let Some(p) = cycle_picks
+            {
+                p.push((kids[best].mv, row.id, own_quality));
             }
         }
     }
@@ -425,10 +425,10 @@ pub fn backed_for(
             if !better_for_mover(bv, o, stm) {
                 return own_back(own);
             }
-            if (b.quality as u128) * BACKED_QUALITY_TOLERANCE_DEN < own_quality as u128 {
-                if let Some(d) = discrepancies.as_deref_mut() {
-                    d.push((b.mv, row.id, own_quality));
-                }
+            if (b.quality as u128) * BACKED_QUALITY_TOLERANCE_DEN < own_quality as u128
+                && let Some(d) = discrepancies
+            {
+                d.push((b.mv, row.id, own_quality));
             }
         } else if if stm { bv <= -MATE_BAND } else { bv >= MATE_BAND } {
             return Backed::NOTHING;

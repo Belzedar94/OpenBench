@@ -680,7 +680,7 @@ impl QueueState {
                 detail.insert("budget_nodes".into(), json!(t.budget));
                 detail.insert("task_state".into(), json!(if t.state == TState::Leased { "searching" } else { "waiting" }));
                 detail.insert("priority".into(), json!(if t.background { "low" } else { "normal" }));
-                detail.insert("backed".into(), json!(!r.account.is_empty() && t.also.iter().any(|a| *a == r.account)));
+                detail.insert("backed".into(), json!(!r.account.is_empty() && t.also.contains(&r.account)));
             }
             None => {
                 for k in ["task", "budget_nodes", "task_state", "priority"] {

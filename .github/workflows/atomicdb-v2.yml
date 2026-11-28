@@ -27,10 +27,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      # The toolchain is pinned in atomicdb-v2/rust-toolchain.toml.
       - name: Toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+          rustup install
+          rustc --version
       - uses: actions/cache@v4
         with:
           path: |

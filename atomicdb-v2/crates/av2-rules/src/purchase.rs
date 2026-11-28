@@ -50,10 +50,10 @@ pub fn caps_interior(child_backed_move_set: bool, budget: u64, cfg: &RulesConfig
 /// never passes one).
 pub fn server_picked_budget(budget: u64, child_backed_move_set: Option<bool>, cfg: &RulesConfig) -> u64 {
     let mut b = budget;
-    if let Some(interior) = child_backed_move_set {
-        if caps_interior(interior, b, cfg) {
-            b = AUTO_INTERIOR_MAX_NODES;
-        }
+    if let Some(interior) = child_backed_move_set
+        && caps_interior(interior, b, cfg)
+    {
+        b = AUTO_INTERIOR_MAX_NODES;
     }
     b.max(SERVER_PICKED_MIN_NODES)
 }

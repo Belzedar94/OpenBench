@@ -31,10 +31,12 @@ pub fn py_int(raw: &str) -> Option<i64> {
 
 /// Q-2.2 `reported_max_budget`: absent or '' -> no cap; not a positive int
 /// -> `Err` (HTTP 400 "max_budget must be a positive whole number of nodes").
+// The caller maps the failure to its fixed HTTP error string: no error value to carry.
+#[allow(clippy::result_unit_err)]
 pub fn parse_max_budget(raw: Option<&str>) -> Result<Option<u64>, ()> {
     match raw {
         None => Ok(None),
-        Some(s) if s.is_empty() => Ok(None),
+        Some("") => Ok(None),
         Some(s) => match py_int(s) {
             Some(v) if v > 0 => Ok(Some(v as u64)),
             _ => Err(()),
@@ -94,6 +96,8 @@ pub fn parse_nodes(raw: Option<&str>) -> u64 {
 }
 
 /// Q-2.36 tb_wdl: '' -> None, not an int -> `Err` ("malformed: invalid tb_wdl").
+// The caller maps the failure to its fixed HTTP error string: no error value to carry.
+#[allow(clippy::result_unit_err)]
 pub fn parse_tb_wdl(raw: Option<&str>) -> Result<Option<i64>, ()> {
     match raw {
         None => Ok(None),
@@ -108,6 +112,8 @@ pub fn parse_tb_dtz(raw: Option<&str>) -> Option<i64> {
 }
 
 /// Q-2.32 nps: clamp to 0..=1e12; not an int -> `Err` ("invalid nps").
+// The caller maps the failure to its fixed HTTP error string: no error value to carry.
+#[allow(clippy::result_unit_err)]
 pub fn parse_nps(raw: Option<&str>) -> Result<u64, ()> {
     match raw.filter(|s| !s.is_empty()) {
         None => Ok(0),
