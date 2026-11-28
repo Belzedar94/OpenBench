@@ -9,7 +9,7 @@
 
 use crate::gate::GateRow;
 use av2_model::record::NO_CP;
-use av2_model::{Edge, GraphRead, PosId, Status};
+use av2_model::{Edge, GraphRead, Move, PosId, Status};
 
 /// Per-position facts the recurrences read (v1 `Position.only('key', 'fen',
 /// 'status', 'eval_cp')`; side to move replaces the FEN).
@@ -40,6 +40,25 @@ pub trait ProofGraph {
     fn fen_of(&self, id: PosId) -> Option<String>;
     /// The full row the gate estimator reads (frontier leaves, root numbers).
     fn gate_row(&self, id: PosId) -> GateRow;
+    /// The backed-value columns the value walker reads (PN-9.2).  The
+    /// default (nothing backed, nothing invested) is for graphs that only
+    /// serve the proof numbers.
+    fn value(&self, _id: PosId) -> ValueInfo {
+        ValueInfo::default()
+    }
+}
+
+/// v1 `Position.backed_eval, backed_move, backed_plies, nodes_invested,
+/// backed_nodes` (the columns `proof._VALUE_CHILD_COLUMNS` reads).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ValueInfo {
+    /// White POV, `None` = NULL.
+    pub backed_eval: Option<i32>,
+    /// `Move::NONE` = NULL (or empty).
+    pub backed_move: Move,
+    pub backed_plies: u32,
+    pub nodes_invested: u64,
+    pub backed_nodes: u64,
 }
 
 impl<G: GraphRead + ?Sized> ProofGraph for G {
@@ -76,6 +95,18 @@ impl<G: GraphRead + ?Sized> ProofGraph for G {
             mate_in: c.mate().map(u32::from),
         }
     }
+    #[inline]
+    fn value(&self, id: PosId) -> ValueInfo {
+        let c = self.core(id);
+        let (nodes_invested, backed_nodes) = self.ext(id).map(|e| (e.nodes_invested, e.backed_nodes)).unwrap_or((0, 0));
+        ValueInfo {
+            backed_eval: c.backed().map(i32::from),
+            backed_move: c.backed_move,
+            backed_plies: u32::from(c.backed_plies),
+            nodes_invested,
+            backed_nodes,
+        }
+    }
 }
 
 /// A graph whose level order and frontier tie-break follow v1's key order
@@ -107,6 +138,9 @@ impl<G: ProofGraph + ?Sized> ProofGraph for KeyOrdered<'_, G> {
     }
     fn gate_row(&self, id: PosId) -> GateRow {
         self.graph.gate_row(id)
+    }
+    fn value(&self, id: PosId) -> ValueInfo {
+        self.graph.value(id)
     }
 }
 

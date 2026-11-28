@@ -76,7 +76,7 @@ impl<G: GraphRead + ?Sized> Descent for GreedyDescent<'_, G> {
         }
         None
     }
-    fn descend_value(&self, c: u64, counter: u64, avoid: &BTreeSet<u64>, start: Option<u64>) -> Option<ValueTarget> {
+    fn descend_value(&self, c: u64, counter: u64, avoid: &BTreeSet<u64>, start: Option<u64>, _live: &dyn Fn(u64) -> bool) -> Option<ValueTarget> {
         self.descend(c, counter, avoid, start).map(|pos| ValueTarget { pos, arm: av2_queue::budget::ValueArm::Spine, floor_nodes: None })
     }
     fn proved_or_clamp(&self, _pos: u64, _c: &[u64]) -> Option<(u64, u32)> {

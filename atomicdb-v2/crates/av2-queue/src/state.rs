@@ -274,6 +274,10 @@ impl QueueState {
     pub fn live_tasks_of(&self, pos: u64) -> Vec<&Task> {
         self.idx.by_pos.get(&pos).into_iter().flatten().filter_map(|id| self.tasks.get(id)).filter(|t| t.state.charged()).collect()
     }
+    /// `proof._has_live_task(pos)`: a PENDING or LEASED task, any generation.
+    pub fn has_live_task(&self, pos: u64) -> bool {
+        self.idx.by_pos.get(&pos).into_iter().flatten().any(|id| self.tasks.get(id).map(|t| t.state.charged()).unwrap_or(false))
+    }
     /// The task on a slot, whatever its state (Q-1.3).
     pub fn slot(&self, pos: u64, generation: i32) -> Option<&Task> {
         self.idx.slots.get(&(pos, generation)).and_then(|id| self.tasks.get(id))

@@ -10,10 +10,10 @@ publish.workspace = true
 [dependencies]
 av2-model.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 av2-store.workspace = true
-sha2.workspace = true
 
 [[bin]]
 name = "av2-proof-bench"

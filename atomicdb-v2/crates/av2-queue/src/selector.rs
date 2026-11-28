@@ -283,7 +283,7 @@ pub struct ValueTarget {
 }
 
 /// What the proof-number crate provides to the minting loop.  Implemented
-/// by `av2-proof` (rules-pn); the queue only calls it.
+/// over `av2-proof` by [`crate::descent::ProofDescent`]; tests use fakes.
 pub trait Descent {
     /// `proof.active_campaigns()`: ProofCampaign ids, ordered by id.
     fn active_campaigns(&self) -> Vec<u64>;
@@ -293,38 +293,27 @@ pub trait Descent {
     fn campaign_roots(&self) -> Vec<(u64, f64)>;
     /// `proof.descend(campaign, counter, avoid, start)` (PN-6).
     fn descend(&self, campaign: u64, counter: u64, avoid: &BTreeSet<u64>, start: Option<u64>) -> Option<u64>;
-    /// `proof.descend_value(...)` (PN-9).
-    fn descend_value(&self, campaign: u64, counter: u64, avoid: &BTreeSet<u64>, start: Option<u64>) -> Option<ValueTarget>;
+    /// `proof.descend_value(...)` (PN-9).  `live` answers `_has_live_task`
+    /// from the queue's state.
+    fn descend_value(
+        &self,
+        campaign: u64,
+        counter: u64,
+        avoid: &BTreeSet<u64>,
+        start: Option<u64>,
+        live: &dyn Fn(u64) -> bool,
+    ) -> Option<ValueTarget>;
     /// `proof.proved_or_clamp(pos, campaigns)` (PN-7).
     fn proved_or_clamp(&self, pos: u64, campaigns: &[u64]) -> Option<Clamp>;
 }
 
-/// `proof.CAMPAIGN_DESCENT_SHARE`.
-pub const CAMPAIGN_DESCENT_SHARE: f64 = 0.35;
+/// The draws are av2-proof's (one copy).
+pub use av2_proof::descent::{CAMPAIGN_DESCENT_SHARE, point};
 
-/// `proof._point(counter, salt)`.
-pub fn point(counter: u64, salt: &str) -> f64 {
-    use sha2::{Digest, Sha256};
-    let d = Sha256::digest(format!("{salt}{counter}").as_bytes());
-    let x = u64::from_be_bytes(d[..8].try_into().unwrap());
-    x as f64 / (1u128 << 64) as f64
-}
-
-/// `proof.campaign_start(counter, roots)`.
+/// `proof.campaign_start(counter, roots)` over the queue's `u64` ids.
 pub fn campaign_start(counter: u64, roots: &[(u64, f64)]) -> Option<u64> {
-    let total: f64 = roots.iter().map(|r| r.1).sum();
-    if roots.is_empty() || total <= 0.0 {
-        return None;
-    }
-    let p = point(counter, "campaign:");
-    let mut edge = 0.0;
-    for &(root, w) in roots {
-        edge += CAMPAIGN_DESCENT_SHARE * w / total;
-        if p < edge {
-            return Some(root);
-        }
-    }
-    None
+    let roots: Vec<(PosId, f64)> = roots.iter().map(|&(p, w)| (PosId(p), w)).collect();
+    av2_proof::descent::campaign_start(counter, &roots).map(|p| p.0)
 }
 
 /// The production selector (`ATOMICDB_SELECTOR=pn`).
@@ -357,7 +346,7 @@ impl<D: Descent + ?Sized> Refill for PnSelector<'_, D> {
             let counter = base + attempts as u64;
             let start = campaign_start(counter, &roots);
             let (pos, target) = if by_value {
-                match self.descent.descend_value(campaign, counter, &seen, start) {
+                match self.descent.descend_value(campaign, counter, &seen, start, &|p| q.has_live_task(p)) {
                     Some(t) => (Some(t.pos), Some(t)),
                     None => (None, None),
                 }

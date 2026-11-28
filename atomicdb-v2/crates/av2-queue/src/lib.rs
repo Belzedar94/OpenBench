@@ -14,13 +14,15 @@
 //!   (`fact::replay`): leases survive a restart with their tokens.
 //! - The graph is read through [`env::QueueEnv`]; the queue never writes it.
 //!   The selector proposes through [`selector::Refill`]; the proof crate
-//!   plugs its descent in through [`selector::Descent`].
+//!   plugs its descent in through [`selector::Descent`] (production:
+//!   [`descent::ProofDescent`] over `av2-proof`).
 
 pub mod apply;
 pub mod arms;
 pub mod budget;
 pub mod config;
 pub mod consts;
+pub mod descent;
 pub mod env;
 pub mod fact;
 pub mod gate;
@@ -36,6 +38,7 @@ pub mod state;
 
 pub use apply::Applied;
 pub use config::{QueueConfig, SelectorMode};
+pub use descent::ProofDescent;
 pub use consts::Ms;
 pub use env::{GraphEnv, MemEnv, PosInfo, QueueEnv, StoredPriority, V1Priority};
 pub use input::*;
