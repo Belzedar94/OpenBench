@@ -17,11 +17,13 @@ from datetime import timedelta
 from unittest import mock
 
 from django.core.management import call_command
+from django.db import DatabaseError
 from django.test import Client, override_settings
 from django.utils import timezone
 
 from . import contributors, ingest, ingest_queue, logic
-from .models import AnalysisTask, Edge, IngestJob, Position, ProofCampaign
+from .models import (AnalysisTask, DBEvent, Edge, IngestJob, Position,
+                     ProofCampaign)
 from .testing import TestCase, worker_account
 
 
@@ -41,6 +43,19 @@ def _analysis_lines(position, value=-320):
     return [{'move': edge.move_uci, 'eval_cp': value, 'pv': [edge.move_uci]}
             for edge in Edge.objects.filter(parent=position)
                                     .order_by('move_uci')[:5]]
+
+
+def _once_done(real, error):
+    """A side effect that fails only once the job has committed as DONE.
+
+    The same functions may also run inside the landing's transaction (the
+    cascade refreshes the cone it changed); failing there is the ordinary
+    rollback and retry, not the defect under test."""
+    def side_effect(*args, **kwargs):
+        if IngestJob.objects.filter(state=IngestJob.JState.DONE).exists():
+            raise error
+        return real(*args, **kwargs)
+    return side_effect
 
 
 # Mate forzado real (el mismo de test_mate_sign): cierra de verdad, sin
@@ -213,6 +228,115 @@ class ProcessorTests(TestCase):
         self.assertTrue(job.payload['lines'])       # el payload, intacto
         self.target.refresh_from_db()
         self.assertEqual(self.target.visits, 0)     # y el arbol, sin tocar
+
+    def _applied_once(self):
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.visits, 1)
+        self.assertEqual(self.target.nodes_invested, 900_000)
+        self.assertEqual(self.target.time_invested, 12.5)
+        job = IngestJob.objects.get()
+        self.assertEqual(job.state, 'DONE')
+        self.assertEqual(job.attempts, 0)
+        self.assertIsNone(ingest_queue.claim_next())   # nothing to reapply
+        return job
+
+    def test_a_failure_after_the_commit_never_reapplies_the_job(self):
+        # Q-3.7 of the v2 rules spec: the proof refresh runs after the job
+        # has committed as DONE; a failure there used to go to _mark_failure,
+        # which wrote PENDING over DONE, and the next claim applied the same
+        # landing again.
+        self._submit()
+        boom = mock.patch.object(
+            ingest.proof, 'refresh_proof_numbers',
+            side_effect=_once_done(ingest.proof.refresh_proof_numbers,
+                                   RuntimeError('pn/dn on fire')))
+        with boom:
+            summary, error = ingest_queue.process_job(
+                ingest_queue.claim_next())
+
+        self.assertIsNone(error)
+        self.assertIn('backed_evals', summary)
+        job = self._applied_once()
+        self.assertEqual(job.last_error, '')
+        # The next drain finds nothing: the landing went in exactly once.
+        self.assertEqual(ingest_queue.drain(), {'done': 0, 'failed': 0})
+        self._applied_once()
+        event = DBEvent.objects.get(kind=ingest_queue.AFTER_COMMIT_EVENT)
+        self.assertEqual(event.payload['job'], job.pk)
+        self.assertEqual(event.payload['position'], self.target.key)
+        self.assertEqual(event.payload['step'], 'proof_refresh')
+        self.assertIn('pn/dn on fire', event.payload['error'])
+
+    def test_a_deadlocked_refresh_after_the_commit_is_tried_again(self):
+        # The production failure: a deadlock in the refresh after the commit.
+        # One more try settles it, and the job is applied once, quietly.
+        self._submit()
+        deadlock = DatabaseError('deadlock detected')
+        deadlock.pgcode = '40P01'
+        real = ingest.proof.refresh_proof_numbers
+        calls = []
+
+        def flaky(*args, **kwargs):
+            if IngestJob.objects.filter(state='DONE').exists():
+                calls.append(args)
+                if len(calls) == 1:
+                    raise deadlock
+            return real(*args, **kwargs)
+
+        with mock.patch.object(ingest.proof, 'refresh_proof_numbers',
+                               side_effect=flaky):
+            summary, error = ingest_queue.process_job(
+                ingest_queue.claim_next())
+
+        self.assertIsNone(error)
+        self.assertEqual(len(calls), 2)
+        self._applied_once()
+        self.assertFalse(DBEvent.objects.filter(
+            kind=ingest_queue.AFTER_COMMIT_EVENT).exists())
+
+    def test_every_step_after_the_commit_fails_alone(self):
+        # The carry and the requested verification run after the commit too:
+        # any exception there (not only a DatabaseError) is logged and kept,
+        # never turned into a retry of the landing.
+        self.task.then_verify = True
+        self.task.requested_by = 'w'
+        self.task.save(update_fields=['then_verify', 'requested_by'])
+        self._submit()
+        cut = mock.patch.object(ingest, 'carried_cuts')
+        with cut as carried, \
+                mock.patch.object(ingest, 'carry_cut_ascents',
+                                  side_effect=_once_done(
+                                      ingest.carry_cut_ascents,
+                                      ValueError('carry broke'))), \
+                mock.patch.object(ingest, 'enqueue_pv_verification',
+                                  side_effect=_once_done(
+                                      ingest.enqueue_pv_verification,
+                                      KeyError('verify broke'))):
+            carried.return_value.__enter__.return_value = [self.root.key]
+            carried.return_value.__exit__.return_value = False
+            summary, error = ingest_queue.process_job(
+                ingest_queue.claim_next())
+
+        self.assertIsNone(error)
+        self.assertNotIn('carried', summary)
+        self.assertNotIn('then_verify', summary)
+        self._applied_once()
+        self.assertEqual(
+            sorted(DBEvent.objects.filter(kind=ingest_queue.AFTER_COMMIT_EVENT)
+                   .values_list('payload__step', flat=True)),
+            ['carry', 'verify'])
+
+    def test_a_failure_record_never_overwrites_a_done_job(self):
+        # Belt and braces: whatever escapes after the commit, the row that
+        # committed DONE stays DONE.
+        self._submit()
+        ingest_queue.drain()
+        job = IngestJob.objects.get()
+
+        self.assertIsNone(ingest_queue._mark_failure(job, RuntimeError('late')))
+
+        job = self._applied_once()
+        self.assertEqual(job.last_error, '')
 
     def test_a_failed_job_can_be_requeued_and_then_succeeds(self):
         self._submit()
