@@ -13,6 +13,36 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Read-path hints for the mappings, from the environment (Linux; ignored
+/// elsewhere), so they can be compared on the production box without a
+/// rebuild:
+/// - `AV2_MMAP_POPULATE=1`: `MAP_POPULATE` (prefault the page tables at open
+///   and after growth: no minor faults on first touch, slower open);
+/// - `AV2_MMAP_ADVICE=random|willneed|hugepage|sequential|normal`: `madvise`.
+#[derive(Clone, Copy, Default)]
+pub struct Hints {
+    pub populate: bool,
+    #[cfg(unix)]
+    pub advice: Option<memmap2::Advice>,
+}
+
+pub fn hints() -> Hints {
+    static H: std::sync::OnceLock<Hints> = std::sync::OnceLock::new();
+    *H.get_or_init(|| Hints {
+        populate: std::env::var("AV2_MMAP_POPULATE").is_ok_and(|v| v == "1"),
+        #[cfg(unix)]
+        advice: match std::env::var("AV2_MMAP_ADVICE").as_deref() {
+            Ok("random") => Some(memmap2::Advice::Random),
+            Ok("willneed") => Some(memmap2::Advice::WillNeed),
+            Ok("sequential") => Some(memmap2::Advice::Sequential),
+            Ok("normal") => Some(memmap2::Advice::Normal),
+            #[cfg(target_os = "linux")]
+            Ok("hugepage") => Some(memmap2::Advice::HugePage),
+            _ => None,
+        },
+    })
+}
+
 pub struct Mapped {
     pub file: File,
     map: Option<MmapRaw>,
@@ -38,7 +68,21 @@ impl Mapped {
             // fdatasync makes the size durable together with the data.
             file.set_len(len)?;
         }
-        let map = if len > 0 { Some(MmapOptions::new().len(len as usize).map_raw(&file)?) } else { None };
+        let map = if len > 0 {
+            let mut o = MmapOptions::new();
+            o.len(len as usize);
+            if hints().populate {
+                o.populate();
+            }
+            let m = o.map_raw(&file)?;
+            #[cfg(unix)]
+            if let Some(a) = hints().advice {
+                let _ = m.advise(a);
+            }
+            Some(m)
+        } else {
+            None
+        };
         Ok(Mapped { file, map, len, path: path.to_path_buf() })
     }
 

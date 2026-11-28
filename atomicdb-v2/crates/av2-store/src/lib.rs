@@ -29,7 +29,7 @@ pub mod testkit;
 pub mod view;
 
 pub use batch::Batch;
-pub use store::{Archive, CommitTimings, Config, InFlight, Reader, RecoveryReport, Stats, Store};
+pub use store::{Archive, CommitTimings, Config, InFlight, Notify, Reader, RecoveryReport, Stats, Store};
 
 #[derive(Debug)]
 pub enum StoreError {

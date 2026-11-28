@@ -264,6 +264,48 @@ fn pipelined_commits_match_the_model() {
     assert_eq!(store_digest(&s), want);
 }
 
+/// Prepared segments: every log file is a zero-filled `seg_bytes` file
+/// written in place (commits never extend it), released ones are recycled,
+/// and a torn frame inside one is zeroed and written over after recovery.
+#[test]
+fn prealloc_segments_are_written_in_place() {
+    use std::io::{Seek, SeekFrom, Write};
+    let d = tempfile::tempdir().unwrap();
+    let cfg = small_cfg(false);
+    assert!(cfg.prealloc);
+    let mut s = Store::create(d.path(), cfg.clone()).unwrap();
+    for seq in 1..=300 {
+        step(&mut s, seq);
+    }
+    let st = s.stats();
+    assert!(st.segments_recycled >= 1, "{st:?}");
+    for e in std::fs::read_dir(d.path().join("log")).unwrap() {
+        let e = e.unwrap();
+        let len = e.metadata().unwrap().len();
+        assert_eq!(len, cfg.seg_bytes, "{} is {len} bytes", e.file_name().to_string_lossy());
+    }
+    drop(s);
+    // A frame torn half way, inside the preallocated zeros after the last valid frame.
+    let segs = av2_store::log::scan(&d.path().join("log")).unwrap();
+    let last = segs.last().unwrap().path.clone();
+    let r = av2_store::log::read_segment(&last).unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).open(&last).unwrap();
+    f.seek(SeekFrom::Start(r.end as u64)).unwrap();
+    f.write_all(&[200, 1, 0, 0, 0xEF, 0xBE, 0xAD, 0xDE, 9, 9, 9, 9]).unwrap();
+    drop(f);
+    let mut s = Store::open(d.path(), cfg.clone()).unwrap();
+    assert_eq!(s.last_seq(), 300);
+    assert_eq!(s.recovery.torn_tail_bytes, 12);
+    assert_eq!(store_digest(&s), model_digest(&model_at(300)));
+    for seq in 301..=320 {
+        step(&mut s, seq);
+    }
+    drop(s);
+    let s = Store::open(d.path(), cfg).unwrap();
+    assert_eq!(s.last_seq(), 320);
+    assert_eq!(store_digest(&s), model_digest(&model_at(320)));
+}
+
 #[test]
 fn readers_run_without_locks_while_the_writer_commits() {
     let d = tempfile::tempdir().unwrap();

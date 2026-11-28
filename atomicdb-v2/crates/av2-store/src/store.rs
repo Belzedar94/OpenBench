@@ -44,8 +44,12 @@ pub struct Config {
     /// Compact the key map once its garbage reaches its live size and at
     /// least this many bytes.
     pub km_compact_min: u64,
-    /// zstd level of `archive/` (3 = zstd's default; 19 for cold storage).
+    /// zstd level of `archive/`: kept for the day a C zstd is linked; the
+    /// pure-Rust encoder used now has one level (about zstd's 1).
     pub archive_zstd_level: i32,
+    /// Simulation only: sleep this long after every fsync (to measure the
+    /// writer against a slow disk, e.g. production's 16 ms md RAID1).
+    pub fsync_delay: Duration,
 }
 
 impl Default for Config {
@@ -63,6 +67,7 @@ impl Default for Config {
             initial_positions: 1 << 20,
             km_compact_min: 64 << 20,
             archive_zstd_level: 3,
+            fsync_delay: Duration::ZERO,
         }
     }
 }
@@ -121,6 +126,11 @@ pub struct Stats {
     pub grows: u64,
     pub segments_released: u64,
     pub compactions: u64,
+    /// Log segments the pool zero-filled: new files, recycled ones, and
+    /// rolls that had to wait for one.
+    pub segments_prepared: u64,
+    pub segments_recycled: u64,
+    pub segment_waits: u64,
     /// Facts written to `archive/`, before and after compression.
     pub archive_raw_bytes: u64,
     pub archive_bytes: u64,
@@ -155,6 +165,8 @@ pub(crate) struct Shared {
     stats: Mutex<Stats>,
     /// True while the checkpoint thread runs.
     bg: std::sync::atomic::AtomicBool,
+    /// Spare log segments (with `prealloc`).
+    pool: Mutex<Option<log::SegPool>>,
 }
 
 /// A commit whose frame is written and whose fsync is in flight.
@@ -163,6 +175,7 @@ pub struct InFlight {
     batch: Arc<Batch>,
     fin: Finalized,
     done: mpsc::Receiver<std::io::Result<Duration>>,
+    result: Option<std::io::Result<Duration>>,
     finalize: Duration,
     grow: Duration,
     write: Duration,
@@ -172,20 +185,43 @@ impl InFlight {
     pub fn seq(&self) -> u64 {
         self.seq
     }
+
+    /// True once the frame's fsync has completed (it is then durable and
+    /// `commit_finish` will not wait).  Never blocks.
+    pub fn is_durable(&mut self) -> bool {
+        if self.result.is_none()
+            && let Ok(r) = self.done.try_recv()
+        {
+            self.result = Some(r);
+        }
+        self.result.is_some()
+    }
 }
 
-type SyncJob = (log::PendingSync, mpsc::SyncSender<std::io::Result<Duration>>);
+/// Called by the sync thread once a frame is durable (see `commit_start_notify`).
+pub type Notify = Box<dyn FnOnce() + Send>;
 
-fn sync_thread(rx: mpsc::Receiver<SyncJob>) {
-    while let Ok((p, reply)) = rx.recv() {
+type SyncJob = (log::PendingSync, mpsc::SyncSender<std::io::Result<Duration>>, Option<Notify>);
+
+fn sync_thread(rx: mpsc::Receiver<SyncJob>, delay: Duration) {
+    while let Ok((p, reply, notify)) = rx.recv() {
         let t = Instant::now();
-        let _ = reply.send(p.run().map(|_| t.elapsed()));
+        let r = p.run();
+        if !delay.is_zero() {
+            // Simulation only (`Config::fsync_delay`): a slower disk.
+            std::thread::sleep(delay);
+        }
+        let _ = reply.send(r.map(|_| t.elapsed()));
+        if let Some(n) = notify {
+            n();
+        }
     }
 }
 
 pub struct Store {
     syncer: Option<mpsc::Sender<SyncJob>>,
     sync_handle: Option<JoinHandle<()>>,
+    pool_handle: Option<JoinHandle<()>>,
     in_flight: bool,
     sh: Arc<Shared>,
     log: LogWriter,
@@ -272,6 +308,7 @@ impl Shared {
             manifest: Mutex::new(manifest),
             stats: Mutex::new(Stats::default()),
             bg: std::sync::atomic::AtomicBool::new(false),
+            pool: Mutex::new(None),
         }
     }
 
@@ -577,7 +614,10 @@ impl Shared {
                 st.archive_raw_bytes += raw;
                 st.archive_bytes += packed;
             }
-            std::fs::remove_file(&g.path)?;
+            match self.pool.lock().unwrap().as_ref() {
+                Some(p) => p.recycle(&g.path)?,
+                None => std::fs::remove_file(&g.path)?,
+            }
         }
         Ok(gone.len() as u64)
     }
@@ -635,7 +675,10 @@ fn archive_facts(seg: &Path, dir: &Path, level: i32) -> Result<(u64, u64)> {
         out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         out.extend_from_slice(&body);
     }
-    let packed = zstd::encode_all(&out[..], level)?;
+    // Pure-Rust zstd (ruzstd, about zstd level 1): the store links no C,
+    // so a static musl binary cross-compiles from anywhere.
+    let _ = level;
+    let packed = ruzstd::encoding::compress_to_vec(&out[..], ruzstd::encoding::CompressionLevel::Fastest);
     let name = format!("{}.zst", seg.file_name().unwrap().to_string_lossy());
     let tmp = dir.join(format!("{name}.tmp"));
     {
@@ -723,6 +766,7 @@ impl Store {
         let mut rep = RecoveryReport { checkpoint_seq: ckpt.seq, last_seq: ckpt.seq, ..Default::default() };
         let mut last = ckpt.seq;
         let mut kept: Vec<Seg> = Vec::new();
+        let mut resume: Option<(Seg, u64)> = None;
         for (i, s) in segs.iter().enumerate() {
             let r = log::read_segment(&s.path)?;
             let is_last = i + 1 == segs.len();
@@ -769,19 +813,18 @@ impl Store {
                 rep.frames_replayed += 1;
                 rep.bytes_replayed += len as u64;
             }
-            if r.torn || r.end < r.data.len() {
-                // Cut the segment where the valid frames end: a torn tail or the
-                // unused preallocation.  Writing resumes in a new segment.
-                rep.torn_tail_bytes += if r.torn { (r.data.len() - r.end) as u64 } else { 0 };
-                let f = std::fs::OpenOptions::new().write(true).open(&s.path)?;
-                f.set_len(r.end as u64)?;
-                // A torn tail must be gone for good before new segments follow
-                // (only the last segment may end badly); unused zeros may stay.
-                if r.torn {
-                    f.sync_all()?;
-                }
+            // A torn frame is overwritten with zeros (durably) before anything
+            // follows it: only the end of the log may hold one.
+            if r.torn {
+                rep.torn_tail_bytes += log::zero_tail(&s.path, &r)?;
             }
-            if r.frames.is_empty() && r.end == 0 {
+            // Writing resumes in the last segment, after its valid frames, if
+            // its name fits the next sequence number.
+            let fits = !r.frames.is_empty() || s.first == last + 1;
+            if is_last && fits {
+                resume = Some((s.clone(), r.end as u64));
+                kept.push(s.clone());
+            } else if r.frames.is_empty() {
                 std::fs::remove_file(&s.path)?;
             } else {
                 kept.push(s.clone());
@@ -797,9 +840,23 @@ impl Store {
         // that never became durable; older than the checkpoint's are dead.
         let (lo, hi) = (ckpt.km_gen, sh.km_gen.load(Ordering::Acquire));
         sh.delete_arenas(|g| g < lo || g > hi);
-        let log = LogWriter::create(&ld, last + 1, cfg.seg_bytes, cfg.prealloc)?;
-        kept.push(Seg { first: last + 1, path: log.path() });
+        let (pool, pool_handle) = match cfg.prealloc {
+            true => {
+                let (p, h) = log::SegPool::start(&ld, cfg.seg_bytes)?;
+                (Some(p), Some(h))
+            }
+            false => (None, None),
+        };
+        let log = match resume {
+            Some((seg, pos)) => LogWriter::resume(&ld, &seg.path, seg.first, pos, cfg.seg_bytes, pool.clone())?,
+            None => {
+                let l = LogWriter::create(&ld, last + 1, cfg.seg_bytes, pool.clone())?;
+                kept.push(Seg { first: last + 1, path: l.path() });
+                l
+            }
+        };
         *sh.segs.lock().unwrap() = kept;
+        *sh.pool.lock().unwrap() = pool.clone();
         rep.micros = t0.elapsed().as_micros() as u64;
         let thread = if cfg.background_checkpoint {
             let s2 = sh.clone();
@@ -809,10 +866,12 @@ impl Store {
             None
         };
         let (stx, srx) = mpsc::channel::<SyncJob>();
-        let sync_handle = Some(std::thread::Builder::new().name("av2-fsync".into()).spawn(move || sync_thread(srx))?);
+        let delay = cfg.fsync_delay;
+        let sync_handle = Some(std::thread::Builder::new().name("av2-fsync".into()).spawn(move || sync_thread(srx, delay))?);
         Ok(Store {
             syncer: Some(stx),
             sync_handle,
+            pool_handle,
             in_flight: false,
             sh,
             log,
@@ -857,7 +916,13 @@ impl Store {
     /// writer can compute the next batch on `batch_after` (which reads
     /// through this one); `commit_finish` waits for the fsync and applies.
     /// One commit may be in flight at a time.
-    pub fn commit_start(&mut self, mut batch: Batch, facts: &[u8]) -> Result<InFlight> {
+    pub fn commit_start(&mut self, batch: Batch, facts: &[u8]) -> Result<InFlight> {
+        self.commit_start_notify(batch, facts, None)
+    }
+
+    /// `commit_start`, and call `notify` (on the sync thread) as soon as the
+    /// frame is durable, so that a writer waiting on its own channel can wake.
+    pub fn commit_start_notify(&mut self, mut batch: Batch, facts: &[u8], notify: Option<Notify>) -> Result<InFlight> {
         if let Some(e) = self.sh.ctl.lock().unwrap().error.clone() {
             return Err(StoreError::Checkpoint(e));
         }
@@ -881,12 +946,19 @@ impl Store {
         }
         let (tx, done) = mpsc::sync_channel(1);
         if self.sh.cfg.durable {
-            self.syncer.as_ref().expect("sync thread").send((sync, tx)).map_err(|_| StoreError::Corrupt("sync thread stopped".into()))?;
+            self.syncer
+                .as_ref()
+                .expect("sync thread")
+                .send((sync, tx, notify))
+                .map_err(|_| StoreError::Corrupt("sync thread stopped".into()))?;
         } else {
             let _ = tx.send(Ok(Duration::ZERO));
+            if let Some(n) = notify {
+                n();
+            }
         }
         self.in_flight = true;
-        Ok(InFlight { seq, batch: Arc::new(batch), fin, done, finalize: t1 - t0, grow, write: app.write })
+        Ok(InFlight { seq, batch: Arc::new(batch), fin, done, result: None, finalize: t1 - t0, grow, write: app.write })
     }
 
     /// An overlay for the next batch while `f` is in flight.
@@ -897,10 +969,13 @@ impl Store {
     /// Second half of a commit: wait for the frame's fsync, apply it, and
     /// return its sequence number.
     pub fn commit_finish(&mut self, f: InFlight) -> Result<u64> {
-        let InFlight { seq, fin, done, finalize, grow, write, .. } = f;
+        let InFlight { seq, fin, done, result, finalize, grow, write, .. } = f;
         self.in_flight = false;
         let t_wait = Instant::now();
-        let fsync_own = done.recv().map_err(|_| StoreError::Corrupt("sync thread stopped".into()))??;
+        let fsync_own = match result {
+            Some(r) => r?,
+            None => done.recv().map_err(|_| StoreError::Corrupt("sync thread stopped".into()))??,
+        };
         let waited = t_wait.elapsed();
         let t2 = Instant::now();
         let body = &fin.body;
@@ -971,7 +1046,14 @@ impl Store {
     }
 
     pub fn stats(&self) -> Stats {
-        self.sh.stats.lock().unwrap().clone()
+        let mut st = self.sh.stats.lock().unwrap().clone();
+        if let Some(p) = self.sh.pool.lock().unwrap().as_ref() {
+            let ps = p.stats();
+            st.segments_prepared = ps.created;
+            st.segments_recycled = ps.recycled;
+            st.segment_waits = ps.waited;
+        }
+        st
     }
 
     /// Bytes in use per file, and their total (what a backup copies).
@@ -1010,6 +1092,12 @@ impl Drop for Store {
         self.stop_thread();
         self.syncer = None;
         if let Some(h) = self.sync_handle.take() {
+            let _ = h.join();
+        }
+        if let Some(p) = self.sh.pool.lock().unwrap().take() {
+            p.stop();
+        }
+        if let Some(h) = self.pool_handle.take() {
             let _ = h.join();
         }
     }

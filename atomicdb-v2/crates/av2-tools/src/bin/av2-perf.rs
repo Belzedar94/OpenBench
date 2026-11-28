@@ -2,6 +2,10 @@
 //!
 //! ```text
 //! av2-perf --src DIR --work DIR [--readers 8] [--secs 5] [--b1 2000] [--b32 200] [--recovery-frames 5000] [--json out.jsonl]
+//!          [--landings-only [--repeat N] [--lean] [--pipeline]] [--until-compaction] [--fsync-delay-ms D]
+//!
+//! `--fsync-delay-ms` adds a sleep after every fsync to simulate a slower
+//! disk (production's md RAID1: 16 ms median per fdatasync).
 //! ```
 //!
 //! `--src` is copied to `--work` with an online backup (timed), and every
@@ -36,7 +40,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn cfg() -> Config {
-    Config { ckpt_bytes: 256 << 20, ..Config::default() }
+    let delay = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--fsync-delay-ms")
+        .and_then(|w| w[1].parse::<f64>().ok())
+        .unwrap_or(0.0);
+    Config { ckpt_bytes: 256 << 20, fsync_delay: Duration::from_secs_f64(delay / 1e3), ..Config::default() }
 }
 
 /// Synthetic FENs, generated once: the store packs each one (that cost is

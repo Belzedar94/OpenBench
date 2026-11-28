@@ -7,10 +7,15 @@
 //! (that is what publishes the batch to the lock-free readers), and every
 //! sender gets the batch's sequence number.
 //!
-//! Pipelined: batch n+1 is computed while batch n's fsync is in flight, on an
-//! overlay that reads through batch n (`Store::commit_start`, `batch_after`,
-//! `commit_finish`).  Batch n is applied, and its senders answered, before
-//! batch n+1 is logged; readers still never see a batch before it is durable.
+//! True group commit: while batch n's fsync is in flight the writer gathers
+//! the inputs that arrive; when the fsync completes it applies n, answers its
+//! senders, computes batch n+1 from everything gathered and starts its fsync.
+//! With a slow disk (16 ms per fsync on production) batches grow with the
+//! load and latency stays near two fsyncs.  If the batch fills up before the
+//! fsync completes, n+1 is computed on an overlay that reads through n
+//! (`Store::commit_start`, `batch_after`, `commit_finish`); either way n is
+//! applied before n+1 is logged and readers never see a batch before it is
+//! durable.
 //! If the rules reject a batch of several inputs, each is retried alone so
 //! that one bad input cannot sink the others.
 //!
@@ -20,7 +25,7 @@ use crate::metrics::{COUNT_BUCKETS, Counter, Gauge, Histogram, LATENCY_BUCKETS};
 use av2_rules::Rules;
 use av2_store::Store;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +44,15 @@ pub(crate) struct Submission<I, O> {
     pub input: I,
     pub enqueued: Instant,
     pub reply: SyncSender<Reply<O>>,
+}
+
+/// What the writer's channel carries: inputs, the sync thread's "your frame
+/// is durable" (so the writer wakes the moment an fsync completes instead of
+/// polling, which on Windows would cost a 15.6 ms timer tick), and stop.
+pub(crate) enum Msg<I, O> {
+    Input(Submission<I, O>),
+    Durable,
+    Stop,
 }
 
 /// The stages of a batch, as labelled in the metrics.
@@ -100,40 +114,66 @@ pub(crate) fn refresh_gauges(store: &Store, g: &Mutex<StoreGauges>) {
 pub(crate) fn run<R: Rules>(
     mut store: Store,
     mut rules: R,
-    rx: Receiver<Submission<R::Input, R::Output>>,
+    rx: Receiver<Msg<R::Input, R::Output>>,
+    wake: Sender<Msg<R::Input, R::Output>>,
     max_batch: usize,
     m: Arc<WriterMetrics>,
     gauges: Arc<Mutex<StoreGauges>>,
 ) -> Store
 where
-    R::Output: Clone,
+    R::Input: Send + 'static,
+    R::Output: Clone + Send + 'static,
 {
     refresh_gauges(&store, &gauges);
     let mut last_refresh = Instant::now();
     // The batch whose fsync is in flight, with its senders.  The next batch
     // is computed meanwhile, on an overlay that reads through it.
     let mut flight: Option<Flight<R::Output>> = None;
+    let mut closed = false;
     loop {
-        // Take what is waiting.  With nothing in flight, wait for one input;
-        // with a commit in flight and nothing waiting, finish it first so
-        // that its senders are not kept waiting for an input that may not come.
+        // True group commit: the next batch is whatever arrives while the
+        // previous fsync is in flight.  With nothing in flight, wait for one
+        // input; with a commit in flight, gather inputs until its fsync
+        // completes (or the batch is full).
         let mut subs = Vec::new();
-        if flight.is_none() {
-            match rx.recv() {
-                Ok(s) => subs.push(s),
-                Err(_) => break,
+        let take = |msg: Msg<R::Input, R::Output>, subs: &mut Vec<Submission<R::Input, R::Output>>, closed: &mut bool| match msg {
+            Msg::Input(s) => subs.push(s),
+            Msg::Durable => {}
+            Msg::Stop => *closed = true,
+        };
+        match flight.as_mut() {
+            None => {
+                if closed {
+                    break;
+                }
+                match rx.recv() {
+                    Ok(msg) => take(msg, &mut subs, &mut closed),
+                    Err(_) => closed = true,
+                }
+            }
+            Some(f) => {
+                while !closed && subs.len() < max_batch.max(1) && !f.inflight.is_durable() {
+                    match rx.recv() {
+                        Ok(msg) => take(msg, &mut subs, &mut closed),
+                        Err(_) => closed = true,
+                    }
+                }
             }
         }
         while subs.len() < max_batch.max(1) {
             match rx.try_recv() {
-                Ok(s) => subs.push(s),
+                Ok(msg) => take(msg, &mut subs, &mut closed),
                 Err(_) => break,
             }
         }
+        // The batch in flight is durable (or nothing arrived): apply it and
+        // answer its senders before computing the next one.
+        if let Some(f) = flight.as_mut()
+            && (subs.is_empty() || f.inflight.is_durable())
+        {
+            finish(&mut store, flight.take().unwrap(), &m);
+        }
         if subs.is_empty() {
-            if let Some(f) = flight.take() {
-                finish(&mut store, f, &m);
-            }
             continue;
         }
         let t0 = Instant::now();
@@ -164,7 +204,7 @@ where
             finish(&mut store, f, &m);
         }
         match computed {
-            Ok(outs) => match store.commit_start(b, &av2_facts::encode_all(&facts)) {
+            Ok(outs) => match store.commit_start_notify(b, &av2_facts::encode_all(&facts), Some(notify(&wake))) {
                 Ok(inflight) => flight = Some(Flight { inflight, meta, outs, started: t0 }),
                 Err(e) => {
                     for (_, reply) in meta {
@@ -206,6 +246,13 @@ where
     }
     refresh_gauges(&store, &gauges);
     store
+}
+
+fn notify<I: Send + 'static, O: Send + 'static>(wake: &Sender<Msg<I, O>>) -> av2_store::Notify {
+    let w = wake.clone();
+    Box::new(move || {
+        let _ = w.send(Msg::Durable);
+    })
 }
 
 struct Flight<O> {

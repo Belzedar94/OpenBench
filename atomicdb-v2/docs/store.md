@@ -92,15 +92,29 @@ fsync and applies. One commit is in flight at a time, frames stay in order,
 and nothing is applied before it is durable, so recovery is unchanged. The
 writer service (`av2-server`) and the crash test (odd trials) use it.
 
-**Segments** are 64 MiB, preallocated 4 MiB at a time so that most commits
-need only an `fdatasync` of data (no size change to journal). A zero frame
-header marks the end of the written part.
+**Segments** are 64 MiB files **written in place, never extended**: a
+background thread (`log::SegPool`) prepares each one by writing zeros over
+the whole file (recycling released segments when it can) and syncing it, so
+rolling over is a rename and a commit's `fdatasync` flushes data only. No
+size change, no block allocation, no unwritten-extent conversion for the
+filesystem to journal: on production's ext4 over md RAID1 that is the
+difference between 13.8 ms and 6.5 ms per `fdatasync` (phase 0,
+`v2-baseline.md`). `fallocate` alone would not do: it leaves unwritten
+extents whose conversion is journaled. A zero frame header marks the end of
+the written part. Without `prealloc` (tests, tools) segments are plain
+appended files.
 
-**Group commit** (`av2-server`'s writer; `av2_store::group::Writer` is the
-same without pipelining or metrics): one thread owns the store; inputs that
-arrived while the previous commit was in flight form the next batch (up to
-`max_batch`), the rules run once over all of them, one frame, one fsync. If
-the rules reject a batch of several inputs, each input is retried alone.
+**Group commit** (`av2-server`'s writer): one thread owns the store. While
+batch n's fsync is in flight it gathers whatever arrives; the sync thread
+wakes it the moment the fsync completes (a callback into the writer's
+channel: polling would cost a 15.6 ms timer tick on Windows); it applies n,
+answers n's senders, computes batch n+1 from everything gathered and starts
+its fsync. Batches therefore grow with the load and the latency of an input
+is at most about two fsyncs. If the batch fills up (`max_batch`) before the
+fsync completes, n+1 is computed on an overlay over n (the pipelined path
+above). If the rules reject a batch of several inputs, each is retried
+alone. `av2_store::group::Writer` is the same loop without the pipeline or
+the metrics, kept for tools.
 
 **Checkpoint** (own thread, `Shared::checkpoint`): read the applied sequence
 number `s`, then load the maps (in that order: maps published before frame
@@ -117,8 +131,10 @@ checkpoint slot records the generation: recovery maps that arena file.
 **Recovery** (`Store::open`): take the valid checkpoint slot with the highest
 generation; read the segments in order; replay every frame with a sequence
 number above the checkpoint, checking that sequence numbers are consecutive;
-cut the last segment at its first torn frame (only the last segment may have
-one: anywhere else it is corruption and opening fails); start a new segment.
+overwrite a torn frame at the end of the last segment with zeros and make
+that durable (only the last segment may end badly: anywhere else it is
+corruption and opening fails); resume writing in the last segment after its
+last valid frame.
 
 Why a page written early by the OS is harmless: nothing is applied to a map
 before its frame is durable, so any page on disk holds only committed bytes;
@@ -188,6 +204,22 @@ entry instead of naming the old region was not idempotent and hung recovery
 from an old checkpoint; it is kept as a test.
 
 ## 5. Readers
+
+### Read-path hints (Linux)
+Phase 0 measured the benchmark's mapped store reading at half the speed of
+the in-memory graph on the production box (level on Windows): page-table
+and TLB cost of 4 KiB file pages, and first-touch minor faults. The
+mappings take two hints from the environment so that they can be compared on
+that box without a rebuild: `AV2_MMAP_POPULATE=1` (`MAP_POPULATE`: page
+tables filled at open and after growth) and
+`AV2_MMAP_ADVICE=random|willneed|hugepage|sequential|normal` (`madvise`).
+`scripts/prod/run_core_prod.sh` runs the read benchmark with each; the
+result decides the default. Transparent huge pages do not apply to ext4
+file mappings, so if the hints do not close the gap the alternative is an
+anonymous in-memory copy of the hot columns (core, out, parent, key map)
+refreshed from the maps, which is a design change and a separate PR.
+
+### Lock-free reads
 
 `Reader::read(|view| ...)` runs the closure on the committed graph and
 repeats it if a batch was applied meanwhile (an epoch counter, odd during an
@@ -268,10 +300,71 @@ similar in shape, not identical (see notes).
 | Checkpoint of the 1.95M-position store after the runs | 310 ms (first manifest hashes everything) | 660 ms worst, on the writer thread | here on its own thread |
 | Online backup of the slice | 0.2 s | | |
 
+### 8.1 After the follow-ups (format 2, prepared segments, pipelining)
+
+Same machine and slice, while about ten other agents built on the tower
+(numbers move by 10 to 20% between runs; each line is one of two runs).
+"Full" landings write 20 to 38 positions with FENs, a 1.2 KB blob and a
+1.3 KB fact each; "lean" ones carry what the benchmark's did (no FEN, blob or
+fact). One fsync per commit; `--fsync-delay-ms 16` adds production's
+median fdatasync (phase 0) after each.
+
+| 32 landings per commit | searches/s | per commit (ms): rules+overlay / finalize / write / fsync (wait) / apply | frame |
+|---|---:|---|---:|
+| before (#340), full | 5,400 to 6,100 | 2.1 / 3.2 for finalize+write+fsync+apply together | 299 KB |
+| full | 8,104 | 1.10 / 0.31 / 0.07 (+0.31 growth) / 1.80 / 0.27 | 200 KB |
+| full, pipelined | **10,842 to 10,871** | 0.93 / 0.34 / 0.08 / 0.95 wait / 0.23 | 200 KB |
+| lean | 14,775 | 0.36 / 0.25 / 0.04 / 1.23 / 0.19 | 84 KB |
+| lean, pipelined | **15,372 to 17,324** | 0.44 / 0.26 / 0.04 / 0.84 wait / 0.21 | 84 KB |
+| benchmark `mmap` store, its own landings | 10,878 | | |
+| full, 16 ms fsync | 1,558 | p50 20 ms, p99 29 ms per commit | |
+| full, 16 ms fsync, pipelined | 1,646 | | |
+
+What changed in the commit path: redo records with varint headers (3,949
+records and 299 KB per commit became 2,100 and 200 KB), filter bits derived
+from insert records instead of logged 64-byte blocks, one run for the parent
+words of new positions, no FEN run without FENs, an allocation-free FEN
+check, a cheaper hash for the overlay's key map, no fsync on file growth,
+and the pipeline.
+
+Through the writer service (`av2-server`, group commit, stub landings,
+closed-loop clients each submitting when its previous landing is
+acknowledged):
+
+| fsync | clients | landings/s | mean batch | submit to visible |
+|---|---:|---:|---:|---|
+| tower (0.8 ms) | 1 | 1,130 | 1 | mean 0.9 ms |
+| tower | 32 | 6,353 | 16 | mean 5.0 ms, p99 <= 25 ms |
+| tower | 128 | 10,476 to 10,822 | 64 | mean 12 ms, p99 <= 100 ms |
+| +16 ms | 1 | 56 | 1 | mean 17.8 ms (one fsync) |
+| +16 ms | 16 | 429 | 8 | mean 37 ms |
+| +16 ms | 128 | 2,740 | 64 | mean 47 ms, p99 <= 100 ms |
+| +16 ms | 512 | 8,830 | 255 | mean 58 ms, p99 <= 250 ms |
+| +16 ms, open load 64/s (5x production's peak) | 64 at 1/s | 64 | 32 | mean 46 ms, p99 <= 250 ms |
+| +16 ms, open load 640/s | 64 at 10/s | 637 | 32 | mean 35 ms, p99 <= 100 ms |
+
+Closed-loop clients split into two groups that alternate between the batch
+in flight and the next one, hence a mean batch of half the clients and a
+latency of about two fsyncs; with 16 ms fsyncs the writer still takes 8,800
+landings a second, 680 times production's peak.
+
+Other numbers: explorer pages 10.1 M/s from 8 readers (8.8 M/s with the
+writer landing at full speed, p99 2.2 us); recovery of 5,000 frames (33 MB)
+194 ms; restart 13 ms (it reads the frames of the last segment and a 16 MiB
+window after them, not the whole 64 MiB); kill -9: **1,000 of 1,000 clean**
+with compaction at a small threshold and half the trials pipelined
+(recovery p50 62 ms, p99 99 ms), then 300 of 300 after the bounded read;
+archive: 194.7 MB of facts became 5.2 MB with the pure-Rust zstd encoder
+(about zstd level 1; the synthetic payloads repeat, real ones will compress
+less).
+
 ## 9. Not done here (and where it goes)
 
 - Compaction runs on the writer (section 4.3); fine at today's size, a
   background copy later if the stall matters.
+- Linux numbers for this PR's commit path and read hints: the script
+  `scripts/prod/run_core_prod.sh` is ready; the run on the production box is
+  the coordinator's call.
 - Restart time: 5 ms on a quiet store here; Linux numbers come from phase 0.
 - The relational projection (`meta.sqlite`) and the projector: phase 5.
 - The power-cut test has only been written, not run (needs the Linux box).

@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
-use writer::{Reply, StoreGauges, Submission, WriterMetrics};
+use writer::{Msg, Reply, StoreGauges, Submission, WriterMetrics};
 
 pub use writer::Ack;
 
@@ -42,7 +42,7 @@ impl Default for ServiceConfig {
 }
 
 pub struct Service<I, O> {
-    tx: Option<Sender<Submission<I, O>>>,
+    tx: Option<Sender<Msg<I, O>>>,
     handle: Option<JoinHandle<Store>>,
     reader: Reader,
     metrics: Arc<WriterMetrics>,
@@ -60,11 +60,12 @@ impl<I: Send + 'static, O: Send + Clone + 'static> Service<I, O> {
         let reader = store.reader();
         let metrics = Arc::new(WriterMetrics::default());
         let gauges = Arc::new(Mutex::new(StoreGauges::default()));
-        let (tx, rx) = mpsc::channel::<Submission<I, O>>();
+        let (tx, rx) = mpsc::channel::<Msg<I, O>>();
         let (m2, g2) = (metrics.clone(), gauges.clone());
         let max_batch = cfg.max_batch;
+        let wake = tx.clone();
         let handle =
-            std::thread::Builder::new().name("av2-writer".into()).spawn(move || writer::run(store, rules, rx, max_batch, m2, g2))?;
+            std::thread::Builder::new().name("av2-writer".into()).spawn(move || writer::run(store, rules, rx, wake, max_batch, m2, g2))?;
         let svc = Arc::new(Service {
             tx: Some(tx),
             handle: Some(handle),
@@ -96,7 +97,7 @@ impl<I: Send + 'static, O: Send + Clone + 'static> Service<I, O> {
         self.metrics.queue_depth.fetch_add(1, Ordering::Relaxed);
         match &self.tx {
             Some(tx) => {
-                if let Err(mpsc::SendError(s)) = tx.send(Submission { input, enqueued: Instant::now(), reply }) {
+                if let Err(mpsc::SendError(Msg::Input(s))) = tx.send(Msg::Input(Submission { input, enqueued: Instant::now(), reply })) {
                     self.metrics.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     let _ = s.reply.send(Err("writer stopped".into()));
                 }
@@ -206,14 +207,18 @@ impl<I: Send + 'static, O: Send + Clone + 'static> Service<I, O> {
     /// Stop taking inputs, drain the queue, return the store.
     pub fn shutdown(self: Arc<Self>) -> Option<Store> {
         let mut s = Arc::try_unwrap(self).ok()?;
-        s.tx = None;
+        if let Some(tx) = s.tx.take() {
+            let _ = tx.send(Msg::Stop);
+        }
         s.handle.take().and_then(|h| h.join().ok())
     }
 }
 
 impl<I, O> Drop for Service<I, O> {
     fn drop(&mut self) {
-        self.tx = None;
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Msg::Stop);
+        }
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }

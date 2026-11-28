@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! av2-server --db DIR [--create] [--listen 127.0.0.1:9187] [--max-batch 256]
-//!            [--bench-secs S --clients C [--rate R]] [--serve]
+//!            [--bench-secs S --clients C [--rate R]] [--fsync-delay-ms D] [--serve]
 //! ```
 //!
 //! Without `--bench-secs` it serves `/metrics` until killed.  With it, `C`
@@ -29,7 +29,11 @@ fn flag(name: &str) -> bool {
 
 fn main() {
     let db = std::path::PathBuf::from(arg("--db").expect("--db DIR"));
-    let cfg = Config::default();
+    let cfg = Config {
+        // Simulation of a slower disk (production: 16 ms per fdatasync).
+        fsync_delay: Duration::from_secs_f64(arg("--fsync-delay-ms").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1e3),
+        ..Config::default()
+    };
     let store = if flag("--create") && !db.join("graph").join("ctl").exists() { Store::create(&db, cfg) } else { Store::open(&db, cfg) }
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -81,7 +85,8 @@ fn main() {
             .map(|(s, h)| format!("\"{s}\":{:.3}", if h.count() > 0 { h.sum() / h.count() as f64 * 1e3 } else { 0.0 }))
             .collect();
         println!(
-            "{{\"stage\":\"service_bench\",\"clients\":{clients},\"rate_per_client\":{rate},\"secs\":{el:.1},\"inputs\":{},\"inputs_per_sec\":{:.0},\"batches\":{},\"mean_batch\":{:.1},\"submit_to_visible_ms\":{{\"p50_le\":{},\"p99_le\":{},\"mean\":{:.3}}},\"stage_mean_ms\":{{{}}}}}",
+            "{{\"stage\":\"service_bench\",\"fsync_delay_ms\":{},\"clients\":{clients},\"rate_per_client\":{rate},\"secs\":{el:.1},\"inputs\":{},\"inputs_per_sec\":{:.0},\"batches\":{},\"mean_batch\":{:.1},\"submit_to_visible_ms\":{{\"p50_le\":{},\"p99_le\":{},\"mean\":{:.3}}},\"stage_mean_ms\":{{{}}}}}",
+            arg("--fsync-delay-ms").unwrap_or_else(|| "0".into()),
             done.load(Ordering::Relaxed),
             done.load(Ordering::Relaxed) as f64 / el,
             m.batches.get(),
