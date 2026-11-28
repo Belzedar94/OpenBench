@@ -1,0 +1,20 @@
+[package]
+name = "av2-store"
+description = "AtomicDB v2 storage core: mapped column files, redo log, group commit, checkpoint, recovery, backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+av2-model.workspace = true
+av2-rules.workspace = true
+av2-facts.workspace = true
+arc-swap.workspace = true
+crc32fast.workspace = true
+memmap2.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

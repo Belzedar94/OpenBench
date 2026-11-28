@@ -1,0 +1,243 @@
+# AtomicDB v2 storage core (`av2-store`)
+
+Phase 1 of `docs/atomicdb/v2-plan.md` (sections 3.2 to 3.5). This file
+records the design decisions taken inside the storage layer, why, and what
+was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
+
+## 1. What the store guarantees
+
+1. **Durable before visible.** A batch is acknowledged only after its frame
+   (facts + redo records) is on disk (`fdatasync`), and no byte of the
+   mapped files changes before that. An acknowledged batch survives a
+   process kill; whether it survives a power cut is what the power-cut test
+   (section 7) checks.
+2. **Atomic batches.** Recovery replays whole frames; a frame that is
+   incomplete or fails its CRC is a torn tail and is discarded. Readers see
+   either all of a batch or none of it.
+3. **Replay over any newer state gives the same result.** The checkpoint
+   only promises that the files are *at least* at its sequence number; they
+   may hold any later frame too (the OS writes pages when it likes, and
+   after a kill the page cache holds everything). Every redo record is
+   idempotent and replays correctly over a state that is already ahead of
+   it. The test `replay_over_a_state_ahead_of_the_checkpoint` exists because
+   a first version of the key-map rebuild record broke this property and
+   hung recovery (section 4.4).
+4. **The log alone rebuilds every change since a checkpoint**, including
+   rebuilt key-map shards, so a copy of the files taken while the writer runs
+   plus the log from the copy's checkpoint is a valid store (backups).
+5. **Lock-free readers.** Readers in other threads never block the writer
+   and are never blocked by it, except for the microseconds of a batch apply,
+   during which they retry.
+
+## 2. Files
+
+```
+<store>/graph/ctl            4 KiB: magic, format version, shard bits, counters
+              core.col       32 B per position   (av2_model::Core)
+              ext.col        64 B per ext record (av2_model::Ext), arena indexed from core
+              out.col         5 B per position   offset+1 of its out-edge block
+              parent.col      5 B per position   parent id+1, or LIST|head of a parent list
+              fen.col        36 B per position   packed canonical FEN (or a blob reference)
+              out.arena      blocks [count u16][child u40 + move u16]*, append-only
+              inx.arena      parent-list cells [parent u40][next u40], append-only
+              blob.arena     [len u32][bytes], append-only (analysis JSON, witness lines, odd FENs)
+              keymap.dir     2^shard_bits entries [region u64][slots u32][count u32]
+              keymap.arena   shard regions [Bloom filter][slots of 17 B], append-only
+              ckpt           two checkpoint slots (generation, sequence, CRC)
+              manifest       page checksums of the last checkpoint
+<store>/log/NNNNNNNNNNNNNNNN.seg     frames, named by the first sequence number
+<store>/archive/NNNN....seg          released segments, facts only (no redo)
+```
+
+All integers are little-endian at fixed offsets; ids are 40 bits on disk
+(`av2_model::id`). Every file grows on demand by at least half its size;
+growing maps the file again and publishes the new mapping to readers
+(`arc_swap`), while readers that still hold the old mapping keep reading a
+valid prefix.
+
+### Differences from the plan's sketch (section 3.2)
+
+| Plan | Here | Why |
+|---|---|---|
+| core 20 B | **32 B** | The 48-bit `version` (plan 2.2 point 4) does not fit in 20 B with the other fields; 5 bytes are kept free for the rules port. 12 B more per position. |
+| ext 48 B | **64 B** | Exact counters (nodes, backed nodes, time, depth, visits, campaign) and three blob references (`last_analysis`, `analysis_passes`, `won_line`). 4 B are reserved for the showcase bound (`TODO(rules)`). Only 17.7% of positions have one in the production slice. |
+| key map 96-bit fingerprint -> id, open addressing | same, **sharded** (4096 shards by default), 17 B slots | One table cannot be resized without rewriting all of it; a shard is rebuilt alone (section 4). |
+| Bloom filter 10 bits per position | same, **one blocked filter per shard** (6 probes in one cache line) | The filter is rebuilt with its shard. |
+| fen.col ~28 B packed | **36 B**, packed only when unpacking gives back the same string, else a blob | No chess rules in the store; exactness by construction. |
+| `analysis.log` | `blob.arena` | One arena for all immutable blobs. |
+| parents: 10 B per *extra* parent | **10 B per parent once a position has two or more** | `parent.col` holds one value: a parent, or the head of a list that then holds all of them. |
+
+## 3. Commit, apply, checkpoint, recovery
+
+**Commit** (`Store::commit`): the writer's `Batch` (an overlay on the
+committed state, `GraphRead`/`GraphWrite`) is turned into redo records in a
+deterministic order (`Batch::finalize`), files are grown if needed, one frame
+is appended to the current segment, `fdatasync`, then the records are applied
+to the maps between two increments of the epoch, then the batch is
+acknowledged.
+
+**Frame**: `[len u32][crc32 u32][seq u64][facts_len u32][facts][redo]*`,
+redo = `[file u8][offset u64][len u32][bytes]`, plus one logical record
+(file id `0x80`) for key-map shard rebuilds.
+
+**Segments** are 64 MiB, preallocated 4 MiB at a time so that most commits
+need only an `fdatasync` of data (no size change to journal). A zero frame
+header marks the end of the written part.
+
+**Group commit** (`group::Writer`): one thread owns the store; inputs that
+arrived while the previous commit was in flight form the next batch (up to
+`max_batch`), the rules run once over all of them, one frame, one fsync. If
+the rules reject a batch of several inputs, each input is retried alone.
+
+**Checkpoint** (own thread, `Shared::checkpoint`): read the applied sequence
+number `s`, then load the maps (in that order: maps published before frame
+`s` was applied cover every file length it needs), flush every map and
+`fdatasync` every file, write the page manifest, write the checkpoint slot
+`(generation+1, s)` and fsync it, then release the segments whose frames are
+all `<= s`. The writer does not wait for any of it. Released segments are
+rewritten without their redo records into `archive/` (the facts are the
+system of record) unless the store is configured to delete them.
+
+**Recovery** (`Store::open`): take the valid checkpoint slot with the highest
+generation; read the segments in order; replay every frame with a sequence
+number above the checkpoint, checking that sequence numbers are consecutive;
+cut the last segment at its first torn frame (only the last segment may have
+one: anywhere else it is corruption and opening fails); start a new segment.
+
+Why a page written early by the OS is harmless: nothing is applied to a map
+before its frame is durable, so any page on disk holds only committed bytes;
+recovery rewrites every byte that frames after the checkpoint touched.
+Why a torn page write is harmless: a page that is half old and half new
+differs from the correct page only in bytes some frame after the checkpoint
+wrote, and those are rewritten by replay; bytes no such frame touched are the
+same in the old and the new version. (Silent corruption, where a device
+returns bytes nobody wrote, is what the page checksums are for.)
+
+## 4. Key map
+
+### 4.1 Variant chosen
+Sharded open addressing: `2^shard_bits` shards (12 by default), shard =
+top bits of the fingerprint, slot = next bits (multiply-shift), linear
+probing; slot = 12 B fingerprint + 5 B id+1. A blocked Bloom filter per
+shard (10 bits per key at maximal load, 6 probes in one 64-byte block)
+answers most lookups of positions that do not exist yet (almost every lookup
+an expansion makes) without touching the slots.
+
+### 4.2 Growth
+A shard is rebuilt when an insert would push it past 3/4 load, into a fresh
+region at the tail of `keymap.arena` with slots for 3/8 load (doubling, so
+the cost per insert stays constant). The bulk loader builds shards at 0.6
+load, so the first wave of rebuilds comes after +25% growth (about a week at
+today's 7M positions a day on 200M; the wave logs only one small record per
+shard, section 4.4).
+
+### 4.3 What it costs and what is left
+The arena is append-only: a rebuilt shard's old region becomes garbage.
+Steady state is between 17/0.75 and 17/0.375 bytes of live slots per
+position (23 to 45 B), plus up to as much garbage between compactions.
+Measured on the production slice: 30 B per position after the load, 46 B
+after +25% growth in one go (every shard rebuilt once). **Not done in this
+PR: compaction** (rewrite the live regions into a new arena when garbage
+exceeds live, as a background task with a switch record). The plan's open
+question 4 (sorted base + small delta) remains the alternative if the
+measured write volume on the Linux box says so.
+
+### 4.4 The rebuild record
+A shard rebuild is logged as one logical record
+`(shard, old region, old slots, old count, new region, new slots)`, not as the
+bytes of the new region: replay recomputes the new region from the old one.
+The old region is never written again after the rebuild (the arena is
+append-only), so the record replays to the same bytes even over a state that
+is already ahead of it. A first version that read the *current* directory
+entry instead of naming the old region was not idempotent and hung recovery
+from an old checkpoint; it is kept as a test.
+
+## 5. Readers
+
+`Reader::read(|view| ...)` runs the closure on the committed graph and
+repeats it if a batch was applied meanwhile (an epoch counter, odd during an
+apply: a seqlock over the whole batch). Every read is bounds-checked against
+the mapping it uses, so a racing read can see stale bytes but never fault.
+The closure must have no side effects other than building its result.
+
+## 6. Page checksums, scrubber, backup
+
+**Manifest**: at each checkpoint (every `manifest_every` checkpoints), the
+xxh3 of every 1 MiB chunk of the live part of every file, for chunks no batch
+touched after the checkpoint's sequence number (the writer marks the chunks a
+frame touches *before* applying it; the checkpoint re-checks after hashing).
+Unchanged chunks keep their previous checksum. **Scrubber**
+(`Store::scrub`, `av2-check --scrub`): recompute every chunk the manifest
+covers and nothing touched since; a mismatch is a page that changed without
+a frame. On the first full manifest of a 200M store this is about 15 GB of
+hashing on the checkpoint thread (seconds); afterwards only changed chunks.
+
+**Backup while running** (`Store::backup`, `BackupHandle`): checkpoint (by
+asking the checkpoint thread, so as not to starve behind it), pin the log
+from that sequence number, copy the live prefix of every graph file, write a
+checkpoint record for the copy, copy the log segments that may hold later
+frames, unpin. Opening the copy replays that log: restore is recovery.
+Tested while a writer commits (`backup_while_running_restores_to_a_committed_state`).
+`av2-perf` copies the 1.56M-position slice this way in 0.2 s.
+
+## 7. Crash and power-cut tests
+
+**kill -9** (`av2-crashtest`, CI runs 60 trials on Linux): a child commits
+synthetic batches (a pure function of the graph and the sequence number:
+positions with FENs, edges, transpositions, value rewrites, ext records,
+blobs) and prints `ACK n` after each durable commit; the parent kills it
+(`TerminateProcess` / `SIGKILL`) at a random moment after its first
+acknowledgement, or (20% of trials) a few milliseconds after start, which
+lands in recovery; reopens the store; checks that no acknowledged batch is
+missing and that at most the one in flight was added; and compares the
+digest of the whole state (`digest::digest`: records, edges, parents, FENs,
+blob contents, key map) with an **independent in-memory model**
+(`mem::MemGraph`) that applied exactly the recovered number of batches.
+Segments of 256 KiB, a checkpoint every 512 KiB of log, 8 key-map shards and
+a 2,048-position initial capacity make kills land in segment rolls,
+checkpoints, archive rewrites, shard rebuilds and file growth.
+
+**Power cut** cannot be simulated on this Windows tower. The script
+`scripts/powercut/dm-log-writes.sh` does it on Linux the way fstests
+generic/482 does: the store runs on a filesystem on a `dm-log-writes`
+device, every acknowledgement is marked in the write log, then `replay-log`
+rebuilds the device at every mark and at random write entries in between
+(states a power cut can leave, torn writes included), and
+`av2-crashtest --verify` checks each image: recovery succeeds, the
+acknowledged batch is there, the state equals the model. Phase 0/1 runs it
+on the Linux box (ext4 and xfs) before the gate.
+
+## 8. Measurements
+
+Windows 10, Ryzen 9 5950X, 1 TB NVMe, release build, one fsync per commit;
+the production slice of the benchmark (1,560,369 positions and 1,994,101
+edges around the root, exported read-only on 27-Nov-2026). The plan's
+benchmark numbers are for the same slice and machine; its workloads are
+similar in shape, not identical (see notes).
+
+| | v2 store (this PR) | benchmark `mmap` store | note |
+|---|---:|---:|---|
+| Load from CSV | **3.4 s** | | CSV parsing dominates (key pass 0.5 s, edges 0.9 s, positions 1.5 s) |
+| Field-by-field check against the export | 1,560,369 rows, **0 differences**; 1,994,101 edges, 0 missing | | every v1 column of the export, counts by status/closure/proof equal |
+| Bytes per position after load | **133.6** (97.6 without the FEN column) | 81 | 32 core, 11.3 ext, 5 out, 5 parent, 36 FEN, 9.1 edges, 5.2 parent lists, 30.0 key map; the benchmark stored no FEN and had 32-bit ids and 16 B key slots |
+| Landing, 1 per commit | **1,020 to 1,054 /s**, p50 0.83 ms, p99 2.4 ms | 1,130 /s | fsync 0.78 ms mean |
+| Landings, 32 per commit | **6,024 to 6,238 /s**, p50 5.0 ms | 10,878 /s | 2.1 ms of the 5.1 ms is building the synthetic batch (FEN generation and packing); every landing writes 20 to 38 positions with FENs, a 1.2 KB blob and a 1.3 KB fact; the key-map rebuild wave (section 4.2) is inside this run |
+| Climbs, 32 per commit | 38,100 /s | 23,297 /s (re-searches) | different stand-in rules |
+| Explorer page, 1 reader | 1.59 M/s, p99 1.4 us | | key lookup, record, moves and their records, parents; 70% interior |
+| Explorer page, 8 readers | 10.9 M/s, p99 1.7 us | | |
+| Explorer page, 8 readers, writer landing at full speed | **10.0 M/s, p99 1.9 us**, writer 996 /s | 3.98 M/s, p99 4 us | |
+| Restart after clean close | 35 ms | 1 ms | 11 files mapped, segment scan; not investigated yet |
+| Recovery, 5,000 frames (49 MB) to replay | **140 to 148 ms** | 102 to 343 ms (256 MB) | |
+| Recovery after kill -9 (crash test) | see the PR | 58 ms median | |
+| Checkpoint of the 1.95M-position store after the runs | 310 ms (first manifest hashes everything) | 660 ms worst, on the writer thread | here on its own thread |
+| Online backup of the slice | 0.2 s | | |
+
+## 9. Not done here (and where it goes)
+
+- Key-map compaction (section 4.3).
+- zstd compression of `archive/` (restic compresses the backup anyway; the
+  archive format is the log's, so compressing it later changes nothing else).
+- Restart time on Windows (35 ms) not investigated; Linux numbers come from
+  phase 0.
+- The relational projection (`meta.sqlite`) and the projector: phase 5.
+- The power-cut test has only been written, not run (needs the Linux box).
