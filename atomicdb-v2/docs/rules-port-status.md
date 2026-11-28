@@ -98,7 +98,17 @@ coverage arm or the drainer: they come with stage (a) and the queue model.
 
 - A `MATE_PV` row with no `won_line` (historic rows) stands on its stored
   `mate_in` as its own witness (DTM-4.1), so whatever number it first takes
-  stays: the fixed point depends on visit order.
+  stays: the fixed point depends on visit order.  **Counted on production
+  (28-Nov, read-only, `TABLESAMPLE SYSTEM (1)`, 2,074,102 rows sampled):
+  0 of 454,878 sampled `MATE_PV` rows lack a `won_line`** (a 0.2% sample
+  with another seed: 0 of 88,794).  With 95% confidence fewer than 7 in a
+  million `MATE_PV` rows (under ~300 of ~45M) are such rows: the quirk is
+  ported but has no data to act on.
+- The witness of a new closure (CAS-1.3) is order-dependent when no distance
+  names one; owner decision 28-Nov: **keep the exact port**.  Post-port
+  simplification to list: recompute the witness on every visit of a decided
+  row (first verified winning child by move, else first winning child),
+  which makes `best_move` order-independent too.
 - A `MINIMAX` row whose stored slack, grade or distance disagrees with its
   children changes when visited; a parent visited before reads the old
   value (and may close through it), one visited after reads the new one.
@@ -166,8 +176,17 @@ coverage arm or the drainer: they come with stage (a) and the queue model.
 
 ## Hooks left for the next steps
 
-- **Step 10 (proof numbers)**: `Effects::proof_refresh(seeds + changed)` is
-  called at the end of every cascade (PN-8.1).
+- **Step 10 (proof numbers)**: wired.  `Effects::proof_refresh(seeds +
+  changed)` is called at the end of every cascade (PN-8.1); `proofs::ProofCalls`
+  wraps the batch's effect sink, collects the calls in order (plus
+  `ProofCalls::landing` for PN-8.4) and the writer replays them after the
+  commit with `av2_proof::Proofs::after_batch(&committed, &calls, seq, now)`
+  (gate-off numbers, `RefreshConfig::default()`).  `tests/proofs.rs`: a
+  closure reaches the root's numbers; the property test
+  `replay_after_commit_equals_inline` (200 cases) shows that replaying after
+  the batch equals refreshing right after the cascade.  `av2-rules` links
+  `av2-proof` for tests only (the proof crate's bench feature depends on
+  `av2-tools`, which depends on `av2-rules`).
 - **Steps 11 to 14 (loops)**: implement `loops::LoopRules`: `begin_ascent`,
   `wrote` (the spine cache), `mark_returning` (LOOP-1.1, sets `cycles` and
   the `elsewhere` pairs), `value_returning` (LOOP-2.1), `open_pointer_loops`

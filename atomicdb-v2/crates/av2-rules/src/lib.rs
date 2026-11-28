@@ -47,6 +47,7 @@ pub mod distance;
 pub mod effects;
 pub mod exact;
 pub mod loops;
+pub mod proofs;
 pub mod purchase;
 pub mod read;
 pub mod testkit;
