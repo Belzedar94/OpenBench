@@ -155,7 +155,13 @@ fn main() {
         }
 
         // ---------------- selector: descents and minting plans (PRI-4.4)
-        let env = GraphEnv { graph: view, priority: Some(&stored) };
+        // Without --pos-csv: the loader's v1prio.col.
+        let file = V1Priority::open(&dir).expect("v1prio.col");
+        if stored.is_empty() {
+            println!("{{\"stage\":\"stored_priority_file\",\"non_zero\":{}}}", file.non_zero());
+        }
+        let prio: &dyn StoredPriority = if stored.is_empty() { &file } else { &stored };
+        let env = GraphEnv { graph: view, priority: Some(prio) };
         let descent = GreedyDescent { g: view, root, max_plies: 64 };
         let avoid = BTreeSet::new();
         let t = Instant::now();

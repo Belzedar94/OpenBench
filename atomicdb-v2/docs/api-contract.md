@@ -223,6 +223,7 @@ Errors, checked in this order:
 |---|---|---|
 | 403 | `{"error": "bad credentials"}` | 1.2 |
 | 400 | `{"error": "max_budget must be a positive whole number of nodes"}` | `max_budget` present and not a positive integer (checked before anything is written) |
+| 400 | `{"error": "upgrade-required"}` | **v2 only (D8, section 10):** `worker_build` below 2026072203 or absent; checked after `max_budget`, nothing is written |
 
 Note: `api/lease` does **not** check the method; a GET runs the same code
 with an empty form and is answered 403.
@@ -791,7 +792,11 @@ AV2_PW=... cargo run -p av2-compat -- worker --base-url http://127.0.0.1:8000 --
 
 ## 10. Listed semantic decisions (allowed differences)
 
-None yet. A difference that an owner decision (plan section 11, D1-D11)
+| Decision | Endpoint | v1 | v2 |
+|---|---|---|---|
+| D8 (drop workers without lease tokens, owner 28-Nov) | `POST /atomicdb/api/lease` | a build older than 2026072203 (or no `worker_build`) gets a lease with `lease_token: ""` | `400 {"error": "upgrade-required"}`, nothing leased, no `WorkerPing` written; heartbeat, submit and release need the exact non-empty token (no tokenless allowance). Scenario `upgrade-required` (`av2-compat worker --decision-d8`). A 4xx is definitive for the worker: an old build stops instead of retrying. |
+
+A difference that an owner decision (plan section 11, D1-D11)
 makes intentional is added to `normalize.json` under `decisions` with the
 decision id, the endpoint and the path, and announced on Discord before the
 cut-over (as agreed after #222).

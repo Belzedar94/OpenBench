@@ -91,13 +91,61 @@ pub trait QueueEnv {
     fn computed_priority(&self, _pos: u64) -> Option<f64> {
         None
     }
+    /// The bought and searched rungs of the task rows folded out of the
+    /// queue (ext `ladder_bought`/`ladder_searched`, Q-6.2).
+    fn ladder(&self, _pos: u64) -> crate::state::Ladder {
+        crate::state::Ladder::default()
+    }
+}
+
+/// Where v1's stored priority comes from (`QueueEnv::queue_rank`).
+pub trait StoredPriority {
+    fn get(&self, pos: u64) -> f64;
+}
+
+impl StoredPriority for std::collections::HashMap<u64, f64> {
+    fn get(&self, pos: u64) -> f64 {
+        std::collections::HashMap::get(self, &pos).copied().unwrap_or(0.0)
+    }
+}
+
+/// The read-only `<store>/v1prio.col` written by `av2-load`
+/// (`av2_model::record::V1PRIO_FILE`): f64 LE per position id.
+pub struct V1Priority {
+    map: Option<memmap2::Mmap>,
+}
+
+impl V1Priority {
+    /// Open `<store_dir>/v1prio.col`; a store without one reads 0.0 everywhere.
+    pub fn open(store_dir: &std::path::Path) -> std::io::Result<V1Priority> {
+        let path = store_dir.join(av2_model::record::V1PRIO_FILE);
+        if !path.exists() {
+            return Ok(V1Priority { map: None });
+        }
+        let f = std::fs::File::open(path)?;
+        // SAFETY: written once by the loader, never modified afterwards.
+        let map = unsafe { memmap2::Mmap::map(&f)? };
+        Ok(V1Priority { map: Some(map) })
+    }
+    /// Positions with a non-zero stored value.
+    pub fn non_zero(&self) -> usize {
+        self.map.as_ref().map(|m| m.chunks_exact(8).filter(|c| *c != [0u8; 8]).count()).unwrap_or(0)
+    }
+}
+
+impl StoredPriority for V1Priority {
+    fn get(&self, pos: u64) -> f64 {
+        let Some(m) = &self.map else { return 0.0 };
+        let at = pos as usize * 8;
+        m.get(at..at + 8).map(|b| f64::from_le_bytes(b.try_into().unwrap())).unwrap_or(0.0)
+    }
 }
 
 /// A [`QueueEnv`] over a graph, with optional overrides for the two values
 /// the graph does not hold (server tables, imported priority).
 pub struct GraphEnv<'a, G: GraphRead + ?Sized> {
     pub graph: &'a G,
-    pub priority: Option<&'a std::collections::HashMap<u64, f64>>,
+    pub priority: Option<&'a dyn StoredPriority>,
 }
 
 impl<'a, G: GraphRead + ?Sized> GraphEnv<'a, G> {
@@ -209,7 +257,14 @@ impl<G: GraphRead + ?Sized> QueueEnv for GraphEnv<'_, G> {
     }
 
     fn queue_rank(&self, pos: u64) -> f64 {
-        self.priority.and_then(|m| m.get(&pos).copied()).unwrap_or(0.0)
+        self.priority.map(|p| p.get(pos)).unwrap_or(0.0)
+    }
+
+    fn ladder(&self, pos: u64) -> crate::state::Ladder {
+        if pos >= self.graph.len() {
+            return crate::state::Ladder::default();
+        }
+        self.graph.ext(PosId(pos)).map(|e| crate::state::Ladder::from_ext(&e)).unwrap_or_default()
     }
 }
 
@@ -221,6 +276,8 @@ pub struct MemEnv {
     pub edges: std::collections::BTreeMap<u64, Vec<(String, u64)>>,
     pub tables: std::collections::BTreeSet<u64>,
     pub priority: std::collections::BTreeMap<u64, f64>,
+    /// The ext ladder fields (`Applied::ladder` writes land here in tests).
+    pub ladders: std::collections::BTreeMap<u64, crate::state::Ladder>,
 }
 
 impl MemEnv {
@@ -265,5 +322,8 @@ impl QueueEnv for MemEnv {
     }
     fn queue_rank(&self, pos: u64) -> f64 {
         self.priority.get(&pos).copied().unwrap_or(0.0)
+    }
+    fn ladder(&self, pos: u64) -> crate::state::Ladder {
+        self.ladders.get(&pos).copied().unwrap_or_default()
     }
 }

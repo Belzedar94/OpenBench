@@ -85,6 +85,10 @@ impl H {
     pub fn apply(&mut self, input: Input) -> Applied {
         let before = self.q.clone();
         let applied = self.q.apply(&input, &self.env, self.refill.as_mut());
+        // The writer puts the folded ladders into the ext records.
+        for (pos, l) in &applied.ladder {
+            self.env.ladders.insert(*pos, *l);
+        }
         self.q.check_invariants().unwrap_or_else(|e| panic!("invariant after {input:?}: {e}"));
         let mut rebuilt = before;
         rebuilt.apply_deltas(&applied.deltas);

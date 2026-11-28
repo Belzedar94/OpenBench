@@ -7,7 +7,8 @@ use av2_model::record::{CORE_SIZE, EXT_SIZE};
 /// Magic at the start of `ctl`: "AV2GRAPH".
 pub const MAGIC: u64 = 0x4850_4152_4732_5641;
 /// Format version of the files in `graph/`.  Bump on any layout change.
-pub const FORMAT_VERSION: u64 = 3;
+/// 4: the ext record grew to 72 bytes (the queue's two ladder fields).
+pub const FORMAT_VERSION: u64 = 4;
 
 pub type FileId = u8;
 pub const F_CTL: FileId = 0;

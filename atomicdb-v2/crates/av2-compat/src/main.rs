@@ -39,6 +39,7 @@ USAGE
         --machine-prefix P   machine names are P-<scenario> (default av2-compat)
         --worker-build N     (default 2026112501)
         --gate-enforced      the server enforces the engine gate: run engine-not-accepted
+        --decision-d8        the server applies owner decision D8: run upgrade-required
         --engine-sha HEX     engine_sha of every normal submit (a reference binary when the gate is on)
         --only NAME          only this scenario (repeatable)
         --transcript PATH    every call as JSON lines (password and tokens redacted)
@@ -53,7 +54,7 @@ struct Args {
 
 impl Args {
     fn parse(raw: &[String]) -> Result<Args, String> {
-        const FLAGS: &[&str] = &["--strict-order", "--bytes", "--through-nginx", "--gate-enforced"];
+        const FLAGS: &[&str] = &["--strict-order", "--bytes", "--through-nginx", "--gate-enforced", "--decision-d8"];
         let mut values: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut flags = Vec::new();
         let mut i = 0;
@@ -269,6 +270,7 @@ fn cmd_worker(args: &Args) -> Result<bool, String> {
         machine_prefix: args.one("--machine-prefix").unwrap_or("av2-compat").to_string(),
         worker_build: args.number("--worker-build", 2026112501)?,
         gate_enforced: args.flag("--gate-enforced"),
+        decision_d8: args.flag("--decision-d8"),
         engine_sha: args.one("--engine-sha").unwrap_or("").to_ascii_lowercase(),
     };
     let mut transport = HttpTransport::new(base, args.number("--rate", 0.0)?, Duration::from_secs(120));

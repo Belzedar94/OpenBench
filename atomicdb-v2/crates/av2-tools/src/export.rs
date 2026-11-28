@@ -134,6 +134,9 @@ pub fn parse_position(c: &Cols, r: &StringRecord) -> Result<PosRow, String> {
         depth_invested: int(c.get(r, "depth_invested"), "depth_invested", 0i32)?,
         visits: int(c.get(r, "visits"), "visits", 0i32)?,
         campaign: int(c.get(r, "campaign_id"), "campaign_id", 0u32)?,
+        // The queue's ladder of the rows it does not import (export.sql).
+        ladder_bought: Ext::ladder_units(int(c.get(r, "ladder_bought"), "ladder_bought", 0u64)?),
+        ladder_searched: Ext::ladder_units(int(c.get(r, "ladder_searched"), "ladder_searched", 0u64)?),
         ..Ext::default()
     };
     Ok(PosRow {
@@ -145,6 +148,16 @@ pub fn parse_position(c: &Cols, r: &StringRecord) -> Result<PosRow, String> {
         passes: opt_text(c.get(r, "analysis_passes")).filter(|p| p != "[]"),
         won_line: opt_text(c.get(r, "won_line")),
     })
+}
+
+/// The v1 stored `priority` of a position row (0.0 when the column is
+/// absent or NULL).  Not part of the graph (D5): the loader writes it to
+/// the read-only `v1prio.col` the queue orders AUTO/FILL leases by.
+pub fn v1_priority(c: &Cols, r: &StringRecord) -> Result<f64, String> {
+    match c.get(r, "priority") {
+        None | Some("") => Ok(0.0),
+        Some(v) => v.parse().map_err(|_| format!("priority: {v:?}")),
+    }
 }
 
 /// One edge row: `(edge id, parent fingerprint, move, child fingerprint)`.
