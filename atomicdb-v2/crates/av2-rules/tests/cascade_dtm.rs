@@ -358,7 +358,7 @@ fn the_parent_follows_a_child_that_corrected_upwards() {
     f.cascade(&[child]);
     assert_eq!(mate(&f, parent), Some(5));
     assert_eq!(best(&f, parent), "f3e5");
-    assert_eq!((mate(&f, parent).unwrap() + 1) / 2, 3);
+    assert_eq!(mate(&f, parent).unwrap().div_ceil(2), 3);
 }
 
 /// test_mate_distance.py::ReportedShapeTests::test_the_parent_still_shortens_when_a_child_improves

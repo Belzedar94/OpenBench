@@ -1,0 +1,9 @@
+# Pinned so that a new stable (new clippy lints) cannot turn CI red overnight.
+# Bump deliberately, together with whatever the new lints ask for.
+[toolchain]
+channel = "1.100.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+# The musl target builds the static Linux binaries for the production box;
+# wasm32 is for the site's islands (av2-web).
+targets = ["x86_64-unknown-linux-musl", "wasm32-unknown-unknown"]

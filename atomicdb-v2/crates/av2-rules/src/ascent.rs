@@ -31,7 +31,7 @@ use av2_model::{Edge, GraphRead, GraphWrite, Move, PosId, Status};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The arguments of `backup_backed_evals` besides the seeds.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AscentOpts {
     /// `max_plies` (default `RulesConfig::backed_max_plies`).
     pub max_plies: Option<u64>,
@@ -39,12 +39,6 @@ pub struct AscentOpts {
     pub open_only: bool,
     /// `generation`: how many times a cut frontier has been carried (BKD-9).
     pub generation: u32,
-}
-
-impl Default for AscentOpts {
-    fn default() -> Self {
-        AscentOpts { max_plies: None, open_only: false, generation: 0 }
-    }
 }
 
 /// How an ascent ended (v1's `report` dict).
@@ -177,10 +171,12 @@ pub fn rows_that_wait(
         if !changed.contains(&r.id) || mv.is_none() || ruled.contains(&r.id) {
             continue;
         }
-        if let Some(c) = children.get(&r.id).and_then(|ks| ks.iter().find(|c| c.mv == mv)) {
-            if moved.contains(&c.id) && !c.cycles && !c.returns {
-                stands_on.insert(r.id, c.id);
-            }
+        if let Some(c) = children.get(&r.id).and_then(|ks| ks.iter().find(|c| c.mv == mv))
+            && moved.contains(&c.id)
+            && !c.cycles
+            && !c.returns
+        {
+            stands_on.insert(r.id, c.id);
         }
     }
     let mut writes: HashMap<PosId, bool> = HashMap::new();
@@ -275,6 +271,8 @@ fn dedup_in_order(v: impl IntoIterator<Item = PosId>) -> Vec<PosId> {
     v.into_iter().filter(|k| seen.insert(*k)).collect()
 }
 
+// The arguments are the fields of v1's guard event, passed through as they are.
+#[allow(clippy::too_many_arguments)]
 fn guard_event(
     effects: &mut dyn Effects,
     reason: GuardReason,

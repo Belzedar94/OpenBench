@@ -13,7 +13,7 @@ use common::*;
 #[test]
 fn the_window_is_four_minutes() {
     assert_eq!(LEASE_MINUTES, 4 * MINUTE);
-    assert!(RESTART_RECYCLE_MINUTES < LEASE_MINUTES);
+    const { assert!(RESTART_RECYCLE_MINUTES < LEASE_MINUTES) };
     assert_eq!(LEASES_PER_MACHINE, 32);
     assert_eq!(RELEASE_MAX_LEASES, LEASES_PER_MACHINE + 1);
 }
@@ -430,8 +430,8 @@ fn deep_lease_cap() {
     live_slots(&mut h, 9);
     let deep: Vec<u64> = (0..4).map(|_| h.user("hog", B10)).collect();
     let cheap = h.user("other", B128);
-    for i in 0..3 {
-        assert_eq!(h.lease("hog", &format!("live{i}")), Some(deep[i]));
+    for (i, &d) in deep.iter().enumerate().take(3) {
+        assert_eq!(h.lease("hog", &format!("live{i}")), Some(d));
     }
     // Fourth slot: the hog holds 3 = 9 // 3 deep leases, so the other account goes.
     assert_eq!(h.lease("hog", "live3"), Some(cheap));
@@ -443,8 +443,8 @@ fn deep_lease_cap() {
     live_slots(&mut h, 90);
     let deep: Vec<u64> = (0..4).map(|_| h.user("hog", B10)).collect();
     h.user("other", B128);
-    for i in 0..4 {
-        assert_eq!(h.lease("hog", &format!("live{i}")), Some(deep[i]));
+    for (i, &d) in deep.iter().enumerate() {
+        assert_eq!(h.lease("hog", &format!("live{i}")), Some(d));
     }
 }
 

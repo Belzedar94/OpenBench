@@ -79,10 +79,12 @@ pub fn mate_distance_refresh(g: &dyn GraphRead, id: PosId, core: &Core, kids: &[
             return (new_mate, b.mv);
         }
     }
-    if !from_child && new_mate != stored && own.plies.is_some() {
-        if let Some(first) = own.line_first {
-            return (new_mate, first);
-        }
+    if !from_child
+        && new_mate != stored
+        && own.plies.is_some()
+        && let Some(first) = own.line_first
+    {
+        return (new_mate, first);
     }
     (new_mate, core.best_move)
 }
@@ -191,7 +193,7 @@ pub fn support_next(
         }
         return Some(best.id);
     }
-    let mut fitting: Vec<&&SupportChild> = same.iter().filter(|c| 1 + c.mate_in.unwrap() <= mate_in).collect();
+    let mut fitting: Vec<&&SupportChild> = same.iter().filter(|c| c.mate_in.unwrap() < mate_in).collect();
     if fitting.is_empty() {
         if own.is_some() || same.is_empty() {
             return None;
@@ -199,7 +201,7 @@ pub fn support_next(
         fitting = same.iter().collect();
     }
     let top = fitting.iter().max_by_key(|c| (c.mate_in.unwrap(), c.mv == best_move, uci_order(c.mv))).unwrap();
-    if own.is_some_and(|o| o >= 1 + top.mate_in.unwrap()) {
+    if own.is_some_and(|o| o > top.mate_in.unwrap()) {
         return None;
     }
     Some(top.id)

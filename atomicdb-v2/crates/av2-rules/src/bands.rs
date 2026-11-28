@@ -170,10 +170,10 @@ pub fn normalize_line(line: &Map<String, Value>, stm_white: bool) -> Option<Map<
     let (new, legacy) = stored_from_raw(line, stm_white)?;
     let current = line.get("eval_cp");
     let is_none = matches!(current, None | Some(Value::Null));
-    if let Some(c) = current {
-        if json_eq_int(c, new) {
-            return None;
-        }
+    if let Some(c) = current
+        && json_eq_int(c, new)
+    {
+        return None;
     }
     if !is_none && !json_eq_int(current.unwrap(), legacy) {
         return None;
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(crate::conv::TB_CLAMP_CEILING, 9_500);
         for cp in [9_000, 9_499, 9_500, 12_000, 15_146, 19_754, 19_981, 20_000] {
             let v = engine_cp_to_stored(cp);
-            assert!(v >= 9_000 && v <= 9_500);
+            assert!((9_000..=9_500).contains(&v));
             assert_eq!(v >= 9_000, legacy_value(cp) >= 9_000);
         }
         for cp in [0, 500, 8_999] {

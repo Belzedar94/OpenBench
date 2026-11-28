@@ -597,11 +597,13 @@ fn set_aside_is_the_same_as_absent() {
 
 /// `_contribution(backed_plies, eval_cp=1120, nodes=ENGINE)`.
 fn contribution(backed_plies: u16, eval_cp: Option<i32>, nodes: u64) -> ChildValue {
-    let mut core = Core::default();
-    core.eval_cp = eval_cp.map(|v| v as i16).unwrap_or(NO_CP);
-    core.backed_eval = 1208;
-    core.backed_plies = backed_plies;
-    core.backed_move = m("f8d8");
+    let core = Core {
+        eval_cp: eval_cp.map(|v| v as i16).unwrap_or(NO_CP),
+        backed_eval: 1208,
+        backed_plies,
+        backed_move: m("f8d8"),
+        ..Core::default()
+    };
     let ext = Ext { backed_nodes: 2_000_000_000, nodes_invested: nodes, ..Ext::default() };
     child_contribution(m("h6f6"), PosId(1), &core, &ext)
 }
