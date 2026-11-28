@@ -136,6 +136,7 @@ pub static ENTRIES: &[Entry] = &[
     entry!("shim.tables", shim_tables, tables = ["atomicdb_dbevent"]),
     entry!("shim.out", shim_out),
     // ---- ported v1 functions (one line each) ----
+    entry!("ingest.backup_cascade", crate::adapters::backup_cascade),
 ];
 
 pub fn find(name: &str) -> Option<&'static Entry> {

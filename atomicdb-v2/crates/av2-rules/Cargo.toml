@@ -1,6 +1,6 @@
 [package]
 name = "av2-rules"
-description = "AtomicDB v2: the value rules (placeholder: the interface the writer calls)"
+description = "AtomicDB v2: the value rules (port of v1's cascade, mate distance and backed values)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,7 @@ publish.workspace = true
 [dependencies]
 av2-model.workspace = true
 av2-facts.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest = "1"
