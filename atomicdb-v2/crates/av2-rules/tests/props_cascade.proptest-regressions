@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c9e98abc6a02b464769bb2c07643f217f112c6b2292d53ce593c89237b8c9eff # shrinks to spec = [NodeSpec { black: true, expanded: false, state: 0, mate: None, slack: None, edges: [1, 2] }, NodeSpec { black: false, expanded: true, state: 0, mate: None, slack: None, edges: [2] }, NodeSpec { black: false, expanded: false, state: 10, mate: None, slack: Some(1), edges: [] }], rot = 21
+cc 58e84095bff9d8f4952988630995fa5645132717f595860d155bd108401a1b44 # shrinks to spec = [NodeSpec { black: true, expanded: false, state: 0, mate: None, slack: None, edges: [1] }, NodeSpec { black: false, expanded: false, state: 10, mate: None, slack: Some(1), edges: [2] }, NodeSpec { black: false, expanded: false, state: 0, mate: None, slack: None, edges: [] }, NodeSpec { black: false, expanded: false, state: 0, mate: None, slack: None, edges: [] }], rot = 0

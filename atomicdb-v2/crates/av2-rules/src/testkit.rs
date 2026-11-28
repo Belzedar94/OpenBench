@@ -335,6 +335,29 @@ impl Fixture {
             core.best_move = Move::parse_opt(best).unwrap();
         });
     }
+
+    /// `ingest.backup_cascade(seeds)` with v1's settings.
+    pub fn cascade(&mut self, seeds: &[PosId]) -> (crate::cascade::CascadeReport, crate::effects::Recorder) {
+        self.cascade_cfg(&crate::config::RulesConfig::default(), seeds)
+    }
+
+    pub fn cascade_cfg(
+        &mut self,
+        cfg: &crate::config::RulesConfig,
+        seeds: &[PosId],
+    ) -> (crate::cascade::CascadeReport, crate::effects::Recorder) {
+        let mut rec = crate::effects::Recorder::default();
+        let mut z = crate::exact::BoardZeroing;
+        let attribution = crate::effects::Attribution::default();
+        let mut env = crate::cascade::Env { cfg, effects: &mut rec, zeroing: &mut z, attribution: &attribution };
+        let report = crate::cascade::backup_cascade(&mut self.g, seeds, &mut env).unwrap();
+        (report, rec)
+    }
+
+    /// The children of `parent` as the cascade reads them (by move).
+    pub fn kids(&self, parent: PosId) -> Vec<crate::exact::Kid> {
+        crate::read::kids_by_move(&self.g, parent, &mut Vec::new())
+    }
 }
 
 #[cfg(test)]

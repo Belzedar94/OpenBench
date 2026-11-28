@@ -36,8 +36,13 @@
 //! proofs, tablebase probes): see plan section 3.1, preparers.
 
 pub mod bands;
+pub mod cascade;
+pub mod config;
 pub mod conv;
+pub mod distance;
+pub mod effects;
 pub mod exact;
+pub mod read;
 pub mod testkit;
 
 use av2_facts::Fact;
