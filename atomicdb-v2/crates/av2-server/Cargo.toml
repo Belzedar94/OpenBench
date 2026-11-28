@@ -12,6 +12,8 @@ av2-model.workspace = true
 av2-facts.workspace = true
 av2-store.workspace = true
 av2-rules.workspace = true
+av2-proof = { path = "../av2-proof" }
+av2-queue = { path = "../av2-queue" }
 
 [dev-dependencies]
 tempfile = "3"
