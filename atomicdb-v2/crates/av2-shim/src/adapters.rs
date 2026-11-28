@@ -82,6 +82,26 @@ pub fn config_from(ctx: &Ctx<'_>) -> RulesConfig {
     cfg
 }
 
+/// v1's loop rules with the budgets the caller had (D1: one second of
+/// `BACKED_LOOP_MAX_SECONDS` / `BACKED_CYCLE_MAX_SECONDS` is 1,000,000
+/// counted units, `repetition::LOOP_COSTS`).  A test that mocks
+/// `_loop_at_best_exit` out (v1 before the rule: it returns `None`) gets a
+/// zero loop budget, which skips the rule the same way.
+pub fn loops_from(ctx: &Ctx<'_>) -> V1Loops {
+    let mut costs = av2_rules::repetition::LOOP_COSTS;
+    let units = |name: &str| ctx.constant("ingest", name).and_then(Value::as_f64).map(|s| (s.max(0.0) * 1_000_000.0) as u64);
+    if let Some(v) = units("BACKED_LOOP_MAX_SECONDS") {
+        costs.loop_budget = v;
+    }
+    if let Some(v) = units("BACKED_CYCLE_MAX_SECONDS") {
+        costs.cycle_budget = v;
+    }
+    if ctx.stubbed("ingest", "_loop_at_best_exit") {
+        costs.loop_budget = 0;
+    }
+    V1Loops::with_costs(costs)
+}
+
 /// `ingest.backup_cascade(seed_keys, report=None) -> changed_total`.
 pub fn backup_cascade(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
     let seeds = known_positions(ctx, args, 0, "seed_keys")?;
@@ -234,7 +254,7 @@ pub fn backup_backed_evals(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, Entr
     };
     let mut rec = Recorder::default();
     let mut tasks = ShimTasks::new(ctx);
-    let mut loops = V1Loops::default();
+    let mut loops = loops_from(ctx);
     let report = {
         let mut env = AscentEnv { cfg: &cfg, effects: &mut rec, tasks: &mut tasks, loops: &mut loops };
         ascent::backup_backed_evals(ctx.graph, &seeds, opts, &mut env)?
@@ -373,7 +393,7 @@ pub fn drain_batch(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> 
         let mut rec = Recorder::default();
         let mut zeroing = BoardZeroing;
         let mut tasks = ShimTasks::new(ctx);
-        let mut loops = V1Loops::default();
+        let mut loops = loops_from(ctx);
         let attribution = Attribution { source: ClosureSource::parse(&source), provenance: None };
         let report = {
             let mut env = ClimbEnv {
