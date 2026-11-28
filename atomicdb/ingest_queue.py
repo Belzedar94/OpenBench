@@ -25,7 +25,9 @@ sin avanzar y su payload guardado, listo para reintentarse a mano con
 IDEMPOTENCIA.  Una tarea tiene como mucho un trabajo (OneToOne), y el
 procesador pasa a DONE dentro de la MISMA transaccion que aplica el
 resultado.  Reprocesar un trabajo ya hecho devuelve su resumen sin tocar el
-arbol.
+arbol.  DONE es terminal: lo que falle despues del commit (pn/dn, carry,
+verificacion pedida) se registra y no devuelve el trabajo a la cola, que lo
+aplicaria dos veces (§ _after_commit_failed).
 """
 
 import logging
@@ -40,7 +42,8 @@ from django.utils import timezone
 from . import (golden_cases, ingest, logic, perf_events, preferences,
                propagation_queue, score_bands)
 from .database import atomic
-from .models import AnalysisTask, IngestJob, Position, RequestNotification
+from .models import (AnalysisTask, DBEvent, IngestJob, Position,
+                     RequestNotification)
 
 logger = logging.getLogger(__name__)
 
@@ -170,10 +173,16 @@ def _backoff_seconds(attempts):
 
 
 def _mark_failure(job, error):
-    """Fuera de la transaccion que acaba de hacer rollback."""
+    """Fuera de la transaccion que acaba de hacer rollback.
+
+    A row that committed DONE is never put back: its landing is in the tree,
+    and PENDING would apply it again.  Returns None for such a row, else
+    whether the job is now parked as FAILED.
+    """
     attempts = job.attempts + 1
     exhausted = attempts >= MAX_ATTEMPTS
-    IngestJob.objects.filter(pk=job.pk).update(
+    updated = IngestJob.objects.filter(pk=job.pk).exclude(
+        state=IngestJob.JState.DONE).update(
         state=(IngestJob.JState.FAILED if exhausted
                else IngestJob.JState.PENDING),
         attempts=attempts,
@@ -183,6 +192,11 @@ def _mark_failure(job, error):
                          + timezone.timedelta(
                              seconds=_backoff_seconds(attempts))),
         updated=timezone.now())
+    if not updated and IngestJob.objects.filter(
+            pk=job.pk, state=IngestJob.JState.DONE).exists():
+        logger.error('AtomicDB ingest job %s failed after it was applied; '
+                     'it stays DONE: %s', job.pk, error)
+        return None
     logger.warning('AtomicDB ingest job %s attempt %s failed: %s',
                    job.pk, attempts, error)
     return exhausted
@@ -354,6 +368,11 @@ def apply_job(job):
                                     'next_attempt_at', 'last_error',
                                     'updated'])
         _notify_requester(job, task)
+    # THE JOB HAS COMMITTED AS DONE.  Nothing below may raise out of here:
+    # process_job would take the exception for a failed application and
+    # write PENDING over DONE, and the next claim would apply the same
+    # landing a second time (visits, nodes and engine time counted twice).
+    # Each step fails alone, logged and recorded (§ _after_commit_failed).
     # A deferred climb does what follows itself, once it has run
     # (§ propagation_queue._after_commit): the proof numbers read what the
     # cascade decides, and the verification reads the position after it.
@@ -363,7 +382,7 @@ def apply_job(job):
     # ya cerrada) y aun asi haber movido la eval que inicializa la hoja.  Esto
     # es lo que garantiza que TODO submit toca los pn/dn de su posicion.
     if not climb_pending:
-        ingest.proof.refresh_proof_numbers([job.position_id])
+        _refresh_after_commit(job)
     # An ascent this job cut short is carried on now that the job has
     # committed, instead of waiting for the sweep (see the block above
     # ingest.CARRY_MAX_KEYS).  The job is applied whatever happens here: a
@@ -375,16 +394,71 @@ def apply_job(job):
             if carried is not None:
                 summary = {**summary, 'carried': carried}
                 IngestJob.objects.filter(pk=job.pk).update(summary=summary)
-        except DatabaseError:
-            logger.exception('AtomicDB ingest job %s: carrying %d cut keys '
-                             'on failed', job.pk, len(set(cut)))
+        except Exception as error:      # noqa: BLE001 - the job is applied
+            _after_commit_failed(job, 'carry', error, cut=len(set(cut)))
     if ((task or {}).get('then_verify') and not summary.get('tb_rejected')
             and not climb_pending):
-        verified = _verify_after(job, task)
-        if verified is not None:
-            summary = {**summary, 'then_verify': verified}
-            IngestJob.objects.filter(pk=job.pk).update(summary=summary)
+        try:
+            verified = _verify_after(job, task)
+            if verified is not None:
+                summary = {**summary, 'then_verify': verified}
+                IngestJob.objects.filter(pk=job.pk).update(summary=summary)
+        except Exception as error:      # noqa: BLE001 - the job is applied
+            _after_commit_failed(job, 'verify', error)
     return summary
+
+
+# The DBEvent kind of a step that failed after its job had committed.
+AFTER_COMMIT_EVENT = 'INGEST_AFTER_COMMIT'
+
+
+def _refresh_after_commit(job):
+    """The pn/dn of the landed position, once the job has committed.
+
+    The failure seen in production is a deadlock with another writer
+    (three jobs between 28-Oct and 7-Nov 2026, each then applied twice).
+    A deadlock or serialization failure gets one more try here: the refresh
+    recomputes from the rows as they stand, so running it again is safe.
+    Anything else, or a second failure, is recorded and left to the next
+    refresh that reaches the position.
+    """
+    for attempt in (1, 2):
+        try:
+            ingest.proof.refresh_proof_numbers([job.position_id])
+            return True
+        except Exception as error:      # noqa: BLE001 - the job is applied
+            if attempt == 1 and propagation_queue._is_transient(error):
+                logger.warning('AtomicDB ingest job %s: the proof refresh '
+                               'after the commit hit %s, trying again',
+                               job.pk, error)
+                continue
+            _after_commit_failed(job, 'proof_refresh', error)
+            return False
+    return False
+
+
+def _after_commit_failed(job, step, error, **extra):
+    """A step after the job's commit failed: log it and record it, never
+    retry the job for it.
+
+    What each step leaves undone is already somebody else's: the proof
+    numbers of the position are refreshed again by the next landing, climb
+    or refresh that reaches it (pn/dn only order the selector, exactly as
+    when the drainer's refresh fails, § propagation_queue._after_commit); a
+    carry that did not finish leaves its frontier to the sweep; a requested
+    verification is the Verify PV button away.  The event names the job,
+    the position and the step, so a refresh can be rerun by hand.  Recording
+    it must not raise either: a database that is gone leaves the log line.
+    """
+    logger.error('AtomicDB ingest job %s: %s after the commit failed; the '
+                 'job stays DONE: %s', job.pk, step, error, exc_info=error)
+    try:
+        DBEvent.objects.create(kind=AFTER_COMMIT_EVENT, payload={
+            'job': job.pk, 'position': job.position_id, 'step': step,
+            'error': f'{type(error).__name__}: {error}'[:500], **extra})
+    except Exception:                   # noqa: BLE001
+        logger.exception('AtomicDB ingest job %s: recording the failure of '
+                         '%s failed', job.pk, step)
 
 
 def _verify_after(job, task):
@@ -439,9 +513,15 @@ def process_job(job):
         # transaccion revertida entera: el arbol no queda a medias y el
         # trabajo vuelve a la cola con backoff.
         exhausted = _mark_failure(job, error)
-        perf_events.event('job', job=job.pk, error=type(error).__name__,
-                          ms=round((time.monotonic() - started) * 1000, 2))
-        return None, ('failed' if exhausted else 'retry')
+        if exhausted is not None:
+            perf_events.event('job', job=job.pk, error=type(error).__name__,
+                              ms=round((time.monotonic() - started) * 1000,
+                                       2))
+            return None, ('failed' if exhausted else 'retry')
+        # The job had committed DONE before the failure: it is applied, and
+        # its row is the record of what it did.
+        summary = (IngestJob.objects.filter(pk=job.pk)
+                   .values_list('summary', flat=True).first() or {})
     elapsed = time.monotonic() - started
     logger.info('AtomicDB ingest job %s applied in %.3fs: %s',
                 job.pk, elapsed, summary)
