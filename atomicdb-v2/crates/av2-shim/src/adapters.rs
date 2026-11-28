@@ -13,7 +13,7 @@ use av2_rules::climb::{self, ClimbEnv};
 use av2_rules::config::RulesConfig;
 use av2_rules::effects::{Attribution, ClosureSource, Recorder};
 use av2_rules::exact::BoardZeroing;
-use av2_rules::loops::NoLoops;
+use av2_rules::loops::V1Loops;
 use av2_rules::purchase::{Purchase, TaskSink};
 use serde_json::{Value, json};
 
@@ -234,7 +234,7 @@ pub fn backup_backed_evals(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, Entr
     };
     let mut rec = Recorder::default();
     let mut tasks = ShimTasks::new(ctx);
-    let mut loops = NoLoops;
+    let mut loops = V1Loops::default();
     let report = {
         let mut env = AscentEnv { cfg: &cfg, effects: &mut rec, tasks: &mut tasks, loops: &mut loops };
         ascent::backup_backed_evals(ctx.graph, &seeds, opts, &mut env)?
@@ -373,7 +373,7 @@ pub fn drain_batch(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> 
         let mut rec = Recorder::default();
         let mut zeroing = BoardZeroing;
         let mut tasks = ShimTasks::new(ctx);
-        let mut loops = NoLoops;
+        let mut loops = V1Loops::default();
         let attribution = Attribution { source: ClosureSource::parse(&source), provenance: None };
         let report = {
             let mut env = ClimbEnv {
