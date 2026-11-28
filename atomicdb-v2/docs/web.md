@@ -284,7 +284,7 @@ depends only on the URL, because the sign-in links carry the path. An
 anonymous hit is a hash-map lookup and a refcounted `Bytes` clone.
 
 **Signed-in visitors.** The account's identity zone is spliced between the two
-cached pieces and gzip level 1 is applied on the fly.
+cached pieces and gzip level 1 is applied on the fly: 175 µs at the median for the explorer.
 
 **Headers.**
 
@@ -441,7 +441,9 @@ These are the router's own timings: no network, brotli requested.
 | roots | 20.0 ms | 760 KB | 54.7 KB | 2.5 / 2.7 µs |
 | queue | 1.2 ms | 17.9 KB | 5.3 KB | 2.4 / 2.9 µs |
 | contributors | 1.7 ms | 35.0 KB | 6.5 KB | 2.4 / 3.1 µs |
-| map | 1.9 ms | 26.0 KB | 7.1 KB | ~3 µs |
+| map | 1.7 ms | 26.0 KB | 7.1 KB | 2.4 / 2.7 µs |
+
+A signed-in hit (the identity zone spliced into the cached explorer, gzip level 1 on the fly) takes 175 µs at the median and 357 µs at p99.
 
 ### Over HTTP
 
