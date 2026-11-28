@@ -1,9 +1,19 @@
-//! AtomicDB v2 rules: **placeholder**.
+//! AtomicDB v2 rules: the port of v1's value rules (phase 2 of the plan).
 //!
-//! The rules port (phase 2 of the plan: cascade, mate distance, backed values,
-//! loops, proof numbers) lives here and is written by another agent.  This
-//! crate only fixes the interface the writer calls, so that the store, the
-//! writer loop and the tools can be built and tested before the rules exist.
+//! Port order and rule ids: `atomicdb-v2/docs/rules-spec.md` section 16;
+//! status per rule: `atomicdb-v2/docs/rules-port-status.md`.
+//!
+//! - step 1 `conv`, `bands`: conventions, score bands, headline value
+//! - step 2 `exact`: backup_status, clock slack, fresh context, proof grade, witness
+//! - steps 3 and 5 `distance`: mate distance, the repetition check
+//! - step 4 `cascade`: the status cascade, its guards, the closure side effects
+//! - steps 6 to 8 `backed`: child contributions, `_backed_for`, the ascent
+//! - step 9 `purchase`: what the ascent buys, as intents through a trait
+//! - `climb`: the cascade then the ascent (stage (b) of one batch)
+//! - `loops`: the hooks steps 11 to 14 fill in
+//!
+//! The writer calls [`Rules::apply`] once per batch; stage (a) (landing a
+//! search) is another agent's port and ends by calling [`climb::climb`].
 //!
 //! # The contract
 //!
@@ -24,6 +34,11 @@
 //! "Prepared" means everything expensive and pure was done before the writer
 //! saw the input (legal moves and child keys, mate-PV verification, AND/OR
 //! proofs, tablebase probes): see plan section 3.1, preparers.
+
+pub mod bands;
+pub mod conv;
+pub mod exact;
+pub mod testkit;
 
 use av2_facts::Fact;
 use av2_model::GraphWrite;
