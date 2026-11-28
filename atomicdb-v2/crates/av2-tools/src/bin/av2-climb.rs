@@ -34,7 +34,7 @@ use av2_rules::climb::{ClimbEnv, climb};
 use av2_rules::config::RulesConfig;
 use av2_rules::effects::{Attribution, Recorder};
 use av2_rules::exact::BoardZeroing;
-use av2_rules::loops::NoLoops;
+use av2_rules::loops::{LoopRules, NoLoops, V1Loops};
 use av2_rules::purchase::MemTasks;
 use av2_store::{Batch, Config, Store};
 use av2_tools::{Args, Lat, die, emit};
@@ -76,16 +76,25 @@ fn parents(b: &Batch, id: PosId) -> Vec<PosId> {
     v
 }
 
-fn run_climb(b: &mut Batch, rcfg: &RulesConfig, cascade: &[PosId], backed: &[PosId], t: &mut Totals, facts: &mut Vec<Fact>) {
+fn run_climb(
+    b: &mut Batch,
+    rcfg: &RulesConfig,
+    loop_rules: bool,
+    cascade: &[PosId],
+    backed: &[PosId],
+    t: &mut Totals,
+    facts: &mut Vec<Fact>,
+) {
     let mut rec = Recorder::default();
     let mut z = BoardZeroing;
     let mut tasks = MemTasks::default();
-    let mut loops = NoLoops;
+    let mut v1 = V1Loops::default();
+    let mut none = NoLoops;
+    let loops: &mut dyn LoopRules = if loop_rules { &mut v1 } else { &mut none };
     let attribution = Attribution::default();
     let t0 = Instant::now();
     let r = {
-        let mut env =
-            ClimbEnv { cfg: rcfg, effects: &mut rec, zeroing: &mut z, tasks: &mut tasks, loops: &mut loops, attribution: &attribution };
+        let mut env = ClimbEnv { cfg: rcfg, effects: &mut rec, zeroing: &mut z, tasks: &mut tasks, loops, attribution: &attribution };
         climb(b, cascade, backed, &mut env).unwrap_or_else(|e| die(&e.to_string()))
     };
     t.rules_ns += t0.elapsed().as_nanos();
@@ -102,7 +111,7 @@ fn run_climb(b: &mut Batch, rcfg: &RulesConfig, cascade: &[PosId], backed: &[Pos
     facts.extend(rec.events.iter().map(|e| e.to_fact(&key)));
 }
 
-fn reclimb(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, t: &mut Totals, facts: &mut Vec<Fact>) {
+fn reclimb(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, lr: bool, t: &mut Totals, facts: &mut Vec<Fact>) {
     let Some(p) = pick(b, rng, |b, id| {
         let c = b.core(id);
         c.is_open() && c.expanded() && c.eval().is_some()
@@ -119,10 +128,10 @@ fn reclimb(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, t: &mut Totals, fac
     b.put_ext(p, e).unwrap();
     let mut backed = vec![p];
     backed.extend(parents(b, p));
-    run_climb(b, rcfg, &[p], &backed, t, facts);
+    run_climb(b, rcfg, lr, &[p], &backed, t, facts);
 }
 
-fn closure(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, t: &mut Totals, facts: &mut Vec<Fact>) {
+fn closure(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, lr: bool, t: &mut Totals, facts: &mut Vec<Fact>) {
     let mut es = Vec::new();
     let Some(p) = pick(b, rng, |b, id| {
         let c = b.core(id);
@@ -148,10 +157,10 @@ fn closure(b: &mut Batch, rng: &mut Rng, rcfg: &RulesConfig, t: &mut Totals, fac
     let mut backed = vec![p];
     backed.extend(parents(b, p));
     backed.extend(&others);
-    run_climb(b, rcfg, &cascade, &backed, t, facts);
+    run_climb(b, rcfg, lr, &cascade, &backed, t, facts);
 }
 
-fn workload(s: &mut Store, name: &str, rcfg: &RulesConfig, commits: u64, seed: u64, out: &Option<PathBuf>) {
+fn workload(s: &mut Store, name: &str, rcfg: &RulesConfig, lr: bool, commits: u64, seed: u64, out: &Option<PathBuf>) {
     let mut rng = Rng::new(seed);
     let mut t = Totals::default();
     let mut lat = Lat::new();
@@ -162,9 +171,9 @@ fn workload(s: &mut Store, name: &str, rcfg: &RulesConfig, commits: u64, seed: u
         let mut facts = Vec::new();
         for _ in 0..32 {
             if name.starts_with("reclimb") {
-                reclimb(&mut b, &mut rng, rcfg, &mut t, &mut facts);
+                reclimb(&mut b, &mut rng, rcfg, lr, &mut t, &mut facts);
             } else {
-                closure(&mut b, &mut rng, rcfg, &mut t, &mut facts);
+                closure(&mut b, &mut rng, rcfg, lr, &mut t, &mut facts);
             }
         }
         s.commit(b, &av2_facts::encode_all(&facts)).unwrap_or_else(|e| die(&e.to_string()));
@@ -175,7 +184,7 @@ fn workload(s: &mut Store, name: &str, rcfg: &RulesConfig, commits: u64, seed: u
     emit(
         out,
         &format!(
-            "{{\"stage\":\"{name}\",\"noise_cut\":{},\"commits\":{commits},\"climbs\":{},\"climbs_per_sec\":{:.0},\"rules_us_per_climb\":{:.1},\"rules_only_climbs_per_sec\":{:.0},\"cascade_writes_per_climb\":{:.2},\"backed_writes_per_climb\":{:.2},\"levels_per_climb\":{:.2},\"processed_per_climb\":{:.1},\"max_processed\":{},\"closures\":{},\"events\":{},\"bought\":{},\"commit_ms\":{}}}",
+            "{{\"stage\":\"{name}\",\"loop_rules\":{lr},\"noise_cut\":{},\"commits\":{commits},\"climbs\":{},\"climbs_per_sec\":{:.0},\"rules_us_per_climb\":{:.1},\"rules_only_climbs_per_sec\":{:.0},\"cascade_writes_per_climb\":{:.2},\"backed_writes_per_climb\":{:.2},\"levels_per_climb\":{:.2},\"processed_per_climb\":{:.1},\"max_processed\":{},\"closures\":{},\"events\":{},\"bought\":{},\"commit_ms\":{}}}",
             rcfg.noise_cut,
             t.climbs,
             t.climbs as f64 / secs,
@@ -212,8 +221,10 @@ fn main() {
     emit(&out, &format!("{{\"stage\":\"open\",\"positions\":{n0}}}"));
     let v1 = RulesConfig::default();
     let d2 = RulesConfig { noise_cut: false, ..RulesConfig::default() };
-    workload(&mut s, "reclimb_b32", &v1, commits, seed, &out);
-    workload(&mut s, "reclimb_b32", &d2, commits, seed + 1, &out);
-    workload(&mut s, "closure_b32", &v1, commits, seed + 2, &out);
-    workload(&mut s, "closure_b32", &d2, commits, seed + 3, &out);
+    // Steps 1-9 alone (the numbers of #347), then with the loop rules.
+    workload(&mut s, "reclimb_b32", &v1, false, commits, seed, &out);
+    workload(&mut s, "reclimb_b32", &v1, true, commits, seed + 10, &out);
+    workload(&mut s, "reclimb_b32", &d2, true, commits, seed + 1, &out);
+    workload(&mut s, "closure_b32", &v1, true, commits, seed + 2, &out);
+    workload(&mut s, "closure_b32", &d2, true, commits, seed + 3, &out);
 }

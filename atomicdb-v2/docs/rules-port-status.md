@@ -187,14 +187,150 @@ coverage arm or the drainer: they come with stage (a) and the queue model.
   the batch equals refreshing right after the cascade.  `av2-rules` links
   `av2-proof` for tests only (the proof crate's bench feature depends on
   `av2-tools`, which depends on `av2-rules`).
-- **Steps 11 to 14 (loops)**: implement `loops::LoopRules`: `begin_ascent`,
-  `wrote` (the spine cache), `mark_returning` (LOOP-1.1, sets `cycles` and
-  the `elsewhere` pairs), `value_returning` (LOOP-2.1), `open_pointer_loops`
-  (LOOP-3.1, LOOP-4.1, returns `wake` and `ruled`, may rewrite `decided`
-  and add cycle picks).  `backed_for` already handles `cycles`, `returns`
-  and `circular`; the settling look (BKD-7.6) already runs on `returning`.
+- **Steps 11 to 14 (loops)**: done, `loops::V1Loops` (below).  The writer
+  passes `V1Loops::default()` as the ascent's `LoopRules`; `NoLoops` is the
+  loop-free behaviour of steps 1-9.
 - **Stage (a)**: ends with `climb::climb(cascade_seeds, backed_seeds)`
   (EXP-6.1); a batch merges seeds with `climb::merge_seeds` (EXP-6.2).
+- **Not done here**: the zeroing differential check against the engine
+  library waits for `stage-a`'s `av2-chess`; the golden cases wait for the
+  `shim` agent's `av2-golden` (step 15's second half).
+
+## Steps 11 and 12: repetition marking and returning lines
+
+| Rule | Rust | Ported | Tests | Deviations |
+|---|---|---|---|---|
+| LOOP-1.1 `_draw_cycling_children` | `repetition::draw_cycling_children` | yes | `tests/loops_repetition.rs` (35 tests: `test_backprop_repetition.py` 10/10 portable, `test_repetition_progress.py` 8/10, `test_cycle_disambiguation.py` 3/3, `test_backed_eval.py` `BackedRepetitionTests` 5/7 and `RepetitionZeroContractTests` 6/9, the counted `test_cycle_deadline.py`) | Parents walked in id order (v1: database order); no value depends on it. |
+| LOOP-1.2 spine cache, step queries | `repetition::SpineCache`, `repetition::resolve_steps` | yes, including the cross-product fetch and the stored-pointer overwrite of `_resolve_spine_steps` and the decided-row exception of `_resolve_level_steps` | through LOOP-1.1, LOOP-3.1 | none |
+| LOOP-2.1 `_resolve_returning_children` | `repetition::resolve_returning_children`, `loops::V1Loops::value_returning` | yes | ReturningLineTests, NestedLoopTests | **D1: the 1.0 s clock is a counted `Meter`** (below).  Children of a level valued in id order of their parents (v1: database order), which decides who is valued first when the clock runs out. |
+| LOOP-2.2 `_value_on_line` | `repetition::value_on_line` | yes | as above | D1 |
+| LOOP-2.3 `_line_verdict` | `repetition::line_verdict` | yes | `test_explorer_repetition_rows.py::BackupPinTests` (in `loops_pointer.rs`), `NoWayOutTests` | none |
+| LOOP-6.1 a repetition settles only a complete node | `backed::backed_for` (step 7) | yes | `RepetitionZeroContractTests` | none |
+| BKD-6.4 grounding with `returns`/`circular`, BKD-7.2 steps 2 and 4, BKD-7.6 settling look | `ascent::decide_level` with `V1Loops` | yes | `test_pointer_loop_grounding.py` 4/4, `test_repetition_progress.py` | none |
+| VIEW-3.1 `line_moves`, `repetition_moves` | not ported (read side, phase 5; the tests build it from the ported pieces) | no | | |
+
+## Steps 13 and 14: pointer loops and the best exit
+
+| Rule | Rust | Ported | Tests | Deviations |
+|---|---|---|---|---|
+| LOOP-3.1 `_open_pointer_loops`, `_loop_still_closed` | `pointer_loops::open_pointer_loops`, `pointer_loops::loop_still_closed` | yes | `tests/loops_pointer.rs` (34 tests: `test_loop_best_exit.py` 24 of 25 portable, `test_pointer_loop_grounding.py` 4, `test_backup_echo.py::EchoFamilyTests` 1 of 2, `test_explorer_repetition_rows.py` backup tests 4) | none |
+| LOOP-4.1 `_loop_at_best_exit` | `pointer_loops::loop_at_best_exit` | yes, the four clock checks at their places | AboveEveryExit, Plies, SideToMove, NoWayOut, Drain, OverlappingLoop, Bound | **D1: `BACKED_LOOP_MAX_SECONDS` is a counted budget per ascent** |
+| LOOP-4.2 `_loop_ways_out`, `_region_children` | `pointer_loops::loop_ways_out`, `pointer_loops::region_children` | yes | as above | none |
+| LOOP-5.1 bounds | `repetition::BACKED_CYCLE_MAX_PLIES`, `BACKED_CYCLE_MAX_NODES`, `LoopCosts` | yes | `Bound` tests, counted deadline tests | D1 |
+
+Skipped (with reasons in the test files): tests through views, the API,
+commands, query counts; `WaitingTests::test_the_wheel_of_the_report_in_miniature`
+(patches `_rows_that_wait` away); the echo test that patches
+`BACKED_ECHO_PLIES`; the request deadline of `line_moves` (read side).
+
+### D1 calibration: the two wall-clock budgets as counted steps
+
+v1 cuts the returning-line valuation 1.0 s after each top-level call
+(`BACKED_CYCLE_MAX_SECONDS`, `_cycle_deadline`) and the best-exit rule after
+1.0 s per ascent (`BACKED_LOOP_MAX_SECONDS`).  v2 counts instead: every
+operation v1 makes at those places charges a `repetition::Meter` with what it
+costs v1 on production, in microseconds, and the budgets stay 1,000,000
+units, checked exactly where v1 reads the clock (strict `>`).
+
+**How the costs were measured (28-Nov-2026, read-only on production).** A
+script ran v1's own `stale_backed_rows` (one level of the backup, writes and
+buys nothing) inside a `READ ONLY` transaction that was rolled back, with the
+loop functions wrapped to count and time them, on 12,651 positions: the
+start position's support spine and every reply along it, a 0.05% page
+sample of open backed positions, and 24 loop families named in v1's code and
+tests (BFS below each, up to 1,200 open positions), as single rows and as
+levels of 32.  Results:
+
+| Measure | Value |
+|---|---|
+| top-level valuations with a returning child | 48 |
+| wall time per valuation, p50 / p90 / max | 0.10 s / 0.22 s / 0.39 s |
+| valuations the 1 s clock cut | **0** |
+| valuations the 64-re-read cap cut | 13 (ported exactly) |
+| fit `secs = a * re-reads + b * step queries` | a = **2.26 ms**, b = **1.16 ms**, R² = 0.983 |
+| `_line_verdict` alone | 22-27 µs mean (17-26 µs p50) |
+| best-exit calls (loop sizes 20, 20, 4, 4) | 3-17 ms, 0 late; fit 30 µs per lap verdict + 4.0 ms of reads |
+
+So `LOOP_COSTS = { reread: 2,260, step_query: 1,160, verdict: 30,
+loop_reads: 4,000 }` µs, budgets 1,000,000.  On the 48 measured valuations
+the counted clock predicts 0.27x to 1.27x of the measured time (median
+0.97x) and cuts none of them, as v1's clock cut none: the outcomes match.
+Under today's load the clock is far from biting (largest valuation 0.39 s,
+about 140 re-reads where 1 s is about 440); it bit in v1 on 19-Oct, when a
+family full of loops turned valuations into minutes.  A cost per operation
+measured on a calmer or busier day moves the bound proportionally; the
+constants are in one place (`repetition::LOOP_COSTS`) and the golden cases
+will show any valuation where v1's clock and the count disagree.
+
+## Step 15: batch-size independence and termination
+
+`tests/props_batch.rs`.  From a graph at rest, 1 to 7 re-searches land (eval
+moves, +128M nodes); climbing after each one or once with the merged seeds
+(EXP-6.2) is compared on every rule-visible column.
+
+| Setting | Compared cases | Differ |
+|---|---:|---:|
+| DAG, noise cut off (D2) | 1,496 | **0** (asserted, plus a 300-case property test) |
+| DAG, noise cut on (v1) | 1,496 | 8 (0.5%) |
+| cycles, loop rules, noise cut off | 1,414 | 8 (0.6%) |
+| cycles, loop rules, noise cut on (v1) | 1,417 | 33 (2.3%) |
+
+So with D2 the climb is batch-size independent on DAGs; v1's noise cut breaks
+it in 0.5% of small dense cases, and the loop rules break it on their own
+(the spine cache and the loop walks read pointers in the order levels decide
+them, LOOP-1.1 "Determinism").  Batch-size independence on graphs with loops
+needs more than D2: an owner decision for after the exact port (options:
+accept it, as v1 does with its sweep; or make the loop rules read only
+stored pointers, which changes results).  Termination: on any graph, cycles
+included, every climb ends within the level bound and an ascent cut by a
+bound reports a `BACKED_GUARD` event (property test, 300 cases).
+
+### Benchmark with the loop rules
+
+`av2-climb` on a fresh export of the same root ball (28-Nov 09:44-09:58
+UTC, read-only, the export SQL of `bench/sql` plus `fen` and `won_line`:
+1,560,875 positions, 1,999,440 edges, 52,783 witness lines), NVMe, release,
+32 climbs per commit, one fsync per commit, 300 commits per row:
+
+| Workload | Loop rules | Noise cut | Climbs/s with commits | Rules only, µs/climb | Rows written per climb | Rows processed |
+|---|---|---|---:|---:|---:|---:|
+| re-search | no (steps 1-9) | on | 12,525 | 44.1 | 1.75 | 5.7 |
+| re-search | **yes** | on (v1) | **9,124** | 80.1 | 1.32 | 4.9 |
+| re-search | yes | off (D2) | 10,222 | 69.1 | 1.14 | 4.7 |
+| mate line closes a child | **yes** | on (v1) | **6,149** | 107.9 | 1.54 + 1.76 | 6.8 |
+| mate line closes a child | yes | off (D2) | 6,716 | 89.9 | 1.51 + 1.66 | 6.5 |
+
+With FENs in the store the fresh-context rule now reads boards (the #347
+numbers had no FEN: 31.6 µs per re-search climb, 15,876/s).  The loop rules
+cost about 36 µs per climb on top (the repetition walk of every backed child
+of every row decided, LOOP-1.1, and the pointer-loop walk of every level,
+LOOP-3.1); the rows sampled differ between rows of the table (seeds), so
+compare per-climb costs, not single rows.
+
+### Golden cases (28-Nov, from the `shim` branch, PR #350, before it merged)
+
+`av2-golden --mode v2 --kind drain` on the 158 recorded production climbs
+(`propagation_queue.drain_batch`, recorded 07:39-08:07 UTC), in a scratch
+merge of #350 with this stack, its adapters switched from `NoLoops` to
+`V1Loops`:
+
+| Loop rules | Clean | Differ | Field diffs |
+|---|---:|---:|---|
+| `NoLoops` (the shim's adapters today) | 145 | 13 | 1,342 extra writes, 320 value diffs, 88 missing writes (`backed_*`) |
+| **`V1Loops` (calibrated budgets)** | **154** | **4** | 42 value diffs, 12 missing writes (`backed_*`) |
+| `V1Loops`, unlimited budgets | 154 | 4 | identical to the calibrated run |
+| `V1Loops`, budgets 0 | 146 | 12 | 444 value diffs, 1,505 extra writes |
+
+So the loop rules close 9 of the 13 differing climbs, and the calibrated
+budgets behave like unlimited ones on these cases (as v1's clock did not
+bite).  The 4 left are the largest and longest batches of the sample (v1
+took 0.8 to 6.5 s and read 2,300 to 15,000 positions; the clean ones
+p50 144 ms and 194 positions); their differences are ties between moves of
+equal value and the plies and support that follow (one family also 986 vs
+968).  Not yet explained: candidates are rows another transaction committed
+while v1's batch ran (READ COMMITTED, the races the rechecks exist for),
+and the row and parent orders that D3 fixes by id.  The shim's adapters
+should pass `V1Loops::default()` once this stack merges.
 
 ## Benchmark: climbs on the production slice
 

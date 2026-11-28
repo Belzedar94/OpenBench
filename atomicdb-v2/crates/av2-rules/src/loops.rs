@@ -68,3 +68,83 @@ pub trait LoopRules {
 pub struct NoLoops;
 
 impl LoopRules for NoLoops {}
+
+/// Steps 11 to 14: v1's loop rules (`repetition.rs`, `pointer_loops.rs`),
+/// with the two wall-clock budgets counted instead (owner decision D1).
+#[derive(Clone, Debug)]
+pub struct V1Loops {
+    /// `_SpineCache`, one per ascent.
+    pub cache: crate::repetition::SpineCache,
+    /// `loop_budget`: what `_loop_at_best_exit` may still spend this ascent.
+    pub loop_budget: i64,
+    pub costs: crate::repetition::LoopCosts,
+}
+
+impl Default for V1Loops {
+    fn default() -> Self {
+        V1Loops::with_costs(crate::repetition::LOOP_COSTS)
+    }
+}
+
+impl V1Loops {
+    pub fn with_costs(costs: crate::repetition::LoopCosts) -> V1Loops {
+        V1Loops { cache: Default::default(), loop_budget: costs.loop_budget as i64, costs }
+    }
+}
+
+impl LoopRules for V1Loops {
+    fn begin_ascent(&mut self) {
+        self.cache = Default::default();
+        self.loop_budget = self.costs.loop_budget as i64;
+    }
+
+    fn wrote(&mut self, id: PosId, backed_move: Move) {
+        self.cache.wrote(id, backed_move);
+    }
+
+    fn mark_returning(&mut self, g: &dyn GraphRead, children: &mut LevelChildren) -> (Vec<PosId>, Vec<(PosId, Move)>) {
+        let mut circular = std::collections::HashSet::new();
+        let cycled = crate::repetition::draw_cycling_children(g, children, &mut self.cache, &[], Some(&mut circular), None);
+        let mut elsewhere: Vec<(PosId, Move)> = circular.into_iter().collect();
+        elsewhere.sort();
+        (cycled.into_iter().map(|(p, _)| p).collect(), elsewhere)
+    }
+
+    fn value_returning(&mut self, g: &dyn GraphRead, children: &mut LevelChildren, open_rows: &[PosId]) {
+        let costs = self.costs;
+        let mut ctx = crate::repetition::LineCtx {
+            g,
+            cache: &mut self.cache,
+            clock: crate::repetition::Meter::new(costs.cycle_budget),
+            costs,
+            verdicts: None,
+        };
+        crate::repetition::resolve_returning_children(&mut ctx, children, &[], None, Some(open_rows), None);
+    }
+
+    fn open_pointer_loops(
+        &mut self,
+        g: &dyn GraphRead,
+        rows: &[Row],
+        children: &mut LevelChildren,
+        decided: &mut BTreeMap<PosId, Backed>,
+        showcases: &BTreeMap<PosId, Showcase>,
+        cycle_picks: &mut Vec<Discrepancy>,
+    ) -> LoopVerdict {
+        let mut ruled = Vec::new();
+        let costs = self.costs;
+        let wake = crate::pointer_loops::open_pointer_loops(
+            g,
+            rows,
+            children,
+            decided,
+            &mut self.cache,
+            showcases,
+            cycle_picks,
+            &mut self.loop_budget,
+            &costs,
+            &mut ruled,
+        );
+        LoopVerdict { wake, ruled }
+    }
+}

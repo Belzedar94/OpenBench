@@ -376,6 +376,40 @@ impl Fixture {
         (r, rec)
     }
 
+    /// `ingest.backup_backed_evals(seeds)` with v1's settings and v1's loop
+    /// rules (steps 11-14, `loops::V1Loops` with the calibrated budgets).
+    pub fn ascent_loops(&mut self, seeds: &[PosId]) -> (crate::ascent::AscentReport, crate::effects::Recorder, crate::purchase::MemTasks) {
+        let mut tasks = crate::purchase::MemTasks::default();
+        let mut loops = crate::loops::V1Loops::default();
+        let (r, rec) = self.ascent_loops_with(
+            &crate::config::RulesConfig::default(),
+            seeds,
+            crate::ascent::AscentOpts::default(),
+            &mut tasks,
+            &mut loops,
+        );
+        (r, rec, tasks)
+    }
+
+    pub fn ascent_loops_with(
+        &mut self,
+        cfg: &crate::config::RulesConfig,
+        seeds: &[PosId],
+        opts: crate::ascent::AscentOpts,
+        tasks: &mut dyn crate::purchase::TaskSink,
+        loops: &mut dyn crate::loops::LoopRules,
+    ) -> (crate::ascent::AscentReport, crate::effects::Recorder) {
+        let mut rec = crate::effects::Recorder::default();
+        let mut env = crate::ascent::AscentEnv { cfg, effects: &mut rec, tasks, loops };
+        let r = crate::ascent::backup_backed_evals(&mut self.g, seeds, opts, &mut env).unwrap();
+        (r, rec)
+    }
+
+    /// `stale_backed_rows(keys)` with v1's loop rules.
+    pub fn stale_loops(&self, keys: &[PosId]) -> Vec<(PosId, crate::backed::Backed, crate::backed::Backed)> {
+        crate::ascent::stale_backed_rows(&self.g, keys, &mut crate::loops::V1Loops::default())
+    }
+
     /// `_backed_for(row, children, ...)` on the row as stored, with its
     /// children and showcase read from the graph (what one level decides).
     pub fn backed_for(&self, id: PosId) -> (crate::backed::Backed, Vec<crate::backed::Discrepancy>, Vec<crate::backed::Discrepancy>) {
