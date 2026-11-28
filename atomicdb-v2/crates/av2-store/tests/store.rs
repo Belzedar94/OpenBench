@@ -204,7 +204,7 @@ fn key_map_compaction_survives_replay() {
         seq += 1;
         step(&mut s, seq);
         // A compaction starts only once a checkpoint is at the current generation.
-        if seq % 40 == 0 {
+        if seq.is_multiple_of(40) {
             s.checkpoint().unwrap();
         }
         assert!(seq < 4000, "no compaction after {seq} batches: {:?}", s.stats());
@@ -250,7 +250,7 @@ fn compaction_is_spread_over_commits() {
     while s.stats().compactions < 1 {
         seq += 1;
         step(&mut s, seq);
-        if seq % 40 == 0 {
+        if seq.is_multiple_of(40) {
             s.checkpoint().unwrap();
         }
         let cursor = s.reader().read(|v| v.counter(av2_store::layout::C_KM_CURSOR));

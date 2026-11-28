@@ -192,10 +192,10 @@ pub fn draw_cycling_children(
             break;
         }
         let pairs: Vec<(PosId, Move)> = walks.iter().map(|w| (w.node, w.mv)).collect();
-        if resolve_steps(g, cache, &pairs, None) {
-            if let Some((m, costs)) = meter.as_mut() {
-                m.charge(costs.step_query);
-            }
+        if resolve_steps(g, cache, &pairs, None)
+            && let Some((m, costs)) = meter.as_mut()
+        {
+            m.charge(costs.step_query);
         }
         let mut alive = Vec::new();
         for mut w in walks {
@@ -247,8 +247,12 @@ pub struct LineCtx<'a> {
     pub clock: Meter,
     pub costs: LoopCosts,
     /// `verdicts[(key, played)] = (move, value, repeats)` when asked.
-    pub verdicts: Option<&'a mut HashMap<(PosId, Vec<PosId>), (Move, Option<i32>, bool)>>,
+    pub verdicts: Option<&'a mut VerdictMap>,
 }
+
+/// `(key, played) -> (move, value, repeats)`: the verdicts a valuation
+/// reports when asked.
+pub type VerdictMap = HashMap<(PosId, Vec<PosId>), (Move, Option<i32>, bool)>;
 
 fn sorted_set(v: &[PosId]) -> Vec<PosId> {
     let mut s = v.to_vec();
