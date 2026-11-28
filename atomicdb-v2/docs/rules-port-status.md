@@ -285,6 +285,31 @@ stored pointers, which changes results).  Termination: on any graph, cycles
 included, every climb ends within the level bound and an ascent cut by a
 bound reports a `BACKED_GUARD` event (property test, 300 cases).
 
+### Golden cases (28-Nov, from the `shim` branch, PR #350, before it merged)
+
+`av2-golden --mode v2 --kind drain` on the 158 recorded production climbs
+(`propagation_queue.drain_batch`, recorded 07:39-08:07 UTC), in a scratch
+merge of #350 with this stack, its adapters switched from `NoLoops` to
+`V1Loops`:
+
+| Loop rules | Clean | Differ | Field diffs |
+|---|---:|---:|---|
+| `NoLoops` (the shim's adapters today) | 145 | 13 | 1,342 extra writes, 320 value diffs, 88 missing writes (`backed_*`) |
+| **`V1Loops` (calibrated budgets)** | **154** | **4** | 42 value diffs, 12 missing writes (`backed_*`) |
+| `V1Loops`, unlimited budgets | 154 | 4 | identical to the calibrated run |
+| `V1Loops`, budgets 0 | 146 | 12 | 444 value diffs, 1,505 extra writes |
+
+So the loop rules close 9 of the 13 differing climbs, and the calibrated
+budgets behave like unlimited ones on these cases (as v1's clock did not
+bite).  The 4 left are the largest and longest batches of the sample (v1
+took 0.8 to 6.5 s and read 2,300 to 15,000 positions; the clean ones
+p50 144 ms and 194 positions); their differences are ties between moves of
+equal value and the plies and support that follow (one family also 986 vs
+968).  Not yet explained: candidates are rows another transaction committed
+while v1's batch ran (READ COMMITTED, the races the rechecks exist for),
+and the row and parent orders that D3 fixes by id.  The shim's adapters
+should pass `V1Loops::default()` once this stack merges.
+
 ## Benchmark: climbs on the production slice
 
 `av2-climb` (`crates/av2-tools/src/bin/av2-climb.rs`) on the slice of
