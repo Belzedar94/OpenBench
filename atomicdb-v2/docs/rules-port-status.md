@@ -54,6 +54,58 @@ landing): `ProofRunTests` (MPV-2.1), `TablebaseDtzTests` (TB-2.4),
 `ClosureSlackTests` (POS-2.1, REV-1.2), `test_closure_trust.py::TablebaseLineTests`
 (TB-3.1), `test_solve.py` (SOL-1.4), `test_won_line_chain.py` (MPV-5): phase 3.
 
-## Steps 3 to 9
+## Step 3: distances without loops
+
+| Rule | Rust | Ported | Tests | Deviations |
+|---|---|---|---|---|
+| DTM-4.1 `_own_witness_plies` | `read::own_witness` | yes | through DTM-1/2 (`OwnWitnessTests`, `LoserWitnessFloorTests`) | none |
+| DTM-1.1 winner's distance, `_witness_rank` | `distance::mate_distance_refresh` | yes | `test_mate_distance.py`: `ReportedShapeTests` 2/2 cascade tests, `OwnWitnessTests` 3/3 (the third with the revocation replaced by the reopened child it leaves), `UnnameableDistanceTests` 1/1; `tests.py::DtmRefineTests` 1/1; `test_chain_link_distance.py::EquivalentWitnessTests` (recurrence half) | Distances are `u16` in the record: a value past 65,534 saturates (only an inflating loop gets there, and DTM-3 plus the rewrite limit stop it long before). |
+| DTM-2.1 loser's distance | `distance::loser_distance` | yes | `AndMirrorTests` 2/2, `LoserWitnessFloorTests` 3/3 cascade tests, `tests.py::DtmTests` 2/2 | as DTM-1.1 |
+
+Not ported here: the `backfill_mate_distance` command tests (CMD-4, phase 3:
+the command reuses `mate_distance_refresh` with `LoopCheck::Always` and
+`Overrides`, both ported) and the `NewClosureTests` of
+`test_chain_link_distance.py` (they land a mate line: stage (a)).
+
+## Step 4: the cascade driver, guards, closure side effects
+
+| Rule | Rust | Ported | Tests | Deviations |
+|---|---|---|---|---|
+| CAS-1.1 `backup_cascade` | `cascade::backup_cascade` | yes | 21 cascade tests (`tests.py::BackupTests` 3/3 portable, `PartialExpansionTests`, `FreshContextTests` 4/4, `MinimaxProofInheritanceTests`, `MinimaxWitnessPreferenceTests`, the DTM tests above); property tests `tests/props_cascade.rs` | **Pop order FIFO (D3)** instead of Python set order; seeds first in their order, then each seed's parents in parent-list order. Events carry position ids; `CASCADE_CYCLE` lists the first 20 by id instead of by key (D3). |
+| CAS-1.2 fresh context | `exact::supporting_status`, `RulesConfig::fresh_context` | yes | `FreshContextTests` 4/4 | none |
+| CAS-1.3 witness | `exact::minimax_witness` | yes | `MinimaxWitnessPreferenceTests` | none.  **Finding** (property test `a_dag_does_not_depend_on_seed_order`): the witness is the first winning child closed *at the moment* the row closes, and DTM-1.1 keeps it when no child has a distance, so `best_move` of such a closure depends on visit order, in v1 too. Every other column of the fixed point is order-independent on a DAG. |
+| CAS-1.4 closed keys and their parents are seeds | input of `backup_cascade` (stage (a) builds the seed list) | n/a here | `test_closure_reaches_all_parents.py` needs a landing: stage (a) | none |
+| CAS-1.5 bulk reads | not ported (no semantic effect) | n/a | n/a | v2 reads its columns directly |
+| CAS-2.1 `closable_rows` | `cascade::closable_rows` | yes | unit via the cascade's predicate; `RecascadeStatusCommandTests` are command tests (phase 3) | Returns the decided keys in input order instead of a dict in row order. |
+| CAS-4.1 closure source | `effects::ClosureSource`, `effects::Attribution` | yes | `one_closure_event_per_closure_with_its_source` | The attribution is passed in `Env` instead of a context variable. |
+| CAS-4.2 provenance | `effects::Provenance::clean` | yes (the value; the row is the projection's) | same | none |
+| CAS-5.1 cascade guard | `RulesConfig::cascade_guard_limit`, `Event::CascadeGuard` | yes | `test_performance_guards.py::CascadeGuardTests` 1/1 | Switchable (D2). |
+| CAS-5.2 rewrite limit | `RulesConfig::cascade_rewrite_limit`, `Event::CascadeCycle` | yes | `CascadeCycleTests` 2/2 | Switchable (D2). |
+| CAS-7.1 closure side effects | `effects::Effects::node_closed` (one call per closure, before the row's write, with status, closure, proof, source, provenance) | yes (the call; the event row, provenance row, claim resolution, task absorption and campaign end are the implementer's: task model and projection) | `one_closure_event_per_closure_with_its_source`, `an_already_closed_row_fires_nothing` | none |
+| PN-8.1 proof refresh hook | `effects::Effects::proof_refresh(seeds + changed)` | yes (the hook; step 10 is another agent's) | same | none |
+
+The other portable CAS-1/CAS-7 tests go through `ingest_analysis`,
+`revoke_closure`, `enqueue_pv_verification`, `materialise_won_line`, the
+coverage arm or the drainer: they come with stage (a) and the queue model.
+
+## Step 5: distance loops
+
+| Rule | Rust | Ported | Tests | Deviations |
+|---|---|---|---|---|
+| DTM-3.1 the repetition check, `_support_next`, `support_reaches` | `distance::loser_distance`, `distance::support_next`, `distance::support_reaches`; hop limit `RulesConfig::mate_support_hops` / `DtmOpts::hops` | yes | `test_mate_distance_cycles.py::RepetitionLoopTests` 9/10 (the listed-backfill one is a command test) and the cascade half of `test_mate_distance.py::BackfillCycleTests` | none |
+
+### Path dependence found by the property tests (v1 behaviour, ported as is)
+
+- A `MATE_PV` row with no `won_line` (historic rows) stands on its stored
+  `mate_in` as its own witness (DTM-4.1), so whatever number it first takes
+  stays: the fixed point depends on visit order.
+- A `MINIMAX` row whose stored slack, grade or distance disagrees with its
+  children changes when visited; a parent visited before reads the old
+  value (and may close through it), one visited after reads the new one.
+- With consistent rows and lines on every `MATE_PV`, the fixed point on a
+  DAG is independent of seed order except for CAS-1.3 above (property test,
+  400 cases per run, 5,000 checked once).
+
+## Steps 6 to 9
 
 Pending (next PRs).
