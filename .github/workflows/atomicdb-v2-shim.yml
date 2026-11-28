@@ -1,0 +1,136 @@
+name: AtomicDB v2 semantic bridges (shim + golden cases)
+
+# Plan docs/atomicdb/v2-plan.md, sections 7.1 and 7.2.
+#
+# shim:   v1's portable tests (atomicdb-v2/docs/test-map.csv) run twice with
+#         the same command, ATOMICDB_ENGINE=v1 then v2.  On v2 every v1
+#         function registered in atomicdb-v2/crates/av2-shim/src/registry.rs
+#         runs in Rust on the test's rows.  shim_report.py prints how many
+#         pass on v2 and fails on a regression of the baseline
+#         (atomicdb-v2/docs/shim-baseline.txt) or on a test the shim broke.
+# golden: av2-golden on the recorder-format fixtures: echo mode must be
+#         clean (every v1 value written is representable in v2), and the v2
+#         mode's classification is printed.
+
+on:
+  push:
+    branches: [atomicdb-v2]
+    paths:
+      - ".github/workflows/atomicdb-v2-shim.yml"
+      - "atomicdb-v2/**"
+      - "atomicdb/**"
+  pull_request:
+    branches: [atomicdb-v2]
+    paths:
+      - ".github/workflows/atomicdb-v2-shim.yml"
+      - "atomicdb-v2/**"
+      - "atomicdb/**"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  shim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: openbench_test
+          POSTGRES_USER: openbench
+          POSTGRES_PASSWORD: openbench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openbench -d openbench_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPENBENCH_POSTGRES_DB: openbench_test
+      OPENBENCH_POSTGRES_USER: openbench
+      OPENBENCH_POSTGRES_PASSWORD: openbench
+      OPENBENCH_POSTGRES_HOST: 127.0.0.1
+      OPENBENCH_POSTGRES_PORT: 5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            atomicdb-v2/target
+          key: av2-shim-${{ runner.os }}-${{ hashFiles('atomicdb-v2/Cargo.lock') }}
+          restore-keys: av2-shim-${{ runner.os }}-
+      - run: pip install -r requirements.txt -r Client/requirements.txt
+      - name: Build the av2 extension
+        run: python atomicdb-v2/scripts/build_av2_py.py --jobs 4
+      - run: python manage.py migrate --noinput
+      - name: The bridge's own tests
+        run: python manage.py test atomicdb.test_v2shim --noinput --verbosity 2
+      - name: Portable tests on v1
+        env:
+          ATOMICDB_ENGINE: v1
+        # The v1 suite's verdict belongs to datagen-postgres; here it is the
+        # reference the v2 run is compared with.
+        run: |
+          python manage.py test atomicdb --noinput \
+            --testrunner atomicdb.v2shim.runner.ShimRunner --portability portable \
+            --shim-report "$RUNNER_TEMP/shim-v1.json" || true
+      - name: Portable tests on v2
+        env:
+          ATOMICDB_ENGINE: v2
+        # Failures are judged by shim_report.py (ratchet), not by the exit code.
+        run: |
+          python manage.py test atomicdb --noinput \
+            --testrunner atomicdb.v2shim.runner.ShimRunner --portability portable \
+            --shim-report "$RUNNER_TEMP/shim-v2.json" || true
+      - name: Report and ratchet
+        run: |
+          python atomicdb-v2/scripts/shim_report.py "$RUNNER_TEMP/shim-v2.json" \
+            --v1 "$RUNNER_TEMP/shim-v1.json" --baseline atomicdb-v2/docs/shim-baseline.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shim-reports
+          path: |
+            ${{ runner.temp }}/shim-v1.json
+            ${{ runner.temp }}/shim-v2.json
+          if-no-files-found: ignore
+
+  golden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: atomicdb-v2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            atomicdb-v2/target
+          key: av2-golden-${{ runner.os }}-${{ hashFiles('atomicdb-v2/Cargo.lock') }}
+          restore-keys: av2-golden-${{ runner.os }}-
+      - run: cargo test -p av2-shim -p av2-golden
+      - run: cargo build --release -p av2-golden
+      - name: Echo mode is clean on the fixtures
+        run: ./target/release/av2-golden --mode echo --fail-on-diff crates/av2-golden/tests/fixtures
+      - name: v2 mode (classification only)
+        run: ./target/release/av2-golden --mode v2 --json "$RUNNER_TEMP/golden-v2.json" crates/av2-golden/tests/fixtures
