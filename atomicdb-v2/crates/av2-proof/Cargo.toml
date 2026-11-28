@@ -1,0 +1,43 @@
+[package]
+name = "av2-proof"
+description = "AtomicDB v2 proof numbers (pn/dn) and selector priority, computed in memory (owner decision D5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+av2-model.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+av2-store.workspace = true
+sha2.workspace = true
+
+[[bin]]
+name = "av2-proof-bench"
+path = "src/bin/av2-proof-bench.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "av2-proof-golden"
+path = "src/bin/av2-proof-golden.rs"
+required-features = ["bench"]
+
+[features]
+# The benchmark binary reads a v2 store built by `av2-load` from the
+# production slice; it needs the store crate.
+bench = ["dep:av2-store", "dep:av2-tools", "dep:csv"]
+
+[dependencies.csv]
+workspace = true
+optional = true
+
+[dependencies.av2-store]
+workspace = true
+optional = true
+
+[dependencies.av2-tools]
+path = "../av2-tools"
+optional = true
