@@ -19,8 +19,4 @@ xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
-[profile.release]
-opt-level = 3
-debug = 1
-lto = "thin"
-codegen-units = 4
+# The release profile lives in the workspace manifest (`../Cargo.toml`).

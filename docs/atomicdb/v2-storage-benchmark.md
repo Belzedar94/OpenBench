@@ -1,8 +1,8 @@
 # AtomicDB v2: the storage race
 
 Measured 27/28-Nov-2026 for [`v2-plan.md`](v2-plan.md). The harness is
-[`atomicdb-v2-bench/`](../../atomicdb-v2-bench/); the raw output of every run
-quoted here is in `atomicdb-v2-bench/results/`.
+[`atomicdb-v2/bench/`](../../atomicdb-v2/bench/); the raw output of every run
+quoted here is in `atomicdb-v2/bench/results/`.
 
 ## 1. Result
 
@@ -833,7 +833,7 @@ that decides the race is on the read side, where the OS does not take part.
 
 ## 9. Reproduce
 
-Everything is in `atomicdb-v2-bench/`; its README has the build line.
+Everything is in `atomicdb-v2/bench/`; its README has the build line.
 
 ```
 # datasets
@@ -853,7 +853,7 @@ The synthetic datasets are deterministic: the same `--nodes` and `--seed`
 give the same files, and the suite gives the same state hash.
 
 The real slice is not in the repository. It is reproduced with the queries in
-`atomicdb-v2-bench/sql/` (`ball_edges.sql`, `ball_pos.sql`, `sample.sql`,
+`atomicdb-v2/bench/sql/` (`ball_edges.sql`, `ball_pos.sql`, `sample.sql`,
 `landings.sql`, `depths.sql`), each run as
 `psql -X -q -f file.sql | zstd > out.csv.zst` on a **restored backup** (they
 were run once on production for this report, read-only, outside the backup

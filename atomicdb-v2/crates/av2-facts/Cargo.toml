@@ -1,0 +1,12 @@
+[package]
+name = "av2-facts"
+description = "AtomicDB v2: the facts of the log, the only long-lived format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
