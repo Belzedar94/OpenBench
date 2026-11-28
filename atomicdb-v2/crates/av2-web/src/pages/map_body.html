@@ -1,0 +1,280 @@
+<div class="move-tree" id="conquest-map"
+  data-api="/atomicdb/api/map/v1"
+  data-root-key="__ROOT_KEY__"
+  data-root-fen="__ROOT_FEN__"
+  data-piece-base="/static/atomicdb/pieces/"
+  data-chessground-module="/static/atomicdb/vendor/chessground/chessground.min.js">
+
+  <header class="tree-hero" aria-labelledby="tree-title">
+    <div class="tree-heading">
+      <span class="tree-eyebrow">Atomic chess analysis</span>
+      <h1 id="tree-title">Conquest map</h1>
+      <p>Explore the move tree, solved territory, and live analysis.</p>
+    </div>
+    <div class="snapshot-actions">
+      <div class="snapshot-status" id="map-snapshot-stamp"
+        role="status" aria-live="polite">
+        <span class="snapshot-dot" aria-hidden="true"></span>
+        <span>Connecting to the solver</span>
+      </div>
+      <button class="snapshot-refresh" id="map-refresh" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"></path>
+        </svg>
+        <span>Refresh</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="tree-toolbar" aria-label="Move tree controls">
+    <label class="tree-search" for="map-search">
+      <span class="visually-hidden">Search the move tree</span>
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="6.5"></circle>
+        <path d="m16 16 4 4"></path>
+      </svg>
+      <input id="map-search" type="search"
+        placeholder="Search a move or line&hellip;" autocomplete="off"
+        spellcheck="false">
+      <kbd aria-hidden="true">/</kbd>
+    </label>
+
+    <fieldset class="branch-modes" id="map-mode"
+      aria-label="Branches to show">
+      <label>
+        <input id="map-mode-all" type="radio" name="tree-mode"
+          value="all" checked>
+        <span>All branches</span>
+      </label>
+      <label>
+        <input id="map-mode-unresolved" type="radio" name="tree-mode"
+          value="unresolved">
+        <span>Unresolved</span>
+      </label>
+      <label>
+        <input id="map-mode-active" type="radio" name="tree-mode"
+          value="active">
+        <span>Active now</span>
+      </label>
+    </fieldset>
+
+    <div class="view-controls" aria-label="Tree view">
+      <button class="tree-icon-button" id="map-zoom-out" type="button"
+        title="Zoom out" aria-label="Zoom out">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M6 12h12"></path>
+        </svg>
+      </button>
+      <button class="tree-icon-button" id="map-zoom-in" type="button"
+        title="Zoom in" aria-label="Zoom in">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 6v12M6 12h12"></path>
+        </svg>
+      </button>
+      <button class="tree-text-button" id="map-fit" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path>
+        </svg>
+        <span>Fit tree</span>
+      </button>
+      <button class="tree-icon-button" id="map-help-open" type="button"
+        title="How to use the move tree" aria-label="How to use the move tree">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M9.8 9a2.3 2.3 0 1 1 3.6 1.9c-.9.6-1.4 1-1.4 2.1M12 17h.01"></path>
+        </svg>
+      </button>
+    </div>
+  </section>
+
+  <nav class="tree-breadcrumbs" id="map-breadcrumbs"
+    aria-label="Current move line">
+    <button type="button" class="current" data-key="__ROOT_KEY__"
+      aria-current="page">Start</button>
+  </nav>
+
+  <div class="tree-status" id="map-status" role="status" aria-live="polite">
+    <span class="tree-spinner" aria-hidden="true"></span>
+    <span>Loading the latest move tree&hellip;</span>
+  </div>
+
+  <section class="tree-workspace" id="map-stage"
+    aria-label="Atomic move tree workspace">
+    <div class="tree-panel">
+      <div class="tree-panel-heading">
+        <div>
+          <span class="tree-panel-kicker">Focused branch</span>
+          <h2 id="tree-branch-title">Start position</h2>
+        </div>
+        <p id="tree-result-key">Select a node to inspect its position.</p>
+      </div>
+
+      <div class="tree-viewport" id="map-svg-wrap">
+        <ul class="tree-legend" aria-label="Position result legend">
+          <li data-status="WHITE_WIN"><span aria-hidden="true">W</span>White wins</li>
+          <li data-status="BLACK_WIN"><span aria-hidden="true">B</span>Black wins</li>
+          <li data-status="DRAW"><span aria-hidden="true">=</span>Draw</li>
+          <li data-status="UNKNOWN"><span aria-hidden="true">?</span>Unknown</li>
+        </ul>
+        <svg id="map-svg" role="tree" tabindex="0"
+          aria-label="Interactive Atomic chess move tree"
+          preserveAspectRatio="xMinYMin meet">
+          <g id="map-scene">
+            <g id="map-links" aria-hidden="true"></g>
+            <g id="map-nodes"></g>
+          </g>
+        </svg>
+
+        <div class="tree-empty" id="map-empty-state" hidden>
+          <strong>No matching branches</strong>
+          <span>Try another search or show all branches.</span>
+          <button type="button" id="map-clear-view">Clear view</button>
+        </div>
+      </div>
+
+      <section class="work-rail work-rail-docked"
+        aria-labelledby="work-rail-title">
+        <div class="work-rail-heading">
+          <span class="live-mark" aria-hidden="true"></span>
+          <div>
+            <h2 id="work-rail-title">Analyzing now</h2>
+            <p>Current solver activity</p>
+          </div>
+        </div>
+        <div class="work-rail-list" id="map-active-work">
+          <div class="work-rail-empty" id="map-active-work-empty">
+            No branch is being analyzed right now.
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <aside class="tree-inspector" id="map-inspector"
+      aria-labelledby="inspector-title">
+      <div class="inspector-handle" aria-hidden="true"></div>
+      <div class="inspector-header">
+        <div>
+          <span class="inspector-kicker">Selected position</span>
+          <h2 id="inspector-title">Start position</h2>
+        </div>
+        <button class="inspector-close" id="map-inspector-close"
+          type="button" aria-label="Collapse position details">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m7 10 5 5 5-5"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div class="inspector-content">
+        <div class="inspector-opening" id="inspector-opening" hidden>
+          <span>Atomic opening</span>
+          <strong id="inspector-opening-name"></strong>
+        </div>
+
+        <div class="inspector-board-shell">
+          <div class="map-board cg-wrap brown cburnett" id="map-board" role="img"
+            aria-label="Atomic chess start position"></div>
+        </div>
+
+        <div class="inspector-line-block">
+          <span>Full line</span>
+          <p id="inspector-line">Start position</p>
+        </div>
+
+        <div class="position-result" id="inspector-result"
+          data-status="UNKNOWN">
+          <span class="result-symbol" id="inspector-result-symbol"
+            aria-hidden="true">?</span>
+          <div>
+            <strong id="inspector-status">Not solved yet</strong>
+            <span id="inspector-eval">No reliable evaluation yet</span>
+          </div>
+        </div>
+
+        <dl class="inspector-stats">
+          <div>
+            <dt>Positions in branch</dt>
+            <dd id="inspector-positions">&hellip;</dd>
+          </div>
+          <div>
+            <dt>Engine nodes</dt>
+            <dd id="inspector-nodes">&hellip;</dd>
+          </div>
+          <div>
+            <dt>Compute time</dt>
+            <dd id="inspector-time">&hellip;</dd>
+          </div>
+          <div>
+            <dt>Visits</dt>
+            <dd id="inspector-visits">&hellip;</dd>
+          </div>
+          <div>
+            <dt>Transpositions</dt>
+            <dd id="inspector-transpositions">&hellip;</dd>
+          </div>
+        </dl>
+
+        <div class="inspector-work" id="inspector-work">
+          <span class="work-state-mark" aria-hidden="true"></span>
+          <span>No active work on this position</span>
+        </div>
+
+        <div class="inspector-actions">
+          <button class="tree-action primary" id="map-focus-branch"
+            type="button">Focus this branch</button>
+          <a class="tree-action" id="map-open-explorer"
+            href="/atomicdb/">Open explorer</a>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <dialog class="tree-help-dialog" id="map-help-dialog"
+    aria-labelledby="map-help-title">
+    <form method="dialog">
+      <div class="help-dialog-heading">
+        <div>
+          <span class="tree-eyebrow">Quick guide</span>
+          <h2 id="map-help-title">Reading the move tree</h2>
+        </div>
+        <button class="tree-icon-button" id="map-help-close"
+          value="close" aria-label="Close help">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m7 7 10 10M17 7 7 17"></path>
+          </svg>
+        </button>
+      </div>
+      <ul class="help-list">
+        <li>
+          <span class="help-symbol branch" aria-hidden="true"></span>
+          <div><strong>Connections are moves.</strong>
+            Follow them from left to right on larger screens, or downward on
+            phones.</div>
+        </li>
+        <li>
+          <span class="help-symbol result" aria-hidden="true">W</span>
+          <div><strong>Every result includes a letter or symbol.</strong>
+            Color reinforces the result but never carries it alone.</div>
+        </li>
+        <li>
+          <span class="help-symbol active" aria-hidden="true"></span>
+          <div><strong>A moving ring means live analysis.</strong>
+            The activity rows below the tree surface current solver work.</div>
+        </li>
+      </ul>
+      <div class="help-shortcuts">
+        <span><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd> move</span>
+        <span><kbd>Enter</kbd> select / expand</span>
+        <span><kbd>Esc</kbd> closes help</span>
+        <span><kbd>/</kbd> search</span>
+      </div>
+    </form>
+  </dialog>
+
+  <noscript>
+    <div class="tree-noscript">
+      <strong>The move tree needs JavaScript.</strong>
+      The rest of AtomicDB remains available from the navigation above.
+    </div>
+  </noscript>
+</div>

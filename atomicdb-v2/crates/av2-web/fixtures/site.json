@@ -1,0 +1,447 @@
+{
+ "queue": {
+  "rows": [
+   {
+    "user": "jeanHeibig",
+    "waiting": 9868,
+    "running": 170,
+    "nodes": 3300000000000,
+    "served": 771190000000,
+    "share": 59.7,
+    "oldest_seconds": 10800
+   },
+   {
+    "user": "MoKy1978",
+    "waiting": 1841,
+    "running": 35,
+    "nodes": 243990000000,
+    "served": 117030000000,
+    "share": 9.1,
+    "oldest_seconds": 86400
+   },
+   {
+    "user": "Torom",
+    "waiting": 307,
+    "running": 34,
+    "nodes": 43650000000,
+    "served": 215300000000,
+    "share": 16.7,
+    "oldest_seconds": 2760
+   },
+   {
+    "user": "whatismymainbro",
+    "waiting": 59,
+    "running": 5,
+    "nodes": 32930000000,
+    "served": 36870000000,
+    "share": 2.9,
+    "oldest_seconds": 3180
+   },
+   {
+    "user": "BManBJ",
+    "waiting": 51,
+    "running": 26,
+    "nodes": 37890000000,
+    "served": 113270000000,
+    "share": 8.8,
+    "oldest_seconds": 2100
+   },
+   {
+    "user": "MoNiKaMaDnEsS",
+    "waiting": 17,
+    "running": 5,
+    "nodes": 11320000000,
+    "served": 36440000000,
+    "share": 2.8,
+    "oldest_seconds": 2280
+   },
+   {
+    "user": "",
+    "waiting": 2,
+    "running": 0,
+    "nodes": 256000000,
+    "served": 0,
+    "share": 0.0,
+    "oldest_seconds": 64800
+   },
+   {
+    "user": "Brendan7625",
+    "waiting": 0,
+    "running": 0,
+    "nodes": 0,
+    "served": 13500000,
+    "share": 0.0,
+    "oldest_seconds": null
+   },
+   {
+    "user": "asfault",
+    "waiting": 0,
+    "running": 0,
+    "nodes": 0,
+    "served": 1920000000,
+    "share": 0.1,
+    "oldest_seconds": null
+   }
+  ],
+  "fleet_nodes_last_hour": 1310000000000
+ },
+ "boards": [
+  {
+   "window": "Today (UTC)",
+   "rows": [
+    {
+     "user": "jeanHeibig",
+     "nodes": 6070000000000,
+     "tasks": 29594,
+     "machines": 1
+    },
+    {
+     "user": "Torom",
+     "nodes": 1600000000000,
+     "tasks": 12149,
+     "machines": 1
+    },
+    {
+     "user": "BManBJ",
+     "nodes": 906060000000,
+     "tasks": 5099,
+     "machines": 1
+    },
+    {
+     "user": "MoKy1978",
+     "nodes": 897170000000,
+     "tasks": 6946,
+     "machines": 1
+    },
+    {
+     "user": "JackIV",
+     "nodes": 527120000000,
+     "tasks": 1686,
+     "machines": 1
+    },
+    {
+     "user": "rhaxier",
+     "nodes": 160370000000,
+     "tasks": 542,
+     "machines": 1
+    },
+    {
+     "user": "MoNiKaMaDnEsS",
+     "nodes": 21710000000,
+     "tasks": 48,
+     "machines": 1
+    },
+    {
+     "user": "Brendan7625",
+     "nodes": 10800000000,
+     "tasks": 39,
+     "machines": 1
+    }
+   ]
+  },
+  {
+   "window": "Last 24 hours",
+   "rows": [
+    {
+     "user": "jeanHeibig",
+     "nodes": 18420000000000,
+     "tasks": 100751,
+     "machines": 1
+    },
+    {
+     "user": "Torom",
+     "nodes": 4840000000000,
+     "tasks": 37607,
+     "machines": 1
+    },
+    {
+     "user": "BManBJ",
+     "nodes": 2850000000000,
+     "tasks": 17620,
+     "machines": 1
+    },
+    {
+     "user": "MoKy1978",
+     "nodes": 2700000000000,
+     "tasks": 18233,
+     "machines": 1
+    },
+    {
+     "user": "JackIV",
+     "nodes": 1650000000000,
+     "tasks": 13063,
+     "machines": 1
+    },
+    {
+     "user": "rhaxier",
+     "nodes": 280190000000,
+     "tasks": 1874,
+     "machines": 1
+    },
+    {
+     "user": "soothdest",
+     "nodes": 177740000000,
+     "tasks": 7104,
+     "machines": 1
+    },
+    {
+     "user": "MoNiKaMaDnEsS",
+     "nodes": 155330000000,
+     "tasks": 387,
+     "machines": 1
+    },
+    {
+     "user": "Brendan7625",
+     "nodes": 41170000000,
+     "tasks": 361,
+     "machines": 1
+    }
+   ]
+  },
+  {
+   "window": "All time",
+   "rows": [
+    {
+     "user": "BManBJ",
+     "nodes": 138760000000000,
+     "tasks": 906009,
+     "machines": 1
+    },
+    {
+     "user": "Torom",
+     "nodes": 137580000000000,
+     "tasks": 1100000,
+     "machines": 1
+    },
+    {
+     "user": "jeanHeibig",
+     "nodes": 136040000000000,
+     "tasks": 1300000,
+     "machines": 1
+    },
+    {
+     "user": "NitroColoraze",
+     "nodes": 90300000000000,
+     "tasks": 751082,
+     "machines": 1
+    },
+    {
+     "user": "gannet",
+     "nodes": 65190000000000,
+     "tasks": 500679,
+     "machines": 1
+    },
+    {
+     "user": "tenzink",
+     "nodes": 42830000000000,
+     "tasks": 349427,
+     "machines": 1
+    },
+    {
+     "user": "MoKy1978",
+     "nodes": 37880000000000,
+     "tasks": 286311,
+     "machines": 1
+    },
+    {
+     "user": "JackIV",
+     "nodes": 35570000000000,
+     "tasks": 279578,
+     "machines": 1
+    },
+    {
+     "user": "auranvesdranor",
+     "nodes": 31400000000000,
+     "tasks": 228002,
+     "machines": 1
+    },
+    {
+     "user": "RickEdinson",
+     "nodes": 26080000000000,
+     "tasks": 172065,
+     "machines": 1
+    },
+    {
+     "user": "randomchampgamer",
+     "nodes": 19850000000000,
+     "tasks": 140897,
+     "machines": 1
+    },
+    {
+     "user": "MoNiKaMaDnEsS",
+     "nodes": 18020000000000,
+     "tasks": 122453,
+     "machines": 1
+    },
+    {
+     "user": "NeoArcturus",
+     "nodes": 4130000000000,
+     "tasks": 16855,
+     "machines": 1
+    },
+    {
+     "user": "rhaxier",
+     "nodes": 3730000000000,
+     "tasks": 28845,
+     "machines": 1
+    },
+    {
+     "user": "ijh",
+     "nodes": 3570000000000,
+     "tasks": 37348,
+     "machines": 1
+    },
+    {
+     "user": "quasa",
+     "nodes": 2810000000000,
+     "tasks": 18407,
+     "machines": 1
+    },
+    {
+     "user": "Imusing",
+     "nodes": 2390000000000,
+     "tasks": 29417,
+     "machines": 1
+    },
+    {
+     "user": "soothdest",
+     "nodes": 2260000000000,
+     "tasks": 36442,
+     "machines": 1
+    },
+    {
+     "user": "zwemke",
+     "nodes": 1410000000000,
+     "tasks": 8708,
+     "machines": 1
+    },
+    {
+     "user": "aysz88",
+     "nodes": 1390000000000,
+     "tasks": 9035,
+     "machines": 1
+    },
+    {
+     "user": "NotsoNatso",
+     "nodes": 1150000000000,
+     "tasks": 7715,
+     "machines": 1
+    },
+    {
+     "user": "zacksloth5",
+     "nodes": 1130000000000,
+     "tasks": 6229,
+     "machines": 1
+    },
+    {
+     "user": "jarcev",
+     "nodes": 742500000000,
+     "tasks": 5252,
+     "machines": 1
+    },
+    {
+     "user": "Accelerator987",
+     "nodes": 537590000000,
+     "tasks": 5632,
+     "machines": 1
+    },
+    {
+     "user": "uipio",
+     "nodes": 317540000000,
+     "tasks": 1518,
+     "machines": 1
+    },
+    {
+     "user": "StealYourKidney2",
+     "nodes": 237800000000,
+     "tasks": 826,
+     "machines": 1
+    },
+    {
+     "user": "thecarislost",
+     "nodes": 197230000000,
+     "tasks": 1268,
+     "machines": 1
+    },
+    {
+     "user": "RandomMatrix",
+     "nodes": 188520000000,
+     "tasks": 854,
+     "machines": 1
+    },
+    {
+     "user": "Brendan7625",
+     "nodes": 125830000000,
+     "tasks": 1195,
+     "machines": 1
+    },
+    {
+     "user": "belzedar",
+     "nodes": 109590000000,
+     "tasks": 3788,
+     "machines": 1
+    },
+    {
+     "user": "nullmove26",
+     "nodes": 104730000000,
+     "tasks": 687,
+     "machines": 1
+    },
+    {
+     "user": "codex_local_worker",
+     "nodes": 85010000000,
+     "tasks": 610,
+     "machines": 1
+    },
+    {
+     "user": "bricerichmond",
+     "nodes": 78170000000,
+     "tasks": 113,
+     "machines": 1
+    },
+    {
+     "user": "PortableExe",
+     "nodes": 40000000000,
+     "tasks": 231,
+     "machines": 1
+    },
+    {
+     "user": "Void",
+     "nodes": 37100000000,
+     "tasks": 253,
+     "machines": 1
+    },
+    {
+     "user": "Alphadream00",
+     "nodes": 30990000000,
+     "tasks": 173,
+     "machines": 1
+    },
+    {
+     "user": "rookgamestrategy",
+     "nodes": 17280000000,
+     "tasks": 81,
+     "machines": 1
+    },
+    {
+     "user": "aiorla",
+     "nodes": 7040000000,
+     "tasks": 52,
+     "machines": 1
+    },
+    {
+     "user": "LaughingOrange",
+     "nodes": 2640000000,
+     "tasks": 6,
+     "machines": 1
+    },
+    {
+     "user": "RandomMatrix2",
+     "nodes": 532100000,
+     "tasks": 5,
+     "machines": 1
+    }
+   ]
+  }
+ ]
+}

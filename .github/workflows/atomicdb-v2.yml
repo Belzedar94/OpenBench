@@ -56,3 +56,43 @@ jobs:
       - name: crash test log
         if: always() && hashFiles('atomicdb-v2/crates/av2-tools/Cargo.toml') != ''
         run: tail -n 5 "$RUNNER_TEMP/crash.jsonl" || true
+
+  # The website (crates/av2-web): the browser build of the islands, then the
+  # full cargo-leptos build (server + WASM bundle) and the assembled static
+  # site, with the bundle sizes in the log.  The ssr build is already covered
+  # by the job above (av2-web is a default member).
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-leptos
+            atomicdb-v2/target
+          key: av2-web-${{ runner.os }}-${{ hashFiles('atomicdb-v2/Cargo.lock') }}
+          restore-keys: av2-web-${{ runner.os }}-
+      - name: clippy (hydrate, wasm32)
+        run: cargo clippy -p av2-web --lib --target wasm32-unknown-unknown --no-default-features --features hydrate -- -D warnings
+      - name: cargo-leptos
+        run: command -v cargo-leptos || cargo install cargo-leptos --version 0.3.12 --locked
+      - name: build (server + islands)
+        working-directory: atomicdb-v2/crates/av2-web
+        env:
+          RUSTFLAGS: ""
+        run: cargo leptos build --release
+      - name: assemble static site
+        run: |
+          ./target/release/av2-web assemble --v1-static ../atomicdb/static/atomicdb \
+            --assets crates/av2-web/assets --logo ../OpenBench/static/logo.svg --site-root target/site
+          ls -l target/site/static/atomicdb/pkg/
+      - name: bench (in-process)
+        run: ./target/release/av2-web bench --site-root target/site --n 5000
