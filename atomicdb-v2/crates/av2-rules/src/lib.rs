@@ -47,9 +47,11 @@ pub mod distance;
 pub mod effects;
 pub mod exact;
 pub mod loops;
+pub mod pointer_loops;
 pub mod proofs;
 pub mod purchase;
 pub mod read;
+pub mod repetition;
 pub mod testkit;
 
 use av2_facts::Fact;
