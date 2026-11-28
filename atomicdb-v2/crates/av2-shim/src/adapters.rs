@@ -46,10 +46,42 @@ fn effects_to_v1(ctx: &mut Ctx<'_>, rec: Recorder) -> Vec<Value> {
     calls
 }
 
+/// The rules' configuration from v1's constants and settings as the
+/// caller had them (defaults where the caller sent none).
+pub fn config_from(ctx: &Ctx<'_>) -> RulesConfig {
+    let mut cfg = RulesConfig::default();
+    let int = |name: &str| ctx.constant("ingest", name).and_then(Value::as_u64);
+    if let Some(v) = int("CASCADE_GUARD_LIMIT") {
+        cfg.cascade_guard_limit = v;
+    }
+    if let Some(v) = int("CASCADE_REWRITE_LIMIT") {
+        cfg.cascade_rewrite_limit = v as u32;
+    }
+    if let Some(v) = int("MATE_SUPPORT_HOPS") {
+        cfg.mate_support_hops = v as usize;
+    }
+    if let Some(v) = int("BACKED_MAX_PLIES") {
+        cfg.backed_max_plies = v;
+    }
+    if let Some(v) = int("BACKED_MAX_REVISITS") {
+        cfg.backed_max_revisits = v as u32;
+    }
+    if let Some(v) = int("BACKED_MAX_NODES") {
+        cfg.backed_max_nodes = v;
+    }
+    if let Some(v) = ctx.setting("ATOMICDB_FRESH_CONTEXT").and_then(Value::as_bool) {
+        cfg.fresh_context = v;
+    }
+    if let Some(v) = ctx.setting("ATOMICDB_AUTO_INTERIOR_DEEP_RUNGS").and_then(Value::as_bool) {
+        cfg.auto_interior_deep_rungs = v;
+    }
+    cfg
+}
+
 /// `ingest.backup_cascade(seed_keys, report=None) -> changed_total`.
 pub fn backup_cascade(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
     let seeds = known_positions(ctx, args, 0, "seed_keys")?;
-    let cfg = RulesConfig::default();
+    let cfg = config_from(ctx);
     let mut rec = Recorder::default();
     let mut zeroing = BoardZeroing;
     let attribution = Attribution::default();
