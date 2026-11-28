@@ -77,6 +77,7 @@ impl QueueState {
             }
             Input::Pool { now, target } => Output::Made { count: self.top_up_pool(env, refill, *now, *target) },
             Input::Arm { now, step } => Output::Made { count: self.arm_step(step, *now, env) },
+            Input::Purchases { .. } => Output::Ok,
             Input::Cascade { now, pos, open_before } => Output::Made { count: self.queue_value_cascade(*pos, *open_before, *now, env) },
             Input::BulkChildren { now, account, pos, route, source, children } => Output::Made {
                 count: self.enqueue_unexplored_children(

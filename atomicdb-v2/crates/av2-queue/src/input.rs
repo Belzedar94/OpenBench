@@ -441,6 +441,12 @@ pub enum Input {
         now: Ms,
         step: crate::arms::ArmStep,
     },
+    /// The quality arm's purchases made by the backed ascent (Q-8.15,
+    /// BKD-11, `quality.rs`).  Applying it changes nothing: the rules made
+    /// the purchases and the record's deltas carry them.
+    Purchases {
+        now: Ms,
+    },
     /// The value cascade of a landing (PRI-4.9).
     Cascade {
         now: Ms,
@@ -493,6 +499,7 @@ impl Input {
             | Input::Pool { now, .. }
             | Input::Arm { now, .. }
             | Input::Cascade { now, .. }
+            | Input::Purchases { now }
             | Input::BulkChildren { now, .. }
             | Input::Tick { now }
             | Input::SetConfig { now, .. } => *now,
