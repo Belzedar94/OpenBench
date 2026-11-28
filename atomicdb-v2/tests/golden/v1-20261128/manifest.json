@@ -1,0 +1,32 @@
+{
+ "recorder_version": 1,
+ "base": "https://belzedar.duckdns.org",
+ "started_at": "2026-11-28T07:52:40.797981+00:00",
+ "finished_at": "2026-11-28T08:20:04.129250+00:00",
+ "seed": 20261128,
+ "responses": 2956,
+ "by_endpoint": {
+  "query": 1701,
+  "principal-variations": 509,
+  "backed-source": 468,
+  "frontier": 156,
+  "live-request": 87,
+  "roots": 3,
+  "map": 20,
+  "my-queue": 6,
+  "my-workers": 6
+ },
+ "by_status": {
+  "200": 2886,
+  "400": 47,
+  "404": 7,
+  "403": 8,
+  "401": 6,
+  "405": 2
+ },
+ "positions_queried": 1026,
+ "fixture_keys": 200,
+ "transport_failures": 0,
+ "rate_limit_per_second": 2.0,
+ "user_agent": "atomicdb-v2-golden-recorder/1 (read-only, <=2 req/s)"
+}
