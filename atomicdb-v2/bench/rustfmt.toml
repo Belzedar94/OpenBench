@@ -1,0 +1,2 @@
+# The benchmark keeps its dense layout; it is frozen as the record of the storage race.
+disable_all_formatting = true

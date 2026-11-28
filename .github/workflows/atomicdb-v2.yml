@@ -1,0 +1,57 @@
+name: AtomicDB v2 (Rust workspace)
+
+on:
+  push:
+    branches: [atomicdb-v2]
+    paths:
+      - ".github/workflows/atomicdb-v2.yml"
+      - "atomicdb-v2/**"
+  pull_request:
+    branches: [atomicdb-v2]
+    paths:
+      - ".github/workflows/atomicdb-v2.yml"
+      - "atomicdb-v2/**"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: atomicdb-v2
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            atomicdb-v2/target
+          key: av2-${{ runner.os }}-${{ hashFiles('atomicdb-v2/Cargo.lock') }}
+          restore-keys: av2-${{ runner.os }}-
+      - name: fmt
+        run: cargo fmt --all --check
+      # The bench (`bench/`) links RocksDB/LMDB/Postgres and is not a default
+      # member: clippy and tests cover the v2 crates.
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+      - name: crash test (short)
+        if: hashFiles('atomicdb-v2/crates/av2-tools/Cargo.toml') != ''
+        run: |
+          cargo build --release -p av2-tools --bin av2-crashtest
+          ./target/release/av2-crashtest --dir "$RUNNER_TEMP/av2-crash" --trials 60 --seed ${{ github.run_number }} --out "$RUNNER_TEMP/crash.jsonl"
+      - name: crash test log
+        if: always() && hashFiles('atomicdb-v2/crates/av2-tools/Cargo.toml') != ''
+        run: tail -n 5 "$RUNNER_TEMP/crash.jsonl" || true

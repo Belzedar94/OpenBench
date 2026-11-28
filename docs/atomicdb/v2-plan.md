@@ -7,7 +7,7 @@ in Rust, and choose the store empirically.
 The store was chosen by a race that was built and run for this plan. The raw
 numbers, the method and how to reproduce them are in
 [`v2-storage-benchmark.md`](v2-storage-benchmark.md); the harness is in
-[`atomicdb-v2-bench/`](../../atomicdb-v2-bench/). This document is the plan.
+[`atomicdb-v2/bench/`](../../atomicdb-v2/bench/). This document is the plan.
 
 ## 0. The plan on one page
 

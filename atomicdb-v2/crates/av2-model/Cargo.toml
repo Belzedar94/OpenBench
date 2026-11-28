@@ -1,0 +1,13 @@
+[package]
+name = "av2-model"
+description = "AtomicDB v2: ids, keys, move encoding, the graph records and the graph traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hex.workspace = true
+serde.workspace = true
+sha2.workspace = true
