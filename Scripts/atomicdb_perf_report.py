@@ -22,6 +22,7 @@ import gzip
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import atomicdb_perf_sample as sampler  # noqa: E402
@@ -113,6 +114,8 @@ def http_records(lo, hi, excluded, pattern):
 
 def report(args):
     lo, hi = epoch(args.since), epoch(args.until)
+    # A window that reaches into the future is measured up to now.
+    hi = min(hi, getattr(args, 'now', None) or time.time())
     excluded = []
     for item in args.exclude or ():
         a, b = item.split('/')
