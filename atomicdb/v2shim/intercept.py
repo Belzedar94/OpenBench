@@ -65,7 +65,10 @@ def _env_set(name):
 
 
 def routed_names():
-    """The v1 names that go to v2 (ported, narrowed by the env filters)."""
+    """The v1 names that go to v2 (ported, narrowed by the env filters);
+    none when the extension is not built."""
+    if not bridge.available():
+        return set()
     names = bridge.ported()
     only = _env_set('ATOMICDB_V2_ONLY')
     if only:
