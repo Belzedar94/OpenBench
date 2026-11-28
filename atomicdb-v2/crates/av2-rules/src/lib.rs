@@ -97,6 +97,17 @@ pub trait Rules {
     /// `facts`; return one output per input, in order.
     fn apply(&mut self, graph: &mut dyn GraphWrite, inputs: &[Self::Input], facts: &mut Vec<Fact>)
     -> Result<Vec<Self::Output>, RulesError>;
+
+    /// The oldest batch `apply` computed is durable and applied as `seq`:
+    /// `committed` is the store as readers now see it.  Work that reads the
+    /// committed graph and never feeds back into it runs here (the proof
+    /// numbers, PN-8.2: `av2_proof::Proofs::after_batch`).  Batches are
+    /// reported in the order they were computed.
+    fn after_commit(&mut self, _committed: &dyn av2_model::GraphRead, _seq: u64) {}
+
+    /// The oldest batch `apply` computed will not be committed (its commit
+    /// failed): drop whatever was kept for its `after_commit`.
+    fn abandoned(&mut self) {}
 }
 
 /// The input type of phase 2/3, sketched so that other crates can name it.

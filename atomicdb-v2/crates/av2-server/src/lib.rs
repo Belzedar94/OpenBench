@@ -11,6 +11,7 @@
 
 pub mod http;
 pub mod metrics;
+pub mod pipeline;
 pub mod stub;
 pub mod writer;
 

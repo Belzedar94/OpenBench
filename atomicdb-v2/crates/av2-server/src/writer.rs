@@ -74,6 +74,9 @@ pub struct WriterMetrics {
     /// How long the writer waited for an fsync after computing the next
     /// batch (the part of the fsync the pipeline did not hide).
     pub fsync_wait: Histogram,
+    /// The rules' post-commit work per batch (`Rules::after_commit`: the
+    /// proof numbers).
+    pub post_commit: Histogram,
 }
 
 impl Default for WriterMetrics {
@@ -90,6 +93,7 @@ impl Default for WriterMetrics {
             queue_depth: AtomicI64::new(0),
             last_seq: Gauge::new(),
             fsync_wait: Histogram::new(LATENCY_BUCKETS),
+            post_commit: Histogram::new(LATENCY_BUCKETS),
         }
     }
 }
@@ -171,7 +175,7 @@ where
         if let Some(f) = flight.as_mut()
             && (subs.is_empty() || f.inflight.is_durable())
         {
-            finish(&mut store, flight.take().unwrap(), &m);
+            finish(&mut store, flight.take().unwrap(), &m, &mut rules);
         }
         if subs.is_empty() {
             continue;
@@ -201,12 +205,13 @@ where
         });
         m.stage[1].observe(t0.elapsed().as_secs_f64());
         if let Some(f) = flight.take() {
-            finish(&mut store, f, &m);
+            finish(&mut store, f, &m, &mut rules);
         }
         match computed {
             Ok(outs) => match store.commit_start_notify(b, &av2_facts::encode_all(&facts), Some(notify(&wake))) {
                 Ok(inflight) => flight = Some(Flight { inflight, meta, outs, started: t0 }),
                 Err(e) => {
+                    rules.abandoned();
                     for (_, reply) in meta {
                         m.rejected.inc(1);
                         let _ = reply.send(Err(e.to_string()));
@@ -242,7 +247,7 @@ where
         }
     }
     if let Some(f) = flight.take() {
-        finish(&mut store, f, &m);
+        finish(&mut store, f, &m, &mut rules);
     }
     refresh_gauges(&store, &gauges);
     store
@@ -262,8 +267,9 @@ struct Flight<O> {
     started: Instant,
 }
 
-/// Wait for the commit in flight to be durable, apply it, acknowledge.
-fn finish<O>(store: &mut Store, f: Flight<O>, m: &WriterMetrics) {
+/// Wait for the commit in flight to be durable, apply it, acknowledge, and
+/// hand the committed graph to the rules' post-commit work.
+fn finish<R: Rules>(store: &mut Store, f: Flight<R::Output>, m: &WriterMetrics, rules: &mut R) {
     let n = f.meta.len();
     match store.commit_finish(f.inflight) {
         Ok(seq) => {
@@ -282,8 +288,12 @@ fn finish<O>(store: &mut Store, f: Flight<O>, m: &WriterMetrics) {
                 m.submit_to_visible.observe(enq.elapsed().as_secs_f64());
                 let _ = reply.send(Ok(Ack { seq, output, batch_inputs: n }));
             }
+            let t = Instant::now();
+            store.reader().read(|v| rules.after_commit(v, seq));
+            m.post_commit.observe(t.elapsed().as_secs_f64());
         }
         Err(e) => {
+            rules.abandoned();
             for (_, reply) in f.meta {
                 m.rejected.inc(1);
                 let _ = reply.send(Err(e.to_string()));
@@ -302,7 +312,14 @@ fn batch<R: Rules>(store: &mut Store, rules: &mut R, inputs: &[R::Input], m: &Wr
     }
     let bytes = av2_facts::encode_all(&facts);
     m.stage[1].observe(t0.elapsed().as_secs_f64());
-    let seq = store.commit(b, &bytes).map_err(|e| e.to_string())?;
+    let seq = match store.commit(b, &bytes) {
+        Ok(seq) => seq,
+        Err(e) => {
+            rules.abandoned();
+            return Err(e.to_string());
+        }
+    };
+    store.reader().read(|v| rules.after_commit(v, seq));
     let ct = store.last_commit();
     m.stage[2].observe(ct.finalize.as_secs_f64());
     m.stage[3].observe((ct.write + ct.grow).as_secs_f64());
