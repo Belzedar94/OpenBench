@@ -77,6 +77,7 @@ impl T {
     }
     /// `_spine(name, plies, tip_fields)`: nodes chained by `backed_move`, the
     /// last one without backing.
+    #[allow(clippy::needless_range_loop)]
     fn spine(&mut self, plies: usize, tip_nodes: u64) -> Vec<PosId> {
         let mut moves = Vec::new();
         for _ in 0..plies {

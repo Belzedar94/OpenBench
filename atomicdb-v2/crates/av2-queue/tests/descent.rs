@@ -102,10 +102,8 @@ impl W {
 
 /// `_campaign(root)`: the only active campaign, primary-only policy.
 fn proofs(root: u64) -> Proofs {
-    let c = Campaign {
-        policy: serde_json::json!({"primary": 1.0, "backup": 0.0, "explore": 0.0}),
-        ..Campaign::default_for(5, PosId(root))
-    };
+    let c =
+        Campaign { policy: serde_json::json!({"primary": 1.0, "backup": 0.0, "explore": 0.0}), ..Campaign::default_for(5, PosId(root)) };
     Proofs::new(vec![c], RefreshConfig::default())
 }
 

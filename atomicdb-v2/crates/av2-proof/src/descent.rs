@@ -278,13 +278,10 @@ impl<'a, G: ProofGraph + ?Sized> Walker<'a, G> {
             let b = bucket(counter.wrapping_add(u64::from(plies)), policy);
             // `_primary_index`.
             let selected = self.table.get(node).map(|r| r.selected).unwrap_or(Move::NONE);
-            let primary =
-                if selected.is_none() { 0 } else { ranked.iter().position(|r| r.1 == selected).unwrap_or(0) };
+            let primary = if selected.is_none() { 0 } else { ranked.iter().position(|r| r.1 == selected).unwrap_or(0) };
             let chosen = match b {
                 Bucket::Primary => ranked[primary].2,
-                Bucket::Backup => {
-                    ranked.iter().enumerate().find(|(i, _)| *i != primary).map(|(_, r)| r.2).unwrap_or(ranked[primary].2)
-                }
+                Bucket::Backup => ranked.iter().enumerate().find(|(i, _)| *i != primary).map(|(_, r)| r.2).unwrap_or(ranked[primary].2),
                 Bucket::Explore => ranked[ranked.len() - 1].2,
             };
             visited.insert(chosen);
@@ -498,7 +495,13 @@ impl<'a, G: ProofGraph + ?Sized> Walker<'a, G> {
                     return pick.best;
                 }
                 if let Some((child, p)) = best_unexplored(&path) {
-                    let plan = Plan { key: child.key, arm: ValueArm::Explore, floor: None, plies: p, line: p as i64 + i64::from(child.v.backed_plies) };
+                    let plan = Plan {
+                        key: child.key,
+                        arm: ValueArm::Explore,
+                        floor: None,
+                        plies: p,
+                        line: p as i64 + i64::from(child.v.backed_plies),
+                    };
                     if pick.offer(plan, &usable) {
                         return pick.best;
                     }
@@ -546,8 +549,7 @@ impl Pick {
     /// The loop's break test, made before the next plan: nothing further
     /// down the order can beat the best.
     fn closed(&self) -> bool {
-        self.best.is_some()
-            && (LONG_LINE_PLAN_DECAY.powi(self.usable as i32) <= self.best_score || self.usable > LONG_LINE_SCAN_PLANS)
+        self.best.is_some() && (LONG_LINE_PLAN_DECAY.powi(self.usable as i32) <= self.best_score || self.usable > LONG_LINE_SCAN_PLANS)
     }
     /// One plan; true when the loop is over.
     fn offer(&mut self, plan: Plan, usable: &dyn Fn(PosId) -> bool) -> bool {
@@ -560,7 +562,8 @@ impl Pick {
         let score = LONG_LINE_PLAN_DECAY.powi(self.usable as i32) * long_line_weight(plan.line);
         self.usable += 1;
         if self.best.is_none() || score > self.best_score {
-            self.best = Some(ValueTarget { pos: plan.key, plies: plan.plies, arm: plan.arm, floor_nodes: plan.floor, line_plies: plan.line });
+            self.best =
+                Some(ValueTarget { pos: plan.key, plies: plan.plies, arm: plan.arm, floor_nodes: plan.floor, line_plies: plan.line });
             self.best_score = score;
         }
         self.best_score >= 1.0

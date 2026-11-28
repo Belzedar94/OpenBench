@@ -74,8 +74,11 @@ impl<G: ProofGraph + ?Sized> Descent for ProofDescent<'_, G> {
         live: &dyn Fn(u64) -> bool,
     ) -> Option<ValueTarget> {
         let w = self.walker(campaign)?;
-        w.descend_value(counter, &|p: PosId| avoid.contains(&p.0), &|p: PosId| live(p.0), start.map(PosId))
-            .map(|t| ValueTarget { pos: t.pos.0, arm: arm(t.arm), floor_nodes: t.floor_nodes })
+        w.descend_value(counter, &|p: PosId| avoid.contains(&p.0), &|p: PosId| live(p.0), start.map(PosId)).map(|t| ValueTarget {
+            pos: t.pos.0,
+            arm: arm(t.arm),
+            floor_nodes: t.floor_nodes,
+        })
     }
 
     fn proved_or_clamp(&self, pos: u64, campaigns: &[u64]) -> Option<Clamp> {
