@@ -93,7 +93,7 @@ from django.db import DatabaseError, connections, transaction
 from django.db.models import Count, Min
 from django.utils import timezone
 
-from . import ingest, perf_events
+from . import golden_cases, ingest, perf_events
 from .database import atomic, connection, current_alias
 from .models import IngestJob, Position, PropagationSeed
 
@@ -483,7 +483,7 @@ def drain_batch(limit=BATCH_SIZE):
     # became visible at ``commit_t``.  A no-op unless ATOMICDB_PERF_DIR is set.
     perf_events.event(
         'drain', settled=len(ids), limit=limit, attempts=attempt + 1,
-        commit_t=round(commit_t, 3),
+        commit_t=round(commit_t, 3), golden=golden_cases.is_recording(),
         climb_ms=round((committed - started) * 1000, 2),
         ms=round((time.perf_counter() - started) * 1000, 2),
         jobs=sorted({payload['job'] for payloads in jobs.values()
@@ -533,7 +533,14 @@ def drain(max_batches=None, limit=BATCH_SIZE):
     """Climb batches until the ready rows run out (or ``max_batches``)."""
     settled, failed, batches = 0, 0, 0
     while max_batches is None or batches < max_batches:
-        done = drain_batch(limit=limit)
+        # A sampled batch is recorded as a golden case for v2 (§ golden_cases;
+        # off unless ATOMICDB_GOLDEN_CASES is set); an empty poll is not kept.
+        with golden_cases.recording('drain', {'limit': limit}) as case:
+            done = drain_batch(limit=limit)
+            if case is not None:
+                case.result(done)
+                if done == 0:
+                    case.discard()
         if done == 0:
             break
         batches += 1
