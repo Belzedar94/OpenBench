@@ -31,7 +31,6 @@ fn climb_collect(g: &mut TestGraph, cascade: &[PosId], backed: &[PosId]) -> Vec<
     let mut env =
         ClimbEnv { cfg: &cfg, effects: &mut calls, zeroing: &mut z, tasks: &mut tasks, loops: &mut loops, attribution: &attribution };
     climb(g, cascade, backed, &mut env).unwrap();
-    drop(env);
     let out = calls.calls.clone();
     assert_eq!(rec.proof_refreshes, out, "the calls are forwarded unchanged");
     out

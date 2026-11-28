@@ -361,10 +361,10 @@ pub fn loop_at_best_exit(
             seen.push(node);
             node = onward[&node];
         }
-        if let Some(at) = seen.iter().position(|&x| x == node) {
-            if seen[at..].iter().any(|o| worth[o].value.is_some_and(|v| v != 0)) {
-                return None;
-            }
+        if let Some(at) = seen.iter().position(|&x| x == node)
+            && seen[at..].iter().any(|o| worth[o].value.is_some_and(|v| v != 0))
+        {
+            return None;
         }
     }
     Some(worth)
