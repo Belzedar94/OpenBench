@@ -136,7 +136,7 @@ HTTP (auth, form parsing: protocol::parse_*)      timers / selector thread / rul
 | Q-5 lanes and fairness | ported (5.1-5.8, 5.10, 5.11); 5.9 queue table: projection |
 | Q-6 requests | ported 6.1-6.22 (breadth swap off, `request_subtree` answers `saturated`), 6.23-6.26 door, 6.27 `then_verify`, bump/withdraw/undo/clear doors; **not**: 6.28-6.34 door parsing (API), 6.36 verify-PV (MPV-6), 6.40-6.45 lists, backlog adoption/subscriptions |
 | Q-7 frontier/subtree/breadth swap/uncertainty/witness arms | **not ported** |
-| Q-8 arms | ported 8.1-8.14, 8.16-8.21 (rates, receipts, debt, coverage, dn repair, fragile, bulk children); **not**: 8.15 quality (fires inside BKD-11) |
+| Q-8 arms | ported 8.1-8.21 (rates, receipts, debt, coverage, dn repair, fragile, bulk children; 8.15 quality in `quality.rs`: the queue answers the backed ascent's `av2_rules::purchase::TaskSink`) |
 | Q-10 sweep16, idle repair | lease side ported (share pass, `fits_slot`); drip/plan/backlog **not ported** |
 | SOL-4 autosolve | **not ported** (the proof lease that serves it is) |
 | Q-11 campaigns | lease side ported (worker campaign band); ownership/rotation: graph + people facts, not here |
@@ -189,7 +189,7 @@ is exact (property test) and 16x faster. The stand-in descent is not
 
 ## 6. Not done / next
 
-- Q-7, Q-8.15, Q-10 drips, SOL-4 autosolve, backlog adoption, Q-3.25 backfill.
+- Q-7, Q-10 drips, SOL-4 autosolve, backlog adoption, Q-3.25 backfill.
 - `Descent` over `av2-proof` tables (PN-6/PN-9 descents are not ported yet).
 - A kind code for queue facts in `av2-facts` (proposed 11 `QUEUE`); today
   `Fact::Opaque { kind: "queue.v1" }`.
