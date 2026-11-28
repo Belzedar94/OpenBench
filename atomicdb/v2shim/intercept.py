@@ -116,11 +116,9 @@ def make_wrapper(name, original, routed):
         stats = bridge.STATS
         if name in routed:
             stats.v2_calls[name] = stats.v2_calls.get(name, 0) + 1
-            _enter()
-            try:
-                return bridge.call_v2(name, args, kwargs)
-            finally:
-                _leave()
+            # Still at depth 0: the follow-up calls an entry asks for
+            # (``$calls``) are routed like the test's own calls.
+            return bridge.call_v2(name, args, kwargs)
         stats.v1_calls[name] = stats.v1_calls.get(name, 0) + 1
         if strict and not is_setup(name):
             raise NotPorted(f'{name} is not ported to v2 (ATOMICDB_V2_STRICT)')
