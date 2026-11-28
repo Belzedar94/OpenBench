@@ -19,9 +19,9 @@
 //! Probing is thread-safe: a `Tablebases` is `Sync` and every probe builds its
 //! own position.
 
-use shakmaty::CastlingMode;
 use shakmaty::fen::Fen;
 use shakmaty::variant::Atomic;
+use shakmaty::{CastlingMode, PositionError};
 use shakmaty_syzygy::Tablebase;
 use std::path::Path;
 
@@ -38,9 +38,39 @@ pub fn is_applicable(fen: &str, max_pieces: usize) -> bool {
 
 /// Parse a FEN into an atomic position the way the probe needs it.  `None`
 /// when shakmaty refuses the position.
+///
+/// python-chess's `AtomicBoard` validates nothing before a probe, so the two
+/// refusals that do not stop a probe are lifted: an "impossible" check (an
+/// explosion can clear two lines at once, which shakmaty's standard-chess
+/// heuristic does not expect) and too much material.  A position where the
+/// side not to move is in check (shakmaty's "opposite check") stays refused:
+/// no legal move leads there, so v1's tree never holds one.
 pub fn atomic_position(fen: &str) -> Option<Atomic> {
     let fen: Fen = fen.parse().ok()?;
-    fen.into_position(CastlingMode::Standard).ok()
+    fen.into_position(CastlingMode::Standard)
+        .or_else(PositionError::ignore_impossible_check)
+        .or_else(PositionError::ignore_too_much_material)
+        .ok()
+}
+
+/// Why shakmaty refuses a position, for the comparison tools.
+pub fn position_error(fen: &str) -> Option<String> {
+    let fen: Fen = match fen.parse() {
+        Ok(f) => f,
+        Err(e) => return Some(format!("fen: {e}")),
+    };
+    let r: Result<Atomic, _> = fen.into_position(CastlingMode::Standard);
+    r.err().map(|e| e.to_string())
+}
+
+/// How the table files are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Positioned reads (`read_at`), safe whatever happens to the files.
+    Read,
+    /// Memory maps, like python-chess: no system call per read.  The files
+    /// must not change while mapped.
+    Mmap,
 }
 
 /// The configured tables (v1: `settings.ATOMICDB_TB_PATHS`).
@@ -54,7 +84,18 @@ impl Tablebases {
     /// them).  A directory that cannot be read makes the whole set unusable,
     /// like v1's cached open failure: every probe then answers `None`.
     pub fn open<P: AsRef<Path>>(paths: &[P]) -> Tablebases {
-        let mut tb = Tablebase::<Atomic>::new();
+        Tablebases::open_with(paths, Access::Read)
+    }
+
+    /// [Tablebases::open] with a choice of file access (see [Access]).
+    pub fn open_with<P: AsRef<Path>>(paths: &[P], access: Access) -> Tablebases {
+        let mut tb = match access {
+            Access::Read => Tablebase::<Atomic>::new(),
+            // SAFETY: the table files are never modified or truncated while
+            // the service runs (they are installed once, read-only), which is
+            // the contract of a memory map; python-chess maps them the same way.
+            Access::Mmap => unsafe { Tablebase::<Atomic>::with_mmap_filesystem() },
+        };
         let mut files = 0;
         let mut any = false;
         for p in paths {
@@ -73,8 +114,12 @@ impl Tablebases {
 
     /// v1's `ATOMICDB_TB_PATHS` string form: `;`-separated.
     pub fn open_list(paths: &str) -> Tablebases {
+        Tablebases::open_list_with(paths, Access::Read)
+    }
+
+    pub fn open_list_with(paths: &str, access: Access) -> Tablebases {
         let v: Vec<&str> = paths.split(';').collect();
-        Tablebases::open(&v)
+        Tablebases::open_with(&v, access)
     }
 
     /// Number of table files found.

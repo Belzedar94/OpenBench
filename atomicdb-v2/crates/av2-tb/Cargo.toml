@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 shakmaty = { version = "0.30", features = ["variant"] }
-shakmaty-syzygy = { version = "0.28", features = ["variant"] }
+shakmaty-syzygy = { version = "0.28", features = ["variant", "mmap"] }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -141,31 +141,53 @@ fn main() {
         }
     }
     println!("library: {}", pf::info());
-    let mut lines = Vec::new();
-    for f in &files {
-        let r = BufReader::new(std::fs::File::open(f).unwrap_or_else(|e| panic!("{f}: {e}")));
-        for l in r.lines() {
-            let l = l.unwrap();
-            if !l.is_empty() {
-                lines.push(l);
-            }
-        }
-    }
     let tally = Tally::default();
-    let next = AtomicU64::new(0);
     let t0 = Instant::now();
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed) as usize;
-                    let Some(l) = lines.get(i) else { break };
-                    let rec: Value = serde_json::from_str(l).unwrap();
-                    check(&rec, &tally);
+    let mut truncated = 0;
+    // Streamed in chunks so that gigabytes of golden data need not fit in
+    // memory.  A file still being written may end in a partial line: only a
+    // final line that does not parse is skipped (and counted).
+    for f in &files {
+        let mut lines = BufReader::new(std::fs::File::open(f).unwrap_or_else(|e| panic!("{f}: {e}"))).lines().peekable();
+        loop {
+            let mut chunk = Vec::with_capacity(20_000);
+            while chunk.len() < 20_000 {
+                match lines.next() {
+                    Some(l) => {
+                        let l = l.unwrap();
+                        if l.is_empty() {
+                            continue;
+                        }
+                        if lines.peek().is_none() && serde_json::from_str::<Value>(&l).is_err() {
+                            truncated += 1;
+                            continue;
+                        }
+                        chunk.push(l);
+                    }
+                    None => break,
+                }
+            }
+            if chunk.is_empty() {
+                break;
+            }
+            let next = AtomicU64::new(0);
+            std::thread::scope(|s| {
+                for _ in 0..threads {
+                    s.spawn(|| {
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed) as usize;
+                            let Some(l) = chunk.get(i) else { break };
+                            let rec: Value = serde_json::from_str(l).unwrap();
+                            check(&rec, &tally);
+                        }
+                    });
                 }
             });
         }
-    });
+    }
+    if truncated > 0 {
+        println!("skipped {truncated} truncated final line(s)");
+    }
     let secs = t0.elapsed().as_secs_f64();
     let m = tally.mismatches.lock().unwrap();
     println!(

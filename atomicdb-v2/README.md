@@ -29,6 +29,8 @@ Docs: `docs/store.md` (storage design, protocol, measurements),
 measurements on the production box: `scripts/prod/run_core_prod.sh`.
 
 Builds on this tower: keep to `-j 12` (an OpenBench worker uses 8 threads).
+`av2-chess` compiles the vendored Fairy-Stockfish sources: it needs a C++17
+compiler (MSVC Build Tools on Windows, g++ or clang on Linux).
 
 Rules for code in this workspace:
 

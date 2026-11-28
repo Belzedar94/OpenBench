@@ -4,7 +4,7 @@
 //! probe the position (v1 probes only open, non-terminal positions).
 //!
 //! ```text
-//! cargo run --release -p av2-tb --example tbequiv -- "DIR[;DIR]" [--threads N] golden.jsonl...
+//! cargo run --release -p av2-tb --example tbequiv -- "DIR[;DIR]" [--mmap] [--threads N] golden.jsonl...
 //! ```
 
 use av2_tb::Tablebases;
@@ -19,17 +19,20 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let paths = args.next().expect("tables");
     let mut threads = 1;
+    let mut access = av2_tb::Access::Read;
     let mut files = Vec::new();
     while let Some(a) = args.next() {
-        if a == "--threads" {
+        if a == "--mmap" {
+            access = av2_tb::Access::Mmap;
+        } else if a == "--threads" {
             threads = args.next().unwrap().parse().unwrap();
         } else {
             files.push(a);
         }
     }
     let t0 = Instant::now();
-    let tb = Tablebases::open_list(&paths);
-    println!("opened {} files in {:.2} s", tb.files(), t0.elapsed().as_secs_f64());
+    let tb = Tablebases::open_list_with(&paths, access);
+    println!("opened {} files in {:.2} s ({access:?})", tb.files(), t0.elapsed().as_secs_f64());
     let mut recs = Vec::new();
     for f in &files {
         for l in BufReader::new(std::fs::File::open(f).unwrap()).lines() {
@@ -51,10 +54,14 @@ fn main() {
                     let Some(r) = recs.get(i) else { break };
                     let fen = r["fen"].as_str().unwrap();
                     let men = r["men"].as_u64().unwrap();
-                    let t = Instant::now();
+                    // The first probe opens and maps the table; the second,
+                    // timed, is the warm latency (python-chess: tools/tb_time.py).
                     let ours = tb.probe_wdl(fen, 6);
+                    let t = Instant::now();
+                    let again = tb.probe_wdl(fen, 6);
                     let dt = t.elapsed().as_secs_f64();
-                    {
+                    assert_eq!(ours, again);
+                    if r["terminal"].is_null() {
                         let mut m = by_men.lock().unwrap();
                         let e = m.entry(men).or_default();
                         e.0 += 1;
@@ -66,9 +73,10 @@ fn main() {
                         format!("agree {}", if theirs.is_some() { "value" } else { "none" })
                     } else {
                         format!(
-                            "DISAGREE {} ours={ours:?} python-chess={theirs:?} err={}",
+                            "DISAGREE {} ours={ours:?} python-chess={theirs:?} err={} shakmaty={:?}",
                             if terminal { "terminal(v1 never probes)" } else { "open" },
-                            r["err"]
+                            r["err"],
+                            av2_tb::position_error(fen)
                         )
                     };
                     let mut m = tally.lock().unwrap();
