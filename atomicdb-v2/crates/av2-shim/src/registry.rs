@@ -28,14 +28,36 @@ use av2_model::{GraphRead, Move, PosId};
 use av2_rules::RulesError;
 use serde_json::{Map, Value, json};
 
+/// What the caller sends besides the graph and the arguments.
+#[derive(Clone, Debug, Default)]
+pub struct Extra {
+    /// Extra v1 tables (`Entry::tables`), `{table: [rows]}`.
+    pub tables: Map<String, Value>,
+    /// v1's module constants as they are at the call, `{module: {NAME: value}}`
+    /// (`ingest`, `propagation_queue`, `ingest_queue`, `proof`): a test that
+    /// patches `ingest.CASCADE_GUARD_LIMIT` sends the patched value.  Golden
+    /// cases carry the same map, recorded with the batch.
+    pub constants: Map<String, Value>,
+    /// The `ATOMICDB_*` settings in force.
+    pub settings: Map<String, Value>,
+}
+
+impl Extra {
+    /// From a request or case object with `tables`, `constants`, `settings`.
+    pub fn from_value(v: &Value) -> Extra {
+        let obj = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
+        Extra { tables: obj("tables"), constants: obj("constants"), settings: obj("settings") }
+    }
+}
+
 /// What an entry gets besides its arguments.
 pub struct Ctx<'a> {
     pub graph: &'a mut ShimGraph,
-    /// Facts the entry emits (projected by the Python adapter: an `Opaque`
-    /// fact of kind `dbevent` becomes a `DBEvent` row).
+    /// Facts the entry emits.  An `Opaque` fact whose kind is upper case is
+    /// a `DBEvent` kind: the Python adapter writes that event.
     pub facts: Vec<Fact>,
-    /// Extra v1 tables the caller exported (`Entry::tables`), by table name.
-    pub tables: &'a Map<String, Value>,
+    /// Tables, constants and settings of the call.
+    pub extra: &'a Extra,
     /// Rows for tables outside the graph that the entry wants written back
     /// (for example `atomicdb_proofnode`), by table name: created, or
     /// updated by primary key (`atomicdb/v2shim/bridge.py`, `WRITEBACK` for
@@ -155,13 +177,25 @@ pub struct Outcome {
 }
 
 /// Call an entry on a loaded graph.
-pub fn call(name: &str, graph: &mut ShimGraph, args: &Value, tables: &Map<String, Value>) -> Result<Outcome, EntryError> {
+pub fn call(name: &str, graph: &mut ShimGraph, args: &Value, extra: &Extra) -> Result<Outcome, EntryError> {
     let entry = find(name).ok_or_else(|| EntryError::NotPorted(name.to_string()))?;
     let args = Args::new(args)?;
-    let mut ctx = Ctx { graph, facts: Vec::new(), tables, writes: Map::new() };
+    let mut ctx = Ctx { graph, facts: Vec::new(), extra, writes: Map::new() };
     let result = (entry.run)(&mut ctx, &args)?;
     let Ctx { facts, writes, .. } = ctx;
     Ok(Outcome { result, changes: graph.changes(), facts, writes })
+}
+
+impl Ctx<'_> {
+    /// A v1 module constant as the caller had it (`ingest`, `CASCADE_GUARD_LIMIT`).
+    pub fn constant(&self, module: &str, name: &str) -> Option<&Value> {
+        self.extra.constants.get(module).and_then(|m| m.get(name))
+    }
+
+    /// An `ATOMICDB_*` setting.
+    pub fn setting(&self, name: &str) -> Option<&Value> {
+        self.extra.settings.get(name)
+    }
 }
 
 // ---------------------------------------------------------------- args
@@ -351,5 +385,5 @@ fn shim_tables(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
     if let Some(rows) = args.get(0, "write") {
         ctx.writes.insert("atomicdb_dbevent".into(), rows.clone());
     }
-    Ok(Value::Object(ctx.tables.clone()))
+    Ok(json!({"tables": ctx.extra.tables, "constants": ctx.extra.constants.len(), "settings": ctx.extra.settings.len()}))
 }

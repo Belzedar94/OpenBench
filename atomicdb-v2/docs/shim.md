@@ -47,7 +47,12 @@ fn backup_cascade(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
   `proof.refresh_proof_numbers` at the end of a cascade; it goes to v2 as
   soon as that one is registered too).
 - `entry!(name, f, tables = ["atomicdb_analysistask"])` exports extra tables
-  into `ctx.tables`.
+  into `ctx.extra.tables`.
+- `ctx.constant("ingest", "CASCADE_GUARD_LIMIT")` and
+  `ctx.setting("ATOMICDB_FRESH_CONTEXT")`: v1's module constants and
+  settings as they are at the call (a test that patches a constant sends
+  the patched value; a golden case sends the values it was recorded with).
+  Build the rules' configuration from them, not from Rust defaults.
 - The return value is JSON; `{"$pos": key}` comes back to Python as a
   `Position`, `{"$set": [...]}` as a set, `{"$tuple": [...]}` as a tuple.
 
