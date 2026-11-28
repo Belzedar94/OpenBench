@@ -1,0 +1,15 @@
+[package]
+name = "av2-expand"
+description = "AtomicDB v2 stage (a): creating positions, expansion and reachability (rules POS-2.1, POS-5.1, EXP-1.1) over the graph traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+av2-model.workspace = true
+av2-chess.workspace = true
+
+[dev-dependencies]
+av2-store.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "av2-tb"
+description = "AtomicDB v2: atomic Syzygy probes through shakmaty-syzygy, with v1's fail-closed contract (atomicdb/tb.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+shakmaty = { version = "0.30", features = ["variant"] }
+shakmaty-syzygy = { version = "0.28", features = ["variant"] }
+
+[dev-dependencies]
+serde_json.workspace = true

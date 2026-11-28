@@ -8,6 +8,9 @@ The Rust workspace of AtomicDB v2 (plan: `docs/atomicdb/v2-plan.md`).
 | `crates/av2-facts` | The facts of the log: versioned envelopes with JSON payloads, the only long-lived format | core |
 | `crates/av2-store` | Mapped column files, redo log segments, group commit, checkpoint, recovery, backup (phase 1) | core |
 | `crates/av2-rules` | The value rules. Today only the `Rules` trait the writer calls | rules |
+| `crates/av2-chess` | The rules of atomic chess through the Fairy-Stockfish sources pyffish 0.0.89 is built from (vendored, C ABI shim): canonical FEN and key, legal moves, child FENs, terminal status (POS-1.1, POS-4.1); equivalence tools against v1 (`tools/golden.py`, `examples/equiv.rs`) | stage (a) |
+| `crates/av2-tb` | Atomic Syzygy probes through `shakmaty-syzygy` with v1's fail-closed contract (TB-1.1, TB-1.2); comparison with python-chess (`tools/tb_golden.py`, `examples/tbequiv.rs`) | stage (a) |
+| `crates/av2-expand` | Creating positions, expansion and reachability over the graph traits (POS-2.1, POS-5.1, EXP-1.1) | stage (a) |
 | `crates/av2-tools` | `av2-load`, `av2-check`, `av2-replay`, `av2-crashtest`, `av2-perf` | core |
 | `crates/av2-compat` | The outside contract (`docs/api-contract.md`): replays v1's golden answers (`tests/golden/`) against a base URL and diffs them field by field; runs the worker protocol scenarios against a test instance | api-golden |
 | `crates/av2-server` | The writer service skeleton: single writer, group commit, stub rules, Prometheus `/metrics` | core |

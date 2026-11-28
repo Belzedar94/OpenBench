@@ -13,6 +13,9 @@ members = [
     "crates/av2-shim",
     "crates/av2-golden",
     "crates/av2-py",
+    "crates/av2-chess",
+    "crates/av2-tb",
+    "crates/av2-expand",
     "bench",
 ]
 # `cargo build` / `cargo test` at the root build the v2 crates only.  The bench
@@ -30,6 +33,9 @@ default-members = [
     "crates/av2-server",
     "crates/av2-shim",
     "crates/av2-golden",
+    "crates/av2-chess",
+    "crates/av2-tb",
+    "crates/av2-expand",
 ]
 
 [workspace.package]
@@ -44,6 +50,7 @@ av2-model = { path = "crates/av2-model" }
 av2-facts = { path = "crates/av2-facts" }
 av2-store = { path = "crates/av2-store" }
 av2-rules = { path = "crates/av2-rules" }
+av2-chess = { path = "crates/av2-chess" }
 arc-swap = "1.7"
 crc32fast = "1.5.6"
 csv = "1.3"

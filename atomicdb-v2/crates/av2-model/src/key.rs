@@ -35,10 +35,10 @@ impl std::error::Error for KeyParseError {}
 impl Key {
     /// `sha256` of an already canonical FEN, exactly as v1 computes it.
     ///
-    /// TODO(rules): canonicalisation itself (`logic.canonical_fen`) needs the
-    /// rules (it keeps the en-passant square only when the capture is legal),
-    /// so it belongs to the rules port.  [`strip_counters`] is the part that
-    /// needs no rules.
+    /// Canonicalisation itself (`logic.canonical_fen`) needs the rules (it
+    /// keeps the en-passant square only when the capture is executable): it
+    /// is `av2_chess::canonical_fen`, and `av2_chess::key_of` is the whole of
+    /// v1's `key_of`.  [`strip_counters`] is the part that needs no rules.
     pub fn of_canonical_fen(fen: &str) -> Key {
         Key(Sha256::digest(fen.as_bytes()).into())
     }
