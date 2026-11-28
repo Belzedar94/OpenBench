@@ -53,6 +53,9 @@ fn backup_cascade(ctx: &mut Ctx<'_>, args: &Args) -> Result<Value, EntryError> {
   settings as they are at the call (a test that patches a constant sends
   the patched value; a golden case sends the values it was recorded with).
   Build the rules' configuration from them, not from Rust defaults.
+- `ctx.stubbed("ingest", "_loop_at_best_exit")`: whether the caller had
+  replaced that function of those modules with a `unittest.mock` object
+  (`bridge.export_stubs`), for v1 tests that switch a rule off that way.
 - The return value is JSON; `{"$pos": key}` comes back to Python as a
   `Position`, `{"$set": [...]}` as a set, `{"$tuple": [...]}` as a tuple.
 
@@ -70,7 +73,11 @@ the rules report through `av2_rules::effects` map to v1 like this:
 `NODE_CLOSED` runs v1's `_emit_closure_events` after the write-back (its
 provenance, claims, tasks and campaigns belong to other ports), other
 events become their `DBEvent`, the proof-number refresh is a follow-up
-`proof.refresh_proof_numbers`, loops are `NoLoops` until steps 11-14.
+`proof.refresh_proof_numbers`, loops are `V1Loops` with the
+`BACKED_LOOP_MAX_SECONDS` / `BACKED_CYCLE_MAX_SECONDS` the caller had
+(`adapters::loops_from`; a test that mocks `_loop_at_best_exit` out gets a
+zero loop budget, which skips the rule as the mock does; one that mocks
+`_rows_that_wait` out gets `RulesConfig::waiting = false`).
 
 Nothing else is needed on the Python side: `intercept` routes every name
 `av2.entries()` lists. Golden cases use two names: `propagation_queue.drain_batch`

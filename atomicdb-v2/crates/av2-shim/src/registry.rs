@@ -43,14 +43,23 @@ pub struct Extra {
     /// What the Python preparer of the entry read from v1's other models
     /// (`atomicdb/v2shim/prepare.py`, `PREPARE`): v2's "prepared inputs".
     pub prepared: Map<String, Value>,
+    /// `module.name` of the functions of those modules a test replaced with a
+    /// `unittest.mock` object at the call (`bridge.export_stubs`): v1 tests
+    /// that switch a rule off that way (`_loop_at_best_exit`).
+    pub stubbed: Vec<String>,
 }
 
 impl Extra {
     /// From a request or case object with `tables`, `constants`, `settings`,
-    /// `prepared`.
+    /// `prepared`, `stubbed`.
     pub fn from_value(v: &Value) -> Extra {
         let obj = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
-        Extra { tables: obj("tables"), constants: obj("constants"), settings: obj("settings"), prepared: obj("prepared") }
+        let stubbed = v
+            .get("stubbed")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        Extra { tables: obj("tables"), constants: obj("constants"), settings: obj("settings"), prepared: obj("prepared"), stubbed }
     }
 }
 
@@ -202,6 +211,11 @@ impl Ctx<'_> {
     /// An `ATOMICDB_*` setting.
     pub fn setting(&self, name: &str) -> Option<&Value> {
         self.extra.settings.get(name)
+    }
+
+    /// Whether the caller had replaced `module.name` with a mock.
+    pub fn stubbed(&self, module: &str, name: &str) -> bool {
+        self.extra.stubbed.iter().any(|s| s.split_once('.') == Some((module, name)))
     }
 }
 
