@@ -85,7 +85,8 @@ import time
 from django.core.management.base import BaseCommand
 from django.db import connections
 
-from atomicdb import autosolve, idle_repair, ingest, metrics, sweep
+from atomicdb import (autosolve, idle_repair, ingest, metrics, real_parent,
+                      sweep)
 from atomicdb.database import connection
 from atomicdb.models import Position
 
@@ -290,6 +291,12 @@ class Command(BaseCommand):
             if not options['no_priorities']:
                 step('priorities',
                      lambda: ingest.refresh_priorities(force=True), None)
+            # Real-parent pointers (§ atomicdb.real_parent).  A no-op with
+            # ``ATOMICDB_REAL_PARENT_WRITE`` off, and inside its interval of
+            # the last pointer pass, including one the v2 priorities pass
+            # just published; so it only does its own bounded Dijkstra when
+            # nothing else carried the pointers (``--no-priorities``, v1).
+            step('real-parents', real_parent.refresh, None)
             # ARRIENDOS SOLVE MUERTOS, DELANTE de los brazos que miran su
             # cupo: una tarea congelada ocupa un sitio de PENDING que el brazo
             # cuenta, asi que reciclar primero es lo que hace que el cupo
@@ -399,6 +406,8 @@ class Command(BaseCommand):
                       'repair_backlog_enqueued': repair_backlog,
                       'sweep16_enqueued': swept,
                       'public_counters_published': published}
+            if real_parent.writer_enabled():
+                report['real_parent'] = real_parent.last_report()
             if failures:
                 report['failed_steps'] = failures
             self.stdout.write(json.dumps(report, sort_keys=True))

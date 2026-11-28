@@ -161,6 +161,24 @@ ATOMICDB_SELECTOR_V2 = os.environ.get(
 # salida de emergencia.
 ATOMICDB_SELECTOR_DELTA = os.environ.get(
     'ATOMICDB_SELECTOR_DELTA', '').lower() not in ('0', 'false', 'no')
+# Real-parent pointers behind the breadcrumbs (§ atomicdb.real_parent).  Two
+# switches so it can ship dark: WRITE publishes the pointers from the regret
+# Dijkstra (riding the priorities pass, or as its own bounded step of
+# refresh_selector when priorities are off), READ makes the line-to-root walk
+# follow them before falling back to the oldest edge and then the BFS.  Both
+# OFF by default; turn WRITE on first, READ once the table is seeded.
+ATOMICDB_REAL_PARENT_WRITE = os.environ.get(
+    'ATOMICDB_REAL_PARENT_WRITE', '').lower() in ('1', 'true', 'yes')
+ATOMICDB_REAL_PARENT_READ = os.environ.get(
+    'ATOMICDB_REAL_PARENT_READ', '').lower() in ('1', 'true', 'yes')
+# Seconds between standalone pointer passes (only when the priorities pass
+# is not carrying them).
+ATOMICDB_REAL_PARENT_INTERVAL = float(os.environ.get(
+    'ATOMICDB_REAL_PARENT_INTERVAL', '600'))
+# Nodes a standalone pointer pass may settle (its read cost is this plus the
+# children of these, in batches of 500).
+ATOMICDB_REAL_PARENT_MAX_SETTLED = int(os.environ.get(
+    'ATOMICDB_REAL_PARENT_MAX_SETTLED', '20000'))
 # Directorio de estado del selector (en el servidor, el ``StateDirectory=``
 # de systemd).  Hoy guarda una sola cosa: el marcador de la ultima pasada
 # completada, para que un reinicio del servicio no fuerce una pasada completa

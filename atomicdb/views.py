@@ -4914,6 +4914,78 @@ def _format_san_line(top, line, max_plies=16, keep_head=False):
 
 
 def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
+    """Breadcrumbs from startpos: real-parent pointers first, BFS last.
+
+    With ``ATOMICDB_REAL_PARENT_READ`` on, the keys whose pointer walk
+    (stored real parent, else the oldest incoming edge) reaches the root in
+    budget are answered from it, in one recursive query per batch
+    (§ atomicdb.real_parent).  Everything else, and everything with the flag
+    off, goes through the reverse BFS exactly as before.
+    """
+    keys = list(dict.fromkeys(key for key in keys if key))
+    result = {}
+    from . import real_parent
+    if keys and real_parent.reader_enabled():
+        result = _pointer_lines_to_root(keys, max_plies)
+    rest = [key for key in keys if key not in result]
+    if rest:
+        result.update(_bfs_lines_to_root(rest, max_plies=max_plies))
+    return result
+
+
+def _pointer_lines_to_root(keys, max_plies):
+    """The keys the pointer walk roots, rendered like the BFS renders."""
+    from . import real_parent
+    start_key = logic.key_of(logic.start_fen())
+    budget = min(max_plies, LINEAGE_SEARCH_MAX_PLIES)
+    try:
+        walked = real_parent.lines_to_root(keys, start_key, budget)
+    except Exception:                    # noqa: BLE001 - the BFS still answers
+        logger.exception('real_parent: pointer walk failed')
+        return {}
+    if not walked:
+        return {}
+    top = Position.objects.only('key', 'fen', 'status').filter(
+        key=start_key).first()
+    if top is None:
+        return {}
+    return {key: (top, _render_lineage(top, ordered))
+            for key, (ordered, _hops) in walked.items()}
+
+
+def _render_lineage(top, ordered):
+    """``[{uci, san, key, white}, ...]`` for ``ordered`` moves from ``top``."""
+    import pyffish as pf
+
+    ucis = [uci for uci, _child_key in ordered]
+    try:
+        # One C++ call parses and advances the full line. Calling
+        # get_san()+get_fen() for every ply dominated the home page once
+        # milestones grew into long PVs (roughly 500 crossings/request).
+        sans = list(pf.get_san_moves('atomic', top.fen, ucis))
+        if len(sans) != len(ordered):
+            raise ValueError('incomplete SAN line')
+    except Exception:
+        # Preserve the previous per-ply behaviour if this PyFFish build
+        # cannot batch a line or returns an incomplete result.
+        sans, fen = [], top.fen
+        for uci in ucis:
+            try:
+                sans.append(pf.get_san('atomic', fen, uci))
+            except Exception:
+                sans.append(uci)
+            fen = logic.apply_move(fen, uci)
+    white = top.fen.split()[1] == 'w'
+    line = []
+    for (uci, child_key), san in zip(ordered, sans):
+        line.append({
+            'uci': uci, 'san': san, 'key': child_key, 'white': white,
+        })
+        white = not white
+    return line
+
+
+def _bfs_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     """Resolve canonical minimum-ply breadcrumbs from startpos in batches.
 
     The home page contains queue rows and milestones with heavily overlapping
@@ -4927,8 +4999,6 @@ def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
     This is the expensive half.  Callers go through ``_lines_to_root``, which
     only sends it the keys a short-lived cache could not answer.
     """
-    import pyffish as pf
-
     keys = list(dict.fromkeys(key for key in keys if key))
     positions = Position.objects.only('key', 'fen', 'status').in_bulk(keys)
     start_key = logic.key_of(logic.start_fen())
@@ -5082,32 +5152,7 @@ def _walk_lines_to_root(keys, max_plies=LINEAGE_SEARCH_MAX_PLIES):
             # bounded reverse BFS cannot cross, and painting it as an orphan
             # fragment is exactly the reported head-drop bug again.
             top.lineage_capped = True
-        ucis = [uci for uci, _child_key in ordered]
-        try:
-            # One C++ call parses and advances the full line. Calling
-            # get_san()+get_fen() for every ply dominated the home page once
-            # milestones grew into long PVs (roughly 500 crossings/request).
-            sans = list(pf.get_san_moves('atomic', top.fen, ucis))
-            if len(sans) != len(ordered):
-                raise ValueError('incomplete SAN line')
-        except Exception:
-            # Preserve the previous per-ply behaviour if this PyFFish build
-            # cannot batch a line or returns an incomplete result.
-            sans, fen = [], top.fen
-            for uci in ucis:
-                try:
-                    sans.append(pf.get_san('atomic', fen, uci))
-                except Exception:
-                    sans.append(uci)
-                fen = logic.apply_move(fen, uci)
-        white = top.fen.split()[1] == 'w'
-        line = []
-        for (uci, child_key), san in zip(ordered, sans):
-            line.append({
-                'uci': uci, 'san': san, 'key': child_key, 'white': white,
-            })
-            white = not white
-        result[key] = (top, line)
+        result[key] = (top, _render_lineage(top, ordered))
     return result
 
 
@@ -5139,7 +5184,12 @@ def _lineage_cache_key(key, max_plies):
     # home page walks 96, and the same position can be rooted under one and
     # "deep line" under the other.  One shared entry would let whichever
     # page rendered first decide what the other one says.
-    return f'atomicdb.lineage.v{LINEAGE_CACHE_VERSION}.{max_plies}.{key}'
+    # The reader flag too: flipping ``ATOMICDB_REAL_PARENT_READ`` must not
+    # keep serving lines the other walk chose.
+    from . import real_parent
+    walk = 'rp.' if real_parent.reader_enabled() else ''
+    return (f'atomicdb.lineage.v{LINEAGE_CACHE_VERSION}.{walk}{max_plies}.'
+            f'{key}')
 
 
 def _lineage_payload(top, line):
