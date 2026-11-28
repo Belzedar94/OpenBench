@@ -37,8 +37,8 @@ from django.db import DatabaseError
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
-from . import (ingest, logic, perf_events, preferences, propagation_queue,
-               score_bands)
+from . import (golden_cases, ingest, logic, perf_events, preferences,
+               propagation_queue, score_bands)
 from .database import atomic
 from .models import AnalysisTask, IngestJob, Position, RequestNotification
 
@@ -276,6 +276,11 @@ def apply_job(job):
             # again, idempotently, for its other callers.
             lines = score_bands.normalize_lines(lines, fen.split()[1] == 'w')
             mate_proofs = ingest.prepare_mate_proofs(fen, lines)
+    # A golden case keeps what was prepared outside the transaction: the mate
+    # proofs run on a wall-clock budget, so a replay cannot recompute them
+    # (a no-op unless this job is being recorded, § golden_cases).
+    golden_cases.note(mate_proofs=mate_proofs, tb_prepared=tb_prepared,
+                      tb_rejected=rejected)
 
     # De QUE cola salio este trabajo.  Es lo unico que sabe la procedencia de
     # todos los cierres que esta aplicacion vaya a producir — incluidos los
@@ -417,8 +422,18 @@ def _verify_after(job, task):
 def process_job(job):
     """``apply_job`` con reintentos: devuelve (resumen, error)."""
     started = time.monotonic()
+    golden = False
     try:
-        summary = apply_job(job)
+        # A sampled job is recorded as a golden case for v2 (§ golden_cases;
+        # off unless ATOMICDB_GOLDEN_CASES is set).
+        with golden_cases.recording('stage_a', {
+                'job': job.pk, 'position': job.position_id,
+                'task': job.task_id, 'attempts': job.attempts,
+                'payload': job.payload}) as case:
+            golden = case is not None
+            summary = apply_job(job)
+            if case is not None:
+                case.result(summary)
     except Exception as error:
         # Cualquier fallo (tipicamente "database is locked") deja la
         # transaccion revertida entera: el arbol no queda a medias y el
@@ -433,7 +448,8 @@ def process_job(job):
     # One line per applied job for the v1 baseline (§ perf_events); a no-op
     # unless ATOMICDB_PERF_DIR is set.
     perf_events.event('job', job=job.pk, ms=round(elapsed * 1000, 2),
-                      deferred=summary.get('propagation') == 'deferred')
+                      deferred=summary.get('propagation') == 'deferred',
+                      golden=golden)
     return summary, None
 
 
